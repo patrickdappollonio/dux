@@ -11,9 +11,8 @@ function ScrollArea({
   onViewportScroll,
   ...props
 }: ScrollAreaPrimitive.Root.Props & {
-  // Access to the actual scrolling element, for consumers that need to window
-  // their content against the real scroll position (e.g. the virtualized file
-  // tree). Base UI merges these with its own internal ref and scroll handler.
+  // Access to the actual scrolling element, for consumers windowing their content
+  // against the real scroll position. Base UI merges these with its own.
   viewportRef?: React.Ref<HTMLDivElement>
   onViewportScroll?: React.UIEventHandler<HTMLDivElement>
 }) {

@@ -30,19 +30,13 @@ function PopoverContent({
     "align" | "alignOffset" | "side" | "sideOffset"
   >) {
   const isMobile = useIsMobile()
-  // Sheet mode hands initial focus to the popup itself rather than base-ui's
-  // default first-tabbable element: a menu sheet never opens the soft
-  // keyboard, so a popover sheet containing an input must not either. The
-  // input is one tap away, exactly like tapping into any menu row.
+  // Sheet mode hands initial focus to the popup rather than the first tabbable
+  // element, so a popover sheet with an input does not raise the soft keyboard.
   const sheetPopupRef = React.useRef<HTMLDivElement | null>(null)
   if (isMobile) {
-    // The bottom-sheet presentation, shared with the dropdown menus (see
-    // ui/popupSheet.ts): on a phone every popup primitive presents the same
-    // way. Same Portal/Positioner/Popup parts as the desktop branch, so the
-    // popover contract (finalFocus, dismissal, Escape) rides through
-    // unchanged; only geometry and animation differ. The anchored align/side
-    // props are accepted and ignored: the positioner still receives them, but
-    // SHEET_POSITIONER_STYLE overrides the computed placement.
+    // The bottom-sheet presentation, shared with the dropdown menus, on the same
+    // parts as the desktop branch so the popover contract rides through unchanged.
+    // The align and side props are accepted and ignored: the sheet style wins.
     return (
       <PopoverPrimitive.Portal>
         <PopoverPrimitive.Backdrop
@@ -79,11 +73,8 @@ function PopoverContent({
       >
         <PopoverPrimitive.Popup
           data-slot="popover-content"
-          // max-h-(--available-height): the positioner publishes how much
-          // viewport is left on the chosen side, and capping the popup there
-          // matches the dropdown menus, so a tall popover scrolls inside
-          // itself (children need min-h-0 chains) instead of running off
-          // screen. Short popovers are unaffected.
+          // The positioner publishes how much viewport is left on the chosen side,
+          // so a tall popover scrolls inside itself (children need min-h-0 chains).
           className={cn(
             "z-50 flex max-h-(--available-height) w-72 origin-(--transform-origin) flex-col gap-2.5 rounded-lg bg-popover p-2.5 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-hidden duration-100 data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
             className

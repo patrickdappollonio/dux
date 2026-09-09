@@ -120,21 +120,12 @@ export interface FlatSelectHandlers {
   onSelectTerminal: (terminalId: string, owner: TerminalOwnerRef) => void
 }
 
-// Display-only project label on a row's second line. It shows which project the
-// agent belongs to; the project's ACTIONS live in the agent's ⋯ menu (a "Project"
-// submenu) and in the New-agent picker, so this label stays a plain span and the
-// whole row remains one clean click target for selecting the agent. The project
-// name is a searched field, so a query hit inside it gets the match emphasis
-// (a result that matched on its project must explain itself).
+// Display-only project label: the project's actions live in the agent's ⋯ menu,
+// so the row stays one click target. Searched, so a hit gets the match emphasis.
 function ProjectTag({ name, query }: { name: string; query: string }) {
   return (
-    // Baseline-aligned like every other tag on line two (see RowLineTwo), so
-    // the project name sits on the same line as the state word whatever the
-    // line's tallest item turns out to be. `self-center` on the tag opted the
-    // whole thing out of that shared baseline and only happened to look right
-    // while every item was the same height. The GLYPH is the one thing centered
-    // here: an icon has no baseline of its own, and resting its box on the text
-    // baseline would hang it into the descender space.
+    // Baseline-aligned like every other tag on line two (see RowLineTwo). The
+    // glyph is the one thing centered: an icon has no baseline of its own.
     <span className="flex min-w-0 shrink items-baseline gap-1 text-muted-foreground">
       <Folder className="size-3 shrink-0 self-center" />
       <span className="min-w-0 truncate">
@@ -144,25 +135,8 @@ function ProjectTag({ name, query }: { name: string; query: string }) {
   )
 }
 
-// The STANDALONE identity tag: the folder something standalone lives in, in
-// the slot an owner would occupy. Worn by a standalone agent's row (where a
-// project tag would sit) and a standalone terminal's row (where the ↳ owner
-// tag would sit): one indicator, learned once, meaning "this one lives in your
-// folder, not in a dux-managed working copy". The glyph is the literal ✷ star
-// drawn as text, following the ↳ arrow's own idiom, and glyph plus label wear
-// the dux-standalone token, the web twin of the TUI's standalone-location
-// theme color: an IDENTITY tone, never a state color, quiet enough that it
-// cannot shout over the row's state cues, and scoped to this tag so the rest
-// of line two stays muted. The star is aria-hidden with an sr-only word beside
-// it, so a screen reader speaks the meaning rather than the Unicode name. The
-// label arrives home-collapsed from the server (the browser is not necessarily
-// on its machine) and is cut to its last component here. Searched like the project name, so a query that
-// matched a path explains itself.
-//
-// The path is set in the row's own face, not monospace: line two is one
-// sentence (folder, dot, state word) and a second typeface inside it read as
-// a different element. Baseline-aligned all the same, because that is the
-// only alignment that survives a font change.
+// The standalone identity tag, on an agent's row and a terminal's row alike: an
+// aria-hidden ✷ plus an sr-only word, in the identity-only dux-standalone token.
 function StandaloneTag({ label, query }: { label: string; query: string }) {
   return (
     <span className="flex min-w-0 shrink items-baseline gap-1 text-dux-standalone">
@@ -181,14 +155,8 @@ function Dot({ className }: { className: string }) {
   return <span className={cn("size-1 shrink-0 self-center rounded-full bg-current opacity-50", className)} />
 }
 
-// Line two of a row, shared by the agent row and the terminal row because a
-// terminal row IS an agent row: the location tag, the separator dot, the state
-// word and whatever else the row appends, all sitting on ONE text baseline.
-// Baseline, not center: a mono folder label and a sans state word carry
-// different ascents, so centering their boxes leaves one visibly higher than
-// the other, and baseline alignment is the only one that survives a font
-// change. Every child either has a real text baseline or pins itself with
-// `self-center` (the dot, the project tag's glyph) and says why.
+// Line two, shared by the agent row and the terminal row: everything sits on ONE
+// text baseline, since a mono label and a sans state word have different ascents.
 function RowLineTwo({ children }: { children: ReactNode }) {
   return (
     <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
@@ -197,12 +165,8 @@ function RowLineTwo({ children }: { children: ReactNode }) {
   )
 }
 
-// The row's state word (Working / Typing / Idle / Detached / …), shared by both
-// row kinds so the two can never drift in tone or in motion. Keyed on the label
-// by the caller so a state change remounts the span and replays the one-shot
-// swap instead of snapping the text. The swap is a fade and ONLY a fade: any
-// vertical motion drops the word below line two's baseline for a frame, and a
-// busy agent changes state often enough that a screenshot will catch it.
+// The row's state word, shared by both row kinds and keyed on the label so a
+// change replays the swap. A fade only: motion drops it off line two's baseline.
 function RowStateWord({ word }: { word: StateWord }) {
   return (
     <span
@@ -216,10 +180,8 @@ function RowStateWord({ word }: { word: StateWord }) {
   )
 }
 
-// The typing cue: a thin blinking caret in the soft-violet typing token, shared by
-// the agent and terminal rows so the two surfaces (and the two row kinds) never
-// drift. Distinct from the working bob/shimmer so "typing" and "working" read
-// differently. Motion-reduce drops the blink and rests the caret fully opaque.
+// The typing cue: a blinking caret in the typing token, shared by both row kinds.
+// Motion-reduce drops the blink and rests the caret fully opaque.
 function TypingCaret() {
   return (
     <span
@@ -229,12 +191,8 @@ function TypingCaret() {
   )
 }
 
-// A row label with the part the live search query matched wrapped in a
-// token-styled emphasis span (bg-primary at low alpha, never a hardcoded
-// color). The range comes from the pure `matchCharRange` (code-point safe, the
-// TS twin of dux-core's `match_char_range`), computed against the DISPLAYED
-// string only, so nothing highlights that the filter did not match on this
-// row's visible text. Splitting via Array.from keeps emoji/CJK intact.
+// A row label with the matched range wrapped in a token-styled emphasis span.
+// The range is computed against the DISPLAYED string only; Array.from keeps CJK intact.
 function HighlightedText({ text, query }: { text: string; query: string }) {
   const range = matchCharRange(text, query)
   if (!range) return <>{text}</>
@@ -278,11 +236,8 @@ function RowName({
   )
 }
 
-// The two-line agent row: line one is the Bot (with the verbatim working bob +
-// attention pulse + name shimmer cues) + name + PR link + relative time; line two
-// is the clickable project tag, a colored state word, and a tab count. The
-// branch is deliberately absent (see line two below). Uses ONLY fields that
-// exist today.
+// The two-line agent row: identity and cues on line one, the location tag, state
+// word and tab count on line two. The branch is deliberately absent.
 function AgentFlatRow({
   session,
   projectName,
@@ -309,9 +264,8 @@ function AgentFlatRow({
     session.typing,
   )
   const word = stateWord(session)
-  // Which thing this agent is IN: its project, or (for a standalone agent) the
-  // folder it runs in. Tagged rather than a bare string, so the row picks the
-  // glyph without re-deriving which kind of agent it is.
+  // Which thing this agent is IN: its project, or a standalone agent's folder.
+  // Tagged so the row picks the glyph without re-deriving the agent kind.
   const location = workspaceLocation(session.workspace)
   const tabCount = session.tabs.length
 
@@ -321,10 +275,8 @@ function AgentFlatRow({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: session.id })
   const style: CSSProperties = {
-    // Vertical reorder list: lock the drag to the Y axis. Without this, dragging
-    // right translates the row past the sidebar's edge (the scroll container is
-    // overflow-x visible), so it flies out over the center pane. Zeroing x keeps
-    // every row inside the column; siblings only ever shift vertically anyway.
+    // Lock the drag to Y: the scroll container is overflow-x visible, so a
+    // sideways drag flies the row out over the center pane.
     transform: transform
       ? `translate3d(0, ${Math.round(transform.y)}px, 0)`
       : undefined,
@@ -343,10 +295,8 @@ function AgentFlatRow({
     >
       <div
         className={cn(
-          // The wrapper owns the highlight (rounded, full-width) so it spans both
-          // lines AND the trailing ⋯, matching the app's other rows. The button
-          // below is transparent and fills the row, so a click anywhere on either
-          // line selects the agent.
+          // The wrapper owns the highlight so it spans both lines and the trailing
+          // ⋯; the button below is transparent and fills the row.
           "group/flat-row relative flex items-stretch rounded-md pr-1 transition-colors",
           "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
           agentSelected && "bg-sidebar-accent text-sidebar-accent-foreground",
@@ -408,14 +358,9 @@ function AgentFlatRow({
                         prIconHoverClass(session.pr.state),
                       )}
                       onClick={(event) => {
-                        // `stopPropagation` keeps the click off the row's own
-                        // select handler. `preventDefault` is what keeps this to
-                        // ONE tab: the anchor already carries `target="_blank"`,
-                        // so without it the browser follows the href as well and
-                        // the explicit `window.open` below opens a second tab.
-                        // The open stays explicit because this anchor is nested
-                        // inside the row's button, where the native default is
-                        // not dependable.
+                        // `stopPropagation` keeps the click off the row's select
+                        // handler; `preventDefault` keeps this to ONE tab, since
+                        // the anchor's `target="_blank"` would open a second.
                         event.preventDefault()
                         event.stopPropagation()
                         window.open(session.pr!.url, "_blank", "noopener")
@@ -494,10 +439,8 @@ function AgentFlatRow({
           <DropdownMenuContent side="right" align="start">
             <PaneMenuBody
               subject={{ kind: "agent", session }}
-              // NO SETTINGS DRILL AT A ROW. This list is the desktop sidebar
-              // under a header whose cog is on screen, and the phone hub under
-              // its own cog in the hub header; either way the app menu is one
-              // press away outside this menu.
+              // No Settings drill at a row: both shells that render this list
+              // keep a cog on screen outside this menu.
               settingsDrill={false}
             />
           </DropdownMenuContent>
@@ -507,14 +450,8 @@ function AgentFlatRow({
   )
 }
 
-// The two-line terminal row, mirroring the agent row's shape. Line one: the
-// terminal icon + primary label (the foreground command when something is running,
-// via `terminalTitle`, else the shell label), with the working shimmer / typing
-// caret cues. Line two: `↳ {ownerLabel} · {stateWord}`, the owner being the agent
-// name (session terminal) or the project name (project terminal), and the state
-// word one of Typing / Working / Idle (terminals have no detached/exited/attention).
-// A standalone terminal swaps the arrow for the shared standalone star over the
-// directory it opened in; see `StandaloneTag`.
+// The two-line terminal row, mirroring the agent row's shape: line two is
+// `↳ {ownerLabel} · {stateWord}`, with the standalone star in place of the arrow.
 function TerminalFlatRow({
   terminal,
   siblings,
@@ -535,11 +472,8 @@ function TerminalFlatRow({
   // The live search query, for the match highlight ("" renders plain).
   query: string
 }) {
-  // In the sidebar row an idle terminal reads a plain "Terminal" (the owner on
-  // line two and row order distinguish several), while a running one shows its
-  // foreground app via `terminalTitle`. The identifying "Terminal N" label still
-  // drives the tooltip and the other surfaces (breadcrumb, task manager) that
-  // call `terminalTitle` directly. Mirrors the TUI terminal row.
+  // An idle terminal reads a plain "Terminal" here; a running one shows its
+  // foreground app. `terminalTitle` still names it for the other surfaces.
   const title =
     terminalForeground(terminal) === null
       ? "Terminal"
@@ -550,19 +484,15 @@ function TerminalFlatRow({
   const shimmer = terminal.working && !terminal.typing
 
   // Whether this row wears the standalone star instead of the owned-by arrow,
-  // decided by the exhaustive owner matcher so a new owner kind must answer
-  // for its marker before this compiles.
+  // decided by the exhaustive owner matcher so a new owner kind must answer.
   const isStandalone = matchOwner(owner, {
     session: () => false,
     project: () => false,
     standalone: () => true,
   })
 
-  // Whole-row drag, exactly like AgentFlatRow: `useSortable` supplies the drag
-  // listeners spread onto the select button (the mouse sensor's 6px activation
-  // distance keeps a plain click as a select; touch arms on a hold, see
-  // lib/dragActivation.ts), and the wrapper carries the Y-locked transform so
-  // a row never flies out of the column.
+  // Whole-row drag: `useSortable`'s listeners go on the select button, whose 6px
+  // activation keeps a plain click a select, and the wrapper is Y-locked.
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: terminal.id })
@@ -664,21 +594,8 @@ function TerminalFlatRow({
   )
 }
 
-// The flat Terminals section: every terminal (companion + project), each a
-// two-line TerminalFlatRow, under a collapsible labeled divider that matches the
-// Quiet tail's header and toggle exactly (a chevron, no leading icon). Renders
-// directly below the main agent list, ABOVE the Inactive tail. Defaults OPEN,
-// unlike the Quiet tail: a listed terminal is a live PTY worth surfacing, so it
-// is shown by default but can be collapsed to reclaim space. Renders nothing
-// when there are no terminals.
-//
-// That last sentence is load-bearing for the divider's + : the section is
-// absent at zero terminals, so the + can never create the FIRST standalone
-// terminal. Its zero-state home is the launcher corner's ⋯, which is always on
-// screen. Deliberate, not an oversight, and written here so nobody "fixes" it
-// by rendering an empty section. There is also no search-forced-open here (only
-// the Quiet tail carries that machinery), so a search cannot conjure the
-// divider either.
+// The flat Terminals section, under a divider defaulting OPEN because a listed
+// terminal is a live PTY. Absent at zero terminals, so its + never creates the first.
 function TerminalsSection({
   terminals,
   selectedTarget,
@@ -745,12 +662,8 @@ function TerminalsSection({
         </SimpleTooltip>
       </div>
       {open ? (
-        // A SEPARATE DndContext + SortableContext from the agents one above: its
-        // items are ONLY terminal ids, so dnd-kit can never pick an agent row as
-        // a drop target for a terminal (or vice versa). This enforces the
-        // within-group rule (a terminal reorders only among terminals) purely
-        // through the two contexts holding disjoint id sets. A drag flips the
-        // shared sort to manual, exactly like the agent drag.
+        // A separate DndContext holding ONLY terminal ids, so dnd-kit can never
+        // pick an agent row as a drop target for a terminal, or the reverse.
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
@@ -785,21 +698,8 @@ function TerminalsSection({
   )
 }
 
-// The Quiet tail: detached / exited agents, collapsed while anything active is
-// on screen so dormant work stops hogging the list, but OPEN while the whole
-// workspace is dormant (see the auto-manage note on `manual` below; the rule is
-// the TUI's, kept in step by hand). Its rows reuse the same AgentFlatRow (they
-// render dimmed via agentRowVisual and carry the Detached/Exited state word).
-//
-// Search auto-expand is DERIVED state, never a mutation of the collapse
-// preference: while `searchHit` (the live query matches something quiet) the
-// section renders open so the results are visible, and it falls back to the
-// manual `open` state the moment the query stops matching. The one override:
-// a user who collapses the section WHILE a matching query is active has made
-// an explicit call, so that dismissal wins, keyed to the NORMALIZED query (the
-// core `quiet_tail` rule) and expiring the moment the normalized query changes
-// (`prevQuery` tracks the transition via React's adjust-state-on-input-change
-// pattern, no effect pass needed).
+// The Quiet tail: detached and exited agents, open only while the whole workspace
+// is dormant. Search auto-expand is derived, never a write to the collapse preference.
 function QuietTail({
   sessions,
   projectName,
@@ -818,25 +718,16 @@ function QuietTail({
   // Whether ANY agent in the workspace is active (pre-search, whole list).
   anyActive: boolean
 }) {
-  // Auto-managed until the user toggles the section by hand, mirroring the
-  // TUI's rule: a wholly-dormant workspace renders its Inactive tail OPEN
-  // (hiding every agent behind a collapsed toggle is the worst possible
-  // landing screen after a restart, which brings agents back dormant), and
-  // the tail collapses once any agent is active. The first manual toggle
-  // takes over from the automation; `null` means "still automatic". The
-  // choice is mirrored into page-load-scoped module state (see
-  // lib/quietTailChoice.ts for why component state is not enough here).
+  // Auto-managed until the user toggles by hand: a wholly-dormant workspace opens
+  // the tail. `null` is still automatic; the choice mirrors to lib/quietTailChoice.ts.
   const [manual, setManual] = useState<boolean | null>(quietTailManualChoice())
   const setManualChoice = (next: boolean) => {
     setQuietTailManualChoice(next)
     setManual(next)
   }
   const open = manual ?? !anyActive
-  // The NORMALIZED query under which the user explicitly collapsed a
-  // search-expanded tail; inert once the normalized query changes. Keying on the
-  // normalized query (not the raw text) matches what the filter actually matches
-  // on, so a whitespace/case variant of the same query does not resurrect a tail
-  // the user just dismissed. Twin of the core `quiet_tail` rule.
+  // The NORMALIZED query under which the user collapsed a search-expanded tail,
+  // inert once that query changes, so a case variant cannot resurrect it.
   const normalizedQuery = normalizeQuery(query)
   const [dismissedQuery, setDismissedQuery] = useState<string | null>(null)
   const [prevQuery, setPrevQuery] = useState(normalizedQuery)
@@ -850,9 +741,8 @@ function QuietTail({
   const effectiveOpen = forcedOpen || open
   const toggle = () => {
     if (effectiveOpen) {
-      // Collapsing: when the search is holding the section open, record the
-      // dismissal for this normalized query; the base state collapses too, so
-      // clearing the query lands on the state the user last chose.
+      // Collapsing while the search holds the section open records the dismissal
+      // for this normalized query; the base state collapses too.
       if (forcedOpen) setDismissedQuery(normalizedQuery)
       setManualChoice(false)
     } else {
@@ -906,11 +796,8 @@ function QuietTail({
 // "active first"; "manual" is the only mode that enables drag-reorder.
 const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manual"]
 
-// One height token for every control in the Agents header (the new-agent + and
-// the sort trigger): they sit side by side, so a difference of a pixel reads as
-// a mistake. Written as an explicit height rather than inherited from padding,
-// per the CLAUDE.md control-height tenet, and lifted to the 40px floor where a
-// finger is the pointer (the hub renders this header too).
+// One height token for every control in the Agents header, set explicitly rather
+// than inherited, and lifted to the 40px floor where a finger is the pointer.
 const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10"
 
 // One counter pill for every section of the list: the count sits immediately
@@ -920,14 +807,8 @@ const SECTION_COUNT_PILL =
 
 function SortControl() {
   const agentSort = agentSortValue(useDux())
-  // The menu, not the trigger, is where the active mode is legible: the trigger
-  // is static ("Sort"), so the checkmark below is the touch-visible truth and
-  // the tooltip is a desktop nicety on top of it.
-  //
-  // name_desc is the one mode the web never OFFERS (only the TUI cycles into
-  // it), so its row is appended only while it is the active mode. Without that
-  // row a TUI-set name_desc would be a checkmark-less menu: five rows, none of
-  // them ticked, and no way to see what the list is actually sorted by.
+  // The trigger is static, so the checkmark in the menu is where the active mode
+  // is legible. `name_desc` is never offered here, so its row shows only while active.
   const keys: FlatSortKey[] =
     agentSort === "name_desc" ? [...SORT_KEYS, "name_desc"] : SORT_KEYS
   return (
@@ -1095,25 +976,15 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
     nothing,
     nothingMatches,
   } = flatAgentListModel(dux)
-  // Mouse drags on a 6px pull (a click stays a select); touch drags on a
-  // HOLD, or it fights the list's scroll gesture on phones. Why this is two
-  // sensors rather than one PointerSensor, and the values themselves, live
-  // in lib/dragActivation.ts.
+  // Mouse drags on a 6px pull; touch drags on a HOLD, or it fights the list's
+  // scroll gesture. The values live in lib/dragActivation.ts.
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: MOUSE_DRAG_ACTIVATION }),
     useSensor(TouchSensor, { activationConstraint: TOUCH_DRAG_ACTIVATION }),
   )
 
-  // The terminal drag's twin of `handleDragEnd`: move the dragged terminal to the
-  // drop target's slot in the COMPLETE terminal id order (any owner) as the
-  // active sort mode DISPLAYS it (`displayedTerminalOrder`; in manual that is
-  // the base order verbatim), and if that changed the order, flip the shared
-  // sort to manual (so the dropped position sticks instead of being re-sorted
-  // away) and persist via `reorderTerminals`. The displayed order matters
-  // because drags start from every sort mode: computing the move against the
-  // hidden base order would land the row relative to neighbors the user is not
-  // seeing. The search filter is deliberately NOT applied: the persisted order
-  // must be total.
+  // Move the dragged terminal to the slot the active sort DISPLAYS, over the
+  // complete order and never the filtered subset, then flip the sort to manual.
   function handleTerminalDragEnd(event: DragEndEvent) {
     const { active, over } = event
     if (!over || active.id === over.id) return
@@ -1127,20 +998,13 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
     if (!over || active.id === over.id) return
-    // Global flat reorder: move the dragged agent to the drop target's slot in
-    // the COMPLETE session order as the active sort mode DISPLAYS it (sorted
-    // main list, quiet tail appended; manual stays the base order verbatim, its
-    // long-standing behavior). Drags start from every sort mode, so the move
-    // must be computed against what the user is looking at, and the captured
-    // baseline is total (all sessions, never the search-filtered subset).
+    // Move the dragged agent to the slot the active sort DISPLAYS, over the
+    // complete session order and never the search-filtered subset.
     const fullOrder = displayedSessionOrder(coreSessions, agentSort)
     const next = moveItem(fullOrder, String(active.id), String(over.id))
     if (ordersMatch(fullOrder, next)) return
-    // A drag is an explicit request for manual control. If the user reordered from
-    // a computed sort (active-first, name, ...), flip the sort to manual so the
-    // dropped position sticks instead of being immediately re-sorted away. The order
-    // persists in SQLite; persisting `agentSort` too (see store) keeps the manual
-    // view across restarts.
+    // A drag is an explicit request for manual control, so a reorder out of a
+    // computed sort flips the sort to manual and the dropped position sticks.
     if (!manual) setAgentSort("manual")
     reorderAgents(next)
   }

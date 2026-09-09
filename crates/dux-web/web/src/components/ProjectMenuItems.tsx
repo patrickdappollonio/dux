@@ -31,17 +31,10 @@ import {
 } from "lucide-react"
 
 /**
- * The shared body of a project's actions dropdown, rendered by both the desktop
- * sidebar and the mobile shell so the two menus never drift. The caller supplies
- * its own <DropdownMenuContent> wrapper (desktop and mobile anchor it
- * differently); this renders only the items.
- *
- * An orphaned group (a session whose project record is gone) has no real
- * project to act on — most actions would 404 on the server — so its menu shows
- * only "Remove project…", which clears the ghost's orphaned sessions. The
- * "New agent from PR…" item is hidden when GitHub integration / `gh` is
- * unavailable, mirroring the TUI (which gates `new-agent-from-pr` the same way;
- * the server also rejects the command in that state).
+ * The shared body of a project's actions dropdown, items only: the caller supplies
+ * its own wrapper, since desktop and mobile anchor it differently. An orphaned
+ * group shows only "Remove project…", which clears its ghost sessions, and
+ * "New agent from PR…" is hidden where `gh` is unavailable.
  */
 export function ProjectMenuItems({ id }: { id: string }) {
   const { spine, bootstrap } = useDux()

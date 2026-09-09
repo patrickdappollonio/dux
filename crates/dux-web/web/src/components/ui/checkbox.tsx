@@ -3,9 +3,8 @@ import { Checkbox as CheckboxPrimitive } from "@base-ui/react/checkbox"
 import { cn } from "@/lib/utils"
 import { CheckIcon, MinusIcon } from "lucide-react"
 
-// `indeterminate` is base-ui's own prop: it reports `aria-checked="mixed"` and
-// stamps `data-indeterminate`, which the filled-box classes below key off,
-// since `data-checked` is absent in that state.
+// `indeterminate` is base-ui's own prop, stamping `data-indeterminate`, which the
+// filled-box classes key off since `data-checked` is absent in that state.
 function Checkbox({
   className,
   indeterminate,

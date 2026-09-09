@@ -55,25 +55,10 @@ import {
 } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
-// The Task Manager (the app menu's "Task Manager…"): what is running, what it
-// costs, and how to stop it. It is both the kill-running surface and the
-// resource monitor.
-//
-// Rows are PER TAB, not per agent: stats are sampled per provider process, and
-// the engine keys those by tab id. A three-tab agent is three rows, grouped
-// under its session-slot tab. (The modal this replaces listed one row per
-// session and could not tell you which tab was burning the CPU.)
-//
-// EVERY stop confirms, including "Stop all…". The modal this replaces killed on
-// a single click, justified by being "the deliberate, clearly-labelled
-// destructive surface". That justification lapses here: a Task Manager is a
-// surface you leave open and read numbers off, so a misclick must not end a
-// process. Both confirmations are existing, established dialogs, so the hung-
-// agent escape hatch stays one keystroke away.
-//
-// Stats arrive by REST poll (only while open, paused when the tab is hidden),
-// not over the event bus: an event names what changed and never carries the
-// changed value, and stats are a value that changes every sample.
+// The Task Manager: what is running, what it costs, and how to stop it. Rows are
+// PER TAB, since stats are sampled per provider process; every stop confirms,
+// because this is a surface you leave open and read numbers off. Stats arrive by
+// REST poll, because an event names what changed and never carries the value.
 export function TaskManagerDialog() {
   const { taskManagerOpen, stopAllOpen } = useDux()
 
@@ -106,21 +91,16 @@ export function TaskManagerDialog() {
 
 function TaskManagerBody() {
   const { spine } = useDux()
-  // ONE layout renders at a time (not two hidden behind CSS): the 4-column table
-  // cannot fit a phone, so mobile gets stacked cards instead. Rendering both and
-  // hiding one would duplicate every row, and every Stop control, in the DOM.
+  // ONE layout renders at a time, not two hidden behind CSS: rendering both would
+  // duplicate every row, and every Stop control, in the DOM.
   const isMobile = useIsMobile()
   const [stats, setStats] = useState<ResourceStatsView[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  // When the last poll actually succeeded, or `null` before the first sample
-  // ever lands. Drives the staleness indicator below: a permanently failing
+  // When the last poll succeeded, or `null` before the first sample. A failing
   // poll must not go on rendering the last good numbers as if they were live.
   const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null)
-  // The time as of the last poll attempt (success or failure), or `null`
-  // before any attempt has run. Rendering must stay pure (no `Date.now()` at
-  // render time), so "now" is captured in an effect and stored as state; this
-  // is also what forces a re-render to re-evaluate `statsAreStale` while
-  // every fetch is failing (a failure alone touches no other state).
+  // The time as of the last poll attempt, or `null` before any has run. State
+  // rather than `Date.now()` at render time, so a failing poll still re-renders.
   const [now, setNow] = useState<number | null>(null)
 
   const sessions = useMemo(() => spine?.sessions ?? [], [spine])
@@ -134,10 +114,8 @@ function TaskManagerBody() {
   const stale = now !== null && statsAreStale(now, lastSuccessAt)
   const summary = useMemo(() => taskManagerSummary(rows), [rows])
 
-  // Poll while visible. Wall-clock: each tick schedules the next from how long
-  // the fetch actually took, so a slow round-trip does not stretch the cadence.
-  // A closed dialog polls nothing (this body is unmounted), which is the whole
-  // point of serving stats over REST rather than pushing them to every client.
+  // Poll while visible. Each tick schedules the next from how long the fetch took,
+  // so a slow round-trip does not stretch the cadence; a closed dialog polls nothing.
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -157,11 +135,8 @@ function TaskManagerBody() {
           setLastSuccessAt(Date.now())
         }
       } catch {
-        // A failed or aborted sample is not worth a toast: the next tick (one
-        // second later) either recovers or the user closes the dialog. The
-        // rows keep rendering from the spine with dashes meanwhile. A run of
-        // failures surfaces as the "stats stalled" indicator instead, driven
-        // by `lastSuccessAt` rather than a per-failure toast.
+        // A failed sample raises no toast: the next tick recovers, and a run of
+        // failures surfaces through the staleness indicator instead.
       }
       if (!cancelled) setNow(Date.now())
       if (cancelled) return
@@ -193,9 +168,8 @@ function TaskManagerBody() {
     }
   }, [])
 
-  // Auto-close ONLY when the list goes from populated to empty while open (the
-  // user stopped the last runtime), never on an open that starts empty, which
-  // would flash the dialog shut before the "Nothing is running." state is read.
+  // Auto-close only on the populated-to-empty transition, never on an open that
+  // starts empty, which would flash the dialog shut before it can be read.
   const wasPopulated = useRef(false)
   useEffect(() => {
     if (!empty) {
@@ -216,23 +190,15 @@ function TaskManagerBody() {
 
   function handleStop(row: TaskRow) {
     if (row.targetId === null) return
-    // Every path opens a confirmation dialog rather than acting now. Guard per
-    // KIND: a terminal (of either owner) needs only its target id. A project
-    // terminal's `sessionId` is null, and a session-null early return here would
-    // leave its Stop button dead.
+    // Every path opens a confirmation rather than acting now. Guard per KIND: a
+    // project terminal's `sessionId` is null, so a null check here kills its Stop.
     if (row.kind === "terminal") {
       openDeleteTerminal(row.targetId)
       return
     }
     if (row.sessionId === null) return
-    // Two different acts wear the same Stop control. An agent's FIRST tab cannot
-    // be closed, so its row STOPS the agent (its provider ends, the agent stays
-    // in the list, relaunchable); an extra tab's row CLOSES that tab for good.
-    // Routing the first tab through the close dialog would confirm and then be
-    // refused by the server, leaving no way to stop an agent from here at all.
-    // The row already carries that answer: `nested` was resolved from the
-    // session record when the row was built, so re-deriving slot-ness from the
-    // two ids here would be a second, weaker copy of the same rule.
+    // Two acts wear the same Stop control: a first tab is STOPPED, an extra tab is
+    // CLOSED. Slot-ness comes from `nested`, resolved when the row was built.
     if (!row.nested) {
       openStopAgent(row.sessionId)
       return
@@ -333,10 +299,8 @@ function TaskManagerBody() {
               </p>
             ) : null}
             {empty ? null : (
-              // Destructive here, unlike a `⋯` menu's neutral destructive items
-              // (CLAUDE.md scopes that tenet to DropdownMenuItems): this is a
-              // dialog footer button, the exact surface the tenet reserves
-              // `variant="destructive"` for.
+              // Destructive here, unlike a `⋯` menu's neutral items: a dialog footer
+              // button is the surface `variant="destructive"` is reserved for.
               <Button variant="destructive" onClick={openStopAll}>
                 Stop all…
               </Button>
@@ -349,11 +313,8 @@ function TaskManagerBody() {
   )
 }
 
-// The header's "still live" cue: a small muted pill with a blinking dot,
-// reading "updating every Ns" with the interval read straight from the real
-// poll constant so the copy cannot drift from the actual cadence. Reuses the
-// existing `.agent-status-dot`/`--on` pulse (StatusBadge's streaming dot):
-// same blink, same `prefers-reduced-motion` handling, one definition.
+// The header's "still live" cue. The interval is read from the poll constant so
+// the copy cannot drift, and the blink reuses `.agent-status-dot`'s one definition.
 function LivePollPill({ intervalMs }: { intervalMs: number }) {
   return (
     <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
@@ -366,13 +327,8 @@ function LivePollPill({ intervalMs }: { intervalMs: number }) {
   )
 }
 
-// The leading row icon: reuses the SAME icons the rest of the app already
-// uses for these kinds, rather than inventing new ones (Sidebar.tsx /
-// MobileShell.tsx / AgentTabsStrip.tsx all use `Bot` for an agent and
-// `SquareTerminal` for a companion terminal). `dux` gets `Activity`, matching
-// the app menu's own Task Manager entry (`lib/appMenu.ts`), so the app's own
-// process reads as "the activity monitor icon", not another agent. TOTAL gets
-// none: it is a summary row, not a process.
+// The leading row icon reuses the icons the rest of the app already uses per kind;
+// `dux` takes the app menu's own Task Manager icon, and TOTAL is not a process.
 const ROW_ICONS: Partial<Record<TaskRowKind, typeof Bot>> = {
   dux: Activity,
   agent: Bot,
@@ -385,13 +341,8 @@ function RowIcon({ kind }: { kind: TaskRowKind }) {
   return <Icon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
 }
 
-// Marks the dux row as "this process", not another agent. Reuses the shared
-// `Badge` primitive (see StatusBadge.tsx) rather than a hand-rolled span.
-// Cyan-tinted per the approved mock, but deliberately STATIC (no
-// `animate-attention-pulse`): that blink is reserved for "needs attention"
-// elsewhere (AttentionDot, Sidebar, MobileShell all pair cyan with the pulse
-// and a tooltip), and dux never needs the user's attention, so this pill
-// borrows the color, not the motion.
+// Marks the dux row as "this process". Cyan but deliberately STATIC: the blink
+// paired with that color everywhere else means "needs attention", which this never is.
 function DuxBadge() {
   return (
     <Badge
@@ -413,15 +364,8 @@ function NoStop() {
   )
 }
 
-// The expand caret. Every KIND expands, terminals included: the collector runs
-// the same tree walk over every target. What decides is whether this row's tree
-// actually has anything to break down.
-//
-// The gate is core's `has_breakdown`, never `children.length`: `children`
-// always includes the row's own root process, so a leaf (a provider that
-// spawned no subprocesses, the common case) has length 1 and a
-// `length === 0` test leaves every single row expandable. Expanding one then
-// reveals exactly one child: a duplicate of the row just expanded.
+// The gate is core's `has_breakdown`, never `children.length`: `children` always
+// includes the row's own root, so a leaf has length 1 and would look expandable.
 function rowHasBreakdown(row: TaskRow): boolean {
   return row.stats?.has_breakdown ?? false
 }
@@ -447,11 +391,8 @@ function ExpandToggle({
           ? `Hide ${row.name} child processes`
           : `Show ${row.name} child processes`
       }
-      // >=40px touch target on phones (CLAUDE.md's touch-target tenet): this
-      // control sits directly beside the correctly-sized Stop button in the
-      // mobile row, and a tiny chevron next to it is a misclick hazard on the
-      // one control a misclick would be worst on. Desktop keeps the compact
-      // 16px density.
+      // 40px touch target on phones: this chevron sits beside Stop, the one control
+      // a misclick would be worst on. Desktop keeps the compact density.
       className="inline-flex size-4 max-md:size-10 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
     >
       <Icon className="size-3.5" />
@@ -459,12 +400,8 @@ function ExpandToggle({
   )
 }
 
-// Stat cells read as dashes when this row had no sample: a dormant tab, or a
-// process born since the last poll. The row still renders and stays stoppable.
-//
-// `pid` is handled by the CALLER, not here: TOTAL has no pid at all (blank,
-// not a dash: it is not a single process), which is a different "nothing to
-// show" than "no sample yet".
+// Stat cells read as dashes when the row had no sample; the row stays stoppable.
+// `pid` is the CALLER's: TOTAL is blank rather than dashed, a different nothing.
 function statCells(stats: ResourceStatsView | null) {
   return {
     cpu: stats ? formatCpu(stats.cpu_percent) : "—",
@@ -489,11 +426,8 @@ function DesktopRow({
   // TOTAL has no pid at all (blank: it is a summary, not a process); every
   // other row shows the real pid, or a dash before the first sample lands.
   const pid = isTotal ? "" : row.stats?.pid != null ? String(row.stats.pid) : "—"
-  // Gate the BODY on the same rule as the toggle, not just the toggle: an
-  // expanded row whose subprocess exits between polls drops to a lone root
-  // entry, and the caret vanishing is not enough to stop the duplicate from
-  // rendering under it. The expansion set is keyed by row and outlives the
-  // shape of the tree it was opened on.
+  // The body is gated on the same rule as the toggle: the expansion set outlives
+  // the tree's shape, so a row that loses its children must stop rendering them.
   const children = rowHasBreakdown(row) ? (row.stats?.children ?? []) : []
 
   return (
@@ -675,10 +609,8 @@ function MobileRow({
   )
 }
 
-// The bulk stop's confirmation. Nested inside the Task Manager, and destructive-
-// styled (unlike the Task Manager itself): this one really is only a dangerous
-// action. Follows the established pattern: Cancel `autoFocus`, the confirm
-// `variant="destructive"`, misclick-safe spacing.
+// The bulk stop's confirmation, nested inside the Task Manager and destructive-
+// styled, unlike the Task Manager itself.
 function ConfirmStopAllDialog({ open }: { open: boolean }) {
   const { spine } = useDux()
   const sessions = spine?.sessions ?? []
@@ -722,16 +654,9 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
   )
 }
 
-// The confirmation behind an agent row's Stop. An agent's FIRST tab cannot be
-// closed, so this row's verb is genuinely "stop", not "close", and it needs its
-// own dialog rather than borrowing ConfirmCloseTabDialog, whose copy promises to
-// delete a tab for good and whose confirm the server would refuse. Follows the
-// established per-action pattern: Cancel `autoFocus`, the confirm
-// `variant="destructive"`, misclick-safe spacing.
-//
-// The copy states what `KillSessionPty` actually does: it stops the provider
-// running in this agent's first tab and nothing else. Sibling tabs keep running,
-// and the agent detaches only when this was its last live tab.
+// The confirmation behind an agent row's Stop. Its own dialog rather than
+// ConfirmCloseTabDialog: a first tab cannot be closed, only stopped, and the
+// copy has to say that sibling tabs keep running.
 function ConfirmStopAgentDialog() {
   const { stopAgentTarget, spine } = useDux()
 

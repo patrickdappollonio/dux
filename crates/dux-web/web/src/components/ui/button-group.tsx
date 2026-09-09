@@ -1,11 +1,7 @@
-// Vendored from shadcn/ui (button-group). The group's child selectors below
-// are kept byte-identical to upstream: they are what squares the inner
-// corners and collapses the shared border of adjacent buttons; `button.tsx`'s
-// `in-data-[slot=button-group]` size classes only normalize radius and rely on
-// these selectors for the actual seam. Two deviations from upstream, both
-// forced by the dependency set (this project is base-ui, not radix):
-// the Separator import path, and ButtonGroupText dropping radix `Slot`
-// (asChild) in favor of a plain div.
+// Vendored from shadcn/ui (button-group). The child selectors below are kept
+// byte-identical to upstream, since they are what squares the inner corners and
+// collapses the shared border. Two deviations, both forced by base-ui rather than
+// radix: the Separator import path, and ButtonGroupText using a plain div.
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 

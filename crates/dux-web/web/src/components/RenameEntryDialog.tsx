@@ -19,11 +19,8 @@ export interface RenameEntryTarget {
 
 interface RenameEntryDialogProps {
   target: RenameEntryTarget | null
-  // True when `target` (or, for a folder, a descendant of it) has unsaved
-  // changes. Computed by the caller from `hasDirtyUnderPath` so this component
-  // stays pure UI. When true, Confirm is disabled and a blocking note is shown
-  // instead of the usual validation error: renaming a dirty open file would
-  // reload it from disk after the move and silently drop the draft.
+  // True when `target`, or a descendant of it, has unsaved changes. It disables
+  // Confirm: renaming a dirty open file reloads it from disk and drops the draft.
   isDirty: boolean
   onClose: () => void
   onSubmit: (newName: string) => Promise<void>
@@ -35,13 +32,9 @@ function finalSegment(path: string): string {
   return idx === -1 ? path : path.slice(idx + 1)
 }
 
-// Renaming an open file's tab retargets its `path` in place (see
-// `editorTabs.ts` `renameTabPaths`) rather than closing and reopening it. For
-// a CLEAN tab that is a deliberate, accepted tradeoff: Monaco's model is keyed
-// by the path's URI, so the new path gets a brand-new model with no undo
-// history or view state (folding, scroll, cursor). We only reach that retarget
-// for a clean tab, though: the `isDirty` gate below refuses to rename a
-// dirty one at all, so an in-progress edit is never silently reloaded away.
+// Renaming an open file's tab retargets its `path` in place. Monaco's model is
+// keyed by the URI, so the new path loses undo history and view state; that is
+// accepted for a CLEAN tab, and the `isDirty` gate refuses a dirty one outright.
 export function RenameEntryDialog({
   target,
   isDirty,

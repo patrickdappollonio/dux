@@ -62,10 +62,8 @@ import { cn } from "@/lib/utils"
 import type { SessionView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
-// The icon rail replaces the flat agent list when the sidebar collapses to
-// `collapsible="icon"` mode. It renders every AGENT across all projects, flattened
-// in project-then-agent order, keeping each row's working-bob / attention-blink
-// cues and opening the same selection the expanded row's click does.
+// The icon rail replaces the flat agent list at `collapsible="icon"` width: every
+// agent, flattened in project-then-agent order, with the same cues and selection.
 function CollapsedAgentIcon({
   session,
   projectName,
@@ -140,10 +138,8 @@ function CollapsedAgentRail({
 }: {
   projectIds: string[]
   grouped: Map<string, SessionView[]>
-  /** The agents that belong to no project, in list order. They sit under no
-   * project row, so grouping by project loses them, and the rail is the ONLY
-   * way to reach an agent at icon width: without this they were unreachable
-   * without expanding the sidebar. */
+  /** The agents that belong to no project, in list order: grouping by project
+   * loses them, and the rail is the only way to reach an agent at icon width. */
   standalone: SessionView[]
   projectName: (id: string) => string
   changes: ChangesSlice
@@ -166,9 +162,8 @@ function CollapsedAgentRail({
   return (
     <SidebarGroup
       data-testid="collapsed-agent-rail"
-      // See the original note: give the rail its own bounded, vertically
-      // scrollable region so a long agent list is never clipped below the fold by
-      // SidebarContent's icon-mode overflow-hidden.
+      // The rail gets its own bounded scrollable region, or SidebarContent's
+      // icon-mode `overflow-hidden` clips a long agent list below the fold.
       className="hidden min-h-0 flex-1 overflow-y-auto no-scrollbar group-data-[collapsible=icon]:flex"
     >
       <SidebarGroupContent>
@@ -191,30 +186,13 @@ function CollapsedAgentRail({
   )
 }
 
-// Edge affordance pinned to the sidebar's right edge: drag-to-resize when
-// expanded, click-to-expand when collapsed. Desktop only.
-//
-// The GESTURE is the shared one: `useDividerDrag` and `DIVIDER_CHROME` are the
-// same acquisition, grab band, touch-action suppression, cursor and keyboard
-// vocabulary the Changes divider gets from react-resizable-panels, so a finger
-// that can move one can move the other. The sidebar keeps its own band and its
-// own collapse target (the icon rail rather than nothing), which is the one
-// difference between the two dividers; that band lives in lib/sidebarResize.ts.
-//
-// Rebuilding the sidebar as a resizable panel group instead was evaluated and
-// rejected: it would fight SidebarProvider's CSS-variable width model, which
-// the collapsed rail and every `group-data-[collapsible=icon]` rule read.
+// Edge affordance on the sidebar's right edge: drag-to-resize when expanded,
+// click-to-expand when collapsed, desktop only. The gesture is the Changes
+// divider's shared one; only the band and the collapse target differ.
 function SidebarResizeHandle() {
   const { state, isMobile } = useSidebar()
-  // KEEPING FOCUS ACROSS THE COLLAPSE. Collapsing and expanding swap the drag
-  // edge for the expand strip and back, so the control the user was standing on
-  // is unmounted by their own keystroke and focus would fall to the body, which
-  // sends the next Tab back to the top of the document. This carries the intent
-  // across the swap: whichever control mounts next claims it, once.
-  //
-  // State rather than a ref, because the claim is made in one component's event
-  // handler and read during another's mount: the two are in the same commit, so
-  // a re-render is exactly the mechanism that gets it there.
+  // A collapse unmounts the control the keyboard was standing on, so this carries
+  // the focus intent across the swap. State, because the claim crosses components.
   const [focusOnMount, setFocusOnMount] = useState(false)
   const claimFocus = useCallback(() => setFocusOnMount(true), [])
   const releaseFocusClaim = useCallback(() => setFocusOnMount(false), [])
@@ -270,10 +248,8 @@ function SidebarExpandStrip({
       type="button"
       data-sidebar="expand-handle"
       aria-label="Expand sidebar"
-      // `detail` is 0 only for a click the keyboard synthesised, which is how a
-      // button tells Enter and Space apart from a real press. A keyboard
-      // expand hands focus on to the drag edge that replaces this strip; a
-      // mouse click leaves focus where the mouse put it.
+      // `detail` is 0 only for a keyboard-synthesised click. A keyboard expand
+      // hands focus to the drag edge; a mouse click leaves focus where it is.
       onClick={(event) => {
         if (event.detail === 0) claimFocus()
         setOpen(true)
@@ -295,41 +271,30 @@ function SidebarDragEdge({
   const { setOpen } = useSidebar()
   const { sidebarWidth } = useDux()
 
-  // The live width, and the width the current gesture is measured from. Refs
-  // because both change on pointer-move cadence and the listeners below are
-  // installed once.
+  // The live width, and the width the current gesture is measured from. Refs: both
+  // change at pointer-move cadence and the listeners below are installed once.
   const widthRef = useRef(sidebarWidth)
   useEffect(() => {
     widthRef.current = sidebarWidth
   })
   const grabbedPxRef = useRef(sidebarWidthToPx(sidebarWidth))
 
-  // The wrapper the `--sidebar-width` variable lives on, resolved once from the
-  // edge's own element rather than threaded down as a prop: it belongs to the
-  // sidebar primitive, several levels above this component, and the only thing
-  // wanted from it is a style property and an attribute.
+  // The wrapper `--sidebar-width` lives on, resolved from the edge's own element:
+  // it belongs to the sidebar primitive, several levels above this component.
   const wrapperRef = useRef<HTMLElement | null>(null)
-  // The width the DOM is currently painted at, which during a gesture is ahead
-  // of the store. Every path that ends a gesture reads it, so a cancel can
-  // leave the sidebar exactly where the finger left it.
+  // The width the DOM is painted at, ahead of the store during a gesture. Every
+  // path that ends one reads it, so a cancel leaves the sidebar where it was.
   const paintedRef = useRef(sidebarWidth)
 
-  // THE LIVE WIDTH IS PAINTED, NOT STORED. A per-move `setSidebarWidth` goes
-  // through the global store, so every `useDux` consumer (the whole agent list
-  // among them) re-rendered on every pointer move of a drag that only ever
-  // changes one CSS variable. Writing the variable straight onto the wrapper
-  // costs one style mutation instead, and the store is written once, at the end
-  // of the gesture, which is also the only value worth persisting.
+  // The live width is painted onto the wrapper, not stored: a per-move store write
+  // re-renders every `useDux` consumer. The store is written once, at the end.
   const paintWidth = useCallback((widthRem: string) => {
     paintedRef.current = widthRem
     wrapperRef.current?.style.setProperty("--sidebar-width", widthRem)
   }, [])
 
-  // Whether a gesture is in flight, and the two things that are true for its
-  // whole duration. The width does not animate: it is following a finger, and a
-  // tween restarted on every move is an edge that trails it and keeps moving
-  // after it lifts. And the terminal owes exactly one refit, at the geometry
-  // the gesture settles on, rather than one per geometry it passes through.
+  // For a gesture's whole duration the width does not animate (a tween would trail
+  // the finger) and the terminal owes one refit, at the geometry it settles on.
   const gestureRef = useRef(false)
   const beginGesture = useCallback(() => {
     if (gestureRef.current) return
@@ -344,15 +309,9 @@ function SidebarDragEdge({
     endLayoutGesture()
   }, [])
 
-  // Every way of moving this divider ends here, so a drag, an arrow key and a
-  // double-click cannot disagree about the band or about when the sidebar snaps
-  // to its rail. Reports whether it collapsed, because a keyboard gesture that
-  // collapses has to hand focus on to the strip that replaces this edge.
-  //
-  // The paint and the store write carry the SAME value on purpose: React only
-  // rewrites the variable when the value it renders differs from the one it
-  // rendered last, so a committed width that happens to equal the last rendered
-  // one would otherwise leave the painted value standing on its own.
+  // Every way of moving this divider ends here, so none can disagree about the
+  // band or the snap. The paint and the store write carry the SAME value, or a
+  // committed width equal to the last rendered one leaves the paint standing.
   const commit = (px: number): boolean => {
     const { widthRem, collapse } = sidebarResizeRelease(px)
     paintWidth(widthRem)
@@ -372,26 +331,15 @@ function SidebarDragEdge({
       paintedRef.current = widthRef.current
       beginGesture()
     },
-    // Live, unpersisted: the width follows the finger by the DELTA from the
-    // press, so a press that landed off centre in the grab band does not
-    // teleport the divider on the first move.
+    // Live and unpersisted: the width follows the DELTA from the press, so a press
+    // off centre in the grab band does not teleport the divider on the first move.
     onDrag: (deltaX) => {
       draggedRef.current = true
       const { widthRem } = sidebarResizeRelease(grabbedPxRef.current + deltaX)
       paintWidth(widthRem)
     },
-    // A PRESS THAT WENT NOWHERE DECIDES NOTHING, which includes deciding to
-    // remember the width it already had. Measured on a touch tablet: a tap on
-    // the sidebar's edge wrote `dux:sidebar-width` (the current value, so
-    // nothing moved on screen), while the same tap on the Changes divider wrote
-    // nothing at all. Storage is the user's record of a width they chose, and a
-    // tap is not a choice: writing on one makes a stray touch pin whatever the
-    // sidebar happened to be at, including a width that only came from a
-    // default the release would otherwise have gone on tracking.
-    //
-    // The threshold is the shared one, so both dividers agree on when a press
-    // has become a drag. Under it, whatever the live drag painted is put back
-    // unpersisted; nothing is written and the sidebar cannot collapse.
+    // A press under the shared drag threshold persists nothing and cannot collapse:
+    // storage records a width the user chose, and a tap is not a choice.
     onDrop: (deltaX) => {
       if (Math.abs(deltaX) < DIVIDER_DRAG_THRESHOLD_PX) {
         if (draggedRef.current) {
@@ -405,11 +353,8 @@ function SidebarDragEdge({
       commit(grabbedPxRef.current + deltaX)
       endGesture()
     },
-    // A cancelled gesture writes nothing and leaves the sidebar where the
-    // finger left it, which is what the panel library's divider does too. What
-    // the finger left is what the drag PAINTED, so the store is squared with it
-    // here (unpersisted): the paint is not a value anyone else can read, and a
-    // store left behind would be put back on the next unrelated render.
+    // A cancelled gesture persists nothing but still squares the store with what
+    // the drag painted, or the next unrelated render puts the old width back.
     onCancel: () => {
       if (draggedRef.current) setSidebarWidth(paintedRef.current)
       endGesture()
@@ -419,11 +364,8 @@ function SidebarDragEdge({
     onReset: () => void commit(sidebarWidthToPx(SIDEBAR_INITIAL_WIDTH)),
   })
 
-  // A GESTURE MUST NOT OUTLIVE THE EDGE THAT STARTED IT. The drag hook's own
-  // teardown drops the listeners without calling a handler, so an edge unmounted
-  // mid-drag (theater mode taking the sidebar away under a finger) would leave
-  // the suppression standing on a wrapper nothing is dragging, and the
-  // terminal's refit held for the rest of the page's life.
+  // A gesture must not outlive the edge that started it: the drag hook's teardown
+  // calls no handler, so an edge unmounted mid-drag would hold the refit for good.
   useEffect(() => {
     wrapperRef.current =
       ref.current?.closest<HTMLElement>('[data-slot="sidebar-wrapper"]') ?? null
@@ -432,14 +374,8 @@ function SidebarDragEdge({
 
   useFocusHandoff(focusOnMount, onFocusClaimed, ref)
 
-  // The library's separator keyboard vocabulary, in the sidebar's own units.
-  //
-  // A DELIBERATE DEVIATION on the step size. The library steps by 5% of the
-  // group its separator splits, which here is the window: on anything wider
-  // than 960px that is more than the 48px between the sidebar's default width
-  // and its auto-collapse threshold, so a single ArrowLeft would put the whole
-  // sidebar away. The sidebar steps by 1rem instead, which is a nudge in a band
-  // only 14rem wide. Home and End still run it to its ends.
+  // The separator keyboard vocabulary in the sidebar's own units: 1rem a step,
+  // not the library's 5% of the window, which would collapse it in one press.
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const action = dividerKeyAction(event.key)
     if (!action) return
@@ -467,10 +403,8 @@ function SidebarDragEdge({
       aria-orientation="vertical"
       aria-valuemin={MIN_SIDEBAR_PX}
       aria-valuemax={MAX_SIDEBAR_PX}
-      // The COMMITTED width, so it is correct at rest, which is when assistive
-      // technology reads it. During a drag it lags the painted width, because
-      // the drag deliberately does not go through the store, and it catches up
-      // the moment the gesture ends.
+      // The COMMITTED width, correct at rest, which is when assistive technology
+      // reads it; during a drag it lags the painted width and catches up at the end.
       aria-valuenow={Math.round(sidebarWidthToPx(sidebarWidth))}
       tabIndex={0}
       onKeyDown={onKeyDown}
@@ -509,11 +443,8 @@ export function AppSidebar() {
   const instanceTitle = resolveInstanceTitle(bootstrap?.title)
 
   return (
-    // The drag edge IS this sidebar's right border now: it paints the same
-    // hair-thin line the Changes divider does, in the same token, so the
-    // container must not draw a second one a pixel to its left. Written with
-    // the same variant the primitive uses, so tailwind-merge drops that one
-    // rather than leaving two rules to fight over specificity.
+    // The drag edge paints this sidebar's right border, so the container must not
+    // draw a second one; the same variant lets tailwind-merge drop the primitive's.
     <Sidebar
       collapsible="icon"
       className="group-data-[side=left]:border-r-0"

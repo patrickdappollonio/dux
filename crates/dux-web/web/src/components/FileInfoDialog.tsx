@@ -39,43 +39,26 @@ interface FileInfoDialogProps {
   onClose: () => void
 }
 
-// Read-only "File info…" panel: path, kind, size, modified time, permissions,
-// and git status for one worktree entry. A Report-family surface in the TUI's
-// vocabulary: it scrolls, and its only control is the dismissal.
-//
-// It fetches its own facts rather than taking them as props, because none of
-// them live in the ViewModel: the file tree is a client-owned lazy cache and a
-// stat is not broadcast to anybody. That also gives the vanished-target guard
-// something REAL to key on. The other editor dialogs (New/Rename/Delete/Move)
-// deliberately skip the guard because they have no live truth about the tree;
-// this one asks the server directly, so a 404 means the entry is gone and the
-// panel dismisses itself. A 400 is the opposite answer, a path that was
-// REFUSED, and that must stay on screen with its reason.
-//
-// Be precise about WHEN it learns that, because the panel must never claim
-// more than it knows: there is no poll and no subscription, so the facts are exactly
-// as fresh as the last fetch. Two things trigger one, the panel opening and
-// the WINDOW REGAINING FOCUS, and the second is the whole reason a file can
-// vanish "while the panel is open" at all. It covers the real journey (delete
-// the file in a terminal or another tab, come back to this one) at the cost of
-// one request per return, and it needs no timer. A file deleted by an agent
-// while this tab stays focused is NOT noticed, and that is the accepted gap.
+// Read-only "File info…" panel for one worktree entry. It fetches its own facts,
+// since none of them live in the ViewModel, which is also what the vanished-target
+// guard keys on: a 404 dismisses the panel, while a 400 is a REFUSAL and stays on
+// screen with its reason. There is no poll and no subscription, so the facts are as
+// fresh as the last fetch, and only opening and the window regaining focus trigger
+// one. A file deleted while this tab stays focused is not noticed; that gap is accepted.
 export function FileInfoDialog({
   root,
   target,
   onClose,
 }: FileInfoDialogProps) {
   const path = target?.path ?? null
-  // Tagged with the path it describes, so "still loading" is DERIVED from the
-  // tag not matching the path being asked about rather than written by a
-  // synchronous setState in the effect body (which cascades renders).
+  // Tagged with the path it describes, so "still loading" is DERIVED from the tag
+  // rather than a synchronous setState in an effect body, which cascades renders.
   const [loaded, setLoaded] = useState<{
     path: string
     result: InfoResult
   } | null>(null)
-  // Bumped to ask again for the SAME path. Not part of the `loaded` tag on
-  // purpose: a revalidation must keep showing the facts it already has rather
-  // than flashing the spinner, so only the answer changing is visible.
+  // Bumped to ask again for the SAME path, and deliberately not part of the
+  // `loaded` tag: a revalidation keeps the facts it has rather than flashing.
   const [revalidateNonce, setRevalidateNonce] = useState(0)
   const result = loaded !== null && loaded.path === path ? loaded.result : null
   const info = result?.kind === "ok" ? result.info : null
@@ -92,9 +75,8 @@ export function FileInfoDialog({
       })
       .catch((e: unknown) => {
         if (cancelled) return
-        // A 404 means the entry is GONE, which is what the vanished-target
-        // guard below reacts to. Anything else (a 400 refusal, a transport
-        // failure) is an answer the user needs to read.
+        // A 404 means the entry is GONE, which the vanished-target guard reacts
+        // to; anything else is an answer the user needs to read.
         if (e instanceof FileApiError && e.status === 404) {
           setLoaded({ path, result: { kind: "vanished" } })
           return
@@ -113,9 +95,8 @@ export function FileInfoDialog({
     }
   }, [root, path, revalidateNonce])
 
-  // The panel's only revalidation signal. A tab the user has come back to is
-  // exactly when its facts are most likely to be stale, and it costs one
-  // request rather than a timer that runs for as long as the panel is open.
+  // The panel's only revalidation signal: a returned-to tab is when the facts are
+  // most likely stale, and it costs one request rather than a running timer.
   useEffect(() => {
     if (path === null) return
     const revalidate = () => setRevalidateNonce((n) => n + 1)

@@ -14,11 +14,9 @@ import {
   useDux,
 } from "@/lib/store"
 
-// Confirms switching a project's SOURCE checkout back to its default branch.
-// The server inspects the repo and decides the target branch (it may already be
-// on the default, or be unable to determine one), so the copy describes the
-// action generically. Mirrors the TUI's checkout flow, which moves HEAD in the
-// shared source checkout — hence the confirmation here.
+// Confirms switching a project's SOURCE checkout back to its default branch, which
+// moves HEAD in a shared checkout. The server decides the target branch, so the
+// copy describes the action generically.
 export function CheckoutDefaultBranchDialog() {
   const { checkoutDefaultBranchTarget, spine } = useDux()
 

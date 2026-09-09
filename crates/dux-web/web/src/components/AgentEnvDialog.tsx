@@ -16,12 +16,9 @@ import { closeAgentEnv, updateProjectSettings, useDux } from "@/lib/store"
 import type { ProjectView, SessionView } from "@/lib/types"
 import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 
-// Edit environment variables from an agent's menu. Env is project-scoped in dux
-// (there is no per-agent env), so this edits the agent's PROJECT env — applied to
-// every agent and terminal in the project, layered over the global env. The
-// dialog makes that scope explicit. Mounted only while open and a project
-// resolves; state seeds lazily from the project (no set-state-in-effect),
-// mirroring GlobalEnvDialog / ProjectSettingsDialog.
+// Edit environment variables from an agent's menu. Env is project-scoped, so this
+// edits the agent's PROJECT env, layered over the global env, and the copy says so.
+// Mounted only while open and a project resolves; state seeds lazily from it.
 function AgentEnvForm({
   session,
   project,

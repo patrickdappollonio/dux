@@ -19,11 +19,9 @@ import {
 import type { ProjectView, SessionView } from "@/lib/types"
 import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 
-// Edit the startup command from an agent's menu. Startup command is
-// project-scoped in dux (there is no per-agent startup command), so this edits
-// the agent's PROJECT — the dialog makes that explicit. The form body is mounted
-// only while open and a project resolves; its state seeds lazily from the project
-// (no set-state-in-effect), mirroring ProjectSettingsDialog.
+// Edit the startup command from an agent's menu. It is project-scoped, so this
+// edits the agent's PROJECT and the copy says so. The form is mounted only while
+// open and a project resolves; its state seeds lazily from the project.
 function AgentStartupCommandForm({
   session,
   project,

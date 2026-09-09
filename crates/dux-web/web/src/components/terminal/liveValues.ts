@@ -1,55 +1,22 @@
-// THE LIVE-VALUES CONTAINER for the terminal pane.
-//
-// The pane's lifecycle effect owns a terminal and a socket and must re-run only
-// when the streamed target changes, so every closure it creates outlives the
-// render that created it. Everything those closures need to read has to reach
-// them some other way. Rather than one ref mirror and one effect per
-// preference (each a chance to be forgotten), this is ONE container and ONE
-// synchronising effect, and it draws the line the mirrors never did:
-//
-//   READ-ONLY SETTINGS (this file) travel one way. The render computes them,
-//   the container publishes them, and the long-lived closures read them AT CALL
-//   TIME. Nothing inside the lifecycle ever writes one. A value that only has
-//   to be fresh belongs here and needs no ceremony beyond a field.
-//
-//   WRITE-BACK CHANNELS (see `channels.ts`) travel both ways, are named, and
-//   have exactly one declared owner each. There are three of them, they are
-//   the state the machines mutate mid-gesture and the screen renders, and they
-//   are deliberately NOT fields here: a value the wiring writes is a different
-//   thing from a preference it reads, and collapsing the two is how the mirrors
-//   became indistinguishable from smuggled state in the first place.
-//
-// The container's own freshness contract: the snapshot is published in a
-// LAYOUT effect with no dependency list, so it lands in EVERY commit's layout
-// phase, before the pane's relayout (declared after this hook, so ordered
-// after it) and before every passive effect. A passive publish is one phase
-// too late for exactly one reader: the relayout is itself a layout effect, and
-// a live preference flip it acts on (the watcher-view mode) would read the
-// PREVIOUS commit's snapshot through the coordinator, shrinking the font for a
-// view whose grid it then refuses to adopt. Every other reader is an
-// event-time closure (socket callbacks, gestures, timers), all of which run
-// after layout anyway, so publishing earlier only narrows their stale window.
-// The initial value is the mount render's snapshot, so no effect ever reads an
-// unset field.
+// The live-values container: the one place the lifecycle's long-lived closures
+// read a render-computed setting from, at call time. Settings here travel ONE WAY,
+// and anything the wiring writes is a named channel in `channels.ts` instead. The
+// snapshot is published in a LAYOUT effect, so the pane's relayout, itself a layout
+// effect, does not act on the previous commit's.
 import { useLayoutEffect, useRef } from "react"
 
 import type { AgentTabView } from "@/lib/types"
 import type { ConfiguredDropPaste, DropPasteProfile } from "@/lib/fileDrop"
 
-/// Everything the pane's long-lived closures may read, and nothing they write.
-///
-/// Every field is a value the RENDER already computed: a preference off the
-/// bootstrap document, a name off the spine, or a derived flag. If a new
-/// closure needs a new preference, it becomes a field here and reads
-/// `live.current.thing` at the moment it needs it; there is no second step.
+/// Everything the pane's long-lived closures may read, and nothing they write:
+/// every field is a value the render already computed.
 export type TerminalLiveSettings = {
   /// `agent_scrollback_lines`, read lazily on every (re)connect so xterm's
   /// 1000-line default never trims the reconnect replay.
   scrollbackLines: number
   /// `ui.copy_on_select`, read inside the mouseup and touch-lift handlers.
   copyOnSelect: boolean
-  /// The two `ui.terminal_font_*` settings, RAW (unsanitised, unclamped): the
-  /// terminal's construction and the live-apply effect both resolve them
+  /// The two `ui.terminal_font_*` settings, RAW: every reader resolves them
   /// through `terminalFont.ts`, which is the one place that knows the rules.
   fontFamily: string
   fontSize: number
@@ -82,43 +49,27 @@ export type TerminalLiveSettings = {
   /// The owning session's tabs, for the tab-gone check. A dependency of the
   /// lifecycle effect would rebuild the socket on every spine refresh.
   sessionTabs: AgentTabView[] | undefined
-  /// Whether the faithful watcher is OVERFLOWING on purpose: even the floor
-  /// font could not fit the adopted grid, so the terminal stands at its true
-  /// size and the host scrolls to the rest of it. Read by the touch gesture's
-  /// `scrollAllowed`, which leaves vertical drags to the browser while the
-  /// host is the scroller. Always false for an owner and in every non-overflow
-  /// state, so those paths never even look at it.
+  /// Whether the faithful watcher is OVERFLOWING on purpose: the floor font could
+  /// not fit the adopted grid, so the host scrolls. Always false for an owner.
   viewerOverflow: boolean
-  /// Whether the compose bar is the typing surface. Deliberately a MIRROR that
-  /// lags the rendered value by one commit, and both mismatch directions
-  /// degrade gracefully: a stale `false` falls through to `term.focus()`, a
-  /// stale `true` at worst redirects one tap into a bar that just unmounted
-  /// (the focus call no-ops on a null ref).
+  /// Whether the compose bar is the typing surface. A mirror that lags the render
+  /// by one commit; both mismatch directions degrade to a harmless focus call.
   composeActive: boolean
 }
 
-/// The read side of the container. A ref rather than a getter so a call site
-/// reads one field without paying for a snapshot, and readonly so the
-/// one-way-ness is a type error to break rather than a convention.
+/// The read side of the container: a ref, so a call site reads one field without
+/// a snapshot, and readonly, so the one-way-ness is a type error to break.
 export type LiveSettings = { readonly current: TerminalLiveSettings }
 
-/// Publish this render's settings for the lifecycle's closures to read.
-///
-/// Call it BEFORE the lifecycle hook in the component body: effects run in
-/// declaration order, so this ordering is what guarantees a lifecycle effect
-/// re-running for a new target reads the new target's settings rather than the
-/// previous one's.
+/// Publish this render's settings for the lifecycle's closures. Call it BEFORE
+/// the lifecycle hook, or an effect re-running for a new target reads stale ones.
 export function useTerminalLiveSettings(
   values: TerminalLiveSettings,
 ): LiveSettings {
   const ref = useRef(values)
-  // No dependency list on purpose: this is sixteen effects' worth of
-  // synchronisation, and enumerating the fields here would reintroduce exactly
-  // the per-field bookkeeping the container exists to delete. Writing a ref is
-  // not a render effect, so running it on every commit costs one assignment.
-  // A LAYOUT effect, not a passive one: the pane's relayout is itself a layout
-  // effect and reads this container (the overflow flag, the fonts), so it must
-  // see THIS commit's snapshot rather than last commit's (see the module doc).
+  // No dependency list on purpose: enumerating the fields is the per-field
+  // bookkeeping this container exists to delete, and a ref write costs one
+  // assignment. Layout, not passive, so the relayout reads THIS commit's snapshot.
   useLayoutEffect(() => {
     ref.current = values
   })

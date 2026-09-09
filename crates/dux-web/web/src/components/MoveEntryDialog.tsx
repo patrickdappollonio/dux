@@ -25,27 +25,17 @@ export interface MoveEntryTarget {
 interface MoveEntryDialogProps {
   root: EditorRoot
   target: MoveEntryTarget | null
-  // True when `target` (or, for a folder, a descendant of it) has unsaved
-  // changes, computed by the caller exactly as RenameEntryDialog's `isDirty`
-  // is. A move is a rename on disk, so the same hazard applies: the tab would
-  // be retargeted to the new path and reloaded, silently dropping the draft.
+  // True when `target`, or a descendant of it, has unsaved changes. A move is a
+  // rename on disk: the tab would be retargeted and reloaded, dropping the draft.
   isDirty: boolean
   onClose: () => void
   onSubmit: (destDir: string) => Promise<void>
 }
 
-// Move a file or folder to another directory.
-//
-// This is deliberately a MODAL and not cut/copy/paste. A clipboard model needs
-// somewhere to hold a pending entry across unrelated interactions, a way to
-// show that something is held, and its own conflict rules on paste; a modal
-// answers the same question ("where should this go?") in one interaction with
-// nothing to remember.
-//
-// The destination is chosen by BROWSING, one directory per request through the
-// same lazy `tree` endpoint the file explorer uses, so a huge worktree costs
-// nothing to open and an empty directory is still reachable (a list derived
-// from file paths would omit it).
+// Move a file or folder to another directory, deliberately as a modal rather than
+// cut and paste, which would need somewhere to hold a pending entry. The
+// destination is BROWSED, one directory per request through the explorer's own
+// lazy `tree` endpoint, so an empty directory is still reachable.
 export function MoveEntryDialog({
   root,
   target,
@@ -62,9 +52,8 @@ export function MoveEntryDialog({
     >
       <DialogContent showCloseButton={false} className="sm:max-w-lg">
         {target && (
-          // Keyed by path so opening the dialog on a different entry starts a
-          // fresh browse at that entry's own folder rather than wherever the
-          // previous move happened to leave off.
+          // Keyed by path, so opening on a different entry starts a fresh browse at
+          // that entry's own folder rather than where the last move left off.
           <MoveEntryDialogBody
             key={target.path}
             root={root}
@@ -102,10 +91,8 @@ function MoveEntryDialogBody({
   const [dir, setDir] = useState(() => parentDir(target.path))
   const [submitting, setSubmitting] = useState(false)
   const [reloadNonce, setReloadNonce] = useState(0)
-  // The last listing that came back, tagged with the directory (and attempt)
-  // it belongs to. "Loading" is DERIVED from that tag not matching what is
-  // being browsed now, rather than written by the effect: a synchronous
-  // setState in an effect body cascades renders (and the lint says so).
+  // The last listing that came back, tagged with the directory and attempt it
+  // belongs to, so "loading" is DERIVED rather than set from inside an effect.
   const [loaded, setLoaded] = useState<{
     key: string
     state: BrowseState
@@ -139,11 +126,9 @@ function MoveEntryDialogBody({
     }
   }, [root, dir, key])
 
-  // Stepping into (or out of) a folder UNMOUNTS the button that was clicked,
-  // and the browser then drops focus onto the dialog container, so a keyboard
-  // user restarts their Tab walk at every level. Put focus back on the first
-  // control of the freshly rendered list instead, which is where they were.
-  // Skipped on the initial listing, where the dialog's own autofocus decides.
+  // Stepping into a folder unmounts the clicked button and focus falls to the
+  // dialog, so it is put back on the new list's first control. Skipped on the
+  // initial listing, where the dialog's own autofocus decides.
   const listRef = useRef<HTMLDivElement | null>(null)
   const navigatedRef = useRef(false)
   function navigateTo(next: string): void {
@@ -167,12 +152,8 @@ function MoveEntryDialogBody({
     onSubmit(dir).finally(() => setSubmitting(false))
   }
 
-  // Only folders are destinations. A symlinked directory whose target escapes
-  // the worktree is already excluded by this one test, because `list_dir`
-  // reports it as `is_dir: false` (it sets `is_dir` and `expandable` to the
-  // same value on every branch, so there is no such thing on the wire as a
-  // directory that cannot be walked into, and a second `expandable` check here
-  // would only look like it was doing something).
+  // Only folders are destinations, and this one test also excludes a symlinked
+  // directory escaping the worktree: `list_dir` reports that as `is_dir: false`.
   const folders =
     state.status === "loaded" ? state.entries.filter((e) => e.is_dir) : []
 
@@ -252,9 +233,8 @@ function MoveEntryDialogBody({
         </p>
       ) : (
         !validation.ok && (
-          // "It is already here" is the state every move dialog OPENS in, not
-          // a mistake the user made, so it reads as a hint. Everything else
-          // (a folder aimed inside itself) really is wrong and reads as such.
+          // "It is already here" is the state every move dialog OPENS in, so it
+          // reads as a hint; everything else really is wrong and reads as such.
           <p
             className={
               dir === parentDir(target.path)

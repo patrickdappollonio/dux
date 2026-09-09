@@ -17,28 +17,17 @@ interface MarkdownPreviewProps {
   path: string | null
 }
 
-// Rendered markdown for the editor's preview toggle. Lazy-loaded (react-markdown
-// is pulled in only when the user previews), styled with theme tokens via
-// arbitrary child-element variants so it tracks the app palette without the
-// Tailwind typography plugin.
-//
-// Plugins: remark-gfm (tables, task lists, strikethrough, autolinks); rehype-raw (renders embedded HTML rather than escaping it); then rehype-sanitize
-// (its default = GitHub's schema). Embedded HTML therefore renders the way it does
-// on GitHub — common formatting tags (div, details/summary, table, kbd, sub/sup,
-// task-list inputs, …) are kept, while <script>, inline event handlers, and
-// javascript: URLs are stripped. Previewed markdown is NOT always author-trusted
-// (a cloned repo's README, a PR under review, agent-generated output), and a
-// preview runs in dux's authenticated origin — so we render "what markdown
-// expects" without opening a script-injection hole. sanitize must run AFTER raw.
+// Rendered markdown for the editor's preview toggle, lazy-loaded and styled from
+// theme tokens. Previewed markdown is NOT author-trusted and the preview runs in
+// dux's own origin, so embedded HTML is rendered through rehype-raw and then
+// sanitized on GitHub's schema: sanitize must run AFTER raw.
 export default function MarkdownPreview({
   content,
   root,
   path,
 }: MarkdownPreviewProps) {
-  // Rewrite a relative image `src` to the auth-gated worktree asset proxy so a
-  // README's relative images resolve against the markdown file's directory rather
-  // than the SPA's URL (where they'd 404). Links and external/absolute URLs fall
-  // through to react-markdown's default (safe) URL handling unchanged.
+  // Rewrite a relative image `src` to the worktree asset proxy, so it resolves
+  // against the markdown file's directory rather than the SPA's URL.
   function transformUrl(url: string, key: string): string {
     if (key === "src" && path !== null) {
       const proxied = markdownAssetUrl(root, path, url)
@@ -47,30 +36,22 @@ export default function MarkdownPreview({
     return defaultUrlTransform(url)
   }
 
-  // Open links in a new tab via event delegation rather than a custom `a`
-  // renderer — a click in the preview must never navigate the SPA away, and this
-  // keeps the markdown component free of react-markdown's injected `node` prop.
+  // Open links in a new tab by delegation rather than a custom `a` renderer: a
+  // click in the preview must never navigate the SPA away.
   function onLinkClick(e: MouseEvent<HTMLDivElement>): void {
     const anchor = (e.target as HTMLElement).closest("a")
     if (!anchor) return
-    // Leave in-page anchor links (#section) and href-less anchors inert: opening
-    // them in a new tab would just spawn a bogus SPA tab (and react-markdown adds
-    // no heading ids, so they wouldn't scroll anyway). Only real links open out.
+    // In-page and href-less anchors stay inert: opening one would spawn a bogus
+    // SPA tab, and react-markdown adds no heading ids to scroll to anyway.
     const href = anchor.getAttribute("href")
     if (!href || href.startsWith("#")) return
     e.preventDefault()
     window.open(anchor.href, "_blank", "noopener,noreferrer")
   }
 
-  // GitHub renders a document's leading YAML block as a table above the prose
-  // rather than dropping it, and front matter is often the only place a title,
-  // date or tag list is written. The values are user content and are rendered as
-  // React text, so they are escaped rather than parsed as markup.
-  //
-  // splitFrontMatter owns the extraction, so there is deliberately no
-  // remark-frontmatter here: it would strip a SECOND `--- … ---` block sitting
-  // right after the first, which GitHub renders as an ordinary rule and setext
-  // heading. Only the leading block is ours.
+  // Front matter renders as a table above the prose, its values as React text
+  // so they are escaped. `splitFrontMatter` owns the extraction rather than
+  // remark-frontmatter, which would also strip a SECOND `--- … ---` block.
   const front = splitFrontMatter(content)
   const body = front === null ? content : front.body
 

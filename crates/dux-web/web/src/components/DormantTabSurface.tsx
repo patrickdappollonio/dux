@@ -5,22 +5,11 @@ import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
 import { startDormantTab } from "@/lib/store"
 import type { TabRunVerdict } from "@/lib/types"
 
-// WHAT A DORMANT TAB LOOKS LIKE, in one decision both shells read.
-//
-// There are two kinds of dormant tab and they deserve two different screens,
-// which is the split the terminal UI has always had and the browser did not:
-//
-//   - A tab that is simply NOT RUNNING (a restart, a stop, a tab waiting to be
-//     asked) is the workspace at rest, so it gets the idle screen: the duck, the
-//     wordmark and a rotating tip, exactly as the terminal UI paints it, plus
-//     the one act that starts the tab. Answering that with a card headed "this
-//     tab isn't running" told the user something they could already see.
-//   - A tab whose LAST RUN ENDED BADLY is not at rest, and it gets the card:
-//     what the run did, how long ago, its last output, and the same button.
-//
-// Selecting an agent still auto-starts its healthy dormant first tab (the gate
-// is the server's and is untouched); the idle screen is what paints for the
-// moment before that, and whenever the gate leaves a tab dormant.
+// What a dormant tab looks like, in one decision both shells read:
+//   - simply NOT RUNNING is the workspace at rest, so it gets the idle screen
+//     the terminal UI paints, plus the one act that starts the tab;
+//   - a LAST RUN THAT ENDED BADLY gets the card: what the run did, how long ago,
+//     its last output, and the same button.
 export function DormantTabSurface({
   sessionId,
   tabId,

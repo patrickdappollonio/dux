@@ -80,9 +80,8 @@ export function registerTerminalSocketCallbacks(
   }
 
   pty.onPtyGrid = (grid, fromHandshake) => {
-    // Adopt before notifying: a heal replay must parse at the PTY's own grid.
-    // The handshake half is passed on because the replay behind it was drawn
-    // for that grid, which the owner has to honour too.
+    // Adopt before notifying: a heal replay must parse at the PTY's own grid, and
+    // the handshake's replay was drawn for it, which the owner honours too.
     resize.noteRemoteGrid(grid, fromHandshake)
     noteRemotePtyGrid(grid, fromHandshake)
   }
@@ -113,12 +112,9 @@ export function registerTerminalSocketCallbacks(
     notePtyConn(connectionState)
   }
 
-  // Extra tabs only: the session-slot tab's disappearance is its session's, not
-  // a tab row's. Slot-ness is asked of the same helper, with the same
-  // `slotTabId`, that the socket URL was just built from, so this must answer
-  // exactly what the URL choice answered. Getting it wrong here would arm an
-  // extra tab's retry guard over the slot tab, and an empty or not-yet-arrived
-  // tab list would then read as "the tab is gone" and stop it reconnecting.
+  // Extra tabs only: the slot tab's disappearance is its session's. Slot-ness is
+  // asked of the same helper and `slotTabId` the socket URL was built from, or a
+  // not-yet-arrived tab list reads as "gone" and stops the slot tab reconnecting.
   if (
     kind === "agent" &&
     (sessionId === null || !isSlotTabTarget(sessionId, id, slotTabId))

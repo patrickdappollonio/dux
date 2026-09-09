@@ -14,21 +14,11 @@ import {
 import { appMenuModel, type AppMenuEntry } from "@/lib/appMenu"
 import { useDux } from "@/lib/store"
 
-// The desktop app menu renders `appMenuModel()` and
-// hand-authors no items, so it cannot drift from the mobile bottom sheet
-// (`AppMenuSheet.tsx`), which renders the same model.
-//
-// The BODY is exported separately from the cog, because the header is not the
-// only place this menu has to appear: theater mode takes the header and the
-// sidebar away, and the floating pill's `⋯` carries the same menu so that
-// Preferences and every creation action stay reachable while the mode is on.
-// It renders the model and reads the same context, so the two anchors cannot
-// offer different things.
-//
-// Deliberately NO keyboard shortcut (the web has no Ctrl+K anymore). The cog is
-// a plain <button>: Tab reaches it, Enter/Space activate it natively, ArrowDown
-// opens it, arrows move within it, Escape closes it and restores focus. All of
-// that comes from base-ui's Menu plus the native button.
+// The desktop app menu renders `appMenuModel()` and hand-authors no items, so it
+// cannot drift from the mobile bottom sheet. The BODY is exported separately from
+// the cog, because theater takes the header away and the pill carries the same
+// menu. Deliberately no keyboard shortcut: the cog is a plain <button>, and
+// base-ui's Menu gives it the rest of the keyboard vocabulary.
 
 export function AppMenuEntries({ entries }: { entries: AppMenuEntry[] }) {
   return (

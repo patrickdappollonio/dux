@@ -1,27 +1,9 @@
-// THE ONE PLAIN BOUNCE, and the reason it cannot be a bare `pty.connect()`.
-//
-// An automatic reconnect is a plain attach and never a take-over: no retry, no
-// resume, no heal bounce carries the flag, and only a press on the take-over
-// button does. The take-over intent enforces that by dying with the socket it
-// was armed for, delivered as `onConn("closed")`.
-//
-// EXCEPT THAT A DELIBERATE REOPEN FIRES NO SUCH CLOSE. `connect()` detaches the
-// orphan socket's handlers before closing it, which is precisely what lets a
-// take-over's own bounce carry its intent across the reconnect it armed. Every
-// OTHER caller of `connect()` inherits that same silence, so an intent that was
-// armed and never confirmed on the wire survives their bounce too, and the next
-// first resize frame carries the flag:
-//
-//   with no expected owner, the server grants the transfer unconditionally, so
-//   a button labelled Reconnect takes the pty from whoever is typing into it;
-//
-//   with a STALE expected owner (a self-succession that never landed), the
-//   server refuses the transfer, and the pane sits believing it owns a pty at a
-//   geometry that was never applied.
-//
-// So every bounce that is not a take-over goes through here, and here spends the
-// intent first. The take-over path deliberately does NOT: it arms and then
-// bounces, and that one intent is the only one allowed to ride a reconnect.
+// The one plain bounce: every reconnect that is not a take-over goes through here
+// and spends the intent first. A bare `connect()` will not do, because it detaches
+// its handlers before closing and so fires no `onConn("closed")` to drop the
+// intent, and an intent surviving into the next resize frame either steals the pty
+// or strands the pane at a geometry the server refused. Only the take-over path
+// arms an intent and bounces, and that one is allowed to ride a reconnect.
 import type { PtySocket } from "@/lib/ptySocket"
 
 import type { TakeoverIntent } from "./channels"

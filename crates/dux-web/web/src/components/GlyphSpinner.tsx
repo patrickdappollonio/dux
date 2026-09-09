@@ -8,19 +8,15 @@ import {
 } from "@/lib/spinnerFrames"
 import { cn } from "@/lib/utils"
 
-// The one text spinner in the web UI, drawing dux's six-frame arc in the
-// glyphs and cadence of `spinnerFrames.ts`. Every site that wants a glyph
-// spinner renders THIS, so the fixed-width slot (`.glyph-spinner` in index.css)
-// and the reduced-motion behavior below cannot drift between them; a site that
-// wants an icon spinner uses lucide's `Loader2` with `motion-safe:animate-spin`
-// instead.
+// The one text spinner in the web UI, in the glyphs and cadence of
+// `spinnerFrames.ts`, so the fixed-width slot and the reduced-motion behavior
+// cannot drift. An icon spinner is lucide's `Loader2` instead.
 export function GlyphSpinner({ className }: { className?: string }) {
   const reduceMotion = usePrefersReducedMotion()
   const [i, setI] = useState(0)
   useEffect(() => {
-    // Reduced motion holds the first frame. The glyph stays on screen (like
-    // the attention dot, which keeps its dot and drops only the pulse) so the
-    // "something is happening" cue survives; only the cycling stops.
+    // Reduced motion holds the first frame rather than removing the glyph, so the
+    // "something is happening" cue survives and only the cycling stops.
     if (reduceMotion) return
     const t = setInterval(
       () => setI((n) => (n + 1) % SPINNER_FRAMES.length),

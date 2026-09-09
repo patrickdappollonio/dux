@@ -14,15 +14,10 @@ import {
   ContextMenuSeparator,
 } from "@/components/ui/context-menu"
 
-// The presentational content of the file tree's right-click menu, reused for
-// every row plus the root/empty-area menu. New File…, New Folder… and (while
-// the server accepts uploads) Upload here… always appear; Rename…, Move…,
-// Delete… and File/Folder info… only for an actual file/dir row (the root has nothing to rename, move, delete or describe).
-// The info item names the KIND of row it sits on, because the panel it opens
-// does too. Every item
-// carries a leading lucide icon and a trailing "…" (it opens a dialog). Delete
-// stays NEUTRAL colored per the menu tenet: the "…" plus the confirm dialog
-// are the danger signal, not red text.
+// The presentational content of the file tree's right-click menu, reused for every
+// row and for the root, which has nothing to rename, move, delete or describe.
+// Every item carries a leading icon and a trailing "…", and Delete stays NEUTRAL:
+// the ellipsis and the confirm dialog are the danger signal, not red text.
 export function FileTreeContextMenu({
   variant,
   onNewFile,
@@ -40,9 +35,8 @@ export function FileTreeContextMenu({
   /// Opens the browser's file picker and uploads into this row's directory.
   /// Called straight from the click, so the user activation still covers it.
   onUpload?: () => void
-  /// Whether the server accepts uploads at all (`file_drop_max_bytes > 0`).
-  /// With it off the tree does not highlight, does not accept a drop, and must
-  /// not offer this either.
+  /// Whether the server accepts uploads at all (`file_drop_max_bytes > 0`). With
+  /// it off the tree refuses a drop, so this must not be offered either.
   canUpload?: boolean
   onRename: () => void
   onMove: () => void

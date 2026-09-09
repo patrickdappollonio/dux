@@ -9,11 +9,9 @@ import {
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeDiscard, discardFile, useDux } from "@/lib/store"
 
-// Confirmation before discarding an unstaged file's changes. The TUI confirms
-// every discard because it is destructive and cannot be undone, with Cancel as
-// the default focus — the web mirrors that. The body copy distinguishes the two
-// outcomes the way the TUI's discard semantics do: a tracked file is restored
-// from its last committed state, while an untracked file is permanently DELETED.
+// Confirmation before discarding an unstaged file's changes, which cannot be
+// undone. The copy distinguishes the outcomes: a tracked file is restored from its
+// last committed state, an untracked file is permanently DELETED.
 export function ConfirmDiscardFileDialog() {
   const { discardTarget, changes } = useDux()
 
@@ -22,9 +20,8 @@ export function ConfirmDiscardFileDialog() {
     discardTarget !== null &&
     changes.sessionId === discardTarget.sessionId &&
     changes.unstaged.some((f) => f.path === discardTarget.path)
-  // Closes the dialog when the file leaves the unstaged list (committed or
-  // staged elsewhere, or already discarded), rather than lingering on a stale
-  // path with possibly-wrong restore-vs-DELETE copy; see the hook.
+  // Closes when the file leaves the unstaged list, rather than lingering on a
+  // stale path whose restore-versus-DELETE copy may now be wrong.
   const isOpen = useVanishedTargetGuard(
     discardTarget !== null,
     stillUnstaged,

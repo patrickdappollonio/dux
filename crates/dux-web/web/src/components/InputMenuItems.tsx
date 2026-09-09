@@ -17,24 +17,12 @@ import {
 import type { InputMenuGates } from "@/lib/inputMenu"
 import { hideTerminalKeysHint, switchTypingSurface } from "@/lib/typingSurface"
 
-// THE INPUT ITEMS, shared by every menu that carries any of them: the input
-// `⋯` inside the virtual input (see `InputMenu`) and the INPUT group at the top
-// of whichever menu the surface always has (see `PaneInputGroup`, which the
-// phone's merged pane menu, the phone's agentless terminal header, the sidebar
-// row menus and the floating pill all render). One component so the labels,
-// icons and store writes can never drift between them.
-//
-// VISIBILITY IS THE CALLER'S, deliberately: this component self-gates nothing.
-// The same item belongs on different predicates depending on where the menu is
-// anchored (the header menus are inside the phone shell, the input menu also
-// serves a coarse-pointer tablet in the desktop shell), and a component that
-// answered that for itself is exactly how the widened keys gate would have been
-// silently undone. Callers compute an `InputMenuGates` and pass it.
-//
-// Neutral color and no trailing ellipsis on the view toggles: they act
-// immediately (an optimistic override plus the generic settings PATCH), no
-// dialog and nothing destructive. "Attach a file…" does carry one, because it
-// opens the operating system's picker dialog.
+// The input items, shared by every menu that carries any of them, so the labels,
+// icons and store writes cannot drift. VISIBILITY IS THE CALLER'S: the same item
+// belongs on different predicates depending on where the menu is anchored, so
+// callers compute an `InputMenuGates` and this component self-gates nothing. The
+// view toggles act immediately, so they are neutral and carry no ellipsis; "Attach
+// a file…" carries one, because it opens the operating system's picker.
 
 export function InputMenuItems({
   gates = { surfaceSwitch: false, keysToggle: false },
@@ -48,37 +36,26 @@ export function InputMenuItems({
   /// The two rows either menu can carry. Defaulted off for the callers whose
   /// menu carries neither, which is every caller of the theater exit.
   gates?: InputMenuGates
-  /// "Attach a file…", which lives in the top menu's INPUT group and nowhere
-  /// else. Off when uploads are switched off server-side
-  /// (`file_drop_max_bytes = 0`) and for anyone who does not own the input: a
-  /// non-owner cannot paste the saved path afterwards, so the file would
-  /// strand. It is a prop rather than a gate because the caller that sets it is
-  /// also the one holding `onAttach`, and the two are the same fact.
+  /// "Attach a file…", in the top menu's INPUT group and nowhere else. Off when
+  /// uploads are off server-side, and for a non-owner, who could not paste the
+  /// saved path afterwards. A prop rather than a gate: it is `onAttach`'s own fact.
   attach?: boolean
-  /// "Leave theater mode". A way BACK and not a way there: entering is the
-  /// header's expand button, and in theater that header is exactly what is not
-  /// on screen. Only the top menus pass it, for the same reason: the bottom
-  /// `⋯` lives inside the virtual input, so it is nobody's guaranteed exit.
+  /// "Leave theater mode": a way back, never a way there. Only the top menus pass
+  /// it, because the bottom `⋯` lives inside the virtual input and can leave.
   theaterExit?: boolean
   /// Opens the file picker. Called synchronously from the item's click, so the
   /// browser's user activation still covers the `.click()` on the hidden input.
   onAttach?: () => void
-  /// Which typing surface is live right now: `true` while the buffered message
-  /// box is up, `false` while keystrokes go straight to the terminal. Only read
-  /// when `gates.surfaceSwitch` is set.
+  /// Which typing surface is live: `true` while the buffered message box is up.
+  /// Only read when `gates.surfaceSwitch` is set.
   composeSurface?: boolean
-  /// Would switching to direct typing leave NOTHING under the terminal? It
-  /// decides whether the one-time "here is the way back" hint fires, so only
-  /// the menu that can flip that way has to answer it. Defaults to the loud
-  /// answer for the top menu, which offers the opposite direction only and can
-  /// therefore never reach the hint at all.
+  /// Would switching to direct typing leave NOTHING under the terminal? It decides
+  /// whether the one-time way-back hint fires, so only the menu that can flip that
+  /// way answers it; the top menu offers the opposite direction and never reaches it.
   directLeavesNothingBelow?: boolean
-  /// Would HIDING THE TERMINAL KEYS leave nothing under the terminal? The other
-  /// door out of the virtual input, and the same one-time hint: from direct
-  /// typing with only the key row down, hiding it takes the bottom `⋯` with it.
-  /// Defaults to the quiet answer for the top menu, whose keys item can only
-  /// ever read "Show terminal keys" (it is offered exactly while no bottom row
-  /// is up, which is exactly when the keys are already hidden).
+  /// Would hiding the terminal keys leave nothing under the terminal? The other
+  /// door out of the virtual input, owing the same one-time hint. Defaults to the
+  /// quiet answer, which is the only one the top menu can reach.
   keysHideLeavesNothingBelow?: boolean
 }) {
   const duxState = useDux()
@@ -114,11 +91,9 @@ export function InputMenuItems({
         <DropdownMenuItem
           onClick={() => {
             void setAccessoryBarVisibility(!accessoryBarVisible)
-            // HIDING THE KEYS IS THE OTHER WAY OUT of the virtual input, so it
-            // owes the same one-time signpost the surface switch does: from
-            // direct typing this row is the whole bottom bar, and the `⋯` that
-            // carries the way back hangs off it. Only ever raised on the way
-            // down, and only where nothing is left below.
+            // Hiding the keys is the other way out of the virtual input, so it owes
+            // the same one-time signpost, raised only on the way down and only where
+            // nothing is left below.
             if (accessoryBarVisible) {
               hideTerminalKeysHint(keysHideLeavesNothingBelow)
             }

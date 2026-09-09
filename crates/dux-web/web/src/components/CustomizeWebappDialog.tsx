@@ -129,15 +129,9 @@ function FaviconControl({
   )
 }
 
-// Clamps to the nearer bound WHILE THE USER IS TYPING: an input affordance so
-// a number field never rejects a keystroke mid-edit. This is deliberately
-// different from how an out-of-range value from config/bootstrap is handled
-// once it lands in the running app: `clampTerminalFontSize` in
-// `lib/terminalFont.ts` (and its server-side twin,
-// `normalized_terminal_font_size` in `crates/dux-core/src/config.rs`) DEGRADE
-// such a value to the documented default instead of nudging it to the nearest
-// bound, so a value that is merely wrong reads as an obviously-reset default.
-// Both behaviors are intentional; they simply answer different questions.
+// Clamps to the nearer bound WHILE TYPING, so a number field never rejects a
+// keystroke mid-edit. An out-of-range configured value degrades to the documented
+// default instead (`clampTerminalFontSize`); the two answer different questions.
 function clampToControl(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n))
 }
@@ -187,9 +181,8 @@ function NumberControl({
         onChange(clampToControl(parsed, min, max))
       }}
       onBlur={() => {
-        // Leaving the field empty (or on some other non-committing state)
-        // reverts the displayed text to the last committed value rather than
-        // stranding a blank input with a stale numeric override underneath.
+        // Leaving the field empty reverts the displayed text to the last committed
+        // value, rather than stranding a blank input over a stale override.
         if (text.trim() === "") setText(String(value))
       }}
     />
@@ -299,18 +292,9 @@ function SettingControl({
   }
 }
 
-// Browser-notification permission. NOT a SettingDescriptor: it writes no config,
-// it asks the BROWSER for permission, which is per-visitor and per-browser state
-// the server never sees. It sits directly under the "Desktop notifications"
-// (`capabilities.web_notifications`) row because that setting cannot do anything
-// until this permission is granted, so the setting and its precondition belong
-// together.
-//
-// This affordance is the ONLY way to grant permission: dux deliberately never
-// auto-prompts, so the visitor must opt in explicitly. The row appears only while there is
-// something to ask for (notifications enabled in config, the API exists, and
-// permission is still "default"); once granted or denied, the browser owns the
-// decision and dux cannot re-ask.
+// Browser-notification permission, not a SettingDescriptor: it writes no config
+// and asks the browser, per visitor. dux never auto-prompts, so this is the only
+// way to grant it, and it shows only while permission is still "default".
 function NotificationPermissionRow({ enabledInConfig }: { enabledInConfig: boolean }) {
   const apiAvailable = typeof Notification !== "undefined"
   const [permission, setPermission] = useState<NotificationPermission>(
@@ -412,25 +396,11 @@ function SettingRow({
   )
 }
 
-// Build the write bodies for a set of [descriptor, value] pairs, keeping only
-// entries whose value actually differs from its ORIGINAL (pre-touch) value
-// (so an untouched-but-equal field, and a field touched back to its original
-// value, never gets sent). Returns null when there is nothing to write.
-//
-// `originalOf` supplies that pre-touch baseline. It is NOT always
-// `d.read(bootstrap)`: `ui.show_changes_pane` (`writeTarget: "changesPane"`)
-// is bespoke, the store tracks an optimistic `changesPaneOverride` for that
-// one field (the Changes menu can flip it live outside this dialog too), so
-// its baseline is the override-aware `changesPaneVisible()`, not the raw
-// bootstrap field, and comparing against the raw field would wrongly treat a
-// toggle back to the STALE bootstrap value as a no-op. The same
-// override-awareness applies to the `ui.mobile_accessory_bar` row, which rides
-// the generic PATCH but is flipped live by the input ⋯ menu's quick toggle;
-// the dialog's `originalOf` resolves both of these to the store's
-// override-aware selectors. Separately,
-// `ui.show_changes_pane` is excluded from the generic `settings` bucket here
-// and routed through `setChangesPaneVisibility` by the caller instead of the
-// generic PATCH. See the `writeTarget` doc in `settingsDescriptors.ts`.
+// Build the write bodies for [descriptor, value] pairs, sending only entries that
+// differ from their pre-touch value; null when there is nothing to write.
+// `originalOf` supplies that baseline and must be override-aware for any field
+// something outside this dialog can flip live, or a toggle back to a stale
+// bootstrap value reads as a no-op. See `writeTarget` in `settingsDescriptors.ts`.
 function buildWrites(
   entries: [SettingDescriptor, SettingValue][],
   originalOf: (d: SettingDescriptor) => SettingValue,
@@ -453,10 +423,8 @@ function buildWrites(
   let tailscale: string | null = null
   let github: boolean | null = null
   for (const [d, value] of entries) {
-    // THE unchanged-row skip. Load-bearing well beyond avoiding a redundant
-    // write: the `github` target below posts to a blind read-and-FLIP endpoint,
-    // so emitting an unchanged row would invert the setting. See the
-    // `writeTarget` doc in settingsDescriptors.ts.
+    // The unchanged-row skip. The `github` target posts to a blind read-and-FLIP
+    // endpoint, so emitting an unchanged row would invert the setting.
     if (value === originalOf(d)) continue
     if (d.writeTarget === "identity") {
       const field = d.key.split(".")[1] as "title" | "favicon"
@@ -469,10 +437,8 @@ function buildWrites(
       tailscale = value as string
     } else {
       const [group, field] = d.key.split(".")
-      // THE single flip point for an `inverted` row (see the descriptor's doc):
-      // the row shows "Show the welcome screen", the config field is
-      // `disable_automated_welcome_screen`. Everything upstream — the seed, the
-      // switch, the unchanged-row skip above — works in shown-values only.
+      // The single flip point for an `inverted` row: everything upstream, the seed,
+      // the switch and the unchanged-row skip, works in shown values only.
       const wire = d.inverted ? !(value as boolean) : value
       if (group === "capabilities") capabilities[field] = wire
       else if (group === "defaults") defaults[field] = wire
@@ -510,9 +476,8 @@ async function persist(
   if (identity) writes.push(setInstanceIdentity(identity))
   if (settings) writes.push(saveSettings(settings))
   if (changesPane !== null) writes.push(setChangesPaneVisibility(changesPane))
-  // `github` is non-null ONLY when the row actually changed, which is what makes
-  // it safe to drive a read-and-flip endpoint from an explicit-value UI. Do NOT
-  // "simplify" this to write unconditionally.
+  // `github` is non-null ONLY when the row changed, which is what makes it safe
+  // to drive a read-and-flip endpoint from an explicit-value UI.
   if (github !== null) {
     writes.push(
       configApi
@@ -526,10 +491,8 @@ async function persist(
         }),
     )
   }
-  // The one row whose reply is a sentence rather than a status code: the server
-  // says what happened to the listener, and that sentence is the toast. It is
-  // raised even on success, because "saved" and "your Tailscale listener just
-  // went away" are different outcomes of the same click.
+  // The one row whose reply is a sentence rather than a status code, raised even
+  // on success: saved and "the listener went away" are different outcomes.
   if (tailscale !== null) {
     const mode = tailscale
     writes.push(
@@ -565,24 +528,13 @@ function CustomizeWebappForm({
 }) {
   const dux = useDux()
   const { bootstrap } = dux
-  // `overrides` holds only the fields the user has explicitly touched in this
-  // dialog session. Every other row renders the LIVE bootstrap value, so a
-  // change made by another connected client while this dialog is open is
-  // reflected instead of silently reverted on Save (mirrors the pre-existing
-  // Changes-pane tracking, generalized to every row).
+  // `overrides` holds only the fields touched in this dialog session; every other
+  // row renders live bootstrap, so another client's change is not reverted on Save.
   const [overrides, setOverrides] = useState<Record<string, SettingValue>>({})
 
-  // The pre-touch baseline for a row: what it would show/compare against if
-  // the user had never touched it in this dialog session. The rule for the
-  // special cases is OVERRIDE-AWARENESS, not writeTarget: any field the store
-  // tracks an optimistic override for (something outside this dialog can flip
-  // it live — the Changes menu, the input ⋯ menu below the terminal) must read
-  // the store's override-aware selector, not the raw bootstrap field. Reading
-  // the raw field would show a stale value until the next bootstrap refetch
-  // reconciles it, and would make `buildWrites` wrongly treat a toggle back to
-  // that stale value as a no-op. That the Changes-pane case coincides with a
-  // bespoke writeTarget is incidental; the accessory-bar row rides the generic
-  // settings PATCH and still needs its baseline read this way.
+  // The pre-touch baseline for a row. Any field the store tracks an optimistic
+  // override for must read the override-aware selector rather than raw bootstrap:
+  // the rule is override-awareness, not `writeTarget`.
   const originalOf = (d: SettingDescriptor): SettingValue => {
     if (d.writeTarget === "changesPane") return changesPaneVisible(dux)
     if (d.key === "ui.mobile_accessory_bar") return mobileAccessoryBarVisible(dux)
@@ -600,9 +552,8 @@ function CustomizeWebappForm({
   const lockOn = (d: SettingDescriptor): string | null =>
     bootstrap ? (d.lockedBy?.(bootstrap) ?? null) : null
 
-  // Refuse to write before the config is loaded. The form seeds its fields
-  // from `bootstrap`, so saving with a null bootstrap would persist fallback
-  // defaults over whatever the operator actually configured.
+  // Refuse to write before the config is loaded: the form seeds from `bootstrap`,
+  // so a null one would persist fallback defaults over the real configuration.
   const requireBootstrap = (): boolean => {
     if (bootstrap) return true
     notifyError("Instance settings aren't loaded yet, try again in a moment.")
@@ -631,26 +582,17 @@ function CustomizeWebappForm({
     savingRef.current = true
     setSaving(true)
     try {
-      // Identity fields (title/favicon) reset to an EMPTY string, not the
-      // literal default text. The server's normalizer resolves an empty
-      // title to "dux" and an empty favicon to the bundled duck, mirroring
-      // the pre-existing "Reset to default" behavior for those two fields.
+      // Identity fields reset to an EMPTY string, not the literal default text:
+      // the server's normalizer resolves empty to the shipped title and favicon.
       const resetValue = (d: SettingDescriptor): SettingValue =>
         d.writeTarget === "identity" ? "" : d.default
-      // A locked row's control is unreachable, and a reset must not write past
-      // it: the run would refuse the value and the toast would contradict the
-      // dialog.
+      // A locked row's control is unreachable, and a reset must not write past it:
+      // the run would refuse the value and the toast would contradict the dialog.
       const entries: [SettingDescriptor, SettingValue][] = settings
         .filter((d) => lockOn(d) === null)
         .map((d) => [d, resetValue(d)])
-      // Only reflect the reset defaults in the dialog's local state AFTER the
-      // write actually lands. Applying the optimistic override first (the
-      // previous behavior) showed reset defaults in the controls even when
-      // `persist()` failed, misrepresenting an unsaved state as saved. The
-      // dialog stays OPEN either way, "reset section" is a section-scoped
-      // action the user may keep editing after, not a full-dialog commit
-      // like Save, so a failure just leaves the prior values in place for
-      // the user to see the error toast and retry.
+      // Reflect the reset defaults only AFTER the write lands: an optimistic
+      // override would show a failed reset as saved. The dialog stays open either way.
       if (await persist(entries, originalOf)) {
         setOverrides((o) => {
           const next = { ...o }
@@ -747,14 +689,8 @@ function CustomizeWebappForm({
 export function CustomizeWebappDialog() {
   const { customizeWebappOpen } = useDux()
 
-  // One persist at a time. The ref gates re-entry synchronously (a double
-  // click or a held Enter fires before React re-renders the disabled state);
-  // the state disables the footer buttons. The guard lives HERE, not in the
-  // form, so onOpenChange can also ignore Escape, backdrop clicks, and the
-  // header X while a write is in flight, otherwise a mid-save dismissal
-  // unmounts the form and the orphaned write's delayed success would close a
-  // freshly reopened dialog session. Both clear in `finally`, so a failed
-  // save re-enables every dismiss path.
+  // One persist at a time: the ref gates re-entry synchronously, the state disables
+  // the footer, and both gate `onOpenChange` too, so no dismissal orphans a write.
   const savingRef = useRef(false)
   const [saving, setSaving] = useState(false)
 

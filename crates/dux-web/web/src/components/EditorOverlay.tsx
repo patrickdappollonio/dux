@@ -11,20 +11,11 @@ import { EditorBody } from "@/components/EditorBody"
 import { swallowMissedFileDrop } from "@/lib/editorDrop"
 
 
-// The overlay shell: owns the Dialog and is desktop-only — Monaco is poor on
-// touch, and every entry point to the OVERLAY is gated to desktop. The one
-// deliberate exception to "no editor on phones" is the STANDALONE surface
-// (StandaloneEditor.tsx), which phones reach at its own address, best-effort.
-// While this tab IS that surface the overlay stands down entirely, so the
-// Dialog and the standalone shell can never both mount an EditorBody (two
-// Monaco model sets and two buffer maps over the same files). The body is
-// keyed by ROOT ONLY (not file/mode) so opening a new file (or a
-// preview-replace) while the overlay is already open never remounts it and
-// drops the tab list. Esc/backdrop/Close all close immediately: closing is
-// NON-destructive now (drafts survive in lib/editorDrafts.ts and the tab
-// list survives in the store), so the old overlay-close discard dialog is
-// retired. The per-tab close confirm (`ConfirmCloseEditorTabDialog`) remains
-// the real discard.
+// The overlay shell, desktop-only: it stands down entirely while this tab is the
+// standalone editor, so the two can never both mount an EditorBody over the same
+// files. The body is keyed by ROOT only, so opening a new file never remounts it
+// and drops the tab list. Closing is non-destructive, drafts and tabs both
+// surviving it; `ConfirmCloseEditorTabDialog` is the real discard.
 export function EditorOverlay() {
   const { editorTarget, standaloneEditor } = useDux()
   const isMobile = useIsMobile()
@@ -40,11 +31,9 @@ export function EditorOverlay() {
     >
       <DialogContent
         showCloseButton={false}
-        // The floor under the file tree's drop targets. A dropped file the
-        // browser is left to handle NAVIGATES the tab to it, so a drag aimed at
-        // the tree that lands on Monaco or the tab strip would throw the editor
-        // away. The tree's own rows stop propagation, so this only ever sees
-        // the misses. See `swallowMissedFileDrop`.
+        // The floor under the file tree's drop targets: a dropped file the browser
+        // handles NAVIGATES the tab away, and the tree's rows stop propagation, so
+        // this only ever sees the misses.
         onDragOver={swallowMissedFileDrop}
         onDrop={swallowMissedFileDrop}
         className="flex h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(80rem,calc(100%-2rem))]"

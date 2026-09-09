@@ -5,22 +5,13 @@ import { Button } from "@/components/ui/button"
 import { DUX_TERMINAL_FONT_STACK } from "@/lib/terminalFont"
 import { cn } from "@/lib/utils"
 
-// A viewport page-scroll intent emitted by the second accessory row's PgUp/PgDn
-// keys. The mobile scrollbar is a slim touch target and a small drag jumps a long
-// way when there is a lot of scrollback, so these buttons drive xterm's scroll
-// API directly (see TerminalPane.onScroll).
+// A viewport page-scroll intent from the PgUp/PgDn keys, driving xterm's scroll
+// API directly: the mobile scrollbar is a slim target that jumps a long way.
 export type ScrollDir = "pageUp" | "pageDown"
 
-// The mobile soft keyboard can't produce Esc, Tab, Ctrl-chords, a Shift-Enter
-// soft newline, cursor arrows, or a usable way to page through output, which a
-// terminal needs constantly. The accessory bar supplies them as two fixed rows of
-// touch targets directly above the on-screen keyboard: row one is the modifier /
-// special keys (Esc, Tab, Ctrl, Alt, and the ⇧↵ newline), row two is navigation
-// (the four cursor arrows plus PgUp/PgDn page scrolling).
-//
-// Presentational only: this component decides layout and emits intents. All
-// behavior (which byte sequence to send, cursor-key mode, one-shot latch
-// clearing, viewport scrolling) lives in TerminalPane + lib/termkeys.
+// Two rows of touch targets for the keys a soft keyboard cannot produce at all.
+// Presentational only: it decides layout and emits intents, while every behavior
+// behind them lives in TerminalPane and lib/termkeys.
 
 interface AccessoryBarProps {
   // Fire-and-forget key intents. The parent maps these to PTY byte sequences,
@@ -40,25 +31,15 @@ interface AccessoryBarProps {
   alt: boolean
   onToggleCtrl: () => void
   onToggleAlt: () => void
-  // The input ⋯ menu, when THIS bar is the bottom-most input row (the message
-  // box is off, so the compose row that normally carries it is not there).
-  // Presentational like everything else here: the parent owns the anchor
-  // matrix and simply hands over a node, absent whenever another row carries
-  // the menu or the menu would be empty.
+  // The input ⋯ menu, when THIS bar is the bottom-most input row. The parent owns
+  // the anchor matrix and hands over a node, absent when another row carries it.
   inputMenu?: React.ReactNode
 }
 
-// CRITICAL: every bar button calls preventDefault() on pointerdown so the press
-// can't shift focus off the active typing surface before the handler runs, and
-// we fire on pointerdown (not click) for a snappy, latency-free feel. Because
-// the press never takes focus, a tap PRESERVES the soft-keyboard state,
-// whichever it was: a user typing keeps the keyboard (and their focus), and a
-// user paging through output with the keyboard closed does not have it pop
-// open — the parent's handlers only refocus when the typing surface had focus
-// at tap time. The PgUp/PgDn page-scroll keys reuse the same handler for that
-// focus/sequencing guarantee but then deliberately blur in
-// TerminalPane.onScroll to dismiss the keyboard for reading. So "preserves the
-// keyboard" is the input-key contract, not a universal one.
+// Every bar button preventDefaults on pointerdown, so the press never shifts focus
+// off the typing surface and a tap preserves the soft-keyboard state as it was.
+// That contract is the input keys'; the page-scroll keys share the handler and then
+// blur deliberately, to dismiss the keyboard for reading.
 function keyDown(handler: () => void) {
   return (event: React.PointerEvent) => {
     event.preventDefault()
@@ -66,20 +47,16 @@ function keyDown(handler: () => void) {
   }
 }
 
-// Keyboard/AT activation, the same pattern as the compose bar's Send button:
-// Enter or Space on the focused button fires a `click` with `detail === 0` (no
-// pointer press). A click that FOLLOWS a real pointer tap carries `detail >= 1`
-// and is ignored, because the pointerdown handler above already fired; without
-// the detail gate every tap would fire the key twice.
+// Keyboard activation: Enter or Space fires a click with `detail === 0`. A click
+// following a real tap carries `detail >= 1` and is ignored, or the key fires twice.
 function keyClick(handler: () => void) {
   return (event: React.MouseEvent) => {
     if (event.detail === 0) handler()
   }
 }
 
-// The soft-newline key's glyph. A bare "⇧↵" text label rendered unevenly across
-// fonts/platforms, so we draw it: a filled shift up-arrow next to a return arrow,
-// stroked in currentColor to match the lucide icons on the neighboring keys.
+// The soft-newline key's glyph, drawn rather than typed: a bare "⇧↵" label renders
+// unevenly across platforms. Stroked in currentColor to match the lucide icons.
 function ShiftEnterIcon() {
   return (
     <svg
@@ -100,14 +77,9 @@ function ShiftEnterIcon() {
   )
 }
 
-// One key cell. flex-1 makes the cells evenly fill the row; h-10 (40px) is a
-// comfortable thumb target while keeping the two-row bar from eating the phone's
-// scarce vertical space. Text labels get the bundled terminal stack (not bare
-// font-mono, which resolves to whatever the OS calls monospace) so Esc/Tab/Ctrl/
-// Alt read like keycaps cut from the same face the terminal beside them draws
-// with; arrow and newline cells pass an icon child instead. The stack is the
-// bundled default only, deliberately not the user's configured terminal family:
-// these caps are dux's own chrome rather than terminal content.
+// One key cell, at the 40px thumb-target floor. Text labels take the BUNDLED
+// terminal stack, deliberately not the user's configured family: these caps are
+// dux's own chrome rather than terminal content.
 function KeyButton({
   label,
   ariaLabel,
@@ -118,9 +90,8 @@ function KeyButton({
   label?: string
   ariaLabel?: string
   pressed?: boolean
-  // The key's intent, fired once per activation: on pointerdown for a real
-  // press (focus-preserving, see `keyDown`) and on a detail-0 click for
-  // keyboard/AT activation (see `keyClick`).
+  // The key's intent, fired once per activation: on pointerdown for a real press,
+  // and on a detail-0 click for keyboard activation.
   onActivate: () => void
   children?: React.ReactNode
 }) {
@@ -156,11 +127,8 @@ export function AccessoryBar({
   onToggleAlt,
   inputMenu,
 }: AccessoryBarProps) {
-  // Two flex rows stacked: modifier/special keys on top, navigation (arrows +
-  // page scroll) below; gap-1.5 between the rows so a fat-finger tap on the top
-  // row doesn't catch the row directly beneath it. Safe-area insets are NOT
-  // applied here: the mobile root pads its own bottom (clearing the home
-  // indicator), handled by an ancestor (see App.tsx mobile root).
+  // Two stacked rows, gapped so a fat-finger tap on one does not catch the other.
+  // Safe-area insets are NOT applied here: the mobile root pads its own bottom.
   return (
     <div className="flex shrink-0 flex-col gap-1.5 border-t bg-background px-1 py-1">
       {/* Row one — modifier / special keys sent to the program. */}

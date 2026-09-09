@@ -166,25 +166,11 @@ function registerPasteGuards(
 }
 
 /**
- * WHILE THE MESSAGE BOX IS UP, XTERM DOES NOT HOLD THE KEYBOARD.
- *
- * The compose bar is THE typing surface when it is on, and everything else in
- * the pane already assumes it: the caret style says "focused" permanently
- * (`inactiveCursorStyle`), a tap on the terminal hands focus back to the box
- * (`touchWiring`), and every automatic focus move routes through
- * `focusTypingSurfaceIn`. A finger has no other way in, so this never mattered
- * until the box could be turned on for a MOUSE, which can click straight into
- * the terminal and start typing past the buffer.
- *
- * One rule at the focus edge rather than a filter on each key: a swallowed
- * keystroke is a keystroke the user has to type again somewhere else, while a
- * redirected focus puts the very next character in the box they asked for.
- * Selecting, copying and the link and mouse gestures are untouched, none of
- * them needs xterm to be focused. The way back is the Direct toggle.
- *
- * Listens on the pane's own CONTAINER for the bubbling `focusin` rather than on
- * xterm's hidden textarea: the container is the element this pane owns, the
- * compose box lives outside it, and nothing else inside it takes focus.
+ * While the message box is up, xterm does not hold the keyboard: a focus landing
+ * anywhere in the pane is redirected into the box, so a mouse cannot click into
+ * the terminal and type past the buffer. One rule at the focus edge rather than a
+ * per-key filter, so selection, copy, links and mouse gestures are untouched.
+ * Listens on the pane's CONTAINER, which is the element this pane owns.
  */
 export function registerComposeFocusGuard(options: {
   container: HTMLElement
@@ -194,17 +180,10 @@ export function registerComposeFocusGuard(options: {
   let disposed = false
   const onFocusIn = () => {
     if (!options.composeActive()) return
-    // DEFERRED BY A MICROTASK, and the delay is load-bearing on Linux. xterm
-    // publishes a terminal selection to the X11 PRIMARY selection by stuffing
-    // it into its hidden textarea and calling `focus()` then `select()` back to
-    // back, synchronously. Moving focus BETWEEN the two takes the selection
-    // away from the element being selected, and middle-click paste into other
-    // applications silently stops working for as long as the box is up. A
-    // microtask runs after that whole synchronous sequence and still long
-    // before the user can type, so nothing else about the redirect changes.
-    //
-    // Asked AGAIN on the way out: the surface can be switched to Direct, and
-    // the pane can be disposed, between the focus and the deferred move.
+    // Deferred by a microtask, which is load-bearing on Linux: xterm publishes to
+    // the X11 PRIMARY selection with a synchronous `focus()` then `select()`, and
+    // moving focus between them breaks middle-click paste. Re-asked on the way out,
+    // since the surface can switch and the pane can be disposed in between.
     queueMicrotask(() => {
       if (disposed || !options.composeActive()) return
       options.focusTypingSurface()
@@ -220,24 +199,11 @@ export function registerComposeFocusGuard(options: {
 }
 
 /**
- * TAKE XTERM'S HIDDEN TEXTAREA OUT OF THE TAB ORDER while the message box is
- * the typing surface. Returns the restore.
- *
- * The focus guard above sends every focus landing inside the pane to the
- * message box, which makes xterm's `tabindex="0"` helper textarea a keyboard
- * TRAP: Shift-Tab out of the box lands on it and is bounced straight back, so
- * there is no way to navigate backwards out of the pane at all.
- *
- * The trap cannot be answered at the focus edge, because a Shift-Tab out of the
- * box and a CLICK into the terminal produce the identical `focusin`: same
- * target, same `relatedTarget` (the box, in both cases), and one of the two
- * must still be redirected. So the keyboard answer is the tab ORDER, which a
- * pointer does not consult: a click still focuses a `tabindex="-1"` element and
- * still lands in the box.
- *
- * Reversible rather than permanent: whatever xterm had is put back the moment
- * the box goes away, so the terminal is an ordinary tab stop again for everyone
- * typing straight into it.
+ * Take xterm's hidden textarea out of the tab order while the message box is the
+ * typing surface, and return the restore. The focus guard would otherwise bounce
+ * a Shift-Tab out of the box straight back, and the edge cannot tell that event
+ * from a click into the terminal: same target, same `relatedTarget`. The tab order
+ * can, because a pointer does not consult it.
  */
 export function suspendTerminalTabStop(
   textarea: { tabIndex: number } | null | undefined,

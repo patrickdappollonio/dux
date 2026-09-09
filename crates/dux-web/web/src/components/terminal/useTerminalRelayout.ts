@@ -116,12 +116,9 @@ function applyFont(
   if (faithful) {
     context.viewerRegridRef.current?.()
   } else if (familyChanged || sizeChanged || wasFaithful) {
-    // Through the coordinator, never a bare `fit.fit()`. New cell metrics do
-    // need a refit, but this one fires while the attach is still in flight
-    // (the configured face is applied on mount, the bundled faces land a
-    // moment later), and a fit landing between the handshake and the replay
-    // undoes the grid the coordinator adopted for that replay. The coordinator
-    // holds it and fits for this once the replay is on screen.
+    // Through the coordinator, never a bare `fit.fit()`: this refit fires while the
+    // attach is in flight, and a fit between the handshake and the replay undoes the
+    // grid adopted for it. The coordinator holds it until the replay is on screen.
     context.ownerRefitRef.current?.()
   }
 

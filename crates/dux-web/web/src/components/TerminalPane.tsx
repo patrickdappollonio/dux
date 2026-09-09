@@ -95,26 +95,13 @@ import {
 import type { TakeoverIntent } from "@/components/terminal/channels"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
-// WHAT THE PANE PAINTS OVER ITS OWN TERMINAL. Today that is the floating
-// theater pill, and the reason it comes in as a prop rather than being mounted
-// by the shells beside the pane is geometric: the pane column holds the compose
-// row and the terminal keys UNDER the terminal, so anything positioned against
-// that column lands on the Send button. The terminal's own box is the only
-// positioning context that means "over the terminal, and over nothing else".
+// Painted over the terminal's own box, which is the only positioning context
+// that excludes the compose row and the key rows sitting under the terminal.
 type TerminalPaneOverlayProp = { overlay?: ReactNode }
 
 type TerminalPaneProps = (
-  // The streamed target: an agent tab, or a companion terminal of either owner.
-  // `id` is the FOCUSED TAB id for an agent and the terminal id for a terminal.
-  // The owner (session id for an agent, `TerminalOwnerRef` for a terminal) is
-  // passed explicitly: it builds the nested PTY socket URL and the macro
-  // target, and the spine may not yet list a just-created terminal when this
-  // pane first mounts.
-  //
-  // `slotTabId` is the agent's slot tab as the spine names it, a generated id
-  // the session merely points at. Slot-ness is decided against it, never
-  // against the session id, so it must be passed by every caller that has the
-  // spine; it is absent only while the spine has not arrived.
+  // The streamed target. `id` is the focused tab id for an agent and the terminal
+  // id for a terminal; `slotTabId` names the slot tab, never the session id.
   | { kind: "agent"; id: string; sessionId: string; slotTabId?: string }
   | { kind: "terminal"; id: string; owner: TerminalOwnerRef }
 ) &
@@ -156,29 +143,18 @@ export function TerminalPane(props: TerminalPaneProps) {
     lastRunFailed,
   } = useTerminalPaneSetup(props)
 
-  // True while the PTY socket has dropped and is retrying (non-blocking), or
-  // while a take-over is deliberately bouncing it. Drives a "Reconnecting…"
-  // overlay that re-arms even after `everReady` has latched, so a mid-session
-  // disconnect is visible rather than the terminal silently freezing. Cleared on
-  // the next (re)open. Input typed while disconnected is dropped by the socket's
-  // readyState guard; this overlay is the signal that it would be. Declared
-  // ABOVE the ownership machine because the take-over bounce raises it: a
-  // deliberate `connect()` fires no `onReconnecting` of its own.
+  // True while the PTY socket is retrying, or while a take-over bounces it.
+  // Declared above the ownership machine, which raises it on a deliberate bounce.
   const [reconnecting, setReconnecting] = useState(false)
 
-  // THE ATTACH EPOCH AND ITS SCREEN. Every open of the socket mints an epoch
-  // (see `terminal/attachReplay.ts`); the cover comes down only when the replay
-  // for the CURRENT one has been parsed, and never merely because the socket
-  // opened. `null` means no open has happened yet, which is covered too.
+  // The cover comes down only when the replay for the CURRENT epoch has been
+  // parsed, never merely because the socket opened. `null` means no open yet.
   const [attachEpoch, setAttachEpoch] = useState<number | null>(null)
   const [appliedEpoch, setAppliedEpoch] = useState<number | null>(null)
   const replayApplied = attachEpoch !== null && appliedEpoch === attachEpoch
 
-  // THE REPLAY WAIT, in ACCUMULATED VISIBLE TIME (see `lib/visibleClock.ts`): a
-  // hidden tab is throttled and a suspended one resumes believing hours passed,
-  // so a wall-clock wait would offer a Reconnect button to a phone the moment it
-  // came out of a pocket. Reset on every attach epoch, because each open's
-  // patience starts from zero.
+  // The replay wait counts accumulated VISIBLE time (`lib/visibleClock.ts`): a
+  // wall clock expires while the tab sits hidden. Reset on every attach epoch.
   const replayClockRef = useRef<VisibleClock | null>(null)
   if (replayClockRef.current === null) {
     replayClockRef.current = createVisibleClock()
@@ -188,16 +164,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     const clock = replayClockRef.current
     return () => clock?.dispose()
   }, [])
-  // Poll the visible clock while a cover is up with no screen behind it. A poll
-  // rather than a timer because the quantity being waited on is visible time,
-  // which a `setTimeout` cannot measure; the interval is a second, so the box
-  // appears within a second of the configured wait. It runs only while there is
-  // something to wait for, so a settled pane pays nothing.
+  // Polled rather than timed: visible time is what is being waited on, and a
+  // `setTimeout` cannot measure it. Runs only while a cover has no screen behind it.
   useEffect(() => {
-    // Nothing to wait for. The flag is not cleared here (that would be a
-    // setState inside an effect body, and a cascading render); it is cleared by
-    // `noteAttachEpoch`, which is the moment a NEW wait begins, and the cover
-    // ignores it entirely while the replay is applied.
+    // The flag is cleared by `noteAttachEpoch`, where a new wait begins: clearing
+    // it here would be a setState in an effect body and a cascading render.
     if (replayApplied) return
     const waitMs = replayWaitMs()
     // A configured zero disables the wait entirely: the cover stays up
@@ -212,9 +183,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     return () => clearInterval(timer)
   }, [replayApplied, attachEpoch])
 
-  // THE OWNERSHIP MACHINE: the four states, the seven transition sites, the
-  // verdict channel, the connection identity and the take-over intent, all in
-  // one module. See `terminal/ownership.ts`.
+  // The ownership states, the verdict channel, the connection identity and the
+  // take-over intent all live in one module, `terminal/ownership.ts`.
   const {
     isOwner,
     ownership,
@@ -231,55 +201,25 @@ export function TerminalPane(props: TerminalPaneProps) {
     id,
     kind,
     conn,
-    // Who the SPINE says drives this pty. It is the only thing that can correct
-    // a device name kept across an events-socket outage, and it exists for a
-    // companion terminal as well as an agent tab, so both cards get it.
+    // Who the spine says drives this pty: the only thing that can correct a device
+    // name kept across an events-socket outage, for a terminal as well as a tab.
     spineInputOwner,
     ptyRef,
     setReconnecting,
   })
 
-  // THE LIVE-SETTINGS SNAPSHOT, published here rather than inside the setup
-  // hook because `composeActive` is OWNER-GATED and the verdict is only known
-  // now. The typing surfaces render for the input owner alone, so a watcher
-  // with a stored `compose` choice has no message box: publishing `true` there
-  // armed the focus guard over a pane with nothing to redirect into (every
-  // redirect a no-op) and painted the permanently-focused caret xterm shows
-  // while the box holds the keyboard. Still ahead of the relayout hook and of
-  // the lifecycle, which is the ordering this container's contract requires.
-  // IS THE MESSAGE BOX THE TYPING SURFACE IN THIS PANE, RIGHT NOW? The bar
-  // renders for the input owner alone, so a watcher with a stored `compose`
-  // choice has no box at all: everything downstream of this flag has to know
-  // that, or it acts on a surface that is not on screen.
+  // Is the message box the typing surface in this pane right now? The bar renders
+  // for the input owner alone, so a watcher with a stored choice has no box.
   const composeSurfaceLive = composeBarEnabled && isOwner
   const live = useTerminalLiveSettings(liveSettingsFor(composeSurfaceLive))
 
-  // THE ONE FOCUS-ROUTING RULE, bound to this pane's three handles. It is a
-  // standalone function in the input surface rather than a method of it,
-  // because two things need it BEFORE the input-surface hook has run: the
-  // ownership machine's take-over, and the lifecycle's focus-on-mount. Every
-  // refocus in the pane goes through this one binding.
+  // Every refocus in the pane goes through this one binding. It is standalone
+  // because the take-over and the lifecycle need it before the input hook runs.
   const focusTypingSurface = () =>
     focusTypingSurfaceIn({ live, composeInputRef, termRef })
 
-  // LOSING OWNERSHIP LEAVES THEATER, and forgets that this pane was ever in it.
-  // Another device is driving now and the take-over card is about to cover the
-  // pane: deciding what to do about that wants the tabs, the pull-request band
-  // and the header back in view, and a covered pane has not earned the whole
-  // screen. Only the LAYOUT comes back; losing ownership stays as sticky as it
-  // ever was, and re-entering theater afterwards is a fresh press.
-  //
-  // On the TRANSITION only, never on the verdict itself. A backgrounded tab
-  // attaches as a watcher without stealing anything, and clearing the memory of
-  // a pane merely being observed would quietly undo a mode the user set up on
-  // the device that is driving.
-  //
-  // AND NOT BEFORE THE FIRST HONEST VERDICT. `isOwner` is a foreground guess
-  // until the handshake answers, so a watcher's first real answer looked exactly
-  // like a demotion: a shared theater link opened on a device somebody else is
-  // driving entered the mode, "lost" ownership it never had, and cleared the
-  // pane's memory on the way out. `theaterOwnershipStep` is where that rule
-  // lives, so it is testable without a socket.
+  // Losing ownership leaves theater and forgets the mode, on the TRANSITION only
+  // and never before the handshake's first honest verdict (`theaterOwnershipStep`).
   const ownerWatchRef = useRef(theaterOwnershipWatchStart)
   useEffect(() => {
     const step = theaterOwnershipStep(ownerWatchRef.current, {
@@ -290,30 +230,23 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (step.lost) noteTheaterOwnershipLost(kind, id)
   }, [handshakeSeen, isOwner, kind, id])
 
-  // THE VIEWER-GRID MACHINE: the honest badge and the bounce-heal. One PTY has
-  // one authoritative grid, the owner's, and a viewer rendering the same bytes
-  // at a different size is rendering wrapped and clamped output into a local
-  // scrollback nothing else will ever clean up. It says so, and it heals by
-  // re-attaching, never by resizing the PTY (that is the silent steal).
+  // One PTY has one authoritative grid, the owner's. A diverged viewer heals by
+  // re-attaching, never by resizing the PTY, which would be a silent steal.
   const viewerGrid = useViewerGrid({
     ptyRef,
     ownership,
     takeoverIntent,
     setReconnecting,
   })
-  // THE FAITHFUL VIEW, presentation half. A watcher renders at the PTY's grid,
-  // full stop: there is no preference behind this any more. The coordinator
-  // derives the same answer for itself off the verdict channel, because it must
-  // be right synchronously; this is the render's copy of it.
+  // A watcher renders at the PTY's grid, with no preference behind it. The
+  // coordinator derives the same answer off the verdict channel, synchronously.
   const faithfulWatcher = !isOwner
   // The grid to render, broken out so the relayout effect depends on the
   // NUMBERS rather than on the object identity the machine hands back.
   const remoteRows = viewerGrid.remoteGrid?.rows ?? 0
   const remoteCols = viewerGrid.remoteGrid?.cols ?? 0
-  // The mount-scoped port onto the coordinator's grid adoption, installed by
-  // the lifecycle (a viewer re-grid is a coordinator act, never a side effect
-  // of a font change), and the pane's own relayout, which the coordinator's
-  // ResizeObserver calls in place of the fit it does not run.
+  // The mount-scoped port onto the coordinator's grid adoption: a viewer re-grid
+  // is a coordinator act, never a side effect of a font change.
   const viewerRegridRef = useRef<(() => void) | null>(null)
   // The same idiom for the owner's side: the relayout's font refit is a
   // coordinator act too, so it goes through this rather than the fit addon.
@@ -332,8 +265,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     targetId: props.id,
   })
 
-  // THE UPLOAD PIPELINE: the three-gesture file journey (drop, paste, picker),
-  // its sinks, its batch loop and its one toast.
+  // The upload pipeline: the file journey every gesture (drop, paste, picker)
+  // shares, its sinks, its batch loop and its one toast.
   const upload = useUploadPipeline({
     id,
     kind,
@@ -365,84 +298,42 @@ export function TerminalPane(props: TerminalPaneProps) {
     remoteCols,
   })
 
-  // Retire any in-flight drag the moment the feature stops being available.
-  // The gate refuses events for a disabled feature, so once it closes there is
-  // no matching `dragleave` or `drop` left to clear the overlay, and it would
-  // sit on screen until the pane unmounted. This is reachable in the ordinary
-  // case: the bootstrap document can land, saying the feature is off, while a
-  // drag is already over the pane.
-  //
-  // This is the documented "adjust state when a prop changes" pattern (a
-  // comparison against the previously seen value, resolved during render)
-  // rather than an effect. An effect setting state synchronously runs AFTER
-  // the commit, so the stale overlay is painted once and then removed, and it
-  // costs a second render pass to do it; this form is caught before the
-  // browser sees anything. It reads BOTH directions of the flip on purpose: a
-  // feature switched off and then back on must not revive a drag that ended
-  // while it was off, since no drag event would ever arrive to clear it.
+  // Retire an in-flight drag on either flip of file-drop availability: the gate
+  // refuses the `dragleave` or `drop` that would otherwise clear the overlay.
   const [dropEnabledSeen, setDropEnabledSeen] = useState(fileDropEnabled)
   if (dropEnabledSeen !== fileDropEnabled) {
     setDropEnabledSeen(fileDropEnabled)
     setDragActive(false)
   }
-  // The depth counter only means anything while a drag is actually active, so
-  // it is pinned back to zero whenever one is not. Without this a count left
-  // over from a retired drag would demand that many extra `dragleave`s before
-  // the next overlay would close. It lives in an effect rather than in the
-  // branch above because a ref must not be written during render.
+  // The depth counter means nothing outside an active drag, so it is pinned to
+  // zero; in an effect, because a ref must not be written during render.
   useEffect(() => {
     if (!dragActive) dragDepthRef.current = 0
   }, [dragActive, dragDepthRef])
-  // Keep an OPEN terminal's unfocused-caret style in step with the typing
-  // surface. The menus' typing-surface switch and a preference flip both
-  // change the answer mid-session, and xterm options are mutable in place (verified
-  // against the installed 6.0.0: only `cols` and `rows` are read-only), so
-  // this never touches the terminal's identity. Before the lifecycle effect has
-  // run `termRef` is null and this is a no-op; the mount reads the same helper
-  // through the container, so a remount opens with the right value.
+  // The typing surface changes mid-session, and xterm options are mutable in
+  // place (installed 6.0.0: only `cols` and `rows` are read-only).
   useEffect(() => {
     const term = termRef.current
     if (!term) return
     term.options.cursorInactiveStyle = inactiveCursorStyle(composeSurfaceLive)
   }, [composeSurfaceLive, termRef])
   // Tracks the attention-grace hidden -> visible transition (see
-  // `visibleSinceAfterTransition` in viewedPing.ts). Refs, not state, so both
-  // the lifecycle's visibility listeners and the ownership-gain effect below
-  // read/update the same value without re-running the lifecycle.
-  // Per-component (not module-level): each mounted pane listens to its own
-  // visibilitychange/focus events, so tracking per-component is correct.
-  // `undefined` means "no transition observed" (covers initial load).
+  // `visibleSinceAfterTransition` in viewedPing.ts). `undefined` means none seen.
   const visibleSinceRef = useRef<number | undefined>(undefined)
   const prevVisibleRef = useRef<boolean | undefined>(undefined)
-  // There is deliberately no `status_clear_seconds` mirror here. The upload
-  // path is entered from a lifecycle listener as well as from a JSX handler,
-  // and the listener closes over the MOUNT render, where the bootstrap document
-  // has usually not arrived: a value read from the render closure pinned every
-  // clipboard-paste toast to the pre-bootstrap default for the life of the
-  // pane. `lib/notify.ts` reads the window at raise time, so there is nothing
-  // here to capture and nothing to capture stale.
 
-  // The pointer type of the most recent press on the host. Android Chrome fires
-  // `contextmenu` on a touch LONG-PRESS, which is dux's own text-selection
-  // gesture; right-click paste only fires for a mouse/pen press, so a touch
-  // long-press selects text instead of pasting. This per-interaction
-  // signal is exact where an `isMobile` width check is not (a touchscreen laptop
-  // with a mouse must still get right-click paste).
+  // Android Chrome fires `contextmenu` on a touch long-press, which is the
+  // selection gesture, so right-click paste is gated on a mouse or pen press.
   const pointerTypeRef = useRef("")
 
-  // IS AN IME COMPOSITION IN FLIGHT? Moving focus mid-composition destroys the
-  // half-typed CJK text and the candidate popup with it, so every automatic
-  // focus move in this pane is gated on this being false. Tracked at the
-  // document, because the composition may be in xterm's hidden textarea or in
-  // the compose box and both are inside this pane.
+  // Moving focus mid-composition destroys half-typed CJK text, so every automatic
+  // focus move is gated on this. At the document: either textarea may hold it.
   const composingRef = useRef(false)
   // Which attach the pane has already moved the keyboard for, as
   // `kind:id:composeBarEnabled`. Null when this pane does not own the pty.
   const focusedForRef = useRef<string | null>(null)
-  // Bumped when a composition ENDS, so an automatic focus move the composition
-  // blocked is retried rather than dropped. Without it the guard read the ref
-  // once and the effect never ran again: a composition in flight when the replay
-  // landed cancelled that pane's one focus move permanently.
+  // Bumped when a composition ends, so an automatic focus move it blocked is
+  // retried rather than dropped.
   const [compositionEnded, setCompositionEnded] = useState(0)
   useEffect(() => {
     const start = () => {
@@ -475,10 +366,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   })
 
   const everReady = useEverReady(hasOutput)
-  // THE ONE LIFECYCLE OWNER. It creates the terminal and the socket, wires
-  // every listener the pair needs, and tears both down, re-running only when
-  // the streamed target changes. Everything it reads travels through the
-  // container, a channel, or one of the ports below.
+  // The one lifecycle owner: it creates and tears down the terminal and socket,
+  // re-running only when the streamed target changes.
   useTerminalLifecycle(props, {
     hostRef,
     containerRef,
@@ -515,60 +404,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     isOwnerRendered: isOwner,
   })
 
-  // THE SURVIVING EFFECTS, inventoried in one place because "one lifecycle
-  // owner, and nothing smuggled past it" is only checkable once the exceptions
-  // are a list. Every effect below is a registration or a genuine reaction
-  // whose lifetime is narrower than the
-  // terminal's, which is why it is not folded into the lifecycle hook. Each
-  // module-scope registration retires only its OWN registration, because on a
-  // focus switch React's old-cleanup / new-effect order is not guaranteed.
-  //
-  //   IN THIS FILE
-  //   [fontFamily, fontSize]              live-apply a font preference change
-  //   [dragActive]                        pin the drag-depth counter to zero
-  //   [composeSurfaceLive]                the open terminal's inactive caret
-  //   [isOwner, composeBarEnabled]        focus the freshly mounted compose box
-  //   [composeBarEnabled, isOwner]        the compose-insert sink
-  //   [live]                              the terminal focus target
-  //   [composeBarEnabled, isOwner]        the compose textarea's paste listener
-  //   [composeSurfaceLive]                xterm's tab stop, while the box is up
-  //   [isOwner, ...the top gates]         the INPUT group the top menus show
-  //   [isSessionSlotTab, everReady, ...]  eject to the welcome screen on exit
-  //   [isOwner]                           the viewed ping on gaining ownership
-  //
-  //   IN THE UNITS
-  //   (every commit)                      the live-settings snapshot
-  //   [composeText]                       the draft splice's caret placement
-  //   [id]                                the `pty.owner` handover subscription
-  //   [kind, id, isOwner, connectionLost] the ownership ledger verdict
-  //   [id, isOwner, fileDropEnabled]      the attach capability
-  //   [kind, id, sessionId, ptyUrl]       THE LIFECYCLE ITSELF
-  //
-  // The typing surfaces render only while this client owns the input, so on
-  // regaining ownership the compose bar mounts in the SAME commit that flips
-  // `isOwner`; `takeOver`'s own `focusTypingSurface()` call runs before that
-  // commit (the compose ref is still null) and falls back to xterm. This
-  // effect lands after the commit and moves the keyboard into the freshly
-  // mounted compose box. Idempotent on the initial mobile mount, a no-op on
-  // desktop (`composeBarEnabled` is mobile-gated).
-  //
-  // AND NOT BEFORE THE PANE HAS RECONCILED. Focusing summons the soft keyboard,
-  // and doing that over a pane that is still resolving ownership or still
-  // waiting for its screen puts a keyboard over a placeholder: the take-over
-  // used to focus optimistically the moment it was pressed, a whole reconnect
-  // and replay ahead of anything to type into. Both facts must be in before the
-  // keyboard comes up, and an IME composition in flight is never interrupted by
-  // it. The two rules are the pure `typingFocusAllowed` (may we?) and
-  // `nextTypingFocus` (do we owe one?).
-  //
-  // ONCE PER ATTACH, NOT ONCE PER EPOCH. `replayApplied` goes false and back to
-  // true on EVERY socket reopen, so an effect keyed on it alone fired on every
-  // background reconnect: on a desktop that pulled focus out of whatever the user
-  // was typing in, and on a phone it raised the soft keyboard unbidden. The pane
-  // remembers what it has already focused for, so a reconnect onto the SAME
-  // target with the SAME ownership and the SAME typing surface is silent, while
-  // a target switch, a regained ownership, or the compose bar appearing still
-  // moves the keyboard exactly once.
+  // The pane's one automatic typing focus: once per attach, and never before the
+  // ownership verdict and the replay are in, or while an IME composition runs.
   useEffect(() => {
     const decision = nextTypingFocus({
       allowed: typingFocusAllowed({
@@ -583,14 +420,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     })
     focusedForRef.current = decision.focusedFor
     if (!decision.focus) return
-    // THE ONE AUTOMATIC FOCUS MOVE IN THE PANE, for both surfaces. The routing
-    // (compose textarea when the box is up, xterm's hidden textarea otherwise)
-    // lives in `focusTypingSurface`, and the mount-time focus that used to sit
-    // in the lifecycle is gone: two focus paths meant two rules.
     focusTypingSurface()
-    // `focusTypingSurface` reads only refs, so its identity says nothing new and
-    // listing it would re-focus on every commit. `compositionEnded` is listed so
-    // a move an IME composition deferred is retried when it finishes.
+    // `focusTypingSurface` reads only refs, so listing it would re-focus on every
+    // commit; `compositionEnded` is listed so a deferred move is retried.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     isOwner,
@@ -603,16 +435,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     composeInputRef,
     termRef,
   ])
-  // While the compose bar is actually rendered (mobile, `ui.compose_bar` on,
-  // input owner — the same gate as the render below), register the
-  // compose-insert sink the store's `runMacro` routes a picked macro through:
-  // the macro's RAW text is spliced into the DRAFT at the caret, an editable
-  // message the user reviews and Sends, never an immediate PTY write. The
-  // module-scope hand-off exists because the mobile macro picker lives in the
-  // terminal screen's header (MobileShell), outside this pane — see
-  // `composeInsert.ts`. The sink retires the moment the bar stops rendering
-  // (viewer demotion, preference flip, unmount), restoring the direct
-  // macro-to-PTY path everywhere the bar is not the typing surface.
+  // While the bar renders, a picked macro is spliced into the compose DRAFT at
+  // the caret instead of being written to the PTY (`composeInsert.ts`).
   useEffect(() => {
     if (!(composeBarEnabled && isOwner)) return
     const sink = {
@@ -625,18 +449,12 @@ export function TerminalPane(props: TerminalPaneProps) {
       // replaced it (the same guard `setActivePtySocket` cleanup uses).
       if (getComposeInsertSink() === sink) setComposeInsertSink(null)
     }
-    // `insertComposeText` is a component-body function that reads only refs and
-    // the (stable) state setter, so a new identity every render says nothing new
-    // and listing it would re-register the sink on every keystroke.
+    // `insertComposeText` reads only refs and the stable setter, so listing it
+    // would re-register the sink on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composeBarEnabled, isOwner])
-  // The desktop macro picker now lives in the header (`InsetHeader`), outside
-  // this pane, so it cannot reach xterm to hand Base UI a close-focus target.
-  // Register the pane's typing surface for it, on the same module-scope
-  // hand-off idiom as the compose sink above (and with the same
-  // only-retire-your-own-registration guard). The pane resolves the surface at
-  // CALL time through `focusTypingSurface`'s own rule, so a picker close lands
-  // where typing already was rather than where it was when this effect ran.
+  // The desktop macro picker lives in the header, outside this pane, so it needs
+  // a registered close-focus target; the surface is resolved at call time.
   useEffect(() => {
     const target = () =>
       live.current.composeActive && composeInputRef.current
@@ -647,14 +465,8 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (peekTerminalFocusTarget() === target) setTerminalFocusTarget(null)
     }
   }, [live, composeInputRef, termRef])
-  // The compose textarea's own image-paste listener. The compose bar renders
-  // OUTSIDE the terminal container (it is a sibling row of the mobile shell),
-  // so the container's capture listener cannot see a paste that lands in it,
-  // and on a phone the compose box is where a paste lands: the tap redirect
-  // puts focus there. Registered on the element rather than passed as an
-  // `onPaste` prop so `ComposeBar` stays presentational, and no capture phase
-  // is needed because this IS the target. The same gate as the render below,
-  // so the listener exists exactly while the box does.
+  // The compose bar renders outside the terminal container, so the container's
+  // capture listener cannot see a paste that lands in the box.
   useEffect(() => {
     if (!(composeBarEnabled && isOwner)) return
     const el = composeInputRef.current
@@ -662,40 +474,22 @@ export function TerminalPane(props: TerminalPaneProps) {
     const handler = (e: ClipboardEvent) => upload.onClipboardPaste(e)
     el.addEventListener("paste", handler)
     return () => el.removeEventListener("paste", handler)
-    // Same reason as the sink above: `onClipboardPaste` reads refs and the live
-    // bootstrap document at call time, so re-registering the listener whenever
-    // its identity changes would buy nothing.
+    // `onClipboardPaste` reads refs and the live bootstrap at call time, so
+    // re-registering on every identity change would buy nothing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composeBarEnabled, isOwner])
 
-  // THE KEYBOARD WAY OUT OF THE PANE while the box holds the typing surface.
-  // The focus guard sends every focus landing in the terminal container to the
-  // message box, which turned xterm's `tabindex="0"` helper textarea into a
-  // trap: Shift-Tab out of the box landed there and was bounced straight back,
-  // so backward navigation out of the pane was impossible. Taking it out of the
-  // tab order is the answer that a pointer does not consult, so a click into
-  // the terminal still hands focus to the box (see `suspendTerminalTabStop`).
-  // Same gate as the box itself, and restored the moment it goes away.
+  // The focus guard would bounce a Shift-Tab out of the box straight back, so
+  // xterm's tab stop is suspended: the tab order is what a pointer does not consult.
   useEffect(() => {
     if (!composeSurfaceLive) return
     return suspendTerminalTabStop(termRef.current?.textarea)
-    // The terminal is created by the lifecycle effect declared above this one,
-    // so `termRef` is filled by the time this runs; it is listed for the linter
-    // rather than because its identity ever changes.
+    // `termRef` is filled by the lifecycle effect above; it is listed for the
+    // linter rather than because its identity changes.
   }, [composeSurfaceLive, termRef])
 
-  // THE PANE'S INPUT GROUP, for whichever TOP menu is on screen over it: the
-  // phone's merged pane menu, the phone's agentless terminal header, the
-  // sidebar row's menu on a computer, the floating pill's one menu (see
-  // `lib/paneInputGroup.ts`). None of them is inside the pane, and only the
-  // pane knows the answers.
-  //
-  // Published only while this pane OWNS the input, so a mounted viewer pane
-  // cannot shadow a mounted owner pane's answers for the same agent.
-  //
-  // Every dependency is a primitive: the gates object is rebuilt on each render,
-  // and a registration keyed on its identity would publish on every commit,
-  // re-render every open menu and come straight back round.
+  // The pane's INPUT group for whichever top menu is over it, published only
+  // while this pane owns the input. Deps stay primitive: gates is rebuilt each render.
   const {
     surfaceSwitch: topSurfaceSwitch,
     keysToggle: topKeysToggle,
@@ -708,36 +502,19 @@ export function TerminalPane(props: TerminalPaneProps) {
     })
   }, [id, isOwner, topSurfaceSwitch, topKeysToggle])
 
-  // Mirror the TUI's exit behavior: when the agent we were attached to stops
-  // running (it produced output in this pane, then its session left `active`
-  // — the exit prune marks it detached), reset the center pane back to the
-  // welcome screen. The "Agent exited" toast explains why. A fresh selection
-  // of the detached agent remounts this pane and relaunches it.
-  // Reset to the welcome screen only when the session-slot tab we were attached to
-  // stops and the whole agent left `active` (status is any-tab-active). Gate on
-  // `isSessionSlotTab`: an extra tab's own exit just turns it dormant via the spine
-  // (handled in `App`, its card rendered there), so we don't eject the user from
-  // here in that case.
-  // A run the server recorded as ended badly stays put: its dormant card is the
-  // diagnosis surface and it takes this pane's place where the user is already
-  // looking. The decision itself is the pure `exitEjectsToWelcome`.
+  // Eject to the welcome screen only when the slot tab stops and the whole agent
+  // leaves `active`; a badly ended run stays put as its diagnosis surface.
   const sessionStatus = session?.status
   useEffect(() => {
     if (exitEjectsToWelcome(isSessionSlotTab, everReady, sessionStatus, lastRunFailed)) {
-      // Marked as OUR eject (not a user navigation) so a re-armed reconnect
-      // deep-link can tell it apart from a deliberate home nav and restore the
-      // route once this agent finishes resuming. See `ejectSelectionForReconnect`.
+      // Marked as OUR eject so a re-armed reconnect deep-link can tell it from a
+      // deliberate home nav and restore the route.
       ejectSelectionForReconnect()
     }
   }, [isSessionSlotTab, everReady, sessionStatus, lastRunFailed])
 
-  // There is deliberately no extra ping on gaining ownership any more. There is
-  // exactly ONE periodic client frame and one timer behind it (see
-  // `lib/heartbeat.ts`), and its cadence is already the viewed ping's 2s in
-  // precisely the state a gain lands in (owner and visible). The gain RETIMES
-  // that one timer rather than adding a second sender: the lifecycle resyncs the
-  // beat when this verdict flips, so the gap already armed under the slow
-  // cadence is cleared instead of waited out.
+  // There is one periodic client frame and one timer behind it (`lib/heartbeat.ts`);
+  // gaining ownership retimes that timer rather than adding a second sender.
 
   const cover = attachCover({
     socket: connectionLost ? "failed" : reconnecting ? "connecting" : "open",
@@ -896,10 +673,8 @@ function terminalTargetView(
     hasOutput: terminalHasOutput(props, records),
     providerName: terminalProviderName(props.kind, records),
     spineInputOwner: terminalSpineInputOwner(props.kind, records),
-    // Slot-ness comes from the session record the spine published, never from
-    // an id comparison: the slot tab's id is generated and is not the session
-    // id. Before the spine arrives there is no session, and the answer is the
-    // safe `false` (this only gates ejecting the user to the welcome screen).
+    // Slot-ness comes from the session record, never an id comparison: the slot
+    // tab's id is generated. Before the spine arrives the safe answer is false.
     isSessionSlotTab:
       props.kind === "agent" &&
       !!records.session &&
@@ -978,24 +753,13 @@ type TerminalInputLayoutInputs = {
 }
 
 function terminalInputLayout(input: TerminalInputLayoutInputs) {
-  // TWO ROWS, TWO SWITCHES, FOUR LEGAL STATES. The key row answers "keys a soft
-  // keyboard cannot produce", the message box answers "where the text is
-  // composed", and neither is the other's on-switch: keys with no box is how a
-  // finger holds a virtual Ctrl while a physical keyboard types the letter.
+  // Two rows, two switches, four legal states: neither is the other's on-switch,
+  // and keys with no box is a finger on a virtual Ctrl beside a real keyboard.
   const accessoryBarShown =
     input.isOwner && input.keysApply && input.accessoryBarVisible
   const composeBarShown = input.isOwner && input.composeBarEnabled
-  // THE BOTTOM `⋯`, which lives INSIDE the virtual input and nowhere else. It
-  // carries only what is local to the rows around it: the surface switch, in
-  // BOTH directions, and the keys toggle. "Attach a file…" moved up to the top
-  // menu's INPUT group, which is on screen whether or not these rows are, and
-  // the theater exit went with it: this menu is not a permanent surface any
-  // more, so it cannot be anybody's guaranteed way back. Neither is a gate
-  // here any more either, so no caller can reintroduce one by passing `true`.
-  // It exists while ANY bottom row does, which is what makes it the way back
-  // for a pane left with the keys alone; there is deliberately no minimal row
-  // of its own, so a pane with neither row has nothing under its terminal and
-  // the top menu is the way back instead.
+  // The bottom `⋯` lives inside the virtual input, so it carries only what is
+  // local to those rows and exists exactly while any bottom row does.
   const bottomBarShown = accessoryBarShown || composeBarShown
   const inputMenuGates = {
     surfaceSwitch:
@@ -1005,13 +769,8 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
     keysToggle: input.isOwner && input.keysApply && bottomBarShown,
   }
   const menuHasItems = inputMenuHasItems(inputMenuGates)
-  // THE TOP MENU'S INPUT GROUP, published for whichever menu is over this pane
-  // (see `lib/paneInputGroup.ts`). It carries a control exactly while the
-  // bottom `⋯` does NOT, so the same row is never in two menus at once: the
-  // bottom one is the way OUT of the virtual input while it is up, and this one
-  // is the way BACK once it is gone. "Attach a file…" is not here because it is
-  // not a gate: the menu borrows the pane's own attach capability, published
-  // under this same pty id on exactly the same condition.
+  // The top menu's INPUT group carries a control exactly while the bottom `⋯`
+  // does not, so the same row is never in two menus at once.
   const topInputGates = {
     surfaceSwitch:
       input.isOwner &&
@@ -1085,10 +844,8 @@ function useTerminalPaneSetup(props: TerminalPaneProps) {
   const target = terminalTargetView(props, spine, ids)
   const composeInputRef = useRef<HTMLTextAreaElement | null>(null)
   const [viewerOverflow, setViewerOverflow] = useState(false)
-  // The snapshot is BUILT here and PUBLISHED in the component body, because one
-  // of its fields is not known yet: whether the message box is actually the
-  // typing surface depends on owning the input, and the ownership machine runs
-  // after this hook. See the publish site for what that gate is worth.
+  // Built here and published in the component body: whether the message box is
+  // the typing surface depends on ownership, which resolves after this hook.
   const liveSettingsFor = (composeActive: boolean) =>
     terminalLiveSettings(preferences, target, viewerOverflow, composeActive)
 
@@ -1239,17 +996,8 @@ function TerminalPaneSurface({
   )
 }
 
-/// Does the cover speak for the whole pane, or is it a cue over one the user
-/// still has?
-///
-/// The floating overlay (theater's pill) is chrome for a surface somebody is
-/// using. A CARD says another device is driving this pty and a BOX says the
-/// picture is gone: both are full-pane, opaque, and carry the one control that
-/// answers them, so a pill on top of either offers a drag over a surface there
-/// is nothing to uncover on, and its one-time hint teaches the gesture to
-/// somebody who cannot see what it is for. The SPINNER is deliberately the other
-/// way: a small, transparent, pointer-transparent cue over a pane that is still
-/// this user's, and a blip must not take the way out of theater with it.
+/// Whether the cover speaks for the whole pane. A card or a box is full-pane and
+/// opaque, so the theater pill is withheld; the transparent spinner keeps it.
 function coverOwnsThePane(cover: AttachCover): boolean {
   switch (cover.kind) {
     case "card":
@@ -1434,10 +1182,8 @@ function TerminalPaneLayout({
       gates={inputMenuGates}
       composeSurface={composeBarEnabled}
       directLeavesNothingBelow={directLeavesNothingBelow}
-      // The message box is the only other row there is, so hiding the keys
-      // leaves nothing below exactly when it is not up. Answered here rather
-      // than by a helper because there is nothing to it: two rows, and this
-      // menu only exists while at least one of them is.
+      // The message box is the only other row, so hiding the keys leaves nothing
+      // below exactly when the box is not up.
       keysHideLeavesNothingBelow={!composeBarShown}
     />
   )

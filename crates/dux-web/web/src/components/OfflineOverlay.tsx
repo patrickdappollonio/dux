@@ -4,10 +4,9 @@ import { createPortal } from "react-dom"
 import { Button } from "@/components/ui/button"
 import { reconnect, useDux } from "@/lib/store"
 
-// The same ASCII "dux" wordmark the standalone PWA offline page (`public/
-// offline.html`) shows, so the in-app modal and the service-worker page read as
-// one experience. Left-aligned inside an inline-block so the body's centering
-// places the art as a block without shearing each line independently.
+// The same ASCII "dux" wordmark `public/offline.html` shows, so the modal and the
+// service-worker page read as one. Left-aligned in an inline-block, or centering
+// shears each line independently.
 const DUX_ART = `       ░██
        ░██
  ░████████ ░██    ░██ ░██    ░██

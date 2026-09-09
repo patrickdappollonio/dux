@@ -15,24 +15,16 @@ export interface ReloadFileTarget {
 
 interface ConfirmReloadFileDialogProps {
   target: ReloadFileTarget | null
-  // Whether there is still something to confirm: the tab is still dirty AND
-  // the file on disk is still different. The caller recomputes it from the
-  // live buffer, so the dialog self-closes if the user saves, reverts, or
-  // reloads from another surface while it is open. See the guard's own doc
-  // for why a target-keyed dialog needs this.
+  // Whether there is still something to confirm: still dirty AND still stale.
+  // Recomputed live, so the dialog self-closes if another surface resolves it.
   present: boolean
   onClose: () => void
   onConfirm: () => void
 }
 
-// Destructive confirm before replacing an edited buffer with what is on disk.
-//
-// The destructive act is discarding the USER'S text, which is why this follows
-// ConfirmCloseEditorTabDialog's template rather than being a plain yes/no:
-// destructive DialogContent, the warning in destructive colour, a misclick
-// spacer above the footer, Cancel taking focus, and the confirm styled as the
-// dangerous one. A clean buffer never reaches here: with nothing to lose the
-// editor reloads in place with no prompt at all.
+// Destructive confirm before replacing an edited buffer with what is on disk: the
+// destructive act is discarding the user's text, so this follows the destructive
+// template rather than a plain yes/no. A clean buffer reloads in place, unprompted.
 export function ConfirmReloadFileDialog({
   target,
   present,

@@ -3,17 +3,10 @@ import type * as React from "react"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import type { TooltipContent } from "@/components/ui/tooltip"
 
-// The single "needs attention" marker used across every surface (sidebar rows,
-// the mobile agent rows, the tab-strip pills): a cyan-frost dot that blinks in a
-// double-pulse-then-fade rhythm (`--animate-attention-pulse` in index.css) and
-// holds still under reduced motion. Extracted so the markup and, crucially,
-// the cyan color live in exactly one place.
-//
-// COLOR PAIRING: the fill is Tailwind `bg-cyan-100`. The favicon compositor in
-// `lib/favicon.ts` draws the same dot onto a canvas, where a Tailwind class is
-// unreadable, so it hardcodes the matching hex (`ATTENTION_DOT_FILL = #cffafe`,
-// cyan-100). Keep the two in lockstep: if you change the dot color here, change
-// `ATTENTION_DOT_FILL` there too.
+// The single "needs attention" marker for every surface, so the markup and the
+// color live in one place; it holds still under reduced motion. The fill must stay
+// in lockstep with `ATTENTION_DOT_FILL` in `lib/favicon.ts`, which draws the same
+// dot onto a canvas where a Tailwind class is unreadable.
 export function AttentionDot({
   withTooltip = true,
   side,

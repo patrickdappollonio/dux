@@ -17,13 +17,9 @@ import {
 import { sessionsApi } from "@/lib/sessionsApi"
 import { closeDelete, deleteSession, useDux } from "@/lib/store"
 
-// The sentence naming why a branch predates the agent, one clause per
-// provenance. The unrecognized one gets its own rather than borrowing "existed
-// before this agent": that is a claim about a branch nothing here can make.
-// `subject` is the branch's name once there are two branches on screen, because
-// the provenance is recorded about the birth branch and "this branch" would no
-// longer say which. Mirrors `BranchProvenance::kept_reason` and the TUI's
-// `delete_agent_branch_warning`.
+// Why a branch predates the agent, one clause per provenance; an unrecognized
+// provenance gets its own, since nothing here can claim the branch is older.
+// `subject` names the branch once there are two on screen.
 function existedBeforeSentence(provenance: string, subject: string): string {
   if (provenance === "adopted")
     return `${subject} came with the worktree this agent adopted.`
@@ -31,20 +27,17 @@ function existedBeforeSentence(provenance: string, subject: string): string {
   return `${subject} existed before the agent.`
 }
 
-// The branch checkbox's label, naming every branch the tick would delete. A box
-// that promised one deletion and performed two would be taking consent it was
-// never given.
+// The branch checkbox's label, naming EVERY branch the tick would delete: a box
+// promising one deletion and performing two takes consent it was not given.
 function branchCheckboxLabel(branches: string[]): string {
   if (branches.length === 0) return ""
   if (branches.length === 1) return `Also delete the branch ${branches[0]}`
   return `Also delete the branches ${branches.join(" and ")}`
 }
 
-// The warning under the branch box, or `null` when there is nothing to warn
-// about. Two reasons, either enough on its own: the branch predates the agent,
-// so it was never dux's to delete, or the agent drifted and the tick takes a
-// second branch with it. `unpushed` is null while the count is in flight and
-// when git could not answer; the count sentence is absent in both cases.
+// The warning under the branch box, or `null`: either the branch predates the
+// agent, or drift means the tick takes a second branch. A null `unpushed` count
+// (in flight, or unanswerable) drops the count sentence.
 function branchWarning(
   provenance: string,
   branches: string[],
@@ -67,10 +60,8 @@ function branchWarning(
   if (unpushed !== null && unpushed.count > 0) {
     const count = unpushed.count
     const plural = count === 1 ? "commit" : "commits"
-    // A repository with no remote-tracking refs has held nothing back; it has
-    // nowhere to have pushed to, and the count is its whole history. "Not
-    // pushed anywhere" reads there as an accusation about work that was never
-    // going anywhere, so the sentence says what is actually true.
+    // With no remote-tracking refs the count is the whole history rather than work
+    // held back, so the sentence must not read as an accusation.
     if (unpushed.has_remote_refs) {
       parts.push(
         drifted
@@ -97,43 +88,30 @@ function branchWarning(
 export function DeleteSessionDialog() {
   const { deleteTarget, spine } = useDux()
   const [deleteWorktree, setDeleteWorktree] = useState(false)
-  // `null` is "the user has not touched the box for this agent", which renders
-  // as the provenance default. Kept separate from the default so reopening on
-  // another agent picks up ITS default rather than the previous agent's answer.
+  // `null` means the box is untouched for this agent and renders the provenance
+  // default, so reopening on another agent picks up ITS default.
   const [branchAnswer, setBranchAnswer] = useState<boolean | null>(null)
-  // How much work ticking the branch box would destroy. Arrives after the
-  // dialog opens: it is a git call, so it runs on the server off the reactor
-  // and the warning line grows a sentence when the answer lands. `null` all the
-  // way through means git could not answer, and the dialog then says nothing
-  // about it rather than guessing a number.
+  // How much work ticking the branch box would destroy, arriving after the dialog
+  // opens. `null` throughout means git could not answer, and nothing is said.
   const [unpushed, setUnpushed] = useState<
     { count: number; has_remote_refs: boolean } | null
   >(null)
-  // The branches the server says the delete would remove, straight from the
-  // answer that counted them. Rendered in preference to working the pair out
-  // here a second time, so what this dialog asks about is what the server would
-  // actually delete. `null` until the answer lands, and the local pair below
-  // stands in until then.
+  // The branches the server says the delete would remove, preferred over working
+  // the pair out again here. `null` until it lands; the local pair stands in.
   const [answeredBranches, setAnsweredBranches] = useState<string[] | null>(
     null,
   )
 
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
   const name = session ? sessionLabel(session) : undefined
-  // The MANAGED identity, when there is one. A standalone agent has none, and
-  // every worktree and branch affordance below hangs off this: there is no
-  // worktree to remove and no branch to delete, so the checkboxes are not
-  // merely unchecked, they do not exist. The offer cannot be rendered, so it
-  // cannot be ticked.
+  // The MANAGED identity, when there is one. Every worktree and branch affordance
+  // hangs off it, so a standalone agent's boxes do not exist rather than unticking.
   const managed = session ? managedWorkspace(session.workspace) : null
   const folder = session ? folderWorkspace(session.workspace) : null
   const provenance = managed?.branch_provenance ?? "created"
   const branchIsDuxs = provenance === "created"
-  // Every branch the box names and the count is about: the one the worktree is
-  // on now and, when the agent has drifted, the one it was born on. Both are
-  // deleted, so both are named. The server's answer wins once it lands; this is
-  // the same rule (`BranchDeleteInputs::warned_branches`) applied to the spine
-  // so the label is never blank while the git call is out.
+  // Every branch the box names and the count covers: the one the worktree is on
+  // now and, on drift, the birth branch. Both are deleted, so both are named.
   const localBranches = managed
     ? managed.initial_branch && managed.initial_branch !== managed.branch_name
       ? [managed.branch_name, managed.initial_branch]
@@ -142,8 +120,7 @@ export function DeleteSessionDialog() {
   const warnedBranches = answeredBranches ?? localBranches
   const branchWarningText = branchWarning(provenance, warnedBranches, unpushed)
   // The box starts in the provenance default: ticked for a branch dux made,
-  // unticked for one that predates the agent. Both are overridable, which is
-  // the whole point of it being a control.
+  // unticked for one that predates the agent. Both are overridable.
   const deleteBranch = branchAnswer ?? branchIsDuxs
 
   function reset() {
@@ -153,9 +130,8 @@ export function DeleteSessionDialog() {
     setAnsweredBranches(null)
   }
 
-  // The component stays mounted across opens, so a vanish-close must also
-  // reset the boxes, otherwise the NEXT delete confirm opens pre-checked.
-  // Wrap the hook's close callback to do both.
+  // The component stays mounted across opens, so a vanish-close must reset the
+  // boxes too, or the next delete confirm opens pre-checked.
   const isOpen = useVanishedTargetGuard(
     deleteTarget !== null,
     session !== undefined,
@@ -165,10 +141,8 @@ export function DeleteSessionDialog() {
     },
   )
 
-  // Asked exactly when the branch offer is on screen, because the answer is
-  // where both the branch names and the count come from. With the worktree kept
-  // there is no branch box at all, so nothing here would be rendered and the
-  // git call would buy nothing.
+  // Asked exactly when the branch offer is on screen, since the answer carries both
+  // the names and the count; with the worktree kept there is nothing to render.
   const askUnpushed = isOpen && managed !== null && deleteWorktree
   useEffect(() => {
     if (!askUnpushed || !deleteTarget) return
@@ -180,9 +154,8 @@ export function DeleteSessionDialog() {
         setUnpushed(answer.unpushed)
         setAnsweredBranches(answer.branches)
       })
-      // A failure is simply "no number to show". The dialog is already telling
-      // the user the branch predates the agent, which is the part that must not
-      // depend on git answering.
+      // A failure is simply no number to show: the sentence saying the branch
+      // predates the agent must not depend on git answering.
       .catch(() => {})
     return () => {
       live = false
@@ -191,15 +164,11 @@ export function DeleteSessionDialog() {
 
   function handleConfirm() {
     if (!deleteTarget) return
-    // A standalone agent has no worktree to remove, and the server REFUSES a
-    // worktree-removing delete on one rather than downgrading it quietly. The
-    // checkboxes do not exist for one, but this component stays mounted across
-    // opens, so a tick left over from a managed agent would otherwise ride along
-    // and wedge the delete in a refusal with no control on screen to clear.
+    // The server REFUSES a worktree-removing delete on a standalone agent, and this
+    // component outlives an open, so a leftover tick would wedge it with no control.
     const removeWorktree = managed ? deleteWorktree : false
-    // The branch answer is sent only when the box was actually on screen. With
-    // the worktree kept there is no branch offer at all, and a standalone agent
-    // has no branch, so both send `null` and the server keeps its own default.
+    // The branch answer is sent only when the box was on screen; otherwise `null`,
+    // and the server keeps its own default.
     const branchAnswerToSend = removeWorktree ? deleteBranch : null
     deleteSession(deleteTarget, removeWorktree, branchAnswerToSend)
     reset()
@@ -225,9 +194,8 @@ export function DeleteSessionDialog() {
           This removes the agent session &ldquo;{name}&rdquo; from dux.
         </p>
         {folder && (
-          // A standalone agent: dux's record of it goes and the user's folder
-          // is exactly as it was. Said out loud, because the sentence above on
-          // its own reads as though something on disk went with it.
+          // Said out loud because the sentence above reads as though something on
+          // disk goes too: a standalone agent's folder is left exactly as it was.
           <p className="text-sm text-muted-foreground">
             Its folder &ldquo;
             <span className="break-all font-mono">{folder.folder_label}</span>
@@ -249,11 +217,8 @@ export function DeleteSessionDialog() {
           </div>
         )}
         {managed && deleteWorktree && (
-          // Revealed by the worktree box rather than sitting beside it,
-          // disabled: git will not delete a branch that is still checked out in
-          // a worktree, so with the worktree kept there is genuinely nothing on
-          // offer here, and a permanently greyed control that happens to look
-          // ticked promises exactly the deletion it cannot do.
+          // Revealed by the worktree box rather than sitting beside it disabled: git
+          // will not delete a branch still checked out, so there is nothing to offer.
           <div className="flex items-center gap-2">
             <Checkbox
               id="delete-branch"
@@ -266,9 +231,8 @@ export function DeleteSessionDialog() {
           </div>
         )}
         {managed && deleteWorktree && branchWarningText !== null && (
-          // The danger sits in the warning text, never in a red checkbox: the
-          // box is an ordinary control and the sentence under it is what says
-          // what is at stake.
+          // The danger sits in the warning text, never in a red checkbox: the box is
+          // an ordinary control and the sentence under it says what is at stake.
           <p className="text-sm text-destructive">{branchWarningText}</p>
         )}
         <div className="h-2" />

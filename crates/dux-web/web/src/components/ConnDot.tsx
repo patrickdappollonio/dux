@@ -3,15 +3,10 @@ import { useDux } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-// The ONE connection indicator, rendered as a small colored dot beside the dux
-// logo (desktop sidebar header + mobile hub header). It replaces the old
-// bottom-of-window "Connected" status bar: engine statuses surface as toasts,
-// and the actionable "connection lost" case is owned by OfflineOverlay, so all
-// this pip needs to do is give an at-a-glance health signal. Colors follow the
-// app's soft-color convention: green=open, amber=in-progress, red=failed.
-// "closed" is amber, not red: the socket auto-retries (a few times with backoff)
-// before declaring failure, so a normal blip reads as recovering — red is
-// reserved for "gave up, needs your action".
+// The one connection indicator, an at-a-glance health signal beside the logo; the
+// actionable connection-lost case belongs to OfflineOverlay. "closed" is amber
+// rather than red, because the socket auto-retries before declaring failure, and
+// red is reserved for "gave up, needs your action".
 const CONN: Record<ConnState, { dot: string; label: string }> = {
   open: { dot: "bg-green-500", label: "Connected" },
   connecting: { dot: "bg-amber-500", label: "Connecting" },
@@ -19,10 +14,8 @@ const CONN: Record<ConnState, { dot: string; label: string }> = {
   failed: { dot: "bg-red-500", label: "Connection failed" },
 }
 
-// A passive status dot. The connection state comes straight from the global
-// store (no prop threading); the label rides an aria-label plus a hover tooltip.
-// Callers position it (e.g. as a ring-separated badge on the logo corner) via
-// `className`.
+// A passive status dot: the state comes from the store, the label rides an
+// aria-label plus a tooltip, and callers position it through `className`.
 export function ConnDot({ className }: { className?: string }) {
   const { conn } = useDux()
   // Fall back to the neutral "connecting" presentation for any unexpected state
