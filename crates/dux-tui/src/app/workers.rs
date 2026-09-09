@@ -1408,8 +1408,8 @@ impl App {
             AgentLaunchReadyView::SessionMissing => {
                 // The session vanished between dispatch and launch. Resolve any
                 // open reconnect busy so its spinner doesn't linger (a create
-                // launch never reaches SessionMissing — it commits unconditionally
-                // — so only the reconnect op needs clearing here), then take down
+                // launch never reaches SessionMissing, it commits unconditionally
+                // so only the reconnect op needs clearing here), then take down
                 // whatever launch spinner is still ON THE LINE as a final
                 // fallback. Writing an empty message used to do that job and no
                 // longer can: the line is a queue, so an empty unkeyed message

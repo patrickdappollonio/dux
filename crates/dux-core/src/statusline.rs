@@ -466,7 +466,7 @@ enum BusyUpgrade {
 impl BusyUpgrade {
     fn message(self) -> String {
         match self {
-            BusyUpgrade::TimedOut => "timed out — check dux.log".to_string(),
+            BusyUpgrade::TimedOut => "timed out, check dux.log".to_string(),
             BusyUpgrade::Stalled => format!(
                 "This operation has reported nothing for {} minutes, so dux has stopped showing it as running. It may still be going; check dux.log.",
                 BUSY_LIVE_CEILING.as_secs() / 60
@@ -1248,7 +1248,7 @@ impl KeyedStatusController {
             anon.message
         ));
         anon.tone = StatusTone::Warning;
-        anon.message = "timed out — check dux.log".to_string();
+        anon.message = "timed out, check dux.log".to_string();
         anon.since = now;
         anon.heartbeat = now;
         anon.generation = Generation(self.next_gen);
@@ -1258,7 +1258,7 @@ impl KeyedStatusController {
         changes.upgraded.push(KeyedWireStatus {
             key: None,
             tone: StatusTone::Warning.as_wire().to_string(),
-            message: "timed out — check dux.log".to_string(),
+            message: "timed out, check dux.log".to_string(),
             scope: anon.scope.clone(),
             sticky: false,
         });
@@ -2196,7 +2196,7 @@ mod tests {
         let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
         assert_eq!(changes.upgraded.len(), 1, "got {:?}", changes.upgraded);
         assert_eq!(changes.upgraded[0].tone, "warning");
-        assert_eq!(changes.upgraded[0].message, "timed out — check dux.log");
+        assert_eq!(changes.upgraded[0].message, "timed out, check dux.log");
         assert!(changes.refreshed.is_empty());
     }
 
@@ -2940,7 +2940,7 @@ mod tests {
         assert!(c.clear("foreground", None));
         assert_eq!(
             run(&mut c, t0 + BUSY_TIMEOUT).as_deref(),
-            Some("timed out — check dux.log"),
+            Some("timed out, check dux.log"),
             "the upgraded warning takes the line it was queued for"
         );
         // And the info is still there: a background operation going quiet says
