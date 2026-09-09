@@ -3493,7 +3493,7 @@ mod tests {
 
     #[test]
     fn detect_conflicts_same_key_same_scope() {
-        // Bind "x" to both toggle_project and new_agent — both are in Left scope.
+        // Bind "x" to both toggle_project and new_agent: both are in Left scope.
         let mut keys = crate::config::KeysConfig::default();
         keys.bindings
             .insert("toggle_project".to_string(), vec!["x".to_string()]);
@@ -3517,7 +3517,7 @@ mod tests {
         keys.bindings
             .insert("open_diff".to_string(), vec!["enter".to_string()]);
         let conflicts = detect_conflicts(&keys);
-        // focus_agent is Left scope, open_diff is Files scope — no overlap.
+        // focus_agent is Left scope, open_diff is Files scope, so no overlap.
         let bad = conflicts.iter().any(|c| {
             (c.action_a == "focus_agent" && c.action_b == "open_diff")
                 || (c.action_a == "open_diff" && c.action_b == "focus_agent")
@@ -3671,7 +3671,7 @@ mod tests {
     #[test]
     fn normalized_uppercase_matches_shift() {
         // Char('P') with no modifiers should normalize identically to
-        // Char('p') with SHIFT — both represent the same physical keypress.
+        // Char('p') with SHIFT: both represent the same physical keypress.
         let upper = KeyCombination::new(KeyCode::Char('P'), KeyModifiers::NONE).normalized();
         let shift = KeyCombination::new(KeyCode::Char('p'), KeyModifiers::SHIFT).normalized();
         assert_eq!(

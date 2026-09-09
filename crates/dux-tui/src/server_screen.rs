@@ -40,11 +40,11 @@ use dux_core::config::DuxPaths;
 /// What the status screen asks the binary to do after a tick. The binary maps
 /// these straight onto `dux_web::ServerTick`.
 pub enum ServerScreenTick {
-    /// No exit key pressed — keep serving.
+    /// No exit key pressed: keep serving.
     Continue,
-    /// `q`/`Q`/`Esc` — stop the server and flip back to the TUI.
+    /// `q`/`Q`/`Esc`: stop the server and flip back to the TUI.
     ReturnToTui,
-    /// `Ctrl-c` — quit dux entirely.
+    /// `Ctrl-c`: quit dux entirely.
     QuitProcess,
 }
 
@@ -54,15 +54,15 @@ pub enum ServerScreenTick {
 /// without a TTY or a loaded theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
-    /// The "dux" wordmark — accent-styled, bold.
+    /// The "dux" wordmark, accent-styled and bold.
     Logo,
     /// Primary heading ("dux server running").
     Heading,
-    /// The URL — accent/emphasis, bold.
+    /// The URL, accent/emphasis and bold.
     Url,
     /// Muted secondary text (the uptime line).
     Muted,
-    /// The non-loopback security warning — warning-styled, bold.
+    /// The non-loopback security warning, warning-styled and bold.
     Warning,
     /// An exit hint's key, rendered as a `<…>` keycap badge matching the TUI
     /// footer (e.g. `<q>`, `<Esc>`, `<Ctrl-c>`).
@@ -107,7 +107,7 @@ pub struct ServerStatusScreen {
 impl ServerStatusScreen {
     /// Enter the alternate screen + raw mode + hide the cursor, load the theme,
     /// and draw the first frame. The caller (binary) falls back to a plain
-    /// println if this returns `Err` — the server must still run even if the
+    /// println if this returns `Err`: the server must still run even if the
     /// status screen cannot be set up.
     pub fn new(
         urls: &[String],
@@ -149,7 +149,7 @@ impl ServerStatusScreen {
 
     /// Non-blocking poll: drain pending input, act on exit keys, and redraw on
     /// resize or when the displayed uptime second advances. Returns the action
-    /// the binary should take. Rendering errors are swallowed — a failed redraw
+    /// the binary should take. Rendering errors are swallowed: a failed redraw
     /// must not crash the server or strand the user; the next tick retries.
     pub fn tick(&mut self) -> ServerScreenTick {
         // Drain every queued event without blocking so a burst of input (or a
@@ -315,7 +315,7 @@ impl Drop for ServerStatusScreen {
 /// Enable raw mode, enter the alternate screen, hide the cursor, and build the
 /// ratatui terminal. On any failure after raw mode is enabled, undo the partial
 /// setup before returning the error so the caller never inherits a raw-mode
-/// terminal (Drop can't help yet — `Self` isn't constructed).
+/// terminal (Drop can't help yet, since `Self` isn't constructed).
 fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     terminal::enable_raw_mode()?;
     if let Err(err) = execute!(stdout(), terminal::EnterAlternateScreen, cursor::Hide) {
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn header_lines_have_no_exit_hints() {
-        // The exit hints moved to the footer — the header must not carry them.
+        // The exit hints moved to the footer: the header must not carry them.
         let lines = header_lines(&one("http://127.0.0.1:8080"), None, 0);
         let text = plain_text(&lines);
         // Pin the header the function DID build: an empty header carries no

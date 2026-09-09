@@ -37,7 +37,7 @@ pub fn parse_focus_event(seq: &[u8]) -> Option<bool> {
 ///
 /// Matched, and only this:
 ///
-/// * A complete OSC (`ESC ] … BEL` or `ESC ] … ST`) — the color and clipboard
+/// * A complete OSC (`ESC ] … BEL` or `ESC ] … ST`): the color and clipboard
 ///   answers. A bare `ESC ]` (the Alt-`]` keystroke) has no terminator and is
 ///   deliberately not matched.
 /// * A CSI whose final byte is `c` (device attributes), `n` (device status),
@@ -347,9 +347,9 @@ fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
 
     let b = buf[0];
     if b == 0x1b {
-        // ESC — start of an escape sequence.
+        // ESC: the start of an escape sequence.
         if buf.len() < 2 {
-            // Bare ESC at end of buffer — could be incomplete.
+            // Bare ESC at end of buffer, so it could be incomplete.
             return SequenceStatus::Incomplete;
         }
 
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn incomplete_csi() {
-        // ESC [ 5 — missing final byte
+        // ESC [ 5: missing final byte
         let input = b"\x1b[5";
         let (seqs, rem) = split_sequences(input);
         assert!(seqs.is_empty());
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn incomplete_ss3() {
-        // ESC O — missing the third byte
+        // ESC O: missing the third byte
         let input = b"\x1bO";
         let (seqs, rem) = split_sequences(input);
         assert!(seqs.is_empty());
@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn osc_incomplete() {
-        // Incomplete OSC — no terminator yet.
+        // Incomplete OSC: no terminator yet.
         let input = b"\x1b]11;rgb:0000/0000";
         let (seqs, rem) = split_sequences(input);
         assert!(seqs.is_empty());
@@ -914,7 +914,7 @@ mod tests {
         // be forwarded to the PTY child as garbage text input.
         let input = b"\x1b]11;rgb:0000/0000/0000\x07";
         let (seqs, rem) = split_sequences(input);
-        // Must be exactly 1 sequence — not fragmented.
+        // Must be exactly 1 sequence, not fragmented.
         assert_eq!(
             seqs.len(),
             1,
@@ -1103,7 +1103,7 @@ mod tests {
     #[test]
     fn translate_sgr_mouse_top_left_corner() {
         // Click at the very first content cell: 1-based (6, 4) with origin (5, 3).
-        // Translated: (1, 1) — the top-left of the child's viewport.
+        // Translated: (1, 1), the top-left of the child's viewport.
         let seq = b"\x1b[<0;6;4M";
         let translated = translate_sgr_mouse(seq, 5, 3).unwrap();
         assert_eq!(translated, b"\x1b[<0;1;1M");

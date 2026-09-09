@@ -18,7 +18,7 @@ struct CopyRequest {
 
 /// Handle for sending clipboard copy requests to a long-lived background
 /// thread. The background thread owns the `arboard::Clipboard` instance so
-/// it stays alive for the entire app lifetime — this is required on X11
+/// it stays alive for the entire app lifetime. This is required on X11
 /// where the clipboard owner must remain running to serve paste requests.
 pub(crate) struct Clipboard {
     tx: mpsc::Sender<CopyRequest>,

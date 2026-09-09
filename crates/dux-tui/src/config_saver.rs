@@ -22,7 +22,7 @@ impl ConfigSurface for TuiConfigSurface {
     fn reload(&self, paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
         thread::spawn(move || {
             // The guard guarantees a `ConfigReloadReady` is posted even if the
-            // load/validate/sync work below panics — otherwise the engine's
+            // load/validate/sync work below panics; otherwise the engine's
             // reload barrier would never close and config saves would freeze.
             let guard = ReloadCompletionGuard::new(worker_tx);
             let result = crate::config::ensure_config(&paths)

@@ -1,4 +1,4 @@
-//! Dux TUI library — the terminal user-interface surface over `dux-core`.
+//! Dux TUI library: the terminal user-interface surface over `dux-core`.
 
 mod app;
 mod cli;
@@ -139,8 +139,8 @@ pub fn resume_after_server(
 
 /// Run an App's event loop and translate its [`app::RunExit`] into a
 /// [`TuiExit`] for the binary's orchestration loop. On a flip, the engine is
-/// moved out of the App (no `Drop` runs on the providers — neither `App` nor
-/// `Engine` has a `Drop` impl, so this is a plain move) and boxed for the
+/// moved out of the App (no `Drop` runs on the providers, since neither `App`
+/// nor `Engine` has a `Drop` impl, so this is a plain move) and boxed for the
 /// caller; the single-instance lock rides along inside the engine.
 fn run_app(
     mut app: app::App,

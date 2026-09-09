@@ -438,7 +438,7 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
 /// Re-apply the commented template to the existing config, keeping every value.
 ///
 /// Non-destructive by default (preview only), mirroring `dux config regenerate`:
-/// `--yes` commits. Unlike `regenerate`, this never falls back to defaults — an
+/// `--yes` commits. Unlike `regenerate`, this never falls back to defaults: an
 /// unparseable config is refused outright, because the whole point of the
 /// command is to be the safe alternative to a defaults-based rewrite.
 #[allow(deprecated)] // blessed sync-direct: CLI-only, one-shot, runs before any engine/queue exists

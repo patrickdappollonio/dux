@@ -628,7 +628,7 @@ fn find_soft_break(spans: &[Span<'static>], max_col: usize) -> Option<usize> {
 /// Wrap pre-rendered diff lines so that continuation lines are indented to
 /// align with the content column (past the gutter).
 ///
-/// When `gutter_width` is 0 this is a no-op — the caller should fall back to
+/// When `gutter_width` is 0 this is a no-op, so the caller should fall back to
 /// `Paragraph::wrap()`.
 pub fn wrap_diff_lines(
     lines: &[Line<'static>],
@@ -859,7 +859,7 @@ mod tests {
         let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
 
         // Context line "aaa" should show both old and new line numbers.
-        // Max line is 4, so ln_width is 1 — numbers are right-aligned in 1 char.
+        // Max line is 4, so ln_width is 1: numbers are right-aligned in 1 char.
         assert!(
             rendered
                 .iter()
@@ -968,14 +968,14 @@ mod tests {
     #[test]
     fn find_soft_break_space_at_end_of_window() {
         let spans = vec![Span::raw("abcde fgh")];
-        // max_col = 6 → chars 0..5: "abcde " — space at col 5, return 6.
+        // max_col = 6 → chars 0..5: "abcde ": space at col 5, return 6.
         assert_eq!(find_soft_break(&spans, 6), Some(6));
     }
 
     #[test]
     fn find_soft_break_space_at_start() {
         let spans = vec![Span::raw(" abcdefgh")];
-        // max_col = 5 → chars 0..4: " abcd" — space at col 0, return 1.
+        // max_col = 5 → chars 0..4: " abcd": space at col 0, return 1.
         assert_eq!(find_soft_break(&spans, 5), Some(1));
     }
 
@@ -990,7 +990,7 @@ mod tests {
     #[test]
     fn find_soft_break_only_spaces() {
         let spans = vec![Span::raw("     ")];
-        // max_col = 3 → chars 0..2: "   " — last space at col 2, return 3.
+        // max_col = 3 → chars 0..2: "   ": last space at col 2, return 3.
         assert_eq!(find_soft_break(&spans, 3), Some(3));
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn find_soft_break_with_multibyte_chars() {
-        // "a│b cd" — │ is 1 char. Positions: a=0, │=1, b=2, ' '=3, c=4, d=5
+        // "a│b cd", where │ is 1 char. Positions: a=0, │=1, b=2, ' '=3, c=4, d=5
         let spans = vec![Span::raw("a│b cd")];
         assert_eq!(find_soft_break(&spans, 5), Some(4));
     }
@@ -1124,7 +1124,7 @@ mod tests {
             Span::raw("+hello world foobar"),
         ])];
         // total_width = 14, gutter = 2, content_width = 12
-        // First 12 chars of content: "+hello world" — last space is at col 6,
+        // First 12 chars of content: "+hello world": last space is at col 6,
         // so soft break after it (col 7): "+hello " on first line,
         // "world foobar" (12 chars, fits) on continuation.
         let wrapped = wrap_diff_lines(&lines, 14, 2);
@@ -1139,9 +1139,9 @@ mod tests {
         // Gutter = "G" (1 col), content = "a│b cdef ghij" (13 chars)
         let lines = vec![Line::from(vec![Span::raw("G"), Span::raw("a│b cdef ghij")])];
         // total_width = 8, gutter = 1, content_width = 7
-        // First 7 chars: "a│b cde" — space at col 3, soft break → take 4
+        // First 7 chars: "a│b cde": space at col 3, soft break → take 4
         // "a│b " on first line, remaining "cdef ghij" (9 chars)
-        // Next 7 chars: "cdef gh" — space at col 4, soft break → take 5
+        // Next 7 chars: "cdef gh": space at col 4, soft break → take 5
         // "cdef " second line, remaining "ghij" (4 chars, fits)
         let wrapped = wrap_diff_lines(&lines, 8, 1);
         assert_eq!(wrapped.len(), 3);

@@ -235,7 +235,7 @@ fn fold_legacy_key_actions(doc: &mut DocumentMut) -> bool {
 // ---------------------------------------------------------------------------
 // Config schema: defines the layout, comments, and value accessors for the
 // TOML config file. Adding a new setting means adding a struct field, its
-// Default value, and one entry here — comments live in exactly one place.
+// Default value, and one entry here: comments live in exactly one place.
 // ---------------------------------------------------------------------------
 
 /// A value extracted from [`Config`] for rendering into TOML.
@@ -1305,7 +1305,7 @@ pub fn render_config_with(
 /// match what the file actually binds.
 ///
 /// This is the function handed to `dux_core::config_write::set_canonical_renderer`,
-/// which is how `dux serve` — a surface with no access to `RuntimeBindings` —
+/// which is how `dux serve`, a surface with no access to `RuntimeBindings`,
 /// still creates a fully-commented config on first run.
 pub fn render_config_documented(config: &Config) -> String {
     let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
@@ -1501,7 +1501,7 @@ fn render_keys_config(
             last_section = Some(section);
         }
 
-        // Description comment — dynamic override for actions that reference other keys.
+        // Description comment: dynamic override for actions that reference other keys.
         let desc = if def.action == keybindings::Action::ToggleResizeMode {
             format!(
                 "Enter resize mode ({} to resize side panes).",
@@ -1968,8 +1968,8 @@ mod tests {
 
         // The two materialized defaults must be semantically neutral.
         // 1. `[keys]` gains every default binding: an absent binding already
-        //    MEANS the default, so writing it changes nothing about behaviour —
-        //    it just makes the file say that rebinding is possible.
+        //    MEANS the default, so writing it changes nothing about behaviour.
+        //    It just makes the file say that rebinding is possible.
         let default_bindings = render_config_default(&Config::default());
         for action in ["quit", "new_agent", "open_palette"] {
             assert!(
@@ -3301,7 +3301,7 @@ oneshot_output = "stdout"
         let mut keys = KeysConfig::default();
         keys.bindings
             .insert("quit".to_string(), vec!["P".to_string()]);
-        // Should succeed — "P" is normalized to "shift-p" before parsing.
+        // Should succeed: "P" is normalized to "shift-p" before parsing.
         assert!(
             validate_keys(&keys).is_ok(),
             "bare uppercase 'P' should be normalized to 'shift-p' and accepted"

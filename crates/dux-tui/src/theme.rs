@@ -187,7 +187,7 @@ pub struct Theme {
 /// Load a theme by name.
 ///
 /// Resolution order:
-///  1. `<config_dir>/themes/<name>.toml` — user-authored themes win first.
+///  1. `<config_dir>/themes/<name>.toml`: user-authored themes win first.
 ///  2. The bundled `dux-dark` TOML (embedded at compile time).
 ///  3. An Opaline built-in (Catppuccin, Nord, Dracula, …). Names use
 ///     underscores, e.g. `tokyo_night`, `catppuccin_mocha`.
@@ -227,11 +227,11 @@ pub fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
     ))
 }
 
-/// Where a theme came from — used by the theme picker to label entries and
+/// Where a theme came from, used by the theme picker to label entries and
 /// disambiguate same-named user themes from built-ins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeSource {
-    /// The bundled `dux-dark` theme — always present, always first in the list.
+    /// The bundled `dux-dark` theme: always present, always first in the list.
     Bundled,
     /// A theme compiled into the opaline crate (e.g. `nord`, `catppuccin-mocha`).
     Opaline,
@@ -242,7 +242,7 @@ pub enum ThemeSource {
 /// Metadata about an available theme, used to populate the theme picker.
 #[derive(Clone, Debug)]
 pub struct ThemeListing {
-    /// Identifier passed to [`load`] — file stem for user themes, kebab-case
+    /// Identifier passed to [`load`]: file stem for user themes, kebab-case
     /// id for built-ins, `dux-dark` for the bundled default.
     pub id: String,
     /// Human-readable label shown in the picker.
@@ -253,7 +253,7 @@ pub struct ThemeListing {
 /// Enumerate every theme reachable from the dux runtime: the bundled
 /// `dux-dark`, the opaline built-ins, and any TOML files the user has
 /// dropped in `<config_dir>/themes/`. Sorted with `dux-dark` first, then
-/// user themes, then built-ins alphabetically — predictable scrolling.
+/// user themes, then built-ins alphabetically, for predictable scrolling.
 pub fn discover_available(paths: &DuxPaths) -> Vec<ThemeListing> {
     let mut themes = Vec::new();
 
@@ -862,8 +862,8 @@ mod tests {
             // dux-dark users see no perceptible change after the frame
             // pre-fill landed.
             app_bg: Color::Rgb(20, 20, 20),
-            // text_fg matches the historical "default fg" — pure white on
-            // dark — so unstyled body text (project names, modal "Current:"
+            // text_fg matches the historical "default fg", pure white on
+            // dark, so unstyled body text (project names, modal "Current:"
             // labels, etc.) renders identically to before for dux-dark.
             text_fg: Color::White,
             header_fg: Color::White,
@@ -1068,7 +1068,7 @@ mod tests {
         assert_field!(help_body_fg);
     }
 
-    /// The fallback path must always produce a valid Theme — it is what the
+    /// The fallback path must always produce a valid Theme: it is what the
     /// app falls back to when the user's configured theme name is unknown.
     #[test]
     fn fallback_is_dux_dark() {
@@ -1089,7 +1089,7 @@ mod tests {
         let mut nord = opaline::load_by_name("nord").expect("nord built-in must exist");
         register_dux_defaults(&mut nord);
         let theme = Theme::from_opaline(&nord);
-        // Nord's accent.primary is `nord8` (#88c0d0) — distinctly not the
+        // Nord's accent.primary is `nord8` (#88c0d0), distinctly not the
         // FALLBACK gray, so this is a real assertion that derivation worked.
         assert_ne!(theme.border_focused, Color::Rgb(128, 128, 128));
         assert_ne!(theme.title_focused, Color::Rgb(128, 128, 128));
