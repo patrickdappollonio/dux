@@ -107,7 +107,6 @@ fn install_panic_hook() {
     });
 }
 
-#[allow(dead_code)] // Public API for future callers
 pub fn warn(message: &str) {
     log(LogLevel::Warn, message);
 }
