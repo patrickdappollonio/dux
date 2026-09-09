@@ -310,23 +310,38 @@ async fn create_session(
         Err(refusal) => return refusal,
     };
 
-    // RACE-FREE PATH: `new`/`fork`/`from_worktree` mint the create op
-    // synchronously and surface its id, so we resolve OUR exact session via the
-    // engine's op→session map even under concurrent creates.
+    resolve_created_session(&state, outcome, is_from_pr, &pre, key).await
+}
+
+/// Wait for the dispatched create to produce its session and answer with it.
+///
+/// Two waits, because the variants surface their op differently. RACE-FREE PATH:
+/// `new`/`fork`/`from_worktree` mint the create op synchronously and surface its
+/// id, so OUR exact session resolves via the engine's op→session map even under
+/// concurrent creates. FALLBACK PATH (from-PR): its op is minted later, inside the
+/// PR-lookup followup, so the set-difference scan waits instead, on the longer
+/// window the `gh pr view` network call needs (see `await_new_session` for the
+/// residual concurrent-create race it carries).
+///
+/// Either wait timing out is a 202: the create may still succeed or fail
+/// asynchronously, and that rides the status stream. A create that produced
+/// NEITHER an op NOR a status did no async work at all, so it fails rather than
+/// spinning out a misleading 202 that would arm a never-resolving client focus
+/// token; a from-PR dispatch always returns a busy status, so it is unaffected.
+async fn resolve_created_session(
+    state: &AppState,
+    outcome: dux_core::wire::WireCommandOutcome,
+    is_from_pr: bool,
+    pre: &std::collections::HashSet<String>,
+    key: Option<String>,
+) -> Response {
     if let Some(op_id) = outcome.created_op_id {
         return match await_session_for_op(&state.engine, op_id, CREATE_AWAIT_TIMEOUT).await {
-            Some(id) => created_response(&state, id, key).await,
-            // Dispatched, but the create did not complete within the window (it may
-            // still succeed or fail asynchronously; that rides the status stream).
+            Some(id) => created_response(state, id, key).await,
             None => StatusCode::ACCEPTED.into_response(),
         };
     }
 
-    // No synchronous create op id. On the happy path only the from-PR create
-    // reaches here (its op is minted later). Fix: a create that produced NEITHER a
-    // create op NOR a status did no async work — treat it as a failure rather than
-    // spinning out a misleading 202 that would arm a never-resolving client focus
-    // token. A from-PR dispatch always returns a busy status, so it is unaffected.
     if outcome.status.is_none() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -335,16 +350,13 @@ async fn create_session(
             .into_response();
     }
 
-    // FALLBACK PATH (from-PR): wait via the set-difference scan with the longer
-    // from-PR window. See `await_new_session` for the residual concurrent-create
-    // race this path carries.
     let timeout = if is_from_pr {
         FROM_PR_CREATE_AWAIT_TIMEOUT
     } else {
         CREATE_AWAIT_TIMEOUT
     };
-    match await_new_session(&state.engine, &pre, timeout).await {
-        Some(id) => created_response(&state, id, key).await,
+    match await_new_session(&state.engine, pre, timeout).await {
+        Some(id) => created_response(state, id, key).await,
         None => StatusCode::ACCEPTED.into_response(),
     }
 }
