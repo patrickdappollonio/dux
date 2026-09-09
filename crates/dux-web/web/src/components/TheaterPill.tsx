@@ -27,7 +27,6 @@ import {
   FLIGHT_TRAVEL_MS,
   FLAP_FILL_VAR,
   flightOffset,
-  flightOwnsPosition,
   flightTranslation,
   peekFlapFill,
   peekFlapRect,
@@ -52,6 +51,8 @@ import {
 } from "@/lib/theaterPill"
 import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
+
+import { theaterPillBox } from "./theaterPillBox"
 
 // The only chrome theater mode leaves on screen. It carries controls that act
 // and nothing that reports, so no tab status rides here.
@@ -97,46 +98,21 @@ export function TheaterPill({
   // `display: none` outside its shape stages, so this decides DOM weight only.
   const flies = flight !== null
   const gripless = useFlightChoreography(boxRef, flight, drag.position)
-  // While it flies home the flight owns the box's coordinates outright, pinning
-  // the pill where it leaves and parking it on the flap's.
-  const flightPlaces = flight !== null && flightOwnsPosition(flight)
-  // The returning chrome's re-clamp snaps rather than settling: the top chrome
-  // shrinks the surface under a resting pill, and an eased clamp crawls the pill
-  // upward ahead of the gesture it belongs to.
-  const positionSnaps = flightPlaces || flight === "expanding"
+  const box = theaterPillBox({
+    flight,
+    position: drag.position,
+    dragging: drag.dragging,
+    justDropped: drag.justDropped,
+    reducedMotion,
+    gripless,
+  })
 
   return (
     <div
       ref={boxRef}
       data-testid="theater-pill"
-      className={cn(
-        "absolute z-30 flex items-center gap-0.5 rounded-full border p-1",
-        // Opaque, and the flap's own published fill (see `FLAP_FILL_VAR`), so
-        // docked and floating are the same pixel colour and the flight has no
-        // colour left to morph. A translucent surface over a terminal cannot
-        // hold a band colour, so there is no blur here.
-        "dux-pill-surface shadow-lg",
-        // The corner it starts in until a measurement gives it real coordinates,
-        // including for a pill that mounts mid-flight. The two cannot fight over
-        // the same edges: parking the box pins `right` and `bottom` to `auto`.
-        drag.position === null && "right-3.5 bottom-3.5",
-        // The settle after a nudge or a re-clamp, absent while a drag is live
-        // (easing toward the finger lags it) and under reduced motion.
-        !reducedMotion &&
-          !drag.dragging &&
-          !drag.justDropped &&
-          !positionSnaps &&
-          "transition-[left,top] duration-150 ease-out",
-        gripless && PILL_GRIPLESS_CLASS,
-        flight === "detaching" && "dux-flight-out",
-        flight === "returning" && "dux-flight-in",
-        flight === "attaching" && "dux-flight-attach",
-      )}
-      style={
-        flightPlaces || drag.position === null
-          ? undefined
-          : { left: drag.position.x, top: drag.position.y }
-      }
+      className={box.className}
+      style={box.style}
     >
       {flies ? <FlapFillets /> : null}
       <SimpleTooltip content={coarse ? "" : "Drag to move"}>
