@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { isLocalAccessHost } from "./localAccess"
+import { isLocalAccessHost, isLoopbackName, isPrivateIpv4, parseIpv4 } from "./localAccess"
 
 describe("isLocalAccessHost", () => {
   it("treats localhost and loopback as local", () => {
@@ -50,5 +50,55 @@ describe("isLocalAccessHost", () => {
   it("treats non-loopback IPv6 (incl. Tailscale ULA) as remote", () => {
     expect(isLocalAccessHost("fd7a:115c:a1e0::1")).toBe(false)
     expect(isLocalAccessHost("fe80::1")).toBe(false)
+  })
+})
+
+describe("isLoopbackName", () => {
+  it("names this machine", () => {
+    expect(isLoopbackName("localhost")).toBe(true)
+    expect(isLoopbackName("dux.localhost")).toBe(true)
+    expect(isLoopbackName("0.0.0.0")).toBe(true)
+    expect(isLoopbackName("::1")).toBe(true)
+    expect(isLoopbackName("[::1]")).toBe(true)
+  })
+
+  it("does not name an address or a domain", () => {
+    expect(isLoopbackName("127.0.0.1")).toBe(false)
+    expect(isLoopbackName("localhost.example.com")).toBe(false)
+    expect(isLoopbackName("fe80::1")).toBe(false)
+  })
+})
+
+describe("parseIpv4", () => {
+  it("reads a dotted quad into its octets", () => {
+    expect(parseIpv4("172.16.0.1")).toEqual([172, 16, 0, 1])
+  })
+
+  it("refuses an octet above 255", () => {
+    expect(parseIpv4("10.0.0.256")).toBeNull()
+  })
+
+  it("refuses anything that is not four octets", () => {
+    expect(parseIpv4("10.0.0")).toBeNull()
+    expect(parseIpv4("getdux.app")).toBeNull()
+    expect(parseIpv4("fd7a:115c:a1e0::1")).toBeNull()
+  })
+})
+
+describe("isPrivateIpv4", () => {
+  it("accepts loopback and the RFC1918 ranges", () => {
+    expect(isPrivateIpv4([127, 1, 2, 3])).toBe(true)
+    expect(isPrivateIpv4([10, 0, 0, 5])).toBe(true)
+    expect(isPrivateIpv4([192, 168, 1, 5])).toBe(true)
+    expect(isPrivateIpv4([172, 16, 0, 1])).toBe(true)
+    expect(isPrivateIpv4([172, 31, 255, 254])).toBe(true)
+  })
+
+  it("rejects the 172.16/12 neighbours and the CGNAT range", () => {
+    expect(isPrivateIpv4([172, 15, 0, 1])).toBe(false)
+    expect(isPrivateIpv4([172, 32, 0, 1])).toBe(false)
+    expect(isPrivateIpv4([100, 64, 0, 1])).toBe(false)
+    expect(isPrivateIpv4([192, 169, 1, 5])).toBe(false)
+    expect(isPrivateIpv4([8, 8, 8, 8])).toBe(false)
   })
 })
