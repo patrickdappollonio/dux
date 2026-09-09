@@ -2382,80 +2382,77 @@ pub fn expand_path(raw: &str) -> Option<String> {
     let mut result = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
 
-    // Handle leading tilde.
-    if chars.peek() == Some(&'~') {
-        chars.next(); // consume '~'
-        let home = home::home_dir()?;
-        result.push_str(&home.to_string_lossy());
-        // Allow `~/...` but also bare `~`.
-        if chars.peek() == Some(&'/') {
-            // keep the slash – the next iteration will push it
-        } else if chars.peek().is_some() {
-            // `~user` style – not supported, reject.
-            return None;
-        }
-    }
-
+    result.push_str(&expand_leading_tilde(&mut chars)?);
     while let Some(ch) = chars.next() {
         if ch == '$' {
-            // Try `${VAR}` or `$VAR`.
-            let braced = chars.peek() == Some(&'{');
-            if braced {
-                chars.next(); // consume '{'
-            }
-            let mut var_name = String::new();
-            while let Some(&c) = chars.peek() {
-                if braced {
-                    if c == '}' {
-                        chars.next(); // consume '}'
-                        break;
-                    }
-                } else if !c.is_ascii_alphanumeric() && c != '_' {
-                    break;
-                }
-                var_name.push(c);
-                chars.next();
-            }
-            // Validate variable name: [A-Za-z_][A-Za-z0-9_]*
-            if var_name.is_empty() || !is_valid_var_name(&var_name) {
-                return None;
-            }
-            match std::env::var(&var_name) {
-                Ok(value) => result.push_str(&value),
-                Err(_) => {
-                    // Unresolved variable – keep the literal token so the user
-                    // can see which variable failed in the warning message.
-                    result.push('$');
-                    if braced {
-                        result.push('{');
-                    }
-                    result.push_str(&var_name);
-                    if braced {
-                        result.push('}');
-                    }
-                }
-            }
+            result.push_str(&expand_variable(&mut chars)?);
         } else {
             result.push(ch);
         }
     }
 
-    let path = std::path::Path::new(&result);
-
-    // Must be absolute.
-    if !path.is_absolute() {
-        return None;
-    }
-
-    // Reject directory traversal (`..`).
-    if path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
+    if !is_safe_expanded_path(&result) {
         return None;
     }
 
     Some(result)
+}
+
+/// The text a leading `~` expands to, empty when the path does not start with
+/// one. `None` rejects `~user`, whose home dux does not resolve.
+fn expand_leading_tilde(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+    if chars.peek() != Some(&'~') {
+        return Some(String::new());
+    }
+    chars.next();
+    let home = home::home_dir()?;
+    // A bare `~` is the home directory; `~/…` leaves the slash for the caller
+    // to push. Anything else names another user.
+    if chars.peek().is_some_and(|c| *c != '/') {
+        return None;
+    }
+    Some(home.to_string_lossy().into_owned())
+}
+
+/// The text the `$VAR`/`${VAR}` reference starting at `chars` expands to, or
+/// the literal reference itself when the variable is unset, so the user can see
+/// which one failed. `None` rejects a name that is not `[A-Za-z_][A-Za-z0-9_]*`.
+fn expand_variable(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+    let braced = chars.peek() == Some(&'{');
+    if braced {
+        chars.next();
+    }
+    let mut var_name = String::new();
+    while let Some(&c) = chars.peek() {
+        if braced {
+            if c == '}' {
+                chars.next();
+                break;
+            }
+        } else if !c.is_ascii_alphanumeric() && c != '_' {
+            break;
+        }
+        var_name.push(c);
+        chars.next();
+    }
+    if var_name.is_empty() || !is_valid_var_name(&var_name) {
+        return None;
+    }
+    match std::env::var(&var_name) {
+        Ok(value) => Some(value),
+        Err(_) if braced => Some(format!("${{{var_name}}}")),
+        Err(_) => Some(format!("${var_name}")),
+    }
+}
+
+/// Whether an expanded path is safe to hand back: absolute, and with no `..`
+/// component that would climb out of where it points.
+fn is_safe_expanded_path(path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
 /// Returns `true` when `name` matches `[A-Za-z_][A-Za-z0-9_]*`.
@@ -3999,6 +3996,65 @@ mod tests {
     #[test]
     fn expand_path_rejects_empty_braced_var_name() {
         assert!(expand_path("${}/foo").is_none());
+    }
+
+    #[test]
+    fn expand_leading_tilde_answers_each_shape() {
+        let home = home::home_dir()
+            .expect("home dir")
+            .to_string_lossy()
+            .into_owned();
+        let mut plain = "/etc".chars().peekable();
+        assert_eq!(expand_leading_tilde(&mut plain).as_deref(), Some(""));
+        assert_eq!(plain.next(), Some('/'), "a path with no tilde is untouched");
+
+        let mut bare = "~".chars().peekable();
+        assert_eq!(expand_leading_tilde(&mut bare), Some(home.clone()));
+
+        let mut rooted = "~/src".chars().peekable();
+        assert_eq!(expand_leading_tilde(&mut rooted), Some(home));
+        assert_eq!(rooted.next(), Some('/'), "the slash is left for the caller");
+
+        let mut other_user = "~someone/src".chars().peekable();
+        assert_eq!(expand_leading_tilde(&mut other_user), None);
+    }
+
+    #[test]
+    fn expand_variable_reads_both_forms_and_stops_at_the_name() {
+        unsafe { std::env::set_var("DUX_TEST_VAR_4", "/value") };
+        let mut plain = "DUX_TEST_VAR_4/rest".chars().peekable();
+        assert_eq!(expand_variable(&mut plain).as_deref(), Some("/value"));
+        assert_eq!(plain.collect::<String>(), "/rest");
+
+        let mut braced = "{DUX_TEST_VAR_4}/rest".chars().peekable();
+        assert_eq!(expand_variable(&mut braced).as_deref(), Some("/value"));
+        assert_eq!(braced.collect::<String>(), "/rest");
+        unsafe { std::env::remove_var("DUX_TEST_VAR_4") };
+
+        let mut unset = "NONEXISTENT_DUX_VAR_998/rest".chars().peekable();
+        assert_eq!(
+            expand_variable(&mut unset).as_deref(),
+            Some("$NONEXISTENT_DUX_VAR_998"),
+            "an unset variable keeps its literal reference"
+        );
+        let mut unset_braced = "{NONEXISTENT_DUX_VAR_998}".chars().peekable();
+        assert_eq!(
+            expand_variable(&mut unset_braced).as_deref(),
+            Some("${NONEXISTENT_DUX_VAR_998}"),
+            "the braces are part of the literal reference"
+        );
+
+        assert_eq!(expand_variable(&mut "(whoami)".chars().peekable()), None);
+        assert_eq!(expand_variable(&mut "{}".chars().peekable()), None);
+        assert_eq!(expand_variable(&mut "1BAD".chars().peekable()), None);
+    }
+
+    #[test]
+    fn is_safe_expanded_path_requires_absolute_without_parent_dirs() {
+        assert!(is_safe_expanded_path("/srv/data"));
+        assert!(!is_safe_expanded_path("relative/path"));
+        assert!(!is_safe_expanded_path("/srv/../etc/passwd"));
+        assert!(!is_safe_expanded_path(""));
     }
 
     #[test]
