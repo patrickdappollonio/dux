@@ -299,6 +299,22 @@ impl RawInputParser {
     }
 }
 
+/// Measure the CSI sequence starting at `buf[0..2]` (`ESC [`), which runs to
+/// the first byte in the final-byte range.
+fn scan_csi(buf: &[u8]) -> SequenceStatus {
+    let mut i = 2;
+    loop {
+        if i >= buf.len() {
+            return SequenceStatus::Incomplete;
+        }
+        let c = buf[i];
+        i += 1;
+        if (0x40..=0x7e).contains(&c) {
+            return SequenceStatus::Complete(i);
+        }
+    }
+}
+
 fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
     if buf.is_empty() {
         return SequenceStatus::Incomplete;
@@ -319,19 +335,7 @@ fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
                 // prefix CSI/OSC/SS3 input such as SGR mouse reports.
                 SequenceStatus::Complete(1)
             }
-            b'[' => {
-                let mut i = 2;
-                loop {
-                    if i >= buf.len() {
-                        return SequenceStatus::Incomplete;
-                    }
-                    let c = buf[i];
-                    i += 1;
-                    if (0x40..=0x7e).contains(&c) {
-                        return SequenceStatus::Complete(i);
-                    }
-                }
-            }
+            b'[' => scan_csi(buf),
             b'O' => {
                 if buf.len() < 3 {
                     SequenceStatus::Incomplete
@@ -992,6 +996,14 @@ mod tests {
         let ev = parse_sgr_mouse(seq).unwrap();
         assert_eq!(ev.kind, MouseEventKind::Up(MouseButton::Left));
         assert!(ev.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn scan_csi_measures_up_to_the_final_byte() {
+        assert_eq!(scan_csi(b"\x1b[A"), SequenceStatus::Complete(3));
+        assert_eq!(scan_csi(b"\x1b[1;5Rrest"), SequenceStatus::Complete(6));
+        assert_eq!(scan_csi(b"\x1b[1;5"), SequenceStatus::Incomplete);
+        assert_eq!(scan_csi(b"\x1b["), SequenceStatus::Incomplete);
     }
 
     #[test]
