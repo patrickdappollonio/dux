@@ -1,27 +1,16 @@
-// THE definition of the web UI's app menu: the cog menu in the desktop header
-// and the mobile hub's bottom sheet render from this one structure.
+// The definition of the web UI's app menu, rendered by the desktop cog flyout
+// and the mobile hub's bottom sheet alike. The rules it lives under:
 //
-// SOURCE OF TRUTH. The Rust `dux_core::palette` registry is NOT the source of
-// truth for this menu; it is the source of truth for the TUI's `Ctrl-p` command
-// palette, and nothing else. The two surfaces are now independent: there is no
-// bootstrap projection and no cross-language pin holding them together. When you
-// add a `Ctrl-p` palette command, decide explicitly whether it warrants an entry
-// here (see CLAUDE.md). Nothing will fail if you skip it, which is exactly why
-// it has to be a deliberate step.
-//
-// The web has no command palette and this menu has NO keyboard shortcut. It is
-// reachable by Tab, opened with Enter/Space, and driven with the arrow keys.
-//
-// This module is pure data: no React, no I/O at module scope, so the whole menu
-// is constructible and assertable without mounting anything. `AppMenu.tsx`
-// renders it as a desktop flyout and `AppMenuSheet.tsx` as a mobile bottom sheet
-// with drill-down (a hover flyout cannot work on touch). NEITHER renderer
-// hand-authors items, so the two presentations cannot drift.
-//
-// What belongs here: GLOBAL actions (things that happen) and dialogs. What does
-// NOT: user preferences. A preference is a row in `settingsDescriptors.ts`,
-// reached through "Preferences…" below. Per-agent/per-project/per-file actions
-// belong in that row's own `⋯` menu.
+// - This file is the source of truth for the menu. `dux_core::palette` is the
+//   TUI palette's, and nothing holds the two together, so a new palette command
+//   warrants an entry here only by a deliberate decision (see CLAUDE.md).
+// - The menu has no keyboard shortcut: it is reached by Tab and driven with
+//   Enter, Space and the arrow keys.
+// - The module is pure data, so the menu is assertable without mounting React,
+//   and neither renderer hand-authors items.
+// - Global actions and dialogs belong here; preferences do not. A preference is
+//   a row in `settingsDescriptors.ts`, and a per-entity action lives in that
+//   entity's own `⋯` menu.
 
 import {
   Activity,
@@ -85,52 +74,35 @@ export interface AppMenuSeparator {
 }
 
 export interface AppMenuContext {
-  /** Whether GitHub / `gh` integration is usable (`bootstrap.gh_available`).
-   *  Gates the from-PR agent variant, exactly as the launcher corner's `⋯`
-   *  menu and the per-project `⋯` menu gate theirs. */
+  /** Whether `gh` is usable, which gates the from-PR agent variant here as it
+   *  does in the launcher corner's and the per-project `⋯` menus. */
   ghAvailable: boolean
-  /** Whether the integration is switched ON (`bootstrap.github_integration`),
-   *  which is a different question from whether `gh` currently works. Gates
-   *  "Re-check GitHub", which exists precisely for when `gh` does NOT work and
-   *  so must never be gated on `ghAvailable`. */
+  /** Whether the integration is switched on, a different question from whether
+   *  `gh` works. It gates "Re-check GitHub", which exists for when `gh` does
+   *  not work and so must never be gated on `ghAvailable`. */
   githubIntegrationEnabled: boolean
 }
 
 /**
- * The app menu, top level first.
- *
- * The context gates the ONE conditional entry (the from-PR agent variant,
- * which is meaningless without `gh`). Resist adding more gating without a
- * real reason: an entry that appears and disappears is harder to learn than
- * one that is always there and explains itself when used.
+ * The app menu, top level first. Resist gating entries on the context without a
+ * real reason: an entry that appears and disappears is harder to learn than one
+ * that is always there and explains itself when used.
  */
 export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
-  // The creation submenus mirror the launcher corner's `⋯` menu: their
-  // entries are the shared lists in creationMenus.ts, spliced into the cog
-  // verbatim (appMenu.test.ts pins this; the corner renders the same lists
-  // grouped under headings and minus the one item its own verb already is,
-  // which is presentation, not a second list). The shared
-  // entries carry the same `kind` tag this tree uses, items and separators
-  // alike, so the splice is a plain assignment: the annotation, not a cast,
-  // is what makes the compiler own the "same shape" claim, so a future
-  // divergence between the two unions fails here instead of rendering wrong.
+  // The creation submenus splice in the shared lists from `creationMenus.ts`
+  // verbatim, the same ones the launcher corner renders. An annotation rather
+  // than a cast, so a future divergence between the two unions fails here
+  // instead of rendering wrong.
   const asEntries = (
     items: ReturnType<typeof addProjectMenuItems>,
   ): AppMenuEntry[] => items
   return [
-    // The two creation submenus OPEN the menu: creating something or adding a
-    // project is the most common reason to reach for the cog, so they
-    // outrank Preferences. They are the menu's twins of the launcher
-    // corner's grouped `⋯` menu; their entries are
-    // the shared lists spliced in verbatim (see asEntries above). No trailing
-    // "…" on the submenu titles: a submenu opens a list, not a dialog; the
-    // "…" lives on the variants inside.
-    //
-    // Titled "New" and iconed Plus rather than "New agent" / Bot: the list
-    // carries the standalone terminal too, so a Bot would promise agents only.
-    // This submenu is the standalone terminal's ONE home in the cog menu; it
-    // used to also sit at the top level, and that duplicate is deliberately
-    // gone.
+    // The creation submenus open the menu, outranking Preferences, because
+    // creating something is the most common reason to reach for the cog. No
+    // trailing "…" on a submenu title: it opens a list, and the "…" lives on
+    // the variants inside. Titled "New" with a Plus rather than "New agent"
+    // with a Bot, because the list carries the standalone terminal too, and
+    // this is that terminal's one home in the cog menu.
     {
       kind: "submenu",
       id: "new-agent",
@@ -159,13 +131,10 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
       id: "sort-agents",
       title: "Sort agents by",
       icon: ArrowUpDown,
-      // Plain action items, deliberately NOT radio items and with no checkmark.
-      // `sortAgents` is a one-shot reorder: it computes an order and POSTs it as
-      // the user's manual drag order, which they are then free to drag around.
-      // There is no persisted sort key to read, so a selected-state indicator
-      // would be arbitrary at best and false the moment a row is dragged. Do not
-      // add one without first adding a real persisted sort mode (a config field,
-      // server support, and drag reconciliation).
+      // Plain action items rather than radio items: `sortAgents` is a one-shot
+      // reorder into the user's manual drag order, so there is no persisted sort
+      // key a checkmark could read, and it would be false the moment a row is
+      // dragged. Adding one means adding a real persisted sort mode first.
       entries: [
         {
           kind: "item",
@@ -221,9 +190,8 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
         {
           kind: "item",
           id: "reload-config",
-          // No ellipsis: this runs immediately, with no dialog and no
-          // confirmation. The engine's routed status reports success; only a
-          // failure needs a toast of our own.
+          // No ellipsis: it runs immediately. The engine's routed status reports
+          // success, so only a failure needs a toast of dux's own.
           title: "Reload config",
           icon: RefreshCw,
           run: () => {
@@ -236,11 +204,9 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
               )
           },
         },
-        // No ellipsis: it runs immediately. Present whenever the integration is
-        // ON, and deliberately NOT gated on gh currently working, because the
-        // state it exists to escape is exactly the one where gh is not working.
-        // Restarting dux would clear a stale gh answer too, and would take every
-        // running agent with it.
+        // No ellipsis: it runs immediately. Gated on the integration being on
+        // and never on `gh` working, because the state it exists to escape is
+        // exactly the one where `gh` does not work.
         ...(ctx.githubIntegrationEnabled
           ? ([
               {
@@ -264,27 +230,22 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
           : []),
       ],
     },
-    // Still here now that the standalone terminal has moved into the "New"
-    // submenu: this rule separates Configuration from the Task Manager.
+    // Separates Configuration from the Task Manager.
     { kind: "separator", id: "sep-agents" },
     {
       kind: "item",
       id: "task-manager",
-      // Neutral, not destructive-tinted: the trailing "…" plus the dialog's own
-      // confirmations are the danger signal (CLAUDE.md menu tenet).
-      //
-      // `Activity`, not `OctagonX`: stopping is now one action among several on
-      // a surface you mostly READ (what is running, and what it costs). The
-      // pulse line is the near-universal OS activity-monitor idiom.
+      // Neutral rather than destructive-tinted: the trailing "…" and the
+      // dialog's own confirmations are the danger signal. `Activity` rather than
+      // `OctagonX`, because the surface is one you mostly read.
       title: "Task Manager…",
       icon: Activity,
       run: () => openTaskManager(),
     },
     { kind: "separator", id: "sep-about" },
-    // ACTIONS, not preferences: each opens a dialog, so each keeps a leading
-    // icon and a trailing "…". Their `ui.disable_*` counterparts are Preferences
-    // rows, and those flags suppress only the AUTOMATIC screens — these entries
-    // keep working regardless, which is the whole reason they exist.
+    // Actions rather than preferences: their `ui.disable_*` counterparts are
+    // Preferences rows, and those flags suppress only the automatic screens, so
+    // these entries keep working however they are set.
     {
       kind: "item",
       id: "welcome-screen",

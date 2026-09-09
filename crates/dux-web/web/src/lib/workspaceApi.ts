@@ -1,15 +1,7 @@
-// HTTP client for the workspace "spine": the projects, sessions, and core-computed
-// sidebar grouping. Like `bootstrapApi.ts` and `changesApi.ts`, this is a plain
-// GET (the read-only `git.ts` pattern, with `credentials: "same-origin"`) so it
-// composes with HTTP caching and reads as a resource fetch. The matching
-// `projects.changed` / `sessions.changed` events over `/ws/events` tell the
-// client WHEN to re-GET.
-//
-// The authoritative document projects live projects, sessions, terminals, and
-// the core sidebar model into one on-demand REST response.
-// A non-2xx is thrown as a `WorkspaceFetchError` carrying the HTTP status so the
-// caller can branch.
-//
+// HTTP client for the workspace "spine": live projects, sessions, terminals and
+// the core-computed sidebar model in one GET. The `projects.changed` /
+// `sessions.changed` events over `/ws/events` tell the client when to re-GET,
+// and a non-2xx throws a `WorkspaceFetchError` carrying the HTTP status.
 import type { AgentWorkspaceWire } from "@/lib/agentWorkspace"
 import type {
   AgentTabView,
@@ -21,34 +13,27 @@ import type {
 
 // The spine document mirrors the server's JSON.
 export interface Spine {
-  /** The server's monotonic revision of this document, minted where the server
-   * rebuilds its cached serialization. It is embedded in the document itself,
-   * so a document that arrived over REST and one that arrived as a push frame
-   * are orderable against each other. Optional because a server that predates
-   * the push does not send it; an absent rev means "not orderable", and the
-   * client applies such a document rather than guessing. Meaningless across
-   * server restarts, which is why the client forgets what it applied whenever
-   * its events socket reopens. */
+  /** The server's monotonic revision of this document, so a document fetched
+   * over REST and one pushed over the socket are orderable against each other.
+   * Absent from a server that predates the push, which means "not orderable":
+   * the client applies such a document rather than guessing. Meaningless across
+   * server restarts. */
   rev?: number
   /** Every known project, in display order. */
   projects: ProjectView[]
   /** Every agent session, in display order. */
   sessions: SessionView[]
-  /** EVERY companion terminal, of every owner, as one flat collection ordered by
-   * the manual `sort_order`. Each entry carries its own tagged `owner`, so the
-   * client does not infer ownership by walking nested collections. An older server that predates
-   * the flat shape nests its terminals instead; `fetchWorkspace` flattens those and
-   * tags each with the owner it was nested under (see `ingestTerminals`). */
+  /** Every companion terminal, of every owner, as one flat collection ordered by
+   * the manual `sort_order`. Each entry carries its own tagged `owner`, so
+   * ownership is never inferred from the collection an entry was found in. */
   terminals: TerminalView[]
   /** Core-computed sidebar grouping (projects + sessions, orphans surfaced) so
    * both surfaces render an identical tree without re-deriving grouping. */
   sidebar: SidebarModel
 }
 
-// A failed spine fetch. `status` is the HTTP status (0 for a network/transport
-// failure with no response). The boot path swallows this and keeps the
-// last-known spine (null on first boot); a later `projects.changed` /
-// `sessions.changed` event or a reconnect retries.
+// A failed spine fetch. `status` is the HTTP status, 0 for a transport failure
+// with no response at all.
 export class WorkspaceFetchError extends Error {
   readonly status: number
 
@@ -78,9 +63,8 @@ export async function fetchWorkspace(): Promise<Spine> {
 }
 
 /** The workspace document as it arrives on the wire, from any server version:
- * optional-on-the-wire fields still optional, terminals possibly still nested
- * inside their owners. Both delivery paths hand this to
- * [`normalizeWorkspace`]. */
+ * optional fields still optional, terminals possibly still nested inside their
+ * owners. Both delivery paths hand this to `normalizeWorkspace`. */
 export type RawWorkspace = Omit<
   Spine,
   "sessions" | "projects" | "terminals"
@@ -104,15 +88,11 @@ export type RawWorkspace = Omit<
       last_focused_tab?: string | null
       terminals?: LegacyTerminal[]
       /** The tagged workspace. Absent from a server that predates the
-       * standalone agent, which sent the git fields flat beside the session
-       * instead; `normalizeWorkspace` synthesizes the managed shape from
-       * those, which is exactly right, because every agent such a server can
-       * have IS managed. */
+       * standalone agent, whose agents are all managed. */
       workspace?: AgentWorkspaceWire
-      /** The legacy FLAT git fields. Present only from a server that predates
-       * the tagged workspace, and read only by the synthesis below. Nothing
-       * downstream may reach for them: an agent with no branch has no honest
-       * value to put here, which is why they moved inside the tag. */
+      /** The flat git fields an older server sends instead, read only by the
+       * synthesis below. Nothing downstream may reach for them: an agent with
+       * no branch has no honest value to put here. */
       project_id?: string
       branch_name?: string
       initial_branch?: string
@@ -123,29 +103,16 @@ export type RawWorkspace = Omit<
   >
 }
 
-/** THE ONE NORMALIZATION POINT for an agent's workspace, in both directions.
+/** The one normalization point for an agent's workspace, in both directions.
  *
- * BACKWARD compatibility: an older server sends the git fields flat, so the
- * managed shape is synthesized from them. That synthesis is safe precisely
- * because a server old enough to send them is one where every agent is managed,
- * so there is no folder case to get wrong.
+ * Anything not recognizably a folder reads as managed: an older server's flat
+ * git fields, a kind from a newer server, and the unclassifiable case alike.
+ * Telling the delete dialog a directory is the user's own when dux may in fact
+ * own that worktree is the wrong way to be wrong.
  *
- * FORWARD compatibility is also here, and deliberately NOT in the matcher. A
- * NEWER server could send a third kind, and `matchWorkspace` throws on a kind it
- * has never heard of; that throw is what keeps a missing case a compile error,
- * but it runs inside render paths, so an unknown kind reaching a component
- * unmounts the whole React root. Degrading once, at ingestion, keeps the
- * matcher's exhaustiveness guarantee and turns "a kind from the future" into one
- * odd-looking agent instead of a blank page. The direction is the same as the
- * absent case below: unknown reads as managed, because telling the delete dialog
- * a directory is the user's own when dux may in fact own that worktree is the
- * wrong way to be wrong.
- *
- * The absent-and-not-legacy case (neither a workspace nor a branch name, which
- * no real server produces) still yields a managed shape with empty fields
- * rather than a folder: reading an unclassifiable agent as a folder would tell
- * the delete dialog its directory is the user's and must be kept, which is the
- * wrong direction to be wrong in for a worktree dux may actually own. */
+ * A kind from the future is degraded here rather than in `matchWorkspace`, whose
+ * throw is what keeps a missing case a compile error but runs in render paths,
+ * where an unknown kind would unmount the React root. */
 function normalizeSessionWorkspace(
   raw: RawWorkspace["sessions"][number],
 ): AgentWorkspaceWire {
@@ -173,9 +140,8 @@ function normalizeSessionWorkspace(
     project_id: raw.project_id ?? "",
     branch_name: raw.branch_name ?? "",
     initial_branch: raw.initial_branch ?? "",
-    // An older server is one that deletes the branch either way, so a missing
-    // provenance reads as "created": the copy must describe what the server it
-    // is talking to will actually do.
+    // A server old enough to omit provenance deletes the branch either way, so
+    // "created" is what the copy must promise the user.
     branch_provenance: raw.branch_provenance ?? "created",
     source_branch: raw.source_branch ?? "",
     worktree_path: raw.worktree_path ?? "",
@@ -184,34 +150,22 @@ function normalizeSessionWorkspace(
 
 // Turn a wire document into the shape every consumer downstream assumes.
 //
-// This is the ONE ingestion boundary, and it is shared deliberately: the same
-// document reaches the client two ways (fetched at boot and on recovery, pushed
-// on every change), and two normalizers would drift the moment either wire
-// shape grew a field. Pure and total: it reads the raw document and returns the
-// normalized one, touching nothing else, so it can be called from the socket
-// handler as safely as from the fetch.
-//
-// Coerce optional-on-the-wire session fields to their required shapes here. An
-// older server (e.g. after a binary downgrade, seen by an already-open client)
-// omits `tabs`, `initial_branch`, and `source_branch`, but every downstream
-// consumer treats them as required: `tabs` becomes `[]` and the two branch
-// fields become `""` (falsy, so the "Unknown"/no-drift fallbacks in the info
-// dialog and header still apply).
+// The one ingestion boundary, shared by both delivery paths (the boot fetch and
+// the push frame) so the two cannot drift. Pure and total, touching nothing
+// else, so the socket handler may call it as safely as the fetch. Fields an
+// older server may omit are coerced to the required shapes downstream assumes.
 export function normalizeWorkspace(raw: RawWorkspace): Spine {
   return {
     ...raw,
     terminals: ingestTerminals(raw),
-    // The nested arrays, when an older server sent them, are dropped from the
-    // owner they rode on: `ingestTerminals` has already lifted them into the one
-    // flat collection, and leaving a second, staler copy behind invites a
-    // consumer to read it.
+    // `ingestTerminals` has lifted any nested array into the flat collection;
+    // the copy on the owner is dropped so nothing reads the staler one.
     projects: raw.projects.map(({ terminals: _nested, ...p }) => p),
     sessions: raw.sessions.map((rawSession) => {
       const {
         terminals: _nested,
-        // The legacy flat git fields are DROPPED here, not merely superseded:
-        // they have been folded into the tagged workspace above, and leaving a
-        // second, flatter copy behind is an invitation to read it.
+        // Folded into the tagged workspace above, and dropped here so nothing
+        // downstream reads the flat copy.
         project_id: _projectId,
         branch_name: _branchName,
         initial_branch: _initialBranch,
@@ -233,27 +187,19 @@ export function normalizeWorkspace(raw: RawWorkspace): Spine {
         // An older server that predates tab-focus memory omits the field; treat
         // missing the same as an explicit null ("no memory recorded").
         last_focused_tab: s.last_focused_tab ?? null,
-        // An older server that predates the published slot pointer omits the
-        // field. The session id is the PLACEHOLDER for "this agent's first tab,
-        // whichever it is" (see `slotTabTargetId`), so filling it here means
-        // every consumer reads one required field instead of re-deriving the
-        // rule; a server that publishes the pointer always wins.
+        // The session id is the placeholder for "this agent's first tab,
+        // whichever it is" (see `slotTabTargetId`), so a server that omits the
+        // pointer still leaves every consumer one required field to read.
         slot_tab_id: s.slot_tab_id ?? s.id,
       }
     }),
   }
 }
 
-// The `typing` cue is newer than the tab/terminal views themselves, so an older
-// server omits it on nested tabs and terminals. Normalize each to a required
-// `false` at this single ingestion boundary, matching how the session-level
-// fields above are coerced (downstream consumers treat `typing`/`working` as
-// required).
+// An older server omits `typing`, which downstream consumers treat as required.
 type RawTab = Omit<AgentTabView, "typing"> & { typing?: boolean }
-// The sort keys (`sort_order`/`created_at`/`updated_at`) are newer than the
-// terminal view too, added for the terminal-sort/drag parity work; an older
-// server omits them, so coerce each to a safe default at this same boundary
-// (`sort_order` to 0, the timestamps to "", which the pure sort treats as epoch 0).
+// An older server omits the sort keys too. The timestamps default to "", which
+// the pure sort treats as epoch 0.
 type RawTerminal = Omit<
   TerminalView,
   "working" | "typing" | "sort_order" | "created_at" | "updated_at"
@@ -265,24 +211,18 @@ type RawTerminal = Omit<
   updated_at?: string
 }
 
-// A terminal as an OLDER server sent it: nested inside its owner, and carrying
-// no owner of its own, because the collection it sat in was the ownership.
+// A terminal as an older server sends it: nested inside its owner, and carrying
+// no owner of its own, because the collection it sits in is the ownership.
 type LegacyTerminal = Omit<RawTerminal, "owner">
 
-// The flat, owner-bearing collection, from EITHER shape the server may send.
+// The flat, owner-bearing collection, from either shape the server may send. A
+// newer server sends `terminals` at the top level, each entry tagged with its
+// owner; an older one nests them inside the owning session or project, and those
+// are lifted and tagged here rather than discarded, which would show an empty
+// Terminals section while every terminal is still running.
 //
-// The two shapes belong to two builds of dux, and a browser tab left open while
-// dux restarts (entirely ordinary during development) is how one client meets
-// both. A new server sends `terminals` at the top level, each entry tagged with
-// its owner. An older one omits that field and nests terminals inside the
-// session or the project that owns them instead, so ownership is which array a
-// terminal was found in; those are lifted out and tagged here, at the single
-// ingestion boundary, rather than being discarded. Discarding them would show
-// that user an empty Terminals section with every terminal still running.
-//
-// The flat field wins whenever it is present, even when empty: a new server with
-// no terminals sends `[]` and means it.
-//
+// The flat field wins whenever it is present, even when empty: a server with no
+// terminals sends `[]` and means it.
 function ingestTerminals(raw: {
   terminals?: RawTerminal[]
   sessions: ReadonlyArray<{ id: string; terminals?: LegacyTerminal[] }>
@@ -310,9 +250,9 @@ function ingestTerminals(raw: {
       )
     }
   }
-  // The flat collection promises the global `sort_order` base order, which the
-  // nested arrays only held WITHIN each owner. `Array.prototype.sort` is stable,
-  // so terminals sharing a `sort_order` keep the order they were nested in.
+  // The flat collection promises a global `sort_order` order, which the nested
+  // arrays hold only within each owner. The sort is stable, so terminals sharing
+  // a `sort_order` keep the order they were nested in.
   return nested.sort((a, b) => a.sort_order - b.sort_order)
 }
 

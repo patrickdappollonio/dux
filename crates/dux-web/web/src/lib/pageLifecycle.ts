@@ -1,41 +1,25 @@
-// THE PAGE LIFECYCLE, HANDLED EXPLICITLY, never inferred from visibility.
+// The page lifecycle, handled explicitly rather than inferred from visibility. A
+// page is not simply visible or hidden: it is also frozen, restored from the
+// back/forward cache, or on its way out, and each wants something different from
+// a WebSocket.
 //
-// A page is not simply visible or hidden. It is also frozen, restored from the
-// back/forward cache, or on its way out, and each of those wants something
-// different from a WebSocket. Guessing at them from `visibilitychange` gets two
-// of them wrong:
+//   `pagehide`  Close both sockets. An open socket disqualifies the page from
+//               the bfcache anyway, and it leaves the server a phantom owner
+//               holding the pty for a connection nothing has noticed is gone.
 //
-//   `pagehide`  CLOSE both sockets, cleanly. A page held in the bfcache with an
-//               open socket is EVICTED from the cache anyway (an open WebSocket
-//               is a documented disqualifier in every engine that implements
-//               it), so keeping it buys nothing, and it costs the server a
-//               phantom owner: the pty stays claimed by a connection whose next
-//               send is the first thing to discover it is gone.
+//   `pageshow`  Reopen, plain, whether or not `persisted` is set. Never a
+//               take-over: an automatic reconnect is never a claim.
 //
-//   `pageshow`  REOPEN, plain, whether or not `persisted` is set. A restored page
-//               has the sockets it closed on the way out, which is none, and a
-//               plain navigation back also lands here. Never a take-over: an
-//               automatic reconnect is never a claim.
+//   `freeze`    Park. The page is about to stop executing, so a timer that
+//               survives fires against a discarded document, or hours late.
 //
-//   `freeze`    PARK (Chromium). The page is about to stop executing; a timer
-//               that survives it fires against a document that has been
-//               discarded, or hours late.
+//   `resume`    Reopen, plain. It fires while the page is still hidden, so the
+//               reopen is a request rather than an act: a parked socket defers
+//               it to the first visible moment (see `resumeNow`), because an
+//               attach that lands hidden claims nothing and is never re-asked.
 //
-//   `resume`    REOPEN, plain (Chromium's other half of `freeze`). It fires
-//               while the page is still HIDDEN, which is why the reopen is a
-//               request rather than an act: a socket that parks defers it to
-//               the first visible moment (see `resumeNow`), because an attach
-//               that lands hidden claims nothing and is never re-asked.
-//
-// The mapping is a pure function so it can be read and tested as a table, and
-// the wiring below is the only place that touches the events.
-//
-// ON RETURN, and BEFORE input is re-enabled, four things reconcile: the
-// server-run identity (the events socket's `onOpen` probe, which is also the PTY
-// retry gate, see `serverValidated.ts`), ownership (the pty handshake's owner
-// snapshot), the replay epoch (`attachReplay.ts`), and the cover
-// (`attachCover.ts`). Nothing here re-enables typing on its own; each of those
-// four is what the pane waits on.
+// On return, and before input is re-enabled, the server-run identity, ownership,
+// the replay epoch and the cover each reconcile; nothing here re-enables typing.
 
 /// What one lifecycle event asks of a socket.
 export type LifecycleAction = "close" | "reopen" | "park" | "ignore"
@@ -61,9 +45,8 @@ export function lifecycleAction(event: string): LifecycleAction {
 /// cannot drift.
 export const LIFECYCLE_EVENTS = ["pagehide", "pageshow", "freeze", "resume"] as const
 
-/// A socket that participates. Both `ReconnectingSocket` subclasses satisfy it
-/// structurally; it is spelled out here so nothing in this module needs to know
-/// what a WebSocket is.
+/// A socket that participates, satisfied structurally, so nothing in this module
+/// needs to know what a WebSocket is.
 export type LifecycleParticipant = {
   close: () => void
   resumeNow: () => void

@@ -11,30 +11,18 @@ import {
 } from "@/lib/theaterFlight"
 
 /**
- * THE PHONE'S THEATER CHOREOGRAPHY, ticking.
+ * The phone's theater choreography, ticking. One phase for the whole gesture, mounted once
+ * per pane screen: the flap and the pill render from it, so "which cluster exists right now"
+ * cannot have two answers, and a screen that hands over to another runs none of its own.
  *
- * One phase for the whole gesture, mounted once per pane screen (the agent's
- * and the agentless terminal's alike): the flap and the pill are rendered FROM
- * it rather than each deciding for itself, so "which cluster exists right now"
- * cannot have two answers and the handoff cannot land in the gap between them.
- * A screen that hands over to another must therefore run none of its own, which
- * is why the phone's terminal spoke is a router with no hooks in it.
+ * A flight runs when the mode MOVES, and only then: a page that opens in theater has no dock
+ * to fly a control in from. That is asked as "did the mode change", never as a first-run
+ * latch, which React's strict mode spends on the first of its two effect invocations and so
+ * flies a phantom leaving gesture on every mount.
  *
- * A FLIGHT RUNS WHEN THE MODE MOVES, and that is the whole condition. A page
- * that OPENS in theater (a shared link, a restored pane) has no flight to run,
- * and animating one would fly a control in from a dock that was never on
- * screen. Asking whether the mode changed answers that without a first-run
- * latch, which React's development strict mode defeats by design: it invokes
- * every effect twice, and the second invocation found the latch already spent
- * and ran a phantom flight on every mount, a whole leaving gesture for anyone
- * opening a shared theater link.
- *
- * A mode that flips back mid-gesture is the flight machine's own question, not
- * the store's, so it is asked of the stage in flight (see `flightForModeFrom`).
- *
- * The reduced-motion answer is read through a ref rather than a dependency, for
- * the same reason the layout gesture reads it that way: a system setting
- * changing mid-page must not restart a gesture over a mode that never moved.
+ * A mode that flips back mid-gesture is asked of the stage in flight (`flightForModeFrom`),
+ * and reduced motion is read through a ref rather than a dependency, so a system setting
+ * changing mid-page cannot restart a gesture over a mode that never moved.
  */
 export function useTheaterFlight(): FlightPhase {
   const { theater } = useDux()
@@ -59,9 +47,8 @@ export function useTheaterFlight(): FlightPhase {
     const hold = flightHoldMs(phase, chromeMs.current)
     if (hold === null) return
     const timer = setTimeout(
-      // Guarded on the phase it was armed for: a mode flipped mid-flight
-      // restarts the machine, and a timer left over from the abandoned stage
-      // must not step the new one on.
+      // Guarded on the phase it was armed for: a timer left over from a stage the mode
+      // flipped out of must not step the new one on.
       () => setPhase((live) => (live === phase ? flightNext(live) : live)),
       hold,
     )

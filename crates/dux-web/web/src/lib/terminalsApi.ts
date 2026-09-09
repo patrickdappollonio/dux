@@ -51,19 +51,17 @@ export const terminalsApi = {
       "DELETE",
       `/api/v1/projects/${encodeURIComponent(projectId)}/terminals/${encodeURIComponent(terminalId)}`,
     ),
-  // A STANDALONE terminal (a plain shell in the user's home directory, owned by
-  // neither an agent nor a project) rides UN-NESTED addresses, because there is
-  // no owner to nest under and nothing that has to exist before it can be
-  // created. The create takes no id at all.
+  // A standalone terminal (a plain shell in the user's home directory, owned by neither an
+  // agent nor a project) rides un-nested addresses: there is no owner to nest under, and
+  // nothing has to exist before it, so the create takes no id at all.
   createStandalone: () =>
     request<CreatedTerminal>("POST", "/api/v1/terminals"),
   removeStandalone: (terminalId: string) =>
     request<void>("DELETE", `/api/v1/terminals/${encodeURIComponent(terminalId)}`),
-  // Reorder the flat Terminals section as one global list (mirrors
-  // `sessionsApi.reorderGlobal`). `terminalIds` must be the COMPLETE set of every
-  // current terminal id (any owner), in the desired order; the server validates it
-  // as a strict permutation and rejects a partial/stale set. Terminal order is
-  // runtime-only (no SQLite), so this resets to creation order on restart.
+  // Reorder the flat Terminals section as one global list. `terminalIds` must be the complete
+  // set of every current terminal id, whatever its owner, in the desired order; the server
+  // validates it as a strict permutation and rejects a stale set. Terminal order is
+  // runtime-only, so it resets to creation order on restart.
   reorder: (terminalIds: string[]) =>
     request<void>("POST", "/api/v1/terminals/reorder", {
       terminal_ids: terminalIds,

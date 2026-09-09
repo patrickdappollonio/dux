@@ -3,15 +3,11 @@ import { useCallback, useRef } from "react"
 
 import { pickFiles } from "@/lib/filePicker"
 
-// The React wrapper around `lib/filePicker`: it owns the hidden
-// `<input type="file" multiple>` the browser needs in the document, and hands
-// back the one function that opens it.
-//
-// The element comes back as `input` (rather than a ref the caller wires up) so
-// a surface cannot half-adopt the picker: rendering `{input}` somewhere in its
-// tree is the whole integration. `open()` must be called SYNCHRONOUSLY from the
-// activating click handler, or the user activation is spent and no dialog
-// appears; see `pickFiles`.
+// The React wrapper around `lib/filePicker`: it owns the hidden `<input type="file" multiple>`
+// the browser needs in the document and hands back the function that opens it. The element
+// comes back as `input` rather than a ref, so rendering `{input}` is the whole integration.
+// `open()` must be called synchronously from the activating click handler, or the user
+// activation is spent and no dialog appears.
 export function useFilePicker(): {
   input: React.ReactElement
   open: () => Promise<File[]>

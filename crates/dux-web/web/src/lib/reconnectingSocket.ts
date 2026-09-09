@@ -19,9 +19,9 @@ export type ReconnectPolicy = {
   /// see the module doc.
   parkWhileHidden: boolean
   /// Consulted immediately before every attempt, wake signals included.
-  /// Returning false HOLDS the retry (the timer re-arms) rather than ending it,
+  /// Returning false holds the retry (the timer re-arms) rather than ending it,
   /// so the socket resumes on its own the moment the gate opens. The PTY socket
-  /// gates on the server-run identity check having RESOLVED, because attaching
+  /// gates on the server-run identity check having resolved, because attaching
   /// to a restarted server force-launches a provider.
   canRetry: () => boolean
   /// The backoff ceiling, read at each doubling so a config change applies to
@@ -47,12 +47,10 @@ export abstract class ReconnectingSocket {
   // client knows is gone. Distinct from `closedByUser`, and the one state no
   // wake signal may revive.
   private stopped = false
-  // DISPOSED IS THE ONE STATE NOTHING REVIVES, `connect()` included. `stopped`
+  // Disposed is the one state nothing revives, `connect()` included. `stopped`
   // is deliberately cleared by `connect()`, because a terminal close code is
-  // recoverable by the Reconnect button; disposal is not recoverable by
-  // anything, because the pane that owned this socket is gone. Reviving it would
-  // open a connection nothing reads and, for a PTY, launch a provider for a pane
-  // that unmounted.
+  // recoverable by the Reconnect button; disposal is not, because the pane that
+  // owned this socket is gone.
   private disposed = false
   private readonly policy: ReconnectPolicy
   private wakeAttached = false
@@ -61,15 +59,12 @@ export abstract class ReconnectingSocket {
   // Drives the status indicator / offline modal (events socket) and the focused
   // terminal's cover (PTY socket).
   onConn: (state: ConnState) => void = () => {}
-  // Fired after the socket (re)opens AND the subclass's `onSocketOpen` hook has
-  // run (EventsSocket resends its subscription set; PtySocket has nothing to
-  // resend). Lets the consumer re-fetch / re-arm after every open.
+  // Fired after the socket (re)opens and the subclass's `onSocketOpen` hook has
+  // run, so the consumer can re-fetch or re-arm after every open.
   onOpen: () => void = () => {}
-  // Fired once per drop, when a reconnect is intended (NOT on a user-initiated
-  // `close()`, and NOT when the far end said stop). Lets a consumer show a
-  // non-blocking "Reconnecting…" cue. Fired for a PARKED socket too: the
-  // connection really is down and the pane really is covered; what parking
-  // changes is when the next attempt happens, not whether one is coming.
+  // Fired once per drop when a reconnect is intended, never on a user-initiated
+  // `close()` and never when the far end said stop. Fired for a parked socket
+  // too: parking changes when the next attempt happens, not whether one is coming.
   onReconnecting: () => void = () => {}
 
   constructor(url: string, policy: Partial<ReconnectPolicy> = {}) {
@@ -81,10 +76,9 @@ export abstract class ReconnectingSocket {
     }
   }
 
-  // A deliberate, user-initiated (re)entry: reset the reconnect bookkeeping
-  // (backoff + closedByUser + the stop flag) so a fresh connect never inherits a
-  // grown delay or a give-up from a prior session. This is also the manual
-  // "Reconnect" path and the take-over bounce.
+  // A deliberate, user-initiated (re)entry: reset the backoff, `closedByUser` and
+  // the stop flag so a fresh connect never inherits a grown delay or a give-up.
+  // Also the manual "Reconnect" path and the take-over bounce.
   connect(): void {
     if (this.disposed) {
       // Debug rather than a warning: a late `connect()` on a disposed socket is
@@ -106,14 +100,12 @@ export abstract class ReconnectingSocket {
     this.open()
   }
 
-  // A page-lifecycle return (`pageshow`, Chromium's `resume`) or one of the four
-  // wake signals: attempt NOW, PLAIN, idempotently. It differs from `connect()`
-  // in the two ways that matter: it never touches a socket that is live or
-  // connecting, and it keeps the grown backoff for the NEXT failure, because a
-  // return signal is evidence about the device rather than about the server.
-  //
-  // It does clear `closedByUser`, because `pagehide` closes both sockets
-  // deliberately and this is the other half of that pair.
+  // A page-lifecycle return (`pageshow`, Chromium's `resume`) or one of the wake
+  // signals: attempt now, plain, idempotently. Unlike `connect()` it never touches
+  // a socket that is live or connecting, and it keeps the grown backoff for the
+  // next failure, because a return signal is evidence about the device rather than
+  // about the server. It does clear `closedByUser`, the other half of the
+  // deliberate `pagehide` close.
   resumeNow(): void {
     if (this.stopped) return
     // Live or still connecting: there is nothing to resume, and tearing it down
@@ -125,12 +117,10 @@ export abstract class ReconnectingSocket {
     if (this.parked()) return
     this.closedByUser = false
     if (!this.policy.canRetry()) {
-      // The gate is shut. Fall back to the ordinary polling retry rather than
-      // opening: a return signal is not permission to attach to a server whose
-      // identity has not been confirmed.
-      //
-      // Repeated wake signals leave an armed timer unchanged and never grow the
-      // delay while the gate remains shut.
+      // The gate is shut: fall back to the ordinary polling retry rather than
+      // opening, since a return signal is not permission to attach to a server
+      // whose identity has not been confirmed. Repeated wake signals leave an
+      // armed timer unchanged and never grow the delay.
       if (this.reconnectTimer === null) this.armRetryTimer({ grow: false })
       return
     }
@@ -138,16 +128,13 @@ export abstract class ReconnectingSocket {
     this.open()
   }
 
-  // Treat the live connection as dead and let the ORDINARY retry path bring it
+  // Treat the live connection as dead and let the ordinary retry path bring it
   // back: close the socket without setting `closedByUser`, so its own `onclose`
   // runs, `onConn("closed")` is emitted and the backoff schedule takes over.
-  //
-  // The heartbeat's missed answer is the caller. Going through the real close
-  // rather than through `connect()` is deliberate on two counts: the reattach is
-  // then PLAIN by construction (a `connect()` detaches its orphan silently, so
-  // nothing would broadcast the close that retires an armed take-over), and the
-  // consumers that react to a drop see the same event they see for a drop the
-  // network caused.
+  // Going through the real close rather than through `connect()` keeps the
+  // reattach plain (a `connect()` detaches its orphan silently, so nothing would
+  // broadcast the close that retires an armed take-over) and gives consumers the
+  // same event a network drop produces.
   //
   // Only an open socket can be declared quiet; closing a connecting attempt
   // would restart a retry already in progress.
@@ -166,13 +153,10 @@ export abstract class ReconnectingSocket {
   }
 
   private open(): void {
-    // A socket may already be live here: a double connect() (double-click
-    // Reconnect firing connect() mid-reconnect) would otherwise overwrite
-    // `this.ws` and leave an orphan whose later `onclose` nulls the SHARED
-    // `this.ws` field — permanently killing outbound frames (stale changes pane /
-    // frozen terminal, no error). Detach the orphan's handlers and close it
-    // BEFORE assigning the new socket so it can never run a handler against
-    // shared state again.
+    // A socket may already be live here (a double `connect()`, from Reconnect
+    // pressed twice mid-reconnect). Detach the orphan's handlers and close it
+    // before assigning the new socket: otherwise its later `onclose` nulls the
+    // shared `this.ws` and permanently kills outbound frames, with no error.
     if (this.ws !== null) {
       const orphan = this.ws
       this.clearSettleTimer()
@@ -195,10 +179,9 @@ export abstract class ReconnectingSocket {
       // open() already replaced must be inert.
       if (this.ws !== ws) return
       this.clearConnectTimer()
-      // An open that LASTS means the connection is usable again, so the next
-      // drop starts a fresh retry schedule from the floor. One that does not is
-      // no evidence at all, and resetting on it pinned the retry gap at the
-      // floor forever; see `HEALTHY_SETTLE_MS`.
+      // An open that lasts means the connection is usable again, so the next drop
+      // starts a fresh retry schedule from the floor. One that does not is no
+      // evidence, and resetting on it pins the gap at the floor forever.
       this.armHealthySettle()
       this.onSocketOpen()
       this.onConn("open")
@@ -214,24 +197,21 @@ export abstract class ReconnectingSocket {
     }
 
     ws.onclose = (event) => {
-      // Only the live socket nulls the shared ref and drives reconnect. Without
-      // this identity check an orphan's close would null the live `this.ws`,
-      // silently dropping every later outbound frame.
+      // Only the live socket nulls the shared ref and drives reconnect: without
+      // this check an orphan's close would null the live `this.ws`, silently
+      // dropping every later outbound frame.
       if (this.ws !== ws) return
       this.clearConnectTimer()
-      // This open never earned the reset. Retiring the timer here is what keeps
-      // the backoff growing across a flapping connection: left armed, it would
-      // fire during the very wait it is supposed to be lengthening.
+      // This open never earned the reset. Left armed, the timer would fire during
+      // the very wait it is supposed to be lengthening.
       this.clearSettleTimer()
       this.ws = null
       this.onConn("closed")
       if (this.closedByUser) return
-      // The close carries a code. A server may close with an app-specific code to
-      // say "do not retry" — e.g. a PTY whose provider failed to launch or has
-      // exited, where re-subscribing would just relaunch the doomed provider.
-      // shouldReconnect() inspects the code and, for such a terminal close,
-      // surfaces the stop state and returns false. Any other close (a transient
-      // transport drop, typically code 1006) retries, indefinitely.
+      // A server may close with an app-specific code meaning "do not retry", such
+      // as a PTY whose provider is gone, where re-subscribing would relaunch a
+      // doomed provider. `shouldReconnect()` surfaces the stop state and returns
+      // false for those; any other close retries, indefinitely.
       if (!this.shouldReconnect(event.code)) {
         this.stopped = true
         return
@@ -247,14 +227,12 @@ export abstract class ReconnectingSocket {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer !== null) return
-    // We are about to retry: signal the consumer so it can show a non-blocking
-    // "Reconnecting…" state. Fired once per drop (the timer guard above keeps a
-    // single retry in flight).
+    // Signal the consumer so it can show a non-blocking "Reconnecting…" state.
+    // Once per drop: the timer guard above keeps a single retry in flight.
     this.onReconnecting()
-    // PARKED. Schedule nothing at all: a hidden page's timer is throttled to
-    // roughly one fire a minute and frozen outright after a few, so an armed
-    // retry there is not a retry, it is a promise the platform will not keep.
-    // One of the four wake signals picks this straight back up.
+    // Parked: schedule nothing at all. A hidden page's timer is throttled to
+    // roughly one fire a minute and frozen outright after a few, so an armed retry
+    // there is a promise the platform will not keep. A wake signal picks it up.
     if (this.parked()) return
     this.armRetryTimer()
   }
@@ -267,12 +245,10 @@ export abstract class ReconnectingSocket {
     )
   }
 
-  // Arm the next attempt. `grow` says whether this arming SPENDS a doubling of
+  // Arm the next attempt. `grow` says whether this arming spends a doubling of
   // the backoff, and it is false for every arming the gate caused rather than a
-  // failure: the backoff measures how badly the far end is answering, and a shut
-  // gate is a fact about this client's own bookkeeping. A gate-held socket
-  // therefore polls at a steady interval instead of drifting out to the cap
-  // while nothing is actually wrong with the network.
+  // failure: the backoff measures how badly the far end is answering, so a
+  // gate-held socket polls steadily instead of drifting out to the cap.
   private armRetryTimer({ grow }: { grow: boolean } = { grow: true }): void {
     const delay = this.reconnectDelay
     if (grow) {
@@ -285,10 +261,9 @@ export abstract class ReconnectingSocket {
       this.reconnectTimer = null
       if (this.closedByUser || this.stopped) return
       if (this.parked()) return
-      // The gate is consulted here, at the last possible moment, rather than at
-      // schedule time: whether the server-run identity check has resolved is a
-      // fact about NOW, and a retry held by it re-arms rather than ending, so it
-      // resumes on its own without needing to be woken.
+      // The gate is consulted at the last possible moment rather than at schedule
+      // time: whether the identity check has resolved is a fact about now, and a
+      // retry it holds re-arms rather than ending, so it resumes unprompted.
       if (!this.policy.canRetry()) {
         this.armRetryTimer({ grow: false })
         return
@@ -299,8 +274,7 @@ export abstract class ReconnectingSocket {
 
   // Abandon a socket that has sat in CONNECTING past the deadline and let the
   // ordinary retry path bring it back. The orphan's handlers are detached first,
-  // exactly as `open()` does, so a late callback from a socket the platform
-  // finally gets round to resolving can never touch shared state.
+  // as `open()` does, so a late callback can never touch shared state.
   private armConnectTimer(ws: WebSocket): void {
     this.clearConnectTimer()
     this.connectTimer = setTimeout(() => {
@@ -350,16 +324,15 @@ export abstract class ReconnectingSocket {
     }
   }
 
-  // The four wake signals. Attached on the first `connect()` and detached only
-  // by `dispose()`, so a socket the app really tore down (a pane unmounting) can
-  // never be revived by a window event, while one merely CLOSED by the page
-  // lifecycle still hears the return that follows.
+  // The wake signals. Attached on the first `connect()` and detached only by
+  // `dispose()`, so a socket the app really tore down cannot be revived by a
+  // window event, while one merely closed by the page lifecycle still hears the
+  // return that follows.
   private attachWakeSignals(): void {
     if (this.wakeAttached) return
-    // Guard on the METHODS rather than on the globals: this runs off-browser
-    // (where neither exists) and under test harnesses that stub a partial
-    // `document`, and a socket that cannot listen must simply not listen rather
-    // than throw on its way to opening.
+    // Guard on the methods rather than on the globals: this runs off-browser and
+    // under harnesses that stub a partial `document`, and a socket that cannot
+    // listen must simply not listen rather than throw on its way to opening.
     if (
       typeof window === "undefined" ||
       typeof document === "undefined" ||
@@ -397,14 +370,12 @@ export abstract class ReconnectingSocket {
     this.resumeNow()
   }
 
-  // A LIFECYCLE CLOSE: the socket goes down deliberately and stays down until
-  // something says otherwise, but this object is still in use and the page it
-  // belongs to is still there. `pagehide` is the caller that matters, and the
-  // wake signals are what bring the socket back afterwards, so they STAY
-  // ATTACHED. Detaching them here left a page that returned through anything
-  // other than `pageshow` (an unlock reported as `visibilitychange`, a refocus,
-  // a network coming back) with two dead sockets and no way back but the
-  // Reconnect button.
+  // A lifecycle close: the socket goes down deliberately and stays down until
+  // something says otherwise, while this object and its page are still in use.
+  // `pagehide` is the caller that matters, and the wake signals are what bring the
+  // socket back afterwards, so they stay attached: detaching them leaves a page
+  // that returns through anything other than `pageshow` with dead sockets and no
+  // way back but the Reconnect button.
   close(): void {
     this.closedByUser = true
     this.clearRetryTimer()
@@ -413,10 +384,9 @@ export abstract class ReconnectingSocket {
     this.ws?.close()
   }
 
-  // THE REAL TEARDOWN: this socket will never be used again (its pane
-  // unmounted, or switched to a different target). Everything `close()` does,
-  // plus the wake listeners, which is the difference between the two and the
-  // whole reason both exist.
+  // The real teardown: this socket will never be used again (its pane unmounted,
+  // or switched to a different target). Everything `close()` does, plus the wake
+  // listeners, which is the difference between the two.
   dispose(): void {
     this.disposed = true
     this.stopped = true
@@ -424,10 +394,10 @@ export abstract class ReconnectingSocket {
     this.close()
   }
 
-  // Reset the backoff. Call it when the connection is confirmed usable so the next
-  // drop starts a fresh retry schedule from the minimum delay. The base calls
-  // this from `onopen` for sockets whose open proves usability; a subclass whose
-  // open does not calls it directly from its own readiness signal instead.
+  // Reset the backoff when the connection is confirmed usable, so the next drop
+  // starts from the minimum delay. The base calls it from `onopen` for sockets
+  // whose open proves usability; a subclass whose open does not calls it from its
+  // own readiness signal instead.
   protected markHealthy(): void {
     this.clearSettleTimer()
     this.reconnectDelay = RECONNECT_MIN_MS
@@ -435,17 +405,14 @@ export abstract class ReconnectingSocket {
 
   // ---- Subclass extension hooks ----------------------------------------------
 
-  // Tweak the freshly-constructed WebSocket before handlers are attached (e.g.
-  // PtySocket sets `binaryType = "arraybuffer"`). Default: no-op. (`void ws` keeps
-  // the param in the base signature — the base calls this with the new socket —
-  // without tripping no-unused-vars.)
+  // Tweak the freshly-constructed WebSocket before handlers are attached. Default:
+  // no-op. (`void ws` keeps the param in the base signature without tripping
+  // no-unused-vars.)
   protected configureSocket(ws: WebSocket): void {
     void ws
   }
 
-  // Run subclass-specific work on every (re)open, BEFORE `onOpen` fires:
-  // EventsSocket re-sends its chunked subscription set here; PtySocket has
-  // nothing to resend (the server replays scrollback as the first frame).
+  // Run subclass-specific work on every (re)open, before `onOpen` fires.
   protected abstract onSocketOpen(): void
 
   // Handle one server frame. EventsSocket parses text; PtySocket splits binary
@@ -453,17 +420,15 @@ export abstract class ReconnectingSocket {
   protected abstract handleMessage(event: MessageEvent): void
 
   // Consulted on every unexpected close, before scheduling a reconnect, with the
-  // close code. Returning `false` stops the loop for good (PtySocket uses it for a
-  // deleted extra tab's now-gone route and for a server "provider unavailable"
-  // close code). Default: always reconnect, whatever the code.
+  // close code. Returning `false` stops the loop for good. Default: always
+  // reconnect, whatever the code.
   protected shouldReconnect(closeCode: number): boolean {
     void closeCode
     return true
   }
 
-  // React to the socket's `error` event. Default: no-op (EventsSocket); PtySocket
-  // logs a breadcrumb. (`void event` keeps the param without tripping the
-  // unused-vars lint.)
+  // React to the socket's `error` event. Default: no-op. (`void event` keeps the
+  // param without tripping the unused-vars lint.)
   protected handleError(event: Event): void {
     void event
   }

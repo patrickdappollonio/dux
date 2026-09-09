@@ -1,22 +1,14 @@
 import type { ReactNode } from "react"
 
-// Renders single-backtick-delimited spans (e.g. "the `gh` CLI") as <code>
-// elements. This is deliberately NOT a markdown parser: no bold, no italic, no
-// links, and no dependency is added for it. It exists because setting
-// descriptions and dialog copy are adapted from config.toml comments that use
-// backticks for inline code, and rendering them as plain text left the literal
-// backtick characters visible in the UI.
-//
-// Pure and side-effect free so it is unit-testable without mounting anything
-// beyond the returned React nodes.
+// Renders single-backtick-delimited spans as <code> elements. Deliberately not a markdown
+// parser: no bold, no italic, no links, and no dependency for it. Setting descriptions and
+// dialog copy are adapted from config.toml comments that use backticks for inline code, which
+// as plain text left the literal backtick characters visible in the UI.
 export function renderInlineCode(text: string): ReactNode[] {
   const parts = text.split("`")
 
-  // An even number of backticks means every opening backtick found a partner,
-  // so parts alternate plain/code/plain/code/... starting and ending on a
-  // plain-text segment. An odd count means the last backtick is dangling (no
-  // closing partner): treat it, and everything after it, as literal text by
-  // rejoining the tail back onto the plain-text stream instead of dropping it.
+  // Parts alternate plain/code when every opening backtick found a partner. A dangling last
+  // backtick and everything after it stay literal text rather than being dropped.
   const isCodeSegment = (index: number) => index % 2 === 1
 
   const nodes: ReactNode[] = []

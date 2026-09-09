@@ -1,12 +1,7 @@
-// The move's COMPOSITION, lifted out of EditorBody so it can be tested.
-//
-// A move is not one call. It is a rename on the wire, plus retargeting every
-// open editor tab that pointed at the moved path (or, for a folder, at
-// anything underneath it), plus revalidating BOTH the directory it left and
-// the one it arrived in, plus reindexing the search list. Getting any of those
-// wrong is invisible in the request and obvious to the user: a lost tab, a
-// stale tree, a search result pointing at a path that no longer exists. The
-// request itself was already covered; this ordering never was.
+// The move's composition, lifted out of EditorBody so it can be tested. A move is a rename on
+// the wire, plus retargeting every open editor tab that pointed at the moved path or anything
+// under it, plus revalidating both the directory it left and the one it arrived in, plus
+// reindexing the search list.
 
 import { moveTarget, parentDir } from "@/lib/fileTreeOps"
 import { movedMessage } from "@/lib/editorMutations"
@@ -38,9 +33,8 @@ export function performMove(
     .rename(from, to)
     .then(() => {
       deps.clearTarget()
-      // Said before the refetches, not after: the confirmation is about the
-      // move, which has already landed, and a rejected revalidation must not
-      // turn a successful move into silence.
+      // Said before the refetches: the move has already landed, and a rejected revalidation
+      // must not turn a successful move into silence.
       deps.reportSuccess(movedMessage(from, destDir))
       deps.retargetTabs(from, to)
       // Both ends: the source directory lost an entry and the destination

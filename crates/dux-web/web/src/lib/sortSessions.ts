@@ -1,36 +1,28 @@
-// Pure comparators backing the shared agent-list display sort. TWIN of the
-// core-owned ordering in `dux_core::flat_list::order_sessions` (the DECISION),
-// pinned by shared vectors, so a mode set on either surface produces the same
-// order. The sort mode is the shared `config.ui.agent_sort` preference; this
-// helper turns a mode into the ordered id list the flat list renders. Kept
-// React-free so it's trivially unit-testable.
+// Pure comparators backing the shared agent-list display sort, the twin of the core-owned
+// ordering in `dux_core::flat_list::order_sessions` and pinned by shared vectors, so a mode
+// set on either surface produces the same order. The mode is `config.ui.agent_sort`.
 
 import type { SessionView } from "./types"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
 export type SortKey = "updated" | "created" | "name" | "name_desc"
 
-// The TUI's name key: the agent's display label, lowercased. Shared with the
-// Rust twin through `sessionLabel`, which falls back to the branch for a
-// managed agent and to the folder's name for a standalone one.
+// The name key is the agent's display label lowercased: `sessionLabel` falls back to the
+// branch for a managed agent and to the folder's name for a standalone one.
 function nameKey(s: SessionView): string {
   return sessionLabel(s).toLowerCase()
 }
 
-// Parse an RFC 3339 / ISO 8601 timestamp to epoch milliseconds. The server
-// always emits valid `to_rfc3339()` output, but guard against NaN (an
-// unparseable value sorts as 0 rather than poisoning the comparator).
+// Parse an RFC 3339 timestamp to epoch milliseconds. An unparseable value sorts as 0 rather
+// than poisoning the comparator with NaN.
 function epoch(iso: string): number {
   const ms = Date.parse(iso)
   return Number.isNaN(ms) ? 0 : ms
 }
 
-// Compare two sessions by name (title-or-branch, lowercased) using Unicode CODE
-// POINTS, not UTF-16 code units: plain JS string comparison orders an
-// astral-plane char (emoji, U+10000+) by its surrogate halves, flipping the
-// order Rust's String::cmp (code points) produces — the two surfaces would
-// disagree for such titles. Spreading iterates code points, matching Rust's
-// `str::cmp` on the lowercased key exactly. Returns <0 / 0 / >0 (ascending).
+// Compare by name using Unicode code points, not UTF-16 code units: plain JS comparison orders
+// an astral-plane char by its surrogate halves, flipping the order Rust's code-point `str::cmp`
+// produces, and the two surfaces would then disagree. Returns <0 / 0 / >0 ascending.
 function compareName(a: SessionView, b: SessionView): number {
   const ka = [...nameKey(a)]
   const kb = [...nameKey(b)]
@@ -43,16 +35,13 @@ function compareName(a: SessionView, b: SessionView): number {
   return ka.length - kb.length
 }
 
-// Return the session ids sorted by `by`, mirroring the TUI comparators:
-//   updated / created → newest first (Rust `Reverse(timestamp)`)
-//   name              → case-insensitive ascending on title-or-branch (A to Z)
-//   name_desc         → the exact reverse of name (Z to A); the TUI sets this,
-//                       the web displays it but does not offer it in its picker
+// The session ids sorted by `by`, mirroring the TUI comparators:
+//   updated / created → newest first
+//   name              → case-insensitive ascending on the display label
+//   name_desc         → the exact reverse of name; the TUI sets it, the web only displays it
 //
-// Stability: the TUI uses Rust's `sort_by_key` / `sort_by`, which are stable.
-// `Array.prototype.sort` is required to be stable by the ECMAScript spec, so
-// equal keys (e.g. identical timestamps or identical names) keep their original
-// relative order on both surfaces. We sort a COPY so callers' input is untouched.
+// Both surfaces sort stably, so equal keys keep their original relative order. Sorts a copy,
+// leaving the caller's array untouched.
 export function sortedSessionIds(
   sessions: SessionView[],
   by: SortKey,

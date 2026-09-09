@@ -1,9 +1,6 @@
-// Pure path -> icon-KIND mapper for the file tree, kept free of any React or
-// lucide import so it is unit-testable in node (mirrors `pathExt.ts`'s reason
-// for staying framework-free). A small component (`FileTreeIcon.tsx`) maps a
-// kind to its lucide glyph. This module is NOT the git-status marker, that
-// stays `FileStatusIcon`/`fileStatusMeta` (renders on the right of a row); this
-// is the LEFT-side, always-present file-type icon.
+// Pure path to icon-kind mapper for the file tree, free of React and lucide imports;
+// `FileTreeIcon.tsx` maps a kind to its glyph. This is the left-side, always-present file-type
+// icon, never the git-status marker, which stays `FileStatusIcon`/`fileStatusMeta`.
 
 import { extensionForPath, fileNameForPath } from "@/lib/pathExt"
 
@@ -20,9 +17,8 @@ export type FileIconKind =
   | "binary"
   | "file" // generic fallback
 
-// Directory icon kind. "empty" (a loaded dir with zero children) outranks
-// "open": an empty dir is visibly distinct whether expanded or collapsed,
-// since there is nothing to show open either way.
+// Directory icon kind. "empty" (a loaded dir with zero children) outranks "open", since there
+// is nothing to show open either way.
 export function dirIconKind(opts: { open: boolean; empty: boolean }): FileIconKind {
   if (opts.empty) return "folder-empty"
   return opts.open ? "folder-open" : "folder"
@@ -59,9 +55,8 @@ const BINARY_EXTENSIONS = new Set([
   ".zip", ".tar", ".gz", ".pdf", ".woff", ".woff2", ".ttf",
 ])
 
-// File icon kind by extension/filename. Checks are ordered most-specific
-// first (lockfiles before generic extension matches, since e.g. "*.lock"
-// files have no useful extension-based mapping otherwise).
+// File icon kind by extension or filename, most-specific first: lockfiles before extension
+// matches, since a "*.lock" name has no useful extension mapping.
 export function fileIconKind(path: string): FileIconKind {
   const name = fileNameForPath(path)
   const ext = extensionForPath(path)

@@ -20,10 +20,9 @@ export type AttachCoverInputs = {
   waitExpired: boolean
   isOwner: boolean
   /// This pane has never had a screen: no replay has been applied on this mount.
-  /// It is what "Attaching…" versus "Reconnecting…" turns on, and it is a fact
-  /// about the PICTURE rather than about the socket, because that is what the
-  /// two words mean to the person reading them: nothing has appeared yet, or
-  /// what appeared has gone away.
+  /// It is what "Attaching…" versus "Reconnecting…" turns on, a fact about the
+  /// picture rather than about the socket: nothing has appeared yet, or what
+  /// appeared has gone away.
   firstAttach: boolean
 }
 
@@ -33,10 +32,9 @@ export type AttachCover =
   | { kind: "none" }
   /// A spinner with a non-blocking cue.
   | { kind: "spinner"; wording: "starting" | "attaching" | "reconnecting" }
-  /// A Reconnect affordance. `lost` is the socket giving up (which it now only
-  /// does on a terminal close code); `no-screen` is an OPEN socket that never
-  /// sent a screen, and the openness is part of the claim rather than an
-  /// implication of it.
+  /// A Reconnect affordance. `lost` is the socket giving up (only on a terminal
+  /// close code); `no-screen` is an open socket that never sent a screen, and the
+  /// openness is part of the claim rather than an implication of it.
   | { kind: "box"; reason: "lost" | "no-screen" }
   /// The full-pane take-over card: another device drives this pty, or nobody
   /// does and this pane has not claimed it.
@@ -46,7 +44,7 @@ export function attachCover(input: AttachCoverInputs): AttachCover {
   // A socket that has given up for good outranks everything, the card included:
   // a watcher whose socket died would otherwise see only "Take over" and never
   // learn the connection is gone. While the app-wide overlay is up it owns this
-  // signal instead, and the pane must not stack a second answer under it.
+  // signal instead.
   if (input.socket === "failed" && !input.offline) {
     return { kind: "box", reason: "lost" }
   }
@@ -54,30 +52,23 @@ export function attachCover(input: AttachCoverInputs): AttachCover {
   // a statement about control rather than about pixels, so it does not wait for
   // a picture to cover.
   if (!input.isOwner) return { kind: "card" }
-  // A socket that is not OPEN has no screen coming either, even when the last
-  // open's replay is still on xterm: the picture is frozen, and saying so is the
-  // whole point of the reconnect cue. So the cover is up for both reasons, and
-  // the wait only ever becomes a box for the one it can honestly name, a healthy
-  // socket that never sent a screen.
+  // A socket that is not open has no screen coming either, even when the last
+  // open's replay is still on xterm: the picture is frozen, which is the whole
+  // point of the reconnect cue. So the cover is up for both reasons, and the wait
+  // only becomes a box for the one it can honestly name, a healthy socket that
+  // never sent a screen.
   if (!input.replayApplied || input.socket !== "open") {
-    // The bounded wait. Suppressed while globally offline, where the offline
-    // overlay already carries a Retry and a second one underneath it would read
-    // as two answers to one question.
+    // The bounded wait, suppressed while globally offline, where the offline
+    // overlay already carries a Retry. Only the box is suppressed there, not the
+    // spinner: the overlay is a full-viewport portal, so a spinner behind it is
+    // not a second thing on screen, while two Reconnect affordances for one
+    // outage is a real double-up.
     //
-    // Only the BOX is suppressed there, not the spinner, and that asymmetry is
-    // deliberate. The offline overlay is a full-viewport portal at a high
-    // z-index: whatever the pane paints is behind it and grayscaled, so a
-    // spinner underneath is not a second thing on screen. The box is different
-    // because it is an ACTION, and two Reconnect affordances for one outage is a
-    // real double-up whether or not both are visible at once.
-    //
-    // AND ONLY AGAINST A HEALTHY SOCKET, which is what the box's whole wording
-    // claims. The clock is reset only by `pty.onOpen`, so its visible time keeps
-    // accumulating straight through a drop; without this condition a pty socket
-    // that took longer than the wait to come back put an opaque "Still waiting
-    // for the terminal's screen" panel over a picture that was perfectly good
-    // and a reconnect that was already under way. A socket that is not open has
-    // its own honest cue, the reconnecting spinner below.
+    // And only against a healthy socket, which is what the box's wording claims.
+    // The clock is reset only by `pty.onOpen`, so its visible time keeps
+    // accumulating straight through a drop; without this condition a slow
+    // reconnect puts an opaque panel over a picture that is perfectly good. A
+    // socket that is not open has its own cue, the reconnecting spinner below.
     if (
       input.socket === "open" &&
       input.waitExpired &&

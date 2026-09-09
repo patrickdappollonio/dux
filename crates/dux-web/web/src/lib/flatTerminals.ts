@@ -1,9 +1,6 @@
-// Pure helpers backing the flat "Terminals" section of the sidebar, shared by the
-// desktop sidebar and the mobile hub so the two surfaces never drift. Kept free
-// of React so every rule here is trivially unit-testable.
-//
-// Every session-, project-, and standalone-owned terminal renders in one flat
-// "Terminals" section. These helpers assemble its labels and state words.
+// Pure helpers backing the flat "Terminals" section of the sidebar, shared by the desktop
+// sidebar and the mobile hub so the two surfaces never drift. Every session-, project- and
+// standalone-owned terminal renders in that one section.
 
 import { assertNever } from "@/lib/assertNever"
 import type { FlatSortKey, StateWord } from "@/lib/flatList"
@@ -15,11 +12,8 @@ import {
 import type { ProjectView, SessionView, TerminalView } from "@/lib/types"
 import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 
-// One entry in the flat Terminals section: the terminal, its owner reference (so
-// a tap selects/streams it), the owner's display label (the agent name, or the
-// project name for a project terminal), the project name tag, and the sibling set
-// the same owner shares (so `terminalTitle` can disambiguate two terminals running
-// the same app).
+// One entry in the flat Terminals section. `siblings` is the set the same owner shares,
+// so `terminalTitle` can disambiguate two terminals running the same app.
 export interface FlatTerminal {
   terminal: TerminalView
   owner: TerminalOwnerRef
@@ -28,20 +22,10 @@ export interface FlatTerminal {
   siblings: readonly TerminalView[]
 }
 
-// Decorate the spine's flat `terminals` collection with everything the row needs
-// that the terminal itself does not carry: its owner reference, the owner's
-// display label, the project tag, and its sibling set.
-//
-// `terminals` is already flat and owner-tagged. Sessions and projects are lookup
-// tables for labels, and the input order is preserved.
-//
-// A companion terminal is labeled `agent@project` (the agent's display name --
-// title, or branch name when untitled -- at its project); a project terminal
-// carries just the project name (it has no agent); a standalone terminal carries
-// the `~`-shortened directory it opened in (it has no owner to name at all). An owner id that resolves to
-// nothing falls back to the id itself, matching the TUI's sidebar: the spine is
-// self-consistent so this should not happen, but showing the row with a truthful
-// id beats dropping it, which is the silent omission this shape exists to end.
+// Decorate the spine's flat `terminals` with what the row needs and the terminal does not
+// carry: owner reference, owner label, project tag, sibling set. The input order is
+// preserved, and an owner id that resolves to nothing falls back to the id itself, because
+// a row with a truthful id beats a silently dropped row.
 export function assembleFlatTerminals(
   terminals: readonly TerminalView[],
   sessions: readonly SessionView[],
@@ -89,11 +73,9 @@ export function assembleFlatTerminals(
         break
       }
       case "standalone": {
-        // No owner to name, so the row's second line names the DIRECTORY the
-        // terminal opened in, already shortened with `~` by the server. That is
-        // also what the sidebar search matches, which is why it goes in
-        // `ownerLabel` rather than somewhere beside it. The project tag is
-        // empty, truthfully: it belongs to no project.
+        // No owner to name, so the second line names the directory the terminal
+        // opened in, already `~`-shortened by the server. It goes in `ownerLabel`
+        // because that is what the sidebar search matches.
         proj = ""
         ownerLabel = wire.cwd_label
         break
@@ -119,10 +101,8 @@ export function terminalStateWord(terminal: TerminalView): StateWord {
   return { label: "Idle", className: "text-muted-foreground" }
 }
 
-// A terminal's WYSIWYG name-sort key: the same primary label the row shows,
-// `foreground_cmd` when present and non-empty else `label`, lowercased. Using the
-// displayed label (not the internal `label`) makes name-sort match what the user
-// reads. Mirrors the TUI `terminal_items` name key in `app/mod.rs`.
+// The name-sort key is the label the row shows, so the sort matches what the user reads:
+// `foreground_cmd` when non-empty else `label`, lowercased. Mirrors TUI `terminal_items`.
 function terminalNameKey(t: TerminalView): string {
   const cmd = t.foreground_cmd
   return (cmd && cmd.length > 0 ? cmd : t.label).toLowerCase()
@@ -135,9 +115,8 @@ function terminalEpoch(iso: string): number {
   return Number.isNaN(ms) ? 0 : ms
 }
 
-// Code-point name comparison, identical in spirit to `sortSessions.ts`'s
-// `compareName`: iterate Unicode code points so the order matches Rust's
-// `str::cmp` on the lowercased key (the TUI side). Returns <0 / 0 / >0 ascending.
+// Iterate Unicode code points so the order matches Rust's `str::cmp` on the lowercased
+// key. Returns <0 / 0 / >0 ascending, like `sortSessions.ts`'s `compareName`.
 function compareTerminalName(a: TerminalView, b: TerminalView): number {
   const ka = [...terminalNameKey(a)]
   const kb = [...terminalNameKey(b)]
@@ -150,9 +129,8 @@ function compareTerminalName(a: TerminalView, b: TerminalView): number {
   return ka.length - kb.length
 }
 
-// Return the complete displayed order used as the terminal drag baseline. The
-// input is already in manual order; computed modes use stable sorting so equal
-// keys retain that base order. Comparators mirror the TUI terminal list.
+// The complete displayed order, used as the terminal drag baseline. The input is already
+// in manual order and computed modes sort stably, so equal keys retain it.
 export function displayedTerminalOrder(
   items: FlatTerminal[],
   key: FlatSortKey,

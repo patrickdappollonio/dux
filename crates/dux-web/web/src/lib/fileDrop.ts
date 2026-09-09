@@ -1,45 +1,20 @@
-// Dropping a file onto a terminal or agent pane: what gets pasted, and what the
-// user is told afterwards.
-//
-// Both halves are pure and live here rather than in the pane, so they are
-// testable without mounting xterm and so the ordering rules cannot drift into a
-// component closure where nobody can see them.
-//
-// The premise, settled and not to be re-litigated: sending a file's BYTES to the
-// terminal cannot work. No agent CLI reads a file from its input stream; they
-// take a path, or they read the clipboard of the machine THEY run on, which for
-// a browser user is the wrong computer. Every terminal emulator whose source was
-// read inserts the path on a drop. So dux saves the file and pastes its path.
+// Pure helpers for a file drop onto a terminal or agent pane. dux saves the file
+// and pastes its path: no agent CLI reads a file from its input stream.
 
-/// How many file names a single toast will spell out before it gives up and
-/// points at the folder instead. Past this the message is longer than anyone
-/// reads and the folder listing is the better answer.
+/// How many file names one toast spells out before it points at the folder
+/// instead.
 export const MAX_NAMED_FILES = 5
 
-/// Whether a drag is carrying files from OUTSIDE the browser.
-///
-/// `types` is the only thing readable during a dragover (the files themselves
-/// are withheld until the drop fires), so it is what every drop target has to
-/// gate on. An in-app drag (the sidebar reorder, a text selection) carries no
-/// `"Files"` entry and must never light a drop target up.
-///
-/// This answers ONE question and nothing else, which is why it takes the type
-/// list rather than an event; the pane's wider enabling gates live in
-/// `paneAcceptsFileDrag` (components/terminal/uploadPipeline.ts), whose name
-/// says it answers the wider question.
+/// Whether a drag carries files from outside the browser. `types` is all a
+/// dragover can read, and an in-app drag carries no `"Files"` entry.
 export function dragCarriesFiles(
   types: readonly string[] | undefined,
 ): boolean {
   return Array.from(types ?? []).includes("Files")
 }
 
-/// What one SAVED file has in common whichever way it ended.
-///
-/// The folder belongs HERE rather than to the drop as a whole. A terminal's
-/// directory changes the moment someone types `cd`, and the uploads are
-/// sequential, so two files dropped together can genuinely land in two different
-/// folders. Keeping one folder for the whole drop meant the last upload's folder
-/// was reported for every file in it.
+/// One saved file. The folder belongs per file rather than to the drop: uploads
+/// are sequential and a terminal's directory can change between them.
 export type SavedFile = {
   requestedName: string
   savedName: string
@@ -50,67 +25,40 @@ export type SavedFile = {
   folderLabel: string
 }
 
-/// What became of one dropped file. Exactly three endings, and the toast is
-/// chosen from an ORDERED list of these in the order the files were dropped,
-/// which is also the order their paths are sent.
+/// What became of one dropped file. The toast reads these in the order the files
+/// were dropped, which is also the order their paths are sent.
 export type DropOutcome =
-  /// Saved, and the path was written to an open socket we own.
-  ///
-  /// Called SENT rather than "pasted" deliberately. Nothing acknowledges a
-  /// write to the PTY socket, and a take-over between the courtesy check and the
-  /// frame reaching the server makes the server drop it silently, so what dux
-  /// knows is that it sent the path, never that the path arrived.
+  /// Saved, and the path was written to an open socket we own. Nothing
+  /// acknowledges a PTY write, so this means sent, never that it arrived.
   | ({ kind: "sent" } & SavedFile)
-  /// Saved, but the path was NOT sent: we do not hold input, or the socket was
-  /// closed. The user has to be able to reach the file by hand, so this carries
-  /// the full path.
+  /// Saved, but the path was not sent: we do not hold input, or the socket was
+  /// closed. Carries the full path so the user can reach the file by hand.
   | ({ kind: "saved-not-sent"; reason: string } & SavedFile)
   /// Never saved. The reason is the server's own words, not a generic one.
   | { kind: "refused"; requestedName: string; reason: string }
 
-/// Does the server's own text already tell the user to try again? Matched
-/// within one sentence so "try ... again" cannot be assembled out of two
-/// unrelated ones.
+/// Does the server's own text already advise a retry? Matched within one
+/// sentence so "try ... again" cannot be assembled out of two unrelated ones.
 const ADVISES_RETRY = /\btry\b[^.!?]*\bagain\b/i
 
-/// Why an upload was refused, in words the user can act on, from the failure's
-/// HTTP status and whatever the server said.
-///
-/// The status was carried on `FileDropApiError` from the start and read nowhere,
-/// so every failure arrived as the same shape of sentence and a 503 was
-/// indistinguishable from a 500 or a socket that never connected. It matters
-/// most for the busy refusal, which is the one case that is not the user's fault
-/// and not permanent: the right advice is to drop the file again in a moment,
-/// and nothing else in this list carries that advice.
-///
-/// The server's own words are PREFERRED wherever it has any, because the server
-/// knows things the browser does not (which name was unusable, which limit was
-/// hit). This only supplies the sentence for statuses where the browser has
-/// something to add, or where there is no body to quote. It never appends
-/// advice the server has already given.
+/// Why an upload was refused, in words the user can act on, from the HTTP status
+/// and whatever the server said. The server's own words win where it has any;
+/// this only adds what they do not already say.
 export function dropRefusalReason(status: number, detail: string): string {
   const said = detail.trim()
-  // 0 is the transport failure `uploadDroppedFile` reports when `fetch` itself
-  // rejected: no response, so no status and nothing the server said.
+  // 0 is the transport failure `uploadDroppedFile` reports when `fetch` rejected.
   if (status === 0) {
     return said || "the server could not be reached"
   }
   if (status === 503) {
-    // The wait is bounded server-side, so this is the answer that arrives when
-    // no upload slot came free in time. Say that it is temporary.
+    // The server-side wait is bounded, so this means no upload slot came free.
     if (!said) {
       return "the server was busy with other uploads, so it was not saved; try the drop again in a moment"
     }
-    // The local tail is only worth adding when the server has not already said
-    // it. dux's own 503 body is two COMPLETE sentences ending in "Try the drop
-    // again shortly.", and welding the tail onto that produced "...Try the drop
-    // again shortly, so it was not saved; try the drop again in a moment": the
-    // advice twice, the second copy comma-spliced into the middle of the
-    // server's own second sentence.
+    // dux's own 503 body already advises a retry; the tail would say it twice.
     if (ADVISES_RETRY.test(said)) return asClause(said)
-    // A body that is already a finished sentence cannot take a comma-spliced
-    // clause either, for the same reason, so the tail becomes its own sentence.
-    // Only a FRAGMENT gets the comma.
+    // A finished sentence cannot take a comma-spliced clause, so the tail becomes
+    // its own sentence and only a fragment gets the comma.
     if (/[.!?]$/.test(said)) {
       return `${said} It was not saved; try the drop again in a moment`
     }
@@ -119,45 +67,19 @@ export function dropRefusalReason(status: number, detail: string): string {
   return said || `the server refused the upload (${status})`
 }
 
-/// How the destination should be DESCRIBED, which is the one thing that is a
-/// property of the whole drop rather than of a file.
+/// How the destination is described, which is a property of the whole drop
+/// rather than of one file.
 export type DropContext = {
-  /// Only for the WORDING, never for the folder itself. Both kinds name the
-  /// real directory the server reported on each saved file, because that is the
-  /// only thing that is true: an agent's files go to its upload folder, which
-  /// is a configured path inside the worktree and not the worktree root, and
-  /// hardcoding a phrase here sent the user somewhere their file was not.
-  ///
-  /// What the kind still decides is two things a label cannot say: what to call
-  /// the destination when the server sent no label at all, and whether several
-  /// folders in one drop need explaining (a terminal MOVES, which is why its
-  /// files can scatter; an agent's cannot, because every tab of one agent
-  /// shares one worktree and therefore one upload folder).
+  /// Only for the wording. Both kinds report the real folder the server sent for
+  /// each saved file; the kind decides the fallback name when the server sent
+  /// none, and whether several folders in one drop are explained.
   kind: "agent" | "terminal"
-  /// Where the path was put, which decides one verb and nothing else.
-  ///
-  /// `"sent"` (the default, and every drop) means it was written to the PTY.
-  /// `"draft"` means it was spliced into the mobile compose bar's draft, where
-  /// NOTHING has gone to the agent yet and the user still has to press Send.
-  /// Reporting that as "sent its path" claimed the agent had the file when it
-  /// did not, which is the one thing this whole toast exists to be exact about.
+  /// Which verb the report uses. `"sent"` (the default) means written to the
+  /// PTY; `"draft"` means spliced into the compose bar, where nothing has gone
+  /// to the agent yet.
   delivery?: "sent" | "draft"
-  /// Set ONLY when this batch is not dropped files at all but one long TEXT
-  /// paste dux turned into a document, and then it is that paste's character
-  /// count.
-  ///
-  /// It exists because that gesture is the one where the user did not ask for a
-  /// file. They pressed paste; a document appeared and a path went to the agent
-  /// instead of their text. Reporting only "Saved pasted-....txt and sent its
-  /// path" would be true and still leave them wondering where their paragraph
-  /// went, so the report leads with what happened and with the size that
-  /// triggered it. The number, rather than a bare "it was long", is what lets
-  /// them decide whether to raise or lower the threshold.
-  ///
-  /// It is a LEAD-IN rather than a fourth rung: everything else the ladder says
-  /// (refused, stranded with its full path, renamed) is exactly as true for a
-  /// pasted document as for a dropped file, so this adds a sentence rather than
-  /// forking the reporting.
+  /// Set only when the batch is one long text paste dux turned into a document,
+  /// and then it is that paste's character count, which leads the report.
   pastedTextChars?: number
 }
 
@@ -183,22 +105,14 @@ function notDelivered(ctx: DropContext): string {
 export type DropToast = {
   tone: "success" | "warning" | "error"
   message: string
-  /// Whether this report waits for the user instead of for a clock.
-  ///
-  /// True on exactly two rungs, and the bar is deliberately high (see
-  /// `NotifyOptions.sticky` in `lib/notify.ts`): a report the user must act on
-  /// OUTSIDE the toast to recover from, or one where something may have been
-  /// lost. A screen that fills up with reports nobody dismissed is the friction
-  /// the auto-clear policy exists to remove, so anything that merely went
-  /// slightly wrong still retires on its own.
+  /// Whether this report waits for the user instead of for a clock. The bar is
+  /// deliberately high (see `NotifyOptions.sticky` in `lib/notify.ts`): recovery
+  /// happens outside the toast, or something may have been lost.
   sticky: boolean
 }
 
-/// The form a dropped file's path takes when it is written into the prompt.
-///
-/// Mirrors `dux_core::config::WebDragDropPaste`, and the names are the exact
-/// strings the server publishes in `DropPasteView::form`, so nothing has to
-/// translate between the two.
+/// The form a dropped file's path takes in the prompt. These are the exact
+/// strings `dux_core::config::WebDragDropPaste` publishes in `DropPasteView`.
 export type DragDropPasteForm =
   | "bare"
   | "single_quoted"
@@ -212,92 +126,47 @@ const DRAG_DROP_PASTE_FORMS: readonly DragDropPasteForm[] = [
   "backslash_escaped",
 ]
 
-/// Everything needed to write ONE pane's dropped path: the form the path takes,
-/// and the CLI that will read it. Mirrors `dux_core::viewmodel::DropPasteView`,
-/// field names included, so nothing has to translate.
-///
-/// The two travel together and are resolved together, never separately, because
-/// they answer the same question (which CLI is on the other end of this paste).
-/// Taking the form off a live process while taking the limit off current config
-/// would describe a CLI that is not running.
+/// One pane's paste inputs, mirroring `dux_core::viewmodel::DropPasteView` field
+/// names. The two resolve together, never separately: they answer the same
+/// question, which CLI is on the other end of this paste.
 export type DropPasteProfile = {
   /// One of the `DragDropPasteForm` names, normalized server-side. Typed as a
   /// plain string because it arrives off the wire, and validated on use.
   form: string
-  /// The FILE NAME of the command being run. This, and not the provider's block
-  /// name, is what identifies the CLI: a provider's name is free text, so
-  /// `[providers.myagent] command = "codex"` is a real Codex and
-  /// `[providers.codex] command = "something-else"` is not.
+  /// The file name of the command being run, not the provider's block name: a
+  /// provider's name is free text, so `[providers.codex] command =
+  /// "something-else"` is not Codex.
   command_name: string
 }
 
-/// `bootstrap.provider_drop_paste`, keyed by PROVIDER NAME: what CONFIG says
-/// right now. `undefined` on an older server.
-///
-/// The FALLBACK, used only for a pane with no live process to read from. What a
-/// live process launched with rides the SPINE, on the tab itself, because that is
-/// what a launch and a termination refresh; this rides the bootstrap document,
-/// which is refreshed by `config.changed`, the event that can change it.
+/// `bootstrap.provider_drop_paste`, keyed by provider name: what config says now,
+/// `undefined` on an older server. The fallback for a pane with no live process,
+/// refreshed by `config.changed`, the event that can change it.
 export type ConfiguredDropPaste = Record<string, DropPasteProfile> | undefined
 
-/// What a drop is landing on. An agent pane runs a provider in a tab, so it has
-/// both a launched profile (`undefined` when nothing is live) and a configured
-/// fallback; a terminal has no provider FIELD and no launched profile at all,
-/// which is what makes it impossible for the terminal branches below to read
-/// either.
+/// What a drop is landing on. An agent tab has a launched profile (`undefined`
+/// when nothing is live) and a configured fallback; a terminal has neither.
 export type DropPasteTarget =
   | {
       kind: "agent"
-      /// `AgentTabView.drop_paste`: what THIS tab's live process launched with.
+      /// `AgentTabView.drop_paste`: what this tab's live process launched with.
       launched: DropPasteProfile | undefined
-      /// The tab's effective provider NAME, used only to look up the configured
+      /// The tab's effective provider name, used only to look up the configured
       /// fallback when nothing is live.
       provider: string | undefined
     }
   | { kind: "terminal" }
 
-/// The form a plain terminal always gets, whatever provider its owner runs and
-/// whatever anybody configured.
-///
-/// A terminal runs a SHELL, and that is the reason it must be quoted, not a
-/// reason it can go bare. The first version of this feature had that exactly
-/// backwards: it sent a terminal's path `bare` "because a terminal runs a shell,
-/// not that CLI". But dux deliberately permits `$`, a backtick, a space, a
-/// semicolon, a quote and parentheses in a destination path, and a bare path
-/// carrying any of those is pasted onto a command line the user is about to
-/// press Enter on. The shell then splits it into several arguments, substitutes a
-/// variable, or runs a command substitution. Quoting is what makes those
-/// characters inert, so a shell needs MORE protection than an agent CLI, not
-/// less.
-///
-/// `single_quoted` is the form that provides it: inside POSIX single quotes
-/// nothing is special at all, so the whole path is one literal word.
-///
-/// Note that the shell in question is POSIX. dux's `[terminal] command` is
-/// configurable, so a user can point it at a shell with different quoting rules
-/// (PowerShell, for instance, does not treat a single-quoted `$` the same way,
-/// and fish differs on `\` inside single quotes). That is not handled here and
-/// deliberately gets no setting of its own: dux targets macOS and Linux, where
-/// the default shell is POSIX, and a form for a non-POSIX shell should be added
-/// only once someone has MEASURED one, the same rule the provider forms follow.
+/// The form a plain terminal always gets, whatever the provider settings say.
+/// dux permits `$`, a backtick, a space, a semicolon, a quote and parentheses in
+/// a path, and a shell would split or expand a bare one; inside POSIX single
+/// quotes nothing is special. A non-POSIX `[terminal] command` (PowerShell, fish)
+/// gets no form of its own until someone has measured one.
 export const TERMINAL_PASTE_FORM: DragDropPasteForm = "single_quoted"
 
 /// The one profile that applies to a pane, or `undefined` when nothing names it.
-///
-/// The order is the whole design, and both steps are load-bearing:
-///
-///   1. What THIS TAB's live process launched with. It WINS rather than merely
-///      filling a gap. If the current config value won, two sibling tabs
-///      launched either side of a config edit would resolve to the same answer
-///      again and publishing per tab would buy nothing. A config edit therefore
-///      takes effect on that tab's next launch. It rides the spine, so it
-///      appears and disappears with the process rather than going stale in the
-///      browser until the next config refetch.
-///   2. What CONFIG says for the tab's provider NAME. The right answer for a
-///      tab with nothing live: it will launch with exactly this.
-///
-/// A TERMINAL has neither, by construction: it runs a SHELL, and the provider
-/// settings describe how an agent CLI reads a paste. See `TERMINAL_PASTE_FORM`.
+/// The tab's launched profile wins over config, so a config edit takes effect at
+/// that tab's next launch. A terminal has neither; see `TERMINAL_PASTE_FORM`.
 function dropPasteProfileFor(
   configured: ConfiguredDropPaste,
   target: DropPasteTarget,
@@ -308,17 +177,9 @@ function dropPasteProfileFor(
   return configured?.[target.provider]
 }
 
-/// Which form to use for the pane being dropped on.
-///
-/// A TERMINAL is decided first and reads nothing else. See `TERMINAL_PASTE_FORM`.
-///
-/// Everything the resolution above does not name falls back to `bare`: a
-/// provider the user added themselves, a server too old to send the map, a tab
-/// whose provider is not known yet, and, defensively, a form name this client
-/// does not know. The server already normalizes and already warned about a
-/// misspelling once at config load, so the last case should not arise; a client
-/// that trusted the string blindly would still be one config typo away from
-/// pasting the literal word into somebody's prompt.
+/// Which form the pane being dropped on needs. A terminal is decided first; an
+/// unnamed provider, an older server or a form name this client does not know
+/// falls back to `bare` rather than being trusted into somebody's prompt.
 export function dragDropPasteFormFor(
   configured: ConfiguredDropPaste,
   target: DropPasteTarget,
@@ -328,50 +189,22 @@ export function dragDropPasteFormFor(
   return DRAG_DROP_PASTE_FORMS.find((f) => f === name) ?? "bare"
 }
 
-/// How many characters of pasted text a CLI will still look at as a possible
-/// file path, keyed by the COMMAND'S FILE NAME.
+/// How many characters of pasted text a CLI still reads as a possible file path,
+/// keyed by the command's file name: Codex's composer files a paste over its own
+/// 1000 character threshold away as large content before it looks for a path.
 ///
-/// Only one entry is real. Codex's composer compares the pasted text's character
-/// count against `LARGE_PASTE_CHAR_THRESHOLD` (1000) and, when it is over, files
-/// the paste away as generic large content BEFORE it ever tries to recognize an
-/// image path. So a long enough path is never attached, however correctly it is
-/// quoted, and the quoting itself adds characters that can push one over.
-///
-/// KEYED BY THE COMMAND, DELIBERATELY. NOT BY FORM, AND NOT BY PROVIDER NAME.
-///
-/// Not by form, because the threshold belongs to the receiving CLI, which is the
-/// same thing the form is chosen for; deriving one from the other was wrong in
-/// both directions at once (a TERMINAL always uses the shell-safe form and so
-/// inherited codex's composer limit, which a shell does not have, and codex
-/// configured with any of the other three forms escaped the limit entirely).
-///
-/// Not by provider NAME, because a provider's name and the command it runs are
-/// independent: `[providers.myagent] command = "codex"` is a real Codex and
-/// `[providers.codex] command = "something-else"` is not. Keyed by the name this
-/// was wrong in both directions too: a real Codex under any other name got no
-/// limit and was handed oversized paths it silently ignores, and an unrelated
-/// CLI merely named codex had valid long paths withheld from it. The server
-/// compares on the command's FILE NAME and publishes that, so a full path
-/// (`/usr/local/bin/codex`) resolves like a bare one.
-///
-/// A command absent from this table has NO limit. Guessing one would withhold
-/// files a CLI would have taken; a new entry belongs here only once someone has
-/// MEASURED it, the same rule the forms themselves follow.
-///
-/// Considered and NOT done: making this a declared per-provider config setting
-/// beside `web_dragdrop_paste`. It is a MEASUREMENT of a third-party CLI's
-/// internals, not a preference, so the user has nothing to base a value on; a
-/// wrong value silently strands files or sends payloads that are silently
-/// ignored, and neither failure names itself. The command key already covers the
-/// alias and the wrapper cases without asking anyone to configure anything.
+/// Keyed by the command, not by form (which a terminal shares without sharing
+/// the limit) and not by provider name (free text that need not match its
+/// command). The server publishes the command's file name, so a full path
+/// resolves like a bare one. A command absent from this table has no limit, and
+/// this is a measurement of a third-party CLI rather than a setting: add an
+/// entry only once someone has measured it.
 const COMMAND_ATTACHMENT_CHAR_LIMITS: Record<string, number> = {
   codex: 1000,
 }
 
 /// The character limit that applies to a drop target, or `null` when none does.
-///
-/// A terminal has none: it is a shell, and a shell has no composer that files a
-/// long paste away somewhere else.
+/// A terminal has none: a shell has no composer to file a long paste away.
 export function attachmentCharLimitFor(
   configured: ConfiguredDropPaste,
   target: DropPasteTarget,
@@ -381,16 +214,15 @@ export function attachmentCharLimitFor(
   return COMMAND_ATTACHMENT_CHAR_LIMITS[command] ?? null
 }
 
-/// Everything a pane needs to turn one saved file into one paste: the FORM and
-/// the CLI's character LIMIT, resolved together because they answer to the same
-/// thing (which CLI is receiving this) and must not be derived from each other.
+/// What a pane needs to turn one saved file into one paste. The two are resolved
+/// together and never derived from each other; see `DropPasteProfile`.
 export type DropPastePlan = {
   form: DragDropPasteForm
   /// `null` means unlimited, not "zero".
   charLimit: number | null
 }
 
-/// Resolve both halves for one drop target, from the ONE profile that applies to
+/// Resolve both halves for one drop target, from the one profile that applies to
 /// it, so they can never come from two different CLIs.
 export function dragDropPasteFor(
   configured: ConfiguredDropPaste,
@@ -402,36 +234,21 @@ export function dragDropPasteFor(
   }
 }
 
-/// Whether this PAYLOAD is too long for the receiving CLI to read as a file path.
-///
-/// Takes the payload rather than the path on purpose: the quotes and the trailing
-/// space are pasted too, so a path comfortably under the limit can produce a
-/// payload over it, and counting the file's own path would miss exactly the cases
-/// this exists to catch.
-///
-/// Takes the LIMIT rather than the form, for the reason spelled out on
-/// `COMMAND_ATTACHMENT_CHAR_LIMITS`. A `null` limit refuses nothing.
-///
-/// Counts CHARACTERS, because that is what the CLI counts. JavaScript's `.length`
-/// counts UTF-16 code units, so a path full of emoji would look twice as long as
-/// it is and be refused when the CLI would have accepted it.
+/// Whether this payload is too long for the receiving CLI to read as a file path.
+/// Takes the whole payload, since the quoting and trailing space are pasted too,
+/// and counts characters rather than UTF-16 units, because that is what the CLI
+/// counts. A `null` limit refuses nothing.
 export function pasteExceedsAttachmentLimit(
   payload: string,
   limit: number | null,
 ): boolean {
-  // Strictly greater, matching `char_count > LARGE_PASTE_CHAR_THRESHOLD`: a
-  // payload of exactly the limit still gets looked at.
+  // Strictly greater: a payload of exactly the limit still gets looked at.
   return limit !== null && [...payload].length > limit
 }
 
-/// Why a saved file's path was held back rather than pasted, in the words the
-/// stranded-file toast will show after "the path was not sent: ".
-///
-/// The path IS still reported, in full, by that same toast, so the user can hand
-/// it to the agent themselves. Pasting it anyway would be worse than not: over
-/// the limit the CLI swaps the text out for a placeholder, so the path would not
-/// even be readable in the prompt, and the toast would have claimed the file was
-/// attached when it was not.
+/// Why a saved file's path was held back, in the words the stranded-file toast
+/// shows after "the path was not sent: ". That toast still reports the path in
+/// full, which is how the user hands it to the agent themselves.
 export function tooLongToAttachReason(limit: number): string {
   return (
     `the path is longer than this agent reads as a file path ` +
@@ -441,40 +258,22 @@ export function tooLongToAttachReason(limit: number): string {
 }
 
 /// The characters `backslashEscaped` protects: whitespace, the quoting and
-/// expansion characters, the shell's own operators, and the glob characters.
-///
-/// Deliberately ASCII-only and deliberately not "everything that is not a letter".
-/// A backslash before an ordinary character is a no-op in POSIX lexing, so
-/// over-escaping is harmless to the LEXER, but it is not harmless to a reader, and
-/// escaping every CJK codepoint in a path would make the prompt unreadable for the
-/// exact users most likely to have one.
+/// expansion characters, the shell's operators, and the glob characters. ASCII
+/// only on purpose: escaping every CJK codepoint would make the prompt
+/// unreadable for the users most likely to have one, for no lexical gain.
 const SHELL_SIGNIFICANT = /[\s"#$&'()*;<>?[\\\]`{|}~]/g
 
 /// Wrap in single quotes, closing and reopening around each embedded apostrophe.
-///
-/// Inside POSIX single quotes NOTHING is special, not `$`, not a backtick, not a
-/// backslash, so the apostrophe is the only character that needs handling and the
-/// only way to include one is to leave the quotes, escape it, and go back in.
-/// Escaping anything else here would be quoting for a shell that does not exist.
+/// Inside POSIX single quotes nothing else is special, so nothing else is
+/// escaped, and leaving the quotes is the only way to include an apostrophe.
 function singleQuoted(path: string): string {
   return `'${path.replaceAll("'", `'\\''`)}'`
 }
 
 /// Wrap in double quotes, escaping all four characters a double-quoted string
-/// gives meaning to: `"`, `\`, `$` and a backtick.
-///
-/// AN EARLIER VERSION ESCAPED ONLY THE FIRST TWO, AND THE REASON GIVEN FOR IT WAS
-/// WRONG. That reason was that the receiving end is a LEXER counting words rather
-/// than an evaluator expanding them, so escaping `$` and a backtick would change
-/// the bytes the CLI finally sees for no gain. The premise is right and the
-/// conclusion does not follow: shell lexing REMOVES the backslash from `\$` and
-/// from the backslash-backtick pair, handing back the literal characters, so the
-/// escape costs nothing at all. (`shlex` 1.3.0's `parse_double` is explicit about
-/// it: `$`, a backtick, `"` and `\` after a backslash each yield just that
-/// character.) It is lossless, and it is what makes this form safe if it ever
-/// reaches something that EVALUATES what it reads instead of merely lexing it.
-/// Current Codex is safe either way; the next reader of a double-quoted path may
-/// not be.
+/// gives meaning to: `"`, `\`, `$` and a backtick. Shell lexing removes the
+/// backslash again, so escaping all four is lossless and stays safe if the paste
+/// ever reaches something that evaluates what it reads rather than lexing it.
 function doubleQuoted(path: string): string {
   return `"${path.replaceAll(/[\\"$`]/g, (c) => `\\${c}`)}"`
 }
@@ -484,49 +283,17 @@ function backslashEscaped(path: string): string {
   return path.replace(SHELL_SIGNIFICANT, (c) => `\\${c}`)
 }
 
-/// What to paste for one saved file: the path in the form this provider needs,
-/// one trailing space, and NO newline.
+/// What to paste for one saved file: the path in the given form, one trailing
+/// space, and no newline, which would submit a half-written prompt. One file per
+/// paste, because these CLIs attach only when the whole paste is that one path.
 ///
-/// Pure, and takes the form rather than reading it, so every case is testable
-/// without mounting a terminal.
-///
-/// WHY THIS IS PER-PROVIDER. The receiving end is an agent CLI, not a shell, and
-/// the CLIs do not agree on how they read a pasted path. `dux_core::config::
-/// WebDragDropPaste` carries the measured table of what each one does and which
-/// form it therefore needs, along with the two combinations known to FAIL. In
-/// short, and measured rather than assumed:
-///
-///   - Claude Code and OpenCode take the WHOLE pasted string and never split on
-///     whitespace, so `bare` is right and a space is harmless. Single-quoting a
-///     path with an APOSTROPHE actively breaks Claude Code, because POSIX writes
-///     that apostrophe as a close-escape-reopen and Claude Code's own unescape
-///     step collapses it into three apostrophes.
-///   - Codex lexes the text with POSIX shell rules and accepts it only if it comes
-///     out as exactly ONE token, so a bare path containing a space is silently
-///     ignored and `single_quoted` is what it needs.
-///
-/// A TERMINAL is not one of these cases and does not consult the setting at all:
-/// it runs a shell, which is why it always gets the shell-safe form. See
-/// `TERMINAL_PASTE_FORM`.
-///
-/// KNOWN LIMITATIONS, stated rather than worked around:
-///
-///   - A path containing a BACKSLASH is mangled by Claude Code's unescape step in
-///     EVERY form, because the unescape eats the backslash. That is a property of
-///     the receiving tool and dux cannot fix it from this side.
-///   - OpenCode strips quote characters off BOTH ENDS rather than one matching
-///     pair, so a path whose own last character is a quote loses it, and it
-///     unescapes backslash sequences, so a path holding a backslash is mangled
-///     there too.
-///   - Length is a separate question this function does not answer: a payload can
-///     be perfectly formed and still be too long for the CLI to look at. See
-///     `pasteExceedsAttachmentLimit`.
-///
-/// One file per paste. In these tools a newline SUBMITS, so a file arriving with
-/// an automatic submit would fire a half-written prompt. Several files means
-/// several pastes in sequence, because these tools only treat a pasted path as an
-/// attachment when the whole pasted string is that one path, so two paths in one
-/// paste become plain text.
+/// The measured per-CLI table is on `dux_core::config::WebDragDropPaste`. Claude
+/// Code and OpenCode read the whole string, so `bare` is right, and single
+/// quoting breaks Claude Code on a path holding an apostrophe; Codex lexes with
+/// POSIX rules and accepts one token only, so it needs `single_quoted`. Known
+/// limitations: a path containing a backslash is mangled by Claude Code and
+/// OpenCode in every form, and OpenCode strips quotes off both ends rather than
+/// one matching pair. Length is answered by `pasteExceedsAttachmentLimit`.
 export function pastePayload(path: string, form: DragDropPasteForm): string {
   switch (form) {
     case "single_quoted":
@@ -545,16 +312,13 @@ function foldersOf(saved: SavedFile[]): string[] {
   return [...new Set(saved.map((s) => s.folderLabel).filter(Boolean))]
 }
 
-/// How to describe where the drop went, when ONE phrase can honestly cover it.
-///
-/// Empty when the terminal's files went to more than one folder: no single
-/// phrase is true then, and claiming one is the bug this exists to prevent. The
-/// caller reaches for `folderBreakdown` instead.
+/// One phrase for where the drop went, or empty when the files landed in more
+/// than one folder and no single phrase is true. Callers then use
+/// `folderBreakdown`.
 function folderPhrase(saved: SavedFile[], ctx: DropContext): string {
   const folders = foldersOf(saved)
   if (folders.length === 1) return folders[0]
-  // No folder at all can only happen if the server sent an empty label; say
-  // something true rather than "undefined".
+  // An empty label from the server still needs something true to say.
   if (folders.length === 0) {
     return ctx.kind === "agent"
       ? "the agent's upload folder"
@@ -563,10 +327,8 @@ function folderPhrase(saved: SavedFile[], ctx: DropContext): string {
   return ""
 }
 
-/// The per-folder listing used when one phrase cannot cover the drop.
-///
-/// Grouped rather than enumerated per file, so three files in two folders read
-/// as two clauses instead of three.
+/// The per-folder listing used when one phrase cannot cover the drop, grouped by
+/// folder so three files in two folders read as two clauses instead of three.
 function folderBreakdown(saved: SavedFile[], ctx: DropContext): string {
   if (folderPhrase(saved, ctx) !== "") return ""
   const order: string[] = []
@@ -587,9 +349,7 @@ function folderBreakdown(saved: SavedFile[], ctx: DropContext): string {
         : names.join(" and ")
     return `${listed} to ${folder}`
   })
-  // Only a terminal can scatter a drop across folders, and saying WHY is worth
-  // a clause; an agent's cannot, so if one somehow did there is no explanation
-  // to offer and the listing has to stand on its own.
+  // Only a terminal can scatter a drop across folders, so only it has a why.
   const why =
     ctx.kind === "terminal" ? "A terminal moves, so they" : "They"
   return ` ${why} did not all land together: ${clauses.join(", ")}.`
@@ -603,14 +363,8 @@ function toPhrase(saved: SavedFile[], ctx: DropContext): string {
 }
 
 /// The stranded files that share a reason, grouped, in the order the reasons
-/// were first hit (which is the order the files were dropped).
-///
-/// Grouped rather than one clause per file, for the same reason
-/// `folderBreakdown` groups by folder: five files stranded by one reconnect
-/// should read as one clause, not five. And grouped rather than reduced to the
-/// FIRST reason, which is what discarded the later ones: the uploads are
-/// sequential, so a reconnect stranding one file and a take-over stranding the
-/// next is an ordinary drop, not a corner case.
+/// were first hit. Uploads are sequential, so one drop can genuinely strand
+/// files for two different reasons and neither may be dropped.
 function strandedByReason(
   notSent: (SavedFile & { reason: string })[],
 ): { reason: string; files: SavedFile[] }[] {
@@ -623,9 +377,8 @@ function strandedByReason(
   return groups
 }
 
-/// Stranded files named with their full paths, because this is the rung where
-/// the user has to go and find them by hand. Capped, with the remainder counted
-/// rather than dropped silently.
+/// Stranded files named with their full paths, since the user has to find them
+/// by hand. Capped, with the remainder counted rather than dropped silently.
 function strandedList(files: SavedFile[]): string {
   const named = files
     .slice(0, MAX_NAMED_FILES)
@@ -636,13 +389,9 @@ function strandedList(files: SavedFile[]): string {
     : named
 }
 
-/// End a sentence with exactly one terminator.
-///
-/// A refusal reason is the SERVER's own words, and the server writes whole
-/// sentences: the busy refusal ends "Try the drop again shortly." So a template
-/// that appends its own period produced "Try the drop again shortly..". The
-/// reasons dux writes itself do not end in one, and both have to read correctly
-/// through the same templates.
+/// End a sentence with exactly one terminator. A server's reason is already a
+/// whole sentence and a reason dux writes itself is not, and both go through the
+/// same templates.
 export function endSentence(text: string): string {
   const trimmed = text.trimEnd()
   if (trimmed === "") return trimmed
@@ -655,9 +404,8 @@ export function asClause(text: string): string {
   return text.trimEnd().replace(/\.+$/, "")
 }
 
-/// The refused files, named with their reasons. Deliberately does NOT end in a
-/// period: every caller embeds this differently, and one of them continues the
-/// sentence afterwards.
+/// The refused files, named with their reasons. Deliberately does not end in a
+/// period: one caller continues the sentence afterwards.
 function reasonList(items: { requestedName: string; reason: string }[]): string {
   if (items.length > MAX_NAMED_FILES) {
     return `${items.length} files were refused; the first was ${items[0].requestedName} (${asClause(items[0].reason)})`
@@ -665,16 +413,13 @@ function reasonList(items: { requestedName: string; reason: string }[]): string 
   return items.map((r) => `${r.requestedName} (${asClause(r.reason)})`).join(", ")
 }
 
-/// The renamed-file note, applied to EVERY saved file at EVERY rung.
-///
-/// Applied at EVERY rung on purpose: a file that was renamed AND whose path
-/// never went out is one the user must find by hand under a name they were
-/// never told.
+/// The renamed-file note, applied to every saved file at every rung: a file that
+/// was renamed and whose path never went out is one the user must find by hand
+/// under a name they were never told.
 function renameNote(saved: SavedFile[], ctx: DropContext): string {
   const renamed = saved.filter((s) => s.requestedName !== s.savedName)
   if (renamed.length === 0) return ""
-  // Named, never counted: a count says something changed without saying what
-  // the file is now called, which is the whole reason for mentioning it.
+  // Named, never counted: a count does not say what the file is now called.
   if (renamed.length > MAX_NAMED_FILES) {
     const where = folderPhrase(renamed, ctx)
     return ` ${renamed.length} already existed and were saved under new names, which are listed in ${where === "" ? "the folders above" : where}.`
@@ -685,22 +430,16 @@ function renameNote(saved: SavedFile[], ctx: DropContext): string {
   return ` ${pairs}, so nothing was overwritten.`
 }
 
-/// The ONE toast for a whole drop, chosen from the ordered per-file outcomes.
+/// The one toast for a whole drop, so a handful of files cannot bury the screen.
+/// The rung is the first that applies, so a bad outcome is never reported good:
 ///
-/// One toast rather than one per file, so a handful of files does not bury the
-/// screen. The rung is the FIRST of these that applies, so a bad outcome can
-/// never be reported as a good one:
-///
-///   1. nothing saved              -> error
-///   2. anything saved but not sent -> warning (names those files and their
-///                                     full paths, because the user now has to
-///                                     reference them by hand)
+///   1. nothing saved               -> error
+///   2. anything saved but not sent -> warning, naming those files' full paths
 ///   3. anything refused            -> warning
 ///   4. otherwise                   -> success
 ///
-/// Two things are said at EVERY rung that has a saved file, whichever one it
-/// lands on: what a renamed file is now called, and which folder each file went
-/// to when they did not all go to the same one.
+/// Every rung with a saved file also says what a renamed file is now called, and
+/// which folder each file went to when they did not all go to the same one.
 export function dropToastFor(
   outcomes: DropOutcome[],
   ctx: DropContext,
@@ -712,12 +451,8 @@ export function dropToastFor(
   )
   return {
     ...report,
-    // A long text paste that saved NOTHING is the second sticky rung. dux
-    // cancels the paste to make room for the file, so a failed save leaves the
-    // text neither typed nor saved: it survives only on the clipboard, and the
-    // recovery sentence naming the force-text chord is the only way back to it.
-    // A failed FILE drop is not sticky, because the file is still sitting where
-    // the user dragged it from.
+    // Sticky: dux cancelled the paste, so a text paste that saved nothing
+    // survives only on the clipboard and the recovery line is the way back.
     sticky: report.sticky || !anySaved,
     message:
       pastedTextLead(ctx.pastedTextChars, anySaved, ctx) +
@@ -726,27 +461,10 @@ export function dropToastFor(
   }
 }
 
-/// The sentence that goes in front of every rung when the "files" were really
-/// one long text paste. Empty for a drop and for an image paste, so no existing
-/// report gains a word.
-///
-/// It says the SIZE (the thing the user can act on: raise the threshold, or
-/// lower it) and it says dux made a file of the text rather than delivering it,
-/// which is the surprising half. What the file is called and where it went are
-/// the ladder's job, and it already does that better than a lead-in could.
-///
-/// TWO things it must get right.
-///
-/// TENSE. It is prepended to whichever rung the ladder chose, INCLUDING rung 1,
-/// where nothing was saved at all. "dux saved it as a file" in front of "Could
-/// not save pasted-....txt" is a flat contradiction, and the user reading it
-/// has no way to tell which half is true. `saved` is what the outcomes actually
-/// say, so a failed save reads "tried to save".
-///
-/// DESTINATION. The path does not always go to the agent: with the mobile
-/// compose bar up it joins the DRAFT, which is what `ctx.delivery` already
-/// tells the ladder ("added its path to your message"). A lead-in hardcoded to
-/// "typing it into the agent" contradicted the sentence directly after it.
+/// The sentence in front of every rung when the "files" were one long text
+/// paste. It states the size, which is what the user can act on. The verb
+/// follows whether anything was saved and the destination follows
+/// `ctx.delivery`, or the lead-in contradicts the rung printed after it.
 function pastedTextLead(
   chars: number,
   saved: boolean,
@@ -760,25 +478,9 @@ function pastedTextLead(
   return `That paste was ${chars} characters, so dux ${verb} it as a file rather than ${instead}. `
 }
 
-/// The way back, appended to EVERY rung of a filed-away text paste.
-///
-/// It is on the good rung as well as the bad ones on purpose. The successful
-/// case is the one where the user is definitely reading, and it is also the
-/// case they may not have wanted: the toast is the only place that can tell
-/// them how to get the literal text this time and how to stop it happening
-/// next time.
-///
-/// On the FAILING rungs it is the whole recovery. dux cancels the paste event
-/// to make room for the file, so when the save fails the text is neither typed
-/// nor saved, and the report would otherwise leave the user with nothing. It
-/// never writes to the clipboard, so the bytes are still exactly where they
-/// were copied from and the force-text chord inserts them literally; that is
-/// enough, and stashing a copy anywhere else would be a new place for content
-/// the user already holds.
-///
-/// The chord is written out for both platforms rather than sniffed, matching
-/// the docs and every other place dux names it: a toast that named the wrong
-/// modifier would be worse than one that names both.
+/// The way back, appended to every rung of a filed-away text paste: dux cancels
+/// the paste event, so on a failing rung this is the whole recovery. The chord
+/// names both platforms rather than sniffing one, matching the docs.
 const PASTED_TEXT_RECOVERY =
   ' Your text is still on the clipboard: press Ctrl+Shift+v (Cmd+Shift+v on a Mac) to paste it as text, or change when this happens under "Save long pastes as a file" in Preferences.'
 
@@ -811,23 +513,14 @@ function savedFilesToast(
     }
   }
 
-  // 2. Something saved whose path never went out. Precise about what "sent"
-  // means: we KNOW these did not go, because we do not hold input or the socket
-  // was closed. (A path written to an open socket is claimed no more strongly
-  // than any keystroke, because nothing acknowledges it.)
-  //
-  // The rename note and the folder breakdown belong here as much as anywhere:
-  // this is the rung where the user has to go and find the file themselves, so
-  // a name they were never told and a folder they were told wrongly are worse
-  // here than on any other rung.
+  // 2. Something saved whose path never went out: we do not hold input, or the
+  // socket was closed. This is the rung where the user finds the file by hand.
   if (notSent.length > 0) {
     const groups = strandedByReason(notSent)
     const alsoRefused =
       refused.length > 0 ? ` ${reasonList(refused)} was not saved at all.` : ""
-    // One reason for all of them is the ordinary case and reads plainly. It is
-    // ALSO the only case where a single "not sent: <why>" clause is true, which
-    // is what the previous version said unconditionally, taking the first
-    // stranded file's reason and applying it to every one of them.
+    // One reason for all of them is the only case where a single "not sent:
+    // <why>" clause is true of every stranded file.
     const head =
       groups.length === 1
         ? `Saved${toPhrase(savedFiles, ctx)}, but the path was ${notDelivered(ctx)}: ${endSentence(groups[0].reason)} ` +
@@ -838,10 +531,8 @@ function savedFilesToast(
             .join("; ")}.`
     return {
       tone: "warning",
-      // THE sticky rung. This message carries the full path of a file that is
-      // on disk and that the agent was never given, and nothing else on screen
-      // names that path. Recovering means typing it or dropping the file again,
-      // which is work the user cannot begin once the report has cleared itself.
+      // Sticky: nothing else on screen names the path of a file that is on disk
+      // and was never given to the agent.
       sticky: true,
       message:
         head +
@@ -856,8 +547,7 @@ function savedFilesToast(
     const total = outcomes.length
     return {
       tone: "warning",
-      // Not sticky: what was refused was never taken from the user, so the
-      // originals are still wherever they were dragged from.
+      // Not sticky: the originals are still wherever they were dragged from.
       sticky: false,
       message:
         `Saved ${savedFiles.length} of ${total} files${toPhrase(savedFiles, ctx)} and ${deliveredMany(ctx)}. ` +
@@ -887,22 +577,10 @@ function savedFilesToast(
   }
 }
 
-/// The sonner id ONE file drop lives on: its per-file spinners and its single
-/// report at the end. One id per drop is what makes the final REPLACE that
-/// drop's spinner in place instead of stacking a second toast beneath it, and it
-/// is what lets the final retire that spinner's leak guard without either side
-/// knowing about the other.
-///
-/// It is minted per drop rather than being a module constant. Uploads within one
-/// drop are sequential, but a drop is not atomic, so two quick drops overlap:
-/// with a shared id, drop A's final landed on the id and was then painted over by
-/// drop B's next per-file spinner, and the user lost A's report entirely. That
-/// report is often the error naming which files were refused, which is the one
-/// the user most needs. A counter rather than a random id, so the ordering stays
-/// legible.
-///
-/// Shared by both drop surfaces (the pane and the editor tree), so their ids
-/// come from one sequence and neither can mint an id the other is using.
+/// The toast id one drop lives on: its per-file spinners and its final report,
+/// so the final replaces that spinner in place. Minted per drop, because two
+/// overlapping drops sharing an id paint over each other's report, and shared by
+/// both drop surfaces, so neither can mint an id the other is using.
 let fileDropSeq = 0
 export function nextFileDropToastId(): string {
   fileDropSeq += 1

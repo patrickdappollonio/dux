@@ -1,8 +1,5 @@
-// Pure helpers for the file tree's context-menu file management flows (New
-// File, New Folder, Rename, Delete). Kept free of React so they're trivially
-// unit-testable; the server remains the source of truth for containment
-// (resolve_worktree_path / is_under / resolves_into_git_dir); validation here
-// is UX only, to reject an obviously-bad name before a round trip.
+// Pure helpers for the file tree's file-management flows. The server remains the authority on
+// containment; validation here is UX only, rejecting a bad name before a round trip.
 
 // The directory a create (New File / New Folder) should target, given the
 // right-clicked context.
@@ -38,9 +35,8 @@ export function renameTarget(from: string, newName: string): string {
   return joinName(parentDir(from), newName)
 }
 
-// The final worktree-relative target of a MOVE: the destination directory
-// plus the source's own basename. A move is a rename that changes the folder
-// and keeps the name, which is why it goes to the same server route.
+// The final worktree-relative target of a move: the destination directory plus the source's
+// own basename. A move is a rename that keeps the name, so it takes the same server route.
 export function moveTarget(from: string, destDir: string): string {
   return joinName(destDir, basename(from))
 }
@@ -51,10 +47,8 @@ export function basename(path: string): string {
   return idx === -1 ? path : path.slice(idx + 1)
 }
 
-// Whether a chosen destination directory is a legal target for moving `from`.
-// UX only: the server is still the authority on containment and on refusing an
-// occupied destination. This just stops the two moves that are obviously
-// pointless or impossible before a round trip.
+// Whether a chosen destination directory is a legal target for moving `from`. UX only: the
+// server is still the authority on containment and on refusing an occupied destination.
 export function validateMove(
   from: string,
   destDir: string,
@@ -62,9 +56,8 @@ export function validateMove(
   if (destDir === parentDir(from)) {
     return { ok: false, error: "This is already the folder it is in." }
   }
-  // A folder cannot contain itself. Compare on a path-segment boundary so a
-  // sibling that merely shares a name prefix ("src-old" next to "src") is not
-  // mistaken for a descendant.
+  // A folder cannot contain itself. Compare on a segment boundary so a sibling that shares a
+  // name prefix ("src-old" next to "src") is not read as a descendant.
   if (destDir === from || destDir.startsWith(`${from}/`)) {
     return { ok: false, error: "A folder cannot be moved inside itself." }
   }
@@ -74,10 +67,8 @@ export function validateMove(
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/
 
-// Validate a single path SEGMENT typed into New File/New Folder/Rename (never
-// a full path: no "/" is ever valid here). Rejects: empty/whitespace-only,
-// a "/" or "\" (would try to create a sub-path or escape), "." or "..", any
-// NUL/control char, and a case-insensitive ".git".
+// Validate a single path segment typed into New File/New Folder/Rename; a full path is never
+// valid here. Rejects empty, slashes, "." and "..", control chars, and a case-insensitive ".git".
 export function validateEntryName(
   name: string,
 ): { ok: true } | { ok: false; error: string } {

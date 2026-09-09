@@ -1,82 +1,52 @@
-// A dedicated WebSocket to ONE PTY (an agent's main provider or a companion
-// terminal). Each focused terminal opens its own socket whose connection IS
-// the subscription, so the
-// server routes that PTY's bytes here with no per-message addressing.
+// A dedicated WebSocket to one PTY (an agent's provider tab or a companion
+// terminal). The connection is the subscription, so the server routes that PTY's
+// bytes here with no per-message addressing.
 //
 // Protocol (matches `handle_pty_socket` in `crates/dux-web/src/server.rs`):
-//   - On (re)open the server sends a Text `connected` frame FIRST carrying this
-//     socket's connection id, the replay generation, who currently drives the
-//     PTY, the ownership epoch of that owner snapshot, the owner's device label
-//     (its captured `User-Agent`; the key is omitted when there is none to
-//     name), the PTY's current grid, and the grid sequence that grid is at
-//     least as new as:
+//   - On (re)open the server sends a Text `connected` frame first:
 //     `{"event":"connected","id":"<connId>","gen":<n>,"owner":"<connId>"|null,"owner_epoch":<n>,"owner_device":"<ua>","rows":<n>|null,"cols":<n>|null,"grid_seq":<n>}`.
-//   - Whenever a resize is APPLIED to the PTY, every socket attached to it gets
-//     a Text event frame `{"event":"size","rows":R,"cols":C,"seq":<n>}`. One PTY
-//     has one authoritative grid (the owner's) and every other attached browser
-//     renders the same byte stream into its own differently sized xterm, so this
-//     is how a viewer learns that what it is rendering is wrapped and clamped.
-//     `seq` is a per-pty counter stamped server-side in APPLY order; the
-//     broadcasts behind these frames are emitted after that order is fixed and
-//     can invert in flight, so this client keeps only the highest seq seen
-//     (seeded from the handshake's `grid_seq`) and drops any older arrival, or
-//     a stale announcement could become its last word on the grid.
-//   - Then the server sends ONE Binary frame replaying the buffered
-//     scrollback/repaint; feed it straight to xterm like any other byte chunk. The
-//     `gen` labels this replay so the client can drop one it already applied.
-//   - server→client Binary = raw PTY bytes (write to xterm).
-//   - client→server Binary = PTY stdin (xterm `onData`).
-//   - client→server Text = a resize control frame `{"rows":R,"cols":C}`, which
-//     claims sizing+input ONLY when the PTY is unowned. A resize that also
-//     carries `"takeover":true` transfers ownership from whoever holds it, and
-//     is the only frame this client ever sends while it knows it is not the
-//     owner.
-//   - Close = detach (the server drops the subscription/forwarder).
+//   - Every applied resize broadcasts `{"event":"size","rows":R,"cols":C,"seq":<n>}`
+//     to every socket on that PTY. `seq` is stamped server-side in apply order but
+//     published after that order is fixed, so this client keeps only the highest
+//     seq seen (seeded from `grid_seq`) and drops any older arrival.
+//   - Then one Binary frame replaying the buffered scrollback; feed it straight to
+//     xterm. `gen` labels it so a replay already applied can be dropped.
+//   - server to client Binary = raw PTY bytes; client to server Binary = PTY stdin.
+//   - client to server Text = `{"rows":R,"cols":C}`, which claims sizing and input
+//     only when the PTY is unowned. Adding `"takeover":true` transfers ownership,
+//     and is the only frame this client sends while it knows it is not the owner.
+//   - Close = detach.
 //
-// Reconnect behavior is the shared `ReconnectingSocket` base, with the two
-// PTY-specific policies it takes:
-//
-//   PARKING. A hidden page schedules nothing. This is the socket the policy
-//   exists for: the events socket keeps retrying while hidden, because attention
-//   indicators and OS notifications ride it precisely then, while a PTY nobody is
-//   looking at is worth nothing until they look again.
-//
-//   THE VALIDATED GATE. A retry is held until the run-identity check has
-//   RESOLVED, never merely until the events socket is open. Attaching an agent's
-//   pty LAUNCHES its provider, so attaching to a server that restarted under this
-//   tab is the one thing the check exists to prevent, and `conn === "open"` is
-//   true a whole round trip before it has answered. See `serverValidated.ts`.
-//
-// Retrying is otherwise indefinite; `failed` means a terminal close code and
-// nothing else. `close()` is the deliberate, user-initiated teardown and
-// suppresses the reconnect loop.
+// Reconnect is the shared `ReconnectingSocket` base with two PTY-specific
+// policies: a hidden page schedules nothing, because a PTY nobody is looking at
+// is worth nothing until they look again; and a retry is held until the
+// run-identity check has resolved, never merely until the events socket is open,
+// because attaching an agent's pty launches its provider (`serverValidated.ts`).
+// Retrying is otherwise indefinite, `failed` means a terminal close code, and
+// `close()` is the deliberate teardown that suppresses the reconnect loop.
 
 import { assertNever } from "./assertNever"
 import { ReconnectingSocket } from "./reconnectingSocket"
 import { onServerValidated, serverValidated } from "./serverValidated"
 import type { TerminalOwnerRef } from "./terminalOwner"
 
-// The WebSocket close code the server sends on a PTY socket when the provider is
-// not available to attach to — it failed to launch (e.g. the CLI is not on PATH)
-// or its process has exited/crashed. It means "do not auto-retry": re-subscribing
-// would just relaunch the doomed provider, so the client stops and surfaces the
-// Reconnect affordance instead of looping. Must match `PROVIDER_GONE_CLOSE_CODE`
-// in `crates/dux-web/src/server.rs`. 4001 is in the application-private range
-// (4000-4999) so it can never collide with a protocol close code.
+// The close code the server sends when the provider is not available to attach
+// to. It means "do not auto-retry": re-subscribing would relaunch a doomed
+// provider, so the client stops and surfaces Reconnect instead of looping. Must
+// match `PROVIDER_GONE_CLOSE_CODE` in `crates/dux-web/src/server.rs`; 4001 is in
+// the application-private range, so it cannot collide with a protocol code.
 export const PROVIDER_UNAVAILABLE_CLOSE = 4001
 
-// Derive the WebSocket scheme from the page protocol so an HTTPS deployment uses
-// `wss://` (a hardcoded `ws://` would be blocked as mixed content under HTTPS).
-// Read at call time (not module load) so the URL builders are safe to import in
-// any environment and tests can stub `location` per-case.
+// Derive the WebSocket scheme from the page protocol: a hardcoded `ws://` would
+// be blocked as mixed content under HTTPS. Read at call time, not module load, so
+// the URL builders import safely anywhere and tests can stub `location`.
 function wsScheme(): string {
   return location.protocol === "https:" ? "wss:" : "ws:"
 }
 
-// The agent session's slot-tab PTY socket URL: a convenience alias for
+// The agent session's slot-tab PTY socket URL: an alias for
 // `tabPtyUrl(sessionId, <that agent's slot tab>)`, which the server resolves.
-// Connecting launches/resumes the provider, exactly as the legacy `Subscribe`
-// did.
+// Connecting launches or resumes the provider.
 export function agentPtyUrl(sessionId: string): string {
   return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(
     sessionId,
@@ -102,20 +72,18 @@ export function projectTerminalPtyUrl(
   )}/terminals/${encodeURIComponent(terminalId)}/pty`
 }
 
-// A standalone terminal's PTY socket URL. Un-nested, because a standalone
-// terminal has no owner to nest under; the server still refuses an owned
-// terminal at this address, so the address is not a way around the nested
-// routes' cross-owner checks.
+// A standalone terminal's PTY socket URL, un-nested because it has no owner to
+// nest under. The server still refuses an owned terminal at this address, so it
+// is not a way around the nested routes' cross-owner checks.
 export function standaloneTerminalPtyUrl(terminalId: string): string {
   return `${wsScheme()}//${location.host}/ws/terminals/${encodeURIComponent(
     terminalId,
   )}/pty`
 }
 
-// A terminal's PTY socket URL, chosen by its OWNER. Which websocket route a
-// terminal is reachable at is an ownership decision, so it is a switch ending in
-// `assertNever` rather than a two-way conditional at the call site: a new owner
-// kind is reachable at a route of its own, and must say which.
+// A terminal's PTY socket URL, chosen by its owner. Which route a terminal is
+// reachable at is an ownership decision, so this is a switch ending in
+// `assertNever`: a new owner kind must say which route it uses.
 export function terminalSocketUrl(
   owner: TerminalOwnerRef,
   terminalId: string,
@@ -133,11 +101,9 @@ export function terminalSocketUrl(
 }
 
 // A tab's own PTY socket URL, nested under its owning session so the server can
-// enforce that the tab belongs to that session. This is the stable address of
-// EVERY tab, the session-slot tab included; the bare `agentPtyUrl` is a
-// convenience alias that reaches the slot tab's identical PTY, and is still what
-// the client dials for it. Connecting launches a dormant tab's provider,
-// resuming or not per the server's dynamic decision.
+// enforce that the tab belongs to that session. The stable address of every tab,
+// the session-slot tab included, which `agentPtyUrl` aliases. Connecting launches
+// a dormant tab's provider, resuming or not per the server's dynamic decision.
 export function tabPtyUrl(sessionId: string, tabId: string): string {
   return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(
     sessionId,
@@ -173,93 +139,77 @@ export class PtySocket extends ReconnectingSocket {
 
   constructor(url: string) {
     super(url, { parkWhileHidden: true, canRetry: serverValidated })
-    // THE GATE PUSHES AS WELL AS BLOCKING. A retry held by the gate re-arms at
-    // whatever delay it had reached, so without this the socket waited out that
-    // gap AFTER the run check had already resolved and everything was healthy.
-    // The gate opening is the moment to try, so it says so.
+    // The gate pushes as well as blocking: a retry held by it re-arms at whatever
+    // delay it had reached, and the gate opening is the moment to try.
     this.unsubscribeGate = onServerValidated(() => {
       this.resumeNow()
     })
   }
 
-  // A lifecycle close (`pagehide`) keeps the gate subscription, exactly as it
-  // keeps the four wake signals: the gate opening is one of the ways a PTY
-  // socket comes back, and a page that is still here must not lose it just
-  // because it went away for a moment. Only a real teardown retires it.
+  // A lifecycle close (`pagehide`) keeps the gate subscription, as it keeps the
+  // wake signals: the gate opening is one of the ways a PTY socket comes back.
+  // Only a real teardown retires it.
   override dispose(): void {
     this.unsubscribeGate()
     super.dispose()
   }
 
   private bytesCb: (bytes: Uint8Array) => void = () => {}
-  // This socket's server-assigned connection id, delivered as the first Text frame
-  // (`{event:"connected", id}`) on every (re)open (the server allocates a fresh id
-  // per open). Null until that frame arrives. The terminal view compares it against
-  // the `owner` field of each `pty.owner` event to decide ownership definitively
-  // (see `ptyOwnership.ts`).
+  // This socket's server-assigned connection id, from the `connected` frame on
+  // every (re)open (a fresh id per open). Null until that frame arrives; the
+  // terminal view compares it against each `pty.owner` event's `owner` to decide
+  // ownership (see `ptyOwnership.ts`).
   private connId: string | null = null
 
   // The generation stamped on the scrollback replay that follows the most recent
-  // `connected` frame (see the reconnect-repaint idempotency guard in
-  // `TerminalPane`). Null until a `connected` frame carrying `gen` arrives, or when
-  // an older server sends none. The pane reads this the instant it applies a replay
-  // and drops any replay whose generation it has already applied, so a duplicate or
-  // late blob can never stack a second copy of the scrollback.
+  // `connected` frame; null until one carrying `gen` arrives. The pane reads it
+  // as it applies a replay and drops any generation it has already applied, so a
+  // duplicate or late blob cannot stack a second copy of the scrollback.
   private replayGen: number | null = null
 
   // Who the server says currently drives this PTY, as of the most recent
-  // `connected` frame. THREE distinct values, and the pane needs all three:
+  // `connected` frame. Three distinct values, and the pane needs all three:
   //   - a connection id: somebody is driving (this client, if it equals `connId`)
   //   - `null`: the key was present and empty, so nobody is driving
-  //   - `undefined`: the key was ABSENT, so this server does not answer the
-  //     question and the client falls back to its foreground guess
+  //   - `undefined`: the key was absent, so this server does not answer and the
+  //     client falls back to its foreground guess
   // Only the handshake writes it; live changes arrive as `pty.owner` events on
   // the separate events socket.
   private connectedOwner: string | null | undefined = undefined
 
   // The ownership epoch stamped on the handshake's owner snapshot
-  // (`owner_epoch`), read server-side under the same lock as `owner` and drawn
-  // from the SAME counter every `pty.owner` event carries. The handshake rides
-  // this socket while `pty.owner` rides the events socket, two TCP connections
-  // with no ordering between them, so the seed compares this against the newest
-  // `pty.owner` epoch already applied and DEFERS to a strictly newer one:
-  // without it, a stale `connected{owner:null}` arriving after a fresh
-  // `pty.owner{owner:B}` would re-seed this client as a phantom owner, and the
-  // stale-null direction emits no correcting event, ever. `undefined` means the
-  // key was absent (an old server, which then omitted `owner` too).
+  // (`owner_epoch`), drawn from the same counter every `pty.owner` event carries.
+  // The handshake and `pty.owner` ride different connections with no ordering
+  // between them, so the seed defers to a strictly newer applied epoch: a stale
+  // `connected{owner:null}` would otherwise re-seed this client as a phantom
+  // owner, and that direction emits no correcting event. `undefined` means the
+  // key was absent, from a server that omits `owner` too.
   private connectedOwnerEpoch: number | undefined = undefined
 
   // The owner's device label on the handshake's owner snapshot
-  // (`owner_device`): the raw `User-Agent` the owning connection presented at
-  // its upgrade, recorded server-side at claim time and read under the same
-  // lock as `owner`. It is the same string a `pty.owner` handover carries as
-  // `device`, and it rides the handshake because a mere attach hears no such
-  // handover: without it a watcher that simply opened the pane could only
-  // title its take-over card with the generic copy. `undefined` when the key
-  // is absent (an old server, an unowned pty, or an owner with no User-Agent).
+  // (`owner_device`): the raw `User-Agent` the owning connection presented,
+  // the same string a `pty.owner` handover carries as `device`. It rides the
+  // handshake because a mere attach hears no handover, leaving a watcher with
+  // only generic copy on its take-over card. `undefined` when the key is absent
+  // (an unowned pty, or an owner with no User-Agent).
   private connectedOwnerDevice: string | undefined = undefined
 
   // The PTY's grid as of the most recent frame that reported one: the
-  // `connected` handshake at attach, then every `size` event after it. Null
-  // when the server did not answer (an old server, or a pty it could not read),
-  // which reads as "nothing is known about the grid" and must never be mistaken
-  // for agreement with the local one.
+  // `connected` handshake at attach, then every `size` event after it. Null means
+  // nothing is known about the grid, which must never be mistaken for agreement
+  // with the local one.
   private ptyGrid: { rows: number; cols: number } | null = null
 
   // The highest grid seq applied so far: the handshake's `grid_seq` seed, then
-  // every accepted `size` event's `seq`. The server stamps seqs in apply order
-  // but publishes after that order is fixed, so two sockets' announcements can
-  // reach this client inverted; a `size` event at or below this mark carries
-  // OLDER geometry than `ptyGrid` already holds and is dropped, never applied.
-  // Null against an old server that sends no seqs, which disables the filter
-  // rather than mistaking "no seq" for "seq zero".
+  // every accepted `size` event's `seq`. Announcements can reach this client
+  // inverted, so a `size` event at or below this mark carries older geometry than
+  // `ptyGrid` already holds and is dropped. Null when no seqs are sent, which
+  // disables the filter rather than reading "no seq" as "seq zero".
   private lastGridSeq: number | null = null
 
-  // Fired with this socket's connection id, the pty's current owner, and the
-  // ownership epoch of that owner snapshot, each time the `connected` frame
-  // lands. Lets the terminal view track which connection id is "us" for the
-  // ownership comparison, and SEED its verdict from the server rather than from
-  // a guess, re-issued on every reconnect.
+  // Fired with this socket's connection id, the pty's current owner, and that
+  // snapshot's epoch each time the `connected` frame lands, so the terminal view
+  // seeds its ownership verdict from the server rather than from a guess.
   onConnected: (
     id: string,
     owner: string | null | undefined,
@@ -267,13 +217,10 @@ export class PtySocket extends ReconnectingSocket {
     ownerDevice: string | undefined,
   ) => void = () => {}
 
-  // Fired with the PTY's grid every time the wire reports one, and with
-  // `fromHandshake` saying WHICH frame reported it. The two are acted on
-  // differently and the distinction is the whole point of the flag: the
-  // handshake's grid is the state a fresh attach is already sized against,
-  // while a CHANGE after the attach is what makes a viewer re-attach to heal.
-  // A frame that carries no grid (an old server, or a pty the server could not
-  // read) reports null rather than a guess.
+  // Fired with the PTY's grid every time the wire reports one. `fromHandshake`
+  // separates the state a fresh attach is already sized against from a change
+  // after the attach, which is what makes a viewer re-attach to heal. A frame
+  // carrying no grid reports null rather than a guess.
   onPtyGrid: (
     grid: { rows: number; cols: number } | null,
     fromHandshake: boolean,
@@ -284,29 +231,20 @@ export class PtySocket extends ReconnectingSocket {
   // so an answer to a stale beat can never satisfy a newer deadline.
   onBeat: (n: number) => void = () => {}
 
-  // `onOpen`, `onReconnecting`, and `onConn` are inherited from ReconnectingSocket.
-  // The pane wires `onOpen` (re-arm first-frame resize; the server replays
-  // scrollback as the first Binary frame on every open), `onReconnecting` (show a
-  // non-blocking "Reconnecting…" cue while the socket retries), and `onConn` (so
-  // it can surface a "connection lost" Reconnect affordance when the shared cap is
-  // hit and the socket emits `failed`). Input typed while disconnected is still
-  // dropped by `sendInput`'s readyState guard — the cues signal that it would be,
-  // they are not a buffer.
+  // `onOpen`, `onReconnecting` and `onConn` are inherited from ReconnectingSocket.
+  // Input typed while disconnected is dropped by `sendInput`'s readyState guard;
+  // the reconnect cues signal that it would be, they are not a buffer.
 
-  // Consulted on every unexpected close, BEFORE scheduling a reconnect. Returning
-  // `false` means the underlying PTY route is gone for good (e.g. an extra tab's
-  // socket 404s because another client deleted that tab while this one was
-  // retrying) rather than merely dropped — retrying against a route that will keep
-  // 404ing would spin with no escape. A close carries no HTTP status the client
-  // can read, so the consumer is expected to check its own source of truth (e.g.
-  // spine tab membership) instead. Defaults to always retry, matching every other
-  // PTY socket (agent session-slot tab, companion terminal), which never go away
-  // out from under a live client this way.
+  // Consulted on every unexpected close, before scheduling a reconnect. `false`
+  // means the underlying PTY route is gone for good rather than merely dropped
+  // (an extra tab another client deleted), where retrying would spin with no
+  // escape. A close carries no HTTP status the client can read, so the consumer
+  // checks its own source of truth, such as spine tab membership. Defaults to
+  // always retry.
   shouldRetry: () => boolean = () => true
 
   // Fired once, in place of scheduling a reconnect, the first time `shouldRetry()`
-  // says the route is gone. The socket does not close itself further (there is
-  // nothing more to tear down); the consumer decides what the UI does next.
+  // says the route is gone. The consumer decides what the UI does next.
   onGone: () => void = () => {}
 
   // Register the raw-bytes consumer (xterm `term.write`). Last registration wins.
@@ -320,8 +258,7 @@ export class PtySocket extends ReconnectingSocket {
   }
 
   // The generation of the scrollback replay that immediately follows the current
-  // `connected` frame, or null when the server sent none (an older server) or before
-  // the first `connected` frame. Read by the pane at the moment it applies a replay.
+  // `connected` frame, or null before that frame and when none was sent.
   get replayGeneration(): number | null {
     return this.replayGen
   }
@@ -435,18 +372,17 @@ export class PtySocket extends ReconnectingSocket {
     console.warn("[dux] PTY socket error; reconnect will follow", event)
   }
 
-  // Whether the underlying WebSocket is currently open, i.e. whether a send
-  // right now would actually go on the wire. The send methods below silently
-  // drop frames when it is not (fine for keystrokes, which are re-typed), but
-  // the compose bar's Send must instead KEEP its buffered message and tell the
-  // user, so it checks this before writing.
+  // Whether a send right now would actually go on the wire. The send methods
+  // below drop frames silently when it is not (fine for keystrokes, which are
+  // re-typed), so the compose bar's Send checks this first and instead keeps its
+  // buffered message and tells the user.
   get isOpen(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN
   }
 
   // Send PTY stdin as a Binary frame. A copy is sent so the buffer is a plain
-  // `ArrayBuffer` (not `ArrayBufferLike`, which `WebSocket.send` rejects under
-  // strict lib typings) and the caller's view can't mutate it in flight.
+  // `ArrayBuffer` (`WebSocket.send` rejects `ArrayBufferLike` under strict lib
+  // typings) and the caller's view cannot mutate it in flight.
   sendInput(bytes: Uint8Array): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(bytes.slice().buffer)
@@ -456,20 +392,16 @@ export class PtySocket extends ReconnectingSocket {
   // Send a resize control frame as Text. The server parses `{rows, cols}` (u16)
   // and issues the SIGWINCH; an unchanged size is a kernel no-op server-side.
   //
-  // `takeover` is the ownership TRANSFER request, set only by a deliberate press
-  // of Take over. Without it the server grants the claim only when the pty is
-  // unowned, and refuses the resize outright when somebody else drives it, which
-  // is what stops an ordinary attach or window change from stealing the prompt.
-  // The flag is omitted from the JSON when false rather than sent as `false`, so
-  // the ordinary frame is byte-identical to the one every prior version sent.
+  // `takeover` requests an ownership transfer, set only by a deliberate press of
+  // Take over. Without it the server grants the claim only on an unowned pty and
+  // refuses the resize outright when somebody else drives it, which is what stops
+  // an ordinary attach or window change from stealing the prompt. The flag is
+  // omitted from the JSON when false rather than sent as `false`.
   //
-  // Returns whether the frame actually went on the wire. Unlike a keystroke, a
-  // dropped resize is not re-typed by anybody: the caller remembers the last
-  // size it told the PTY about and skips a size it believes is already there,
-  // so a frame silently discarded here (the socket is CONNECTING or CLOSED,
-  // which is every reconnect) must be reported rather than swallowed, or the
-  // size is booked as delivered and never re-asserted. A take-over intent rides
-  // on exactly this answer: it is cleared only when this returns true.
+  // Returns whether the frame actually went on the wire. A dropped resize is
+  // re-typed by nobody: the caller skips a size it believes is already there, so
+  // a frame discarded here must be reported rather than booked as delivered and
+  // never re-asserted. A take-over intent is cleared only when this returns true.
   sendResize(
     rows: number,
     cols: number,
@@ -488,22 +420,18 @@ export class PtySocket extends ReconnectingSocket {
     return false
   }
 
-  // THE ONE PERIODIC CLIENT FRAME: `{"beat":N,"viewed":B}`.
+  // The one periodic client frame: `{"beat":N,"viewed":B}`.
   //
-  // `viewed` is the older half. It NEVER claims sizing ownership server-side; it
-  // only stamps the engine's engagement window, so an agent the user is actively
-  // watching keeps its attention flag down without requiring keystrokes. The
-  // caller decides it through `shouldSendViewed`.
+  // `viewed` never claims sizing ownership server-side; it only stamps the
+  // engine's engagement window, so an agent the user is watching keeps its
+  // attention flag down without keystrokes. The caller decides it through
+  // `shouldSendViewed`. `beat` is the liveness half, and a watcher sends it too:
+  // the server's own ping is send-only with no pong deadline, so it cannot see
+  // the half-open socket a network handoff leaves behind. The server echoes the
+  // number back.
   //
-  // `beat` is the liveness half, and a WATCHER sends it too (with `viewed`
-  // false): the server's own WebSocket ping is send-only with no pong deadline,
-  // so it reaps a socket the OS has given up on but cannot see the half-open one
-  // a Wi-Fi to cellular handoff leaves behind. The server echoes the number back.
-  //
-  // One frame rather than two, because they run on the same timer and a second
-  // periodic frame is a second thing to keep in step. Returns whether it went on
-  // the wire, so the heartbeat does not start a deadline for a frame it never
-  // sent.
+  // Returns whether it went on the wire, so the heartbeat does not start a
+  // deadline for a frame it never sent.
   sendBeat(n: number, viewed: boolean): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ beat: n, viewed }))
@@ -514,11 +442,9 @@ export class PtySocket extends ReconnectingSocket {
 }
 
 // The PTY socket the focused center pane is currently driving, or null when no
-// terminal is focused. The macro quick-picker writes a macro's payload straight
-// to this socket as stdin (there is no server-side `run_macro` command;
-// delivery is client-side),
-// so the store needs a handle to "the active PTY" without reaching into React.
-// `TerminalPane` registers its socket on mount and clears it on unmount.
+// terminal is focused. Macro delivery is client-side, so the store needs a handle
+// to the active PTY without reaching into React. `TerminalPane` registers its
+// socket on mount and clears it on unmount.
 let activePtySocket: PtySocket | null = null
 
 export function setActivePtySocket(s: PtySocket | null): void {

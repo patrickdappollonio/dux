@@ -1,12 +1,10 @@
-// Pure helpers for the code-editor tab strip, kept out of components so they
-// are unit-testable without mounting React or Monaco. Mirrors the `agentTabs.ts`
-// idiom: components and the store call ONLY these functions, never reimplement
-// the selection/promotion rules inline.
+// Pure helpers for the code-editor tab strip. Components and the store call
+// only these functions and never reimplement the selection or promotion rules,
+// the same idiom `agentTabs.ts` follows.
 //
-// Editor tabs are pure client state (not server-sourced like agent tabs): the
-// store keeps one `EditorTabsState` per session, keyed by session id. The heavy
-// Monaco buffer (loaded/draft/view-state/diff cache) lives in the `EditorBody`
-// component, keyed by tab id: see `EditorOverlay.tsx`.
+// Editor tabs are client state, not server-sourced: the store keeps one
+// `EditorTabsState` per session, while the heavy Monaco buffer lives in the
+// `EditorBody` component, keyed by tab id.
 
 export type EditorTabMode = "file" | "diff" // reuses the EditorViewMode shape
 
@@ -27,22 +25,16 @@ export function emptyTabsState(): EditorTabsState {
   return { tabs: [], activeId: null }
 }
 
-// Open a file, applying the VS Code preview model. Single source of truth for
-// every open entry point (tree single-click, tree double-click, search, new
-// file, changed-files Edit/Diff):
-//  1. If a tab already holds `path`: activate it; if opts.pin, clear its preview;
-//     if opts.mode is given (an EXPLICIT mode intent, e.g. the changed-files
-//     Edit/Diff buttons), retarget the existing tab's mode. A plain activation
-//     (tree/search click, opts.mode omitted) PRESERVES whatever mode the tab
-//     was already showing: a tree re-click must never silently flip an open
-//     diff tab back to file view.
-//  2. Else if a NON-DIRTY preview tab exists: REPLACE it in place (reuse its id,
-//     swap path+mode; preview stays true unless opts.pin). Never accumulates.
-//     The new tab's mode is opts.mode, defaulting to "file".
-//  3. Else: append a new tab (preview = !opts.pin, mode = opts.mode ?? "file"),
-//     activate it.
-// A dirty preview tab is impossible in normal flow (editing pins a tab), but
-// rule 2 guards `!preview.dirty` defensively so we never clobber unsaved edits.
+// Open a file, applying the VS Code preview model. The one entry point for every
+// open gesture:
+//  1. A tab already holding `path` is activated, pinned when opts.pin, and
+//     retargeted only when opts.mode states an explicit intent, so a tree
+//     re-click never flips an open diff tab back to file view.
+//  2. Else a non-dirty preview tab is replaced in place, reusing its id, so
+//     preview tabs never accumulate.
+//  3. Else a new tab is appended and activated.
+// Rule 2 guards on `!preview.dirty` so unsaved edits are never clobbered, even
+// though editing pins a tab.
 export function openFile(
   state: EditorTabsState,
   path: string,
@@ -93,13 +85,10 @@ export function pinTab(state: EditorTabsState, id: string): EditorTabsState {
   }
 }
 
-// Returns the SAME `state` reference when the target tab's dirty flag is
-// already `dirty` (including when `id` doesn't match any tab). This matters
-// because the store wrapper skips `setState` on a same-reference result (see
-// `store.ts` `editorSetTabDirty`), and the overlay currently calls this on
-// every keystroke. Without the identity short-circuit, that call would fan
-// out a store-wide re-render (useSyncExternalStore has no per-field
-// selectors) on every keystroke rather than only on an actual dirty flip.
+// Returns the same `state` reference when the flag is unchanged or the id
+// matches no tab. The store skips `setState` on a same-reference result, and
+// the overlay calls this on every keystroke, so without the short-circuit each
+// keystroke would fan a store-wide re-render out.
 export function setTabDirty(
   state: EditorTabsState,
   id: string,
@@ -139,10 +128,9 @@ export function closeTab(state: EditorTabsState, id: string): EditorTabsState {
   return { tabs, activeId: tabs.length === 0 ? null : nextId }
 }
 
-// VS Code next-active rule: the tab to the RIGHT of the closing tab's index,
-// else the tab to the LEFT, else null (no tabs left). `tabs` is the PRE-close
-// list. `activeId` is accepted for signature symmetry with the reducer but the
-// rule only depends on the closing tab's position within `tabs`.
+// VS Code next-active rule: the tab right of the closing tab's index, else the
+// one left of it, else null. `tabs` is the pre-close list; `activeId` is taken
+// for signature symmetry with the reducer and unused.
 export function nextActiveId(
   tabs: EditorTab[],
   closingId: string,
@@ -162,12 +150,9 @@ export function shouldConfirmClose(state: EditorTabsState, id: string): boolean 
   return state.tabs.find((t) => t.id === id)?.dirty ?? false
 }
 
-// Whether a first edit should promote its tab from preview to permanent, so
-// an in-progress edit is never silently discarded by a later preview-replace.
-// True only when the edit turns a still-preview tab dirty; false for an
-// already-permanent tab (nothing to promote) or an edit that doesn't actually
-// change the dirty flag (e.g. undoing back to the saved content, or a
-// duplicate call for a tab that's already dirty).
+// Whether a first edit should promote its tab from preview to permanent, so an
+// in-progress edit is never discarded by a later preview-replace. True only when
+// the edit turns a still-preview tab dirty.
 export function shouldPromoteOnEdit(
   tab: EditorTab | undefined,
   newDirty: boolean,
@@ -183,26 +168,17 @@ function underPath(tabPath: string, base: string): boolean {
   return tabPath === base || tabPath.startsWith(`${base}/`)
 }
 
-// Rename retarget: rewrite the path of the tab whose path === `from` (a file
-// rename), or every tab whose path is under `from/` (a folder rename),
-// replacing the `from` prefix with `to`. Returns the SAME state reference
-// when nothing matched (ref-equal short-circuit, matching `setTabDirty`'s
-// contract so `setEditorTabsFor` bails out of a no-op setState).
+// Rename retarget: rewrite the path of the tab at `from`, or of every tab under
+// `from/`, replacing the prefix with `to`. Returns the same state reference when
+// nothing matched, matching `setTabDirty`'s contract.
 //
-// Before rewriting, closes any OTHER (non-renaming) tab that already sits at
-// one of the computed destination paths -- e.g. a stale tab left open from a
-// previously deleted file. Without this, retargeting would produce two tabs
-// holding the same path, violating the path-uniqueness invariant the Monaco
-// model-disposal effect in EditorOverlay.tsx depends on. The collision close
-// reuses `closeTab`'s next-active rule, one tab at a time.
+// Any other tab already sitting at a destination path is closed first, through
+// `closeTab`'s next-active rule, or retargeting would leave two tabs on one
+// path and break the uniqueness the Monaco model disposal depends on.
 //
-// Note: retargeting a CLEAN open tab necessarily discards its Monaco undo
-// history and view state (folding, scroll position, cursor) -- the Monaco
-// model is keyed by the path's URI, so the new path gets a fresh model with
-// no history. This is accepted (see the plan): the alternative is a dirty
-// buffer silently reloading from disk, which is worse. A dirty tab is never
-// renamed at all -- the caller gates the Rename dialog on `hasDirtyUnderPath`
-// before ever calling this reducer.
+// Retargeting a clean tab discards its Monaco undo history and view state,
+// since the model is keyed by the path's URI. A dirty tab is never renamed: the
+// caller gates the Rename dialog on `hasDirtyUnderPath`.
 export function renameTabPaths(
   state: EditorTabsState,
   from: string,
@@ -233,10 +209,9 @@ export function renameTabPaths(
   }
 }
 
-// Delete: close the tab whose path === `path` (a file) or every tab under
-// `path/` (a folder). Reuses the `closeTab` next-active rule for each removed
-// tab, one at a time, so cascading closes reselect exactly as a user closing
-// them one by one would. Returns the same reference when nothing matched.
+// Delete: close the tab at `path` or every tab under `path/`, one at a time
+// through `closeTab`, so a cascade reselects as a user closing them one by one
+// would. Returns the same reference when nothing matched.
 export function closeTabsUnderPath(
   state: EditorTabsState,
   path: string,
@@ -260,12 +235,9 @@ export function hasDirtyUnderPath(
   return state.tabs.some((t) => underPath(t.path, path) && t.dirty)
 }
 
-// True when any tab of any session carries a dirty flag. This is the
-// beforeunload-guard predicate: the STORE flags are what outlive the editor
-// body, so the guard stays honest while the editor is closed with a dirty
-// draft still cached (see lib/editorDrafts.ts). The old overlay-close discard
-// dialog read a per-session dirty count here; closing became non-destructive
-// (drafts survive in the cache), so that dialog and its copy are gone.
+// True when any tab of any session carries a dirty flag: the beforeunload-guard
+// predicate. The store flags outlive the editor body, so the guard stays honest
+// while the editor is closed with a dirty draft cached (see `editorDrafts.ts`).
 export function hasAnyDirtyTab(
   states: Record<string, EditorTabsState>,
 ): boolean {
@@ -277,15 +249,10 @@ export interface SaveResolution {
   message: string
 }
 
-// What to toast, and whether it is honest to celebrate, once a save's
-// `fileApi.write` resolves. `tabStillOpen` must be checked against the LIVE
-// tabs list AT RESOLVE TIME, not at the moment `save()` was called: a delete
-// confirmed while the write was in flight already reached the server and
-// succeeded there (the write cannot be un-sent), so recreating the just-
-// deleted file on disk is real. Reporting "Saved" in that case would lie
-// about what happened; a warning is the honest outcome. EditorOverlay still
-// applies the write's OWN buffer/dirty bookkeeping only when the tab is still
-// open (there's no tab left to mark clean otherwise).
+// What to toast once a save's write resolves. `tabStillOpen` must be read from
+// the live tabs list at resolve time, not when `save()` was called: a delete
+// confirmed mid-write already reached the server, so the file really was
+// recreated on disk and "Saved" would misreport it.
 export function saveResolutionOutcome(
   path: string,
   tabStillOpen: boolean,

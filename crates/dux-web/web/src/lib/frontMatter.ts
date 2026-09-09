@@ -2,20 +2,14 @@
 // preview, which renders the leading `--- … ---` block as a key/value table the
 // way GitHub does.
 //
-// This is NOT a YAML implementation and is not trying to become one: dux ships
-// no YAML parser and pulling one in for a preview table would be a large
-// dependency for a decorative feature. It reads the subset front matter is
-// actually written in (scalars, quoted strings, flow and block lists, one level
-// of nested map) and falls back to showing the raw text for anything else. It
-// never throws and never drops text: a value it cannot read is displayed
-// verbatim, and a block it produces no rows at all for is reported through
-// `unreadable` so the caller can show the block itself. The block is stripped
-// from the body either way, so silence there would lose what the author wrote.
-//
-// Known limits, stated rather than hidden: anchors, aliases, tags, multi-document
-// streams and maps nested more than one level deep are shown as raw text; flow
-// maps (`{a: 1}`) are raw text; comments are stripped only when they follow a
-// space on an unquoted scalar, which is the form YAML itself requires.
+// Not a YAML implementation: it reads the subset front matter is written in
+// (scalars, quoted strings, flow and block lists, one level of nested map) and
+// shows anything else as raw text. It never throws and never drops text: an
+// unreadable value is displayed verbatim, and a block that yields no rows is
+// reported through `unreadable`, since the block is stripped from the body
+// either way. Anchors, aliases, tags, multi-document streams, flow maps and
+// deeper nesting are raw text; a comment is stripped only after a space on an
+// unquoted scalar, the form YAML itself requires.
 
 export type FrontMatterScalar = string | number | boolean | null
 export type FrontMatterValue = FrontMatterScalar | FrontMatterScalar[]
@@ -28,9 +22,8 @@ export interface FrontMatterRow {
 
 export interface FrontMatterSplit {
   rows: FrontMatterRow[]
-  // The block's own text, when it holds content this reader produced no rows
-  // for. The caller shows it verbatim: the block is stripped from the body, so
-  // dropping it silently would lose text the author wrote.
+  // The block's own text, when it holds content that produced no rows. The
+  // caller shows it verbatim, or the stripped block's text is lost.
   unreadable: string | null
   // The document with the front-matter block removed, ready for the markdown
   // renderer.
@@ -160,9 +153,8 @@ function readNestedMap(parent: string, block: string[]): FrontMatterRow[] {
     // at a different indent is a mis-indented sibling: bail rather than drop it.
     if (indentOf(line) !== base) return []
     const entry = splitKey(line)
-    // A line that is neither an entry at this level nor a continuation of one
-    // means this block is not the shape we read. Give up on the whole block so
-    // the caller shows its text rather than a table missing rows.
+    // Neither an entry at this level nor a continuation: give up on the whole
+    // block, so the caller shows its text rather than a table missing rows.
     if (entry === null) return []
     const inner: string[] = []
     let j = i + 1
@@ -270,9 +262,8 @@ export function parseScalar(text: string): FrontMatterScalar {
   if (/^(false|no|off)$/i.test(bare)) return false
   if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(bare)) {
     const n = Number(bare)
-    // Only when the number survives the round trip. `007`, `1.10`, `-0` and
-    // integers past the float range all come back different, and a table must
-    // show what the author wrote, not what JavaScript made of it.
+    // Only when the number survives the round trip: `007`, `1.10` and `-0` come
+    // back different, and the table must show what the author wrote.
     if (Number.isFinite(n) && String(n) === bare) return n
   }
   return bare

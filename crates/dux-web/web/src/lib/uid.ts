@@ -1,11 +1,7 @@
-// Pure client-id generator. `crypto.randomUUID` only exists on secure
-// contexts (https, or localhost); dux is frequently run over plain HTTP on a
-// LAN/Tailscale address (see `lib/sw.ts`'s `isSecureContext` gating for the
-// same deployment reality), where `crypto` is present but `randomUUID` is
-// undefined. Falling back to `crypto.getRandomValues` (available even on an
-// insecure context) keeps tab-id generation from throwing there; a final
-// `Math.random` fallback covers the practically nonexistent, but still
-// guarded defensively, case where `crypto` itself is unavailable.
+// Pure client-id generator. `crypto.randomUUID` exists only on secure contexts, and dux is
+// frequently served over plain HTTP on a LAN or Tailscale address, where `crypto` is present
+// but `randomUUID` is not; `getRandomValues` works there, and a `Math.random` fallback covers
+// a `crypto` that is missing entirely.
 export function newClientId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID()
@@ -19,8 +15,7 @@ export function newClientId(): string {
     const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
   }
-  // No Web Crypto at all: fall back to a non-cryptographic but still unique-
-  // enough id for a client-only tab identifier (never sent to the server as a
-  // security token).
+  // No Web Crypto at all: a non-cryptographic id is enough for a client-only tab identifier,
+  // which is never sent to the server as a security token.
   return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 }

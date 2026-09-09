@@ -1,18 +1,12 @@
-// Whether the dux server is reachable at a "local-access" URL — used to gate the
-// editor's "Open in editor" action, which spawns a GUI editor on the SERVER.
+// Whether the dux server is reachable at a local-access URL, which gates the editor's "Open in
+// editor" action, spawning a GUI editor on the server rather than in the browser. Local means
+// localhost, loopback (0.0.0.0 included) and the RFC1918 private IPv4 ranges. Deliberately not
+// local: Tailscale's CGNAT range (100.64.0.0/10), public IPs, and any hostname or domain. IPv6
+// is remote except ::1, so a Tailscale IPv6 is never misread as local.
 //
-// "Local" = localhost / loopback (incl. 0.0.0.0) / RFC1918 private IPv4 ranges,
-// matching the user-facing rule "localhost or a local IP". Deliberately NOT
-// local: Tailscale's CGNAT range (100.64.0.0/10), public IPs, and ANY
-// hostname/domain (a letsencrypt domain, a Tailscale MagicDNS name). IPv6 is
-// treated as remote except loopback (::1), so a Tailscale IPv6 (fd7a:…) is never
-// misread as local.
-//
-// Caveat: a private LAN IP only means "some host on this network" — it may be a
-// DIFFERENT machine than the browser, in which case the editor opens on the
-// server rather than the user's screen (a harmless no-op on a headless server).
-// Loopback is the only true same-machine guarantee; LAN IPs are included by the
-// user's explicit request to enable the feature for local IPs.
+// A private LAN IP only means "some host on this network", which may be a different machine
+// than the browser, where the editor opens on the server rather than the user's screen.
+// Loopback is the only true same-machine guarantee; LAN IPs are included by explicit request.
 export function isLocalAccessHost(hostname: string): boolean {
   const host = hostname.trim().toLowerCase()
   if (

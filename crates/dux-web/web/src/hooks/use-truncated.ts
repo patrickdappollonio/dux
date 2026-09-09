@@ -1,20 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
-// Is this element's text actually cut off by its own `truncate`?
-//
-// The header's chips reveal their full value on hover, but ONLY when there is
-// something to reveal: a tooltip that repeats text the user can already read is
-// noise. "Cut off" is not a guess, it is a measurement (`scrollWidth` against
-// `clientWidth`), and it has to be re-taken whenever the element's box changes,
-// which on this surface happens constantly: the terminal/Changes split is
-// draggable, the window resizes, and a chip's siblings grow and shrink around
-// it.
-//
-// So the measurement is re-taken on three events: the ref attaching, the watched
-// value changing, and a ResizeObserver firing on the element itself. There is
-// deliberately no polling. `ResizeObserver` is absent under jsdom, so its
-// absence is a supported state rather than a crash: the hook simply reports the
-// mount-time answer, which in a layout-free test environment is "not truncated".
+// Is this element's text actually cut off by its own `truncate`? A tooltip repeating text the
+// user can already read is noise, so this is measured (`scrollWidth` against `clientWidth`)
+// and re-measured on the ref attaching, the watched value changing, and a ResizeObserver
+// firing on the element; there is deliberately no polling. A missing `ResizeObserver` (jsdom)
+// is a supported state: the hook then reports the mount-time answer.
 export function useIsTruncated<T extends HTMLElement = HTMLElement>(
   // Re-measure when this changes. Pass the rendered text: a longer value can
   // overflow a box whose own size never moved, so the observer alone misses it.
@@ -25,10 +15,8 @@ export function useIsTruncated<T extends HTMLElement = HTMLElement>(
 
   const measure = useCallback(() => {
     const el = nodeRef.current
-    // A sub-pixel layout can leave scrollWidth one larger than clientWidth on
-    // text that is not actually clipped, so compare with a 1px tolerance rather
-    // than strictly: a tooltip that fires on a glyph's worth of rounding is the
-    // same noise this hook exists to avoid.
+    // A sub-pixel layout can leave scrollWidth one larger than clientWidth on text that is
+    // not actually clipped, so compare with a 1px tolerance rather than strictly.
     setTruncated(el ? el.scrollWidth - el.clientWidth > 1 : false)
   }, [])
 

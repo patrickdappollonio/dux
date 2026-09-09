@@ -1,13 +1,12 @@
-// Terminal ownership, defined ONCE and switched on exhaustively.
+// Terminal ownership, defined once and switched on exhaustively.
 //
 // A terminal is owned by exactly one owner and ownership never changes after
-// spawn. The owner is a tagged value the server sends (`TerminalOwnerWire`, the
-// mirror of Rust's `dux_core::viewmodel::TerminalOwnerView`), and every decision
-// it drives goes through a `switch` whose last statement is `assertNever`, so a
-// new variant is a COMPILE error at every site that has to answer for it.
-//
-// A two-way `owner.kind === "session" ? ... : ...` conditional is the failure
-// this prevents: it keeps compiling for a third kind and treats it as a project.
+// spawn. The owner is a tagged value the server sends (`TerminalOwnerWire`), and
+// every decision it drives goes through a `switch` whose last statement is
+// `assertNever`, so a new variant is a compile error at every site that has to
+// answer for it. A two-way `owner.kind === "session" ? ... : ...` conditional is
+// the failure this prevents: it keeps compiling for a third kind and treats it
+// as a project.
 
 import { assertNever } from "@/lib/assertNever"
 
@@ -20,9 +19,8 @@ export type TerminalOwnerWire =
   // Owned by nothing: a standalone terminal, opened in the user's home
   // directory. There is no owner id to carry, so it carries what its row names
   // it by instead: the server-side directory it opened in, already written with
-  // the home directory collapsed to `~`. The server shortens it because the
-  // browser is not necessarily on the same machine and has no `~` of the
-  // server's to collapse against.
+  // the home directory collapsed to `~`, because the browser is not necessarily
+  // on the same machine.
   | { kind: "standalone"; cwd_label: string }
 
 // The client-side owner reference: the same union, in the app's own spelling.
@@ -32,9 +30,8 @@ export type TerminalOwnerRef =
   | { kind: "session"; sessionId: string }
   | { kind: "project"; projectId: string }
   // No id, because there is no owner. Every standalone terminal shares this one
-  // reference value, which is exactly right: the terminal id is what tells two
-  // of them apart, and the address they live at (`#/terminal/<id>`) carries no
-  // owner segment for the same reason.
+  // reference value: the terminal id is what tells two of them apart, and the
+  // address they live at (`#/terminal/<id>`) carries no owner segment either.
   | { kind: "standalone" }
 
 // Wire → client. The one ingestion point for ownership, so nothing downstream
@@ -52,14 +49,13 @@ export function ownerRefFromWire(owner: TerminalOwnerWire): TerminalOwnerRef {
   }
 }
 
-// A handler per owner variant, mapped over the union's `kind`. This is the
-// second half of the guarantee, and it exists because a `switch` inside a HELPER
-// only protects the helper: `ownerSessionId` below is exhaustive, yet a caller
-// that reduces an owner to that nullable id keeps compiling the day a new
-// variant starts answering null, and quietly does the wrong thing with it. So a
-// consumer whose BEHAVIOUR depends on the owner takes one of these instead. The
-// object literal it writes is missing a key the moment a variant is added, which
-// is a compile error at the CONSUMER, where the decision actually lives.
+// A handler per owner variant, mapped over the union's `kind`. A `switch` inside
+// a helper only protects the helper: `ownerSessionId` below is exhaustive, yet a
+// caller that reduces an owner to that nullable id keeps compiling the day a new
+// variant starts answering null. A consumer whose behaviour depends on the owner
+// takes one of these instead, and the object literal it writes is missing a key
+// the moment a variant is added, which is a compile error where the decision
+// lives.
 //
 // Use `matchOwner`/`matchWireOwner` wherever the owner selects what is rendered,
 // where a row is emitted, or what something is called. Use `ownerSessionId` and
@@ -109,16 +105,15 @@ export function matchWireOwner<T>(
   }
 }
 
-// The owning SESSION's id, or null when this terminal belongs to something that
+// The owning session's id, or null when this terminal belongs to something that
 // is not a session. Session-scoped UI (the changes pane, the agent breadcrumb,
-// the session PTY route) hangs off this, and every one of those surfaces already
-// tolerates null, which is what makes null the right answer for a non-session
-// owner rather than a special case at each call site.
+// the session PTY route) hangs off this and already tolerates null, which makes
+// null the right answer rather than a special case at each call site.
 //
-// LOSSY ON PURPOSE. It collapses every non-session owner into one answer, so it
-// can only be used where "is it a session or not" is the ENTIRE decision, and
-// each such use must say so. Anything that has to SAY something about the owner
-// (name it, place its row, choose its screen) uses `matchOwner` above instead.
+// Lossy on purpose: it collapses every non-session owner into one answer, so use
+// it only where "is it a session or not" is the entire decision, and say so at
+// the call site. Anything that has to say something about the owner (name it,
+// place its row, choose its screen) uses `matchOwner` above instead.
 export function ownerSessionId(owner: TerminalOwnerRef): string | null {
   switch (owner.kind) {
     case "session":
@@ -159,8 +154,8 @@ export function sameOwner(
     case "project":
       return ref.kind === "project" && ref.projectId === wire.project_id
     // Every standalone terminal has the same owner, so this is a kind test and
-    // nothing more. Two standalone terminals ARE each other's siblings, which
-    // is what makes `terminalTitle` disambiguate two of them running `vim`.
+    // nothing more. Two standalone terminals are each other's siblings, which is
+    // what makes `terminalTitle` disambiguate two of them running `vim`.
     case "standalone":
       return ref.kind === "standalone"
     default:

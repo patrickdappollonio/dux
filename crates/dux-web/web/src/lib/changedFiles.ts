@@ -1,15 +1,10 @@
-// Shared, React-free changed-files helpers (so they stay trivially
-// unit-testable): git-status interpretation (`fileStatusMeta` → kind + label,
-// consumed by FileStatusIcon) and the changed-files search filter
-// (`filterChangedFiles`: a case-insensitive substring match on the path; an
-// empty or whitespace-only query passes everything through).
+// React-free changed-files helpers: git-status interpretation and the changed-files
+// search filter, a case-insensitive substring match an empty query passes through.
 
 import type { ChangedFileView } from "./types"
 
-// A file's git status, interpreted once here (kept React-free so it's trivially
-// unit-testable) and shared by the changes pane and the editor's file
-// tree/search so the marker reads identically everywhere. `kind` selects the
-// icon (see FileStatusIcon); `label` is the human-readable tooltip/aria text.
+// A file's git status interpreted once, shared by the changes pane and the editor's file
+// tree so the marker reads identically. `kind` selects the icon, `label` is the aria text.
 export type FileStatusKind =
   | "modified"
   | "added"
@@ -32,9 +27,8 @@ export function fileStatusMeta(status: string): FileStatusMeta {
   if (code === "?" || code === "??") {
     return { kind: "untracked", label: "Untracked" }
   }
-  // Everything else keys off the first significant char, so porcelain forms like
-  // "MM", "R ", or the conflict code "UU" collapse to the same kind as their
-  // leading single-letter code.
+  // Everything else keys off the first significant char, so "MM", "R " and "UU"
+  // collapse to the kind of their leading letter.
   switch (code[0]) {
     case "M":
       return { kind: "modified", label: "Modified" }
@@ -65,11 +59,8 @@ export function filterChangedFiles(
   return files.filter((f) => f.path.toLowerCase().includes(needle))
 }
 
-// A group's aggregate recap: how many files, how many lines they add and
-// remove between them, and how many of them are binary. Binary files carry no
-// line counts (the wire reports zeroes for them), so they contribute nothing to
-// the sums and are counted separately instead, which is what lets the header
-// say "no lines here, these are binaries" rather than a bare "+0 −0".
+// A group's aggregate recap. Binary files carry no line counts on the wire, so they
+// contribute nothing to the sums and are counted separately instead.
 export interface ChangedFilesRecap {
   count: number
   additions: number
@@ -78,7 +69,7 @@ export interface ChangedFilesRecap {
 }
 
 // The recap describes exactly the rows visible beneath it, so callers pass the
-// FILTERED list, never the source one.
+// filtered list, never the source one.
 export function summarizeChangedFiles(
   files: ChangedFileView[],
 ): ChangedFilesRecap {
@@ -99,19 +90,11 @@ export function summarizeChangedFiles(
   return recap
 }
 
-// A recap's line count, abbreviated so a large sum cannot crowd out the file
-// count beside it: under a thousand it is printed as it is, and from a thousand
-// up it reads in thousands with one decimal, trimmed when that decimal is zero
-// (1000 -> "1k", 1300 -> "1.3k", 12345 -> "12.3k").
-//
-// The decimal is TRUNCATED rather than rounded, so the figure never claims more
-// lines than there are: 1999 reads "1.9k", never "2k". Only LINE counts
-// abbreviate: file counts and the binary count stay raw, because a count of
-// files is a small number the user is meant to read exactly, and so do the
-// per-row +N -N badges, which are data beside a path. There is deliberately no
-// "M" step above this: one unit is one thing to learn, and a diff that large is
-// past the point where the exact figure matters. The TUI's `format_recap_count`
-// answers the same cases identically.
+// A recap's line count, abbreviated from a thousand up in thousands with one decimal,
+// trimmed when that decimal is zero (1300 -> "1.3k"). The decimal is truncated, never
+// rounded, so the figure never claims more lines than there are, and there is no "M"
+// step above it. Only line counts abbreviate: file and binary counts and the per-row
+// badges stay raw. The TUI's `format_recap_count` answers the same cases identically.
 export function formatRecapCount(n: number): string {
   if (n < 1000) return String(n)
   const thousands = Math.floor(n / 1000)
@@ -133,13 +116,10 @@ export function mergeChangedFilesRecaps(
   }
 }
 
-// The changed-files engine state (`watched_worktree`/`changed_files`) is GLOBAL
-// and broadcast to every client, but selection is per-client. So a client must
-// only trust the broadcast lists when they belong to the session it actually has
-// selected; otherwise it would briefly show another tab's session's files. This
-// is true exactly when the ViewModel's `watched_session_id` matches the locally
-// selected session. Returns false while nothing is selected, or while the server
-// hasn't caught up to this client's latest selection (the "loading" window).
+// The changed-files broadcast is global but selection is per client, so a client trusts
+// the lists only while `watched_session_id` matches its own selection; otherwise it would
+// briefly show another tab's files. False while nothing is selected, or while the server
+// has not caught up to this client's latest selection.
 export function shouldShowChangedFiles(
   watchedSessionId: string | null,
   selectedSessionId: string | null,
@@ -154,10 +134,8 @@ export interface ChangedFileSelection {
   unstaged: Set<string>
 }
 
-// Drop every checked path that is no longer in the section it was checked in. A
-// file selected to be staged and then staged is no longer selected to stage, so
-// it leaves the set rather than following the file across. Pure and applied at
-// render, so keeping the selection honest across a refresh needs no effect.
+// Drop every checked path that is no longer in the section it was checked in: a file
+// checked to be staged and then staged leaves the set rather than following the file across.
 export function reconcileSelection(
   prev: ChangedFileSelection,
   slice: { staged: ChangedFileView[]; unstaged: ChangedFileView[] },

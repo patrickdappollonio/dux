@@ -1,8 +1,5 @@
-// Pure, React-free model builder for the "full vitals" agent tooltip (shared by
-// the collapsed icon rail and the expanded sidebar agent rows — see
-// components/AgentVitalsTooltip.tsx). Kept here, framework-free, so the row
-// selection/omission logic is trivially unit-testable without mounting a
-// tooltip or a store.
+// Pure model builder for the "full vitals" agent tooltip, shared by the collapsed icon rail
+// and the expanded sidebar agent rows (components/AgentVitalsTooltip.tsx).
 
 import { statusDotColorClass } from "@/lib/agentRow"
 import type { ChangesSlice } from "@/lib/store"
@@ -29,11 +26,8 @@ export interface AgentVitalsModel {
   rows: AgentVitalsRow[]
 }
 
-// The status line's label, mirroring StatusBadge's semantics: needs_attention
-// wins over everything else (cyan "Needs attention"); an active+working agent
-// reads "Working" (green); a plain active agent reads "Active" (green); anything
-// else (detached/exited) falls back to the raw status word, capitalized, in
-// StatusBadge's muted/amber tone via `statusDotColorClass`.
+// The status line's label, mirroring StatusBadge's precedence: needs_attention, then
+// working, then active; anything else is the raw status word, capitalized.
 function vitalsStatusLabel(session: SessionView): string {
   if (session.needs_attention) return "Needs attention"
   if (session.status === "active" && session.working) return "Working"
@@ -41,9 +35,8 @@ function vitalsStatusLabel(session: SessionView): string {
   return session.status.charAt(0).toUpperCase() + session.status.slice(1)
 }
 
-// Live/total tab count ("2 of 3 live"), or null when there is only one tab (a
-// single-tab agent's liveness is already obvious from the status line, so the
-// row is omitted entirely rather than showing a redundant "1 of 1").
+// Live/total tab count ("2 of 3 live"), or null for a single-tab agent, whose liveness the
+// status line already shows.
 function tabsSummary(session: SessionView): string | null {
   const total = session.tabs.length
   if (total <= 1) return null
@@ -51,12 +44,8 @@ function tabsSummary(session: SessionView): string | null {
   return `${live} of ${total} live`
 }
 
-// One line summarizing what runs in the agent's tabs: providers in first-
-// appearance order, each with a count when it holds more than one tab, e.g.
-// `claude (2), codex, copilot (4)`. A single-tab agent reads as just its
-// provider name. Tab provider strings arrive already resolved (a tab without
-// its own provider inherits the session's), so no fallback logic is needed
-// beyond the tabless edge case.
+// The tabs' providers in first-appearance order, each counted when it holds more than one
+// tab (`claude (2), codex`). Tab provider strings arrive already resolved.
 export function providersSummary(session: SessionView): string {
   if (session.tabs.length === 0) return session.provider
   const counts = new Map<string, number>()
@@ -68,9 +57,8 @@ export function providersSummary(session: SessionView): string {
     .join(", ")
 }
 
-// Branch row value: plain current branch, or an "initial → current" drift form
-// when the worktree has moved off the branch the agent was created on. `null`
-// for a standalone agent, which has no branch and therefore no row.
+// Plain current branch, or an "initial → current" drift form when the worktree has moved off
+// the branch the agent was created on. `null` for a standalone agent, which has no branch.
 function branchValue(session: SessionView): string | null {
   const managed = managedWorkspace(session.workspace)
   if (!managed) return null
@@ -83,12 +71,9 @@ function branchValue(session: SessionView): string | null {
   return managed.branch_name
 }
 
-// The changed-files store slice only ever holds data for the currently
-// SELECTED session (see ChangesSlice in lib/store.ts), so a row for any other
-// session must omit the changes count rather than showing stale/wrong data.
-// This is the one staleness gate shared by both sidebar surfaces (the
-// collapsed rail icon and the expanded row) — extracted here so they can't
-// drift out of sync.
+// The changed-files store slice only ever holds the selected session's data, so any other
+// session omits the count rather than showing another session's. Shared by both sidebar
+// surfaces so they cannot drift.
 export function changesCountFor(
   changes: ChangesSlice | null | undefined,
   sessionId: string,
@@ -99,11 +84,8 @@ export function changesCountFor(
   return changes.staged.length + changes.unstaged.length
 }
 
-// Builds the vitals row model for one session. `changesCount` is the changed
-// (staged + unstaged) file count for this session, or null when that data
-// isn't available (the changed-files store slice only ever holds data for the
-// currently SELECTED session — see ChangesSlice in lib/store.ts — so a
-// non-selected row omits this line rather than showing a stale/wrong count).
+// Builds the vitals row model for one session. `changesCount` is this session's staged plus
+// unstaged file count, or null when unavailable, and the row is then omitted.
 export function buildAgentVitals(
   session: SessionView,
   projectName: string,
@@ -130,11 +112,8 @@ export function buildAgentVitals(
     })
   }
 
-  // A STANDALONE agent's folder. The managed shape deliberately has no
-  // directory row, because a worktree is named after its branch and the branch
-  // row already identifies it. That reasoning does not carry over: this folder
-  // is the user's own, named nothing in particular, and it is the single most
-  // useful fact about the agent.
+  // A standalone agent's folder. The managed shape has no directory row, because a worktree
+  // is named after its branch, but a user's own folder is named nothing in particular.
   const folder = folderWorkspace(session.workspace)
   if (folder) {
     rows.push({

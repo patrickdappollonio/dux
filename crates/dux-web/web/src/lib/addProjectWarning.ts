@@ -1,16 +1,6 @@
-// Branch-warning copy + decision helpers for the add-project pre-flight, ported
-// from the TUI's `ConfirmNonDefaultBranch` dialog (dux-tui render.rs / input.rs).
-//
-// The TUI inspects the repo's current branch before adding and, when HEAD is not
-// the default branch, shows a warning with two variants:
-//   - Known     (origin/HEAD resolved a default that differs from HEAD): names
-//                the default branch and OFFERS to check it out before adding
-//                ("Check Out & Add" — the TUI defaults this on).
-//   - Heuristic (origin/HEAD unavailable, HEAD is not main/master): warns but
-//                CANNOT offer a switch, because dux can't identify the default.
-//
-// The strings below are byte-for-byte the TUI's lines, joined into prose for the
-// web dialog. Keep them in sync with crates/dux-tui/src/app/render.rs.
+// Branch-warning copy and decision helpers for the add-project pre-flight. The strings
+// are byte-for-byte the TUI's `ConfirmNonDefaultBranch` lines, joined into prose for the
+// web dialog. Keep them in step with crates/dux-tui/src/app/render.rs.
 
 import type { BranchWarningView, InspectKind } from "./types"
 
@@ -64,9 +54,8 @@ export interface NoCommitsCopy {
 }
 
 /**
- * Copy for the unborn-HEAD case: a freshly `git init`'d repo has no commits, so
- * it can't back a worktree until it has a root commit. dux offers to create an
- * empty initial commit; existing files are left untracked.
+ * Copy for the unborn-HEAD case: a repo with no commits cannot back a worktree
+ * until it has a root commit, so dux offers an empty initial commit.
  */
 export function noCommitsCopy(): NoCommitsCopy {
   return {
@@ -84,10 +73,8 @@ export interface InitRepoCopy {
 }
 
 /**
- * Copy for the plain-folder case: dux offers to initialize a repository. The
- * note names what dux will do and lists the actual seed candidates found in
- * the folder, omitting the seed clause entirely when there are none (never
- * promise a seed that will not happen).
+ * Copy for the plain-folder case: dux offers to initialize a repository. The seed
+ * clause is omitted when there are no candidates, never promising a seed that will not happen.
  */
 export function initRepoCopy(candidates: string[]): InitRepoCopy {
   const seedClause =
@@ -105,9 +92,8 @@ export interface InsideRepoCopy {
 }
 
 /**
- * Copy for the blocked case: the folder sits inside an existing repository
- * (or inside git's internal directory, where `root` is null and the copy
- * degrades to not naming a root).
+ * Copy for the blocked case: the folder sits inside an existing repository. A null
+ * `root` means git's internal directory, and the copy degrades to not naming a root.
  */
 export function insideRepoCopy(root: string | null): InsideRepoCopy {
   if (root) {
@@ -134,13 +120,10 @@ export interface AddProjectPrimaryAction {
 }
 
 /**
- * Decide the add dialog's primary action + button label from the inspection
- * state. `blocked` (a folder inside a repository) outranks everything; a
- * `plain` kind outranks `hasCommits` (the plain reply carries
- * `has_commits: false`, and init subsumes the commit). An unborn repo (no
- * commits) takes precedence over any branch warning: there is no default
- * branch to check out, and after the initial commit the current branch simply
- * becomes the leading branch.
+ * The add dialog's primary action and button label, in precedence order:
+ * `blocked` (a folder inside a repository) outranks everything; a `plain` kind
+ * outranks `hasCommits`, because init subsumes the commit; an unborn repo
+ * outranks a branch warning, because there is no default branch to check out.
  */
 export function addProjectPrimaryAction(opts: {
   kind: InspectKind

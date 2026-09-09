@@ -1,47 +1,27 @@
-// The editor's per-ROOT draft cache, plus the beforeunload guard that
-// covers the one loss the cache cannot: the page itself going away.
+// The editor's per-root draft cache, plus the beforeunload guard covering the
+// one loss the cache cannot: the page itself going away. A module Map rather
+// than the store, whose unselective external store would re-render every
+// consumer on each keystroke, and rather than the deliberately pure
+// `editorBuffers.ts`.
 //
-// Why a NEW module with mutable state, rather than either of the obvious
-// homes. Not the store: file contents in `useDux()`'s unselective external
-// store would fan a re-render out to every consumer on each keystroke, which
-// is the exact design `EditorBody` keeps its buffers in component state to
-// avoid (see lib/editorTabs.ts header comment). Not `editorBuffers.ts`: that
-// module is deliberately PURE (stateless helpers with their own unit tests),
-// and module-level mutable state would change its character and leak state
-// across its tests. So the cache lives here: a plain module Map that
-// `EditorBody` seeds its buffer state from on mount and writes back on every
-// change, which is what lets an unsaved draft survive the editor being closed
-// and reopened.
-//
-// Lifecycle: entries are pruned to the live tab set whenever the store's
-// editor-tabs slice changes (`setEditorTabsFor`), so a closed tab's draft
-// (including a confirmed per-tab discard) leaves the cache with the tab, and
-// a whole root's entry dies with the target it was rooted at (`editorClearRoot`).
-// Drafts live in page memory only: a reload or a dux restart loses them,
-// which is exactly what the beforeunload guard below exists to warn about.
+// Entries are pruned to the live tab set whenever the store's editor-tabs slice
+// changes (`setEditorTabsFor`), and a root's entry dies with its target
+// (`editorClearRoot`). Drafts live in page memory only.
 
 import type { TabBuffer } from "./editorBuffers"
 
 const cache = new Map<string, Map<string, TabBuffer>>()
 
-// A COPY of the root's cached buffers, safe to hand to React state. A
-// buffer cached mid-fetch (`loading: true`) is dropped: its resolver died
-// with the component that started it, and restoring it would make
-// `shouldSkipFileLoad` skip the re-read and park the tab on a spinner
-// forever. The remount re-fetches that path from scratch instead.
+// A copy of the root's cached buffers, safe to hand to React state. A buffer
+// cached mid-fetch (`loading: true`) is dropped, because its resolver died with
+// the component that started it and `shouldSkipFileLoad` would then skip the
+// re-read and park the tab on a spinner.
 //
-// Everything else comes back untouched, INCLUDING the disk-freshness fields
-// (`diskState`, `diskFact`, `acknowledgedDisk`), and that is a decision rather
-// than an oversight. Those fields are facts about the file, not about the
-// component: if the file on disk had moved away from this buffer before the
-// editor was closed, it has still moved away when it reopens, and dropping the
-// banner would hide a live difference at exactly the moment the user comes
-// back to look at the text. The same goes for a dismissal: "keep mine" was an
-// answer about a specific change, and re-asking it because a panel was closed
-// and reopened would make the button mean nothing. Neither field is ever a
-// save token, so a restored one cannot authorize an overwrite, and the mount
-// trigger in `EditorBody` re-checks every restored buffer, so a stale banner
-// is retired by the next check rather than living forever.
+// Everything else comes back untouched, including the disk-freshness fields
+// (`diskState`, `diskFact`, `acknowledgedDisk`): those are facts about the file
+// rather than the component, so a live difference and a "keep mine" answer both
+// survive a close and reopen. None of them is a save token, so a restored one
+// cannot authorize an overwrite.
 export function loadRootDrafts(rootKey: string): Map<string, TabBuffer> {
   const entry = cache.get(rootKey)
   const restored = new Map<string, TabBuffer>()
@@ -52,9 +32,8 @@ export function loadRootDrafts(rootKey: string): Map<string, TabBuffer> {
   return restored
 }
 
-// Snapshot the root's buffers into the cache. Called by `EditorBody` on
-// every buffer change; copying is cheap (the map is small and the buffers are
-// immutable values) and keeps the cache immune to later state mutations.
+// Snapshot the root's buffers into the cache. Copied rather than referenced, so
+// the cache is immune to later state mutations.
 export function storeRootDrafts(
   rootKey: string,
   buffers: ReadonlyMap<string, TabBuffer>,
@@ -63,9 +42,8 @@ export function storeRootDrafts(
 }
 
 // Drop every cached buffer whose tab no longer exists. Wired into the store's
-// `setEditorTabsFor`, so a tab closed ANYWHERE (per-tab discard confirmed, a
-// deleted file closing its tabs, a rename collision) takes its draft with it,
-// whether or not an `EditorBody` is mounted at the time.
+// `setEditorTabsFor`, so a tab closed anywhere takes its draft with it, whether
+// or not an `EditorBody` is mounted at the time.
 export function pruneRootDrafts(
   rootKey: string,
   liveTabIds: ReadonlySet<string>,
@@ -84,17 +62,10 @@ export function clearRootDrafts(rootKey: string): void {
   cache.delete(rootKey)
 }
 
-// --- The beforeunload guard ------------------------------------------------
-//
-// Closing the EDITOR is non-destructive now (the cache above), so the only
-// real losses left are the page-level ones: a hard refresh, closing the
-// browser tab, closing the window. The guard is armed while any editor tab of
-// any session is dirty IN THE STORE (the store flag outlives `EditorBody`, so
-// the guard deliberately stays armed while the editor is closed with a dirty
-// draft cached: that draft is real, a refresh really would lose it, and the
-// way to stop the prompt is to deal with the draft, not to close the editor).
-// The one page unload that must NOT prompt is the server-restart reload,
-// which is silent by tenet: `reloadPage()` disarms the guard first.
+// The guard is armed while any editor tab of any session is dirty in the store,
+// which outlives `EditorBody`: a cached draft is real and a refresh would lose
+// it, so closing the editor must not disarm the prompt. The one unload that
+// must not prompt is the silent server-restart reload, which disarms first.
 
 let armedHandler: ((event: BeforeUnloadEvent) => void) | null = null
 
@@ -106,9 +77,9 @@ function beforeUnloadHandler(event: BeforeUnloadEvent): void {
 }
 
 // Bring the guard in line with the dirty predicate. Idempotent, so the store
-// can call it on every editor-tabs write. A window missing EITHER half of the
-// listener API gets no handler at all: a handler that could be added but
-// never removed would prompt forever.
+// can call it on every editor-tabs write. A window missing either half of the
+// listener API gets no handler: one that could be added but never removed would
+// prompt forever.
 export function syncBeforeUnloadGuard(anyDirty: boolean): void {
   if (
     typeof window === "undefined" ||
@@ -126,10 +97,9 @@ export function syncBeforeUnloadGuard(anyDirty: boolean): void {
   }
 }
 
-// The restart-reload escape hatch: `reloadPage()` calls this immediately
-// before `window.location.reload()`, because that reload is silent by tenet
-// (no prompt, no toast, no banner) and must win over the guard. The drafts
-// are lost in that case, and the plan says so plainly.
+// The restart-reload escape hatch, called by `reloadPage()` immediately before
+// reloading: that reload is silent by tenet and must win over the guard, at the
+// cost of the drafts.
 export function disarmBeforeUnloadGuard(): void {
   syncBeforeUnloadGuard(false)
 }

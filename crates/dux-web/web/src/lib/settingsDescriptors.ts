@@ -1,35 +1,16 @@
-// Pure, data-driven model for the Preferences modal, opened from the app menu's
-// cog (`CustomizeWebappDialog.tsx`). Each descriptor is one config field the
-// modal exposes: its label, a human-readable description, which surface(s)
-// it affects, its control type, its documented default, and how to read its
-// current value out of the `Bootstrap` document. The dialog renders from
-// `SETTING_GROUPS` instead of hand-written per-field JSX, so adding/removing
-// a field here is the only change needed to change what the modal shows.
+// Data model for the Preferences modal (`CustomizeWebappDialog.tsx`), which
+// renders from `SETTING_GROUPS` rather than per-field JSX. The rules this list
+// respects:
 //
-// KEEP IN SYNC WITH `crates/dux-tui/src/config.rs` (the `config_schema()`
-// canonical-template table, see the "KEEP IN SYNC" comment just above that
-// function): each `description` below is adapted PROSE from that table's
-// `comment` text, not a verbatim copy. See `settingsDescriptors.test.ts` for
-// the drift guard (it pins the exposed key SET, not exact description
-// strings, so a field's wording can evolve without the test going stale).
-//
-// A curated subset: this does NOT expose every `[ui]`/`[capabilities]` field,
-// just the ones judged safe, portable, and low blast-radius. `terminal_identity`,
-// `clipboard_passthrough`, and the numeric infra knobs (`agent_scrollback_lines`,
-// `branch_sync_interval`, `pr_poll_interval_seconds`, `agent_tabs_max`) are
-// deliberately deferred.
-//
-// `ui.upload_directory` is deliberately excluded and is not merely deferred:
-// it is a PATH, editing one in a free-text row is a poor affordance, and doing
-// it properly needs a directory picker this dialog does not have. Its
-// companion `ui.upload_write_gitignore` is a plain toggle and IS here.
-//
-// THIS IS WHERE SETTINGS LIVE. A user preference is a row here, never an app-menu
-// item: the menu carries actions and dialogs. The web command palette used to
-// carry six preference-shaped toggles, four of which already existed here under a
-// second name; the other two (`ui.github_integration`,
-// `defaults.enable_randomized_pet_name_by_default`) became rows here when it was
-// removed.
+// - Each `description` is prose adapted from the `config_schema()` table in
+//   `crates/dux-tui/src/config.rs`; keep the two in step.
+// - The exposed set is curated, not exhaustive: a field belongs here only when
+//   it is safe, portable, and low blast-radius. `settingsDescriptors.test.ts`
+//   pins the exposed key set, not the description strings.
+// - `ui.upload_directory` stays out: editing a path in a free-text row needs a
+//   directory picker this dialog does not have.
+// - A user preference is a row here, never an app-menu item; the menu carries
+//   actions and dialogs.
 
 import type { Bootstrap } from "./bootstrapApi"
 import {
@@ -43,11 +24,8 @@ export type SettingControl =
   | { kind: "bool" }
   | { kind: "number"; min: number; max: number; zeroMeaning?: string; unit?: string }
   | { kind: "enum"; options: { value: string; label: string }[] }
-  /** Like "enum", but the option list isn't known statically: it is resolved
-   * at render time from a live `Bootstrap` field (currently only
-   * `available_providers`), so the client can never offer a provider name the
-   * server doesn't have configured. See `CustomizeWebappDialog.tsx`'s
-   * `SettingControl` for the resolution. */
+  /** Like "enum", but the options resolve at render time from a live `Bootstrap`
+   * field, so the client cannot offer a provider the server has not configured. */
   | { kind: "enum-dynamic"; source: "available_providers" }
   | { kind: "favicon" }
   | { kind: "text"; maxLen: number }
@@ -64,91 +42,52 @@ export interface SettingDescriptor {
   surface: SettingSurface
   control: SettingControl
   default: SettingValue
-  /** Which write path Save uses for this row: the generic settings PATCH, the
-   * dedicated instance-identity endpoint (title/favicon only, see the
-   * CLAUDE.md web-UI tenet: "keep title/favicon on the existing endpoint"), or
-   * the bespoke Changes-pane visibility endpoint. `"changesPane"` is bespoke
-   * because the store tracks an optimistic `changesPaneOverride` for that one
-   * field (the Changes menu toggles it live outside this dialog too), so its
-   * row is wired directly to `changesPaneVisible()`/`setChangesPaneVisibility`
-   * in `CustomizeWebappDialog.tsx` rather than through the generic
-   * read/buildWrites/saveSettings path every other row uses.
-   *
-   * `"github"` is bespoke for a different reason: flipping `ui.github_integration`
-   * has SIDE EFFECTS beyond the config write (it arms or disarms the background
-   * PR-sync poll, kicks an initial refresh, and clears cached PR statuses), and
-   * that logic lives behind `POST /api/v1/ui/toggle-github-integration`. Routing
-   * the row there reuses it instead of forking it into the generic settings PATCH.
-   *
-   * HAZARD, and the reason this is safe: that endpoint is a blind read-and-FLIP,
-   * while this modal saves EXPLICIT values. The two only agree because
-   * `buildWrites` diffs each row against its pre-touch baseline and emits it ONLY
-   * when it actually changed, so "present in the write" implies "flip". If anyone
-   * ever "simplifies" `persist` to write unconditionally, this silently INVERTS
-   * the setting. Pinned by `CustomizeWebappDialog.test.tsx`'s "does not call the
-   * GitHub endpoint when the row is unchanged".
-   *
-   * `"tailscale"` is bespoke for a third reason: saving `[server] tailscale` is
-   * only half of what the row does. The other half moves the RUNNING listener
-   * (stop or start the interface watcher, bind or drop the Tailscale leg, move
-   * the Host guard's tailnet-literal rule with it), which only the serve loop
-   * can perform, and the endpoint answers with what it actually did. Unlike
-   * `"github"` this one carries an explicit value, so the unchanged-row skip is
-   * an optimization here rather than a correctness requirement. */
+  /** Which write path Save uses for this row. Three targets are bespoke because
+   * their fields are not plain config writes:
+   * - `"changesPane"`: the store keeps an optimistic override for it (the
+   *   Changes menu toggles it live too), so the row is wired to
+   *   `changesPaneVisible()`/`setChangesPaneVisibility`.
+   * - `"github"`: flipping it arms or disarms the PR-sync poll and clears
+   *   cached statuses, which lives behind the dedicated endpoint. That endpoint
+   *   is a blind read-and-flip, so `buildWrites` must emit the row only when it
+   *   changed; writing unconditionally inverts the setting.
+   * - `"tailscale"`: the endpoint also moves the running listener, which only
+   *   the serve loop can do. It carries an explicit value, so skipping an
+   *   unchanged row is an optimization here rather than correctness. */
   writeTarget: "settings" | "identity" | "changesPane" | "github" | "tailscale"
-  /** True when the config field is the NEGATIVE of what this row shows: the row
-   * says "Show the welcome screen" while `ui.disable_automated_welcome_screen`
-   * says the opposite. Every row in this modal is phrased positively, because a
-   * "Disable X" toggle turned off is a double negative the reader has to unpick.
-   *
-   * The contract, and it is only two places: `read` returns the value AS SHOWN
-   * (already flipped), and `buildWrites` in `CustomizeWebappDialog.tsx` flips it
-   * back once, immediately before it goes on the wire. Nothing else in the
-   * pipeline knows or cares, so the unchanged-row skip still compares
-   * shown-value to shown-value. Bool rows only. */
+  /** True when the config field is the negative of what this row shows, so that
+   * every row can be phrased positively. `read` returns the value as shown and
+   * `buildWrites` flips it back once, immediately before the wire, so the
+   * unchanged-row skip compares shown value to shown value. Bool rows only. */
   inverted?: boolean
-  /** A lock this RUN of the server puts on the row: the sentence saying why the
-   * value cannot take effect until the next run, or `null` when it can. A locked
-   * row renders disabled and shows this sentence instead of `description`, so
-   * the dialog never offers a write the server is going to refuse. Absent on
-   * every row that no run-scoped flag can override. */
+  /** Why this run of the server cannot honour the value until it restarts, or
+   * `null` when it can. A locked row renders disabled and shows this sentence
+   * instead of `description`. */
   lockedBy?: (b: Bootstrap) => string | null
   /** Reads the current value out of the live Bootstrap document, falling back
-   * to `default` when an older server omits the field. NOTE: for the
-   * `"changesPane"`-targeted row this is NOT the effective value shown in the
-   * dialog, the override-aware `changesPaneVisible()` in `store.ts` is. It is
-   * kept here only so generic helpers (the drift-guard test, `defaultLabel`)
-   * that read every descriptor still have something to call. */
+   * to `default` when an older server omits the field. For the `"changesPane"`
+   * row this is not the effective value the dialog shows; the override-aware
+   * `changesPaneVisible()` in `store.ts` is. */
   read: (b: Bootstrap) => SettingValue
 }
 
 export interface SettingGroup {
   surface: SettingSurface
-  /** Shown once above the group's rows (CLAUDE.md web-UI tenet: group by
-   * surface with an explicit per-group caption rather than repeating the
-   * caveat per row). */
+  /** Shown once above the group's rows, so the surface caveat is stated per
+   * group rather than repeated on every row. */
   caption: string
   settings: SettingDescriptor[]
 }
 
-// Mirrors the server-side clamp ceilings in `crates/dux-core/src/config.rs`
-// (`MAX_STATUS_CLEAR_SECONDS`, `MAX_ATTENTION_GRACE_SECONDS`). These bound
-// the number inputs for UX only. The server re-clamps and is authoritative;
-// the post-save bootstrap refetch reflects whatever it actually saved.
+// Mirror the server-side clamp ceilings in `crates/dux-core/src/config.rs`;
+// they bound the number inputs for UX only and the server re-clamps.
 const MAX_STATUS_CLEAR_SECONDS = 3_600
 const MAX_ATTENTION_GRACE_SECONDS = 300
-// Mirrors `MAX_UPLOAD_PASTED_TEXT_CHARS` / `DEFAULT_UPLOAD_PASTED_TEXT_CHARS`
-// in `crates/dux-core/src/config.rs`. The floor is deliberately NOT mirrored as
-// the input's `min`: `0` is a real value (switch the behaviour off) and the
-// server clamps anything between 1 and the floor up with a warning, so bounding
-// the input at the floor would make the off switch unreachable from here.
+// The floor is deliberately not the input's `min`: 0 switches the behaviour
+// off, and the server raises anything between 1 and the floor.
 const MAX_UPLOAD_PASTED_TEXT_CHARS = 100_000
 const MIN_UPLOAD_PASTED_TEXT_CHARS = 200
 const DEFAULT_UPLOAD_PASTED_TEXT_CHARS = 4_000
-// MIN_TERMINAL_FONT_SIZE/MAX_TERMINAL_FONT_SIZE are imported above from
-// terminalFont.ts rather than redeclared here (that file mirrors the
-// server-side bounds in `crates/dux-core/src/config.rs`). UX bounds only; the
-// server re-clamps.
 
 export const SETTING_GROUPS: SettingGroup[] = [
   {
@@ -245,11 +184,8 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         key: "ui.mobile_accessory_bar",
-        // The key stays `mobile_accessory_bar` for compatibility, but the copy
-        // says TOUCH: the keys travel with the pointer, so a tablet in
-        // landscape gets them inside the desktop layout, and this preference
-        // is shared across your devices. Naming it "phones" sent a user
-        // looking for a bar that was never the phone's alone.
+        // The key stays `mobile_accessory_bar` for config compatibility while
+        // the copy says touch: the keys follow the pointer, not the layout.
         label: "Touch terminal keys",
         description:
           "On a touch device, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box, in the wide layout as well as on a phone. Hide it to give those rows to the terminal; bring it back from the input ⋯ menu beside the message box, from the terminal's own ⋯ menu when there is no typing bar left to hold one, or from this Preferences dialog.",
@@ -285,13 +221,8 @@ export const SETTING_GROUPS: SettingGroup[] = [
         },
         default: DEFAULT_UPLOAD_PASTED_TEXT_CHARS,
         writeTarget: "settings",
-        // ABSENT MEANS OFF, not "means the default". An older server publishes
-        // nothing here, `TerminalPane` reads that as 0 and files nothing away,
-        // and `bootstrapApi.ts` documents the rule. Reading it as the shipped
-        // default here showed a threshold that was not in force, and a user who
-        // saved the dialog would have switched the feature on without asking
-        // for it. `default` below is the shipped value, which is a different
-        // question and is answered separately.
+        // Absent means off rather than the shipped default: an older server
+        // publishes nothing here and `TerminalPane` reads that as 0.
         read: (b) => b.upload_pasted_text_chars ?? 0,
       },
       {
@@ -321,10 +252,8 @@ export const SETTING_GROUPS: SettingGroup[] = [
           kind: "number",
           min: 0,
           max: MAX_STATUS_CLEAR_SECONDS,
-          // Neither "like a warning" nor "sticky" can name this: a warning
-          // retires at three times this window rather than persisting, and
-          // sticky is the handful of messages that wait for the user whatever
-          // this is set to.
+          // Neither "like a warning" nor "sticky" names this: a warning retires
+          // at three times this window, and sticky messages ignore it entirely.
           zeroMeaning: "Never auto-clear (stays until you dismiss it)",
           unit: "seconds",
         },
@@ -468,8 +397,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
         control: { kind: "bool" },
         default: false,
         writeTarget: "settings",
-        // The bootstrap projects this as `randomize_agent_names_by_default`,
-        // not under its config key's name.
+        // The bootstrap projects this under a different name from its config key.
         read: (b) => b.randomize_agent_names_by_default ?? false,
       },
       {
@@ -479,10 +407,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
           "Shows a one-time welcome screen the first time dux runs, explaining projects, agents, and worktrees. Turning this off skips it automatically; the app menu's \"Welcome screen…\" still opens it any time.",
         surface: "both",
         control: { kind: "bool" },
-        // Presented POSITIVELY ("show it") while the config field is a
-        // NEGATIVE ("disable it"), because a row that reads "Disable X" turns
-        // every toggle into a double negative. The dialog inverts on read and on
-        // write: `buildWrites` in `CustomizeWebappDialog.tsx` flips it exactly once.
+        // Shown as "show it" while the config field says "disable it".
         inverted: true,
         default: true,
         writeTarget: "settings",
@@ -509,10 +434,8 @@ export const SETTING_GROUPS: SettingGroup[] = [
         control: { kind: "enum-dynamic", source: "available_providers" },
         default: "claude",
         writeTarget: "settings",
-        // The bootstrap projects this as `global_default_provider` (not
-        // `default_provider`), to keep it unambiguous next to the
-        // per-project `default_provider` field the project settings dialog
-        // reads.
+        // Named `global_default_provider` on the bootstrap to stay unambiguous
+        // next to the per-project `default_provider` field.
         read: (b) => b.global_default_provider ?? "claude",
       },
     ],

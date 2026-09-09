@@ -9,17 +9,15 @@ export function isMarkdownPath(path: string): boolean {
   return MARKDOWN_EXTENSIONS.some((ext) => lower.endsWith(ext))
 }
 
-// A URL is "external" (leave it alone in the preview) when it carries a scheme
-// (http:, data:, mailto:, …), is protocol-relative (//host), or is already
-// root-absolute (/foo) — anything but a worktree-relative path.
+// A URL is external, and left alone in the preview, when it carries a scheme, is
+// protocol-relative, or is root-absolute: anything but a worktree-relative path.
 function isExternalUrl(url: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(url) || url.startsWith("//") || url.startsWith("/")
 }
 
-// Resolve a relative asset reference (a markdown image `src`) against the markdown
-// FILE's directory into a normalized, worktree-relative path. Returns null when
-// the reference is external (see isExternalUrl) or escapes the worktree root via
-// `..` — the caller then leaves the URL untouched. Query/hash suffixes are dropped.
+// Resolve a relative asset reference against the markdown file's own directory into a
+// normalized, worktree-relative path. Null when the reference is external or escapes the
+// worktree root via `..`, and the caller then leaves the URL untouched. Query and hash dropped.
 export function resolveWorktreeRelative(
   filePath: string,
   src: string,
@@ -42,9 +40,8 @@ export function resolveWorktreeRelative(
   return stack.length > 0 ? stack.join("/") : null
 }
 
-// The same-origin proxy URL that serves an asset under the editor's root for
-// the markdown preview, or null when `src` isn't a root-relative reference. The
-// path is re-validated server-side for containment inside that root.
+// The same-origin proxy URL serving an asset under the editor's root, or null when `src` is
+// not a root-relative reference. The server re-validates the path for containment in that root.
 export function markdownAssetUrl(
   root: EditorRoot,
   filePath: string,

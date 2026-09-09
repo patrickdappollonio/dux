@@ -141,12 +141,11 @@ import type {
 } from "./types"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 
-// Who a companion terminal belongs to. The type now lives in
-// `lib/terminalOwner.ts` alongside the exhaustive switches that consume it, and
-// is re-exported here so the many existing `from "@/lib/store"` imports keep
-// working. Every consumer must switch on `kind` and end that switch in
-// `assertNever`; there is deliberately no bare-id accessor, so no owner kind can
-// be silently ignored by session-shaped code.
+// Who a companion terminal belongs to, defined in `lib/terminalOwner.ts`
+// alongside the exhaustive switches that consume it and re-exported here for
+// the `from "@/lib/store"` imports. Every consumer switches on `kind` and ends
+// that switch in `assertNever`; there is deliberately no bare-id accessor, so
+// no owner kind can be silently ignored by session-shaped code.
 export type { TerminalOwnerRef } from "./terminalOwner"
 
 // What the editor is rooted at: an agent's worktree, or the directory a
@@ -251,22 +250,16 @@ export interface PendingSessionOrder {
 // Where the agent this client is creating will land, which is what makes a new
 // session in the next spine recognizable as ours (see `armCreateFocus`).
 //
-// A tagged pair rather than a nullable project id, because the two answers are
-// genuinely different questions and one of them used to be unaskable: an agent
-// created in a project is matched by that project, while a standalone agent
-// belongs to no project at all and is matched by having none. A nullable field
-// would spell "standalone" and "the project could not be resolved" the same
-// way, and the callers that cannot resolve a project must skip arming rather
-// than arm a token that grabs the next standalone agent to appear.
+// A tagged pair rather than a nullable project id: a nullable field spells
+// "standalone" and "the project could not be resolved" the same way, and a
+// caller that cannot resolve a project must skip arming rather than arm a token
+// that grabs the next standalone agent to appear.
 export type CreateFocusScope =
   | { kind: "project"; projectId: string }
   | { kind: "standalone" }
 
-// The changed-files request state machine for the SELECTED session. This is the
-// single source of truth for changed-files data across the app (the changes
-// pane, commit dialog, discard dialog, mobile badge, and editor markers all read
-// it), fed by `GET /api/v1/sessions/:id/changes` and invalidated by
-// `session.changes` events over `/ws/events`.
+// The changed-files request state machine for the selected session, and the one
+// source of changed-files data in the app.
 //
 //   - `idle`    nothing selected (or the slice was cleared, e.g. a 404).
 //   - `loading` a fetch is in flight for `sessionId`.
@@ -275,10 +268,8 @@ export type CreateFocusScope =
 //               next `session.changes` event (which always refetches in this
 //               state, side-stepping the `rev > undefined` trap).
 //
-// `sessionId` is the session these lists belong to; consumers only trust the
-// slice when it equals their own session id. `rev` is the monotonic per-session
-// revision of the applied data; a response or event with an older `rev` is
-// dropped (out-of-order / lost-race protection).
+// Consumers trust the slice only while `sessionId` equals their own. `rev` is
+// monotonic per session; an older `rev` is dropped as an out-of-order reply.
 export type ChangesPhase = "idle" | "loading" | "loaded" | "error"
 
 export interface ChangesSlice {
@@ -298,33 +289,25 @@ export interface ChangesSlice {
 // (`lib/ptySocket.ts`).
 
 export interface DuxState {
-  // The workspace "spine" from `GET /api/v1/workspace`: projects, sessions, and
-  // the core-computed sidebar grouping, fetched once after auth resolves
-  // (alongside the bootstrap document) and thereafter PUSHED by the server as a
-  // `workspace` event on every change. A server that does not push, or a frame
-  // this client cannot read, falls back to re-fetching on the coarse
-  // `projects.changed` / `sessions.changed` events; a reconnect re-fetches
-  // either way. `null` until the first document lands, and every consumer falls
-  // back to empty lists so nothing crashes in that pre-load window.
+  // The workspace "spine": projects, sessions, and the core-computed sidebar
+  // grouping, fetched once and pushed thereafter. A server that does not push,
+  // or a frame this client cannot read, falls back to re-fetching on the coarse
+  // change events. `null` until the first document lands, with every consumer
+  // falling back to empty lists in that window.
   spine: Spine | null
-  // The build-static / config-derived document from `GET /api/v1/bootstrap`
-  // (providers, macros, palette commands, welcome tips, version, UI flags,
-  // global env). Fetched once after auth resolves and re-fetched on a
-  // `config.changed` event. `null` until the first fetch lands — every consumer
-  // falls back to a sensible default (empty list / true / the scrollback
-  // default) so nothing crashes in that pre-load window.
+  // The build-static and config-derived document: providers, macros, palette
+  // commands, welcome tips, version, UI flags, global env. Re-fetched on a
+  // `config.changed` event, and `null` until the first fetch lands, with every
+  // consumer falling back to a sensible default in that window.
   bootstrap: Bootstrap | null
   // Set to true synchronously when boot runs (at module load). Tests wait on
   // this as a settled signal.
   booted: boolean
   conn: ConnState
-  // Sticky "the app-wide events socket is not connected" flag that drives the
-  // full-screen offline modal (`OfflineOverlay`). Distinct from `conn` because a
-  // reconnect attempt re-enters `conn === "connecting"` between drops, and gating
-  // the modal on the raw state would flicker it off on every retry. So this latches
-  // true on the first drop (`closed`/`failed`) and clears ONLY when we are `open`
-  // again; an intermediate `connecting` leaves it untouched. False during the very
-  // first boot connect (no prior connection to have lost).
+  // Sticky "the events socket is not connected" flag behind `OfflineOverlay`.
+  // Distinct from `conn`, which re-enters "connecting" between drops and would
+  // flicker the modal off on every retry: this latches on a drop and clears
+  // only on `open`. False during the first boot connect, with nothing lost yet.
   offline: boolean
   selectedTarget: SelectedTarget | null
   // THEATER MODE: the focused pane fills the surface and every piece of dux's
@@ -349,16 +332,13 @@ export interface DuxState {
   // already-focused pane (same target id) must re-issue `subscribe` to attach to
   // the new provider. Folded into the pane's React key alongside the target id.
   terminalEpoch: number
-  /// THE COMPOSE DRAFTS, keyed by target id (an agent tab id or a terminal id).
+  /// The compose drafts, keyed by target id (an agent tab id or a terminal id).
   ///
-  /// They live here rather than in the pane precisely because `reconnect()` bumps
-  /// `terminalEpoch` to REMOUNT the pane, and the Retry button that bumps it is
-  /// the thing a user reaches for after a bad network, which is exactly when they
-  /// are most likely to have an unsent message typed. Hook state died with that
-  /// remount, and so did the message.
-  ///
-  /// Keyed rather than single, so switching agents keeps each pane's draft, and
-  /// entries are dropped only when their target leaves the spine.
+  /// They live here rather than in the pane because a Retry bumps
+  /// `terminalEpoch` and remounts it, and Retry is what a user reaches for after
+  /// a bad network, with an unsent message typed. Keyed rather than single, so
+  /// switching agents keeps each pane's draft; an entry is dropped only when its
+  /// target leaves the spine.
   composeDrafts: Record<string, string>
   commitTarget: string | null
   commitDraft: string
@@ -398,16 +378,12 @@ export interface DuxState {
   // dialog resolves the owning project from the session id.
   agentStartupCommandTarget: string | null
   agentEnvTarget: string | null
-  // The entity whose startup-command log viewer is open, or null. The log files
-  // + the displayed file's contents are fetched over REST into the fields below
-  // when the viewer opens (mirroring the attach-worktree listing).
+  // The entity whose startup-command log viewer is open, or null. The log list
+  // and the displayed file are fetched over REST into the fields below.
   //
-  // `startupLogsTarget` is a SESSION id in "agent" scope and a PROJECT id in
-  // "project" scope, matching `dux_core::startup::StartupCommandLogScope`: an
-  // agent's own runs, or every run across every agent of a project. The scope
-  // picks the REST client (sessionsApi vs projectsApi) and the dialog's title,
-  // subtitle, empty state and vanished-target lookup. It is a separate field
-  // rather than a tagged target so the agent-scope callers and their tests keep
+  // `startupLogsTarget` is a session id in "agent" scope and a project id in
+  // "project" scope, matching `dux_core::startup::StartupCommandLogScope`. It
+  // is a separate field rather than a tagged target so agent-scope callers keep
   // reading a plain id.
   startupLogsScope: StartupLogsScope
   startupLogsTarget: string | null
@@ -450,13 +426,10 @@ export interface DuxState {
   browsePath: string
   browseEntries: DirEntryView[]
   browseLoading: boolean
-  // Branch pre-flight for the add-project flow, mirroring the TUI's
-  // `ConfirmNonDefaultBranch` prompt. When the user selects a git repo the
-  // dialog fires `inspectProjectPath`; the reply lands here keyed by `path` so a
-  // stale reply for a previously-selected repo is ignored. `loading` drives the
-  // dialog's spinner; `warning` null (with a resolved `path`) means the repo is
-  // on its default branch — no warning step. `null` overall means no inspection
-  // is pending or resolved (nothing selected).
+  // Branch pre-flight for the add-project flow. The reply lands here keyed by
+  // `path`, so a stale reply for a previously-selected repo is ignored. A null
+  // `warning` beside a resolved `path` means the repo is on its default branch
+  // and there is no warning step; null overall means nothing is selected.
   projectPathInspection: {
     path: string
     // Path classification from the server ("repo" | "bare" | "repo_subdir" |
@@ -526,14 +499,11 @@ export interface DuxState {
   // (like renameDraft) so the input stays fully store-controlled.
   attachPullRequestTarget: string | null
   attachPullRequestDraft: string
-  // New-agent dialog state lives in the store (like `commitDraft`) so the input
-  // is fully store-controlled: the server's generated-name reply fills it via an
-  // event-driven callback, never a set-state-in-effect. Mirrors the TUI prompt.
-  //   - `createAgentDraft`: the sanitized branch-name input.
-  //   - `createAgentRandomize`: the "Use randomized pet name" checkbox.
-  //   - `createAgentGeneratedName`: the last name the server generated, so an
-  //     uncheck clears the input ONLY when it still equals that name (exact TUI
-  //     semantics); null once the user edits away from it or no name is pending.
+  // New-agent dialog state lives in the store so the input is fully
+  // store-controlled: the server's generated-name reply fills it through a
+  // callback, never a set-state-in-effect. `createAgentGeneratedName` is the
+  // last name the server generated, so an uncheck clears the input only while
+  // it still equals that name, and is null once the user edits away from it.
   createAgentDraft: string
   createAgentRandomize: boolean
   //   - `createAgentCopyChanges`: the "Copy uncommitted changes from the
@@ -617,31 +587,20 @@ export interface DuxState {
   // spine confirms it. Mirrors `pendingAgentOrder` exactly (see `reorderTerminals`).
   pendingTerminalOrder: string[] | null
   // Optimistic overlay for a session's slot pointer, keyed by session id: the
-  // tab a close of the SLOT tab just promoted into it, alongside the tab that
-  // close destroyed. The DELETE's answer is the only thing that knows this until
-  // the next spine arrives, and the difference is user-visible (which pill is
-  // the agent's first, whether the address is the bare agent form, whether the
-  // promoted tab is shown the Start-session card), so the answer is held here
-  // rather than waited on.
+  // tab a slot-tab close just promoted, and the tab that close destroyed. The
+  // DELETE's answer is the only thing that knows this until the next spine, and
+  // the difference is user-visible, so it is held rather than waited on.
   //
-  // Retired by the CLOSED tab, not the promoted one: see
+  // Retired by the closed tab, not the promoted one: see
   // `reconcilePendingSlotTab`.
   pendingSlotTab: Record<string, PendingSlotTab>
-  // While an agent-create THIS client initiated is in flight, holds the session
-  // ids that already existed when we submitted, plus where the new agent will
-  // land. Agent creation is an async server job whose only completion
-  // signal is a `sessions.changed` event + spine refetch (no per-client reply, no request/echo
-  // correlation), so we recognize "our" new agent as the session id that matches
-  // `scope` and wasn't in `knownIds`, then focus it, mirroring the TUI,
-  // which jumps selection to a freshly created agent when its launch completes.
-  // Only the client that armed this reacts, so other connected clients aren't
-  // yanked off whatever they're viewing. Null when no create is awaiting focus.
-  // See `armCreateFocus` and `focusNewlyCreatedSession`.
-  // `armedAt` (epoch ms) bounds the token's lifetime: a create that never lands
-  // (the dispatch failed silently server-side, or the agent took absurdly long)
-  // would otherwise leave the token armed forever, ready to mis-focus the next
-  // unrelated session that happens to match `scope`. See
-  // `CREATE_FOCUS_TTL_MS` and `focusNewlyCreatedSession`.
+  // While an agent-create this client started is in flight: the session ids
+  // that existed at submit, plus where the new agent will land. Creation has no
+  // per-client reply, so the new agent is recognized as the id matching `scope`
+  // that was not in `knownIds`. Only the arming client reacts, so nobody else
+  // is yanked off what they are viewing. Null when nothing awaits focus.
+  // `armedAt` (epoch ms) bounds the token by `CREATE_FOCUS_TTL_MS`: a create
+  // that never lands would otherwise mis-focus the next matching session.
   pendingCreateFocus: {
     knownIds: string[]
     scope: CreateFocusScope
@@ -652,12 +611,12 @@ export interface DuxState {
   // reads this so a collapse survives re-renders, and creating an agent under a
   // collapsed project can force it open (see `focusNewlyCreatedSession`).
   projectOpen: Record<string, boolean>
-  // The flat agent list's display sort (shared by desktop + mobile), persisted
-  // SERVER-SIDE in `config.ui.agent_sort` so it survives restarts and every client
-  // agrees. This field is the optimistic OVERRIDE (null = follow config), reconciled
-  // by applyBootstrap exactly like `changesPaneOverride`; the effective mode is
-  // `agentSort ?? bootstrap.agent_sort ?? "active"`. A drag flips it to "manual" so
-  // the dropped order (stored in SQLite) sticks. Active-first is recomputed live.
+  // The flat agent list's display sort, persisted server-side in
+  // `config.ui.agent_sort` so it survives restarts and every client agrees.
+  // This field is the optimistic override (null follows config), reconciled by
+  // `applyBootstrap`; the effective mode is
+  // `agentSort ?? bootstrap.agent_sort ?? "active"`. A drag flips it to
+  // "manual" so the dropped order sticks.
   agentSort: FlatSortKey | null
   // The shared search query filtering the flat agent/terminal list on both
   // surfaces. Empty string shows everything.
@@ -690,22 +649,16 @@ export interface DuxState {
   // The generation of the ONE resolve this dialog is waiting for, or null when
   // it is waiting for none.
   //
-  // A resolve is a git call per project on the server, so it can easily still
-  // be out when the user has cancelled the dialog, retargeted it at a project,
-  // or submitted a different reference. Nothing can recall a reply already in
-  // flight, so the only safe rule is that a reply acts when its generation is
-  // still the current one. Checking merely that SOME pull-request dialog is
-  // open does not catch it: the open one may be a different question, and
-  // acting would create an agent from the reference the user replaced and
-  // close the dialog they are looking at.
+  // A resolve is a git call per project, so it can still be out after the user
+  // cancels, retargets or submits a different reference. A reply acts only when
+  // its generation is still current: checking merely that some pull-request
+  // dialog is open would create an agent from a reference already replaced.
   createAgentPrRequestId: number | null
-  // Whether the desktop sidebar is expanded (false is the icon rail). Lifted
-  // out of `SidebarProvider`'s own `useState` and into the store because
-  // theater mode has to be able to hold it still: with the panel unmounted the
-  // primitive's keyboard toggle would still flip the state and write the
-  // preference behind the mode's back, and the layout the user came from would
-  // be different on the way out. The provider is CONTROLLED from here, so the
-  // store owns the persistence too (see `persistSidebarOpen`).
+  // Whether the desktop sidebar is expanded; false is the icon rail. It lives
+  // here rather than in `SidebarProvider` because theater has to hold it still:
+  // with the panel unmounted, the primitive's keyboard toggle would flip the
+  // state behind the mode's back. The provider is controlled from here, so the
+  // store owns the persistence too (`persistSidebarOpen`).
   sidebarOpen: boolean
   sidebarWidth: string
   // Optimistic override for the Changes pane's visibility (desktop). `null`
@@ -714,17 +667,12 @@ export interface DuxState {
   // toggle persists to config via the server; this clears once the broadcast
   // confirms (or on command error / disconnect, which roll it back).
   changesPaneOverride: boolean | null
-  // The Changes panel's CURRENT width, as a percentage of the desktop panel
-  // group (0..100). Lifted out of the ResizablePanelGroup by its onLayoutChange
-  // so the InsetHeader, which is the group's sibling directly above it and spans
-  // exactly the same width, can mirror the percentage as a right-hand spacer and
-  // park the Macros button on the terminal pane's right edge. Mirroring the
-  // PERCENTAGE rather than measuring pixels is what keeps that alignment correct
-  // at any zoom or window size, with nothing having to know the pane's width.
+  // The Changes panel's current width as a percentage of the desktop panel
+  // group (0..100), lifted out by its onLayoutChange so the header above can
+  // mirror it as a right-hand spacer. Mirroring the percentage rather than
+  // pixels is what keeps that alignment right at any zoom or window size.
   //
-  // Runtime-only and deliberately not persisted: a dragged split is not
-  // remembered across hide/show today (see the note in App.tsx), and this field
-  // reports the split rather than deciding it.
+  // Runtime-only and not persisted: this reports the split, never decides it.
   changesPanePercent: number
   // Optimistic override for the touch terminal-keys bar. `null` follows the
   // persisted config (`bootstrap.mobile_accessory_bar`); the input ⋯ menu's
@@ -732,31 +680,18 @@ export interface DuxState {
   // against the next bootstrap exactly like `changesPaneOverride` above, and
   // rolled back (with a toast) when the settings PATCH fails.
   mobileAccessoryBarOverride: boolean | null
-  // Per-PTY input-ownership verdicts from MOUNTED TerminalPanes, keyed by pty
-  // id (a tab id, the agent's first tab included). The
-  // pane is the freshest source: it learns handovers from the `pty.owner`
-  // events on its own socket the moment they happen, ahead of the next spine
-  // refetch. "elsewhere" gates the agent ⋯ menu's mutating actions at once;
-  // "mine" overrides a STALE spine field the other way (right after a
-  // take-over, the spine still names the previous owner until the refetch
-  // lands, and the menu must not stay disabled for the device that just took
-  // over). "mine" is the pane's live BELIEF, not a server receipt: it starts
-  // as the optimistic foreground guess the pane itself starts from (the
-  // foregrounded pane claims via its first resize moments later) and is
-  // corrected by `pty.owner` handovers. Unmounting the pane, or its socket
-  // failing for good, removes the entry — with no live socket this client has
-  // no verdict and the server-published `AgentTabView.input_owner` field (see
-  // `sessionActiveElsewhere`) takes over. Runtime-only client state.
+  // Per-PTY ownership verdicts from mounted TerminalPanes, keyed by pty id.
+  // The pane is the freshest source, learning handovers from `pty.owner` ahead
+  // of the next spine refetch, so it overrides the spine in both directions.
+  // "mine" is the pane's live belief, not a server receipt: it starts as the
+  // pane's optimistic foreground guess. An entry lives only as long as the
+  // pane's socket; without one, `AgentTabView.input_owner` takes over.
   ptyOwnership: Record<string, "mine" | "elsewhere">
-  // This client's OWN live PTY-socket connection ids, one per mounted pane
-  // with an open socket (the server allocates a fresh id per socket open; the
-  // pane registers it from the socket's `connected` frame and retires it on
-  // reconnect/close). This is the identity half of the server-published
-  // ownership comparison: a spine tab whose `input_owner` is NOT in this set
-  // is owned by some other connection — another device, or another tab of
-  // this browser. Deliberately the PTY-socket id space, not the events-socket
-  // `X-Connection-Id`: ownership is recorded per PTY socket server-side, and
-  // the `pty.owner` frames already speak this id space.
+  // This client's own live PTY-socket connection ids, one per mounted pane with
+  // an open socket. A spine tab whose `input_owner` is not in this set is owned
+  // by some other connection. Deliberately the PTY-socket id space, not the
+  // events-socket `X-Connection-Id`: ownership is recorded per PTY socket
+  // server-side and the `pty.owner` frames already speak this id space.
   ownPtyConnIds: Record<string, true>
   // The session whose code-editor overlay is open, the file to auto-open on
   // launch (null = none preselected), and the view it opens in: "file" (editable
@@ -769,25 +704,21 @@ export interface DuxState {
     initialPath: string | null
     initialMode: EditorViewMode
   } | null
-  // The editor's LIVE position, and the source of the URL's editor suffix:
-  // which session's editor is open, and the active tab's mode + path (path
-  // null = editor open with no file). Distinct from `editorTarget` on
-  // purpose: that is a one-shot MOUNT SEED frozen when the body mounts, while
-  // this field tracks every active-tab change (`editorSyncActiveTab`) so
-  // `currentRoute()` can serialize where the editor actually is. Written by
-  // open/close and the reconstitution paths; null = editor closed.
+  // The editor's live position and the source of the URL's editor suffix: whose
+  // editor is open, and the active tab's mode and path (a null path is an
+  // editor open with no file). Distinct from `editorTarget`, a one-shot mount
+  // seed: this tracks every active-tab change so `currentRoute()` can serialize
+  // where the editor actually is. Null while the editor is closed.
   editorRoute: {
     root: EditorRoot
     mode: EditorViewMode
     path: string | null
   } | null
-  // True while this tab IS the standalone editor surface (`#/editor/agent/…`
-  // addresses): `App()` renders `StandaloneEditorShell` instead of either
-  // shell, and `EditorOverlay` stands down so the overlay Dialog and the
-  // standalone shell can never both mount an `EditorBody` (two Monaco models
-  // and two buffer maps over the same files). Seeded from the boot address
-  // and kept in line with the URL by `applyUrlRoute`, so the standalone
-  // header's plain-anchor way back into the full app just works.
+  // True while this tab is the standalone editor surface: `App()` renders
+  // `StandaloneEditorShell` and `EditorOverlay` stands down, so the two can
+  // never both mount an `EditorBody` over the same files. Seeded from the boot
+  // address and kept in line with the URL by `applyUrlRoute`, which is what
+  // makes the standalone header's plain anchor back into the app work.
   standaloneEditor: boolean
   // Per-ROOT editor tab metadata (pure client state; the heavy Monaco buffers
   // live in the `EditorBody` component, keyed by tab id). Keyed by `rootKey`,
@@ -816,22 +747,15 @@ export interface DuxState {
 // file defaults to "diff"; the file tree / edit actions default to "file".
 export type EditorViewMode = "file" | "diff"
 
-// Is there a browser around this module at all? Everything in the app runs in
-// one, and every existing guard below (`typeof location === "undefined"`, the
-// `typeof document` check in `refreshAttentionChrome`) says the same thing in
-// its own words; this names it once.
-//
-// It is false in exactly one place: a build-time render outside a browser. The
-// marketing site renders the REAL components to static HTML (see
-// `website/src/figure/`), which imports this module under plain Node, where
-// `localStorage`, `location` and `window` do not exist and a WebSocket has
-// nothing to connect to. Under jsdom (the unit tests) and in a browser this is
-// true and NOTHING below changes.
+// Is there a browser around this module at all? False only for a build-time
+// render outside one: `website/src/figure/` imports this module under plain
+// Node, where `localStorage`, `location` and `window` do not exist. Under jsdom
+// and in a browser it is true and nothing below changes.
 const hasBrowser = typeof window !== "undefined"
 
 // The expanded sidebar width is drag-resizable and persisted across reloads.
-// 18rem gives agent names breathing room next to the PR/status badges; a
-// previously persisted width still wins.
+// 18rem gives agent names room beside the PR and status badges; a persisted
+// width wins over it.
 const SIDEBAR_WIDTH_KEY = DIVIDER_STORAGE_KEYS.sidebarWidth
 
 // The Changes panel's mount-time size, in percent. Shared by the panel's own
@@ -850,13 +774,11 @@ export const TERMINAL_PANE_MIN_PERCENT = 30
 export const CHANGES_PANE_MAX_PERCENT = 100 - TERMINAL_PANE_MIN_PERCENT
 
 // What the Changes split mounts at: the width the user last released the
-// divider on, or the default. The sidebar's edge has remembered its width
-// across reloads since it existed; this is the same promise on the other side.
+// divider on, or the default.
 //
-// READ LIVE, never captured at module load. The panel unmounts when the pane is
-// hidden and mounts again when it is shown, and its `defaultSize` is what it
-// comes back at: a constant frozen at page load would hand back the width the
-// page STARTED with and overwrite whatever the user dragged to since.
+// Read live, never captured at module load. The panel unmounts when the pane is
+// hidden and comes back at its `defaultSize`, so a constant frozen at page load
+// would overwrite whatever the user has dragged to since.
 export function changesPaneMountPercent(): number {
   if (!hasBrowser) return CHANGES_PANE_DEFAULT_PERCENT
   return readStoredPanePercent(
@@ -867,14 +789,10 @@ export function changesPaneMountPercent(): number {
   )
 }
 
-// The sidebar's expanded/collapsed preference, kept exactly where the shadcn
-// primitive kept it (same cookie name, same lifetime) now that the store owns
-// the state and the provider is controlled. Written on every toggle and READ
-// AT BOOT, so a sidebar left collapsed comes back collapsed. The primitive
-// wrote this cookie and never read it (it takes a server-rendered `defaultOpen`
-// instead, which a single-page app has nowhere to come from), so the preference
-// was recorded and thrown away; that is also what a page which BOOTED into
-// theater lands on when it leaves, having captured nothing.
+// The sidebar's expanded/collapsed preference, at the cookie name and lifetime
+// the shadcn primitive uses. Written on every toggle and read at boot, so a
+// sidebar left collapsed comes back collapsed, and so a page that booted
+// straight into theater has something to land on when it leaves.
 const SIDEBAR_OPEN_COOKIE = "sidebar_state"
 const SIDEBAR_OPEN_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 export const SIDEBAR_DEFAULT_OPEN = true
@@ -894,7 +812,7 @@ function loadSidebarOpen(): boolean {
       return SIDEBAR_DEFAULT_OPEN
     }
   } catch {
-    // Cookies refused. The sidebar opens on its default, as it always did.
+    // Cookies refused, so the sidebar opens on its default.
   }
   return SIDEBAR_DEFAULT_OPEN
 }
@@ -956,40 +874,26 @@ function loadingChanges(sessionId: string): ChangesSlice {
   }
 }
 
-// Whether this tab BOOTED on the standalone editor's whole-tab address. The
-// SHELL choice must be settled at module init (or the ordinary shell would
-// flash and open its sockets first), and it uses the SAME strict grammar the
-// router uses — `parseStandaloneEditorRoute`, a hoisted function with no
-// dependence on the route constants declared below, so calling it here is
-// safe. Strictness is the point: a malformed tail is not a standalone route,
-// so it boots the NORMAL shell and takes the ordinary route-correction path
-// there, instead of marooning the tab on a standalone shell whose route
-// resolves to nothing. `applyUrlRoute` keeps the flag in line with the URL
-// from then on.
+// Whether this tab booted on the standalone editor's whole-tab address. The
+// shell choice must settle at module init, or the ordinary shell flashes and
+// opens its sockets first, so this calls `parseStandaloneEditorRoute`, which is
+// hoisted and does not read the route constants below. Its strictness is the
+// point: a malformed tail boots the normal shell and takes the ordinary
+// route-correction path rather than marooning the tab on an empty one.
 function bootIsStandaloneEditor(): boolean {
   if (typeof location === "undefined") return false
   return parseStandaloneEditorRoute(location.hash ?? "") !== null
 }
 
-// Whether this tab BOOTED on a theater address, and therefore whether the very
-// FIRST layout is the theater one.
+// Whether this tab booted on a theater address, so the first painted layout is
+// already the theater one. The flag otherwise commits with the selection, which
+// is too late: the chrome would collapse as a transition under a mounting pane,
+// and the terminal would fit, parse its replay, and re-grid at two geometries.
 //
-// The flag is otherwise committed with the selection, once the first spine has
-// resolved the route. That is too late for the LAYOUT: the chrome is painted at
-// boot, and the flag arriving later collapses it as an animated transition
-// underneath a pane that is mounting into it. The pane fits at a geometry it is
-// only passing through, the server's replay is parsed at that grid, and the
-// settled fit re-grids on top of it, which drops and reorders lines. Reading
-// the address here makes the boot layout agree with where the page is going, so
-// there is no transition to mount into.
-//
-// Deliberately LOOSER than `parseRoute`, which cannot be called at module init
-// (it reads route constants declared below, unlike the hoisted helpers
-// `bootIsStandaloneEditor` uses). This is the modifier's own suffix test plus
-// "the address names a position at all", which every address `withTheaterHash`
-// writes satisfies. A hand-made address that gets past it costs a moment of
-// hidden chrome and nothing else: the route resolution commits the honest value
-// for the position it lands on, `theaterSerializable` included.
+// Deliberately looser than `parseRoute`, which cannot run at module init
+// because it reads route constants declared below. A hand-made address that
+// gets past this costs a moment of hidden chrome and nothing else, since route
+// resolution commits the honest value for the position it lands on.
 function bootIsTheater(): boolean {
   if (typeof location === "undefined") return false
   const { hash, theater } = splitTheaterHash(location.hash ?? "")
@@ -1142,13 +1046,11 @@ export function getSnapshot(): DuxState {
   return state
 }
 
-// Seed the store directly, for a render that has no server to fetch from. The
-// marketing site's static figure (`website/src/figure/`) is the only caller: it
-// runs at build time under plain Node, where `boot()` is skipped and the state
-// would otherwise sit at its empty initial value forever. It is deliberately a
-// thin pass-through to `setState` so the seeded state settles through exactly
-// the same derivation (mobile screen, not-found) that a live patch does. Not
-// used by the app at runtime, and it opens no socket and fires no fetch.
+// Seed the store directly, for a render that has no server to fetch from: the
+// marketing site's static figure runs at build time under plain Node, where
+// `boot()` is skipped. Deliberately a thin pass-through to `setState`, so the
+// seeded state settles through the same derivation a live patch does. It opens
+// no socket and fires no fetch.
 export function seedStaticSnapshot(patch: Partial<DuxState>): void {
   setState(patch)
 }
@@ -1255,14 +1157,11 @@ function routeEvent(event: EventsServerMessage): void {
 
 eventsSocket.onEvent = routeEvent
 
-// The `boot()` driver kicks off the very first bootstrap+spine load alongside
-// `eventsSocket.connect()`, so the first `onOpen` that follows must NOT re-fetch
-// them or it would duplicate that initial load. The driver sets this flag right
-// before connecting; the first `onOpen` consumes it. Every
-// later (RE-connect) open leaves it false and so always retries, crucially even
-// when the FIRST load FAILED: the retry must not key off `state.bootstrap !==
-// null`, because a failed first fetch leaves that null forever, so every
-// reconnect would skip it and the app would stay empty with no recovery path.
+// `boot()` starts the first bootstrap and spine load alongside
+// `eventsSocket.connect()`, so the first `onOpen` consumes this flag rather
+// than duplicating that load. Every reconnect open leaves it false and always
+// refetches, deliberately not keyed off `state.bootstrap !== null`: a failed
+// first fetch leaves that null forever, and the app would never recover.
 let skipNextEventsOnOpenLoad = false
 
 // Which run of which build of dux this tab loaded against, read once at boot
@@ -1288,24 +1187,14 @@ function scheduleIdentityReprobe(again: () => void): void {
   }, IDENTITY_REPROBE_MS)
 }
 
-// Learn the baseline. Called from `boot`, alongside the other initial reads, and
-// again by its own retry while the answer is still unknown.
+// Learn the run-identity baseline the hard reload compares against. A tab that
+// never learns one has that protection off for its whole life, so an unknown
+// answer is retried rather than accepted.
 //
-// TWO THINGS HANG OFF THIS READ, and the second is not obvious.
-//
-// It is the baseline the run-identity hard reload compares against, so a tab
-// that never learned one has that whole protection silently switched off for its
-// entire life. A page loaded during a network blip is exactly such a tab, so an
-// unknown answer is RETRIED rather than accepted forever.
-//
-// And its completion is what OPENS THE PTY RETRY GATE on a freshly loaded page.
-// The read is by construction a round trip to the very server this tab loaded
-// from, so finishing it, with an answer or without one, is proof the run has not
-// moved: nothing can have replaced the server between the document and this
-// fetch without the fetch noticing. A FAILED read validates too, matching this
-// module's standing "unknown is not evidence of a change" policy: holding every
-// terminal shut because one endpoint was unreachable is the wrong failure for a
-// tool whose job is to keep a terminal on screen.
+// Completing this read, with an answer or without one, is also what opens the
+// PTY retry gate: it is a round trip to the server this tab loaded from, so the
+// run cannot have moved unnoticed. A failed read validates too, since holding
+// every terminal shut over one unreachable endpoint is the wrong failure.
 async function loadServerIdentityBaseline(): Promise<void> {
   serverIdentityBaseline = await fetchServerIdentity()
   noteServerValidated()
@@ -1316,19 +1205,13 @@ async function loadServerIdentityBaseline(): Promise<void> {
   }
 }
 
-// The reconnect's first question: is this the server that served this tab?
+// Is this the server that served this tab? A reconnect is the only moment dux
+// can have been restarted underneath it, so the answer picks between an
+// in-place refetch and a hard reload with no prompt.
 //
-// A reconnect is the ONLY moment dux can have been restarted under an open tab,
-// and a tab whose server was replaced is running code that no longer matches
-// what it is being sent. So the answer decides between two whole recovery
-// strategies: identical, and the ordinary in-place refetch below is exactly
-// right; different, and there is nothing in the page worth keeping, so the
-// window is hard reloaded with no prompt.
-//
-// It runs ALONGSIDE that refetch rather than gating it. The probe is a network
-// round-trip, and blocking recovery on it would strand the app whenever the
-// probe hung; letting the refetch start a moment early costs nothing, because a
-// reload discards whatever it produced.
+// It runs alongside that refetch rather than gating it: blocking recovery on a
+// network round-trip would strand the app whenever the probe hung, and a reload
+// discards whatever the early refetch produced.
 async function reloadIfServerChanged(): Promise<void> {
   const current = await fetchServerIdentity()
   if (serverChanged(serverIdentityBaseline, current)) {
@@ -1369,19 +1252,14 @@ eventsSocket.onOpen = () => {
     // First open after a boot/login load: skip the duplicate fetch this once.
     skipNextEventsOnOpenLoad = false
   } else {
-    // A reconnect (or an open the driver did not pre-load for): re-fetch both so
-    // anything missed during the outage — or a load that failed on first boot —
-    // recovers. Concurrent loads are safe: both the spine and the bootstrap load
-    // are seq-guarded, so an older reply cannot overwrite a newer one.
+    // Re-fetch both so anything missed during the outage recovers. Concurrent
+    // loads are safe: spine and bootstrap loads are both seq-guarded.
     //
-    // Capture the deep-linked route BEFORE `loadWorkspace` so a transient exit-eject
-    // during the reconnect (the center pane resets to home while the agent is
-    // momentarily `detached`) can be re-restored once the agent resumes. Reading
-    // the hash here — before any spine apply runs — beats that eject wiping it.
+    // The deep-linked route is captured before `loadWorkspace` so a transient
+    // exit-eject during the reconnect cannot wipe the hash first.
     //
-    // First, though: ask whether this is even the same server. dux may have been
-    // restarted during the outage, in which case refetching state into old code
-    // is the wrong recovery and the window is reloaded instead.
+    // The identity probe comes first: dux may have been restarted during the
+    // outage, and refetching state into old code is the wrong recovery.
     void reloadIfServerChanged()
     armReconnectDeepLink()
     loadBootstrap()
@@ -1417,12 +1295,9 @@ function switchChangesSubscription(
 }
 
 // Fire a changed-files fetch for `sessionId` and route the outcome through the
-// guarded apply/error handlers. Errors are caught here so a failed fetch can
-// never surface as an unhandled rejection.
-// Returns the fetch's promise so a caller that must report on the result (the
-// forced refresh, which names the counts it just read) can wait for it. Every
-// other caller ignores it: errors are already handled here, so nothing it
-// returns can reject.
+// guarded apply and error handlers, so a failed fetch never surfaces as an
+// unhandled rejection. The returned promise never rejects; it exists for a
+// caller that must report on the result, such as the forced refresh.
 function loadChanges(sessionId: string): Promise<void> {
   return fetchChanges(sessionId)
     .then((resp) => applyChangesResponse(sessionId, resp))
@@ -1478,16 +1353,11 @@ function applyChangesError(sessionId: string, err: unknown): void {
   })
 }
 
-// Re-fetch the selected session's changes (the changes pane's error-card Refresh
-// button). No-op when nothing is selected.
+// Re-fetch the selected session's changes; a no-op when nothing is selected.
 //
-// This only RE-READS. The server answers a GET from its per-session cache, which
-// it drops when one of its own git or editor routes changes a file, so this is
-// the right call after an error (nothing is cached) or an event (the cache was
-// already dropped). It is
-// the WRONG call for a user-driven "refresh now": the server would hand back the
-// same cached answer and nothing would appear to change. Use
-// `forceRefreshChanges` for that.
+// This only re-reads, and the server answers from its per-session cache, so it
+// is right after an error or an event and wrong for a user-driven "refresh
+// now", which would hand back the same answer. Use `forceRefreshChanges`.
 export function refreshChanges(): void {
   const id = state.selectedSessionId
   if (id === null) return
@@ -1495,27 +1365,14 @@ export function refreshChanges(): void {
   loadChanges(id)
 }
 
-// The Changes pane's "Refresh changes" action: force the server to ask git
-// again, then re-read. dux has no file watcher, so a change it did not make
-// through one of its own routes (a file the user changed from a terminal, an
-// agent writing in its worktree) is only as fresh as the last poll: 2s while
-// any agent or terminal in the workspace is running, 10s while none is. A file
-// dropped onto a pane is not one of those: the upload refreshes the pane itself
-// whenever the file lands in the agent's worktree.
+// Force the server to ask git again, then re-read. Rejects when the forcing
+// POST fails so the caller can report it, but the re-read runs either way: a
+// pane stuck in `loading` after a failed force is worse than a stale one.
 //
-// Rejects when the forcing POST fails so the caller can report it the way the
-// pane's other quick actions do; the re-read still happens either way, since a
-// pane left in `loading` after a failed force would be worse than a stale one.
-//
-// A success is announced, with the counts, because the common case is that
-// nothing changed: the pane flickers and comes back identical, which is the
-// wrong amount of evidence for an action whose whole purpose is proving dux
-// looked again. Push and pull report themselves through the engine's keyed
-// status stream, but this route emits no status (it mutates nothing), so the
-// browser says it, in the same words the terminal UI's `refresh-changes`
-// command uses. Nothing is said when the re-read did not land: a lost race or a
-// failed GET has already told the pane what it needs to show, and claiming
-// counts from a slice this refresh did not fill would be a made-up number.
+// The success toast is raised here rather than by the engine's status stream,
+// which this route does not emit into because it mutates nothing, and it is
+// skipped when the re-read did not land: counts from a slice this refresh did
+// not fill would be made up.
 export async function forceRefreshChanges(): Promise<void> {
   const id = state.selectedSessionId
   if (id === null) return
@@ -1533,15 +1390,10 @@ export async function forceRefreshChanges(): Promise<void> {
   )
 }
 
-// Monotonic sequence for bootstrap loads, mirroring `loadWorkspaceSeq` exactly. Two
-// `config.changed` events in quick succession (a config edit followed by another,
-// or an edit landing during a reconnect refetch) fire concurrent
-// `fetchBootstrap()`s, and nothing orders the replies. Without this an older
-// response resolving last overwrites a newer one, and every client keeps applying
-// config the server has already replaced until the next edit happens to come back
-// in order. Every value the document carries is exposed to that; the one that
-// prompted the guard is `provider_drop_paste`, where the stale answer decides how
-// a dropped file's path is quoted.
+// Monotonic sequence for bootstrap loads, mirroring `loadWorkspaceSeq`. Rapid
+// `config.changed` events fire concurrent `fetchBootstrap()`s and nothing else
+// orders the replies, so without this a client goes on applying config the
+// server has already replaced until an edit happens to come back in order.
 let loadBootstrapSeq = 0
 
 // Fetch the bootstrap document and fold it into state. Errors are swallowed: on
@@ -1617,14 +1469,11 @@ function applyBootstrap(b: Bootstrap): void {
   offerAutomaticFirstLoad(b.pending_first_load ?? null)
 }
 
-// The instance title/favicon carry a live "needs attention" overlay: a `(N) `
-// count prefix on the browser-tab title and a cyan dot composited onto the
-// favicon, both driven by how many agents are flagged in the current spine. This
-// runs whenever the count could change (a spine apply) or the base title/favicon
-// changes (a bootstrap/config.changed), or the surface bit flips (the standalone
-// editor tab reports no attention at all). `applyAttentionFavicon` composes at most
-// once per state and no-ops when nothing changed, so calling this on every spine
-// apply is cheap. Self-guards on the DOM.
+// Repaint the tab title's `(N) ` prefix and the favicon's attention dot from
+// the agents flagged in the current spine. Call it whenever the count, the base
+// title or favicon, or the surface bit could have changed;
+// `applyAttentionFavicon` composes at most once per state, so it is cheap on
+// every spine apply. Self-guards on the DOM.
 function refreshAttentionChrome(): void {
   if (typeof document === "undefined") return
   const count = attentionCountForSurface(
@@ -1639,15 +1488,13 @@ function refreshAttentionChrome(): void {
   applyAttentionFavicon(state.bootstrap?.favicon, count > 0)
 }
 
-// Monotonic sequence for spine loads. Two rapid `sessions.changed`/
-// `projects.changed` events fire concurrent `fetchWorkspace()`s; without a guard an
-// older response resolving last would overwrite a newer spine (observable as a
-// focus-then-prune-clear flicker on agent create). Each `loadWorkspace` captures the
-// seq it bumped to; `applyWorkspace` discards a result once a newer load has started.
+// Monotonic sequence for spine loads: rapid change events fire concurrent
+// `fetchWorkspace()`s, and without this an older reply resolving last would
+// overwrite a newer spine. Each `loadWorkspace` captures the seq it bumped to
+// and `applyWorkspace` discards a result once a newer load has started.
 //
-// This counter orders FETCH against FETCH and nothing else. Fetch against push
-// is ordered by the server's `rev` below, because only the server knows which
-// of two documents describes the later state.
+// It orders fetch against fetch and nothing else. Fetch against push is ordered
+// by the server's `rev` below, since only the server knows which is later.
 let loadWorkspaceSeq = 0
 
 // Whether this server pushes the workspace document. Set by the first pushed
@@ -1660,14 +1507,12 @@ let serverPushesWorkspace = false
 // carrying a revision at or below this one describes a state already applied and
 // is discarded, whichever way it arrived.
 //
-// Revisions are scoped to ONE RUN of the server and to one socket generation:
-// dux restarting mints revisions from 1 again, and a client still holding a
-// high-water mark from the previous run would discard every push forever, which
-// is a permanently frozen sidebar. `eventsSocket.onOpen` therefore clears this,
-// exactly as it clears the PTY ownership epochs, for exactly the same reason.
-// The run-id reload is not the guard here: it answers a different question
-// (has the CODE changed), it runs alongside recovery rather than gating it, and
-// an unanswered identity probe never reloads.
+// Revisions are scoped to one run of the server and one socket generation: a
+// restart mints them from 1 again, so a client holding the previous run's
+// high-water mark would discard every push and freeze the sidebar.
+// `eventsSocket.onOpen` therefore clears this. The run-id reload is not the
+// guard here: it answers whether the code changed, and it never reloads on an
+// unanswered probe.
 let appliedWorkspaceRev: number | null = null
 
 // Forget the applied revision. Called on every events-socket open, including
@@ -1687,13 +1532,10 @@ function loadWorkspace(): void {
   const seq = ++loadWorkspaceSeq
   fetchWorkspace().then(
     (s) => {
-      // Applying is not fetching, and the two failures need different names:
-      // folding a throw from the apply into the rejection handler below would
-      // report a perfectly good fetch as a failed one and send whoever reads
-      // the console after the wrong thing. This is a backstop for the apply as a
-      // whole, NOT the history-write guard: a refused history call is caught at
-      // the write itself (`syncUrl`), because the apply is only one of many
-      // paths that write the URL and the rest are user clicks.
+      // Applying is not fetching: folding a throw from the apply into the
+      // rejection handler below would report a good fetch as a failed one. A
+      // backstop for the apply as a whole, not the history-write guard, which
+      // lives in `syncUrl` because most URL writes are user clicks.
       try {
         applyWorkspace(s, seq)
       } catch (err) {
@@ -1709,19 +1551,14 @@ function loadWorkspace(): void {
   )
 }
 
-// Apply a freshly fetched spine. This is the single place the projects/sessions/
-// sidebar data lands, and it drives the client-view reconciliation:
-//   - retire the optimistic reorder overlays once the server's order matches;
-//   - auto-focus an agent THIS client just created, the instant it appears;
-//   - prune the selection when its target session/terminal has vanished.
-// Order matters: set the slice (with reconciled overlays) first, then focus
-// (which only ever selects a session present in the spine, so the prune below
-// leaves it alone), then prune.
+// Apply a freshly fetched spine, the single place sidebar data lands. Order
+// matters: set the slice with reconciled overlays first, then focus (which only
+// selects a session present in the spine, so the prune leaves it alone), then
+// prune.
 //
-// `seq` is the `loadWorkspaceSeq` value the originating `loadWorkspace` captured; discard
-// this (now-stale) result if a newer load has since started, so a slow older
-// response can never overwrite a fresher spine (and re-run focus/prune against
-// outdated data).
+// `seq` is the `loadWorkspaceSeq` the originating `loadWorkspace` captured; a
+// stale result is discarded so a slow reply cannot overwrite a fresher spine or
+// re-run focus and prune against outdated data.
 function applyWorkspace(rawSpine: Spine, seq: number): void {
   if (seq < loadWorkspaceSeq) return
   // The server's ordering, applied to both delivery paths from one place. A
@@ -1744,14 +1581,11 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
   // vanished agent picks its replacement from this ordering (see
   // `navigateAfterVanish`), since the new list no longer holds its position.
   const previousSessions = state.spine?.sessions ?? []
-  // Retire the "explicitly started" latch for any tab the launch it was bridging
-  // has now answered about, either way: the process is up, or the server has
-  // recorded that the run failed. The latch only covers the press->answer gap.
-  // Dropping it on liveness means a *later* exit (has_live_process back to
-  // false) correctly re-shows the card for a tab whose last run failed; dropping
-  // it on a recorded failure is what stops a press from hiding the diagnosis
-  // surface forever when the retry fails too. Tabs still waiting on an answer
-  // keep their latch.
+  // Retire the "explicitly started" latch for any tab whose launch has been
+  // answered, either way: the process is up, or the run is recorded as failed.
+  // Dropping it on liveness lets a later exit re-show the card, and dropping it
+  // on a recorded failure stops a press from hiding the diagnosis surface
+  // forever when the retry fails too. Tabs still waiting keep their latch.
   const answeredTabIds = new Set(
     spine.sessions.flatMap((s) =>
       s.tabs.filter((t) => t.has_live_process || t.last_run_failed).map((t) => t.id),
@@ -1806,15 +1640,13 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
   if (rev !== undefined) appliedWorkspaceRev = rev
 }
 
-// Drop editor-tab state for any root whose target no longer exists in the
-// spine (deleted here or by another client), and close the editor if it was
-// pointed at that now-gone target, the code-editor's own out-of-band-clear
-// path, mirroring `pruneSelectionIfGone` for the main selection.
+// Drop editor-tab state for any root whose target has left the spine, and close
+// the editor if it pointed at that target. The editor's own out-of-band clear,
+// mirroring `pruneSelectionIfGone` for the main selection.
 //
-// A terminal root is checked against the live TERMINALS, and the check has to
-// exist because an editor must not outlive its target: closing a terminal
-// takes its editor with it. A terminal id is also never reused after it goes,
-// so there is nothing to come back for.
+// A terminal root is checked against the live terminals: an editor must not
+// outlive its target, and a terminal id is never reused, so there is nothing to
+// come back for.
 function pruneEditorStateIfGone(spine: Spine): void {
   const live = liveEditorRootKeys(spine)
   pruneDeadEditorTabs(live, null)
@@ -1914,17 +1746,13 @@ function reconcilePendingTerminalOrder(
 }
 
 // Drop a promoted-slot overlay once the spine has caught up with the close it
-// covers, or once the session it was about is gone. Twin of the pending-order
-// reconcilers above: the overlay exists only to cover the window between the
-// close's answer and the spine that confirms it.
+// covers, or the session is gone. The overlay only covers the window between
+// the close's answer and the spine confirming it.
 //
-// "Caught up" is the CLOSED tab having left the session's tab list, not the
-// spine naming the promoted tab as the slot. The two differ exactly when
-// somebody else promoted again before this client's spine arrived (we moved the
-// slot A -> B, another surface then moved it B -> C): waiting for a spine to say
-// "the slot is B" would wait forever, and every reader of `slotTabIdFor` would
-// go on answering with a tab that no longer holds the slot, or is gone
-// altogether. The close's own disappearance is a fact any later spine carries.
+// "Caught up" is the closed tab having left the tab list, not the spine naming
+// the promoted tab as the slot: another surface promoting again first would
+// make that wait forever, while the close's own disappearance is a fact any
+// later spine carries.
 function reconcilePendingSlotTab(
   spine: Spine,
   pending: Record<string, PendingSlotTab>,
@@ -1953,17 +1781,13 @@ function slotTabIdFor(sessionId: string): string {
   )
 }
 
-// Slot-ness for the same imperative actions. Twin of `slotTabIdFor`, and the
-// only way this module answers the question when it holds two ids rather than a
-// session record.
+// Slot-ness when this module holds two ids rather than a session record.
 //
-// The PLACEHOLDER spelling counts too. A target built before any spine arrived
-// (a parsed hash, the editor's flattened root) names the slot tab by the
-// session id, because that is the URL grammar's way of saying "the first tab,
-// whichever it is". Both spellings must answer the same, or the same position
-// serializes to two different hashes depending on when it was built. A real
-// extra tab can never collide with it: tab ids are generated and a session's
-// own id is never handed out as one.
+// The placeholder spelling counts too: a target built before any spine arrived
+// names the slot tab by the session id, which is the URL grammar's way of
+// saying "the first tab, whichever it is". Both spellings must answer alike, or
+// one position serializes to two hashes. A real tab cannot collide, since a
+// session's own id is never handed out as a tab id.
 function isSlotTabOf(sessionId: string, tabId: string): boolean {
   return tabId === slotTabIdFor(sessionId) || isSlotTabTarget(sessionId, tabId)
 }
@@ -1990,15 +1814,10 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
       !isFirstTab(session, target.tabId) &&
       !session.tabs.some((t) => t.id === target.tabId)
     ) {
-      // A REWRITE, like every other vanish path: the user did not ask to leave
-      // the tab, so this must not push an entry they never created and leave the
-      // dead tab's entry sitting underneath it. `changes` is carried across
-      // because changed files are session-scoped, so the screen the user is
-      // reading survives the tab going away under it.
-      //
-      // Belt and braces, again: carrying `changes` is exactly what keeps the
-      // SCREEN the same, so `syncUrl` would replace here with or without the
-      // argument. It stays because it is the sentence above, written down.
+      // A rewrite, like every other vanish path: the user did not ask to leave
+      // the tab, so pushing would leave the dead tab's entry underneath. The
+      // `changes` flag is carried across because changed files are
+      // session-scoped, so the screen being read survives the tab going away.
       selectSessionRoute(
         target.sessionId,
         "replace",
@@ -2007,26 +1826,19 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
     }
     return
   }
-  // A terminal: it must still exist UNDER its owner. `ownerHasTerminal` checks
-  // both halves at once (the id is present AND its owner tag matches the address
-  // we are on), so this no longer has to know which collection each owner kind
-  // would have been nested in.
+  // A terminal must still exist under its owner. `ownerHasTerminal` checks both
+  // halves at once, the id being present and its owner tag matching the address
+  // in hand, so nothing here knows how each owner kind nests.
   const owner = target.owner
   const stillExists = ownerHasTerminal(spine.terminals, owner, target.terminalId)
   if (!stillExists) {
-    // The other out-of-band path: a terminal whose PTY exited is dropped from
-    // the ViewModel while the user may be looking at it. A terminal is not an
-    // agent and has no "next terminal" worth guessing at, so the destination is
-    // whatever sits one level UP: the owning agent for a companion terminal
-    // (which is alive and is a real position), home for a project terminal
-    // (which has nothing above it). This matches what the deep-link path
-    // already does, and both rewrite the current entry rather than stepping
-    // history. Ejecting a companion terminal all the way to home threw away a
-    // position that still existed.
+    // A terminal that exited has no "next terminal" worth guessing at, so the
+    // destination is one level up: the owning agent, or home when there is
+    // none. Like the deep-link path, this rewrites the current entry rather
+    // than stepping history.
     //
-    // The lossy `ownerSessionId` is right here because "is there an agent above
-    // this terminal" IS the whole decision: an owner that is not a session has
-    // nothing above it, and home is already the answer for that.
+    // The lossy `ownerSessionId` suffices because "is there an agent above this
+    // terminal" is the whole decision.
     const ownerSession = ownerSessionId(owner)
     const fallback =
       ownerSession !== null && spine.sessions.some((s) => s.id === ownerSession)
@@ -2036,31 +1848,23 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
   }
 }
 
-// The destination when the focused agent vanishes under the user. On a phone
-// that is always the hub, for the reason written inside; on a computer it is the
-// next ACTIVE agent in the order the list is already showing (see
-// `nextActiveSessionId`), or home when every remaining agent is dormant. The
-// URL is REWRITTEN rather than pushed, so the entry pushed on the way in is
-// gone: one Back can then land on the screen the user is already on and look
-// inert. That is accepted, and it only happens when the world changed under
-// them, which beats being thrown out of the app entirely.
+// The destination when the focused agent vanishes under the user: the hub on a
+// phone, and on a computer the next active agent in the order already on screen
+// (`nextActiveSessionId`), or home when every remaining agent is dormant. The
+// URL is rewritten rather than pushed, so one Back can land on the screen the
+// user is already on. Accepted: it beats being thrown out of the app.
 function navigateAfterVanish(
   spine: Spine,
   previous: SessionView[],
   goneSessionId: string,
 ): void {
-  // ON A PHONE THE ANSWER IS THE HUB, and the difference is what the two shells
-  // have on screen. On a computer the agents list is a pane the user is still
-  // looking at, so landing on the next row keeps the list, the position and the
-  // deletion all visible at once. On a phone that list is a SCREEN of its own:
-  // the agent that vanished filled the display, and the next one fills it
-  // identically, so the surface says nothing about what just happened and reads
-  // as a delete that hit the wrong agent. Going up one level is the truthful
-  // move, and it is the same place the header's own way out goes.
+  // On a phone the destination is the hub, not the next row: the agents list is
+  // a screen of its own there, so a neighbouring agent would fill the display
+  // identically and read as a delete that hit the wrong one. On a computer the
+  // list stays visible beside the pane, so the next row is truthful.
   //
-  // Still a rewrite, like every other vanish path and for the reason above: the
-  // entry the user pushed on the way in names an agent that no longer exists,
-  // so pushing over it would leave Back pointing at a not-found screen.
+  // A rewrite either way: the entry pushed on the way in names an agent that no
+  // longer exists, so pushing over it leaves Back on a not-found screen.
   if (isMobileViewport()) {
     selectSessionRoute(null, "replace")
     return
@@ -2079,22 +1883,17 @@ function navigateAfterVanish(
   selectSessionRoute(next, "replace")
 }
 
-// Snapshot the session ids that exist right now and arm auto-focus for an agent
-// THIS client is creating, so the next spine carrying a new id matching `scope`
-// is recognized as our new agent and focused (see `focusNewlyCreatedSession`).
-// Call this immediately before dispatching an agent-create command; it is wired
-// into `submitNameDialog` (new/fork/from-PR), `attachWorktree` and
-// `createStandaloneAgent`. Re-arming overwrites any prior pending focus, so a
-// fresh create supersedes an earlier one whose agent never arrived. Always pass
-// the scope the new agent will land in: a caller creating in a project it
-// cannot resolve must skip arming rather than pass a placeholder.
-// How long an armed create-focus token stays live before it self-expires. Set
-// comfortably above the longest server-side create window (the from-PR create
-// awaits up to 60s — see `FROM_PR_CREATE_AWAIT_TIMEOUT`) so a legitimate slow
-// create still auto-focuses, but bounded so a create that never lands cannot keep
-// a stale token armed to grab a later, unrelated session.
+// How long an armed create-focus token stays live. Above the longest
+// server-side create window (`FROM_PR_CREATE_AWAIT_TIMEOUT`, 60s) so a slow
+// create still auto-focuses, but bounded so a create that never lands cannot
+// keep a stale token armed to grab a later, unrelated session.
 const CREATE_FOCUS_TTL_MS = 90_000
 
+// Snapshot the session ids that exist now and arm auto-focus for an agent this
+// client is creating. Call it immediately before dispatching the create.
+// Re-arming supersedes any earlier create whose agent never arrived. The scope
+// must be the one the new agent lands in: a caller that cannot resolve its
+// project skips arming rather than passing a placeholder.
 function armCreateFocus(scope: CreateFocusScope): void {
   const knownIds = (state.spine?.sessions ?? []).map((s) => s.id)
   setState({
@@ -2123,13 +1922,11 @@ function sessionInCreateScope(
   }
 }
 
-// Focus the agent THIS client just created, the instant it shows up. With a
-// pending-focus token armed (`armCreateFocus`), scan the incoming spine for a
-// session that wasn't known at submit time and matches the armed scope,
-// select it (which points the changed-files watch at it; the focused TerminalPane
-// subscribes its PTY on mount), and disarm. No-op — and cheap — when nothing is
-// pending, the overwhelmingly common case. Other clients never armed a token, so
-// they don't react: focus moves only on the client that initiated the create.
+// Focus the agent this client just created, the instant it shows up: with a
+// token armed by `armCreateFocus`, the incoming spine is scanned for a session
+// unknown at submit time that matches the armed scope. A cheap no-op when
+// nothing is pending, and other clients armed nothing, so focus moves only on
+// the client that initiated the create.
 function focusNewlyCreatedSession(spine: Spine): void {
   const pending = state.pendingCreateFocus
   if (!pending) return
@@ -2169,13 +1966,10 @@ export function setProjectOpen(projectId: string, open: boolean): void {
 
 eventsSocket.onConn = (conn) => {
   // A connection break invalidates any in-flight optimistic reorder: the
-  // command (or its rejection) may have been lost, and after the reconnect
-  // nothing would ever reconcile a non-matching overlay — leaving the UI
-  // showing an order the server never persisted. Snap back to authoritative.
-  // The same break also voids any pending create-focus: its `knownIds` snapshot
-  // predates the disconnect, so diffing it against the post-reconnect ViewModel
-  // could mis-identify an unrelated session as "ours". Drop it and let the user
-  // pick up the new agent from the sidebar.
+  // command or its rejection may have been lost, and nothing would reconcile
+  // the overlay afterwards. It also voids a pending create-focus, whose
+  // `knownIds` snapshot predates the disconnect and could mis-identify an
+  // unrelated session as ours.
   const patch =
     conn === "closed" || conn === "failed" ? clearPendingClientIntent() : {}
   // Latch the sticky offline flag that drives the full-screen `OfflineOverlay`.
@@ -2222,15 +2016,12 @@ function clearPendingOrders(): Partial<DuxState> {
   }
 }
 
-// Clear every transient, optimistic client intent at once: the reorder overlays,
-// any pending create-focus, AND the Changes-pane visibility override. Used on the
-// failure/teardown paths (command error, async error status, socket disconnect)
-// where an in-flight create can no longer be trusted to resolve — a surviving
-// `pendingCreateFocus` snapshot would otherwise mis-identify a later, unrelated
-// session as the one we created, and a surviving Changes-pane override would
-// strand the pane in the toggled state until reload. NOT folded into
-// `clearPendingOrders` because user actions like sorting also clear the order
-// overlays but must NOT cancel an in-flight create-focus.
+// Clear every transient client intent at once, for the failure and teardown
+// paths where an in-flight create can no longer be trusted to resolve: a
+// surviving create-focus token would mis-identify a later session as ours, and
+// a surviving pane override would strand the pane until reload. Deliberately
+// not folded into `clearPendingOrders`, which user actions like sorting also
+// call and which must not cancel an in-flight create-focus.
 function clearPendingClientIntent(): Partial<DuxState> {
   return {
     ...clearPendingOrders(),
@@ -2315,41 +2106,23 @@ export function useDux(): DuxState {
 
 // --- Routing (a tiny hash router) -----------------------------------------
 //
-// The URL is the SOURCE OF TRUTH for where the app is, including which screen
-// the mobile shell shows. The selected target is mirrored into `location.hash`
-// so a tab can be bookmarked/shared/reloaded back to the same place:
-//   #/agent/<sessionId>
-//   #/agent/<sessionId>/terminal/<terminalId>
-//   #/agent/<sessionId>/changes
-// Session ids are stable (a reload restores the agent); terminal ids are
-// ephemeral (a reload that finds the session but not the terminal falls back to
-// the agent). A hash naming a session the workspace does not have resolves to
-// the not-found screen (`routeNotFound`) rather than silently landing home.
+// `location.hash` is the source of truth for the whole position, the mobile
+// screen included. Session ids are stable across a reload; terminal ids are
+// ephemeral, so a hash whose terminal is gone falls back to the agent, and a
+// hash naming an absent session resolves to `routeNotFound`, never home.
 //
-// Moving to a DIFFERENT screen pushes a history entry, in BOTH directions:
-// going into an agent pushes, and the Up control that comes back out pushes too,
-// because both are ordinary navigation between two real positions and the
-// browser is supposed to accumulate those. Changing which agent or tab is
-// focused within the same screen replaces the current entry, so switching around
-// never piles up. Back and Forward are only ever the browser's own, and the app
-// never steps history relatively: `history.go` appears nowhere. The screen is
-// read from the URL, so there is no separate depth to keep in agreement with it.
-//
-// Only two things replace on a screen CHANGE, and both name a position the
-// browser is already parked on rather than a new one: a RESTORE (the boot
-// deep-link, the reconnect re-restore, the destination chosen when what the user
-// was looking at vanished under them) and a CORRECTION (leaving the not-found
-// screen, which is retiring a bad address, not visiting a place worth keeping).
+// A screen change pushes, in both directions; a move within one screen
+// replaces. The app never steps history relatively (`history.go` appears
+// nowhere). The only screen changes that replace are a restore and a
+// correction, both of which name a position the browser is already parked on.
 
 // Parse a deep-link hash into a target, or null when it is absent/malformed.
 function parseSelectionHash(hash: string): SelectedTarget | null {
-  // Three mutually-exclusive shapes: bare agent (`#/agent/<sid>` = session-slot tab), a
-  // extra tab (`#/agent/<sid>/tab/<tabId>`), or a companion terminal
-  // (`#/agent/<sid>/terminal/<tid>`). The literal `tab`/`terminal` keyword
-  // disambiguates, so a tab/terminal literally named "tab" can't be confused.
-  // A project terminal deep-links as `#/project/<pid>/terminal/<tid>`, its own
-  // grammar, because the agent shapes embed a session id and a project terminal
-  // has none.
+  // Three mutually exclusive shapes: the bare agent (its session-slot tab), an
+  // extra tab, or a companion terminal, disambiguated by the literal `tab` or
+  // `terminal` keyword so a tab named "tab" cannot be confused. A project
+  // terminal has its own grammar, because the agent shapes embed a session id
+  // and it has none.
   const pm = hash.match(/^#\/project\/([^/]+)\/terminal\/([^/]+)$/)
   if (pm) {
     try {
@@ -2475,21 +2248,13 @@ const CHANGES_SUFFIX = "/changes"
 // encodeURIComponent-encoded, so it is one slashless segment).
 const EDITOR_SUFFIX = "/editor"
 
-// Parse the editor suffix off a hash, or null when it carries none. The
-// prefix must itself parse as a target, whatever kind: a terminal has an
-// editor too, rooted at the directory it was spawned in, so
-// `#/terminal/<tid>/editor` and `#/project/<pid>/terminal/<tid>/editor` are
-// routes. `#/agent/<sid>/terminal/<tid>/editor` keeps its existing meaning,
-// the AGENT's worktree, because `editorRootForTarget` sends a session-owned
-// terminal to its agent root.
+// Parse the editor suffix off a hash, or null when it carries none. The prefix
+// must itself parse as a target of any kind, a terminal included.
 //
-// NOT a single greedy regex, deliberately: a file literally named "editor"
-// makes the string contain "/editor" twice (`#/agent/s1/editor/file/editor`),
-// and a greedy match splits at the LAST one, leaving a prefix that is not a
-// target, so the whole route would fall through to home. Instead every
-// "/editor" occurrence is tried as the split point, rightmost first, and the
-// first candidate whose tail has the suffix shape AND whose prefix parses as
-// a target wins.
+// Not one greedy regex, deliberately: a file named "editor" puts "/editor" in
+// the hash twice, and splitting at the last one leaves a prefix that is not a
+// target. Every occurrence is tried, rightmost first, and the first candidate
+// whose prefix parses wins.
 function parseEditorRoute(hash: string): Route | null {
   let at = hash.length
   while ((at = hash.lastIndexOf(EDITOR_SUFFIX, at - 1)) > 0) {
@@ -2512,11 +2277,9 @@ function parseEditorRoute(hash: string): Route | null {
 //   #/editor/terminal/<tid>
 //   #/editor/project/<pid>/terminal/<tid>
 //
-// The last two exist so both menu items are offered for every kind of
-// terminal; menu symmetry beats grammar thrift. None of them can collide with
-// the target grammars, which never begin `#/editor/`. An agent address always
-// names the session-slot target: the standalone surface is the editor, not a
-// tab strip.
+// None can collide with the target grammars, which never begin `#/editor/`. An
+// agent address always names the session-slot target: the standalone surface is
+// the editor, not a tab strip.
 function parseStandaloneEditorRoute(hash: string): Route | null {
   const m = hash.match(
     /^#\/editor\/(agent\/[^/]+|terminal\/[^/]+|project\/[^/]+\/terminal\/[^/]+)(?:\/(file|diff)\/([^/]+))?$/,
@@ -2582,13 +2345,10 @@ function parsePosition(hash: string): Route {
   if (standalone) return standalone
   const direct = parseSelectionHash(hash)
   if (direct) return { target: direct, changes: false, editor: null, standalone: false, theater: false }
-  // The editor suffix is tried BEFORE the changes suffix, which is what makes
-  // the two mutually exclusive in practice: an editor path is a single
-  // encoded segment, so `#/agent/s1/editor/file/changes` (a file literally
-  // named "changes") must resolve as an editor route, never as a changes
-  // route with a mangled tail. The direct parse above stays first as the
-  // common case; every regex here is end-anchored, so no hash parses two
-  // ways.
+  // The editor suffix is tried before the changes suffix, which is what keeps
+  // the two mutually exclusive: a file literally named "changes" must resolve
+  // as an editor route, never as a changes route with a mangled tail. Every
+  // regex here is end-anchored, so no hash parses two ways.
   const editor = parseEditorRoute(hash)
   if (editor) return editor
   if (hash.endsWith(CHANGES_SUFFIX)) {
@@ -2598,13 +2358,11 @@ function parsePosition(hash: string): Route {
   return { target: null, changes: false, editor: null, standalone: false, theater: false }
 }
 
-// The hash for a route. Home is the empty hash; both suffixes only apply on
-// top of a focused target, and AT MOST ONE is emitted: the editor wins over
-// changes (they cannot honestly coexist — the desktop editor overlay covers
-// the screen, and the changes screen is the mobile shell's). `parseRoute`
-// mirrors this by trying the editor suffix first, and the round-trip test
-// pins the cross-product. A pathless editor suffix carries no mode segment,
-// so a pathless route's mode is normalized to "file" on the way back in.
+// The hash for a route. Home is the empty hash; a suffix only applies on top of
+// a focused target and at most one is emitted, the editor winning over changes,
+// which `parseRoute` mirrors by trying the editor suffix first. A pathless
+// editor suffix carries no mode segment, so a pathless route's mode normalizes
+// to "file" on the way back in.
 export function routeHash(route: Route): string {
   return withTheaterHash(
     positionHash(route),
@@ -2614,13 +2372,10 @@ export function routeHash(route: Route): string {
 
 function positionHash(route: Route): string {
   // The standalone form replaces the whole address rather than riding as a
-  // suffix, and it is SESSION-SLOT ONLY by definition (the surface is the
-  // editor, not a tab strip) with no changes screen: an extra-tab target is
-  // serialized by its session id alone and a changes flag is dropped, which
-  // the parser mirrors (it can only ever produce the normalized form; the
-  // round-trip test pins both normalizations). A standalone route whose
-  // target somehow lost its session (or its editor half) falls through to
-  // the ordinary grammar.
+  // suffix, and is session-slot only with no changes screen: an extra-tab
+  // target serializes by its session id alone and a changes flag is dropped,
+  // which the parser mirrors. A standalone route that lost its session, or its
+  // editor half, falls through to the ordinary grammar.
   if (route.standalone && route.editor && route.target !== null) {
     // The root half is the selection grammar with `#/editor` in front of it,
     // the exact inverse of the parser's peel.
@@ -2639,15 +2394,12 @@ function positionHash(route: Route): string {
 }
 
 // The one rule a standalone editor address is spelled by: an agent is named by
-// its SESSION-SLOT tab, because the standalone surface is the editor and not a
-// tab strip, and the parser can only ever produce that form. A terminal is
-// already its own whole spelling.
+// its session-slot tab, which is the only form the parser can produce, and a
+// terminal is already its own whole spelling.
 //
-// It takes either spelling of the same thing, because both reach the same rule.
-// From a selection the step is lossy on purpose: an extra tab's own id is
-// dropped in favour of the slot's, which is exactly the normalization the
-// parser mirrors. From an editor root there is no tab id to drop, so the same
-// step is the plain inverse of `editorRootForTarget` for the roots it produces.
+// Lossy on purpose from a selection: an extra tab's id is dropped in favour of
+// the slot's, mirroring that normalization. From an editor root there is no tab
+// id to drop, so the step is the plain inverse of `editorRootForTarget`.
 function slotTargetFor(target: SelectedTarget | EditorRoot): SelectedTarget {
   if (target.kind === "terminal") return target
   return {
@@ -2664,20 +2416,14 @@ function routeScreen(route: Route): MobileScreen {
   return route.changes ? "changes" : "terminal"
 }
 
-// What `syncUrl` compares to decide push versus replace. NOT `routeScreen`:
-// that function's output IS `mobileScreen` (six call sites consume it), so
-// folding the editor bit into it would leak an "editor" screen into the
-// mobile shell. This key exists for exactly one consumer, the push/replace
-// comparison: opening the editor changes the key (so it pushes, and one Back
-// closes it), while switching files inside the editor keeps it (so switches
-// replace and never pile up). Exported for the routing tests only.
+// What `syncUrl` compares to decide push versus replace. Deliberately not
+// `routeScreen`, whose output IS `mobileScreen`: folding the editor bit in
+// would leak an "editor" screen into the mobile shell. Opening the editor
+// changes the key, so it pushes; switching files inside it does not.
 //
-// The key says nothing about WHICH root the editor is on, so moving one
-// standalone editor tab from an agent root to a terminal root replaces rather
-// than pushes. Accepted: nothing in the app navigates between two standalone
-// editors (that surface has no in-app exits at all), so the only way to
-// produce it is to edit the address by hand, and a replace there is a
-// defensible reading of typing over an address anyway.
+// The key says nothing about which root the editor is on, so retargeting a
+// standalone editor tab replaces rather than pushes. Accepted: only a
+// hand-edited address can produce that.
 export function routePushKey(route: Route): string {
   return `${routeScreen(route)}${route.editor ? "+editor" : ""}${route.standalone ? "+standalone" : ""}`
 }
@@ -2725,30 +2471,14 @@ function currentRoute(): Route {
   }
 }
 
-// Bring the URL in line with the app's current position. Pushes when the
-// destination is a DIFFERENT screen from the one the URL names (the user moved
-// between two positions, in either direction) and replaces when it is the same
-// screen (switching agents or tabs in place), so switching around never piles up
-// while every screen change stays reachable by Back. `mode: "replace"` forces a
-// replace for a move the user did not ask for: the boot deep-link restore, the
-// reconnect re-restore, the destination picked when what they were looking at
-// vanished under them, and the way out of the not-found screen. Those last two
-// deliberately discard the entry pushed on the way in, so one Back can land on
-// the screen you are already on; that is accepted, and far better than either
-// stepping out of the app or bouncing back onto a dead link.
+// Bring the URL in line with the app's current position: pushes on a screen
+// change, replaces within one screen. `mode: "replace"` forces a replace for a
+// move the user did not ask for (a restore, or leaving the not-found screen).
 //
-// Defensive: in non-browser test environments `history.replaceState` /
-// `history.pushState` / a real `location` may be absent, so this degrades
-// rather than throwing.
-//
-// The write itself is BEST-EFFORT and never throws at its caller. A browser can
-// refuse a history call (Safari rate-limits them), and every call site here is
-// reached from a click handler AFTER the screen has already moved, so letting
-// the refusal propagate would abort the handler mid-navigation and leave the
-// screen and the URL disagreeing with no one to put them back. Swallow it, warn
-// so a persistently-refusing browser is visible, and let the next successful
-// write bring the address bar back in line. This is the ONE place a history call
-// is made, which is what makes the one guard enough.
+// Best-effort and never throws at its caller: browsers rate-limit history calls
+// and every call site runs after the screen has already moved, so a refusal
+// propagating would leave the screen and the URL disagreeing. This is the one
+// place a history call is made, which is what makes the one guard enough.
 function syncUrl(mode?: "replace" | "push"): void {
   if (typeof history === "undefined" || typeof history.replaceState !== "function") {
     return
@@ -2767,13 +2497,11 @@ function syncUrl(mode?: "replace" | "push"): void {
       ? (location.pathname ?? "") + (location.search ?? "")
       : ""
   const url = next === "" ? base : next
-  // `routePushKey`, not `routeScreen`: the editor-open bit must push/pop like
-  // a screen without ever BEING a screen (see routePushKey's comment).
-  // `mode: "push"` is the explicit form, for a move that changes the screen
-  // without changing the SHAPE the push key describes: entering theater is a
-  // real position the user chose, so Back has to come back out of it, but it
-  // is still the terminal screen and the key cannot say so. Leaving is an
-  // ordinary replace, so Back never re-enters a mode just dismissed.
+  // `routePushKey`, not `routeScreen`: the editor-open bit must push and pop
+  // like a screen without being one. `mode: "push"` is for a move the key
+  // cannot describe: entering theater is a position Back must come out of,
+  // while still being the terminal screen. Leaving replaces, so Back never
+  // re-enters a mode just dismissed.
   const movedScreen =
     mode === "push" ||
     routePushKey(parseRoute(next)) !== routePushKey(parseRoute(current))
@@ -2807,18 +2535,15 @@ function applyUrlRoute(): void {
   }
   const spine = state.spine
   if (!spine) {
-    // A popstate before the first spine landed: a slow spine fetch, or a
-    // session/bfcache restore that comes back with a back stack already. The
-    // route cannot be dropped here on the theory that the boot deep-link
-    // restore will resolve it: that restore resolves the BOOT hash, and the
-    // browser has since moved to a different one (measured in both directions:
-    // the address bar names an agent the app never selects, or the boot restore
-    // silently undoes the Back and overwrites the entry the user landed on).
+    // A popstate before the first spine landed. The route cannot be left to the
+    // boot deep-link restore, which resolves the BOOT hash the browser has
+    // since moved off: that either strands the address bar on an agent the app
+    // never selects, or silently undoes the Back.
     //
-    // So the pending boot link is REPLACED by where the browser actually is,
-    // and `restoreDeepLink` resolves that against the first spine. A route
-    // naming home replaces it with null, which cancels the boot link. Nothing
-    // else can be done here: resolving a target needs a session list.
+    // So the pending boot link is replaced by where the browser actually is,
+    // for `restoreDeepLink` to resolve against the first spine, and a route
+    // naming home replaces it with null. Resolving a target needs a session
+    // list, so nothing more can happen here.
     pendingDeepLink = route.target
     pendingDeepLinkChanges = route.changes
     pendingDeepLinkEditor = route.editor
@@ -2840,19 +2565,14 @@ function applyUrlRoute(): void {
   resolveRoute(spine, route)
 }
 
-// Clear the editor's open/position state WITHOUT writing the URL. The two
-// callers are exactly the paths that must not write it: the reconstitution
-// paths (the browser is already parked on an address that names no editor)
-// and the spine prune (where `pruneSelectionIfGone`'s navigation is the single
-// URL writer in the pass). Everything user-initiated goes through
-// `closeEditor`, which does write.
-// It also drops the STANDALONE SURFACE flag: every clear outside popstate
-// (the spine prune, a route resolving to a session that is gone) leaves no
-// editor for the standalone shell to show, and a shell kept up over a null
-// `editorTarget` is the boot spinner forever — the blocker this line fixes.
-// The popstate path is unaffected: `applyUrlRoute` re-syncs the flag from the
-// URL before any of this runs, so an address that really names a live
-// standalone editor keeps its shell.
+// Clear the editor's open state WITHOUT writing the URL, for the paths that
+// must not write it: reconstitution, where the browser is already parked on an
+// address naming no editor, and the spine prune, whose single URL writer is
+// `pruneSelectionIfGone`. Everything user-initiated uses `closeEditor`.
+//
+// It also drops the standalone-surface flag, because a shell left up over a
+// null `editorTarget` is a permanent boot spinner. Popstate is unaffected:
+// `applyUrlRoute` re-syncs that flag from the URL before this runs.
 function clearEditorStateSilently(): void {
   if (
     state.editorTarget === null &&
@@ -2864,27 +2584,21 @@ function clearEditorStateSilently(): void {
   setState({ editorTarget: null, editorRoute: null, standaloneEditor: false })
 }
 
-// Has the OPEN editor, on either surface, lost what it was rooted at? Both
-// the standalone tab and the in-app overlay get the same answer, because a
-// root vanishes routinely (a typed exit, a crash, another client closing the
-// terminal or deleting the agent) and the owner's two rulings compose the
-// same way on both: an editor does not outlive its target, but only a
-// destructive confirm may discard typed text. Answering true owns the whole
-// pass, so the ordinary selection and editor prunes do not also run: the
-// editor prune would delete the very tabs a dirty hold protects, and on the
-// standalone tab the selection prune would clear the surface flag first and
-// leave the tab blank on an address that still names a dead target.
+// Has the open editor, on either surface, lost what it was rooted at? An editor
+// does not outlive its target, but only a destructive confirm may discard typed
+// text, and both surfaces compose those two rulings alike.
+//
+// Answering true owns the whole pass, so the ordinary selection and editor
+// prunes do not also run: the editor prune would delete the very tabs a dirty
+// hold protects, and the selection prune would blank the standalone tab.
 function endOpenEditorIfRootGone(spine: Spine): boolean {
   const root = state.editorTarget?.root ?? state.editorRoute?.root ?? null
   if (root === null || rootIsLive(spine, root)) return false
   if (hasDirtyTabForRoot(root)) {
-    // HOLD the pass for this root: the root that could have saved this text
-    // is exactly what vanished, so leaving now would discard it with no way
-    // back; the tab stays as it is, words on screen, until the confirm behind
-    // `editorTargetGone` is answered. The dead selection it holds on to
-    // meanwhile is resolved the moment that answer arrives. Other dead roots'
-    // tabs are NOT shielded by the hold: they have nothing on screen, so they
-    // are pruned here in the same pass the ordinary prune would have run.
+    // Hold the pass for this root: what vanished is the root that could have
+    // saved this text, so the tab stays as it is until the confirm behind
+    // `editorTargetGone` is answered, and the dead selection it holds resolves
+    // then. Other dead roots have nothing on screen and are pruned as usual.
     const key = rootKey(root)
     pruneDeadEditorTabs(liveEditorRootKeys(spine), key)
     if (vanishedEditorAsked !== key) {
@@ -2938,14 +2652,11 @@ export function keepVanishedEditor(): void {
   setState({ editorTargetGone: null })
 }
 
-// Mirror a parsed route's editor half into state, directly and silently.
-// This is the reconstitution path (popstate, boot deep-link, the not-found
-// retry): it NEVER calls `openEditor` (which selects the session and writes
-// the URL — the browser is already parked on this address, and `openEditor`'s
-// `selectSession` would double-write it) and never writes the URL itself. Tab
-// seeding goes through the `editorOpenFile` reducer wrapper, which is pure
-// state work. An editor half naming a session this spine does not have (or no
-// editor half at all) closes an open editor, state only.
+// Mirror a parsed route's editor half into state, directly and silently. The
+// reconstitution path: it never calls `openEditor`, whose `selectSession` would
+// re-write an address the browser is already parked on, and writes no URL
+// itself. An editor half naming a session this spine does not have, or no
+// editor half at all, closes an open editor as state only.
 function syncEditorStateFromRoute(spine: Spine, route: Route): void {
   const root =
     route.editor !== null && route.target !== null
@@ -2985,12 +2696,11 @@ function rootIsLive(spine: Spine, root: EditorRoot): boolean {
 function resolveRoute(spine: Spine, route: Route): void {
   if (route.target === null) return
   syncEditorStateFromRoute(spine, route)
-  // THE ADDRESS WINS over the pane's remembered mode while a route is being
-  // resolved, because the route IS the user's position: a shared theater link,
-  // and a Back out of theater onto the same pane, both have to override what
-  // that pane's memory says. Armed around the commit and dropped in a
-  // `finally` so a route that resolves to not-found cannot leave the override
-  // armed for whatever selection happens next.
+  // The address wins over the pane's remembered mode while a route resolves,
+  // because the route is the user's position: a shared theater link and a Back
+  // out of theater both have to override that memory. Armed around the commit
+  // and dropped in a `finally`, so a route resolving to not-found cannot leave
+  // the override armed for the next selection.
   pendingTheater = route.theater
   try {
     resolveRouteTarget(spine, route.target, route.changes)
@@ -3085,18 +2795,13 @@ function resolveRouteTarget(
     setRouteNotFound(sessionId)
     return
   }
-  // `changes` travels WITH the target rather than being applied after it. The
-  // URL names the screen as well as the focus, and `syncUrl` reads the screen
-  // off state, so committing the target first and the screen second would write
-  // the address from a half-applied route and strip the `/changes` segment off
-  // the very URL being resolved.
+  // `changes` travels with the target rather than after it: `syncUrl` reads the
+  // screen off state, so committing them separately would write the address
+  // from a half-applied route and strip `/changes` off the URL being resolved.
   //
-  // The `"replace"` here is BELT AND BRACES. Every caller has the browser
-  // already parked on this hash, and the only rewrites this path can produce
-  // (a gone tab or a gone terminal falling back to its session) stay on the
-  // same SCREEN, so `syncUrl` would replace on its own. It is passed because
-  // the intent, "this is a restore, never a new position", should be stated at
-  // the call site rather than inferred from what the fallbacks happen to do.
+  // The `"replace"` is belt and braces (every caller is already parked on this
+  // hash), passed so the call site states the intent: a restore, not a new
+  // position.
   applyDeepLinkSelection(session, spine.terminals, target, "replace", changes)
 }
 
@@ -3109,19 +2814,14 @@ function targetSessionId(target: SelectedTarget): string | null {
   return ownerSessionId(target.owner)
 }
 
-// Retire the not-found screen once a spine carries the agent its URL names. The
-// flag is set from the route, so only the route can clear it, and nothing else
-// on the spine path touches it: the prune returns early (there is no selection
-// to prune) and no state patch mentions the missing target. Without this the
-// screen sticks after the agent comes back, and on a phone it replaces the whole
-// shell, so its single button is the only way out.
+// Retire the not-found screen once a spine carries the agent its URL names.
+// Nothing else on the spine path clears the flag: the prune returns early with
+// no selection to prune, so without this the screen sticks after the agent
+// comes back, and on a phone it is the whole shell.
 //
-// The check that the URL still names the agent we flagged is BELT AND BRACES,
-// not a live guard: any move the user makes carries a target, and a patch
-// carrying a target clears the flag (see `setState`), so by the time the hash
-// disagrees there is no flag left to act on. It is kept because it is the one
-// line that makes "never re-read a stale hash" true by inspection rather than
-// by tracing every writer of `routeNotFound`.
+// Re-checking that the URL still names the flagged agent is belt and braces:
+// any patch carrying a target already clears the flag. It stays because it
+// makes "never re-read a stale hash" true by inspection.
 function retryRouteNotFound(spine: Spine): void {
   const missing = state.routeNotFound
   if (!missing) return
@@ -3169,12 +2869,9 @@ let pendingDeepLinkTheater = bootRoute.theater
 
 // Route a normalized route target onto an already-resolved session: restore a
 // still-present terminal or extra tab, else fall back to the session-slot tab.
-// Shared by the boot restore, the reconnect re-restore, and Back/Forward so all
-// three honor tabs/terminals identically. `urlMode` is passed through to
-// `syncUrl`: these are all restores of a position the URL already names (or a
-// correction to one), never a fresh move in, so they replace. `changes` is the
-// screen half of the route and is committed in the SAME state patch as the
-// target, never after it, so the URL is only ever written from a whole route.
+// Shared by every restore path so all of them honor tabs and terminals alike.
+// `changes` is committed in the same patch as the target, never after it, so
+// the URL is only ever written from a whole route.
 function applyDeepLinkSelection(
   session: Spine["sessions"][number],
   terminals: readonly TerminalView[],
@@ -3225,13 +2922,11 @@ function applyDeepLinkSelection(
   selectSessionRoute(target.sessionId, urlMode, changes)
 }
 
-// Restore the boot URL against the first spine. Resolve the session in the
-// spine; restore the terminal when it still exists, else fall back to the
-// session; render the not-found screen when the session is gone. The mobile
-// shell lands on the screen the URL names (`resolveRouteTarget` commits the
-// target, and the screen follows from it), which is what makes an agent link
-// open its terminal rather than leaving the hub on top of it. Nothing is pushed:
-// the browser is already parked on this entry.
+// Restore the boot URL against the first spine: the terminal when it still
+// exists, else the session, else the not-found screen. The mobile shell lands
+// on the screen the URL names, which is what makes an agent link open its
+// terminal rather than leaving the hub on top of it. Nothing is pushed: the
+// browser is already parked on this entry.
 function restoreDeepLink(spine: Spine): void {
   const link = pendingDeepLink
   if (!link) return
@@ -3245,13 +2940,11 @@ function restoreDeepLink(spine: Spine): void {
   })
 }
 
-// Restore a project-terminal route against a spine: select the terminal when its
-// project still carries it, and land home when either the project or the terminal
-// is gone. Landing home is a real navigation, URL included: returning silently
-// would leave the address bar naming a terminal the app is not showing, which
-// is the exact URL-versus-state disagreement this router exists to remove. There
-// is no not-found screen for a terminal, deliberately, since terminal ids are
-// ephemeral and a closed terminal is ordinary rather than a broken link.
+// Restore a project-terminal route against a spine, landing home when either
+// the project or the terminal is gone. Landing home writes the URL too, or the
+// address bar would name a terminal the app is not showing. There is
+// deliberately no not-found screen here: terminal ids are ephemeral, so a
+// closed terminal is ordinary rather than a broken link.
 function applyProjectTerminalDeepLink(
   spine: Spine,
   terminalId: string,
@@ -3288,23 +2981,16 @@ function applyStandaloneTerminalDeepLink(
   selectSessionRoute(null, urlMode)
 }
 
-// Deep-link intent re-armed on an events-socket RECONNECT — distinct from the
-// boot `pendingDeepLink` one-shot above. When the connection drops while the
-// user is deep-linked to a running agent, the reconnect can transiently clear
-// the selection: the center pane mirrors the TUI's "agent exited" behavior and
-// ejects to the welcome screen while the agent is momentarily `detached` (it
-// exited during the outage and has not finished resuming yet), and that eject
-// wipes the URL hash back to home. Nothing then restores the route, because
-// `restoreDeepLink` is a spent boot one-shot. So on every reconnect we capture
-// the route from `location.hash` — BEFORE any spine apply or eject can wipe it
-// — and re-restore it once the agent is present AND back to `active` (its resume
-// has completed). Restoring earlier, while still `detached`, would ping-pong
-// with the center pane's eject.
-// The `changes` half of the route rides along with the target: the intent is a
-// whole POSITION, not just a focus. Arming from a target alone strands a user
-// reading changed files twice over: the anchored `parseSelectionHash` reads
-// `#/agent/<sid>/changes` as no link at all, and the restore would drop them
-// onto the terminal screen.
+// Deep-link intent re-armed on an events-socket reconnect, distinct from the
+// boot `pendingDeepLink` one-shot: a reconnect can eject to the welcome screen
+// while the agent is momentarily `detached`, wiping the hash, and the boot
+// one-shot is spent. The route is captured before any spine apply can wipe it
+// and restored only once the agent is back to `active`, since restoring while
+// still `detached` ping-pongs with the eject.
+//
+// It carries the whole position, not just the target: `parseSelectionHash`
+// reads `#/agent/<sid>/changes` as no link, so a target-only intent would drop
+// a user reading changed files onto the terminal screen.
 interface ReconnectDeepLink {
   target: SelectedTarget
   changes: boolean
@@ -3312,15 +2998,12 @@ interface ReconnectDeepLink {
 }
 let reconnectDeepLink: ReconnectDeepLink | null = null
 
-// Bound how long the re-armed intent stays live, measured from the LATEST
-// events-socket reopen (armReconnectDeepLink refreshes `armedAt` on every
-// reopen, including one that finds the hash already wiped by our own eject,
-// see below). This is a best-effort bound, generously above a normal provider
-// resume: an agent that never returns to `active` within a window after the
-// last reopen (resume failed, or it was genuinely stopped) intentionally gives
-// up rather than keep chasing it indefinitely. A slow resume across a laptop
-// sleep gets a fresh full window on the wake-triggered reopen, so this mostly
-// only bites a resume that is actually stuck.
+// How long the re-armed intent stays live, measured from the latest
+// events-socket reopen, which `armReconnectDeepLink` refreshes `armedAt` on. A
+// best-effort bound well above a normal provider resume: an agent that never
+// returns to `active` within it gives up rather than chase indefinitely. A
+// sleep gets a fresh window on the wake-triggered reopen, so this mostly only
+// bites a resume that is genuinely stuck.
 const RECONNECT_DEEPLINK_TTL_MS = 60_000
 
 // Set by `ejectSelectionForReconnect` immediately around its own
@@ -3380,13 +3063,10 @@ function restoreReconnectDeepLink(spine: Spine): void {
     restoreSessionScopedReconnect(spine, armed, armedTarget.sessionId)
     return
   }
-  // A handler per owner variant, not a predicate plus a nullable id.
-  //
-  // Reducing the owner to a nullable session id answers null for any unhandled
-  // kind and silently drops its restoration intent, with nothing anywhere
-  // saying why. A predicate keeps compiling; the matcher's object literal is
-  // missing a key the moment a variant is added, which is a compile error
-  // HERE, where the decision is.
+  // A handler per owner variant, not a predicate plus a nullable id: reducing
+  // the owner to a nullable session id would silently drop an unhandled kind's
+  // restoration intent, while the matcher's object literal is missing a key the
+  // moment a variant is added, which is a compile error here.
   const terminal = armedTarget
   matchOwner(terminal.owner, {
     session: (owner) =>
@@ -3402,16 +3082,13 @@ function restoreReconnectDeepLink(spine: Spine): void {
   })
 }
 
-// The AGENTLESS half of `restoreReconnectDeepLink`: a terminal owned by a
-// project, or by nothing at all. Both restore on identical terms, which is why
-// they share this rather than getting two near-copies.
+// The agentless half of `restoreReconnectDeepLink`: a terminal owned by a
+// project or by nothing, which restore on identical terms.
 //
-// Neither has a resume phase and neither pane issues the reconnect eject (that
-// path is gated on the agent session-slot tab), so the selection normally
-// survives a reconnect on its own and this usually just disarms as a no-op. The
-// one restorable gap is a selection cleared by OUR OWN eject while the intent
-// was armed; any deliberate navigation (a non-null selection that is not the
-// armed terminal, or a home nav without the eject flag) disarms instead.
+// Neither has a resume phase and neither pane issues the reconnect eject, so
+// the selection normally survives on its own and this disarms as a no-op. The
+// one restorable gap is a selection cleared by our own eject while the intent
+// was armed; any deliberate navigation disarms instead.
 function restoreAgentlessTerminalReconnect(
   spine: Spine,
   armed: ReconnectDeepLink,
@@ -3517,16 +3194,12 @@ function restoreSessionScopedReconnect(
   reconnectDeepLink = null
 }
 
-// Select an agent session as the streamed target. Signature kept stable so
-// existing callers continue to work unchanged.
+// Select an agent session as the streamed target.
 //
 // Restores the agent's remembered tab-focus (`resolveFocusedTab`, backed by
-// `SessionView.last_focused_tab`): when the spine has the session and its
-// remembered tab is still a live extra tab, this routes through `selectTab`
-// (so the hash/changes wiring is identical to an explicit tab click) instead
-// of always landing on the session-slot tab. This is a READ of the memory,
-// not a write — no persistence call happens here; `selectTab` below owns
-// persisting an actual tab switch.
+// `SessionView.last_focused_tab`) by routing through `selectTab` when that tab
+// is still live, so the wiring matches an explicit tab click. A read of the
+// memory only: `selectTab` owns persisting an actual switch.
 export function selectSession(id: string | null): void {
   selectSessionRoute(id, undefined)
 }
@@ -3539,16 +3212,12 @@ function screenPatch(changes?: boolean): { mobileScreen: MobileScreen } | object
   return changes ? { mobileScreen: "changes" as const } : {}
 }
 
-// The editor half of a selection commit. A selection that moves to a session
-// DIFFERENT from the open editor's CLOSES the editor in the same state patch:
-// the hash must always name the VISIBLE position; merely dropping the editor
-// suffix from the URL (see `currentRoute`'s session guard) while the editor
-// state lingers leaves the two disagreeing.
-// Closing also drops the standalone surface flag, per the rule that every
-// editor clear outside popstate does (`clearEditorStateSilently`). Selecting
-// the editor's OWN session (or the same session's tab/terminal) keeps it
-// open. `openEditor` overrides this patch with its own open patch, which is
-// how its selection move and its editor open land as one commit.
+// The editor half of a selection commit. Moving to a session other than the
+// open editor's closes the editor in the same patch, because the hash must name
+// the visible position and dropping the suffix alone leaves the two
+// disagreeing. Closing also drops the standalone surface flag, as every editor
+// clear outside popstate does. `openEditor` overrides this patch with its own,
+// which is how its selection move and its open land as one commit.
 function editorSelectionPatch(target: SelectedTarget | null): Partial<DuxState> {
   const openRoot = state.editorRoute?.root ?? state.editorTarget?.root ?? null
   if (openRoot === null) return {}
@@ -3561,12 +3230,10 @@ function editorSelectionPatch(target: SelectedTarget | null): Partial<DuxState> 
 }
 
 // `selectSession` with control over how the URL is written. `urlMode:
-// "replace"` is for a move the user did not make: a restore, or the destination
-// chosen when what they were looking at vanished. `changes` restores the changes
-// screen for a route that names it. `extra` is a state patch committed IN THE
-// SAME setState as the selection (and therefore serialized by the same, single
-// `syncUrl` write); its only caller is `openEditor`, whose selection move and
-// editor open must land as one history entry, one real position.
+// "replace"` is for a move the user did not make. `extra` is a state patch
+// committed in the same `setState` as the selection, and so serialized by the
+// same single `syncUrl` write, which is what lets a selection move and an
+// editor open land as one history entry.
 function selectSessionRoute(
   id: string | null,
   urlMode?: "replace",
@@ -3640,14 +3307,11 @@ function clearSelection(urlMode?: "replace", extra?: Partial<DuxState>): void {
   syncUrl(urlMode)
 }
 
-// The ONE carve-out to `selectSession`'s "any clear disarms the reconnect
-// intent" rule: called exclusively by the center pane's transient
-// reconnect-eject (mirroring the TUI's "agent exited" reset, see
-// `TerminalPane`), never by a user-initiated navigation. Marks this specific
-// `selectSession(null)` as OUR eject so `restoreReconnectDeepLink` can tell it
-// apart from a deliberate home navigation the user made on their own while the
-// agent was still resuming, only the former should be undone once the agent
-// comes back to `active`.
+// The one carve-out to `selectSession`'s "any clear disarms the reconnect
+// intent" rule, for the center pane's transient reconnect-eject and never for a
+// user-initiated navigation. It marks this `selectSession(null)` as our own
+// eject, so `restoreReconnectDeepLink` can tell it apart from a deliberate home
+// navigation: only the former is undone once the agent is `active` again.
 export function ejectSelectionForReconnect(): void {
   // A replace, not a push: the eject is transient (the reconnect re-restore
   // undoes it), so it must not leave a home entry between the user and the
@@ -3660,12 +3324,10 @@ export function ejectSelectionForReconnect(): void {
 // equivalent to `selectSession`. The changed files belong to the SESSION, so the
 // subscription/fetch key off `sessionId` regardless of tab.
 //
-// Persists the choice as the agent's remembered tab-focus (fire-and-forget,
-// no status/toast) so a later `selectSession` restores it, on this client or
-// any other sharing the same server. `tabsApi.setFocusedTab` itself normalizes
-// the session-slot tab to "clear the memory" server-side. Pass `persist:
-// false` for a selection that must not rewrite the workspace-shared memory
-// (e.g. `restoreDeepLink`, which only follows a link, it doesn't set intent).
+// Persists the choice as the agent's remembered tab-focus, fire and forget, so
+// a later `selectSession` restores it on any client of the same server. Pass
+// `persist: false` for a selection that must not rewrite that shared memory,
+// such as following a link rather than stating an intent.
 export function selectTab(
   sessionId: string,
   tabId: string,
@@ -3677,12 +3339,10 @@ export function selectTab(
     // setState, threaded through when a remembered tab diverts an
     // `openEditor` selection here.
     extra?: Partial<DuxState>
-    // THE MODE THE SWITCH CARRIES. A tab switch made from inside theater (the
-    // floating pill's mini strip) must not consult the DESTINATION's memory:
-    // the user is looking at a full-screen pane and asked for a different tab
-    // in it, so the mode follows their attention and the destination remembers
-    // it from then on. Same override the route path arms, said at the call
-    // site instead of through module state.
+    // The mode the switch carries. A tab switch made from inside theater must
+    // not consult the destination's memory: the user asked for a different tab
+    // in a full-screen pane, so the mode follows and the destination remembers
+    // it. The same override the route path arms, stated at the call site.
     theater?: boolean
   },
 ): void {
@@ -3705,14 +3365,11 @@ export function selectTab(
   persistFocusedTab(sessionId, isSlotTabOf(sessionId, tabId) ? null : tabId)
 }
 
-// Per-session bookkeeping for the fire-and-forget focus-tab PUT. `selectTab`
-// can fire in rapid succession (fast tab switching) and the resulting network
-// responses can settle out of order, so we keep only the LATEST intended
-// `(generation, tabId)` per session. When a response settles for a stale
-// generation whose value differs from the current intent
-// (`shouldRefireFocusPut`), we re-issue a PUT for the latest intent so the
-// server's last write always matches the user's last click, regardless of
-// response ordering.
+// Per-session bookkeeping for the fire-and-forget focus-tab PUT: only the
+// latest intended `(generation, tabId)` is kept. Rapid tab switching settles
+// out of order, so a stale generation whose value differs from the current
+// intent re-issues a PUT (`shouldRefireFocusPut`), keeping the server's last
+// write equal to the user's last click.
 const focusPutIntent = new Map<
   string,
   { generation: number; tabId: string | null }
@@ -3863,13 +3520,6 @@ export function findTerminalOwner(
   return terminal ? ownerRefFromWire(terminal.owner) : undefined
 }
 
-// Close (delete) a companion terminal via REST. The endpoint is nested
-// under the owner, so resolve it from the spine across BOTH owner kinds,
-// sessions and projects (a session-only scan would silently make project
-// terminals undeletable); a terminal that already vanished (no owner) is a no-op. The
-// terminal is removed from the workspace spine, and if it was the focused target
-// the selection clears via the spine prune in `applyWorkspace` (driven by the
-// `sessions.changed` refetch). A failure surfaces as a toast.
 // The DELETE endpoint for a terminal is nested under its owner, so which URL to
 // call is an owner decision and gets an exhaustive switch of its own.
 function terminalDeleteRequest(
@@ -3889,6 +3539,10 @@ function terminalDeleteRequest(
   }
 }
 
+// Close a terminal via REST. The owner is resolved from the spine across every
+// owner kind, since a session-only scan would make project terminals
+// undeletable, and a terminal that already vanished is a no-op. A focused
+// terminal's selection clears through the spine prune, not from here.
 export function deleteTerminal(terminalId: string): void {
   const owner = findTerminalOwner(terminalId)
   if (owner === undefined) return
@@ -3927,13 +3581,10 @@ export function addTab(sessionId: string, provider?: string): void {
     })
 }
 
-// Open the close-tab confirmation for a tab. Closing ALWAYS confirms. Closing a
-// tab ends it; closing the tab in the session slot hands the slot to the next
-// tab in strip order, and closing the agent's last live tab detaches the agent.
-// Two gestures do NOT come here: an agent's ONLY tab, whose close the server
-// refuses and whose menu item is therefore disabled with the reason rather than
-// opening a dialog, and the Task Manager's first-tab row, which is a Stop and
-// routes to `openStopAgent`.
+// Open the close-tab confirmation; closing always confirms. Two gestures do not
+// come here: an agent's only tab, whose close the server refuses and whose menu
+// item is disabled with the reason, and the Task Manager's first-tab row, which
+// is a Stop and routes to `openStopAgent`.
 export function openCloseTab(sessionId: string, tabId: string): void {
   setState({ closeTabTarget: { sessionId, tabId } })
 }
@@ -3955,20 +3606,14 @@ export function closeStopAgent(): void {
   setState({ stopAgentTarget: null })
 }
 
-// Close a tab via REST. Any tab may be closed, the one in the session slot
-// included: the server hands the slot to the next tab in strip order and names
-// it back as `promoted`. The agent's ONLY tab is the exception, refused by the
-// engine, because an agent always has a slot. The 200 body also reports
-// `{ detached }`, true when the close took the agent's last live tab.
+// Close a tab via REST. Any tab may go, the slot tab included: the server hands
+// the slot on and names the successor back as `promoted`, and reports
+// `{ detached }` when the close took the agent's last live tab. An agent's only
+// tab is refused by the engine.
 //
-// All focus/latch mutations wait for the DELETE to actually resolve: closing is
-// NOT optimistic, because mutating them beforehand would leave the UI navigated
-// away from a tab that is still alive server-side whenever the request fails,
-// with only a toast and no rollback. On success, if the closed tab was the
-// focused target, focus lands on the tab that took the slot (or, for an extra
-// tab's close, falls back to the slot tab) so the pane never sits on the
-// just-closed tab and re-subscribes it (subscribing force-relaunches the
-// provider). A failure toasts and leaves all state untouched.
+// Nothing is optimistic: focus and latches move only once the DELETE resolves,
+// or a failed request would leave the UI navigated away from a live tab with no
+// rollback. Focus must leave the closed tab, since subscribing relaunches it.
 export function closeTab(sessionId: string, tabId: string): void {
   tabsApi
     .remove(sessionId, tabId)
@@ -4029,13 +3674,11 @@ export async function retargetTab(
 }
 
 // Explicitly start a dormant tab from its dormant card. Selection is immediate,
-// because it is what the press MEANT and a request must never be able to yank it
-// back: navigating away while the start is in flight has to stick. The launch
-// itself is the server's, and the LATCH waits for its answer, which is what keeps
-// the pane from mounting early: the card stays up (so no PTY socket opens) until
-// the start route has actually dispatched the launch, because the socket path
-// refuses a tab whose last run failed and the start route is the only way past
-// that. A refusal leaves the card where it is and says why.
+// because it is what the press meant and navigating away mid-flight must stick.
+// The latch waits for the server's answer, so the card stays up and no PTY
+// socket opens until the launch is dispatched: the socket path refuses a tab
+// whose last run failed, and this route is the only way past that. A refusal
+// leaves the card where it is and says why.
 export function startDormantTab(sessionId: string, tabId: string): void {
   selectTab(sessionId, tabId)
   tabsApi
@@ -4046,18 +3689,14 @@ export function startDormantTab(sessionId: string, tabId: string): void {
     )
 }
 
-// Latch a tab as deliberately STARTED by this client, so the dormant card does
-// not sit in front of a launch that is already on its way. The ONLY gesture that
-// needs this is the card's own button, and only for the gap between the server
-// accepting the start and the spine reporting the tab live; a create, a
-// reconnect and a plain selection of a healthy dormant first tab need no latch,
-// because none of them shows the card in the first place.
+// Latch a tab as started by this client so the dormant card does not sit in
+// front of a launch already on its way. Only the card's own button needs it,
+// for the gap between the server accepting the start and the spine reporting
+// the tab live.
 //
-// It is dropped by `applyWorkspace` when the tab goes live, and equally when the
-// spine says the tab's last run FAILED, which is the launch this latch was
-// bridging for having come back with a verdict. There is no timer behind it:
-// a latch that neither outcome ever retires would mean the server never answered
-// about a launch it accepted, which is not a state a clock can improve.
+// `applyWorkspace` drops it when the tab goes live and equally when the spine
+// says the run failed, which is the same launch coming back with a verdict.
+// There is no timer: neither outcome arriving is not a state a clock improves.
 function markTabStarted(tabId: string): void {
   if (state.startedDormantTabs.includes(tabId)) return
   setState({ startedDormantTabs: [...state.startedDormantTabs, tabId] })
@@ -4070,13 +3709,10 @@ function dropTabStarted(tabId: string): void {
   })
 }
 
-// An extra tab's PTY socket discovered (via `isTabGone` against the current
-// spine) that this tab no longer exists — another client closed it while this
-// one was retrying the socket. The route will keep 404ing, so there is nothing
-// left to reconnect to: clear the started-dormant latch (it would otherwise
-// linger forever, since the tab is gone and `applyWorkspace` only clears the latch
-// once a tab goes LIVE, which this one now never will) and toast so the user
-// knows why the pane stopped retrying instead of it just going quiet.
+// An extra tab's PTY socket found the tab gone (`isTabGone`), closed by another
+// client mid-retry. The route will keep 404ing, so the started-dormant latch is
+// cleared here: `applyWorkspace` only clears it once a tab goes live, which this
+// one never will. The toast says why the pane stopped retrying.
 export function handleTabGone(tabId: string): void {
   dropTabStarted(tabId)
   notifyError("This tab was closed elsewhere.")
@@ -4115,16 +3751,12 @@ export function setCommitDraft(text: string): void {
   setState({ commitDraft: text })
 }
 
-// Open the code-editor overlay for a session. Selecting the session first points
-// the engine's changed-files watch at its worktree so the editor's file list
-// populates from the same broadcast the changes pane uses. `initialPath` (from a
-// per-file affordance) auto-loads that file, seeded as a tab via
-// `editorOpenFile`, so external opens (ChangedFiles Edit/Diff, Sidebar) funnel
-// through the same VS Code preview model as the tree/search; `mode` chooses the
-// opening view: "diff" when a changed file is clicked (show its diff first),
-// "file" otherwise. Does NOT clear the session's existing tab list, so reopening
-// the overlay on a session restores its tabs (`editorTabs` persists across
-// `closeEditor`; only `editorClearSession`, on session delete, clears it).
+// Open the code-editor overlay for a session. Selecting the session first
+// points the engine's changed-files watch at its worktree, so the file list
+// comes from the same broadcast the changes pane uses. `initialPath` is seeded
+// through `editorOpenFile`, so an external open uses the same preview model as
+// the tree. Does not clear the session's tab list: `editorTabs` outlives
+// `closeEditor` and only `editorClearSession` drops it.
 export function openEditor(
   root: EditorRoot,
   initialPath: string | null = null,
@@ -4147,15 +3779,12 @@ export function openEditor(
   // history sees.
   if (initialPath !== null)
     editorOpenFile(root, initialPath, { mode: effectiveMode })
-  // Opening the editor is a move to a new position, so by default it PUSHES
-  // (routePushKey changes on the editor-open bit) and one Back closes it and
-  // lands wherever the user opened it FROM. When the session was not already
-  // selected, the selection move and the editor open are still ONE navigation
-  // the user made, so they commit as ONE setState (the `extra` patch) and one
-  // `syncUrl` — never two pushes with a never-visited agent screen buried
-  // between. `urlMode: "replace"` is for the restore paths, exactly as on
-  // the selection functions.
-  // A terminal root selects its TERMINAL rather than a session: the editor's
+  // Opening the editor pushes, so one Back closes it and lands where it was
+  // opened from. A selection move and the editor open are one navigation, so
+  // they commit as one setState and one `syncUrl`, never two pushes with a
+  // never-visited agent screen between. `urlMode: "replace"` is for restores.
+  //
+  // A terminal root selects its terminal rather than a session: the editor's
   // address rides on the target's hash, so the two must name the same thing.
   if (root.kind === "terminal") {
     const selected = state.selectedTarget
@@ -4234,13 +3863,11 @@ export function editorTabsFor(root: EditorRoot): EditorTabsState {
   return state.editorTabs[rootKey(root)] ?? emptyTabsState()
 }
 
-// Skips `setState` entirely when `next` is REFERENCE-EQUAL to the session's
-// current tabs state. A reducer that determined nothing actually changed
-// (e.g. `setTabDirty` called with the flag it already has) returns the same
-// object back. `useDux()` is an unselective `useSyncExternalStore`, so every
-// consumer app-wide re-renders on every `setState`; without this guard a
-// no-op dispatch (like the one `editorSetTabDirty` would otherwise fire on
-// every keystroke) would still fan out a global re-render for nothing.
+// Skips `setState` when `next` is reference-equal to the session's current
+// tabs state, which is what a reducer returns when nothing changed. `useDux()`
+// is an unselective `useSyncExternalStore`, so every consumer re-renders on
+// every `setState`, and a no-op dispatch on each keystroke would fan out a
+// global re-render for nothing.
 function setEditorTabsFor(root: EditorRoot, next: EditorTabsState): void {
   const key = rootKey(root)
   if (state.editorTabs[key] === next) return
@@ -4255,13 +3882,10 @@ function setEditorTabsFor(root: EditorRoot, next: EditorTabsState): void {
   syncBeforeUnloadGuard(hasAnyDirtyTab(state.editorTabs))
 }
 
-// Open (or activate, or preview-replace) a file in a session's tab list. See
-// `lib/editorTabs.ts` `openFile` for the exact promotion rules. `opts.mode` is
-// an EXPLICIT mode intent (changed-files Edit/Diff, a brand-new file, an
-// external deep-link via `openEditor`); it always drives a new/replaced tab's
-// mode and, given, also retargets an already-open tab's mode. Omit it for a
-// plain activation (tree/search click) so re-clicking an already-open path
-// never silently flips its existing diff view back to file view.
+// Open, activate or preview-replace a file in a session's tab list; the
+// promotion rules live in `openFile` in `lib/editorTabs.ts`. `opts.mode` is an
+// explicit mode intent and retargets an already-open tab; omit it for a plain
+// activation, so re-clicking an open path never flips its diff view back.
 export function editorOpenFile(
   root: EditorRoot,
   path: string,
@@ -4517,12 +4141,11 @@ export function closeChangeProvider(): void {
   setState({ changeProviderTarget: null })
 }
 
-// Whether `provider` is in the bootstrap document's configured provider list. The
-// server re-validates authoritatively, but checking here first avoids firing a
-// PATCH that the server will reject — important for the multi-field project PATCH,
-// where a bad provider rejected mid-sequence would leave earlier fields (rename,
-// auto-reopen) already committed (the PATCH is not atomic across independent
-// fields). Empty list (pre-bootstrap) treats every provider as unconfigured.
+// Whether `provider` is in the bootstrap document's configured provider list.
+// The server re-validates, but checking first matters for the multi-field
+// project PATCH, which is not atomic: a provider rejected mid-sequence would
+// leave the rename and auto-reopen already committed. An empty list, before the
+// bootstrap lands, treats every provider as unconfigured.
 function providerIsConfigured(provider: string): boolean {
   return (state.bootstrap?.available_providers ?? []).includes(provider)
 }
@@ -4565,16 +4188,10 @@ export function toggleSessionAutoReopen(
 }
 
 // Ask the server to reconnect (relaunch) an agent. `force` starts a fresh
-// session with no resume args (the TUI's force-reconnect); the default resumes
-// the prior conversation when the provider supports it. The web UI deliberately
-// exposes only the forced variant (the confirmed "Force recreate agent…" menu
-// item), so no web surface currently calls `force: false`; the parameter stays
-// because the wire contract supports resume and the TUI still exposes plain
-// reconnect as a separate action. Focus the session and
-// bump `terminalEpoch` so the pane remounts and re-subscribes — the reconnect
-// swaps in a new server-side provider, and the previously-attached forwarder is
-// dead, so even an already-focused pane must re-issue `subscribe`. The server
-// defers that subscribe until the freshly launched provider comes up.
+// session with no resume args; the default resumes the prior conversation where
+// the provider supports it. `terminalEpoch` is bumped so the pane remounts and
+// re-subscribes: the reconnect swaps in a new provider and the attached
+// forwarder is dead, so even an already-focused pane must re-issue `subscribe`.
 export function reconnectSession(sessionId: string, force: boolean): void {
   sessionsApi
     .reconnect(sessionId, force)
@@ -4833,13 +4450,10 @@ function runBrowse(path: string | null): void {
     })
 }
 
-/** Open the standalone-agent folder picker, at the server's configured default
- * start directory.
- *
- * Deliberately no inspection: the add-project picker classifies the folder
- * before committing, because a project must be a repository. A standalone agent
- * accepts whatever is there, so there is nothing to check and nothing to warn
- * about. */
+/** Open the standalone-agent folder picker at the server's configured default
+ * start directory. Deliberately no inspection, unlike the add-project picker:
+ * a project must be a repository, while a standalone agent accepts whatever is
+ * there, so there is nothing to check. */
 export function openStandaloneAgentPicker(): void {
   setState({
     standaloneAgentPickerOpen: true,
@@ -5271,28 +4885,17 @@ export function openForkAgent(sessionId: string): void {
 
 // Open the name dialog in "from PR" mode.
 //
-// `projectId` is the project-first shape, opened from a project's own menu, and
-// behaves exactly as it always did. `null` is the reference-first shape, opened
-// from the global command: no project is chosen and none is asked for, and the
-// reference decides which project the agent lands in.
+// `projectId` is the project-first shape, opened from a project's own menu.
+// `null` is the reference-first shape, opened from the global command: no
+// project is chosen or asked for, and the reference decides where it lands.
 export function openCreateAgentFromPr(projectId: string | null): void {
   openNameDialog({ kind: "pr", projectId })
 }
 
-// Shared opener for all modes of the name dialog. Pre-checks the randomize
-// default and requests a name right away so the input previews it, exactly like
-// the TUI prompt — EXCEPT in PR mode: the TUI seeds the PR's head branch as the
-// name and never randomizes there (a pet name would become the branch the PR
-// head is fetched into). The web doesn't know the head branch until after the
-// lookup, so PR mode opens blank and the server's head-branch fallback applies.
-// Runs in the click handler that opens the dialog — never an effect — so there
-// is no set-state-in-effect.
-// Request a fresh pet name for the new-agent dialog over REST. The TUI fills
-// the input with the generated name (that fill IS the preview) and remembers it so a
-// later uncheck can tell "still the generated name" from "user-edited". We mirror
-// that: fill the draft and stash the name. Ignored if the dialog closed or the
-// user unchecked the box before the reply landed (a stale reply must not refill).
-// A failure stops the spinner so the user can type a name by hand.
+// Request a fresh pet name over REST. The generated name is stashed as well as
+// filled, so a later uncheck can tell it from one the user typed. A reply that
+// lands after the dialog closed or the box was unchecked is ignored, and a
+// failure stops the spinner so a name can be typed by hand.
 function requestAgentName(): void {
   browseApi
     .agentName()
@@ -5315,6 +4918,10 @@ function requestAgentName(): void {
     })
 }
 
+// Shared opener for every mode of the name dialog. Pre-checks randomize and
+// requests a name at once so the input previews it, except in PR mode, where a
+// pet name would become the branch the PR head is fetched into. Runs in the
+// click handler rather than an effect, so there is no set-state-in-effect.
 function openNameDialog(target: CreateAgentTarget): void {
   const randomize =
     target.kind !== "pr" &&
@@ -5430,14 +5037,11 @@ export function toggleCreateAgentRandomize(): void {
   }
 }
 
-// Surface a create-action REST error as a toast, EXCEPT a 409 Conflict. A 409
-// means the engine's in-flight create guard refused: it returns an `Ok`
-// error-toned status that the engine ALSO broadcasts over `/ws/events` status
-// events (scoped to this connection) and that the REST handler maps to 409.
-// Toasting the 409 here would double up: the user would see two identical
-// toasts for one refusal. The `/ws/events` status stream is the single surface
-// for that case; every other status still
-// toasts. Network failures (`status === 0`) and all other codes are surfaced.
+// Surface a create-action REST error as a toast, except a 409 Conflict: that is
+// the engine's in-flight create guard, whose refusal already reaches this
+// connection over the `/ws/events` status stream, so toasting it here would
+// show the same refusal twice. Every other code, network failures included, is
+// surfaced.
 function toastCreateError(e: unknown, fallback: string): void {
   if (e instanceof SessionsApiError && e.status === 409) return
   notifyError(e instanceof Error ? e.message : fallback)
@@ -5493,13 +5097,10 @@ export function closeExistingBranch(): void {
   setState({ existingBranchTarget: null })
 }
 
-// Flat-list display controls (shared desktop + mobile), plus the New-agent
-// picker's open/close. All plain state writes.
-// Set the flat-list sort mode and persist it server-side (config.ui.agent_sort).
-// Optimistic: set the override now, POST to the dedicated endpoint; the engine
-// persists and emits config.changed, and the refetched bootstrap drops the
-// override (applyBootstrap) once config matches. On failure, clear the override so
-// the UI snaps back to the authoritative config value.
+// Set the flat-list sort mode and persist it to `config.ui.agent_sort` through
+// its dedicated endpoint. The override is optimistic, dropped by
+// `applyBootstrap` once config matches, and cleared on failure so the UI snaps
+// back to the authoritative value.
 export function setAgentSort(sort: FlatSortKey): void {
   setState({ agentSort: sort })
   configApi.setAgentSort(sort).catch((e) => {
@@ -5576,14 +5177,11 @@ export function createAgentFromPr(projectId: string, pr: string, name: string): 
 }
 
 // Text that names a pull request number and nothing else, with or without the
-// `#`. It names NO repository, so with no project chosen there is nothing for a
-// resolve to look for and the server would only refuse it. The refusal belongs
-// here, in the field, next to the action that fixes it.
+// `#`. It names no repository, so with no project chosen the server can only
+// refuse it, and the refusal belongs next to the field that fixes it.
 //
-// This is deliberately the ONLY shape refused in the browser. The full
-// reference grammar lives in Rust (`dux_core::pr_reference`) and reimplementing
-// it here would be two grammars drifting apart; every other refusal comes back
-// from the server, which stays the second line of defence for this one too.
+// Deliberately the only shape refused in the browser: the full grammar lives in
+// `dux_core::pr_reference` and a second copy here would drift.
 export function isBareNumberReference(raw: string): boolean {
   return /^#?\d+$/.test(raw.trim())
 }
@@ -5710,14 +5308,10 @@ export function submitNameDialog(name: string): void {
   closeCreateAgent()
 }
 
-// Optimistically reorder a project's sessions, then tell the server. `orderedIds`
-// MUST be the complete ordered set of that project's session ids — the server
-// validates it as a strict permutation and rejects partial/stale sets. The
-// overlay clears when the next spine confirms the order (or on error).
-// Flat model: reorder every agent as one global list. `orderedIds` MUST be the
-// complete set of ALL session ids (the server validates it as a strict
-// permutation and rejects partial/stale sets). Optimistic overlay clears when the
-// next spine confirms the order (or on error).
+// Reorder every agent as one global list. `orderedIds` must be the complete set
+// of session ids: the server validates it as a strict permutation and rejects a
+// partial or stale one. The optimistic overlay clears when the next spine
+// confirms the order, or on error.
 export function reorderAgents(orderedIds: string[]): void {
   setState({ pendingAgentOrder: orderedIds })
   sessionsApi.reorderGlobal(orderedIds).catch((e) => {
@@ -5729,12 +5323,10 @@ export function reorderAgents(orderedIds: string[]): void {
   })
 }
 
-// Flat model: reorder every terminal as one global list (the twin of
-// `reorderAgents`). `orderedIds` MUST be the complete set of ALL terminal ids (any
-// owner) in the desired order. The server validates it as a strict permutation and
-// rejects a partial/stale set. The optimistic `pendingTerminalOrder` overlay clears
-// when the next spine confirms the order (or on error). Terminal order is
-// runtime-only, so this resets to creation order on restart.
+// Reorder every terminal as one global list, the twin of `reorderAgents`.
+// `orderedIds` must be the complete set of terminal ids of any owner, validated
+// server-side as a strict permutation. Terminal order is runtime-only, so it
+// resets to creation order on restart.
 export function reorderTerminals(orderedIds: string[]): void {
   setState({ pendingTerminalOrder: orderedIds })
   terminalsApi.reorder(orderedIds).catch((e) => {
@@ -5763,21 +5355,13 @@ export function reorderSessions(projectId: string, orderedIds: string[]): void {
     })
 }
 
-// Sort every project's sessions by the chosen key. This is the app menu's
-// ONE-SHOT reorder (distinct from the flat-list sidebar sort control, which sets
-// the shared `config.ui.agent_sort` display mode via setAgentSort): for each
-// project we compute the sorted id order (sortedSessionIds, which mirrors the TUI
-// comparators exactly) and send the EXISTING `reorder_sessions` command, which
-// the server persists into the shared global order — so the stored order the TUI
-// displays under "manual" stays in sync by construction.
+// One-shot reorder of every project's sessions, distinct from `setAgentSort`,
+// which sets the shared display mode. It persists through `reorder_sessions`,
+// so the manual order the terminal UI shows stays in step by construction.
 //
-// We deliberately DON'T set the optimistic `pendingSessionOrder` overlay here.
-// That overlay holds a single project; a sort touches N projects, so an overlay
-// could only cover one of them and would leave the rest snapping anyway. The
-// spine echo arrives within tens of milliseconds, so the brief reflow is
-// acceptable and keeps the single-project drag overlay invariant untouched.
-// Projects with fewer than two sessions are skipped — sorting them is a no-op
-// that would only churn the wire.
+// No optimistic `pendingSessionOrder` overlay: that overlay holds one project
+// and a sort touches many, so it could only cover one and would leave the rest
+// snapping anyway.
 export function sortAgents(by: SortKey): void {
   const sessions = state.spine?.sessions ?? []
   const projects = state.spine?.projects ?? []
@@ -5827,24 +5411,14 @@ export function reorderProjects(orderedIds: string[]): void {
 // draft, while the PTY path keeps today's focus behavior.
 export type MacroDestination = "compose" | "pty" | "none"
 
-// Run a macro by name on the focused target. There is no server-side macro
-// command: the macro's text is resolved from the bootstrap document and
-// delivered client-side, to one of two destinations.
+// Run a macro by name on the focused target, client-side: the text comes from
+// the bootstrap document and goes to one of two destinations.
 //
-// While the mobile compose bar is the rendered typing surface, `TerminalPane`
-// has a compose-insert sink registered (see `composeInsert.ts`) and the macro's
-// RAW text is inserted into the compose DRAFT at the caret — an editable draft
-// the user reviews and Sends, never an immediate wire write (the Send path owns
-// the newline→keystroke transform, which is exactly why the raw text goes in
-// verbatim).
-//
-// Otherwise (desktop, compose bar off, non-owner viewer) the macro takes the
-// direct path: the newline→Alt+Enter transform (`macroPayloadBytes`, an exact
-// port of the engine's) is written straight to the active PTY socket as stdin —
-// the same socket the focused terminal pane drives. The macro picker is already
-// filtered to the focused surface, so the active socket IS the macro's target.
-// The text is pasted WITHOUT a trailing submit, mirroring the TUI: the user
-// reviews it in the prompt and presses Enter to send.
+// With a compose-insert sink registered, the RAW text joins the compose draft
+// at the caret, because the Send path owns the newline to keystroke transform.
+// Otherwise `macroPayloadBytes` applies that transform and writes to the active
+// PTY socket, which the picker's own filtering guarantees is the macro's
+// target. Neither path appends a submit: the user presses Enter.
 export function runMacro(name: string): MacroDestination {
   const macro = (state.bootstrap?.macros ?? []).find((m) => m.name === name)
   if (!macro) return "none"
@@ -5902,13 +5476,9 @@ export function saveMacros(macros: MacroView[]): void {
 }
 
 // Persist a drag-reorder of the macro editor's list through the same wholesale
-// PUT as `saveMacros`, WITHOUT closing the dialog (the user is still arranging
-// the list). Resolves `true` on success and `false` on any refusal or failure,
-// so the dialog can apply the new order optimistically and roll it back when
-// this reports false — the same optimistic-apply / snap-back idiom as
-// `reorderAgents`, with the overlay living in the dialog's local draft instead
-// of a store field (the draft is component state; a spine never reconciles it).
-// Failures toast here, mirroring the reorder actions above.
+// PUT as `saveMacros`, without closing the dialog. Resolves false on any
+// refusal or failure so the dialog can snap its optimistic order back; the
+// overlay lives in the dialog's own draft, which no spine reconciles.
 export function persistMacroOrder(macros: MacroView[]): Promise<boolean> {
   // Same guard as saveMacros: before bootstrap loads the draft was seeded
   // empty, and a wholesale PUT from that base would wipe the server's macros.
@@ -5929,26 +5499,18 @@ export function persistMacroOrder(macros: MacroView[]): Promise<boolean> {
 
 // --- Theater mode ----------------------------------------------------------
 //
-// One pane, no chrome. The header, the pull-request band and the tab strip
-// leave (on the phone shell, its own header takes their place in that list) and
-// the terminal takes the height they were using. Three acts reach these: the
-// expand button in the pane header, the floating pill's exit, and the
-// "Leave theater mode" item in the input `⋯` menu. Escape is a fourth, but only
-// where nothing typeable has focus (see `escExitsTheater`).
+// One pane, no chrome: the header, the pull-request band and the tab strip
+// leave and the terminal takes their height.
 //
-// BOTH DIRECTIONS PUSH, on the `closeEditor` precedent: closing a position is
-// a move between two real places, and replacing on the way out left the entry
-// entering pushed on the stack with nothing behind it, so a Back straight after
-// enter-then-exit did nothing at all. The accepted cost, stated rather than
-// discovered: that Back re-enters theater. Both directions write the pane's
-// memory, so coming back to the pane later comes back to the mode.
+// Both directions push, so a Back straight after enter-then-exit re-enters
+// theater rather than doing nothing. Both write the pane's memory, so returning
+// to the pane returns to the mode.
 
-// THEATER IS A MODIFIER ON A PANE, and neither the editor nor the phone's
-// changes screen is that pane: the address has no room for the modifier there
-// (see `theaterSerializable`), so leaving the live flag on would make state and
-// URL disagree about a mode the user can neither see nor leave. Opening either
-// SUSPENDS the mode and leaves the pane's memory alone; landing back on the
-// pane reads that memory again, so the two are one round trip.
+// Theater is a modifier on a pane, and neither the editor nor the phone's
+// changes screen is that pane: the address cannot carry the modifier there
+// (`theaterSerializable`), so a live flag would make state and URL disagree
+// about a mode the user can neither see nor leave. Opening either suspends the
+// mode and leaves the pane's memory alone, which is what makes it a round trip.
 function theaterSuspendPatch(): { theater: boolean } {
   return { theater: false }
 }
@@ -5961,38 +5523,26 @@ function theaterResumePatch(): { theater: boolean } {
   return { theater }
 }
 
-// BOTH SIDE PANELS LEAVE TOO, on the desktop: theater is one pane and the whole
-// window, so the sidebar (rail included) and the Changes pane are unmounted for
-// the duration. Neither of those is a preference the user changed, so neither
-// may be written: the shell derives its layout from the live `theater` flag and
-// touches nothing persisted, and this snapshot is the guarantee that whatever
-// the layout was on the way in is what comes back on the way out.
+// The layout theater borrows, restored on the way out. Theater unmounts the
+// sidebar and the Changes pane without the user having changed any preference,
+// so the shell derives its layout from the live `theater` flag and writes none.
 //
-// The Changes pane's VISIBILITY is deliberately not in here. It is
-// server-persisted config shared by every connected client, so the mode is not
-// allowed to PUT it, and putting a captured value back into the optimistic
-// override would overwrite a preference changed from the TUI or another browser
-// while the mode was on. The pane returns because the suppression lifts, which
-// is the same thing arrived at without writing anything, and a captured value
-// nothing may act on is a field that only invites somebody to act on it.
+// The Changes pane's visibility is deliberately absent: it is server-persisted
+// config shared by every client, so putting a captured value back would
+// overwrite a preference changed elsewhere while the mode was on. The pane
+// returns when the suppression lifts, which needs no write at all.
 export interface TheaterLayoutSnapshot {
   sidebarOpen: boolean
   sidebarWidth: string
   changesPanePercent: number
 }
 
-// THE ONE OWNER OF THE SNAPSHOT. Hand it the patch a commit is about to apply
-// and it appends the capture or the restore for whatever `theater` value that
-// patch actually SETTLES ON.
-//
-// Reconciling here rather than beside each decision is the whole point. Two
-// different halves of one commit can each have an opinion about the mode (the
-// editor suspends the pane being left while the selection enters the pane being
-// arrived at), they are read against the state before either lands, and the
-// later spread wins the flag. Deciding the snapshot next to either half means
-// pairing one half's flag with the other half's snapshot, which is a
-// `theaterLayout` captured with the mode off: a layout that gets restored on
-// some later exit that never happened.
+// The one owner of the snapshot: hand it the patch a commit is about to apply
+// and it appends the capture or restore for the `theater` value that patch
+// settles on. Two halves of one commit can each have an opinion about the mode,
+// both read against the pre-commit state, and the later spread wins the flag.
+// Deciding beside either half pairs one half's flag with the other's snapshot,
+// which restores a layout captured with the mode off.
 function withTheaterLayout(
   patch: Partial<DuxState> & { theater?: boolean },
 ): Partial<DuxState> {
@@ -6047,17 +5597,12 @@ export function toggleTheater(): void {
 }
 
 /**
- * A mounted pane lost input ownership of its PTY: another device is driving it
- * now, and the take-over card is about to cover the pane.
+ * A mounted pane lost input ownership of its PTY, so the take-over card is
+ * about to cover it. Theater leaves and so does the pane's memory of it:
+ * deciding what to do about a take-over wants the chrome in view, and
+ * re-entering is then a fresh press. Losing ownership itself stays sticky.
  *
- * Theater goes away, and so does the memory. Deciding what to do about a
- * take-over wants the tabs, the pull-request band and the header in view, and a
- * covered pane has not earned the whole screen; re-entering afterwards is a
- * fresh press rather than something that happens to the user. Losing ownership
- * itself stays sticky, exactly as the tenet says: only the layout comes back.
- *
- * Keyed on the PTY, not on the selection, so a pane that is no longer the
- * focused one still forgets its own mode.
+ * Keyed on the PTY, not the selection, so an unfocused pane forgets too.
  */
 export function noteTheaterOwnershipLost(
   kind: "agent" | "terminal",
@@ -6160,30 +5705,23 @@ export function composeDraft(s: DuxState, targetId: string): string {
 }
 
 export function reconnect(): void {
-  // Retrying is indefinite now, so this is not a rescue from a give-up state; it
-  // is the user saying "stop waiting out the backoff and try again". `connect()`
-  // resets the events socket backoff to the floor and attempts immediately, and
-  // the `terminalEpoch` bump remounts the focused TerminalPane so its PTY socket
-  // does the same. Without the bump, one Retry would hurry the spine along and
-  // leave the terminal waiting out its own gap.
+  // Retrying is indefinite, so this is not a rescue: it is the user asking to
+  // stop waiting out the backoff. `connect()` resets the events backoff to the
+  // floor, and the `terminalEpoch` bump remounts the focused TerminalPane so
+  // its PTY socket does the same rather than waiting out its own gap.
   //
-  // The remount is why the compose draft lives in this store and not in the pane:
-  // the gesture a user reaches for after a bad network is precisely the one that
-  // used to throw away the message they had typed.
+  // That remount is why the compose draft lives in this store and not the pane.
   eventsSocket.connect()
   setState({ terminalEpoch: state.terminalEpoch + 1 })
 }
 
 // Expand or collapse the desktop sidebar, and remember the choice.
 //
-// INERT IN THEATER, and so is the width below. Both side panels are unmounted
-// there, so a toggle has nothing to act on: the sidebar's own trigger and rail
-// are gone with it, and what is left is the primitive's keyboard shortcut,
-// which would otherwise silently flip a panel nobody can see and write the
-// preference for it. Inert rather than "exit theater first" because one gesture
-// should mean one thing: the mode has four exits of its own (the pane header's
-// button, the pill, the input menu and Escape), and a key that means "collapse
-// the sidebar" must not become a way out of an unrelated mode.
+// Inert in theater, as is the width below: the panel is unmounted there, and
+// the primitive's keyboard shortcut would otherwise flip a panel nobody can see
+// and write the preference for it. Inert rather than exiting the mode, because
+// a key meaning "collapse the sidebar" must not become a way out of an
+// unrelated mode that has exits of its own.
 export function setSidebarOpen(open: boolean): void {
   if (state.theater) return
   if (state.sidebarOpen === open) return
@@ -6233,14 +5771,11 @@ export function persistChangesPanePercent(percent: number): void {
 }
 
 // What the header must reserve on its right so the control before the spacer
-// lands on the terminal pane's right edge. Zero when the Changes pane is hidden,
-// because the terminal pane then runs to the window edge and the button slides
-// out with it.
-//
-// Zero in theater too, by the same rule the shell lays out with
+// lands on the terminal pane's right edge. Zero when the Changes pane is hidden
+// and zero in theater, by the same rule the shell lays out with
 // (`changesPaneVisible(dux) && !theater`): the mode suppresses the pane without
-// touching the preference, so the preference alone still says "visible" and the
-// header would hold back a strip of nothing while the two collapse together.
+// touching the preference, so the preference alone would reserve a strip of
+// nothing.
 export function changesSpacerPercent(s: DuxState): number {
   return changesPaneVisible(s) && !s.theater ? s.changesPanePercent : 0
 }
@@ -6252,13 +5787,10 @@ export function changesSpacerPercent(s: DuxState): number {
 export const CHANGES_PANE_COLLAPSE_EPSILON = 1
 
 // Did this layout report take the Changes panel from a measured, open width to
-// nothing? That is a user dragging the divider off the edge, the one state that
-// strands the pane: zero-width but still "visible", so no reopen control
-// anywhere on screen (its own ⋯ menu is inside the zero).
-//
-// `prevPercent` is undefined on a panel's very FIRST report, before anything has
-// been measured. That is not a collapse; treating it as one would hide the pane
-// during its own mount.
+// nothing? That is the one state that strands the pane: zero-width but still
+// "visible", so its own menu is inside the zero. An undefined `prevPercent` is
+// a panel's first report and never a collapse, or the pane would hide during
+// its own mount.
 export function isChangesPaneDragCollapse(
   percent: number,
   prevPercent: number | undefined,
@@ -6284,58 +5816,15 @@ export type ChangesPaneCollapseStep =
   | "disarm"
   | "restore"
 
-// WHY THE LATCH. Writing the visibility preference the instant the panel
-// reports zero unmounts the panel and its separator while the pointer is still
-// down. react-resizable-panels 4.11.2 re-registers the pre-unmount group object
-// from its own `pointerup` handler, so the group survives as a zombie: its
-// detached separator still hit-tests, as a phantom strip at the viewport's
-// top-left corner that swallows presses, and the registry leaks one entry per
-// collapse until the page is reloaded.
+// A collapse to zero is decided during the drag and written only at its end:
+// writing on the report unmounts the separator mid-gesture, and
+// react-resizable-panels 4.11.2 re-registers the dead group from its own
+// `pointerup`, leaving a phantom separator that swallows presses.
 //
-// So the collapse is decided during the drag and written at the end of it. That
-// also restores the escape the instant write took away: drag past the snap,
-// drag back out, release, and the pane stays. While the gesture finishes, the
-// panel simply sits at ~0% width, which is the library's own supported
-// collapsed state.
-//
-// `pointerDown` is what tells a drag apart from the paths that have no gesture
-// to wait for (the separator's arrow-key resize); those commit without waiting
-// for a pointerup that is never coming.
-//
-// `reshowPending` is the one report that must never be believed. A pane coming
-// back from hidden re-mounts into whatever layout the library cached for the
-// two-panel group, which for a pane that LEFT at zero is a zero, and the panel
-// reports that mount width like any other resize. Reading it as a collapse
-// would hide the pane during the very act of showing it, and the user's click
-// would look like it did nothing. The re-show heal owns that window (it is the
-// thing that resizes the pane back to a real width); the latch stays out of it.
-// WHY A COLLAPSE CAN ARRIVE THAT NOBODY ASKED FOR, and why "restore" exists.
-//
-// Measured on a touch tablet, against react-resizable-panels 4.11.2. A press
-// that lands in the divider's grab band but on a NEIGHBOUR (which is what
-// happens when the neighbour is painted over the band) is still acquired by the
-// library, because it hit-tests a rectangle on the document rather than the
-// element. The neighbour's `touch-action` is `auto`, so the browser then claims
-// the same gesture as a scroll and sends `pointercancel`. The library has no
-// `pointercancel` listener, so its separator stays latched "active"; the
-// `pointerleave` Chrome fires next is handled as a move, and a move with no
-// recorded press point is read by its own code as a full-scale delta
-// (`clientX < 0 ? -100 : 100`). The pane is driven to zero, and the old rules
-// here read that as "the user dragged the pane shut" and wrote it to the
-// server. A tap near the divider closed the Changes pane.
-//
-// The stacking fix in lib/paneDivider.ts stops the press being stolen in the
-// first place. This is the second line: a collapse is believed only when the
-// gesture that produced it was real. Real means one of
-//
-//   - a pointer that actually travelled (`pointerMoved`), and was not taken
-//     away by the browser (`cancelled`), or
-//   - a keyboard step, which moves the separator with no pointer at all.
-//
-// Anything else is undone rather than committed, because the cost is not
-// symmetric: an unwritten collapse is one more drag, and a written one is a
-// pane that vanished and a preference changed on the server behind the user's
-// back.
+// A zero is believed only when the gesture was real: a press the browser claims
+// as a scroll reaches the library as a full-scale delta and drives the pane to
+// zero unasked, and `reshowPending` is the cached mount width of a pane that
+// left at zero, healed by the re-show rather than latched here.
 export function changesPaneCollapseStep(args: {
   percent: number
   prevPercent: number | undefined
@@ -6358,34 +5847,21 @@ export function changesPaneCollapseStep(args: {
   return "none"
 }
 
-// Is the Changes pane out of the user's reach right now? Either the preference
-// is off, or it is on and the pane is nonetheless zero-width. The header's
-// reopen button and the pane-boundary rule both gate on this rather than on the
-// preference alone, so a pane that is somehow zero-width still has a way back.
-//
-// Note it reads `changesPanePercent` RAW, not `changesSpacerPercent`: the spacer
-// is defined as zero while the preference is off, so it cannot tell the two
-// hidden states apart.
+// Is the Changes pane out of reach right now: the preference off, or on with
+// the pane at zero width? The reopen button gates on this rather than the
+// preference alone, so a zero-width pane still has a way back. It reads
+// `changesPanePercent` raw, because `changesSpacerPercent` is defined as zero
+// while the preference is off and cannot tell the two hidden states apart.
 export function changesPaneEffectivelyHidden(s: DuxState): boolean {
   if (!changesPaneVisible(s)) return true
   return s.changesPanePercent < CHANGES_PANE_COLLAPSE_EPSILON
 }
 
-// A divider drag that collapsed the pane writes the SAME preference the pane's
-// hide item writes, so "hidden by drag" and "hidden by menu" are one state with
-// one way back. This is the sidebar's own precedent: dragging its edge past the
-// threshold sets the same collapsed state its collapse button does.
-//
-// Guarded on the current visibility because a panel can report zero more than
-// once and each write is a config PUT.
-//
-// AND ON THEATER, explicitly. The mode unmounts the pane while the preference
-// still says visible, and an unmount is measured: react-resizable-panels 4.11.2
-// happens to unregister the panel in a `useLayoutEffect` before any layout
-// report can reach these rules, but that is a library detail, and if it ever
-// changes then entering theater would read as the user dragging the pane shut
-// and would write that preference for every connected client. The mode may
-// never write a preference it is only borrowing.
+// A drag collapse writes the same preference the pane's hide item writes, so
+// there is one hidden state with one way back. Guarded on current visibility
+// because a panel can report zero repeatedly and each write is a config PUT,
+// and on theater, which unmounts the pane it is only borrowing and may never
+// write that preference for every connected client.
 export function collapseChangesPaneFromDrag(): void {
   if (state.theater) return
   if (!changesPaneVisible(state)) return
@@ -6403,14 +5879,11 @@ export function showChangesPane(): void {
   setChangesPaneVisibility(true)
 }
 
-// Set the Changes pane's visibility and persist it (config.ui.show_changes_pane).
-// The override is set optimistically for an instant response; the server writes
-// config.ui.show_changes_pane and emits `config.changed`, the refetched bootstrap
-// document carries the confirmed value, and `applyBootstrap` drops the override
-// so config is the single source of truth across every connected client. Rolls
-// the optimistic override back with a toast on error. Resolves to whether the
-// persist succeeded so a caller (the customize-webapp dialog) can gate on it;
-// fire-and-forget callers ignore the returned promise.
+// Set the Changes pane's visibility and persist it to
+// `config.ui.show_changes_pane`. The override is optimistic so the pane moves
+// at once, dropped by `applyBootstrap` once config confirms it, and rolled back
+// with a toast on error. Resolves to whether the persist succeeded, so a caller
+// can gate on it.
 export function setChangesPaneVisibility(next: boolean): Promise<boolean> {
   setState({ changesPaneOverride: next })
   return configApi
@@ -6435,29 +5908,20 @@ export function toggleChangesPane(): void {
 
 // ── The hideable touch terminal-keys bar (ui.mobile_accessory_bar) ─────────
 
-// The accessory key bar's effective visibility: the optimistic override if
-// set, else the config default from the bootstrap document, else visible (the
-// pre-load window before the first bootstrap fetch lands).
-//
-// The top bar had a preference of its own once, and it is gone: theater mode
-// hides the phone's whole chrome stack and carries its own way back, so a
-// second flow for hiding the same header was only ever a way for the two to
-// disagree about what was on screen.
+// The accessory key bar's effective visibility: the optimistic override if set,
+// else the config default, else visible for the window before the first
+// bootstrap fetch lands.
 export function mobileAccessoryBarVisible(s: DuxState): boolean {
   return (
     s.mobileAccessoryBarOverride ?? s.bootstrap?.mobile_accessory_bar ?? true
   )
 }
 
-// Set the accessory key bar's visibility and persist it through the GENERIC
-// settings PATCH (the preference is a pure render gate with no server-side
-// side effect, so it rides `PATCH /api/v1/config/settings` like any
-// Preferences row; see the settings tenet). The override is set optimistically
-// so the bar moves on tap; the server writes config and emits `config.changed`,
-// the refetched bootstrap carries the confirmed value, and `applyBootstrap`
-// drops the override so config is the single source of truth across every
-// client. Rolls the optimistic override back with a toast on error. Resolves to
-// whether the persist succeeded; fire-and-forget callers ignore the promise.
+// Set the accessory key bar's visibility and persist it through the generic
+// settings PATCH, which it may use because the preference is a pure render gate
+// with no server-side effect. The override is optimistic so the bar moves on
+// tap, dropped by `applyBootstrap` once config confirms it, and rolled back
+// with a toast on error. Resolves to whether the persist succeeded.
 export function setAccessoryBarVisibility(next: boolean): Promise<boolean> {
   const prev = state.mobileAccessoryBarOverride
   setState({ mobileAccessoryBarOverride: next })
@@ -6517,19 +5981,12 @@ export function noteOwnPtyConnection(connId: string, live: boolean): void {
   setState({ ownPtyConnIds: next })
 }
 
-// True while any of the agent's tab PTYs is input-owned by another connection
-// (another device, or another tab of this browser). The agent ⋯ menu disables
-// its MUTATING entries on this (deleting or relaunching an agent someone else
-// is driving is a surprise for them); read-only entries stay usable.
+// True while any of the agent's tab PTYs is input-owned by another connection.
+// The agent menu disables its mutating entries on this; read-only ones stay.
 //
-// Two sources feed the answer, per tab, freshest first:
-//  - a MOUNTED pane's live verdict in `ptyOwnership` ("mine" clears the tab
-//    even when the server field is stale right after a take-over; "elsewhere"
-//    gates it before the next spine refetch lands), then
-//  - the server-published `AgentTabView.input_owner` (the owning PTY-socket
-//    connection id riding the spine), compared against this client's own ids:
-//    owned, and not by me, means elsewhere. This is what lets the hub and
-//    sidebar row menus gate an agent NO pane on this device is attached to.
+// Per tab, freshest first: a mounted pane's `ptyOwnership` verdict, then the
+// spine's `AgentTabView.input_owner` compared against this client's own ids,
+// which is what gates an agent no pane on this device is attached to.
 // The optional chains are deliberate: unit-test states are partial mocks.
 export function sessionActiveElsewhere(
   s: DuxState,
@@ -6687,19 +6144,14 @@ export function openReleaseNotes(): void {
     })
 }
 
-// Close the first-load dialog. Closing an AUTOMATIC screen also dismisses it:
-// the server records the running version as seen in SQLite, the one row the TUI
-// reads too, so the screen is settled on both surfaces. An on-demand open
-// dismisses nothing.
+// Close the first-load dialog. Closing an automatic screen also dismisses it
+// server-side, settling it on both surfaces; an on-demand open dismisses
+// nothing.
 //
-// The close is optimistic and unconditional — a failed dismissal must not trap
-// the user behind a modal — and the re-open guard is set SYNCHRONOUSLY, in the
-// same `setState` that clears the dialog, then ROLLED BACK if the write fails. It
-// cannot wait for the POST to resolve: a `config.changed` arriving in that window
-// re-runs `applyBootstrap` → `offerAutomaticFirstLoad`, whose guards would both
-// pass, and the just-dismissed dialog would reopen. The rollback is what keeps the
-// failure behaviour honest — a failed write leaves the screen genuinely pending
-// for the next load rather than silently swallowing it.
+// The close is optimistic and unconditional, since a failed dismissal must not
+// trap the user behind a modal, and the re-open guard is set in the same
+// `setState`, then rolled back if the write fails. It cannot wait for the POST:
+// a `config.changed` arriving in that window would reopen the dialog.
 export function closeFirstLoad(): void {
   const open = state.firstLoad
   if (open === null) return
@@ -6726,13 +6178,11 @@ export function closeFirstLoad(): void {
   })
 }
 
-// Persist the instance identity (browser tab title + favicon colour). The
-// server validates + writes config.toml and emits `config.changed`, so
-// `applyBootstrap` re-applies the tab title, wordmark, and favicon on every
-// client. We do NOT hand-apply here — config is the single source of truth. A
-// success toast is the engine's routed status; here we only surface a failure.
-// Resolves to whether the persist succeeded so the customize-webapp dialog can
-// gate its close on it; fire-and-forget callers ignore the returned promise.
+// Persist the instance identity (browser tab title and favicon colour).
+// Nothing is hand-applied here: `applyBootstrap` re-applies the title,
+// wordmark and favicon on every client once config confirms them. The success
+// toast is the engine's routed status, so only a failure is surfaced here.
+// Resolves to whether the persist succeeded, so a dialog can gate on it.
 export function setInstanceIdentity(body: {
   title?: string
   favicon?: string
@@ -6748,13 +6198,11 @@ export function setInstanceIdentity(body: {
     })
 }
 
-// Persist an explicit patch of the Settings modal's `[ui]`/`[capabilities]`
-// fields (everything the modal exposes EXCEPT title/favicon, which stay on
-// `setInstanceIdentity`). Mirrors `setInstanceIdentity`'s resolves-to-boolean +
-// toast-on-error contract so the dialog can `Promise.all` both writes and gate
-// its close on every one succeeding. The server validates/clamps and emits
-// `config.changed`; we do NOT hand-apply here. The refetched bootstrap is the
-// single source of truth, so the dialog re-seeds from it.
+// Persist the Settings modal's `[ui]` and `[capabilities]` fields; title and
+// favicon stay on `setInstanceIdentity`. Same resolves-to-boolean and
+// toast-on-error contract as that function, so the dialog can `Promise.all`
+// both writes. Nothing is hand-applied here: the refetched bootstrap is the
+// single source of truth and the dialog re-seeds from it.
 export function saveSettings(
   patch: Parameters<typeof configApi.patchSettings>[0],
 ): Promise<boolean> {
@@ -6832,19 +6280,10 @@ export function saveConfigEditor(content: string): void {
   configApi
     .writeRawConfig(content)
     .then(() => {
-      // Save PERSISTS but does not APPLY: the server writes config.toml and leaves
-      // the running config untouched (no adopt, no `config.changed`) until the user
-      // explicitly runs "Reload config". The toast states exactly that so the lack
-      // of a visible change isn't mistaken for a no-op.
-      //
-      // STICKY was weighed here and declined, and it is the closest call on the
-      // list: the user does have to act outside the toast, and the edit sits
-      // inert until they do, which is the first half of the rule. What it fails
-      // is the second half. Nothing is lost. The file is written, the setting
-      // survives a reload of the page and a restart of the browser, and the
-      // action the toast names is a permanent entry in the cog menu rather than
-      // something only this sentence knows about. Pinning it would spend the
-      // sticky budget on a reminder rather than on a rescue.
+      // Save persists but does not apply: config.toml is written and the running
+      // config is untouched until the user runs "Reload config", which the toast
+      // says so the lack of a visible change is not read as a no-op. Not sticky:
+      // nothing is lost, and the action it names is a permanent menu entry.
       closeConfigEditor()
       notifySuccess("Saved config.toml. Run “Reload config” to apply it.")
     })

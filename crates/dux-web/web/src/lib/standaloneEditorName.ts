@@ -1,10 +1,6 @@
-// How the standalone editor tab's header names what the editor is rooted at.
-//
-// Pure, and drawn from the same facts the sidebar row is drawn from, so the tab
-// and the row cannot end up calling the same thing two different names. A
-// terminal is named the way its row names it: the terminal's own identity, with
-// the second line's owner text beside it, which for a standalone terminal is
-// the home-collapsed directory it opened in.
+// How the standalone editor tab's header names what the editor is rooted at, drawn from the
+// same facts the sidebar row is, so the two cannot call one thing two different names. A
+// terminal is named as its row names it: its own identity plus the second line's owner text.
 
 import { matchWireOwner } from "./terminalOwner"
 import { sessionLabel } from "./agentWorkspace"
@@ -31,10 +27,8 @@ export function standaloneEditorName(
     const session = spine?.sessions.find((s) => s.id === root.sessionId)
     return {
       glyph: "agent",
-      // Falling back to the raw id rather than to nothing: an id is poor but
-      // truthful, and an empty header says the tab is broken when it is not.
-      // sessionLabel is workspace-aware: a standalone agent has no branch to
-      // fall back to, so its label falls through to its folder's name.
+      // Falling back to the raw id rather than to nothing: an id is poor but truthful, where
+      // an empty header says the tab is broken when it is not.
       name: session ? sessionLabel(session) : root.sessionId,
       detail: null,
     }
@@ -53,9 +47,8 @@ export function standaloneEditorName(
       const project = spine?.projects.find((p) => p.id === owner.project_id)
       return project ? project.name : owner.project_id
     },
-    // No owner to name, so the row's second line names the DIRECTORY the
-    // terminal opened in, already collapsed to `~` by the server. That is also
-    // the root this editor is pinned to.
+    // No owner to name, so this is the directory the terminal opened in, already `~`-collapsed
+    // by the server, which is also the root this editor is pinned to.
     standalone: (owner) => owner.cwd_label,
   })
   return {

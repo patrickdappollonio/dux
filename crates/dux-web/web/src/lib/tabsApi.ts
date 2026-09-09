@@ -23,12 +23,9 @@ export interface CreatedTab {
   provider: string
 }
 
-// The 200 body for a tab close: whether that close detached the agent (it was
-// the LAST live tab), and which tab took the session slot when the closed tab
-// was the one holding it. The caller never has to guess either outcome from a
-// stale local snapshot, which matters most for `promoted`: the spine that would
-// answer it has not caught up when this resolves. `promoted` is absent for an
-// ordinary extra tab's close.
+// The 200 body for a tab close: whether the close detached the agent (it was the last live
+// tab), and which tab took the session slot when the closed tab held it. `promoted` is absent
+// for an ordinary extra tab, and the spine has not caught up when this resolves.
 export interface ClosedTab {
   detached: boolean
   promoted?: string
@@ -48,21 +45,17 @@ export const tabsApi = {
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs`,
       provider === undefined ? {} : { provider },
     ),
-  // Close a tab: the tab is destroyed, and the agent detaches when it was the
-  // last live one. Closing the session-slot tab promotes the next tab in strip
-  // order into the slot. The 200 body carries both authoritative outcomes rather
-  // than leaving the caller to guess from a pre-close snapshot. The agent's ONLY
-  // tab is refused with a 400: an agent always has a slot.
+  // Close a tab. The agent detaches when it was the last live one, and closing the slot tab
+  // promotes the next tab in strip order; the 200 body carries both outcomes. The agent's
+  // only tab is refused with a 400, because an agent always has a slot.
   remove: (sessionId: string, tabId: string) =>
     request<ClosedTab | undefined>(
       "DELETE",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}`,
     ),
-  // Start a DORMANT tab: the "Start session" press. It is the only start that
-  // gets past a recorded launch failure, because opening the tab's PTY socket
-  // deliberately refuses to launch a tab whose last run failed. Dispatching the
-  // launch is itself what clears that verdict, so the pane that mounts behind
-  // the retiring card attaches to a launch already in flight.
+  // Start a dormant tab. It is the only start that gets past a recorded launch failure, which
+  // opening the tab's PTY socket refuses; dispatching the launch clears that verdict, so the
+  // pane behind the retiring card attaches to a launch already in flight.
   start: (sessionId: string, tabId: string) =>
     request<void>(
       "POST",
@@ -75,13 +68,9 @@ export const tabsApi = {
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}`,
       { provider },
     ),
-  // Remember the tab the user just focused on this agent (a dedicated verb,
-  // matching the one-route-per-action style of the other tab REST calls).
-  // `tabId` of `null` clears the memory. Fire-and-forget: this is a
-  // high-frequency, user-paced write with no status/toast on the server side,
-  // so a failure here is logged and otherwise swallowed rather than
-  // surfaced to the user or allowed to block the (already-applied) local
-  // selection change.
+  // Remember the tab the user just focused; `tabId` of `null` clears it. Fire-and-forget: a
+  // high-frequency write whose failure is logged rather than allowed to block the
+  // already-applied local selection change.
   setFocusedTab: (sessionId: string, tabId: string | null) =>
     request<void>(
       "PUT",

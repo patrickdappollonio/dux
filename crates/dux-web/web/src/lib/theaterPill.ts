@@ -1,18 +1,11 @@
-// THE FLOATING PILL'S GEOMETRY AND GESTURE, as pure rules.
+// The floating pill's geometry and gesture, as pure rules: where a rectangle may
+// sit inside another, when a press stops being a tap, and what a stored position
+// must look like to be believed. None of it is rendering.
 //
-// The pill is the only chrome theater leaves on screen, so it is also the only
-// thing that can cover the newest line of output. The answer is not a cleverer
-// resting place: it is letting the user move it. Everything that decision needs
-// to be right lives here rather than in the component, because all of it is
-// arithmetic and policy (where a rectangle may sit inside another rectangle,
-// when a press stops being a tap, what a stored position has to look like to be
-// believed) and none of it is rendering.
-//
-// The position is remembered PER DEVICE, under one key, not per pane: a corner
-// the user cleared because their agent draws there is a fact about where they
-// hold the tablet, not about which agent they were looking at. That makes it a
-// viewer convenience like the mode memory itself, so `localStorage` is the right
-// home and every access degrades quietly.
+// The position is remembered per device under one key, not per pane: a corner
+// the user cleared is a fact about how they hold the device rather than about
+// which agent they were looking at. It is a viewer convenience, so it lives in
+// `localStorage` and every access degrades quietly.
 
 import { MOUSE_DRAG_ACTIVATION, TOUCH_DRAG_ACTIVATION } from "./dragActivation"
 
@@ -23,24 +16,19 @@ export const THEATER_PILL_POSITION_KEY = "dux:theater-pill-position"
 export const THEATER_PILL_HINT_KEY = "dux:theater-pill-hint"
 
 /// How far the default resting place sits off the surface's edges, in pixels.
-/// Equal to Tailwind's `3.5` spacing step (0.875rem at the 16px root), which is
-/// the inset the pill was pinned at before it could move.
+/// Equal to Tailwind's `3.5` spacing step (0.875rem at the 16px root).
 export const THEATER_PILL_MARGIN = 14
 
-/// The grip's own width, on every surface: a per-axis relaxation of the 40px
-/// floor argued at the button itself. It is written here as well as in the
-/// button's class because the resting corner is arithmetic about it; a test
-/// pins the two together.
+/// The grip's own width, a per-axis relaxation of the 40px floor argued at the
+/// button itself. It must stay equal to the button's class, which a test pins.
 export const THEATER_PILL_GRIP_W_PX = 18
 
 /// The gap between the pill's controls, Tailwind's `gap-0.5`.
 export const THEATER_PILL_ROW_GAP_PX = 2
 
-/// THE WIDTH THE CLUSTER GAINS ON ITS WAY OUT of the flap and gives back on the
-/// way home: the grip plus the gap that appears with it. The docked flap has no
-/// grip and reserves no blank space for one, so the pill starts every detach
-/// this much narrower than it will settle at, and anything measuring the pill
-/// for a resting place has to add it back.
+/// The width the cluster gains leaving the flap and gives back on the way home:
+/// the grip plus its gap. The docked flap reserves no space for it, so anything
+/// measuring the pill mid-flight for a resting place must add it back.
 export const THEATER_PILL_GRIP_SLOT_PX =
   THEATER_PILL_GRIP_W_PX + THEATER_PILL_ROW_GAP_PX
 
@@ -48,22 +36,15 @@ export const THEATER_PILL_GRIP_SLOT_PX =
 /// applies it and the measurement that has to know it is applied.
 export const PILL_GRIPLESS_CLASS = "dux-pill-gripless"
 
-/// How far one arrow-key press moves the pill.
-///
-/// Keyboard nudging exists because dragging is a pointer gesture and a keyboard
-/// user would otherwise have no way to clear an occluded corner at all. The step
-/// is small enough to place the pill precisely and large enough that crossing a
-/// pane takes a held key rather than a hundred presses.
+/// How far one arrow-key press moves the pill. Nudging is the keyboard's only
+/// way to clear an occluded corner, so the step is small enough to place the
+/// pill precisely and large enough to cross a pane on a held key.
 export const THEATER_PILL_NUDGE_PX = 16
 
-/// How far a finger has to slide on the grip before the pill lifts.
-///
-/// There is deliberately no hold behind it, unlike the sidebar's reorder drag:
-/// a row is a row first and a drag handle only on a hold, while the grip is
-/// nothing but a drag handle, carries `touch-none`, and has no scroll gesture
-/// underneath it to be told apart from. So the only thing left to decide is tap
-/// versus drag, and a small slop decides that without a wait. It is wider than
-/// the mouse's because a finger wobbles on contact.
+/// How far a finger has to slide on the grip before the pill lifts. No hold
+/// gates it, unlike the sidebar's reorder drag: the grip is nothing but a drag
+/// handle, so only tap versus drag is left to decide. Wider than the mouse's
+/// slop because a finger wobbles on contact.
 export const THEATER_PILL_TOUCH_DISTANCE = TOUCH_DRAG_ACTIVATION.tolerance
 
 /// How far a mouse has to pull before the press becomes a drag. A plain click
@@ -90,11 +71,9 @@ function clampAxis(value: number, span: number): number {
 }
 
 /**
- * Keep the pill wholly inside the surface.
- *
- * The one rule the drag, the arrow keys, the restore and the resize observer
- * all share: whatever moved the pill, it ends up somewhere the user can still
- * reach every one of its buttons.
+ * Keep the pill wholly inside the surface. Every mover (the drag, the arrow
+ * keys, the restore, the resize observer) ends here, so whatever moved the pill
+ * leaves every one of its buttons reachable.
  */
 export function clampPillPosition(
   pos: PillPosition,
@@ -108,11 +87,9 @@ export function clampPillPosition(
 }
 
 /**
- * Where the pill sits before anybody has moved it: the bottom-right corner.
- *
- * That corner is the thumb's on a held tablet and the one an agent CLI is least
- * likely to be drawing something that must be read, which is why it was the
- * fixed position and why it stays the default one.
+ * Where the pill sits before anybody has moved it: the bottom-right corner, the
+ * thumb's on a held device and the one an agent CLI is least likely to be
+ * drawing something that must be read in.
  */
 export function defaultPillPosition(
   surface: PillSize,
@@ -132,11 +109,9 @@ export function defaultPillPosition(
  * The position a freshly measured pill takes: the remembered one where there is
  * one, the default corner otherwise, and either way inside today's surface.
  *
- * `null` when the surface has no size yet. A pane that has not been laid out
- * (the frame before the first measurement, a test that never stubbed a rect)
- * cannot be clamped into honestly, and pinning the pill at the origin for that
- * frame would be a visible jump. The caller keeps its CSS default until a real
- * measurement arrives.
+ * `null` when the surface has no size yet: a pane that has not been laid out
+ * cannot be clamped into honestly, so the caller keeps its CSS default rather
+ * than jumping the pill to the origin for a frame.
  */
 export function resolvePillPosition(
   stored: PillPosition | null,
@@ -150,11 +125,9 @@ export function resolvePillPosition(
 }
 
 /**
- * One arrow-key press, or `null` for a key that is not one of the four.
- *
- * Returning `null` rather than the unchanged position is what lets the caller
- * decide whether to swallow the keystroke: every other key on a focused grip
- * still belongs to the page.
+ * One arrow-key press, or `null` for any other key. `null` rather than the
+ * unchanged position, so the caller can tell what to swallow: every other key
+ * on a focused grip still belongs to the page.
  */
 export function nudgePillPosition(
   pos: PillPosition,
@@ -189,17 +162,11 @@ export interface PillGestureInput {
 }
 
 /**
- * Tap or drag?
- *
- * ONE GATE FOR BOTH POINTER KINDS, and it is travel: the pill lifts as soon as
- * the pointer has moved past the slop, and the only thing the pointer kind
- * changes is how much slop that is. Nothing waits on a clock, because the grip
- * is a dedicated drag handle rather than a control with a second meaning, so
- * there is no other gesture on it a hold would have to disambiguate from.
- *
- * A press that ends before the slop is crossed is a plain tap, which is what
- * keeps the grip harmless: it does nothing, and the buttons beside it keep
- * their meanings.
+ * Tap or drag? One gate for both pointer kinds, and it is travel: the pill lifts
+ * once the pointer passes the slop, and the pointer kind only chooses how much
+ * slop that is. Nothing waits on a clock, because the grip is a dedicated drag
+ * handle with no second gesture to disambiguate from. A press that ends first is
+ * a plain tap and does nothing.
  */
 export function classifyPillGesture(input: PillGestureInput): PillGestureVerdict {
   if (input.ended) return "tap"
@@ -210,10 +177,8 @@ export function classifyPillGesture(input: PillGestureInput): PillGestureVerdict
   return input.travel >= slop ? "lift" : "pending"
 }
 
-// Storage can be absent (a test that never stubbed it) or throw outright
-// (Safari private mode, a browser set to block site data). Neither is a reason
-// for the pill to fail to render, so both degrade to "nothing remembered".
-// Same shape as `theater.ts` and `typingSurface.ts`.
+// Storage can be absent or throw outright (private mode, a browser set to block
+// site data). Both degrade to "nothing remembered".
 function storage(): Storage | null {
   try {
     return typeof localStorage === "undefined" ? null : localStorage
@@ -237,12 +202,8 @@ function validCoordinate(value: unknown): value is number {
 
 /**
  * Read a stored position out of its JSON, refusing anything that is not one.
- *
- * Everything unbelievable falls back to the default corner: a missing key, junk
- * a different app wrote, the right keys with the wrong types, and coordinates no
- * surface could have produced. A clamp would silently rescue most of those, but
- * clamping a lie still moves the pill somewhere the user never put it, and the
- * corner it has always defaulted to is the better answer.
+ * Everything unbelievable falls back to the default corner rather than being
+ * clamped: clamping a lie still puts the pill somewhere the user never put it.
  */
 export function parsePillPosition(raw: string | null): PillPosition | null {
   if (!raw) return null
@@ -283,11 +244,9 @@ export function writePillPosition(pos: PillPosition): void {
 }
 
 /**
- * Should the "hold the grip" hint fire on this device?
- *
- * A storage that cannot answer reads as "already shown", deliberately. The
- * latch is the only thing standing between a one-time hint and a toast on every
- * single entry into theater, and nagging is the worse failure of the two.
+ * Should the "hold the grip" hint fire on this device? A storage that cannot
+ * answer reads as "already shown": without the latch the hint would fire on
+ * every entry into theater, and nagging is the worse failure.
  */
 export function readPillHintPending(): boolean {
   try {

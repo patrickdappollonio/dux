@@ -10,9 +10,8 @@ export function envToText(env: Record<string, string>): string {
     .join("\n")
 }
 
-// Parse `KEY=VALUE` text back to an object. Blank lines and `#` comments are
-// skipped; the first `=` splits key and value so values may themselves contain
-// `=`.
+// Parse `KEY=VALUE` text back to an object. Blank lines and `#` comments are skipped; the
+// first `=` splits, so a value may itself contain `=`.
 export function parseEnv(text: string): Record<string, string> {
   const env: Record<string, string> = {}
   for (const raw of text.split("\n")) {

@@ -1,22 +1,11 @@
-// Presentation decisions about a fetched diff payload (lib/fileApi's
-// FileDiffContents shape), kept pure so they are unit-testable without
-// mounting Monaco (which cannot run under vitest, see monacoSetup.ts).
+// Presentation decisions about a fetched diff payload, kept pure so they are
+// testable without mounting Monaco, which cannot run under vitest.
 
-// Whether a diff renders as an ALL-DELETE diff: HEAD has content and the
-// working side is empty. DiffViewer uses this to suppress Monaco's phantom
-// trailing "1 +" inserted line on such diffs: a Monaco text model always has
-// at least one line, so an empty modified side is one empty line, and the
-// diff computer reports a real insertion for it (measured on monaco 0.55.1:
-// original [1,N) -> modified [1,2) for every original shape, trailing newline
-// or not). That added line exists in no real content — git reports zero added
-// lines for a deletion — so hiding its decorations is honest, and the
-// original side's text is never touched.
-//
-// Content-based on purpose, not git-status-based: a file truncated to zero
-// bytes (status M) produces the same empty modified side, and git equally
-// reports zero added lines for it, so the phantom is just as false there.
-// The binary arm renders its own refusal before DiffViewer mounts; excluding
-// it here keeps the answer honest for callers that ask earlier.
+// Whether a diff renders as an all-delete diff: HEAD has content and the working
+// side is empty. A Monaco text model always holds at least one line, so an empty
+// modified side reports a phantom inserted line that exists in no real content,
+// and DiffViewer suppresses its decorations. Content-based rather than
+// git-status-based, since a file truncated to zero bytes has the same phantom.
 export function isAllDeleteDiff(diff: {
   original: string
   modified: string
@@ -25,19 +14,12 @@ export function isAllDeleteDiff(diff: {
   return !diff.binary && diff.original !== "" && diff.modified === ""
 }
 
-// The Monaco diff-editor options that vary with the all-delete decision.
-// Extracted (rather than branched inline in DiffViewer) because Monaco cannot
-// mount under vitest, so this mapping is the only honestly testable half of
-// the suppression; the CSS half is validated by screenshot in the preview
-// env. On an all-delete diff:
-//  - the overview ruler is a CANVAS, so the phantom insertion's green speck
-//    on it is unreachable by CSS; dropping the ruler is the only way to kill
-//    it, and an all-delete ruler said nothing anyway (every line is red);
-//  - the current-line highlight is what draws a border around the phantom
-//    empty row the CSS rules blank out (the TextModel really has one line),
-//    so it goes too.
-// Every other diff keeps Monaco's defaults, stated explicitly so a future
-// Monaco default change cannot silently flip them.
+// The Monaco diff-editor options that vary with the all-delete decision. On an
+// all-delete diff the overview ruler goes, because it is a canvas and the
+// phantom insertion's speck on it is unreachable by CSS, and the current-line
+// highlight goes, because it borders the phantom row the CSS blanks out. Every
+// other diff keeps Monaco's defaults, stated explicitly so a future default
+// change cannot silently flip them.
 export function allDeleteDiffOptions(allDelete: boolean): {
   renderOverviewRuler: boolean
   renderLineHighlight: "line" | "none"

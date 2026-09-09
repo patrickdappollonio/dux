@@ -1,6 +1,5 @@
-// Scoped REST client for project mutations. Requests include the connection id
-// so server-side operation status is routed back to the initiating client;
-// failures surface as `ProjectsApiError`.
+// Scoped REST client for project mutations. Requests carry the connection id so
+// server-side operation status routes back to the caller; failures are `ProjectsApiError`.
 
 import { createJsonRequest } from "./jsonRequest"
 import type { DeleteWorktreeReply } from "./worktreeDelete"
@@ -25,9 +24,8 @@ export class ProjectsApiError extends Error {
   }
 }
 
-// PATCH body for a project's settings. Each scalar is tri-state: omit the key to
-// leave it untouched, send `null` to clear it back to the inherited default, or
-// send a value to set it. `env` is replace-wholesale (omit = untouched).
+// PATCH body for a project's settings. Each scalar is tri-state: omit to leave untouched,
+// `null` to clear to the inherited default, a value to set it. `env` replaces wholesale.
 export interface PatchProjectBody {
   provider?: string | null
   auto_reopen_agents?: boolean | null
@@ -44,20 +42,17 @@ export const projectsApi = {
     path: string
     name?: string
     checkout_default?: boolean
-    // Birth an empty initial commit before registering an unborn (`git init`,
-    // no commits) repo so it can back worktrees. Backend no-ops if the repo
-    // already has commits.
+    // Birth an empty initial commit so an unborn repo can back worktrees. The
+    // backend no-ops when the repo already has commits.
     create_initial_commit?: boolean
-    // Adopt a plain (non-repo) folder: run `git init`, seed a starter
-    // .gitignore, create an empty initial commit, then register. Outranks
-    // `create_initial_commit` server-side (init subsumes the commit).
+    // Adopt a plain folder: `git init`, seed a starter .gitignore, empty initial
+    // commit, then register. Outranks `create_initial_commit` server-side.
     init_repo?: boolean
   }) => request<ProjectView>("POST", "/api/v1/projects", body),
   remove: (id: string) =>
     request<void>("DELETE", `/api/v1/projects/${encodeURIComponent(id)}`),
-  // The destructive cascade: `?delete_worktrees=true` routes the same DELETE to
-  // `WireCommand::DeleteProject`, which removes the project, its agents, AND
-  // their worktrees from disk (the plain `remove` above keeps the worktrees).
+  // The destructive cascade: removes the project, its agents and their worktrees
+  // from disk, where the plain `remove` above keeps the worktrees.
   deleteWithWorktrees: (id: string) =>
     request<void>(
       "DELETE",
@@ -71,42 +66,29 @@ export const projectsApi = {
     request<void>("POST", `/api/v1/projects/${encodeURIComponent(id)}/pull`),
   checkoutDefault: (id: string) =>
     request<void>("POST", `/api/v1/projects/${encodeURIComponent(id)}/checkout-default`),
-  // List a project's managed worktrees for the "Attach worktree" picker. Replaces
-  // the retired `/ws` `list_project_worktrees` request → `project_worktrees` reply.
+  // List a project's managed worktrees for the "Attach worktree" picker.
   worktrees: (id: string) =>
     request<{ entries: ProjectWorktreeEntryView[] }>(
       "GET",
       `/api/v1/projects/${encodeURIComponent(id)}/worktrees`,
     ),
-  // Remove ONE managed worktree from disk. The server re-validates against a
-  // fresh classification: a path that is not a managed worktree of this project
-  // is a 404 and one an agent holds is a 409, so the UI's rules are not the only
-  // thing standing between a stale list and a destroyed worktree.
-  // `deleteBranch` force-deletes the branch the worktree is on as well. The
-  // server defaults it to false when the parameter is absent, so a request that
-  // says nothing never deletes a branch; the confirmation dialog is what decides
-  // to ask, and it only asks when the worktree actually has a branch.
-  // The reply reports what actually happened to the branch (`deleted`,
-  // `already_gone`, `refused` with git's reason, or absent when nothing was
-  // attempted), because the request's own flag says what was ASKED FOR and
-  // `git branch -D` can refuse.
+  // Remove one managed worktree from disk. The server re-validates: a path that is
+  // not a managed worktree of this project is a 404, one an agent holds is a 409.
+  // `deleteBranch` force-deletes the worktree's branch as well; absent means false.
+  // The reply says what actually happened to the branch, since `git branch -D` can refuse.
   deleteWorktree: (id: string, worktreePath: string, deleteBranch: boolean) =>
     request<DeleteWorktreeReply>(
       "DELETE",
       `/api/v1/projects/${encodeURIComponent(id)}/worktrees?path=${encodeURIComponent(worktreePath)}&delete_branch=${deleteBranch}`,
     ),
-  // Managed-worktree counts for every project, so the project picker can label
-  // its rows and an empty project is a choice rather than a surprise.
+  // Managed-worktree counts for every project, so the project picker can label its rows.
   worktreeCounts: () =>
     request<{ counts: Record<string, number> }>(
       "GET",
       "/api/v1/projects/worktree-counts",
     ),
-  // List the PROJECT-scoped startup-command log files: every run across every
-  // agent of the project, newest first, with the newest file's contents
-  // pre-loaded. The agent-scoped counterpart is `sessionsApi.startupLogs`; both
-  // return the same `StartupLogsList` shape, which is what lets one dialog serve
-  // both scopes.
+  // Project-scoped startup-command logs: every run across every agent of the project,
+  // newest first, newest contents pre-loaded. `sessionsApi.startupLogs` is agent-scoped.
   startupLogs: (id: string) =>
     request<StartupLogsList>(
       "GET",
@@ -122,13 +104,11 @@ export const projectsApi = {
       }`,
     ),
   // Branch pre-flight for the add-project flow: inspect a candidate repo path and
-  // report its current branch + a non-default-branch warning. Replaces the retired
-  // `/ws` `inspect_project_path` request → `project_path_inspection` reply.
+  // report its current branch plus a non-default-branch warning.
   inspectPath: (path: string) =>
     request<{
-      // Path classification. Optional: an older backend omits it (version
-      // skew), and the store treats a missing kind as "repo" (mirroring the
-      // `has_commits !== false` skew handling below).
+      // Path classification. Absent from an older backend, which the store
+      // treats as "repo".
       kind?: InspectKind
       // The enclosing repository root for `kind: "repo_subdir"`; null/absent
       // when inside git's internal directory (no user-facing root to name).
@@ -139,8 +119,7 @@ export const projectsApi = {
       current_branch: string | null
       warning: BranchWarningView | null
       // `false` for a freshly `git init`'d repo with no commits (unborn HEAD).
-      // Optional: an older backend that predates this field omits it (version
-      // skew), and the store treats a missing value as "has commits".
+      // Absent from an older backend, which the store treats as "has commits".
       has_commits?: boolean
     }>("GET", `/api/v1/projects/inspect?path=${encodeURIComponent(path)}`),
 }

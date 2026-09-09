@@ -1,14 +1,11 @@
-// Shared GitHub PR state -> presentation mapping. This is the ONE intentional
-// semantic-color exception in the web UI: PR states carry real-world meaning
-// that maps directly to green/purple/red, matching the dux TUI banner colors
-// (open=green, merged=purple, closed=red). Both the sidebar icon and the PR
-// banner lane read from here so the two surfaces can never drift.
+// Shared GitHub PR state to presentation mapping, the one intentional semantic-color exception
+// in the web UI: open is green, merged purple, closed red, matching the TUI banner. The sidebar
+// icon and the PR banner lane both read from here so the two surfaces cannot drift.
 
 import type { PrView } from "@/lib/types"
 
-// A PR state plus a defensive "unknown" bucket for any value the server might
-// add later — callers never crash on an unrecognized state, they fall back to a
-// neutral presentation.
+// A PR state plus a defensive "unknown" bucket for a value the server may add later, so a
+// caller falls back to a neutral presentation rather than crashing.
 type PrStateLike = PrView["state"] | (string & {})
 
 // The human word for a state, mirroring the TUI's lowercase wording
@@ -20,11 +17,8 @@ export function prStateLabel(state: PrStateLike): string {
   return "unknown"
 }
 
-// The sentence a screen reader speaks for a PR link. Spelled out ("Pull
-// request") rather than the written abbreviation, which is read as letters, and
-// the state is a clause rather than a parenthetical so it is spoken as prose. A
-// state this build does not recognize is left off entirely: naming it "unknown"
-// tells the listener nothing the link did not already say.
+// The sentence a screen reader speaks. "Pull request" is spelled out, since the abbreviation
+// is read as letters, and an unrecognized state is left off rather than spoken as "unknown".
 export function prAriaLabel(number: number, state: PrStateLike): string {
   const label = prStateLabel(state)
   return label === "unknown"
@@ -41,10 +35,8 @@ export function prIconClass(state: PrStateLike): string {
   return "text-muted-foreground"
 }
 
-// Explicit, state-consistent hover for the icon link. Without this the row's
-// hover surface (a light, near-white tint) washed the icon out — green-on-near-
-// white was nearly invisible. A brighter glyph plus a subtle same-hue chip keeps
-// the icon readable on both the sidebar background and the row hover surface.
+// Explicit hover for the icon link: the row's near-white hover surface washes a plain glyph
+// out, so a brighter glyph plus a subtle same-hue chip keeps it readable on both surfaces.
 export function prIconHoverClass(state: PrStateLike): string {
   if (state === "open") return "hover:bg-green-600/15 hover:text-green-400"
   if (state === "merged") return "hover:bg-purple-600/15 hover:text-purple-300"

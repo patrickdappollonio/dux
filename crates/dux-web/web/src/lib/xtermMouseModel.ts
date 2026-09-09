@@ -1,29 +1,23 @@
 /**
- * A TEST FIXTURE, not shipped code. Nothing under `components/` or `lib/`
- * imports it, so it never reaches a bundle; it exists because jsdom cannot open
- * a real xterm (no canvas) and the thing under test is precisely what xterm
- * does with a mouse event.
+ * A test fixture, not shipped code: nothing under `components/` or `lib/`
+ * imports it, so it never reaches a bundle. It exists because jsdom cannot open
+ * a real xterm (no canvas) and the thing under test is what xterm does with a
+ * mouse event.
  *
- * It is a line-by-line transcription of the mouse pipeline in the INSTALLED
- * `@xterm/xterm` 6.0.0 (`node_modules/@xterm/xterm/lib/xterm.mjs`): the
- * `bindMouse` dispatcher on `CoreBrowserTerminal`, `MouseService`'s
- * `getCoordsRelativeToElement` / `getMouseReportCoords`, and
- * `CoreMouseService`'s protocol restrictions and encoding table. The
- * transcription is checked against the real thing by measuring a running
- * terminal in `tools/preview-env`; these tests pin dux's HALF of the contract
- * (that the right DOM events reach the right node, and that a report coming
- * back out is forwarded on the right channel with the right byte encoding).
+ * It transcribes the mouse pipeline of the installed `@xterm/xterm` 6: the
+ * `bindMouse` dispatcher on `CoreBrowserTerminal`, `MouseService`'s coordinate
+ * helpers, and `CoreMouseService`'s protocol restrictions and encoding table,
+ * checked against a running terminal in `tools/preview-env`.
  *
  * Deliberately faithful to the parts that bite:
- *  - `getMouseReportCoords` measures the SCREEN element, subtracts its CSS
- *    padding, clamps into the canvas, and divides by the MEASURED cell size,
- *    yielding a ZERO-based cell. `triggerMouseEvent` then rejects an
- *    out-of-grid cell and only afterwards makes the cell one-based.
- *  - `X10` reports presses only and strips modifiers; `VT200` drops motion;
- *    the wheel is bound only for a protocol whose event mask has bit 16.
- *  - the `DEFAULT` encoding goes out on `onBinary`, everything else on
- *    `onData`. That split is the reason a pane subscribing only to `onData`
- *    dropped X10 reports entirely.
+ *  - `getMouseReportCoords` measures the screen element, subtracts its CSS
+ *    padding, clamps into the canvas and divides by the measured cell size,
+ *    yielding a zero-based cell; `triggerMouseEvent` rejects an out-of-grid cell
+ *    and only afterwards makes the cell one-based.
+ *  - `X10` reports presses only and strips modifiers; `VT200` drops motion; the
+ *    wheel is bound only for a protocol whose event mask has bit 16.
+ *  - the `DEFAULT` encoding goes out on `onBinary`, everything else on `onData`,
+ *    so a pane subscribing only to `onData` drops X10 reports entirely.
  */
 
 export type MouseProtocol = "NONE" | "X10" | "VT200" | "DRAG" | "ANY"
@@ -198,10 +192,9 @@ export function installXtermMouseModel(options: XtermMouseModelOptions) {
     })
   }
 
-  // xterm registers `mouseup` on the DOCUMENT from inside its `mousedown`
-  // handler, and only for a protocol whose mask has the up bit. That is why a
-  // release dispatched at the element alone is never seen, and why X10 (mask 1)
-  // silently reports no release.
+  // xterm registers `mouseup` on the document from inside its `mousedown`
+  // handler, and only for a protocol whose mask has the up bit: a release
+  // dispatched at the element alone is never seen, and X10 reports no release.
   const documentMouseUp = (ev: Event) => {
     report(ev as MouseEvent)
     doc.removeEventListener("mouseup", documentMouseUp)

@@ -1,28 +1,17 @@
-// Activation constraints for the sidebar/hub reorder drags (the agents list
-// and the terminals list share them through FlatAgentList's one `useSensors`
-// call). Kept as plain data in a leaf module so the values are unit-testable
-// without mounting dnd-kit.
+// Activation constraints for the sidebar/hub reorder drags, shared by the agents and terminals
+// lists through FlatAgentList's one `useSensors` call.
 //
-// Two sensors, one per pointer kind, because
-// @dnd-kit/core 6.3.1's `PointerActivationConstraint` applies one constraint
-// to every pointer type (its `DelayConstraint | DistanceConstraint` union has
-// no per-pointer-type branch, read from the installed package's
-// AbstractPointerSensor.d.ts), and the two input kinds need OPPOSITE gates:
+// Two sensors, one per pointer kind, because @dnd-kit/core's `PointerActivationConstraint`
+// applies one constraint to every pointer type, and the two kinds need opposite gates:
 //
-// - MOUSE keeps the small distance gate: a plain click stays a select, and a
-//   6px pull starts the drag immediately, exactly the previous desktop feel.
-// - TOUCH arms on a HOLD (delay + tolerance): instant activation arms a touch
-//   drag on contact and fights the list's own scroll gesture, so reordering
-//   glitches and aborts on phones.
-//   The delay makes a swipe scroll (moving past the tolerance during the
-//   hold cancels activation) and a deliberate hold grab the row. The
-//   activator buttons carry `touch-manipulation`, the touch-action dnd-kit
-//   pairs with delayed touch activation (`none` would kill list scrolling
-//   entirely; once the drag IS active the TouchSensor's non-passive touchmove
-//   listener prevents scrolling for the drag's duration).
+// - Mouse keeps a small distance gate: a plain click stays a select, a short pull drags.
+// - Touch arms on a hold, because instant activation fights the list's own scroll gesture.
+//   Moving past the tolerance during the hold cancels activation, so a swipe still scrolls.
+//   The activator buttons carry `touch-manipulation`, the touch-action dnd-kit pairs with
+//   delayed touch activation; `none` would kill list scrolling entirely.
 //
-// The hold length sits between "a scroll-intent touch still arms it"
-// (~200ms and below) and the browser's own long-press behaviors (~500ms).
+// The hold sits between "a scroll-intent touch still arms it" (~200ms) and the browser's own
+// long-press behaviors (~500ms).
 
 export const MOUSE_DRAG_ACTIVATION = { distance: 6 } as const
 

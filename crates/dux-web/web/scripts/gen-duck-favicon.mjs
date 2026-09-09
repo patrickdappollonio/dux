@@ -1,30 +1,20 @@
-// Regenerates the recolorable-duck favicon assets from the brand logo:
+// Regenerates the recolorable-duck favicon assets from public/dux-logo.png: the traced cutout
+// silhouette written into DUCK_PATH (`src/lib/favicon.ts`), and public/favicon.png.
 //
-//   public/dux-logo.png  ──► DUCK_PATH  (the traced cutout silhouette, in
-//                                        `src/lib/favicon.ts`)
-//                       └──► public/favicon.png  (the full-colour default duck)
+// The cutout is traced from the logo's ink, not a plain alpha silhouette: the beak, eyes and
+// bowtie are dark ink on an opaque body, so an alpha threshold yields a featureless blob. The
+// mask is black only where a pixel is both opaque and bright, the lit body, and white
+// everywhere else, so potrace's even-odd path reads the ink as negative space.
 //
-// The cutout is traced from the LOGO'S INK, not a plain alpha silhouette: the
-// beak/eyes/bowtie are dark ink painted on an opaque body, so a naive alpha
-// threshold yields a featureless blob. Instead we build a mask where a pixel is
-// BLACK only when it is both opaque (alpha > 128) AND bright (luminance >= 70) —
-// i.e. the duck's lit body — and WHITE everywhere else (background AND the dark
-// ink). potrace then traces the black body into an even-odd path so the ink reads
-// as negative-space cutouts.
-//
-// This is a MANUAL, ad-hoc tool: `jimp` and `potrace` are intentionally NOT
-// project dependencies (they pull a heavy ~150-package tree). Install them just
-// for a regeneration and don't save them:
+// A manual tool: `jimp` and `potrace` are deliberately not project dependencies. Install them
+// for a regeneration and do not save them:
 //
 //   npm i --no-save jimp potrace
 //   node scripts/gen-duck-favicon.mjs
 //
-// potrace's output is NONDETERMINISTIC — re-running produces a different-but-
-// equivalent path, so this never reproduces the committed DUCK_PATH byte-for-byte.
-// Validate the emitted duck VISUALLY before committing. The committed output is a
-// visually-validated asset; `duckPath.test.ts` only guards it against gross
-// corruption (truncation, breakout characters, lost sub-shapes), NOT staleness or
-// an exact match against a fresh run.
+// potrace's output is nondeterministic, so a run never reproduces the committed DUCK_PATH byte
+// for byte. Validate the emitted duck visually before committing: `duckPath.test.ts` guards
+// only against gross corruption, never staleness or a match against a fresh run.
 
 import { createRequire } from "node:module"
 import { fileURLToPath } from "node:url"

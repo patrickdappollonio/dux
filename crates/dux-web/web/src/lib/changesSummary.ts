@@ -1,13 +1,6 @@
-// The changed-files summary a CONTROL carries while the list itself is off
-// screen: the phone's ±N button in the agent header (which opens the changes
-// screen) and the desktop header's reopen button (which brings the hidden pane
-// back). Both answer the same question, "how much has this agent changed", so
-// they read one helper and cannot drift into saying different numbers or
-// wording the count differently.
-//
-// It rides the existing changed-files broadcast: the store slice it reads is
-// fed by `session.changes` events, so both controls update live with nothing
-// polling on their behalf.
+// The changed-files summary a control carries while the list itself is off screen: the phone's
+// ±N header button and the desktop header's reopen button. One helper, so the two cannot say
+// different numbers. It rides the `session.changes` broadcast, so both update with no polling.
 
 import { changesCountFor } from "@/lib/agentVitals"
 import type { ChangesSlice } from "@/lib/store"
@@ -15,22 +8,17 @@ import type { ChangesSlice } from "@/lib/store"
 export interface ChangesSummary {
   // Staged plus unstaged files, every status weighted the same.
   count: number
-  // What the control prints: a count, which is DATA, so it survives on
+  // What the control prints: a count, which is data, so it survives on
   // surfaces that otherwise prefer icon-only controls.
   label: string
   // What a screen reader is told the number means.
   countLabel: string
 }
 
-// The summary for the agent in view, or null when there is no agent for the
-// count to be about (a focused project or standalone terminal), where the
-// control carries its icon alone.
-//
-// An unloaded, failed or stale slice reads as zero rather than as "no summary":
-// the count is a live figure that arrives moments later, and a control that
-// appears and disappears under it would flicker on every selection change.
-// Overloaded so a caller that already has an agent (the phone's agent screen)
-// gets a summary rather than a maybe-summary it would have to unwrap.
+// The summary for the agent in view, or null when there is no agent for the count to be about
+// (a focused project or standalone terminal), where the control carries its icon alone. An
+// unloaded, failed or stale slice reads as zero rather than as "no summary": the figure arrives
+// moments later, and a control appearing and disappearing under it would flicker.
 export function changesSummary(
   changes: ChangesSlice | null | undefined,
   sessionId: string,

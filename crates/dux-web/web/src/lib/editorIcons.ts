@@ -1,11 +1,9 @@
 // Brand glyphs for the editor picker, vendored from simple-icons
-// (CC0-1.0 — https://github.com/simple-icons/simple-icons). Each entry is a
-// single monochrome path rendered with `fill="currentColor"`, so the glyph
-// inherits the menu's text color and stays consistent with the rest of the
-// dropdown instead of mixing full-color logos. The trademarks remain each
-// vendor's; the marks denote only "open in <editor>". Keys match the dux-core
-// editor config keys (see crates/dux-core/src/editor.rs). To add an editor, drop
-// its simple-icons path here under the matching key.
+// (CC0-1.0, https://github.com/simple-icons/simple-icons); the trademarks remain each vendor's
+// and the marks denote only "open in <editor>". Each entry is one monochrome path rendered with
+// `fill="currentColor"`, so a glyph inherits the menu's text color. Keys match the dux-core
+// editor config keys (crates/dux-core/src/editor.rs); add an editor by dropping its path in
+// under the matching key.
 
 export const EDITOR_ICON_PATHS: Record<string, string> = {
   cursor: "M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23",
