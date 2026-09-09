@@ -870,6 +870,40 @@ function matchingSessions(
   )
 }
 
+// Which of the list's two blank screens is on, and what the onboarding one's
+// hero button offers. A workspace with nothing in it beats an empty search
+// result, so both flags are reported and the list decides in that order.
+interface FlatListEmptyState {
+  // The empty workspace: nothing to show whatever the search box says.
+  nothing: boolean
+  // Rows exist, but the query hides every one of them.
+  nothingMatches: boolean
+  emptyVerbIsAddProject: boolean
+}
+
+function flatListEmptyState(input: {
+  // Null while the spine is unloaded, which is not yet a zero project count.
+  projectCount: number | null
+  coreSessions: SessionView[]
+  quiet: SessionView[]
+  visibleMain: SessionView[]
+  visibleQuiet: SessionView[]
+  flatTerminals: FlatTerminal[]
+  query: string
+}): FlatListEmptyState {
+  const noTerminals = input.flatTerminals.length === 0
+  return {
+    nothing:
+      input.coreSessions.length === 0 && noTerminals && input.quiet.length === 0,
+    nothingMatches:
+      input.query.trim() !== "" &&
+      input.visibleMain.length === 0 &&
+      input.visibleQuiet.length === 0 &&
+      noTerminals,
+    emptyVerbIsAddProject: launcherVerb(input.projectCount) === "add-project",
+  }
+}
+
 function flatAgentListModel(dux: DuxState) {
   const {
     spine,
@@ -931,17 +965,16 @@ function flatAgentListModel(dux: DuxState) {
         query,
       ),
   )
-  const emptyVerbIsAddProject =
-    launcherVerb(spine ? rawProjects.length : null) === "add-project"
-  const nothing =
-    coreSessions.length === 0 &&
-    flatTerminals.length === 0 &&
-    quiet.length === 0
-  const nothingMatches =
-    query.trim() !== "" &&
-    visibleMain.length === 0 &&
-    visibleQuiet.length === 0 &&
-    flatTerminals.length === 0
+  const { nothing, nothingMatches, emptyVerbIsAddProject } =
+    flatListEmptyState({
+      projectCount: spine ? rawProjects.length : null,
+      coreSessions,
+      quiet,
+      visibleMain,
+      visibleQuiet,
+      flatTerminals,
+      query,
+    })
 
   return {
     selectedTarget,
