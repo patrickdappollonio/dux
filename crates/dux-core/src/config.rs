@@ -3,7 +3,7 @@
 //! `discover_root`) and the env-expansion helpers (`expand_env_vars`,
 //! `expand_path`, `resolve_project_env`, …). The keybinding-aware *renderer* of
 //! the documented config, plus `ensure_config`/`save_config` orchestration and
-//! the toml_edit patching, live in the binary's `config` module — not here.
+//! the toml_edit patching, live in the binary's `config` module, not here.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -152,25 +152,25 @@ pub struct EditorConfig {
 /// [`ServerConfig::max_websocket_events_connections`]. Shared so the config
 /// default and the server's router default cannot drift apart.
 pub const DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS: u32 = 32;
-/// Default cap on concurrent agent-PTY WebSocket connections — see
+/// Default cap on concurrent agent-PTY WebSocket connections. See
 /// [`ServerConfig::max_websocket_agent_connections`].
 pub const DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS: u32 = 32;
-/// Default cap on concurrent terminal-PTY WebSocket connections — see
+/// Default cap on concurrent terminal-PTY WebSocket connections. See
 /// [`ServerConfig::max_websocket_terminal_connections`].
 pub const DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS: u32 = 64;
 /// Default cap on concurrent extra-tab PTY WebSocket connections across ALL
-/// agents — see [`ServerConfig::max_websocket_tab_connections`]. A pool of its
+/// agents. See [`ServerConfig::max_websocket_tab_connections`]. A pool of its
 /// own so tab sockets can never starve the agent-PTY (session-slot tab) pool.
 pub const DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS: u32 = 64;
 
 /// Default per-agent cap on concurrent live extra-tab PTY sockets, checked
-/// before a permit is taken from the shared tab pool — see
+/// before a permit is taken from the shared tab pool. See
 /// [`ServerConfig::max_websocket_tabs_per_agent`]. Keeps one agent's tabs from
 /// monopolizing that pool and starving other agents' tabs.
 pub const DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT: u32 = 8;
 
 /// Default per-agent tab cap (see [`UiConfig::agent_tabs_max`]), counting the
-/// session-slot tab — so the default 20 allows the session-slot tab plus 19 extra tabs.
+/// session-slot tab, so the default 20 allows the session-slot tab plus 19 extra tabs.
 pub const DEFAULT_AGENT_TABS_MAX: u16 = 20;
 /// Hard ceiling the per-agent tab cap is clamped to, so a fat-fingered config
 /// value can't ask the app to keep unbounded live PTYs per agent.
@@ -285,8 +285,8 @@ pub const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u16 = 30;
 
 /// Hard ceiling on a configured shutdown timeout. The field is seconds, but a
 /// `u16` reaches ~18 hours, so a fat-fingered millisecond value (e.g. `30000`)
-/// would otherwise block quit — and, on the web server, the single engine
-/// thread that services every client — for that whole time. Clamping keeps a
+/// would otherwise block quit (and, on the web server, the single engine
+/// thread that services every client) for that whole time. Clamping keeps a
 /// misconfiguration from wedging shutdown while still allowing any sane grace.
 pub const MAX_SHUTDOWN_TIMEOUT_SECONDS: u16 = 600;
 
@@ -774,10 +774,10 @@ pub struct ServerConfig {
     /// requests are not rejected by the host guard. Empty by default.
     pub allowed_hosts: Vec<String>,
     /// Colored, vite-style console output for `dux server`. One of `"auto"`
-    /// (default — color only when stdout is a terminal, `NO_COLOR` is unset, and
+    /// (default: color only when stdout is a terminal, `NO_COLOR` is unset, and
     /// `TERM` is not `dumb`), `"always"` (force color), or `"never"` (plain text).
     /// An unrecognized value is treated as `"auto"` with a warning. The TUI flip's
-    /// status screen is unaffected — this only governs the `dux server` CLI.
+    /// status screen is unaffected: this only governs the `dux server` CLI.
     pub color: String,
     /// Whether `dux server` prints a per-request access log line (method, path,
     /// status, latency) to its console. The `/healthz` probe is always skipped.
@@ -874,7 +874,7 @@ pub struct ServerConfig {
     /// server's blocking-thread pool from a burst of tree requests (e.g. many
     /// tabs expanding directories at once) starving other blocking work like
     /// git operations and file reads/writes. A request beyond the limit WAITS
-    /// for a free slot rather than being rejected — unlike the
+    /// for a free slot rather than being rejected: unlike the
     /// `max_websocket_*_connections` family, this bounds a small, fast unit of
     /// background work, not a long-lived connection. `0` disables the bound
     /// entirely. Default 8. Takes effect on the next server restart.
@@ -1042,12 +1042,12 @@ pub struct ProviderCommandConfig {
     /// Scroll-forwarding policy for the wheel and PgUp/PgDn over this
     /// provider's embedded PTY. Tri-state:
     ///
-    /// - `None` (key absent) — auto: forward the wheel to the child when it
+    /// - `None` (key absent) is auto: forward the wheel to the child when it
     ///   asked for mouse reporting (an app that takes the mouse owns the
     ///   wheel, alternate screen or not) and the page keys when it owns the
     ///   alternate screen; otherwise scroll dux's own host scrollback.
-    /// - `Some(true)` — always forward scroll and page keys to the child.
-    /// - `Some(false)` — never forward; always use dux host scrollback.
+    /// - `Some(true)`: always forward scroll and page keys to the child.
+    /// - `Some(false)`: never forward; always use dux host scrollback.
     pub forward_scroll: Option<bool>,
     /// How the WEB UI writes a dropped file's path into this provider's prompt.
     /// The raw config string, parsed at use through [`WebDragDropPaste`] so a typo
@@ -2605,8 +2605,8 @@ pub fn provider_config(
         })
 }
 
-/// Parse and validate `s` as a complete [`Config`] — the same `toml::from_str`
-/// check [`load_config`] performs — returning the parsed value on success or a
+/// Parse and validate `s` as a complete [`Config`] (the same `toml::from_str`
+/// check [`load_config`] performs), returning the parsed value on success or a
 /// user-facing error message on failure. The web's raw config editor calls this
 /// to reject invalid TOML before it overwrites `config.toml`; it also uses the
 /// returned value to compare security-sensitive sections against the running
@@ -2620,12 +2620,12 @@ pub fn validate_config_str(s: &str) -> Result<Config, String> {
 /// Load config for a read-only consumer (the web server). Reads `config.toml` if
 /// present and parses it; on a missing file or parse error, falls back to defaults
 /// (logging the error). Always applies provider defaults. Unlike the TUI's
-/// `ensure_config`, this never creates, migrates, or writes the config file — the
+/// `ensure_config`, this never creates, migrates, or writes the config file: the
 /// server must not mutate config (that's the TUI's canonical renderer).
 /// Deserialize `raw` into a [`Config`], recovering from a bad field or section
 /// instead of discarding the entire file. A full-document parse success is used
-/// directly; otherwise the offending key(s) are pruned — at FIELD granularity
-/// where a single field can be isolated, else the whole top-level section — reset
+/// directly; otherwise the offending key(s) are pruned (at FIELD granularity
+/// where a single field can be isolated, else the whole top-level section), reset
 /// to their defaults, warned to the log, and the rest is kept. A genuine TOML
 /// syntax error (or a structure that can't be recovered) still falls back to
 /// `Config::default()`. This means one bad value (e.g. `agent_tabs_max = -1`) can
@@ -2755,7 +2755,7 @@ pub fn load_config(paths: &DuxPaths) -> Config {
     };
     config.providers.ensure_defaults();
     // Surface a stale/unrecognized editor preference instead of silently falling
-    // back to the first editor detected on PATH — e.g. a config left pointing at a
+    // back to the first editor detected on PATH, e.g. a config left pointing at a
     // now-removed editor like "antigravity"/"windsurf".
     let configured_editor = config.editor.default.trim();
     if !configured_editor.is_empty() && crate::editor::editor_label(configured_editor).is_none() {
@@ -2956,14 +2956,14 @@ fn is_executable_file(path: &Path) -> bool {
 /// One address in a [`ServerPlan`], tagged with whether binding it is REQUIRED or
 /// merely BEST-EFFORT.
 ///
-/// - `required: true` — a deliberate listener (the configured `host:port` or an
+/// - `required: true`: a deliberate listener (the configured `host:port` or an
 ///   explicit `--bind`). A bind failure here is FATAL per the explicit-failure
 ///   tenet: the operator asked for this address, so refusing to serve it silently
 ///   would hide their intent.
-/// - `required: false` — an opportunistic add-on. Today this is ONLY the
+/// - `required: false`: an opportunistic add-on. Today this is ONLY the
 ///   Tailscale leg of LOCAL MODE: it is auto-added when a Tailscale address is
 ///   detected, mirroring how tailscale-NOT-detected already degrades to loopback
-///   with a warning. A bind failure here must NOT block the server — it warns
+///   with a warning. A bind failure here must NOT block the server: it warns
 ///   loudly and serves on the remaining (bound) addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanAddr {
@@ -2972,7 +2972,7 @@ pub struct PlanAddr {
 }
 
 impl PlanAddr {
-    /// A required (deliberate) listener — its bind failure is fatal.
+    /// A required (deliberate) listener: its bind failure is fatal.
     pub fn required(addr: std::net::SocketAddr) -> Self {
         Self {
             addr,
@@ -2980,7 +2980,7 @@ impl PlanAddr {
         }
     }
 
-    /// A best-effort (opportunistic) listener — its bind failure degrades to a
+    /// A best-effort (opportunistic) listener: its bind failure degrades to a
     /// warning and the server continues on the remaining addresses.
     pub fn best_effort(addr: std::net::SocketAddr) -> Self {
         Self {
@@ -3667,7 +3667,7 @@ mod tests {
             "garbage must be rejected"
         );
         // Structurally-valid TOML with a wrong-typed field must also be rejected
-        // (deserialization failure, not just a parse failure) — otherwise the web
+        // (deserialization failure, not just a parse failure); otherwise the web
         // editor would accept a value the engine can't load.
         assert!(
             validate_config_str("[ui]\nagent_scrollback_lines = \"lots\"\n").is_err(),
@@ -4455,7 +4455,7 @@ github_integration = false
     fn load_config_falls_back_to_defaults_when_file_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_test_paths(dir.path());
-        // No config.toml written — file does not exist.
+        // No config.toml written: file does not exist.
 
         let config = load_config(&paths);
 

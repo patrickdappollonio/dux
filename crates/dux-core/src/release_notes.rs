@@ -3,12 +3,12 @@
 //!
 //! [`load_release_notes`] is the entry point both surfaces call. It asks for the
 //! RUNNING version's own tag, because the screen must describe the version the
-//! user actually has — not whatever GitHub published most recently.
+//! user actually has, not whatever GitHub published most recently.
 //! [`fetch_latest`] exists for the one case with no tag to ask for: a development
 //! build.
 //!
 //! Every `fetch_*` / `load_*` function here BLOCKS. They must only ever be called
-//! from a background worker, never from a UI thread — see CLAUDE.md.
+//! from a background worker, never from a UI thread. See CLAUDE.md.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -223,7 +223,7 @@ pub fn parse_release_body(body: &str) -> ParsedBody {
 
         if let Some(rest) = trimmed.strip_prefix("## ") {
             if seen_top_heading {
-                break; // "What's Changed" / "Installation" — stop here.
+                break; // "What's Changed" / "Installation": stop here.
             }
             seen_top_heading = true;
             notes.headline = strip_inline_markup(rest);
@@ -282,7 +282,7 @@ fn strip_inline_markup(s: &str) -> String {
         match chars[i] {
             '*' | '`' | '_' => {}
             '[' => {
-                // `[text](url)` — keep `text`, drop the target.
+                // `[text](url)`: keep `text`, drop the target.
                 if next_close.is_none_or(|j| j < i) {
                     // Resume from wherever the scan left off; never restart at
                     // `i` alone, or the work becomes quadratic again. Anything
@@ -657,9 +657,9 @@ fn from_api(release: ApiRelease) -> ReleaseNotes {
 
 /// How long a cached copy is trusted before dux refetches.
 ///
-/// Six hours. Live fetching is the point of the feature — a typo in the release
+/// Six hours. Live fetching is the point of the feature: a typo in the release
 /// body gets fixed within hours of publishing, and a cache that outlived the fix
-/// would pin the mistake on screen — so the window has to be short. Six hours
+/// would pin the mistake on screen, so the window has to be short. Six hours
 /// also keeps dux to at most four requests a day per machine against the
 /// unauthenticated 60/hour per-IP limit, however many times dux is launched, and
 /// it comfortably covers a single working session (the realistic case: launch,
@@ -896,7 +896,7 @@ mod tests {
         // rest of the line and keeps only the link text. This is the prototype
         // parser's behavior, ported unchanged, and it is documented rather than
         // "fixed": it can only be reached by malformed Markdown in a release
-        // body, and the important property — no panic, no byte slicing — holds.
+        // body, and the important property (no panic, no byte slicing) holds.
         assert_eq!(strip_inline_markup("[t]("), "t");
         assert_eq!(strip_inline_markup("see [t](http and more"), "see t");
     }
@@ -980,7 +980,7 @@ mod tests {
         // characters in an UNOPTIMIZED test build (which is how this test runs):
         // 27.7s before the forward cursor, 2.8ms after; 1,000,000 characters now
         // take 45ms. In release it is 0.45ms and 7ms. The 300ms bound is ~100x
-        // the measured linear time — generous enough not to flake on slow CI —
+        // the measured linear time (generous enough not to flake on slow CI)
         // and ~90x under the old quadratic time, which blew past it by four
         // orders of magnitude.
         let input = "[".repeat(64_000);

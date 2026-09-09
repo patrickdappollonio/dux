@@ -1,9 +1,9 @@
 //! Headless, serializable diff source shared by web clients. Returns the two raw
-//! sides of a single file — its content at HEAD and its working-copy content — as
+//! sides of a single file (its content at HEAD and its working-copy content) as
 //! whole UTF-8 text, leaving the actual diff rendering to the client. The web UI
 //! runs Monaco's DiffEditor over these two sides; non-UTF-8/binary content is
 //! reported as `binary: true` with empty sides. No syntax highlighting, no
-//! terminal/ratatui types — the TUI keeps its own syntect+ratatui diff renderer
+//! terminal/ratatui types: the TUI keeps its own syntect+ratatui diff renderer
 //! in `dux-tui/src/diff.rs`.
 
 use std::path::Path;
@@ -17,10 +17,10 @@ use crate::worktree_file::MAX_EDITABLE_BYTES;
 pub struct DiffContents {
     pub path: String,
     /// File content at HEAD. Empty when the path is absent at HEAD (a newly
-    /// added/untracked file) — the client then renders an all-insert diff.
+    /// added/untracked file); the client then renders an all-insert diff.
     pub original: String,
     /// Working-copy content on disk. Empty when the path was deleted from the
-    /// working tree — the client then renders an all-delete diff.
+    /// working tree; the client then renders an all-delete diff.
     pub modified: String,
     /// True when either side is non-UTF-8/binary. `original` and `modified` are
     /// then empty and the client should refuse to render a text diff.
@@ -63,7 +63,7 @@ pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<Dif
     }
 
     // Working side via a no-follow stat: refuse symlinks (consistent with
-    // `read_file` — the boundary's existence-gated escape check can miss a
+    // `read_file`: the boundary's existence-gated escape check can miss a
     // dangling or in-worktree symlink) and cap the size before buffering. A
     // missing path means no working copy (a deletion, or absent); any other
     // stat/read error propagates rather than silently rendering an empty side.
@@ -233,7 +233,7 @@ mod tests {
         // The realistic `git rm sub/only-file` shape: git prunes the now-empty
         // parent directory too, so the working side's stat fails with a
         // missing PARENT, not just a missing file. That must still read as a
-        // deletion (HEAD content vs empty), never an error — the web Changes
+        // deletion (HEAD content vs empty), never an error: the web Changes
         // pane renders a deleted file's diff from exactly this state.
         let repo = init_repo();
         std::fs::create_dir(repo.path().join("sub")).expect("mkdir");
@@ -280,7 +280,7 @@ mod tests {
         assert!(file_diff_contents(repo.path(), "a/../../b").is_err());
     }
 
-    /// A symlink inside the worktree that points OUTSIDE it must be refused — the
+    /// A symlink inside the worktree that points OUTSIDE it must be refused: the
     /// component check alone wouldn't catch this, and the web reads client-
     /// supplied paths.
     #[test]
@@ -301,7 +301,7 @@ mod tests {
     }
 
     /// An in-worktree symlink (target inside the tree, so the escape check passes)
-    /// must still be refused by the no-follow stat — matching `read_file`, which
+    /// must still be refused by the no-follow stat, matching `read_file`, which
     /// refuses all symlinks. Closes the read-path inconsistency.
     #[test]
     fn in_worktree_symlink_is_refused() {
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(c.modified, "");
     }
 
-    /// A path absent both at HEAD and on disk is a stale/typo path — it errors
+    /// A path absent both at HEAD and on disk is a stale/typo path: it errors
     /// rather than returning a confusing all-blank diff.
     #[test]
     fn absent_on_both_sides_errors() {

@@ -53,7 +53,7 @@ impl ScrollHint {
 /// Classify a scrollable surface.
 ///
 /// `offset` is the first visible row/item, `viewport` how many fit on screen,
-/// and `total` how many exist — all in the SAME unit (see the module docs).
+/// and `total` how many exist, all in the SAME unit (see the module docs).
 ///
 /// An `offset` past the last reachable position is treated as
 /// [`ScrollHint::AtBottom`] rather than as an error: renderers clamp the offset

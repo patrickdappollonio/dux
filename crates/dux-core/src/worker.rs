@@ -255,8 +255,8 @@ pub enum AgentLaunchKind {
     },
     StartupAutoReopen,
     /// An extra-tab launch. Whether it resumes is decided dynamically, per
-    /// provider, by `Engine::tab_resume_decision` — the same rule every other
-    /// launch path uses — not hardcoded to "never". `is_fresh` distinguishes a
+    /// provider, by `Engine::tab_resume_decision` (the same rule every other
+    /// launch path uses), not hardcoded to "never". `is_fresh` distinguishes a
     /// brand-new `create_tab` (whose row should be deleted if this very first
     /// spawn fails) from an explicit relaunch of an already-persisted dormant
     /// extra tab (whose row is kept and whose real error is surfaced).

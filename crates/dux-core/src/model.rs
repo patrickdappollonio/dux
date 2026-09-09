@@ -607,7 +607,7 @@ pub struct AgentSession {
     /// away and back (either surface, and across restarts) restores it. `None`
     /// means "no memory recorded" and resolves to the session-slot tab (see
     /// [`AgentSession::slot_tab_id`]). A remembered value naming the slot tab, or
-    /// one that no longer names a live extra tab, also resolves to it — see
+    /// one that no longer names a live extra tab, also resolves to it. See
     /// [`AgentSession::resolved_focused_tab`]. Derived runtime/UI state: kept in
     /// SQLite via a dedicated setter, never in portable config, and deliberately
     /// excluded from `upsert_session`'s hot-path SET/INSERT lists so status

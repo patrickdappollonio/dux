@@ -313,7 +313,7 @@ fn a_tag_that_could_rewrite_the_request_path_is_refused_without_any_request() {
 #[test]
 fn the_development_build_path_still_asks_for_the_newest_release() {
     // A dev build has no tag to look up, so `/releases/latest` is the right
-    // question there — and the only place it is still asked.
+    // question there, and the only place it is still asked.
     let server = TestServer::serving_sample_release("v0.9.0", "https://example.invalid/v0.9.0");
     let notes = release_notes::fetch_latest(&server.base_url).expect("fetch");
     assert_eq!(notes.version, "v0.9.0");

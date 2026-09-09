@@ -12,8 +12,8 @@
 //! ([`flock(2)`]) on a well-known lockfile. Users who want multiple concurrent
 //! workspaces can point `DUX_HOME` at different directories.
 //!
-//! The lockfile also contains the holder's PID — written after the lock is
-//! acquired — so a colliding launch can tell the user which process to close.
+//! The lockfile also contains the holder's PID, written after the lock is
+//! acquired, so a colliding launch can tell the user which process to close.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -29,8 +29,8 @@ use crate::io_retry::retry_on_interrupt_errno;
 /// Exclusive single-instance lock on the dux config directory.
 ///
 /// The file handle is kept open for the lifetime of this value. The kernel
-/// releases the advisory lock when the file descriptor is closed — including
-/// on process exit via `SIGKILL` or crash — so stale lockfiles never block a
+/// releases the advisory lock when the file descriptor is closed, including
+/// on process exit via `SIGKILL` or crash, so stale lockfiles never block a
 /// future launch. Only a live peer actively holding the lock will.
 #[derive(Debug)]
 pub struct SingleInstanceLock {
@@ -51,7 +51,7 @@ impl Drop for SingleInstanceLock {
 #[derive(Debug)]
 pub enum AcquireError {
     /// Another live dux process already holds the lock. `pid` is the holder's
-    /// PID as read from the lockfile — `None` if the file was empty or its
+    /// PID as read from the lockfile. `None` if the file was empty or its
     /// contents could not be parsed.
     AlreadyRunning { pid: Option<u32>, path: PathBuf },
     /// An unexpected filesystem error occurred (not contention).
@@ -176,7 +176,7 @@ fn read_holder_pid_with_retry(file: &mut File) -> Option<u32> {
 ///
 /// If two consecutive reads agree within `attempts`, that value is returned
 /// immediately. If the budget is exhausted without agreement, the last
-/// successfully parsed PID is returned as a best-effort fallback —
+/// successfully parsed PID is returned as a best-effort fallback:
 /// reporting a potentially-stale PID is more useful than `None`. Returns
 /// `None` only if no attempt produced a parseable value at all.
 ///
@@ -188,7 +188,7 @@ fn read_holder_pid(file: &mut File, attempts: usize, delay: Duration) -> Option<
     for attempt in 0..attempts {
         if let Some(pid) = read_holder_pid_once(file) {
             if last_pid == Some(pid) {
-                // Two consecutive reads agree — the PID is stable.
+                // Two consecutive reads agree: the PID is stable.
                 return Some(pid);
             }
             last_pid = Some(pid);
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn pid_read_requires_two_consecutive_agreeing_reads() {
         // When a stale PID sits in the lockfile, the first read parses
-        // successfully. The retry loop must NOT accept it immediately —
+        // successfully. The retry loop must NOT accept it immediately:
         // it needs a second read to agree. Here the file changes between
         // reads: attempt 0 sees 9999, the writer overwrites to 7777, and
         // the loop eventually stabilises on 7777.
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn pid_read_gives_up_and_returns_none_when_file_stays_empty() {
-        // Use minimal budget here — no writer thread, so every attempt
+        // Use minimal budget here: no writer thread, so every attempt
         // fails immediately and there's nothing to wait for.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("dux.lock");

@@ -1,9 +1,9 @@
 //! Safe working-copy file read/write for client-supplied worktree paths, used by
 //! the web editor. The editor works against the WORKTREE itself: any file inside
-//! it can be read, written, or CREATED — the only constraint is containment.
+//! it can be read, written, or CREATED: the only constraint is containment.
 //! Reads use a read-permissive resolver that allows `.git/` paths (returning them
 //! as `read_only`); writes keep the full guards and refuse `.git/` and outside-
-//! resolving symlinks. There is no git-tracked/changed-file gate here — that is
+//! resolving symlinks. There is no git-tracked/changed-file gate here: that is
 //! the changes pane's concern.
 
 use std::path::{Path, PathBuf};
@@ -21,11 +21,11 @@ pub const MAX_EDITABLE_BYTES: u64 = 5 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorktreeFile {
     pub path: String,
-    /// True when the working copy is non-UTF-8/binary — `content` is then empty
+    /// True when the working copy is non-UTF-8/binary; `content` is then empty
     /// and the editor refuses to open it.
     pub binary: bool,
     pub content: String,
-    /// True when the file was opened read-only — an outside-resolving symlink
+    /// True when the file was opened read-only: an outside-resolving symlink
     /// or a `.git/` path. The UI must grey out Save and ignore the dirty guard.
     #[serde(default)]
     pub read_only: bool,
@@ -183,7 +183,7 @@ pub fn resolve_worktree_path_for_read(
 
     // Check whether the literal path contains a `.git` component. We check this
     // first because the canonical path check below uses `real`, which for a
-    // not-yet-existing leaf is the parent-canonicalized path — a `.git/new-file`
+    // not-yet-existing leaf is the parent-canonicalized path: a `.git/new-file`
     // that doesn't exist would return false from the canonical check but true
     // from the literal check.
     let is_git_literal = rp
@@ -191,7 +191,7 @@ pub fn resolve_worktree_path_for_read(
         .any(|c| c.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".git")));
 
     // Also check whether the canonical real path passes through a `.git`
-    // directory — covers symlinks that redirect INTO a `.git/` dir even when
+    // directory, covering symlinks that redirect INTO a `.git/` dir even when
     // the literal path has no `.git` component.
     let is_git_canonical = real
         .strip_prefix(&real_worktree)
@@ -239,7 +239,7 @@ pub fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::
     use std::os::unix::io::IntoRawFd;
 
     // O_NOFOLLOW | O_RDONLY. rustix's OFlags::NOFOLLOW is available when the
-    // `fs` feature is enabled (already is — see Cargo.toml workspace dep).
+    // `fs` feature is enabled (already is; see Cargo.toml workspace dep).
     let fd = rustix_open(abs_path, OFlags::RDONLY | OFlags::NOFOLLOW, Mode::empty())
         .map_err(|e| anyhow::anyhow!("open {}: {e}", abs_path.display()))?;
 
@@ -255,14 +255,14 @@ pub fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::
 /// Binary content yields `binary: true` with empty `content`.
 ///
 /// ANY symlink leaf is read with `read_only: true` regardless of where its
-/// target lives — `write_file` refuses all symlinks so the Save button would
+/// target lives: `write_file` refuses all symlinks so the Save button would
 /// always fail for them; marking them read-only surfaces this immediately.
 /// `.git/` paths are always `read_only: true`.
 /// Dangling symlinks (target does not exist) return an error.
 pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile> {
     // Use the read-permissive resolver (allows .git/ paths).
     // `is_outside` is true when the canonical real path escapes the worktree
-    // via ANY symlink — intermediate or leaf — so an intermediate-dir symlink
+    // via ANY symlink (intermediate or leaf), so an intermediate-dir symlink
     // (e.g. `evil/ -> /etc`) is caught here before we ever reach the leaf check.
     let (path, is_git_dir, is_outside) = resolve_worktree_path_for_read(worktree, rel_path)?;
 
@@ -279,7 +279,7 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
         //
         // For an intermediate-symlink escape, `path` is not itself a symlink at
         // the leaf but the canonical resolution already confirmed the real path
-        // is outside — we still read via the resolved path so O_NOFOLLOW on
+        // is outside. We still read via the resolved path so O_NOFOLLOW on
         // `path` would succeed (the leaf is a plain file), but reading via
         // `canonicalize` is the consistent, safe choice in both cases.
         let target = std::fs::canonicalize(&path)?; // follows all symlinks
@@ -300,7 +300,7 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
         let (bytes, read_meta) = read_nofollow_stat(&target)?;
 
         // `read_only` is true when: the leaf is ANY symlink (write_file refuses
-        // all symlinks, so Save would always fail — mark it read-only up front),
+        // all symlinks, so Save would always fail; mark it read-only up front),
         // OR the real path is outside the worktree (is_outside), OR the path is
         // inside .git/.
         (
@@ -451,7 +451,7 @@ fn write_checked_existing(
 
 /// Write text to a worktree file, creating it if it does not exist (the editor
 /// can save brand-new, uncommitted files). The only constraint is containment:
-/// the target — and, when creating, its parent directory — must stay inside the
+/// the target (and, when creating, its parent directory) must stay inside the
 /// worktree. Refuses to write THROUGH a symlink (an existing one, or a dangling
 /// one whose target could appear between the boundary's existence check and the
 /// write) and refuses to write to a directory/fifo/device.
@@ -1199,7 +1199,7 @@ mod tests {
         let dir = worktree();
         // A symlink INSIDE the worktree pointing to another file inside it.
         // Even in-tree symlinks are read_only because write_file refuses ALL
-        // symlinks — the Save button must be disabled rather than lie to the user.
+        // symlinks: the Save button must be disabled rather than lie to the user.
         std::os::unix::fs::symlink(dir.path().join("hello.txt"), dir.path().join("link.txt"))
             .unwrap();
         let f = read_file(dir.path(), "link.txt").unwrap();
@@ -1357,11 +1357,11 @@ mod tests {
             dir.path().join("link.txt"),
         )
         .unwrap();
-        // Read is now permissive — returns content but read_only = true.
+        // Read is now permissive: returns content but read_only = true.
         let f = read_file(dir.path(), "link.txt").unwrap();
         assert_eq!(f.content, "top secret\n");
         assert!(f.read_only, "out-of-tree symlink must be read_only");
-        // Write is still refused — outside file untouched.
+        // Write is still refused: outside file untouched.
         assert!(write_file(dir.path(), "link.txt", "x").is_err());
         assert_eq!(
             std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
@@ -1408,7 +1408,7 @@ mod tests {
 
     #[test]
     fn nested_git_directory_is_refused() {
-        // A NESTED repo's .git (vendored dep / submodule) must be unreachable —
+        // A NESTED repo's .git (vendored dep / submodule) must be unreachable:
         // a hook written here would run as code on the next git op in that repo.
         let dir = worktree();
         std::fs::create_dir_all(dir.path().join("vendor/repo/.git/hooks")).unwrap();
@@ -1461,7 +1461,7 @@ mod tests {
     /// Before the fix, `read_file` only checked whether the LEAF path component
     /// was a symlink. An intermediate directory symlink (e.g. `evil/ -> /tmp/…`)
     /// was not caught: the leaf `secret.txt` is a plain file, so the code took
-    /// the non-symlink branch and returned `read_only: false` — serving an
+    /// the non-symlink branch and returned `read_only: false`, serving an
     /// out-of-tree file as if it were an editable in-tree file.
     ///
     /// After the fix, `resolve_worktree_path_for_read` canonicalizes the FULL
@@ -1476,14 +1476,14 @@ mod tests {
         std::fs::write(outside_dir.path().join("secret.txt"), "classified\n").unwrap();
 
         // Create a directory symlink INSIDE the worktree that points OUTSIDE it.
-        // `evil` is not itself a file — it is an intermediate directory component.
+        // `evil` is not itself a file: it is an intermediate directory component.
         std::os::unix::fs::symlink(outside_dir.path(), worktree_dir.path().join("evil")).unwrap();
 
         // rel_path = "evil/secret.txt"
         //   - The leaf "secret.txt" is a plain file (not a symlink).
         //   - The intermediate "evil/" is a symlink pointing outside the worktree.
         //   - Before the fix: symlink_metadata on the leaf says "regular file",
-        //     so the code returned read_only: false — the bypass.
+        //     so the code returned read_only: false, the bypass.
         //   - After the fix: the full canonical path resolves outside the
         //     worktree, so read_only must be true.
         let f = read_file(worktree_dir.path(), "evil/secret.txt").unwrap();

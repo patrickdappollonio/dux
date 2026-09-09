@@ -340,11 +340,11 @@ pub fn run_create_initial_commit_job(
     let result = match git::create_initial_commit(Path::new(&add.path)) {
         Ok(committed_branch) => {
             // Persist the branch the commit ACTUALLY landed on (create_initial_commit
-            // resolves HEAD itself), and re-derive the leading branch from it — the
+            // resolves HEAD itself), and re-derive the leading branch from it: the
             // pre-commit values on `add` could be stale if HEAD moved concurrently.
             // Guard the empty case (a Born+detached race yields no branch) so
             // `leading_branch` degrades to the "main" fallback rather than an
-            // empty string — it MUST be a real branch name (agent creation checks
+            // empty string: it MUST be a real branch name (agent creation checks
             // `local_branch_exists(leading_branch)`). `branch` (the current branch)
             // is left empty for a detached HEAD on purpose: that's how the whole
             // codebase represents "detached" (see `load_projects`), and every
@@ -894,7 +894,7 @@ mod tests {
                     "leading_branch must never be empty"
                 );
                 assert_eq!(add.leading_branch, "main");
-                // current_branch is intentionally empty for a detached HEAD — the
+                // current_branch is intentionally empty for a detached HEAD, the
                 // codebase-standard "detached" representation (consumers guard it).
                 assert_eq!(add.branch, "", "detached HEAD has no current branch");
             }

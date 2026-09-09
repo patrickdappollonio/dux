@@ -1366,7 +1366,7 @@ mod tests {
             path: repo.to_string_lossy().to_string(),
             explicit_default_provider: None,
             // `provider_config` falls back to the provider name as the command,
-            // so a provider literally named "cat" spawns `cat` — a harmless PTY
+            // so a provider literally named "cat" spawns `cat`, a harmless PTY
             // process that stays alive on stdin, available on any Unix PATH.
             default_provider: ProviderKind::new("cat"),
             leading_branch: Some("main".to_string()),

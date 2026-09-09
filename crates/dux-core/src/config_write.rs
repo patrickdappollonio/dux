@@ -3,7 +3,7 @@
 //! This module owns the surgical PATCH path: given an in-memory [`Config`], it
 //! updates only the keys it manages in an existing TOML document, preserving the
 //! user's comments, formatting, and any unknown keys. It deliberately does NOT
-//! render the fully-commented canonical template — that path needs the TUI's
+//! render the fully-commented canonical template: that path needs the TUI's
 //! `RuntimeBindings` for two comment strings and stays in the binary.
 //!
 //! Both the TUI and the web surface share this patch path so a save from either
@@ -189,7 +189,7 @@ pub fn write_config_plain_with(
 }
 
 /// Render `config` to a fresh, plain (comment-free) `config.toml` text using the
-/// shared patch set against an empty document — no comments (this is the plain
+/// shared patch set against an empty document, with no comments (this is the plain
 /// fallback, not the TUI's pretty first-creation path). The same shape
 /// [`write_config_plain`] writes, but returned as a `String` instead of written.
 /// Used by a surface's `recover_render` (e.g. the web's plain recovery render) so
@@ -655,7 +655,7 @@ fn patch_table_u16(doc: &mut DocumentMut, section: &str, key: &str, value: u16) 
 
 /// Set a dotless key at the document root. With the pinned `toml_edit`, a
 /// table's own key/value pairs render before its child tables, so a root leaf
-/// key emits at the top of the document, ahead of every `[table]` header — valid
+/// key emits at the top of the document, ahead of every `[table]` header, valid
 /// TOML whether the document is empty (plain render) or an existing user file
 /// already full of tables (patch). That ordering is emergent encoder behavior,
 /// not a documented `toml_edit` API guarantee, so it is not assumed blindly: the
@@ -1139,7 +1139,7 @@ fn patch_env_table(doc: &mut DocumentMut, section: &str, env: &BTreeMap<String, 
 /// predates their removal carries them forever.
 ///
 /// Anything listed here is REMOVED by the documentation-restore merge (and the
-/// removal is reported to the user — a silent drop is data loss even when the
+/// removal is reported to the user; a silent drop is data loss even when the
 /// data was inert). Everything NOT listed here is preserved verbatim: a user may
 /// hand-add keys, run a fork, or have keys from a newer dux.
 ///
@@ -1332,7 +1332,7 @@ fn collect_unmanaged(
 
 /// Insert `item` at `path` in `doc`, creating intermediate tables as needed.
 ///
-/// Returns false when the path cannot be materialized — the only such case is an
+/// Returns false when the path cannot be materialized: the only such case is an
 /// array-of-tables index the rendered document does not have (dux cannot invent
 /// a `[[projects]]` entry that the canonical renderer did not emit).
 fn insert_at_path(doc: &mut DocumentMut, path: &[PathSeg], key: Key, item: Item) -> bool {
@@ -1350,7 +1350,7 @@ fn insert_at_path(doc: &mut DocumentMut, path: &[PathSeg], key: Key, item: Item)
         };
 
         if let Some(PathSeg::Index(index)) = parents.get(step + 1) {
-            // `key[index]` — descend into an existing array-of-tables entry. dux
+            // `key[index]`: descend into an existing array-of-tables entry. dux
             // cannot invent an entry the canonical renderer did not emit, so a
             // missing array or index means "cannot preserve here".
             let Some(arrays) = table.get_mut(key).and_then(Item::as_array_of_tables_mut) else {
@@ -1380,7 +1380,7 @@ fn insert_at_path(doc: &mut DocumentMut, path: &[PathSeg], key: Key, item: Item)
     }
 
     // `insert_formatted` (rather than `insert`) is what carries the key's own
-    // decor — including any comment written above it — into the restored file.
+    // decor (including any comment written above it) into the restored file.
     table.insert_formatted(&key, item);
     true
 }
@@ -1589,7 +1589,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
 
     #[test]
     fn patch_adds_root_key_to_existing_file_without_corruption() {
-        // An existing user file already full of tables and comments — the worst
+        // An existing user file already full of tables and comments, the worst
         // case for appending a dotless root key.
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("config.toml");

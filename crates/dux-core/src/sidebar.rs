@@ -1,7 +1,7 @@
 //! Core-owned projection of how projects and sessions group into the sidebar
 //! tree. Both the TUI and the web render from this single grouping so neither
 //! surface re-derives ordering, partitioning, or orphan handling at the
-//! interface — the surfaces apply only display state (collapse, selection) on
+//! interface: the surfaces apply only display state (collapse, selection) on
 //! top of it. Kept dependency-light and pure so it is trivially unit-testable.
 
 use serde::Serialize;
@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::model::{AgentSession, Project};
 
 /// A project's sessions, grouped for the sidebar. `orphaned` marks a group whose
-/// project record no longer exists — its sessions outlived a removed project; its
+/// project record no longer exists. Its sessions outlived a removed project; its
 /// `name` is then a short id slice and it always has agents.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SidebarGroup {
@@ -22,7 +22,7 @@ pub struct SidebarGroup {
 }
 
 /// The ordered sidebar grouping. `groups` lists projects-with-agents first
-/// (orphan groups appended), then — when split — the projects with no agents.
+/// (orphan groups appended), then, when split, the projects with no agents.
 /// `agentless_start`, when `Some(i)`, is the index in `groups` where the
 /// "projects with no agents" section begins; the surfaces draw a separator
 /// before it. `None` means no split (below the threshold, or nothing to sink).
@@ -32,7 +32,7 @@ pub struct SidebarModel {
     pub agentless_start: Option<usize>,
 }
 
-/// The short display name used for an orphaned (project-less) group — the same
+/// The short display name used for an orphaned (project-less) group, the same
 /// 8-char id slice both surfaces show.
 pub fn short_project_id(id: &str) -> String {
     id.chars().take(8).collect()
@@ -117,7 +117,7 @@ pub fn build_sidebar(
     }
 
     // Only sink the agent-less projects below a separator when there is both
-    // something above it and something to sink — matching the TUI's guard.
+    // something above it and something to sink, matching the TUI's guard.
     let agentless_start = if !agentless.is_empty() && !groups.is_empty() {
         let start = groups.len();
         groups.extend(agentless);

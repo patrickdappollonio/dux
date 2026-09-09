@@ -497,14 +497,14 @@ fn clamp_replay_top(full_top: i32, bottom: i32) -> i32 {
 /// terminal parser's query replies are queued here for the dedicated writer
 /// thread. When a child stops reading its input the writer thread blocks and the
 /// queue fills; past this cap, new chunks are dropped rather than blocking the
-/// caller — a child that is not reading would discard the input anyway.
+/// caller: a child that is not reading would discard the input anyway.
 const PTY_WRITE_QUEUE_CAP: usize = 1024;
 
 /// How long `PtyWriter::drop` will wait for the writer thread to acknowledge its
 /// shutdown signal before abandoning the join. A well-behaved teardown (child
 /// group killed, PTY slave released) finishes in microseconds; this generous
 /// ceiling only fires when a write is genuinely wedged (slave still open despite
-/// the group kill — e.g. a double-forked daemon that left the group). On timeout
+/// the group kill, e.g. a double-forked daemon that left the group). On timeout
 /// the thread is abandoned rather than hanging the dropping thread indefinitely.
 const PTY_WRITER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -520,7 +520,7 @@ enum PtyWriteMsg {
 
 /// Push a chunk onto a PTY write queue without ever blocking. A full queue (the
 /// child is not draining its terminal) logs and drops the chunk rather than
-/// blocking the caller — a child that is not reading would discard the bytes
+/// blocking the caller: a child that is not reading would discard the bytes
 /// anyway. A disconnected channel (the writer thread is gone) is a no-op. Shared
 /// by [`PtyWriter::send`] (user input) and the reader thread (terminal parser
 /// replies) so both log drops identically.
@@ -540,8 +540,8 @@ fn pty_queue_send(tx: &std::sync::mpsc::SyncSender<PtyWriteMsg>, bytes: Vec<u8>)
 /// reader thread must keep draining the child's output; a raw blocking `write()`
 /// to a child that has stopped reading its input (e.g. a CLI paused on a network
 /// call) would wedge whichever thread called it. Routing every write through this
-/// one thread means only it can ever block — never the engine thread and never
-/// the reader — which is what prevents one stalled child from freezing the whole
+/// one thread means only it can ever block (never the engine thread and never
+/// the reader), which is what prevents one stalled child from freezing the whole
 /// server. A single writer thread also serializes input and parser replies in
 /// submission order.
 struct PtyWriter {
@@ -562,7 +562,7 @@ impl PtyWriter {
             // child's process group is killed first, which closes the PTY and makes
             // the write return an error, so the loop exits promptly. If a
             // `Shutdown` message arrives first, the loop exits unconditionally
-            // without waiting for that error — so a surviving sender clone (the
+            // without waiting for that error, so a surviving sender clone (the
             // reader thread holds one) can never prevent the thread from stopping.
             // Loop exits on `Shutdown` or a channel error (the pattern stops
             // matching), or on a write error (explicit break below).
@@ -602,7 +602,7 @@ impl Drop for PtyWriter {
     fn drop(&mut self) {
         // Send an explicit Shutdown rather than relying on channel disconnect.
         // The reader thread holds a clone of `tx`, so merely dropping our copy
-        // does not disconnect the channel — the writer thread's `recv` would
+        // does not disconnect the channel: the writer thread's `recv` would
         // keep blocking, and the join below would hang. `Shutdown` is obeyed
         // unconditionally regardless of how many sender clones remain alive.
         if let Some(tx) = self.tx.take() {
@@ -619,8 +619,8 @@ impl Drop for PtyWriter {
             // Bounded join: in the normal path (child group killed, PTY slave
             // released) the writer thread exits in microseconds. On timeout the
             // thread is abandoned rather than blocking the dropping thread. A
-            // well-behaved teardown — `PtyClient::drop` kills the child group
-            // and joins the reader before this runs — means the write has already
+            // well-behaved teardown (`PtyClient::drop` kills the child group
+            // and joins the reader before this runs) means the write has already
             // errored out, so the timeout is never reached in practice; it is a
             // last-resort safety net for a wedged write on a misbehaving child.
             let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(0);
@@ -808,7 +808,7 @@ pub struct PtyClient {
     /// state changes. Cleared by `snapshot_into` after rebuilding the buffer.
     dirty: Arc<AtomicBool>,
     /// Set by the reader thread when new data arrives. Cleared by
-    /// `take_received_data` — used to detect streaming activity without
+    /// `take_received_data`, used to detect streaming activity without
     /// interfering with the snapshot dirty flag.
     received_data: Arc<AtomicBool>,
     /// Records the last resize so `take_received_data` can suppress the
@@ -1111,7 +1111,7 @@ impl PtyClient {
         // A child is already forked at this point. If the reader/writer setup
         // fails we must reap it before returning `Err`, or a live orphaned
         // process leaks with no `PtyClient` (and no `providers` entry) to track
-        // or terminate it — the tab-create failure cleanup relies on a spawn
+        // or terminate it: the tab-create failure cleanup relies on a spawn
         // `Err` meaning "no live process".
         let reader = match pair
             .master
@@ -1233,13 +1233,13 @@ impl PtyClient {
 
     /// Write raw bytes to the PTY (forwards keystrokes to the child process).
     /// Also marks the terminal dirty so the next render frame rebuilds the
-    /// snapshot — the child process will echo or react to this input, and
+    /// snapshot: the child process will echo or react to this input, and
     /// pre-marking dirty avoids a one-frame delay waiting for the reader
     /// thread to process the echo.
     pub fn write_bytes(&self, bytes: &[u8]) -> Result<()> {
         // Hand the bytes to the dedicated writer thread and return immediately.
         // The write itself may block on a child that has stopped reading its
-        // input, but that can only ever stall the writer thread — never this
+        // input, but that can only ever stall the writer thread, never this
         // caller, which on the web server is the single engine thread that must
         // stay responsive for every other session. Delivery is best-effort: a
         // full queue drops the chunk (logged) rather than blocking. The `Result`
@@ -1286,19 +1286,19 @@ impl PtyClient {
         // (see `spawn_reader` above); `prune_exited_ptys` is the only later
         // remover, running once per tick. A subscribe landing after that
         // one-shot clear but before the next prune tick used to attach to a
-        // client that will never see another `subs.clear()` call — the
+        // client that will never see another `subs.clear()` call: the
         // forwarder's `recv_timeout` would only ever see `Timeout`, never
         // `Disconnected`, so its task (and the PTY socket, connection-cap
         // permit, and per-tab subscriber-quota slot it holds) would never be
         // reaped until the browser itself disconnected. `exited` is monotonic
-        // (set once, never reset), so checking it here — instead of pushing
-        // unconditionally — closes the window: if the PTY has already exited,
+        // (set once, never reset), so checking it here (instead of pushing
+        // unconditionally) closes the window: if the PTY has already exited,
         // don't register at all. `tx` is dropped without being stored, so `rx`
         // observes `Disconnected` on its very next `recv`/`try_recv`, letting
         // the caller's forwarder complete and reap immediately instead of
         // leaking until the next prune tick (which would still miss it, since
         // the entry was never in `subscribers` for `prune_exited_ptys` to see
-        // in the first place — the leak was in never delivering `Disconnected`
+        // in the first place; the leak was in never delivering `Disconnected`
         // at all).
         if !self.is_exited() {
             self.subscribers
@@ -1530,7 +1530,7 @@ impl PtyClient {
         if !self.received_data.swap(false, Ordering::AcqRel) {
             return false;
         }
-        // Ignore data that arrived within 500ms of a resize — it's almost
+        // Ignore data that arrived within 500ms of a resize: it's almost
         // certainly the child redrawing in response to SIGWINCH.
         if let Ok(ts) = self.last_resize_at.lock()
             && ts.is_some_and(|t| t.elapsed().as_millis() < 500)
@@ -1706,7 +1706,7 @@ impl PtyClient {
         let _ = self.signal_process_groups(rustix::process::Signal::HUP);
     }
 
-    /// Hard-kill the child's whole process group (SIGKILL) — the forceful
+    /// Hard-kill the child's whole process group (SIGKILL), the forceful
     /// counterpart to [`terminate`]. `shutdown_ptys` calls this for any child
     /// that has not exited once the grace period elapses, so the "force-closing"
     /// log line is truthful at the instant it prints rather than relying solely
@@ -1809,7 +1809,7 @@ impl PtyClient {
 
         let shell_pid = self.child.process_id()?;
         if fg_pid == shell_pid {
-            // Shell itself is in the foreground — no command running.
+            // Shell itself is in the foreground: no command running.
             return None;
         }
 
@@ -2010,8 +2010,8 @@ impl Drop for PtyClient {
         // reaps those descendants so the slave is released. A job-control
         // FOREGROUND app (in its own group under an interactive shell) is also
         // reached, via the foreground-group signal in `signal_process_groups`.
-        // (A descendant that has left both groups — a double-forked daemon, or a
-        // job-control BACKGROUND job — is still out of reach here. A well-behaved
+        // (A descendant that has left both groups, such as a double-forked daemon
+        // or a job-control BACKGROUND job, is still out of reach here. A well-behaved
         // daemon redirects its inherited
         // terminal fds away before detaching so it will not hold the slave
         // open; a misbehaving one that keeps the slave open could still stall
@@ -2020,7 +2020,7 @@ impl Drop for PtyClient {
         // SIGKILL the child's group AND the foreground group when a job-controlled
         // app owns a different one (see `signal_process_groups`). ESRCH just means
         // a group already exited (benign). Anything else (e.g. EPERM) means a kill
-        // did not happen, so the reader join below could stall — leave a
+        // did not happen, so the reader join below could stall; leave a
         // breadcrumb in the log.
         if let Err(err) = self.signal_process_groups(rustix::process::Signal::KILL)
             && err != rustix::io::Errno::SRCH
@@ -2040,7 +2040,7 @@ impl Drop for PtyClient {
         // fd itself was dropped at spawn time; the child group held the last
         // references). The master read then returns EOF (on Linux, EIO, which
         // portable-pty maps to Ok(0)) and the reader thread returns. Join it so
-        // the thread does not outlive this client — otherwise detached reader
+        // the thread does not outlive this client; otherwise detached reader
         // threads accumulate across a long session and across the test suite.
         if let Some(handle) = self.reader_thread.take() {
             let _ = handle.join();
@@ -2429,7 +2429,7 @@ impl TerminalState {
     /// rebuild the client's primary buffer by printing the whole grid (history +
     /// viewport) as a newline-separated line stream; natural scrolling pushes
     /// the history into the client's scrollback. Printing is the only way to
-    /// populate a terminal's scrollback over a byte stream — absolute-positioned
+    /// populate a terminal's scrollback over a byte stream: absolute-positioned
     /// repaints overwrite the viewport without ever scrolling.
     fn reconnect_repaint(&self) -> Vec<u8> {
         if self.is_alt_screen() {
@@ -2525,7 +2525,7 @@ impl TerminalState {
         let mut last_style: Option<(CellColor, CellColor, CellModifier)> = None;
         // A soft-wrapped row carries `WRAPLINE` on its last cell. We replay such a
         // row at full width with NO line break and let the client's autowrap
-        // re-create the soft wrap when the next row's first cell overflows — that
+        // re-create the soft wrap when the next row's first cell overflows; that
         // preserves copy/paste and resize-reflow semantics. A `\r\n` is emitted
         // only for genuine (hard) line breaks.
         let mut prev_wrapped = false;
@@ -2538,7 +2538,7 @@ impl TerminalState {
                 // screen scrolls, and a scroll fills the newly-exposed row with
                 // the CURRENT background color (Background-Color-Erase). Without
                 // this reset the previous line's background bleeds onto the next
-                // line on the client — even though we re-emit SGR for the next
+                // line on the client: even though we re-emit SGR for the next
                 // line's first cell, the bleed has already happened during the
                 // scroll. Soft-wrapped rows intentionally skip this so a colored
                 // background continues across the wrap.
@@ -3778,7 +3778,7 @@ mod tests {
         assert!(replay.contains("line11"), "recent line must be present");
 
         // The viewport-only repaint (the previous behavior) omits scrolled-off
-        // history — this is exactly the gap this method closes.
+        // history: this is exactly the gap this method closes.
         let viewport_only = String::from_utf8(synthesize_repaint(
             &terminal.snapshot(),
             false,
@@ -4781,7 +4781,7 @@ mod tests {
         let replay = src.reconnect_repaint();
 
         // Feeding the replay into a fresh terminal of the same size must rebuild
-        // the same grid — proven by idempotence: the rebuilt terminal's own
+        // the same grid, proven by idempotence: the rebuilt terminal's own
         // replay is byte-identical, and the scrollback is repopulated.
         let mut dst = TerminalState::with_scrollback(4, 20, 1000);
         dst.process(&replay);
@@ -5253,7 +5253,7 @@ mod tests {
     #[test]
     fn drop_kills_child_and_joins_reader_without_hanging() {
         // The child sleeps far longer than the test. Drop must kill + reap it
-        // and join the reader thread promptly — it must NOT block until the
+        // and join the reader thread promptly: it must NOT block until the
         // child would have exited on its own, and the join must not deadlock.
         let args = vec!["-c".to_string(), "sleep 120".to_string()];
         let client =
@@ -5261,7 +5261,7 @@ mod tests {
 
         // `exited` is set only by the reader thread, immediately before it
         // returns. Hold a clone so we can prove, after the drop, that the
-        // reader actually finished — which only the `join()` in `Drop`
+        // reader actually finished, which only the `join()` in `Drop`
         // guarantees synchronously. Without the join, drop would return while
         // the reader is still catching up and this flag would still be false.
         let reader_exited = Arc::clone(&client.exited);
@@ -5398,7 +5398,7 @@ mod tests {
         // terminal: the foreground app may die, but the shell survives and
         // the terminal always eats the full force-kill timeout ("0 terminals
         // exited successfully" on every shutdown). The signal that means
-        // "your terminal is going away" is SIGHUP — what a real terminal
+        // "your terminal is going away" is SIGHUP, what a real terminal
         // emulator delivers on close, and which shells answer by resending
         // HUP to their jobs and exiting. `terminate()` must send it too.
         let args = vec![
@@ -6312,8 +6312,8 @@ mod tests {
         // slave), holding the slave open. `</dev/tty` is required: a shell
         // redirects a background job's stdin to /dev/null, so reading plain
         // stdin would hit immediate EOF and the grandchild would exit on its
-        // own. Killing only the direct child — even combined with the kernel's
-        // SIGHUP to the foreground process group when the session leader dies —
+        // own. Killing only the direct child (even combined with the kernel's
+        // SIGHUP to the foreground process group when the session leader dies)
         // leaves that grandchild alive with the slave open, so the master read
         // never sees EOF and the reader-thread join in `Drop` would block
         // forever. The fix SIGKILLs the whole process group, which the
@@ -6328,7 +6328,7 @@ mod tests {
             PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
 
         // Wait until the grandchild has actually started and printed its marker
-        // — proof it is running and holding the slave open — rather than
+        // (proof it is running and holding the slave open) rather than
         // guessing with a fixed sleep. Without this, on a slow host the drop
         // could run before the grandchild grabs the slave, and the test would
         // pass without exercising the group kill at all.
@@ -6371,11 +6371,11 @@ mod tests {
         // The core of the deadlock fix. A child that has stopped reading its input
         // is modelled by a writer whose `write` blocks until released. The web
         // engine runs every request on one thread and forwards input through this
-        // writer; `send` must return immediately regardless — queueing or dropping
-        // — but never blocking the caller. (Done with a mock writer because a real
+        // writer; `send` must return immediately regardless (queueing or dropping)
+        // but never blocking the caller. (Done with a mock writer because a real
         // PTY's blocking is platform- and mode-dependent: macOS blocks the master
         // write when the slave input buffer fills, while a Linux tty in canonical
-        // mode drops overflow at the line discipline instead — so flooding a real
+        // mode drops overflow at the line discipline instead, so flooding a real
         // PTY is not a reliable cross-platform reproduction.)
         struct BlockingWriter {
             gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
@@ -6400,7 +6400,7 @@ mod tests {
         }));
 
         // Flood past the queue cap from a worker thread; the writer thread is
-        // wedged on the first write, so the queue fills and the rest is dropped —
+        // wedged on the first write, so the queue fills and the rest is dropped,
         // but no `send` may block.
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let flooder = std::thread::spawn(move || {
@@ -6455,7 +6455,7 @@ mod tests {
         writer.send(b"def".to_vec());
 
         // Dropping the writer joins its thread, which guarantees every queued
-        // chunk has been written — so this is the synchronization point, no sleep.
+        // chunk has been written, so this is the synchronization point, no sleep.
         drop(writer);
         let delivered = seen.lock().unwrap().clone();
         assert_eq!(
@@ -6652,7 +6652,7 @@ mod tests {
         terminal.process(b"\x1b[9;1H\x1b[2KChange something");
         terminal.process(b"\x1b[10;1H\x1b[2KCustom input");
 
-        // Snapshot before scrolling — this is the "known good" state.
+        // Snapshot before scrolling: this is the "known good" state.
         let before = terminal.snapshot();
         let before_lines = viewport_lines(&before);
 
@@ -6682,7 +6682,7 @@ mod tests {
         assert_eq!(terminal.scrollback_offset(), 5);
 
         // Verify the bottom options are NOT visible while scrolled (they're
-        // below the viewport). This is expected — just confirming the scroll
+        // below the viewport). This is expected: just confirming the scroll
         // actually shifted the view.
         let scrolled = terminal.snapshot();
         let scrolled_lines = viewport_lines(&scrolled);
@@ -6722,7 +6722,7 @@ mod tests {
             "row 10 content changed after scroll round-trip"
         );
 
-        // Also verify cursor position is preserved — the child process left
+        // Also verify cursor position is preserved: the child process left
         // the cursor at row 10 after writing "Custom input". After scroll
         // round-trip, the cursor should still be at the same viewport position.
         let cursor_before = before.cursor;
@@ -7052,7 +7052,7 @@ mod tests {
     /// `Shutdown` so the thread exits regardless of surviving clones.
     #[test]
     fn pty_writer_drop_exits_promptly_with_a_surviving_sender_clone() {
-        // A no-op writer — we are only testing shutdown timing, not data delivery.
+        // A no-op writer: we are only testing shutdown timing, not data delivery.
         struct NullWriter;
         impl Write for NullWriter {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {

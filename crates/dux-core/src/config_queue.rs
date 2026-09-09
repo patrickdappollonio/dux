@@ -24,7 +24,7 @@ enum WriteMsg {
     Flush(SyncSender<()>),
     Pause(SyncSender<()>),
     Resume,
-    /// Stop the writer thread unconditionally — obeyed even while paused. Sent by
+    /// Stop the writer thread unconditionally, obeyed even while paused. Sent by
     /// `Drop` so shutdown never depends on channel disconnect (a `QuiesceGuard`
     /// holds a sender clone, so the channel can stay connected) or on guard drop
     /// order.
@@ -44,7 +44,7 @@ pub struct QuiesceGuard {
     tx: Sender<WriteMsg>,
     /// `true` when the writer explicitly acknowledged the `Pause` message (the
     /// happy path); `false` on timeout or a dead writer. The guard ALWAYS sends
-    /// `Resume` on drop regardless of this flag — callers MUST NOT suppress it
+    /// `Resume` on drop regardless of this flag: callers MUST NOT suppress it
     /// (a slow-but-alive writer will eventually process the `Pause` and needs
     /// the matching `Resume` to unblock).
     acknowledged: bool,
@@ -92,7 +92,7 @@ impl ConfigWriteQueue {
     pub fn save_lazy(&self, config: Config) {
         // Bound in-flight lazy snapshots so a stalled or paused writer cannot let
         // the channel grow without limit. Lazy writes are coalesced anyway, so
-        // dropping a snapshot at the cap is acceptable — the fixed deadline still
+        // dropping a snapshot at the cap is acceptable: the fixed deadline still
         // lands a write. The reservation is a single atomic update (not a separate
         // load-then-add) so concurrent callers cannot overshoot the cap.
         if self
@@ -220,11 +220,11 @@ impl Drop for ConfigWriteQueue {
         // stale snapshots, so only writes from before the barrier land here.
         self.flush();
 
-        // Step 2 — tell the writer to exit.  We cannot rely on channel disconnect:
+        // Step 2: tell the writer to exit.  We cannot rely on channel disconnect:
         // an outstanding `QuiesceGuard` holds a clone of the sender, so dropping
         // our own `tx` would not disconnect the channel, and a paused writer would
-        // wait forever for a `Resume` that only arrives when the guard drops —
-        // which, on `Engine`, happens AFTER the queue.  `Shutdown` is obeyed even
+        // wait forever for a `Resume` that only arrives when the guard drops
+        // (which, on `Engine`, happens AFTER the queue).  `Shutdown` is obeyed even
         // while paused, so shutdown is independent of guard lifetime/drop order.
         let _ = self.tx.send(WriteMsg::Shutdown);
 
@@ -548,7 +548,7 @@ mod tests {
     }
 
     /// Dropping the queue while a `QuiesceGuard` is still alive (a reload barrier
-    /// left open — e.g. an `Engine` torn down mid-reload) must NOT deadlock. The
+    /// left open, e.g. an `Engine` torn down mid-reload) must NOT deadlock. The
     /// guard holds a clone of the writer's channel sender, so the channel never
     /// disconnects; the paused writer must be stopped by an explicit shutdown
     /// signal, independent of guard drop order. The drop runs on a worker thread
@@ -579,7 +579,7 @@ mod tests {
             }
         }
         // The guard outlives the queue; dropping it now sends Resume to a writer
-        // that is already gone — a harmless no-op (mirrors Engine field order).
+        // that is already gone, a harmless no-op (mirrors Engine field order).
         drop(guard);
     }
 
@@ -598,7 +598,7 @@ mod tests {
             let mut cfg = Config::default();
             cfg.env.insert("DROP_MARKER".into(), "flushed".into());
             q.save_lazy(cfg);
-            // Drop q here — the Drop impl must flush the pending lazy write.
+            // Drop q here: the Drop impl must flush the pending lazy write.
         }
 
         let saved = std::fs::read_to_string(&path).unwrap_or_default();
@@ -648,7 +648,7 @@ mod tests {
     }
 
     /// A `quiesce()` on a queue whose writer has already exited returns a guard
-    /// with `is_acknowledged() == false` — the barrier is not effective.
+    /// with `is_acknowledged() == false`: the barrier is not effective.
     #[test]
     fn quiesce_not_acknowledged_on_dead_writer() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -682,7 +682,7 @@ mod tests {
     }
 
     /// Lazies sent during an open barrier are discarded by the paused writer, and
-    /// their in-flight count must be decremented so the cap gate re-opens — a
+    /// their in-flight count must be decremented so the cap gate re-opens: a
     /// post-barrier lazy must still land.
     #[test]
     fn inflight_counter_drains_during_barrier_and_gate_reopens() {
@@ -703,7 +703,7 @@ mod tests {
 
         // The writer drains the discarded burst asynchronously after resuming, so
         // the counter returns below the cap without a fixed timing guarantee. Poll
-        // (bounded) until a fresh lazy lands — proving the gate re-opens once the
+        // (bounded) until a fresh lazy lands, proving the gate re-opens once the
         // backlog drains, without depending on drain timing.
         let mut landed = false;
         for _ in 0..200 {

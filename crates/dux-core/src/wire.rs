@@ -63,7 +63,7 @@ pub enum WireCommand {
     /// Discard a single file's working-tree changes. The wire layer derives the
     /// destructive distinction (tracked → restore from HEAD vs untracked →
     /// delete the file) SERVER-SIDE from the worktree's live git status, and
-    /// rejects the command when the file is currently staged — mirroring the
+    /// rejects the command when the file is currently staged, mirroring the
     /// TUI, which only allows discarding unstaged files.
     DiscardFile {
         session_id: String,
@@ -392,7 +392,7 @@ pub enum WireCommand {
     /// showing the branch name. A non-empty title is validated with the same
     /// agent-name rules the TUI rename enforces. This is title-only: unlike the
     /// TUI prompt (which can also rename the git branch via a checkbox), the web
-    /// rename never touches the branch — see `rename_session` for the rationale.
+    /// rename never touches the branch. See `rename_session` for the rationale.
     RenameSession {
         session_id: String,
         title: String,
@@ -448,7 +448,7 @@ pub enum WireCommand {
     },
     /// Close an extra tab (a non-Main provider tab): tear down its PTY and delete
     /// its `agent_tabs` row. Destructive and unrecoverable (extra tabs are
-    /// ephemeral). The session-slot tab is never closed through here — a Main "close" is a
+    /// ephemeral). The session-slot tab is never closed through here: a Main "close" is a
     /// detach via `KillSessionPty`. `tab_id` must belong to `session_id`.
     CloseAgentTab {
         session_id: String,
@@ -608,7 +608,7 @@ fn is_unsafe_title_char(ch: char) -> bool {
 /// Normalize a title for `config.server.title`.
 ///
 /// Replaces every unsafe character (Unicode control codes and bidi/format
-/// characters — see [`is_unsafe_title_char`]) with a space, collapses runs of
+/// characters; see [`is_unsafe_title_char`]) with a space, collapses runs of
 /// whitespace to a single space, and trims. Caps the result to at most 200
 /// characters (counted by `char`, never bytes, so multi-byte glyphs can't be
 /// sliced mid-codepoint). An empty result resets to the default `"dux"` (which is
@@ -680,7 +680,7 @@ pub fn normalize_pr_banner_position(raw: &str) -> Option<String> {
     }
 }
 
-/// The present/absent fields for [`WireCommand::SetSettings`] — the SINGLE
+/// The present/absent fields for [`WireCommand::SetSettings`], the SINGLE
 /// field list for the settings path, and the payload the variant carries.
 ///
 /// Every field is optional; an absent field is left untouched, and a patch with
@@ -1078,7 +1078,7 @@ impl WireCommandOutcome {
 
 /// Statuses produced by a web `drive_*_followup`, plus any keyed busies the
 /// followup resolved to a `Final::Clear`. A `WireStatus` cannot represent a
-/// clear (it has no "clear" tone — clearing is a separate `StatusEmitter::clear`
+/// clear (it has no "clear" tone; clearing is a separate `StatusEmitter::clear`
 /// operation), so the followup hands the clear KEYS back for the web actor to
 /// dismiss. The `statuses` are broadcast as usual.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1116,7 +1116,7 @@ struct WebProjectAdd<'a> {
 }
 
 /// The authoritative "added" status message from a `PersistProject::Add`
-/// reaction (the engine's real outcome — an honest dedup message when a race
+/// reaction (the engine's real outcome: an honest dedup message when a race
 /// hit that path, or the normal success text), or `None` for any other reaction.
 fn added_status_message(reaction: &EventReaction) -> Option<String> {
     if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction
@@ -1813,7 +1813,7 @@ impl Engine {
         // apart. Quiet drops the INFO statuses only, and only for a patch
         // confined to the accessory-bar field (see the field's doc); errors
         // below still bail loudly. `None` here means "succeeded, say
-        // nothing" — the bar visibly moving is the feedback.
+        // nothing": the bar visibly moving is the feedback.
         let quiet = patch.quiet && patch.is_accessory_bar_only();
         let info = |status: WireStatus| if quiet { None } else { Some(status) };
         // Ask before the destructure moves the patch apart. This message is
@@ -2311,8 +2311,8 @@ impl Engine {
         let label = session.display_label();
         let current = session.provider.clone();
 
-        // Validate against the configured provider list — the same source the
-        // ViewModel's `available_providers` is built from — so a forged or
+        // Validate against the configured provider list (the same source the
+        // ViewModel's `available_providers` is built from), so a forged or
         // stale provider name from the client is rejected with actionable copy.
         if !self.config.providers.commands.contains_key(provider) {
             anyhow::bail!(
@@ -2845,7 +2845,7 @@ impl Engine {
     /// Create an empty initial commit for an unborn repo, then register it.
     /// Borrows the worker-chain SHAPE of [`Self::add_project_checkout_default`]
     /// (validate → busy status → worker → followup), but ADDITIONALLY serializes
-    /// per repo path via `InFlightKey::InitialCommit` — a gate the checkout-add
+    /// per repo path via `InFlightKey::InitialCommit`, a gate the checkout-add
     /// flow doesn't need, since a `git switch` can't silently double-append the
     /// way an empty-commit bootstrap could. Worker completion drives
     /// `AddProjectAfterInitialCommit`.
@@ -2926,7 +2926,7 @@ impl Engine {
                     }
                     WebAddProjectOutcome::AddFailed { message } => Final::error(message.clone()),
                     // This flow never switches branches, so `SwitchFailed` can't be
-                    // produced for it — but the op type is shared with the
+                    // produced for it, but the op type is shared with the
                     // checkout-add flow, so the match must stay total.
                     WebAddProjectOutcome::SwitchFailed { repo_path, .. } => Final::error(format!(
                         "Couldn't add the project at {repo_path} after creating the initial commit."
@@ -2942,7 +2942,7 @@ impl Engine {
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             // Guarantee the in-flight gate clears and the op resolves even if the
-            // job panics — otherwise the gate would strand the repo path forever.
+            // job panics; otherwise the gate would strand the repo path forever.
             let tx_panic = worker_tx.clone();
             let add_panic = add.clone();
             let op_id_panic = op_id.clone();
@@ -3082,7 +3082,7 @@ impl Engine {
         // Parse the PR reference up front so a garbage input fails synchronously
         // with an actionable message (the TUI's lookup worker would otherwise
         // surface it asynchronously, but the web has the project remote available
-        // here only via the worker — so we validate the NAME synchronously and let
+        // here only via the worker, so we validate the NAME synchronously and let
         // the shared worker re-parse the PR against the live remote, which is the
         // single source of host/owner_repo truth). An empty `pr` is caught here.
         if pr.trim().is_empty() {
@@ -3412,7 +3412,7 @@ impl Engine {
             .map(|op| op.scope().clone())
             .unwrap_or(crate::statusline::StatusScope::All);
         self.current_origin = origin;
-        // The engine's Added outcome carries the AUTHORITATIVE message — which is
+        // The engine's Added outcome carries the AUTHORITATIVE message, which is
         // the dedup chokepoint's honest "already in the workspace" text when a
         // race hit that path, not this caller's optimistic narrative. Surface
         // that (falling back to the caller's message only if the engine didn't
@@ -3675,7 +3675,7 @@ impl Engine {
                     if !self.is_slot_tab(&outcome.session, TabIdRef::new(&outcome.tab_id)) {
                         // Support-tab launch success: no op is stashed under a tab
                         // id, so emit a status KEYED `tab-launch-<tab_id>` (matching
-                        // the failure path) rather than an unkeyed one — otherwise an
+                        // the failure path) rather than an unkeyed one; otherwise an
                         // unrelated unkeyed toast could clobber this confirmation.
                         WebFollowupStatuses {
                             statuses: vec![
@@ -3733,7 +3733,7 @@ impl Engine {
                 ),
                 // Startup-auto-reopen failure is an unkeyed warning (no web busy
                 // precedes it, as it never goes through `reconnect_session`), and
-                // resume-fallback failure is silent — both mirror the TUI.
+                // resume-fallback failure is silent. Both mirror the TUI.
                 AgentLaunchFailedOutcome::StartupAutoReopen {
                     agent_label,
                     message,
@@ -3824,7 +3824,7 @@ impl Engine {
         // busy), the success message must resolve THAT op so the spinner is
         // replaced by its same-key final. The synchronous inline path has no op
         // stashed, so it falls back to an unkeyed info status (its busy, if any,
-        // is the legacy `delete:{id}` key only on the async path — gone now).
+        // is the legacy `delete:{id}` key only on the async path, gone now).
         match self.apply(Command::FinishDeleteSession {
             session_id: session_id.to_string(),
             removal,
@@ -4469,8 +4469,8 @@ impl Engine {
     /// List the project's managed worktrees that are currently adoptable as a
     /// new agent: managed by dux (under the worktrees root) and selectable (no
     /// live session, not the project checkout). Shells to git via
-    /// `list_worktrees` + `classify_project_worktrees` — bounded plumbing reads,
-    /// no working-tree writes — and is the single source of truth shared by the
+    /// `list_worktrees` + `classify_project_worktrees` (bounded plumbing reads,
+    /// no working-tree writes) and is the single source of truth shared by the
     /// listing handler and the wire re-validation, so the client's path is always
     /// checked against a fresh classification rather than a stale snapshot.
     pub fn adoptable_managed_worktrees(
@@ -5234,7 +5234,7 @@ mod tests {
 
     #[test]
     fn wire_to_command_discard_rejects_unchanged_file() {
-        // a.txt is committed and clean — nothing to discard.
+        // a.txt is committed and clean: nothing to discard.
         let repo = init_repo_with_commit();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
@@ -5668,7 +5668,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         assert!(engine.config.ui.show_changes_pane);
 
-        // Toggle off — the write is lazy (fire-and-forget via config_writer).
+        // Toggle off: the write is lazy (fire-and-forget via config_writer).
         engine
             .apply_wire(WireCommand::SetChangesPaneVisible { visible: false })
             .expect("apply set_changes_pane_visible");
@@ -5686,7 +5686,7 @@ mod tests {
             "flushed config must contain show_changes_pane = false, got:\n{disk}"
         );
 
-        // Toggle back on — in-memory must flip again.
+        // Toggle back on: in-memory must flip again.
         engine
             .apply_wire(WireCommand::SetChangesPaneVisible { visible: true })
             .expect("apply toggle back");
@@ -6619,7 +6619,7 @@ mod tests {
             "msg: {}",
             status.message
         );
-        // EVERY tab's provider is gone — not just the session-slot one.
+        // EVERY tab's provider is gone, not just the session-slot one.
         assert!(
             !engine.providers.contains_key(TabIdRef::new("s1-slot")),
             "session-slot tab stopped"
@@ -6728,7 +6728,7 @@ mod tests {
     fn apply_wire_checkout_project_default_branch_switches_from_feature() {
         // A project whose persisted leading branch ("trunk") differs from HEAD
         // ("feature") gets switched back, and the in-memory state updates to
-        // Leading — mirroring the TUI's Known-default-branch outcome. apply_wire
+        // Leading, mirroring the TUI's Known-default-branch outcome. apply_wire
         // now returns Busy and spawns the inspection worker; the switch happens
         // off-thread, driven through the two-worker chain like the web actor.
         let repo = init_repo_on_feature_branch("trunk");
@@ -6975,7 +6975,7 @@ mod tests {
     fn checkout_default_branch_resolves_op_with_keyed_success() {
         // Drive the full two-worker chain (inspect → switch) and assert the
         // success final REPLACES the busy on the same opaque op id, with the
-        // byte-identical message — the migration's core invariant.
+        // byte-identical message, the migration's core invariant.
         let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
         let (mut engine, _tmp) = test_engine();
         let mut project = sample_project("p1", &work.to_string_lossy());
@@ -7566,7 +7566,7 @@ mod tests {
     }
 
     // Clone `origin` (init'd on `default_branch`) into a fresh working tree and
-    // check out `feature/x`, so HEAD sits off the KNOWN default — `git clone`
+    // check out `feature/x`, so HEAD sits off the KNOWN default. `git clone`
     // sets refs/remotes/origin/HEAD, so `branch_warning_kind` resolves Known.
     // Returns (origin tempdir, clone tempdir, clone working-tree path).
     fn clone_repo_on_feature_branch(
@@ -7960,7 +7960,7 @@ mod tests {
     fn create_initial_commit_born_race_during_reload_defers_without_fabricating_success() {
         // During a config-reload barrier, PersistProject is deferred (reaction is
         // `Nothing`). The born fast-path must NOT fabricate a "Project added"
-        // success — it returns no status, matching the plain AddProject handler.
+        // success: it returns no status, matching the plain AddProject handler.
         let repo = init_unborn_repo_dir();
         run_in_repo(
             repo.path(),
@@ -8016,7 +8016,7 @@ mod tests {
     fn apply_wire_add_project_checkout_default_switches_then_adds() {
         // Known default ("main") differs from HEAD ("feature/x"): the wire spawns
         // the switch worker (busy status), the switch moves HEAD to main, and the
-        // follow-up registers the project — mirroring the TUI's "Check Out & Add".
+        // follow-up registers the project, mirroring the TUI's "Check Out & Add".
         let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
         let (mut engine, _tmp) = test_engine();
 
@@ -8325,7 +8325,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        // The web delete path must also drop the activity stamp — this is the
+        // The web delete path must also drop the activity stamp: this is the
         // engine-side cleanup; no TUI App caller exists on this path to do it.
         engine
             .pty_activity
@@ -8387,7 +8387,7 @@ mod tests {
         // The create success / startup-error finals are resolved ENGINE-SIDE
         // against the shared create op and ride alongside the View as a sibling
         // `Status` in the same `Multi`. `wire_statuses_from_reaction` on the bare
-        // View therefore emits nothing — the sibling `Status` is surfaced by the
+        // View therefore emits nothing: the sibling `Status` is surfaced by the
         // `EventReaction::Status` arm. (The engine-side resolution is covered in
         // `engine::events` tests, where the private op registry is accessible.)
         let committed = crate::engine::AgentLaunchReadyOutcome {
@@ -8583,7 +8583,7 @@ mod tests {
                 session_id: Some("s1".to_string()),
             })
             .expect("apply_wire");
-        // No synchronous status — the changed-files event is the feedback.
+        // No synchronous status: the changed-files event is the feedback.
         assert!(outcome.status.is_none());
 
         // The watch is armed immediately, but the changed-files compute now runs
@@ -8732,7 +8732,7 @@ mod tests {
     fn apply_wire_add_project_surfaces_success_status() {
         // The direct web add path (no branch checkout). The inline Add returns
         // ProjectPersistenceOutcome(Added), which the generic apply_wire tail would
-        // drop (no Status reaction) — apply_wire must explicitly surface the
+        // drop (no Status reaction); apply_wire must explicitly surface the
         // "Added project …" info so the web client gets a confirmation toast.
         let repo = init_repo_with_commit();
         let (mut engine, _tmp) = test_engine();
@@ -8804,7 +8804,7 @@ mod tests {
 
     #[test]
     fn wire_to_command_remove_project_with_sessions_cascades() {
-        // Removing a project with agents no longer errors — it cascades,
+        // Removing a project with agents no longer errors: it cascades,
         // deleting the agents' records while keeping their worktrees on disk.
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
@@ -9971,7 +9971,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        // "frobnicate" is not in the configured provider list — the server must
+        // "frobnicate" is not in the configured provider list: the server must
         // reject it rather than trusting the client.
         let err = engine
             .apply_wire(WireCommand::ChangeAgentProvider {
@@ -10168,7 +10168,7 @@ mod tests {
     #[test]
     fn wire_to_command_create_agent_from_worktree_rejects_foreign_path() {
         // A path that is not an adoptable managed worktree (here: the project's
-        // own repo checkout, which classification excludes) must be rejected —
+        // own repo checkout, which classification excludes) must be rejected:
         // the server never trusts the client's path.
         let (mut engine, _tmp) = test_engine();
         let (project, _managed) = engine_with_managed_worktree(&engine, "orphan");
@@ -10343,8 +10343,8 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         // gh_status defaults to Unknown and github_integration_enabled to false,
-        // so the PR flow is unavailable — the dialog hides it, but a raw client
-        // must still be rejected (and must NOT error/panic — graceful refusal).
+        // so the PR flow is unavailable: the dialog hides it, but a raw client
+        // must still be rejected (and must NOT error/panic: graceful refusal).
         let err = engine
             .apply_wire(WireCommand::CreateAgentFromPr {
                 project_id: "p1".to_string(),
@@ -10412,7 +10412,7 @@ mod tests {
         enable_gh(&mut engine);
         // A real repo with a GitHub origin so the lookup worker can parse the
         // remote and reach the parse stage. The worker shells out to `gh`, which
-        // may be absent in CI — the test only asserts the SYNCHRONOUS busy status
+        // may be absent in CI; the test only asserts the SYNCHRONOUS busy status
         // and that the worker channel receives a PullRequestResolved event
         // (success or failure).
         let repo = init_repo_with_commit();
@@ -10448,7 +10448,7 @@ mod tests {
         );
 
         // The lookup worker posts exactly one PullRequestResolved (Ok if gh is
-        // installed and the PR resolves, Err otherwise — either way the channel
+        // installed and the PR resolves, Err otherwise; either way the channel
         // delivers it). Block briefly for the spawned thread.
         let event = engine
             .worker_rx
@@ -10502,7 +10502,7 @@ mod tests {
                 custom_name: Some("my-agent".to_string()),
             }),
             // No registered op (id None), so the followup returns no clear key and
-            // resolves nothing — the create busy flows through the worker channel.
+            // resolves nothing: the create busy flows through the worker channel.
             status_op_id: None,
         };
         // The followup dispatches the create worker; the busy status is posted on
@@ -10716,7 +10716,7 @@ mod tests {
     #[test]
     fn mutates_config_static_flags_only_bootstrap_config_writes() {
         // The eager-save config mutations that have no disk-reload to drive a
-        // `config.changed` signal — the web actor fires it for these.
+        // `config.changed` signal: the web actor fires it for these.
         assert!(WireCommand::UpdateMacros { entries: vec![] }.mutates_config_static());
         assert!(
             WireCommand::PersistGlobalEnv {
@@ -11184,7 +11184,7 @@ mod tests {
     }
 
     /// The quiet flag: an accessory-bar-only patch that asks for quiet gets NO
-    /// status at all — the bar visibly moving is the feedback, and the write
+    /// status at all: the bar visibly moving is the feedback, and the write
     /// still lands. Suppression is per request: only a request carrying the
     /// flag is silent, so no other settings write can lose its toast.
     #[test]
@@ -11636,7 +11636,7 @@ mod tests {
         assert_eq!(disk.ui.terminal_font_size, after.ui.terminal_font_size);
     }
 
-    /// CROSS-LANGUAGE PIN: the curated favicon color names live twice — here in
+    /// CROSS-LANGUAGE PIN: the curated favicon color names live twice, here in
     /// `CURATED_FAVICON_COLORS` and in the TS `FAVICON_COLORS` map that drives the
     /// customize-webapp dialog and the tinted-duck SVG. A recolor/rename dialog that
     /// offered a color the server rejects (or vice versa) would degrade silently, so

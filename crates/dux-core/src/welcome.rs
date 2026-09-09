@@ -1,7 +1,7 @@
 //! THE single source of truth for welcome-screen tips, shared by every surface.
 //!
 //! Both the TUI's idle agent pane and the web UI's center-pane welcome screen
-//! render from this one list — do NOT add surface-local tip lists. To add a
+//! render from this one list. Do NOT add surface-local tip lists. To add a
 //! tip, append a `WelcomeTip` here and provide BOTH renderings when the
 //! feature exists on both surfaces (`web: None` / `tui: None` mark a tip as
 //! surface-specific). Keep the tone playful and sassy (see CLAUDE.md's
@@ -9,7 +9,7 @@
 //! references secondary. Wrap text in backticks to highlight it in an accent
 //! color on both surfaces (the backticks themselves are never rendered).
 //! TUI variants receive a resolver so keybinding labels stay accurate after
-//! rebinding — never hardcode key names.
+//! rebinding. Never hardcode key names.
 
 use crate::action::Action;
 
@@ -493,7 +493,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     // The in-process flip: discoverable from both sides. The web variant winks
     // at how the user may have gotten here; the TUI variant advertises the way
     // out. `start-web-server` is a palette-only command (no keybinding), so
-    // naming it literally is correct — there is no label to resolve.
+    // naming it literally is correct: there is no label to resolve.
     WelcomeTip {
         web: Some(
             "This whole web UI can be born from the terminal UI: the `start-web-server` command flips dux inside out, and the agents never notice.",

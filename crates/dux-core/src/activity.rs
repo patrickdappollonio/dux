@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn concurrent_pushes_and_snapshots_stay_consistent() {
-        // Many producer threads push while a reader snapshots in a tight loop —
+        // Many producer threads push while a reader snapshots in a tight loop,
         // the shape of the real workload (tokio workers push, the TUI thread
         // reads). The ring must never exceed the cap, every reader snapshot must
         // carry a generation that is consistent with its events (generation is

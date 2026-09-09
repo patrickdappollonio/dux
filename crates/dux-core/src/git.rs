@@ -469,7 +469,7 @@ pub fn init_repo(path: &Path) -> Result<()> {
 /// git failure from a genuinely unborn HEAD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitState {
-    /// HEAD resolves to a commit — the repo has history.
+    /// HEAD resolves to a commit: the repo has history.
     Born,
     /// A valid repo whose HEAD is *unborn* (fresh `git init`, no commits yet):
     /// the branch named by HEAD does not exist under `refs/heads/` until the
@@ -559,7 +559,7 @@ pub fn create_initial_commit(path: &Path) -> Result<String> {
         }
     }
     // Courtesy refuse-if-staged. The commit uses an empty tree and never reads
-    // the index, so this can't leak staged content into history — it just stops
+    // the index, so this can't leak staged content into history; it just stops
     // us from quietly adding a project while the user has staged work pending.
     let staged = Command::new("git")
         .args(["-C", repo.as_ref(), "diff", "--cached", "--quiet"])
@@ -584,7 +584,7 @@ pub fn create_initial_commit(path: &Path) -> Result<String> {
     }
     // Now confirmed unborn, so the symbolic HEAD is guaranteed to exist. Its
     // fully-qualified ref (e.g. `refs/heads/main`) is the branch the commit lands
-    // on. (A detached unborn HEAD has no symbolic ref and can't be bootstrapped —
+    // on. (A detached unborn HEAD has no symbolic ref and can't be bootstrapped;
     // reported rather than guessed.)
     let head_ref = run_git_capture(
         path,
@@ -866,7 +866,7 @@ pub fn switch_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
 /// Checks whether a branch exists locally or on the `origin` remote.
 ///
 /// Uses the plumbing command `git rev-parse --verify --quiet` and inspects
-/// only the exit code — no stdout is parsed.
+/// only the exit code: no stdout is parsed.
 pub fn branch_exists(repo_path: &Path, name: &str) -> Option<BranchLocation> {
     let repo = repo_path.to_string_lossy();
     let local_ref = format!("refs/heads/{name}");
@@ -1573,7 +1573,7 @@ pub fn remove_worktree_keep_branch(repo_path: &Path, worktree_path: &Path) -> Re
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        // Worktree already gone from disk — prune stale git refs.
+        // Worktree already gone from disk: prune stale git refs.
         let _ = Command::new("git")
             .args([
                 "-C",
@@ -1740,13 +1740,13 @@ fn walk_files(
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                // Permission error, broken symlink, etc. — skip and continue;
+                // Permission error, broken symlink, etc. Skip and continue;
                 // a broken entry should not blank the entire listing.
                 logger::warn(&format!("worktree_files: skipping entry: {e}"));
                 continue;
             }
         };
-        // Only emit leaf paths — directories are structural, not files.
+        // Only emit leaf paths: directories are structural, not files.
         // Symlinked dirs appear as Symlink (follow_links=false), so they ARE
         // emitted here (the symlink target is not recursed).
         if entry.file_type().is_dir() {
@@ -1767,7 +1767,7 @@ fn walk_files(
 
 /// One entry in a single-directory listing for the web editor's lazy file tree.
 /// Produced by [`list_dir`]; unlike [`worktree_files`] this never recurses and
-/// never caps — it reflects exactly one directory's children as they are on disk.
+/// never caps: it reflects exactly one directory's children as they are on disk.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DirEntryInfo {
     /// The child's own name (final path segment), never a full path.
@@ -1775,7 +1775,7 @@ pub struct DirEntryInfo {
     /// The child's worktree-relative path (`parent_rel/name`, or `name` at root).
     pub path: String,
     /// True when the entry is a directory (a real dir, OR a symlink that
-    /// resolves to a directory that is still inside the worktree — those are
+    /// resolves to a directory that is still inside the worktree; those are
     /// expandable).
     pub is_dir: bool,
     /// True when the entry is a symlink (of any kind). The UI may badge it; a
@@ -1838,7 +1838,7 @@ pub fn list_dir(worktree: &Path, rel_dir: &str) -> Result<Vec<DirEntryInfo>> {
                 .unwrap_or(false);
             if target_is_dir {
                 // Expandable only when the resolved target stays inside the
-                // worktree — an escaping symlinked dir is shown but can never
+                // worktree: an escaping symlinked dir is shown but can never
                 // be walked out of the tree.
                 let in_tree = crate::worktree_file::resolve_worktree_path_for_read(worktree, &path)
                     .map(|(_, _, is_outside)| !is_outside)
@@ -2780,8 +2780,8 @@ pub fn file_bytes_at_head(worktree_path: &Path, path: &str) -> Result<Option<Vec
 }
 
 /// Return the size in bytes of a file's blob at HEAD via the plumbing command
-/// `cat-file -s` — which reads the object header WITHOUT inflating the whole
-/// blob — or `None` for new (untracked) files. Lets a caller cap a diff/read by
+/// `cat-file -s` (which reads the object header WITHOUT inflating the whole
+/// blob), or `None` for new (untracked) files. Lets a caller cap a diff/read by
 /// size before buffering the full HEAD content into memory.
 pub fn blob_size_at_head(worktree_path: &Path, path: &str) -> Result<Option<u64>> {
     let output = Command::new("git")
@@ -2799,7 +2799,7 @@ pub fn blob_size_at_head(worktree_path: &Path, path: &str) -> Result<Option<u64>
     }
     // A successful `cat-file -s` always prints just the decimal byte size. A parse
     // failure here means genuinely unexpected output (corrupt store, a wrapper
-    // injecting text) — propagate it rather than collapsing it into the `None`
+    // injecting text); propagate it rather than collapsing it into the `None`
     // ("absent at HEAD") sentinel, which would silently skip the caller's size cap.
     let raw = String::from_utf8_lossy(&output.stdout);
     let size = raw.trim().parse::<u64>().map_err(|e| {
@@ -2830,7 +2830,7 @@ pub fn is_under(base: &Path, candidate: &Path) -> bool {
 /// check run against the always-safe worktree root instead of the symlink's
 /// real (possibly escaping) location. UI-supplied paths never legitimately need
 /// `.`, so it is refused outright rather than specially handled. Returns
-/// the joined path, which may not yet exist — existence/file-kind is the caller's
+/// the joined path, which may not yet exist; existence/file-kind is the caller's
 /// concern.
 ///
 /// A DANGLING symlink is checked on its own branch: `exists()` FOLLOWS the link
@@ -2864,7 +2864,7 @@ pub fn resolve_worktree_path(worktree: &Path, rel_path: &str) -> anyhow::Result<
         anyhow::bail!("invalid worktree path: {rel_path}");
     }
     // Never touch a git metadata directory. Reject `.git` as ANY path component,
-    // not just the first — editing is gated by containment alone, so a NESTED
+    // not just the first: editing is gated by containment alone, so a NESTED
     // repo's `.git` (a vendored dep, a submodule) must be unreachable too.
     // Case-insensitive for case-folding filesystems (e.g. default macOS).
     if rp
@@ -2958,7 +2958,7 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 }
 
 /// True when `candidate`'s realpath lies inside a `.git` directory under the
-/// worktree — a literal nested `.git`, or one reached through a symlinked
+/// worktree: a literal nested `.git`, or one reached through a symlinked
 /// directory (which the literal component check can't see). Used to close the
 /// symlink-into-`.git` gap on both read/write and on file creation (where the
 /// parent dir is checked). Returns false if either path can't be canonicalized.
@@ -3054,7 +3054,7 @@ pub fn display_path_relative_to(path: &str, base: Option<&str>) -> String {
 /// instantaneous; a multi-second wait means the process is wedged (a stale
 /// `.git/index.lock`, an NFS stall, etc.). Without this bound a hung child
 /// never posts `BranchRenameCompleted`, so the session's in-flight marker and
-/// `rename_expected` stay set for the process's lifetime — permanently
+/// `rename_expected` stay set for the process's lifetime, permanently
 /// blocking further renames and deferring drift detection.
 const RENAME_BRANCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -4198,7 +4198,7 @@ mod tests {
             "ignored file in a partially-tracked dir should be listed: {files:?}"
         );
         // With the walkdir-based implementation, fully-ignored dir contents ARE
-        // listed (node_modules/dep.js appears). That is intentional — the new
+        // listed (node_modules/dep.js appears). That is intentional: the new
         // walk surfaces everything. The old ls-files collapse is gone.
         assert!(
             files.iter().any(|f| f.starts_with("node_modules")),
@@ -4378,7 +4378,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Two distinct single-byte names, both invalid UTF-8 on their own, that
         // `to_string_lossy()` both collapse to the same single replacement
-        // character (U+FFFD) — a real filesystem collision the tree UI (which
+        // character (U+FFFD), a real filesystem collision the tree UI (which
         // keys rows by path) must never see duplicated.
         let name_a = OsString::from_vec(vec![0xFF]);
         let name_b = OsString::from_vec(vec![0xFE]);
@@ -5514,7 +5514,7 @@ mod tests {
     #[test]
     fn wait_child_or_kill_times_out_and_kills_a_wedged_child() {
         // A hung child must be killed once the deadline passes, and the error
-        // must say so — this is what keeps a wedged `git branch -m` from
+        // must say so: this is what keeps a wedged `git branch -m` from
         // stranding the rename worker forever.
         use std::time::{Duration, Instant};
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
@@ -6473,7 +6473,7 @@ mod tests {
     fn create_worktree_existing_branch_fails_when_already_checked_out() {
         let repo = init_test_repo();
         let _wt = add_worktree(repo.path(), "occupied");
-        // "occupied" is checked out in _wt — git forbids a second worktree.
+        // "occupied" is checked out in _wt: git forbids a second worktree.
         let worktrees_root = repo.path().join("wt-root");
         let result =
             create_worktree_existing_branch(repo.path(), &worktrees_root, "proj", "occupied");
@@ -8271,7 +8271,7 @@ mod tests {
     #[test]
     fn create_initial_commit_is_idempotent_when_already_born() {
         // Called on a repo that already has a commit (e.g. one raced in), it must
-        // NOT add a second commit — it returns Ok with the current branch so the
+        // NOT add a second commit; it returns Ok with the current branch so the
         // caller can still register the project.
         let repo = init_test_repo(); // one empty commit on "main"
         assert!(repo_has_commits(repo.path()));
@@ -8313,7 +8313,7 @@ mod tests {
     #[test]
     fn create_initial_commit_produces_a_truly_empty_commit() {
         // The commit must contain no files, regardless of an untracked working
-        // tree — its tree must equal the empty tree.
+        // tree: its tree must equal the empty tree.
         let repo = init_test_repo_no_commit();
         std::fs::write(repo.path().join("untracked.txt"), "x").unwrap();
         create_initial_commit(repo.path()).expect("initial commit should succeed");
@@ -8412,7 +8412,7 @@ mod tests {
 
     #[test]
     fn create_initial_commit_runs_no_hooks() {
-        // The bootstrap commit is built with plumbing, so NO hook runs — not
+        // The bootstrap commit is built with plumbing, so NO hook runs, not
         // pre-commit/commit-msg (which `--no-verify` would skip) and crucially not
         // post-commit/reference-transaction (which `--no-verify` does NOT skip).
         let repo = init_test_repo_no_commit();
@@ -8441,7 +8441,7 @@ mod tests {
     #[test]
     fn create_initial_commit_works_on_a_bare_repo() {
         // A fresh `git init --bare` repo has no work tree, so `git commit` can't
-        // be used — the plumbing path must still bootstrap it.
+        // be used: the plumbing path must still bootstrap it.
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
             let out = test_support::git_command()
@@ -8484,7 +8484,7 @@ mod tests {
 
         let branch = create_initial_commit(repo.path())
             .expect("a born detached-HEAD repo must be idempotent success, not an error");
-        // Detached HEAD has no symbolic branch name — the returned branch is
+        // Detached HEAD has no symbolic branch name: the returned branch is
         // empty (the worker degrades this to the "main" fallback, tested in
         // project_browser).
         assert!(
@@ -8511,8 +8511,8 @@ mod tests {
     #[test]
     fn create_initial_commit_is_race_safe_across_threads() {
         // Two threads bootstrap the SAME unborn repo concurrently (simulating two
-        // dux instances). The update-ref CAS must let exactly one commit land —
-        // never two — and the loser must NOT hard-error: it sees the repo is now
+        // dux instances). The update-ref CAS must let exactly one commit land
+        // (never two), and the loser must NOT hard-error: it sees the repo is now
         // Born and returns Ok too. End state: exactly one commit.
         let repo = init_test_repo_no_commit();
         let path = repo.path().to_path_buf();
@@ -8561,7 +8561,7 @@ mod tests {
             repo_commit_state(init_test_repo().path()),
             CommitState::Born
         );
-        // A non-repo path can't be classified — Indeterminate, never Unborn.
+        // A non-repo path can't be classified: Indeterminate, never Unborn.
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(repo_commit_state(tmp.path()), CommitState::Indeterminate);
     }
@@ -8873,7 +8873,7 @@ mod tests {
         run(staging, &["commit", "--allow-empty", "-m", "init"]);
         run(staging, &["push", "origin", "main"]);
 
-        // Now clone the bare repo — this sets origin/HEAD automatically.
+        // Now clone the bare repo: this sets origin/HEAD automatically.
         let clone_dir = tempfile::tempdir().unwrap();
         let clone = clone_dir.path();
         run(clone, &["clone", bare.to_str().unwrap(), "."]);
@@ -8929,7 +8929,7 @@ mod tests {
 
         // Fork feat branch with a different version of a.txt. Uses `switch
         // -c` to both create and switch to the branch; switch_branch is not
-        // exercised here — that's the subject under test below.
+        // exercised here: that's the subject under test below.
         run_git(repo.path(), &["switch", "-c", "feat"]);
         fs::write(repo.path().join("a.txt"), "feat-v1\n").unwrap();
         commit_all(repo.path(), "modify a.txt on feat");

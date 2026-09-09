@@ -250,7 +250,7 @@ mod tests {
     }
 
     /// CROSS-LANGUAGE PIN: the web "Open editor" menu (`OPEN_IN_EDITORS` in
-    /// editors.ts) must use exactly the dux-core `EDITOR_SPECS` config keys — no
+    /// editors.ts) must use exactly the dux-core `EDITOR_SPECS` config keys: no
     /// menu entry with a key the server would reject, and no supported editor
     /// missing from the menu. Without this, a typo'd key ("sublime-text") or a
     /// half-added editor would only surface as a runtime 400 on click. Skips when

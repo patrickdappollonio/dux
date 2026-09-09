@@ -33,7 +33,7 @@ pub struct RateLimitInfo {
 
 /// Per-host outcome of a sync cycle, used to drive the per-host backoff. Only
 /// hosts that were actually queried this cycle appear (a host skipped because it
-/// is already backed off, or one with only zero-network sessions, is absent — so
+/// is already backed off, or one with only zero-network sessions, is absent, so
 /// its backoff window is left untouched rather than spuriously cleared).
 pub struct HostSignal {
     pub host: String,
@@ -325,7 +325,7 @@ fn run_entries(
         trigger,
     );
 
-    // Group by host; for each host either skip it (already backed off — keep
+    // Group by host; for each host either skip it (already backed off: keep
     // last-known PRs, no gh call, no signal) or chunk its sessions by alias
     // budget and emit one per-host signal driving the backoff.
     let now = Instant::now();
@@ -532,7 +532,7 @@ fn plan_entries(
         }
 
         let Some((owner, repo)) = owner_repo.split_once('/') else {
-            // Malformed owner/repo — nothing we can query; fall back to stored.
+            // Malformed owner/repo: nothing we can query; fall back to stored.
             let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
             results.push((entry.session_id.clone(), pr));
             continue;
@@ -576,7 +576,7 @@ fn graphql_string(s: &str) -> String {
 
 // The GraphQL alias names. `build_chunk_query` writes them and
 // `parse_chunk_response` reads them back, so both sides MUST derive them from
-// these helpers — a divergence would silently return "no PR" for every session.
+// these helpers: a divergence would silently return "no PR" for every session.
 fn repo_alias(k: usize) -> String {
     format!("r{k}")
 }
@@ -1154,7 +1154,7 @@ fn run_command_with_timeout(cmd: std::process::Command, timeout: Duration) -> Gh
 /// Build and run one batched GraphQL query for a chunk of same-host sessions,
 /// returning `(session_id, Option<PrInfo>)` for each, the rate-limit snapshot,
 /// and whether the whole call hard-failed (spawn error / timeout / unparseable
-/// stdout — as opposed to a per-alias error, which is handled inline).
+/// stdout, as opposed to a per-alias error, which is handled inline).
 fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
     let (query, pos_repo) = build_chunk_query(planned, chunk);
 
@@ -1254,7 +1254,7 @@ fn looks_rate_limited(text: &str) -> bool {
 
 /// Build the batched GraphQL query for a chunk plus the per-position repo-alias
 /// index (`pos_repo[pos] == k` means session `s{pos}` lives under `r{k}`), so the
-/// response can be reparsed. Pure — no I/O — so it is unit-testable.
+/// response can be reparsed. Pure, with no I/O, so it is unit-testable.
 fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize>) {
     // Group the chunk's sessions by repo → one aliased `repository(...)` block
     // each. `pos` is the session's index within the chunk (its `s{pos}` alias).
@@ -1325,7 +1325,7 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
 /// Map a GraphQL `data` object (or `None` when the call failed) back to each
 /// chunk session's `(session_id, Option<PrInfo>)`, applying the per-session merge
 /// rule. A `null` repo/node (deleted repo or branch) resolves independently to
-/// that session's fallback, so one bad alias never poisons the batch. Pure — so
+/// that session's fallback, so one bad alias never poisons the batch. Pure, so
 /// it is unit-testable with a synthetic response.
 fn parse_chunk_response(
     planned: &[Planned],
@@ -1571,7 +1571,7 @@ fn merge_pr_result(p: &Planned, ref_pr: Option<PrInfo>, num_pr: Option<PrInfo>) 
         }
         (Some(rf), None) => Some(rf),
         (None, Some(nw)) => Some(nw),
-        // Both lookups came back empty for a KNOWN-open PR — this is a per-alias
+        // Both lookups came back empty for a KNOWN-open PR: this is a per-alias
         // fetch failure (a null repo alias / transient GraphQL error), NOT a real
         // close (GitHub returns the node with state CLOSED/MERGED, never null, for
         // a real terminal PR). Preserve the last-known PR instead of wiping the
@@ -3226,7 +3226,7 @@ mod tests {
     #[test]
     fn parse_chunk_response_preserves_known_pr_on_whole_call_failure() {
         // data=None means the whole gh call failed; an OPEN known PR must NOT be
-        // wiped to None (which the UI reads as "PR gone") — keep last-known state.
+        // wiped to None (which the UI reads as "PR gone"): keep last-known state.
         let ps = vec![planned(
             "s0",
             "octocat",

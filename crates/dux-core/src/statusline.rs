@@ -1433,7 +1433,7 @@ impl KeyedStatusController {
     }
 
     // -----------------------------------------------------------------------
-    // Single-status compatibility surface — thin wrappers over the most-recent
+    // Single-status compatibility surface: thin wrappers over the most-recent
     // projection used by TUI tests and existing call sites.
     // -----------------------------------------------------------------------
 

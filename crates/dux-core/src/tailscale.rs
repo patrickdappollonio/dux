@@ -83,7 +83,7 @@ pub fn undetected_warning(
 /// Detect this machine's Tailscale address by shelling out to `tailscale ip`.
 ///
 /// Returns `Ok(addr)` with the preferred address, or `Err(reason)` when no
-/// address is available. This NEVER blocks serving — the caller treats `Err` as
+/// address is available. This NEVER blocks serving: the caller treats `Err` as
 /// "serve loopback only" and warns. The CLI call follows the `gh`-availability
 /// precedent: any failure to spawn maps to `CommandMissing`, a non-zero exit to
 /// `CommandFailed`, and unparseable output to `NoAddress`.
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn rejects_ipv6_outside_the_tailscale_48() {
         // One past the /48 (third segment a1e1), a plain ULA, a documentation
-        // address, and a real global must all be rejected — the leg accepts ONLY
+        // address, and a real global must all be rejected: the leg accepts ONLY
         // fd7a:115c:a1e0::/48, not "any global/ULA v6".
         assert_eq!(parse_tailscale_ip("fd7a:115c:a1e1::\n"), None);
         assert_eq!(parse_tailscale_ip("fc00::1\n"), None);
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn rejects_non_cgnat_ipv4() {
         // A plain LAN IPv4 is not a Tailscale CGNAT address, and a link-local
-        // IPv6 is not a usable bind target — so nothing is returned.
+        // IPv6 is not a usable bind target, so nothing is returned.
         let out = "192.168.1.50\nfe80::1\n";
         assert_eq!(parse_tailscale_ip(out), None);
     }

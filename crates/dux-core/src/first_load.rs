@@ -61,7 +61,7 @@ pub enum NotesOutcome {
     /// The notes are in hand.
     Fetched,
     /// GitHub answered definitively: there is no release for this tag (404).
-    /// Common and legitimate — a locally built or not-yet-published tagged
+    /// Common and legitimate: a locally built or not-yet-published tagged
     /// binary has no release page. Retrying can never help, so this DOES mark
     /// the version seen; otherwise every future launch would repeat a request
     /// whose answer cannot change.
@@ -139,10 +139,10 @@ pub fn plan(
 /// Only [`FirstLoad::WhatsNew`] depends on the network; every other plan passes
 /// through unchanged (the welcome screen needs no notes).
 ///
-/// - [`NotesOutcome::Fetched`] — keep the screen and the stamp.
-/// - [`NotesOutcome::NoSuchRelease`] — no screen, but DO stamp: the answer is
-///   definitive and re-asking every launch is a permanent pointless request.
-/// - [`NotesOutcome::TemporarilyUnavailable`] — no screen and NO stamp, so the
+/// - [`NotesOutcome::Fetched`]: keep the screen and the stamp.
+/// - [`NotesOutcome::NoSuchRelease`]: no screen, but DO stamp, because the answer
+///   is definitive and re-asking every launch is a permanent pointless request.
+/// - [`NotesOutcome::TemporarilyUnavailable`]: no screen and NO stamp, so the
 ///   notes reappear on a launch that can reach GitHub.
 pub fn after_fetch(plan: FirstLoadPlan, outcome: NotesOutcome) -> FirstLoadPlan {
     if plan.screen != FirstLoad::WhatsNew {

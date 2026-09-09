@@ -1,5 +1,5 @@
 //! Serializable projection of `Engine` state for web clients. Selection, focus,
-//! and scroll position are intentionally excluded — those are client-side state
+//! and scroll position are intentionally excluded: those are client-side state
 //! under the independent-navigation model. This is a one-way `core -> client`
 //! view; it never deserializes.
 
@@ -61,8 +61,8 @@ pub struct BootstrapView {
     /// Text macros from `[macros]` in `config.toml`, in config (IndexMap) order.
     /// The web surfaces these two ways: the terminal-pane quick-picker filters
     /// by the focused target's surface and runs one via `RunMacro`, and the
-    /// macro-editor dialog lists/edits them (which is why `text` is exposed —
-    /// the web session is authenticated). A config reload that changes `[macros]`
+    /// macro-editor dialog lists/edits them (which is why `text` is exposed: the
+    /// web session is authenticated). A config reload that changes `[macros]`
     /// rebuilds this, delivered by a `config.changed` refetch.
     pub macros: Vec<MacroView>,
     /// Web-surface welcome-screen tips, from the shared `dux_core::welcome` list.
@@ -82,7 +82,7 @@ pub struct BootstrapView {
     /// The web dialog hides/disables its "From PR" mode with a quiet explanation
     /// when false, matching the TUI's gating of the `new-agent-from-pr` command.
     pub gh_available: bool,
-    /// Mirrors the raw `config.ui.github_integration` flag — distinct from
+    /// Mirrors the raw `config.ui.github_integration` flag, distinct from
     /// `gh_available`, which is the composite (integration on AND `gh`
     /// installed/authed). Distinct from `gh_available` so the web can reason
     /// about the user's raw preference independently of whether `gh` is
@@ -179,7 +179,7 @@ pub struct BootstrapView {
     pub agent_sort: String,
     /// Mirrors `config.ui.agent_scrollback_lines`. The web sizes each xterm.js
     /// instance's scrollback to this so it can retain the full history the
-    /// reconnect repaint replays — without it, xterm.js silently caps at its
+    /// reconnect repaint replays. Without it, xterm.js silently caps at its
     /// 1000-line default and trims the replayed history.
     pub agent_scrollback_lines: usize,
     /// Mirrors `config.ui.show_changes_pane`. The desktop web hides the
@@ -258,7 +258,7 @@ pub struct BootstrapView {
     /// demand and the content is config-static. Distinct from `welcome_tips`,
     /// the rotating idle-pane tip list.
     pub welcome_screen: WelcomeScreenView,
-    /// `dux_core::urls::WEBSITE` — where the welcome screen's secondary button
+    /// `dux_core::urls::WEBSITE`: where the welcome screen's secondary button
     /// goes. Projected rather than hardcoded client-side so the surfaces cannot
     /// disagree about a dux URL (see the `urls` module docs).
     pub website_url: String,
@@ -411,7 +411,7 @@ pub struct MacroView {
     pub name: String,
     /// The macro's expansion text (may be multi-line).
     pub text: String,
-    /// "agent" | "terminal" | "both" — matches the config serde casing for
+    /// "agent" | "terminal" | "both", matching the config serde casing for
     /// `MacroSurface`.
     pub surface: String,
 }
@@ -594,7 +594,7 @@ pub struct SessionView {
     /// The tab id the user last focused on this agent, verbatim from
     /// [`crate::model::AgentSession::last_focused_tab`]. `None` (or a value
     /// naming a tab no longer in `tabs`) means "no memory" and callers should
-    /// resolve to the session-slot tab (`id`) — see
+    /// resolve to the session-slot tab (`id`). See
     /// `crates/dux-web/web/src/lib/agentTabs.ts`'s `resolveFocusedTab` for the
     /// web-side resolver and [`crate::model::AgentSession::resolved_focused_tab`]
     /// for the shared rule.
@@ -673,7 +673,7 @@ pub struct TerminalView {
     /// `None` when the shell itself is idle in the foreground. Projected verbatim
     /// from [`crate::model::CompanionTerminal::foreground_cmd`], which the engine
     /// refreshes at most every ~2s
-    /// ([`crate::engine::FOREGROUND_REFRESH_INTERVAL`]) — so this field changes
+    /// ([`crate::engine::FOREGROUND_REFRESH_INTERVAL`]), so this field changes
     /// slowly and the coarse `sessions.changed` signal stays calm. The web UI
     /// shows this as the terminal's title when present, falling back to `label`.
     pub foreground_cmd: Option<String>,
@@ -755,7 +755,7 @@ pub struct AgentTabView {
     /// otherwise the tab's configured provider).
     pub provider: String,
     /// Position in the strip: 0 = session-slot tab, 1..N = extra tabs in creation
-    /// order. Display ordering only — no tab is privileged (resume is decided
+    /// order. Display ordering only: no tab is privileged (resume is decided
     /// dynamically at launch by liveness, not by position).
     pub order: u32,
     /// Whether this tab's PTY is actively streaming (per-tab hysteresis boolean).
@@ -770,7 +770,7 @@ pub struct AgentTabView {
     /// Whether this tab's PTY has emitted any output yet.
     pub has_output: bool,
     /// Whether a live PTY exists for this tab right now. `false` for a dormant
-    /// extra tab (e.g. reopened after a restart) — the web client renders the
+    /// extra tab (e.g. reopened after a restart). The web client renders the
     /// dormant card from this flag *without* subscribing, because subscribing
     /// would force-launch the provider.
     pub has_live_process: bool,

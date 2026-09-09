@@ -48,7 +48,7 @@ impl SessionStore {
         // instead of an immediate `SQLITE_BUSY` failure (the default timeout is 0).
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // `journal_mode` returns the resulting mode as a row, so use a statement
-        // that tolerates it (a `:memory:` DB stays in "memory" mode — a harmless
+        // that tolerates it (a `:memory:` DB stays in "memory" mode, a harmless
         // no-op). `execute_batch` ignores the returned row.
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         // The database mirrors the same per-project `env` map that made
@@ -144,7 +144,7 @@ impl SessionStore {
         // ALTER, and the loser sees SQLite's "duplicate column name" error (which
         // `is_duplicate_column_error` swallows as `Ok(false)`). Wrapping the ALTER
         // in a transaction instead would make the loser raise SQLITE_BUSY_SNAPSHOT,
-        // which that classifier does NOT match — hard-failing `open()`.
+        // which that classifier does NOT match, hard-failing `open()`.
         let initial_branch_added = ensure_column(
             &self.conn,
             "agent_sessions",
@@ -421,7 +421,7 @@ impl SessionStore {
         // session and no project, and that must be SHARED by the TUI and the
         // web (see `last_seen_version`: dismissing the what's-new screen in one
         // surface dismisses it in the other). Additive and backward compatible:
-        // existing databases start with zero rows. Keep it deliberately small —
+        // existing databases start with zero rows. Keep it deliberately small:
         // per-entity state belongs in its own purpose-built table, exactly like
         // `changes_rev`.
         self.conn.execute_batch(
@@ -856,7 +856,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// The largest `sort_order` among a session's extra tabs, if any — used to
+    /// The largest `sort_order` among a session's extra tabs, if any, used to
     /// append a new tab after the existing ones.
     pub fn max_tab_sort_order(&self, session_id: &str) -> Result<Option<i64>> {
         let value: Option<i64> = self.conn.query_row(
@@ -883,7 +883,7 @@ impl SessionStore {
     /// First call for a session returns `1`; each subsequent call returns the
     /// previous value plus one. Implemented as a single upsert with `RETURNING`
     /// (supported by the bundled SQLite in `rusqlite`) so it is the one chokepoint
-    /// that guarantees a strictly-increasing, persisted `rev` per session — the
+    /// that guarantees a strictly-increasing, persisted `rev` per session, the
     /// ordering/dedup token web clients apply to changed-files GETs and events.
     pub fn next_changes_rev(&self, session_id: &str) -> rusqlite::Result<u64> {
         let rev: i64 = self.conn.query_row(
@@ -1108,8 +1108,8 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Remove a project and every record that belongs to it — each session's PR
-    /// rows, the session rows, and the `projects` row — in a single transaction,
+    /// Remove a project and every record that belongs to it (each session's PR
+    /// rows, the session rows, and the `projects` row) in a single transaction,
     /// returning the deleted session ids. Atomic: a failure leaves all rows
     /// intact, so a removal can never half-delete a project (e.g. agents gone but
     /// the project row surviving to reappear on restart). Deleting a project row
@@ -1486,7 +1486,7 @@ impl SessionStore {
             return Ok(());
         }
         // A brand-new session lands at the TOP of its project's order: one
-        // position above the current minimum (negative values are fine —
+        // position above the current minimum (negative values are fine;
         // positions are relative, only their ordering matters). The engine is
         // single-threaded over this connection, so the UPDATE-miss → INSERT
         // sequence cannot race.
@@ -1552,7 +1552,7 @@ impl SessionStore {
     /// Assign positions `0..n` to exactly `ordered_ids`, in that order, scoped
     /// to `project_id`. Runs in a single transaction. The storage layer is
     /// intentionally "dumb": it does not validate that `ordered_ids` is the
-    /// complete set of the project's sessions — that strict validation lives in
+    /// complete set of the project's sessions. That strict validation lives in
     /// `Engine::apply`. `updated_at` is deliberately NOT touched, because doing
     /// so would corrupt the "sort by most recently updated" semantics.
     pub fn reorder_sessions(&self, project_id: &str, ordered_ids: &[String]) -> Result<()> {
@@ -1605,7 +1605,7 @@ impl SessionStore {
     }
 
     /// True when some project has more than one session and ALL of that
-    /// project's sessions are still at `sort_order = 0` — the fingerprint of a
+    /// project's sessions are still at `sort_order = 0`, the fingerprint of a
     /// `sort_order` backfill that never ran (stranded by a crash between the
     /// autocommitted ALTER and the backfill). Used to make the one-time
     /// backfill retryable.
@@ -1613,8 +1613,8 @@ impl SessionStore {
     /// This is deliberately narrower than "every row is 0": a project with a
     /// single session legitimately sits at `sort_order = 0` (position 0), so
     /// that state must NOT trigger a re-run on every open. Two-or-more sessions
-    /// in one project all pinned at 0 is impossible in steady state — inserts
-    /// land at `min-1` (negative) and reorders assign distinct `0..n` — so it
+    /// in one project all pinned at 0 is impossible in steady state, because
+    /// inserts land at `min-1` (negative) and reorders assign distinct `0..n`, so it
     /// only ever indicates a stranded half-migration. `count(nullif(sort_order,
     /// 0))` counts only rows whose value is neither 0 nor NULL.
     fn session_sort_order_needs_backfill(&self) -> Result<bool> {
@@ -1642,7 +1642,7 @@ impl SessionStore {
     /// the upgrade.
     fn backfill_session_sort_order(&self) -> Result<()> {
         // Assign a GLOBAL 0..n order (flat model: agents are one independent list).
-        // Order by the CURRENT effective order (`sort_order asc, updated_at desc` —
+        // Order by the CURRENT effective order (`sort_order asc, updated_at desc`,
         // the same order `load_sessions` uses) so this is non-destructive: a legacy
         // per-project arrangement is frozen into a sensible global sequence rather
         // than reshuffled, and a fresh (all-zero) table falls back to most-recent
@@ -1782,7 +1782,7 @@ impl SessionStore {
         // Delete the session and all of its dependent rows atomically. These
         // tables declare ON DELETE CASCADE FKs to `agent_sessions`, but the
         // connection never enables `PRAGMA foreign_keys`, so those cascades do
-        // not fire — delete the rows explicitly. Wrapped in a transaction so a
+        // not fire. Delete the rows explicitly. Wrapped in a transaction so a
         // mid-sequence failure leaves either all of the session's rows or none,
         // never a half-deleted session (e.g. tabs gone but the session surviving).
         let tx = self.conn.unchecked_transaction()?;
@@ -1816,7 +1816,7 @@ impl SessionStore {
     /// Persist the remembered last-focused tab for a session. `None` clears the
     /// memory (resolves to the session-slot tab). Deliberately its own tiny
     /// setter, mirroring [`Self::set_auto_reopen_enabled`], rather than folded
-    /// into `upsert_session` — see the field doc comment on
+    /// into `upsert_session`. See the field doc comment on
     /// [`crate::model::AgentSession::last_focused_tab`] for why. `updated_at` is
     /// intentionally NOT touched: a focus change is not a content change, and
     /// touching it would perturb "sort by most recently updated" ordering.
@@ -3373,7 +3373,7 @@ mod tests {
         assert_eq!(store.load_pr_overrides().unwrap(), vec![stored_pr("c", 3)]);
         // Same for the suppression rows: p1's went, p2's stayed.
         assert_eq!(store.load_pr_suppressions().unwrap(), vec!["c".to_string()]);
-        // The project row itself is deleted in the same transaction — only p2
+        // The project row itself is deleted in the same transaction: only p2
         // remains, so a removal cannot leave a row that reappears on restart.
         let project_ids: Vec<String> = store
             .load_projects()
@@ -3796,7 +3796,7 @@ mod tests {
         // (when the initial_branch column is first added), not on every open().
         // A store built by legacy_store_with_sessions has already migrated once,
         // so the initial_branch column now exists. Insert a fresh auto-named
-        // agent (title NULL — intentionally, so its display tracks the branch),
+        // agent (title NULL, intentionally, so its display tracks the branch),
         // then migrate() again (simulating a later startup / config reload). The
         // second migration must NOT re-run the backfill and freeze the NULL title.
         let store = legacy_store_with_sessions(&[("feat-x", "p1", "2026-01-01T00:00:00Z")]);
@@ -3972,7 +3972,7 @@ mod tests {
         // The flat model needs a GLOBAL total order. Two sessions in different
         // projects both at sort_order 0 (legacy per-project numbering) is NOT a
         // valid global order, so the backfill must run to give them distinct
-        // positions — then never re-run once globalized.
+        // positions, then never re-run once globalized.
         let store = test_store();
         let now = Utc::now();
         store
@@ -4113,7 +4113,7 @@ mod tests {
 
         // Group the loaded ids by project and assert each project's internal
         // order is updated_at DESC. (Cross-project interleaving in the global
-        // Vec is not meaningful — the UI groups by project.)
+        // Vec is not meaningful: the UI groups by project.)
         let p1: Vec<&str> = ordered
             .iter()
             .filter(|(p, _)| *p == "p1")
@@ -4319,7 +4319,7 @@ mod tests {
         store
             .upsert_session(&test_session_in("new", "proj", now, now))
             .unwrap();
-        // Flatten every position to 0 — the half-upgraded state.
+        // Flatten every position to 0: the half-upgraded state.
         store
             .conn
             .execute("update agent_sessions set sort_order = 0", [])
@@ -4556,7 +4556,7 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -
         Ok(_) => Ok(true),
         // Tolerate a concurrent add: two connections opening at first-boot-after
         // -upgrade can both pass the pragma check above and race on the ALTER.
-        // The loser sees SQLite's "duplicate column name" error — the column is
+        // The loser sees SQLite's "duplicate column name" error: the column is
         // present, so treat it as already-existing (Ok(false)) instead of
         // hard-failing open().
         Err(e) if is_duplicate_column_error(&e) => Ok(false),
