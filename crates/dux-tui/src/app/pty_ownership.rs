@@ -1593,6 +1593,11 @@ mod tests {
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
 
+        // The first press's message is NEWS (a terminal changed hands), not a
+        // hint about what is on screen, so the queue is right to still be showing
+        // it and the pre-clear stays. Emptying the line and putting a marker on it
+        // is what makes "the second press wrote nothing" readable at all.
+        app.set_info(String::new());
         app.set_info("a marker nothing else writes".to_string());
         app.take_over_focused_pty();
 
@@ -2374,7 +2379,11 @@ mod tests {
         app.take_over_focused_pty();
         assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
 
-        // The render pass is about a different pty now.
+        // The render pass is about a different pty now. Both messages here are
+        // NEWS rather than hints, so the queue is right to hold the first one and
+        // the pre-clear stays: it is how the drop's own message can be read
+        // without waiting out the take-over message's window.
+        app.set_info(String::new());
         app.expire_stale_pty_takeover(Some("session-2-slot"));
         assert_eq!(
             app.pending_pty_takeover, None,

@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -159,6 +159,30 @@ pub const FINAL_REPLAY_WINDOW: Duration = Duration::from_secs(30);
 /// toast agree; `the_web_mirrors_the_warning_clear_factor` reads that file and
 /// fails if they drift.
 pub const WARNING_CLEAR_FACTOR: u32 = 3;
+
+/// How many statuses may WAIT behind the one on the TUI's status line.
+///
+/// The line is a queue, not a transcript. A burst of work should be readable in
+/// full, but a user who looked away for a minute must not come back to a
+/// backlog of news that is no longer true, and a runaway producer must not be
+/// able to take unbounded memory through the status line. Five is a couple of
+/// screenfuls of reading at the default window and comfortably more than any
+/// single operation dux runs posts in one go.
+///
+/// When the queue is full the OLDEST waiting `Info` is dropped, not the newest
+/// arrival: the newer message is the more current fact, and the older one has
+/// already been overtaken by everything queued behind it.
+pub const MAX_QUEUED_STATUSES: usize = 5;
+
+/// The storage key of the `n`th anonymous entry under [`StatusRetention::Retain`].
+///
+/// The TUI queues unkeyed messages instead of overwriting a single slot, so each
+/// one needs an identity of its own to hold a queue position. The prefix is a
+/// control character no engine status key contains, so a synthetic id can never
+/// collide with a real one.
+fn anon_storage_key(n: u64) -> String {
+    format!("\u{1}anon:{n}")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusTone {
@@ -319,9 +343,12 @@ pub struct StatusTickChanges {
 /// long over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusRetention {
-    /// Store a final and keep it until something replaces it. The TUI's single
-    /// status line has no other way to show an outcome, and it is never
-    /// "reconnected", so the last message simply stays on screen.
+    /// Store a final and keep it until its turn on the line is over. The TUI's
+    /// single status line has no other way to show an outcome, and it is never
+    /// "reconnected", so a message stays on screen rather than being broadcast
+    /// and forgotten. Because there is only one line, the entries QUEUE under
+    /// this policy instead of overwriting each other; the rules are on
+    /// [`KeyedStatusController`].
     Retain,
     /// Treat a final as an event with a short tail: it is broadcast live by the
     /// caller (the web emitter sends the `WireStatus` it was given), kept
@@ -350,8 +377,21 @@ pub enum StatusRetention {
 /// `String → KeyedStatus` map for named operations. Each emit bumps a
 /// generation token on its key so that a stale-success clear from a prior
 /// attempt can never silently dismiss a newer, live status.
+///
+/// The two retention policies also render differently. Under
+/// [`StatusRetention::Emit`] the web stacks every open status as its own toast
+/// and dismisses them independently. Under [`StatusRetention::Retain`] the TUI
+/// has ONE line, so the entries form a short QUEUE rather than fighting over it:
+/// infos take the line in arrival order, each for its full
+/// `ui.status_clear_seconds` window from the moment it is SHOWN; a warning or an
+/// error pre-empts and drops the infos still waiting behind it; a busy takes the
+/// line at once and drops nothing. See [`Self::store_queued`] and
+/// [`Self::advance`].
 pub struct KeyedStatusController {
-    /// The anonymous slot; most-recent-wins.
+    /// The anonymous slot; most-recent-wins. Written under
+    /// [`StatusRetention::Emit`] only: the TUI's queue needs a per-message
+    /// identity, so under `Retain` an unkeyed message goes into
+    /// [`Self::entries`] under a synthetic [`anon_storage_key`] instead.
     anon: Option<KeyedStatus>,
     /// Named entries in insertion order.
     entries: IndexMap<String, KeyedStatus>,
@@ -377,12 +417,32 @@ pub struct KeyedStatusController {
     /// that does not care, and any future surface before it is wired) behaves
     /// exactly as it did before liveness existed.
     live: LiveStatusKeys,
+    /// The TUI's status queue: storage keys of [`Self::entries`] in the order
+    /// they take the single line, front first. Populated ONLY under
+    /// [`StatusRetention::Retain`]; the web stacks every open status as a toast
+    /// and has nothing to queue, so under `Emit` this stays empty and every
+    /// queue-aware path is skipped.
+    queue: VecDeque<String>,
+    /// Which entry is on the line and when it went there.
+    ///
+    /// The instant is what gives an `Info` its FULL window from the moment it is
+    /// SHOWN rather than from the moment it was posted, which is the whole point
+    /// of the queue: a message that waited its turn still gets read. The key
+    /// travels with it so [`Self::advance`] can notice the front has changed
+    /// underneath it and re-stamp, rather than relying on every mutation
+    /// remembering to reset a bare instant.
+    shown: Option<(String, Instant)>,
+    /// Storage key of the newest anonymous entry under `Retain`, so [`Self::pin`],
+    /// [`Self::anon_generation`] and [`Self::anon_busy_matches`] can still name
+    /// "the unkeyed message" now that there may be several queued at once.
+    anon_key: Option<String>,
+    /// Monotonic counter behind [`anon_storage_key`].
+    next_anon: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatusTickAction {
     Keep,
-    Clear,
     Purge,
     Upgrade,
     /// The entry has been busy past [`BUSY_LIVE_CEILING`], so it is upgraded
@@ -424,7 +484,6 @@ impl BusyUpgrade {
 
 #[derive(Default)]
 struct KeyedTickActions {
-    clear: Vec<String>,
     purge: Vec<String>,
     upgrade: Vec<String>,
     stalled: Vec<String>,
@@ -465,6 +524,10 @@ impl KeyedStatusController {
             anon_pinned: false,
             retention,
             live: LiveStatusKeys::default(),
+            queue: VecDeque::new(),
+            shown: None,
+            anon_key: None,
+            next_anon: 0,
         }
     }
 
@@ -484,17 +547,27 @@ impl KeyedStatusController {
         self.anon_pinned = true;
     }
 
-    /// The generation of the message currently on the anonymous slot, or
-    /// `None` when the slot is empty.
+    /// The generation of the NEWEST unkeyed message, or `None` when there is
+    /// none.
     ///
-    /// The anonymous slot is most-recent-wins and shared by every unkeyed
-    /// producer, so "is my message still the one on the line" cannot be
+    /// The unkeyed producers all share one identity here and none of them can
+    /// tell the others apart, so "is my message still the one on the line" cannot be
     /// answered by tone (several producers write warnings) or by text
     /// (comparing strings would match a second producer's identical message).
     /// A producer that wants to retire its own message keeps the generation its
     /// `set` returned and clears only while this still equals it.
     pub fn anon_generation(&self) -> Option<Generation> {
-        self.anon.as_ref().map(|a| a.generation)
+        self.newest_anonymous().map(|a| a.generation)
+    }
+
+    /// The newest unkeyed entry, wherever this controller keeps it: the single
+    /// anonymous slot under `Emit`, or the newest queued unkeyed entry under
+    /// `Retain`.
+    fn newest_anonymous(&self) -> Option<&KeyedStatus> {
+        if self.retention == StatusRetention::Retain {
+            return self.entries.get(self.anon_key.as_deref()?);
+        }
+        self.anon.as_ref()
     }
 
     pub fn set_clear_after(&mut self, clear_after: Duration) {
@@ -503,7 +576,10 @@ impl KeyedStatusController {
 
     /// Set/replace a status.
     ///
-    /// - `key == None` writes the anonymous slot (most-recent-wins).
+    /// - `key == None` writes an unkeyed message: the anonymous slot under
+    ///   `Emit` (most-recent-wins), a queue position of its own under `Retain`.
+    ///   An EMPTY unkeyed message is the TUI's "clear the line" gesture and
+    ///   takes the unkeyed entries off the queue instead of joining it.
     /// - `key == Some(_)` upserts the named entry and bumps its generation.
     ///
     /// Returns the stored entry's generation so a producer can correlate a
@@ -550,6 +626,13 @@ impl KeyedStatusController {
             seq,
         };
 
+        // Under `Retain` every entry, unkeyed ones included, lives in `entries`
+        // under a storage key so it can hold a position in the queue.
+        if self.retention == StatusRetention::Retain {
+            self.store_queued(now, key, entry);
+            return generation;
+        }
+
         // Both policies STORE the entry, including a final: `Emit` differs only
         // in how long it keeps one, which is [`tick`](Self::tick)'s job. Storing
         // is also what retires the `Busy` the final replaces, so no spinner is
@@ -575,6 +658,422 @@ impl KeyedStatusController {
         }
 
         generation
+    }
+
+    /// Store an entry under [`StatusRetention::Retain`] and give it a place in
+    /// the TUI's queue.
+    ///
+    /// The tone rules the single line follows live here:
+    /// - an `Info` joins the BACK of the queue and waits its turn;
+    /// - a `Warning` or an `Error` PRE-EMPTS, taking the line at once and
+    ///   dropping every `Info` behind it, because an info the user has not read
+    ///   yet that has since been overtaken by a warning is stale news;
+    /// - a `Busy` also takes the line at once but drops NOTHING, because it is
+    ///   live state rather than an outcome: the waiting infos resume after its
+    ///   final.
+    ///
+    /// An `Error` on the line is retired by the ARRIVAL of any newer message,
+    /// whatever its tone (see [`Self::retire_showing_error`]), which is what
+    /// "until it is replaced" means on a queued line.
+    ///
+    /// A replacement on a key already in the queue keeps its position, whatever
+    /// its tone. The queue orders NEWS, and a producer restating itself on the
+    /// key it already holds has not produced any; this is what lets a keyed
+    /// `Busy`'s final replace it in place at the front.
+    fn store_queued(&mut self, now: Instant, key: Option<String>, entry: KeyedStatus) {
+        let tone = entry.tone;
+        let storage = match key {
+            Some(k) => {
+                if tone != StatusTone::Busy {
+                    self.live.retire(&k);
+                }
+                k
+            }
+            None => {
+                // The pin always belonged to the message that was last set.
+                self.anon_pinned = false;
+                match self.anon_storage_for(&entry.message) {
+                    Some(k) => k,
+                    None => {
+                        self.drop_newest_anonymous();
+                        return;
+                    }
+                }
+            }
+        };
+
+        // Some entries wait for a REPLACEMENT rather than for a clock, and on a
+        // queued line the thing that replaces them is whatever is said next.
+        self.retire_replaced_by_arrival(&storage);
+
+        let queued = self.queue.contains(&storage);
+        self.entries.insert(storage.clone(), entry);
+
+        // Pre-emption applies whether or not the entry is new to the queue, so a
+        // busy whose final is a warning still clears the stale news behind it.
+        if matches!(tone, StatusTone::Warning | StatusTone::Error) {
+            self.drop_waiting_infos(&storage);
+        }
+        if !queued {
+            if tone == StatusTone::Info {
+                self.queue.push_back(storage.clone());
+            } else {
+                self.queue.push_front(storage.clone());
+            }
+            self.enforce_queue_bound();
+        }
+        if self.queue.front() == Some(&storage) {
+            // Stamped HERE and not left to the next tick: a message is on the
+            // line from the instant it is set, so its window has to start there
+            // too or the first frame after it appears would hand it a free one.
+            // A new message on the line is a new thing to read, so a replacement
+            // in place restarts the window rather than inheriting the old one's.
+            self.shown = Some((storage, now));
+        }
+    }
+
+    /// The storage key an anonymous message should be written to, or `None` when
+    /// the message is the empty "clear the line" one every TUI producer uses to
+    /// say it has nothing left to report.
+    ///
+    /// A repeat of a message already in the queue reuses that entry's key rather
+    /// than minting a new one: producers that restate a standing condition on
+    /// every selection move (the missing-project warning) would otherwise fill
+    /// the queue with copies of one sentence, and a second copy of a message is
+    /// not a second thing to read.
+    fn anon_storage_for(&mut self, message: &str) -> Option<String> {
+        if message.is_empty() {
+            return None;
+        }
+        let existing = self
+            .queue
+            .iter()
+            .find(|k| {
+                self.entries
+                    .get(*k)
+                    .is_some_and(|e| e.key.is_none() && e.message == message)
+            })
+            .cloned();
+        let key = match existing {
+            Some(k) => k,
+            None => {
+                let k = anon_storage_key(self.next_anon);
+                self.next_anon += 1;
+                k
+            }
+        };
+        self.anon_key = Some(key.clone());
+        Some(key)
+    }
+
+    /// Retire the entry on the line that this arrival REPLACES.
+    ///
+    /// Two entries wait to be replaced rather than for a clock, and on a queued
+    /// line nothing would ever replace them unless the arrival itself did:
+    ///
+    /// - An `Error`, always. It is the one outcome the user must not be able to
+    ///   miss by looking away, so it has no dwell clock. On a most-recent-wins
+    ///   line the next message replaced it by definition; on a queue an unkeyed
+    ///   error would sit there for the rest of the session with everything
+    ///   behind it unreadable, because nothing can ever write the synthetic id
+    ///   it is stored under.
+    /// - EVERY tone but `Busy` when `clear_after` is zero. That setting means
+    ///   "never auto-clear", so there is no window for anything to wait out and
+    ///   the line is most-recent-wins, which is exactly what the setting has
+    ///   always promised. Without this a warning at a zero window held the line
+    ///   for the session and everything queued behind it was evicted unread.
+    ///
+    /// A `Busy` is the deliberate exception at a zero window: a spinner is live
+    /// state rather than an outcome, it says work is happening right now, and
+    /// the thing that replaces it is its own final on its own key. An arrival
+    /// therefore queues behind it, and if that final never comes the busy
+    /// timeout still upgrades the spinner to a warning, which the next arrival
+    /// may then replace.
+    ///
+    /// A `sticky` entry and a pinned one are never retired here whatever the
+    /// window: both flags mean "this one waits for a person", which is the whole
+    /// reason they exist.
+    fn retire_replaced_by_arrival(&mut self, incoming: &str) {
+        let Some(front) = self.queue.front().cloned() else {
+            return;
+        };
+        if front == incoming || (self.anon_pinned && self.anon_key.as_deref() == Some(&*front)) {
+            return;
+        }
+        let Some(entry) = self.entries.get(&front) else {
+            return;
+        };
+        let replaceable = !entry.sticky
+            && match entry.tone {
+                StatusTone::Busy => false,
+                StatusTone::Error => true,
+                StatusTone::Info | StatusTone::Warning => self.clear_after.is_zero(),
+            };
+        if replaceable {
+            self.remove_queued(&front);
+        }
+    }
+
+    /// Take the NEWEST unkeyed entry off the queue: the TUI's empty-message set
+    /// is one producer saying it has nothing left to report, which is a claim
+    /// about its own message and not about every other unkeyed producer's.
+    /// A producer holding a generation should use
+    /// [`Self::clear_anonymous_generation`] instead, which names its message
+    /// exactly.
+    fn drop_newest_anonymous(&mut self) {
+        let Some(key) = self.anon_key.clone() else {
+            return;
+        };
+        self.remove_queued(&key);
+    }
+
+    /// Remove the unkeyed entry with this exact generation, wherever it is.
+    ///
+    /// The unkeyed producers share one identity and cannot tell each other's
+    /// messages apart by tone or by text, so a producer that must retire its own
+    /// message keeps the generation its [`set`](Self::set) returned and names it
+    /// here. Without this the only unkeyed retraction was "clear the unkeyed
+    /// line", which on a queued line takes somebody else's standing warning with
+    /// it.
+    ///
+    /// Returns `true` when something was removed.
+    pub fn clear_anonymous_generation(&mut self, generation: Generation) -> bool {
+        if self.retention == StatusRetention::Retain {
+            let doomed = self
+                .queue
+                .iter()
+                .find(|k| {
+                    self.entries
+                        .get(*k)
+                        .is_some_and(|e| e.key.is_none() && e.generation == generation)
+                })
+                .cloned();
+            let Some(doomed) = doomed else { return false };
+            if self.anon_key.as_deref() == Some(&*doomed) {
+                self.anon_pinned = false;
+            }
+            self.remove_queued(&doomed);
+            return true;
+        }
+        if self
+            .anon
+            .as_ref()
+            .is_some_and(|a| a.generation == generation)
+        {
+            self.anon = None;
+            self.anon_pinned = false;
+            return true;
+        }
+        false
+    }
+
+    /// Retire the newest open `Busy`, wherever it sits in the queue.
+    ///
+    /// A worker that ends with nothing to say has to take its own spinner down.
+    /// Writing an empty message used to do that, because the line was
+    /// most-recent-wins and an empty unkeyed message covered whatever was under
+    /// it; against a KEYED busy that is now a no-op, and the spinner would sit
+    /// there until the busy timeout upgraded it to a false "timed out".
+    ///
+    /// Deliberately NOT limited to the entry on the line. A spinner is pushed off
+    /// the front by any warning or error that arrives while the work is running,
+    /// and that is exactly the case where the operation ends quietly and nothing
+    /// else will ever take its spinner down; a front-only retirement leaves it to
+    /// be called timed out, which it was not.
+    ///
+    /// This is the FALLBACK, for the paths that hold no key. A caller that knows
+    /// its key must use [`Self::clear`] with it, which names one operation
+    /// exactly; the newest busy is a guess, and it is only defensible because a
+    /// caller reaching here has no better one.
+    ///
+    /// Returns `true` when a spinner was taken down.
+    pub fn retire_newest_busy(&mut self) -> bool {
+        if self.retention == StatusRetention::Retain {
+            let Some(newest) = self
+                .queue
+                .iter()
+                .filter_map(|key| self.entries.get(key).map(|entry| (key, entry)))
+                .filter(|(_, entry)| entry.tone == StatusTone::Busy)
+                .max_by_key(|(_, entry)| entry.seq)
+                .map(|(key, _)| key.clone())
+            else {
+                return false;
+            };
+            if let Some(key) = self.entries.get(&newest).and_then(|e| e.key.clone()) {
+                self.live.retire(&key);
+            }
+            let was_showing = self.queue.front() == Some(&newest);
+            self.remove_queued(&newest);
+            if was_showing {
+                self.shown = None;
+            }
+            return true;
+        }
+        if self
+            .anon
+            .as_ref()
+            .is_some_and(|a| a.tone == StatusTone::Busy)
+        {
+            self.anon = None;
+            return true;
+        }
+        false
+    }
+
+    /// Drop every `Info` in the queue except `except`, which is the pre-empting
+    /// entry itself.
+    fn drop_waiting_infos(&mut self, except: &str) {
+        let doomed: Vec<String> = self
+            .queue
+            .iter()
+            .filter(|k| {
+                k.as_str() != except
+                    && self
+                        .entries
+                        .get(*k)
+                        .is_some_and(|e| e.tone == StatusTone::Info)
+            })
+            .cloned()
+            .collect();
+        for key in doomed {
+            self.remove_queued(&key);
+        }
+    }
+
+    /// Hold the queue to [`MAX_QUEUED_STATUSES`] waiters behind the line.
+    fn enforce_queue_bound(&mut self) {
+        while self.queue.len() > MAX_QUEUED_STATUSES + 1 {
+            // Position 0 is on screen and is never taken out from under the
+            // reader. Among the waiters the oldest `Info` goes first; with no
+            // info left to drop the oldest waiter of any tone goes instead,
+            // because the bound has to hold whatever is queued.
+            let Some(doomed) = self
+                .oldest_waiter(true)
+                .or_else(|| self.oldest_waiter(false))
+            else {
+                return;
+            };
+            self.remove_queued(&doomed);
+        }
+    }
+
+    /// The waiter that has been queued longest, optionally restricted to
+    /// `Info`s.
+    ///
+    /// Ordered by `seq`, the arrival counter, and never by queue POSITION: the
+    /// pre-empting tones are pushed to the front, so position 1 is the second
+    /// NEWEST of them, and evicting it would drop the freshest news while
+    /// keeping a backlog of older warnings nobody can reach.
+    fn oldest_waiter(&self, only_infos: bool) -> Option<String> {
+        self.queue
+            .iter()
+            .skip(1)
+            .filter_map(|key| self.entries.get(key).map(|entry| (key, entry)))
+            .filter(|(_, entry)| !only_infos || entry.tone == StatusTone::Info)
+            .min_by_key(|(_, entry)| entry.seq)
+            .map(|(key, _)| key.clone())
+    }
+
+    /// Take one entry out of both the queue and the storage behind it.
+    fn remove_queued(&mut self, key: &str) {
+        self.queue.retain(|k| k != key);
+        self.entries.shift_remove(key);
+        if self.anon_key.as_deref() == Some(key) {
+            self.anon_key = self.newest_anonymous_key();
+        }
+    }
+
+    /// Whichever unkeyed entry is left with the highest arrival counter.
+    ///
+    /// Nulling [`Self::anon_key`] on a removal instead would tell the next
+    /// producer that no unkeyed message exists while several are still queued.
+    fn newest_anonymous_key(&self) -> Option<String> {
+        self.queue
+            .iter()
+            .filter_map(|key| self.entries.get(key).map(|entry| (key, entry)))
+            .filter(|(_, entry)| entry.key.is_none())
+            .max_by_key(|(_, entry)| entry.seq)
+            .map(|(key, _)| key.clone())
+    }
+
+    /// Move the TUI's queue on: stamp whatever is on the line, and retire it
+    /// once its dwell is up so the next entry can be read.
+    ///
+    /// Pure in `now`. The only clock is the instant handed in, so neither a slow
+    /// tick cadence nor a fast one can change how long a message is readable.
+    fn advance(&mut self, now: Instant, changes: &mut StatusTickChanges) {
+        loop {
+            // A position whose entry has gone (a clear, an eviction) is not a
+            // turn on the line.
+            while self
+                .queue
+                .front()
+                .is_some_and(|k| !self.entries.contains_key(k))
+            {
+                self.queue.pop_front();
+            }
+            let Some(front) = self.queue.front().cloned() else {
+                self.shown = None;
+                return;
+            };
+            let shown_at = match &self.shown {
+                Some((key, at)) if *key == front => *at,
+                _ => {
+                    self.shown = Some((front.clone(), now));
+                    now
+                }
+            };
+            if !self.front_dwell_elapsed(&front, shown_at, now) {
+                return;
+            }
+            self.queue.pop_front();
+            if let Some(entry) = self.entries.shift_remove(&front) {
+                changes.cleared_keys.push(entry.key.clone());
+            }
+            if self.anon_key.as_deref() == Some(front.as_str()) {
+                self.anon_key = self.newest_anonymous_key();
+            }
+            self.shown = None;
+        }
+    }
+
+    /// Whether the entry on the line has had its time.
+    ///
+    /// An `Info`'s window runs from when it was SHOWN, so one that waited its
+    /// turn is still readable for a full window. A `Warning`'s runs from when it
+    /// was POSTED, so one that waited behind a newer warning shows only the
+    /// retention it has left, and one that ran out while waiting never reaches
+    /// the line at all. A `Busy` and an `Error` have no dwell CLOCK: a busy
+    /// leaves when its final replaces it (or when the busy timeout upgrades it),
+    /// and an error when the next message arrives, which
+    /// [`Self::retire_showing_error`] does at the moment of arrival rather than
+    /// here.
+    fn front_dwell_elapsed(&self, key: &str, shown_at: Instant, now: Instant) -> bool {
+        let Some(entry) = self.entries.get(key) else {
+            return true;
+        };
+        if entry.sticky {
+            return false;
+        }
+        if self.anon_pinned && self.anon_key.as_deref() == Some(key) {
+            return false;
+        }
+        if self.clear_after.is_zero() {
+            // `status_clear_seconds = 0` means "never auto-clear", so there is no
+            // window for anything to wait out. An arrival already retires
+            // whatever it replaces (see [`Self::retire_replaced_by_arrival`]);
+            // this covers what is left behind a `Busy`, which an arrival does not
+            // touch: once that spinner has been replaced by its own final, or
+            // upgraded by the busy timeout, whatever queued behind it takes the
+            // line at the next tick rather than waiting out a window that does
+            // not exist.
+            return entry.tone != StatusTone::Busy && self.queue.len() > 1;
+        }
+        match (entry.tone, entry.tone.clear_windows()) {
+            (_, None) => false,
+            (StatusTone::Info, Some(_)) => now.duration_since(shown_at) >= self.clear_after,
+            (_, Some(windows)) => now.duration_since(entry.since) >= self.clear_after * windows,
+        }
     }
 
     /// Remove a keyed entry IFF the carried generation matches the stored one
@@ -618,7 +1117,13 @@ impl KeyedStatusController {
                 Some(g) => entry.generation == g,
             };
             if matches {
-                self.entries.swap_remove(key);
+                if self.retention == StatusRetention::Retain {
+                    // The queue must let go of the position too, wherever the
+                    // entry was in it: on the line, the line moves on.
+                    self.remove_queued(key);
+                } else {
+                    self.entries.swap_remove(key);
+                }
                 return true;
             }
         }
@@ -657,11 +1162,32 @@ impl KeyedStatusController {
         let mut changes = StatusTickChanges::default();
         self.tick_anonymous(now, busy_timeout, &mut changes);
         let actions = self.keyed_tick_actions(now, busy_timeout);
-        self.clear_keyed_finals(actions.clear, &mut changes);
+        let upgraded_keys: Vec<String> = actions
+            .upgrade
+            .iter()
+            .chain(actions.stalled.iter())
+            .cloned()
+            .collect();
         self.purge_keyed_finals(actions.purge, &mut changes);
         self.upgrade_keyed_busys(actions.upgrade, now, &mut changes);
         self.stall_keyed_busys(actions.stalled, now, &mut changes);
         self.heartbeat_keyed_busys(actions.heartbeat, now, &mut changes);
+        if self.retention == StatusRetention::Retain {
+            // A busy that timed out into a warning is a warning taking the line,
+            // so the infos queued behind it are as stale as they would be behind
+            // one that arrived saying it. Only when it IS the one on the line,
+            // though: a background operation timing out somewhere down the queue
+            // says nothing about the message the user is reading now.
+            if let Some(front) = self.queue.front().cloned()
+                && upgraded_keys.contains(&front)
+            {
+                self.drop_waiting_infos(&front);
+            }
+            // Last, so a busy the steps above upgraded into a warning is on the
+            // line with its own fresh retention rather than being judged on the
+            // instant the busy started.
+            self.advance(now, &mut changes);
+        }
 
         changes
     }
@@ -743,7 +1269,6 @@ impl KeyedStatusController {
         for (key, entry) in &self.entries {
             match self.keyed_tick_action(key, entry, now, busy_timeout) {
                 StatusTickAction::Keep => {}
-                StatusTickAction::Clear => actions.clear.push(key.clone()),
                 StatusTickAction::Purge => actions.purge.push(key.clone()),
                 StatusTickAction::Upgrade => actions.upgrade.push(key.clone()),
                 StatusTickAction::Stalled => actions.stalled.push(key.clone()),
@@ -760,6 +1285,11 @@ impl KeyedStatusController {
         now: Instant,
         busy_timeout: Duration,
     ) -> StatusTickAction {
+        // The pin exempts the unkeyed message it was taken on from every timer,
+        // the busy timeout included, wherever this controller stores it.
+        if self.anon_pinned && self.anon_key.as_deref() == Some(key) {
+            return StatusTickAction::Keep;
+        }
         let age = now.duration_since(entry.since);
         if entry.tone == StatusTone::Busy {
             // The ceiling is measured from `since` (when the operation started),
@@ -783,21 +1313,10 @@ impl KeyedStatusController {
                 StatusTickAction::Keep
             };
         }
-        if !entry.sticky
-            && !self.clear_after.is_zero()
-            && let Some(windows) = entry.tone.clear_windows()
-            && age >= self.clear_after * windows
-        {
-            return StatusTickAction::Clear;
-        }
+        // Under `Retain` a final leaves through the queue in [`Self::advance`],
+        // which is the only place that knows how long it has actually been on
+        // the line rather than merely how long ago it was posted.
         StatusTickAction::Keep
-    }
-
-    fn clear_keyed_finals(&mut self, keys: Vec<String>, changes: &mut StatusTickChanges) {
-        for key in keys {
-            self.entries.swap_remove(&key);
-            changes.cleared_keys.push(Some(key));
-        }
     }
 
     fn purge_keyed_finals(&mut self, keys: Vec<String>, changes: &mut StatusTickChanges) {
@@ -844,7 +1363,7 @@ impl KeyedStatusController {
     /// one back for re-broadcast.
     ///
     /// `since` is deliberately left alone: the operation started when it started,
-    /// and the spinner animation and the TUI's most-recent-wins ordering both
+    /// and the spinner animation and the web's most-recent-wins ordering both
     /// read it. Only `heartbeat` moves, which is the field the timeout measures.
     fn heartbeat_keyed_busys(
         &mut self,
@@ -858,7 +1377,7 @@ impl KeyedStatusController {
             };
             entry.heartbeat = now;
             changes.refreshed.push(KeyedWireStatus {
-                key: Some(key),
+                key: entry.key.clone(),
                 tone: entry.tone.as_wire().to_string(),
                 message: entry.message.clone(),
                 scope: entry.scope.clone(),
@@ -895,7 +1414,7 @@ impl KeyedStatusController {
         entry.heartbeat = now;
         entry.seq = seq;
         Some(KeyedWireStatus {
-            key: Some(key.to_string()),
+            key: entry.key.clone(),
             tone: StatusTone::Warning.as_wire().to_string(),
             message: entry.message.clone(),
             scope: entry.scope.clone(),
@@ -918,7 +1437,9 @@ impl KeyedStatusController {
         }
         for entry in self.entries.values() {
             out.push(KeyedWireStatus {
-                key: Some(entry.key.clone().unwrap_or_default()),
+                // `entry.key` and not the storage key: under `Retain` an unkeyed
+                // entry is stored under a synthetic id it must not report.
+                key: entry.key.clone(),
                 tone: entry.tone.as_wire().to_string(),
                 message: entry.message.clone(),
                 scope: entry.scope.clone(),
@@ -928,9 +1449,15 @@ impl KeyedStatusController {
         out
     }
 
-    /// Select the most-recently-set open status. Sequence numbers break ties
-    /// between entries written at the same instant.
+    /// The status on the line: the front of the queue under `Retain`, and the
+    /// most-recently-set open status under `Emit`, where sequence numbers break
+    /// ties between entries written at the same instant.
     fn most_recent_entry(&self) -> Option<&KeyedStatus> {
+        // Under `Retain` the TUI's single line is a QUEUE, so what is on it is
+        // the front of that queue, never simply the newest thing set.
+        if self.retention == StatusRetention::Retain {
+            return self.entries.get(self.queue.front()?);
+        }
         let anon_ref = self.anon.as_ref();
         let keyed_ref = self.entries.values().max_by_key(|e| (e.since, e.seq));
 
@@ -948,11 +1475,10 @@ impl KeyedStatusController {
         }
     }
 
-    /// The single line the TUI shows: the most-recently-set open status (keyed
-    /// or anonymous), or `None` when nothing is open.
-    ///
-    /// When two entries share the same `since` timestamp the one with the
-    /// higher sequence number wins (the later `set` call).
+    /// The one status on the line (keyed or anonymous), or `None` when nothing
+    /// is open. Under `Retain` that is the front of the queue; under `Emit` it
+    /// is the most-recently-set entry, and when two share the same `since`
+    /// timestamp the one with the higher sequence number wins.
     pub fn most_recent(&self) -> Option<KeyedWireStatus> {
         let winner = self.most_recent_entry()?;
 
@@ -969,12 +1495,11 @@ impl KeyedStatusController {
     /// with the exact given message. Used by deletion workers to guard against
     /// clobbering a newer status that replaced their Busy while they ran.
     pub fn anon_busy_matches(&self, message: &str) -> bool {
-        self.anon
-            .as_ref()
+        self.newest_anonymous()
             .is_some_and(|a| a.tone == StatusTone::Busy && a.message == message)
     }
 
-    /// TUI projection: the most-recently-set open status as a `(tone, text)`
+    /// TUI projection: the status on the line as a `(tone, text)`
     /// pair suitable for direct rendering. For `Busy` entries the braille
     /// spinner is prepended exactly as [`StatusLine::text()`] does, using the
     /// entry's `since` instant so the animation stays wall-clock based.
@@ -996,7 +1521,7 @@ impl KeyedStatusController {
     // projection used by TUI tests and existing call sites.
     // -----------------------------------------------------------------------
 
-    /// The tone of the most-recently-set open status, or `Info` when nothing
+    /// The tone of the status on the line, or `Info` when nothing
     /// is open (mirrors the previous `StatusLine::tone()` API).
     pub fn tone(&self) -> StatusTone {
         self.most_recent_tui()
@@ -1004,14 +1529,14 @@ impl KeyedStatusController {
             .unwrap_or(StatusTone::Info)
     }
 
-    /// The rendered text of the most-recently-set open status (spinner
+    /// The rendered text of the status on the line (spinner
     /// prepended for `Busy`), or an empty string when nothing is open.
     /// Mirrors the previous `StatusLine::text()` API.
     pub fn text(&self) -> String {
         self.most_recent_tui().map(|(_, t)| t).unwrap_or_default()
     }
 
-    /// The raw message of the most-recently-set open status without any
+    /// The raw message of the status on the line without any
     /// spinner prefix, or an empty string when nothing is open. Mirrors the
     /// previous `StatusLine::message()` API.
     pub fn message(&self) -> String {
@@ -1031,7 +1556,7 @@ impl KeyedStatusController {
 mod tests {
     use super::{
         BUSY_LIVE_CEILING, BUSY_TIMEOUT, FINAL_REPLAY_WINDOW, KeyedStatusController,
-        LiveStatusKeys, StatusTone,
+        LiveStatusKeys, MAX_QUEUED_STATUSES, StatusTone, WARNING_CLEAR_FACTOR,
     };
     use std::time::{Duration, Instant};
 
@@ -1130,10 +1655,10 @@ mod tests {
 
         let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
 
-        assert_eq!(
-            changes.cleared_keys,
-            vec![None, Some("clear-a".into()), Some("clear-b".into())]
-        );
+        // Nothing is retired: the two busies took the line ahead of the finals
+        // and their upgrades are warnings with fresh retention of their own, so
+        // no queued entry has had its turn yet.
+        assert!(changes.cleared_keys.is_empty(), "{changes:?}");
         assert_eq!(
             changes
                 .upgraded
@@ -1146,6 +1671,8 @@ mod tests {
         assert_eq!(c.entries["upgrade-a"].seq, 5);
         assert_eq!(c.entries["upgrade-b"].generation, super::Generation(6));
         assert_eq!(c.entries["upgrade-b"].seq, 6);
+        // The three infos behind the warnings are stale news and went with them.
+        assert_eq!(c.snapshot().len(), 2);
     }
 
     #[test]
@@ -1180,10 +1707,18 @@ mod tests {
             vec![None, Some("keyed")]
         );
         assert!(changes.upgraded.iter().all(|status| !status.sticky));
-        let anon = c.anon.as_ref().expect("anonymous upgrade");
+        // Under `Retain` an unkeyed entry is stored the same way a keyed one is
+        // so it can hold a queue position, so it is upgraded through the same
+        // path and clears its sticky flag as the keyed one does. The old
+        // anonymous slot kept the flag; that difference was an accident of
+        // having two upgrade paths, not something any surface asked for.
+        let anon = c
+            .newest_anonymous()
+            .cloned()
+            .expect("the anonymous upgrade is still stored");
         assert_eq!(anon.generation, super::Generation(2));
         assert_eq!(anon.seq, 2);
-        assert!(anon.sticky, "the anonymous stored entry keeps its flag");
+        assert!(!anon.sticky);
         let keyed = &c.entries["keyed"];
         assert_eq!(keyed.generation, super::Generation(3));
         assert_eq!(keyed.seq, 3);
@@ -1210,49 +1745,56 @@ mod tests {
         let t0 = Instant::now();
         let window = Duration::from_secs(6);
         let mut c = KeyedStatusController::with_clear_after(window);
+        // One tone at a time: the TUI's line is a queue now, so a warning and an
+        // error set together do not race each other's clocks, they take turns.
+        // Which one takes the line first is `the_newer_warning_shows_first...`.
         c.set(t0, None, StatusTone::Warning, "Already serving.");
-        c.set(
-            t0,
-            Some("push".into()),
-            StatusTone::Warning,
-            "Push is stale.",
-        );
-        c.set(t0, Some("pull".into()), StatusTone::Error, "Pull failed.");
 
         // One window in, a warning is still there: it outlives an info.
         let changes = c.tick(t0 + window, BUSY_TIMEOUT);
         assert!(changes.cleared_keys.is_empty(), "{changes:?}");
-        assert_eq!(c.snapshot().len(), 3);
+        assert_eq!(c.snapshot().len(), 1);
 
-        // A second short of three windows still keeps them.
+        // A second short of three windows still keeps it.
         let changes = c.tick(t0 + window * 3 - Duration::from_secs(1), BUSY_TIMEOUT);
         assert!(changes.cleared_keys.is_empty(), "{changes:?}");
-        assert_eq!(c.snapshot().len(), 3);
-
-        // At three windows both warnings go, announced, and the error stays.
-        let changes = c.tick(t0 + window * 3, BUSY_TIMEOUT);
-        assert!(changes.cleared_keys.contains(&None));
-        assert!(changes.cleared_keys.contains(&Some("push".to_string())));
-        assert_eq!(changes.cleared_keys.len(), 2);
-        let snap = c.snapshot();
-        assert_eq!(snap.len(), 1, "only the error survives: {snap:?}");
-        assert_eq!(snap[0].key.as_deref(), Some("pull"));
-
-        // And the error is still there an hour later.
-        let _ = c.tick(t0 + Duration::from_secs(3600), BUSY_TIMEOUT);
         assert_eq!(c.snapshot().len(), 1);
+
+        // At three windows it goes, announced.
+        let changes = c.tick(t0 + window * 3, BUSY_TIMEOUT);
+        assert_eq!(changes.cleared_keys, vec![None]);
+        assert!(c.snapshot().is_empty());
+
+        // An error takes the line and is still there an hour later.
+        c.set(
+            t0 + window * 3,
+            Some("pull".into()),
+            StatusTone::Error,
+            "Pull failed.",
+        );
+        let _ = c.tick(t0 + Duration::from_secs(3600), BUSY_TIMEOUT);
+        let snap = c.snapshot();
+        assert_eq!(snap.len(), 1, "an error waits for a replacement: {snap:?}");
+        assert_eq!(snap[0].key.as_deref(), Some("pull"));
     }
 
     #[test]
-    fn a_zero_window_keeps_warnings_too() {
+    fn a_zero_window_never_clears_on_a_timer() {
         // `status_clear_seconds = 0` means "never auto-clear", for every tone.
+        // What takes a message off the line at a zero window is the next message
+        // arriving, never a clock; see `a_zero_window_is_most_recent_wins_for_
+        // every_tone_but_busy`.
         let t0 = Instant::now();
         let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
         c.set(t0, None, StatusTone::Warning, "Already serving.");
-        c.set(t0, Some("save".into()), StatusTone::Info, "Saved.");
         let changes = c.tick(t0 + Duration::from_secs(3600), BUSY_TIMEOUT);
         assert!(changes.cleared_keys.is_empty(), "{changes:?}");
-        assert_eq!(c.snapshot().len(), 2);
+        assert_eq!(c.snapshot().len(), 1);
+
+        c.set(t0, Some("save".into()), StatusTone::Info, "Saved.");
+        let changes = c.tick(t0 + Duration::from_secs(7200), BUSY_TIMEOUT);
+        assert!(changes.cleared_keys.is_empty(), "{changes:?}");
+        assert_eq!(c.snapshot().len(), 1);
     }
 
     #[test]
@@ -1332,22 +1874,29 @@ mod tests {
         let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
         c.set(t0, None, StatusTone::Info, "Saved.");
         c.set(t0, Some("commit".into()), StatusTone::Info, "Committed.");
-        // A warning outlasts the info window; an error outlasts everything.
-        c.set(t0, Some("stale".into()), StatusTone::Warning, "Heads up.");
-        c.set(t0, Some("push".into()), StatusTone::Error, "Push error.");
+        // Two infos in one burst are both read now: they take the line in turn,
+        // each for its own full six-second window, rather than the second one
+        // overwriting the first before anybody saw it.
         let changes = c.tick(t0 + Duration::from_secs(6), Duration::from_secs(20));
-        // Both Info entries cleared; the warning and the error persist.
-        assert_eq!(changes.cleared_keys.len(), 2);
-        assert!(changes.cleared_keys.contains(&None));
-        assert!(changes.cleared_keys.contains(&Some("commit".to_string())));
-        assert_eq!(c.snapshot().len(), 2);
+        assert_eq!(changes.cleared_keys, vec![None]);
+        assert_eq!(c.message(), "Committed.");
+        let changes = c.tick(t0 + Duration::from_secs(12), Duration::from_secs(20));
+        assert_eq!(changes.cleared_keys, vec![Some("commit".to_string())]);
+        assert!(c.is_empty());
 
-        // The warning is still on the line at seventeen seconds and gone at
-        // eighteen, three times the six-second window.
-        let changes = c.tick(t0 + Duration::from_secs(17), Duration::from_secs(20));
+        // A warning outlasts the info window: still on the line at seventeen
+        // seconds and gone at eighteen, three times the six-second window.
+        let t1 = t0 + Duration::from_secs(12);
+        c.set(t1, Some("stale".into()), StatusTone::Warning, "Heads up.");
+        let changes = c.tick(t1 + Duration::from_secs(17), Duration::from_secs(20));
         assert!(changes.cleared_keys.is_empty(), "{changes:?}");
-        let changes = c.tick(t0 + Duration::from_secs(18), Duration::from_secs(20));
+        let changes = c.tick(t1 + Duration::from_secs(18), Duration::from_secs(20));
         assert_eq!(changes.cleared_keys, vec![Some("stale".to_string())]);
+
+        // An error outlasts everything.
+        let t2 = t1 + Duration::from_secs(18);
+        c.set(t2, Some("push".into()), StatusTone::Error, "Push error.");
+        let _ = c.tick(t2 + Duration::from_secs(3600), Duration::from_secs(20));
         assert_eq!(c.snapshot().len(), 1);
         assert_eq!(c.snapshot()[0].key.as_deref(), Some("push"));
     }
@@ -1411,6 +1960,11 @@ mod tests {
             vec![None],
             "after a new set the pin is gone and auto-clear must fire"
         );
+        // The message that released the pin was queued behind it rather than
+        // overwriting it, so it takes the line next and gets its own window.
+        assert_eq!(c.message(), "Saved.");
+        let changes = c.tick(t0 + Duration::from_secs(3613), Duration::from_secs(20));
+        assert_eq!(changes.cleared_keys, vec![None]);
         assert!(c.most_recent().is_none());
     }
 
@@ -1828,6 +2382,14 @@ mod tests {
         let t0 = Instant::now();
         let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
         c.set(t0, Some("ordinary".into()), T::Error, "Push failed.");
+        // Read before the sticky one arrives: an arriving message retires the
+        // ordinary error it replaces on the line, which is what `sticky` exempts
+        // the other one from.
+        let ordinary = c
+            .snapshot()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("ordinary"))
+            .expect("ordinary entry");
         c.set_scoped(
             t0,
             Some("halfdone".into()),
@@ -1837,10 +2399,6 @@ mod tests {
             true,
         );
         let snap = c.snapshot();
-        let ordinary = snap
-            .iter()
-            .find(|e| e.key.as_deref() == Some("ordinary"))
-            .expect("ordinary entry");
         let halfdone = snap
             .iter()
             .find(|e| e.key.as_deref() == Some("halfdone"))
@@ -1930,6 +2488,665 @@ mod tests {
             snap.len(),
             3,
             "every open status must appear in the snapshot"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The TUI's status queue (StatusRetention::Retain)
+    // -----------------------------------------------------------------------
+
+    /// The TUI's configured auto-clear window in these tests.
+    const WINDOW: Duration = Duration::from_secs(6);
+    const TICK: Duration = Duration::from_millis(1);
+
+    fn tui() -> KeyedStatusController {
+        KeyedStatusController::with_clear_after(WINDOW)
+    }
+
+    /// What the TUI's single line is showing right now, without the spinner.
+    fn line(c: &KeyedStatusController) -> Option<String> {
+        c.most_recent().map(|s| s.message)
+    }
+
+    fn run(c: &mut KeyedStatusController, at: Instant) -> Option<String> {
+        c.tick(at, BUSY_TIMEOUT);
+        line(c)
+    }
+
+    #[test]
+    fn queued_infos_are_shown_in_arrival_order_each_for_a_full_window() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "first");
+        c.set(t0, None, StatusTone::Info, "second");
+        c.set(t0, None, StatusTone::Info, "third");
+
+        assert_eq!(line(&c).as_deref(), Some("first"));
+        assert_eq!(run(&mut c, t0 + WINDOW - TICK).as_deref(), Some("first"));
+        // The second Info's own window starts when it is SHOWN, not when it was
+        // posted, so it is still up a whole window later.
+        assert_eq!(run(&mut c, t0 + WINDOW).as_deref(), Some("second"));
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * 2 - TICK).as_deref(),
+            Some("second")
+        );
+        assert_eq!(run(&mut c, t0 + WINDOW * 2).as_deref(), Some("third"));
+        assert_eq!(run(&mut c, t0 + WINDOW * 3).as_deref(), None);
+    }
+
+    #[test]
+    fn a_warning_pre_empts_and_drops_every_waiting_info() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "info a");
+        c.set(t0, None, StatusTone::Info, "info b");
+        c.set(t0, None, StatusTone::Warning, "careful");
+
+        assert_eq!(line(&c).as_deref(), Some("careful"));
+        // A warning keeps its three windows, and nothing stale follows it.
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR - TICK).as_deref(),
+            Some("careful")
+        );
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR).as_deref(),
+            None,
+            "the infos behind the warning are stale news and are dropped"
+        );
+    }
+
+    #[test]
+    fn a_warning_pre_empts_but_lets_a_later_info_have_the_line_after_it() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Warning, "careful");
+        c.set(t0, None, StatusTone::Info, "afterwards");
+
+        assert_eq!(line(&c).as_deref(), Some("careful"));
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR).as_deref(),
+            Some("afterwards")
+        );
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * (WARNING_CLEAR_FACTOR + 1)).as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_newer_warning_shows_first_and_the_older_follows_with_what_is_left() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, Some("older".into()), StatusTone::Warning, "older");
+        c.set(
+            t0 + Duration::from_secs(1),
+            Some("newer".into()),
+            StatusTone::Warning,
+            "newer",
+        );
+        assert_eq!(line(&c).as_deref(), Some("newer"));
+
+        // The newer one leaves early, so the older one takes the line with the
+        // retention it has left rather than a fresh three windows.
+        assert!(c.clear("newer", None));
+        assert_eq!(
+            run(&mut c, t0 + Duration::from_secs(2)).as_deref(),
+            Some("older")
+        );
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR - TICK).as_deref(),
+            Some("older")
+        );
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR).as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_queued_warning_that_expired_while_waiting_never_reaches_the_line() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, Some("older".into()), StatusTone::Warning, "older");
+        c.set(t0, Some("newer".into()), StatusTone::Error, "newer");
+        assert_eq!(line(&c).as_deref(), Some("newer"));
+
+        // An Error stays until it is replaced, so by the time it is cleared the
+        // warning behind it is long past its own retention.
+        assert!(c.clear("newer", None));
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR).as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_busy_is_shown_at_once_drops_nothing_and_its_final_replaces_it_in_place() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, Some("op".into()), StatusTone::Busy, "working");
+        c.set(t0, None, StatusTone::Info, "one");
+        c.set(t0, None, StatusTone::Info, "two");
+        assert_eq!(line(&c).as_deref(), Some("working"));
+
+        // A busy never leaves on a dwell clock, however long the waiters wait
+        // (and eighteen seconds is still inside the twenty-second busy timeout).
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR).as_deref(),
+            Some("working")
+        );
+
+        let done = t0 + WINDOW * WARNING_CLEAR_FACTOR;
+        c.set(done, Some("op".into()), StatusTone::Info, "finished");
+        assert_eq!(line(&c).as_deref(), Some("finished"));
+        assert_eq!(run(&mut c, done + WINDOW).as_deref(), Some("one"));
+        assert_eq!(run(&mut c, done + WINDOW * 2).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn a_same_key_replacement_never_changes_queue_position() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "showing");
+        c.set(t0, Some("k".into()), StatusTone::Info, "waiting");
+        c.set(t0, None, StatusTone::Info, "last");
+        c.set(t0, Some("k".into()), StatusTone::Info, "waiting, revised");
+
+        assert_eq!(line(&c).as_deref(), Some("showing"));
+        assert_eq!(
+            run(&mut c, t0 + WINDOW).as_deref(),
+            Some("waiting, revised")
+        );
+        assert_eq!(run(&mut c, t0 + WINDOW * 2).as_deref(), Some("last"));
+    }
+
+    #[test]
+    fn a_full_queue_drops_the_oldest_waiting_info_first() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "showing");
+        for i in 0..MAX_QUEUED_STATUSES {
+            c.set(t0, None, StatusTone::Info, format!("q{i}"));
+        }
+        // One more than the queue holds: the oldest waiter goes, not the newest.
+        c.set(t0, None, StatusTone::Info, "newest");
+
+        let mut seen = vec![line(&c).expect("a line")];
+        for step in 1..=MAX_QUEUED_STATUSES {
+            seen.push(run(&mut c, t0 + WINDOW * step as u32).expect("a line"));
+        }
+        let mut expected = vec!["showing".to_string()];
+        expected.extend((1..MAX_QUEUED_STATUSES).map(|i| format!("q{i}")));
+        expected.push("newest".to_string());
+        assert_eq!(seen, expected);
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * (MAX_QUEUED_STATUSES as u32 + 1)),
+            None
+        );
+    }
+
+    #[test]
+    fn clearing_a_key_removes_it_wherever_it_is_in_the_queue() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "showing");
+        c.set(t0, Some("k".into()), StatusTone::Info, "waiting");
+        c.set(t0, None, StatusTone::Info, "after");
+        assert!(c.clear("k", None));
+        assert_eq!(line(&c).as_deref(), Some("showing"));
+        assert_eq!(run(&mut c, t0 + WINDOW).as_deref(), Some("after"));
+
+        // And clearing the one ON the line moves the line straight on.
+        let mut c = tui();
+        c.set(t0, Some("k".into()), StatusTone::Busy, "working");
+        c.set(t0, None, StatusTone::Info, "behind");
+        assert!(c.clear("k", None));
+        assert_eq!(line(&c).as_deref(), Some("behind"));
+    }
+
+    #[test]
+    fn the_dwell_clock_is_the_instant_handed_in_and_nothing_else() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "first");
+        c.set(t0, None, StatusTone::Info, "second");
+        // Any number of ticks at the same instant never advance the queue.
+        for _ in 0..50 {
+            assert_eq!(run(&mut c, t0).as_deref(), Some("first"));
+        }
+        assert_eq!(run(&mut c, t0 + WINDOW).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn an_empty_anonymous_message_clears_the_line_rather_than_queueing() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(
+            t0,
+            None,
+            StatusTone::Warning,
+            "Project path not found: /gone",
+        );
+        c.pin();
+        c.set(t0, None, StatusTone::Info, "");
+        assert_eq!(line(&c), None, "an empty anonymous message clears the line");
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_anonymous_message_replaces_its_queued_copy() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "showing");
+        for _ in 0..20 {
+            c.set(
+                t0,
+                None,
+                StatusTone::Warning,
+                "Project path not found: /gone",
+            );
+        }
+        // The repeat is the same news, so it never stacks up behind itself.
+        assert_eq!(line(&c).as_deref(), Some("Project path not found: /gone"));
+        assert_eq!(
+            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR).as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_error_holds_the_line_only_until_the_next_message_arrives() {
+        let t0 = Instant::now();
+
+        // An unkeyed error is stored under an id nothing can ever write, so
+        // without the arrival rule one `set_error` would freeze the line for the
+        // session. Each tone in turn takes it away.
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Error, "it went wrong");
+        assert_eq!(
+            run(&mut c, t0 + Duration::from_secs(3600)).as_deref(),
+            Some("it went wrong"),
+            "an error waits for a replacement rather than a clock"
+        );
+        c.set(t0, None, StatusTone::Info, "and then this happened");
+        assert_eq!(line(&c).as_deref(), Some("and then this happened"));
+
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Error, "it went wrong");
+        c.set(t0, None, StatusTone::Warning, "careful");
+        assert_eq!(line(&c).as_deref(), Some("careful"));
+
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Error, "it went wrong");
+        c.set(t0, Some("op".into()), StatusTone::Busy, "working");
+        assert_eq!(line(&c).as_deref(), Some("working"));
+
+        // A warning queued behind an error is reachable again.
+        let mut c = tui();
+        c.set(t0, Some("w".into()), StatusTone::Warning, "queued warning");
+        c.set(t0, None, StatusTone::Error, "it went wrong");
+        assert_eq!(line(&c).as_deref(), Some("it went wrong"));
+        c.set(t0, Some("op".into()), StatusTone::Busy, "working");
+        assert_eq!(line(&c).as_deref(), Some("working"));
+        assert!(c.clear("op", None));
+        assert_eq!(
+            run(&mut c, t0).as_deref(),
+            Some("queued warning"),
+            "the warning the error was sitting on top of is readable again"
+        );
+    }
+
+    #[test]
+    fn every_info_after_an_error_is_read() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Error, "it went wrong");
+        // Ten messages arriving over ten windows, the way a working session
+        // produces them. Before the arrival rule the error swallowed all ten.
+        let mut seen = Vec::new();
+        for i in 0..10 {
+            let at = t0 + WINDOW * i;
+            c.set(at, None, StatusTone::Info, format!("step {i}"));
+            c.tick(at, BUSY_TIMEOUT);
+            seen.push(line(&c).expect("a line"));
+        }
+        let expected: Vec<String> = (0..10).map(|i| format!("step {i}")).collect();
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn an_error_is_replaced_by_the_next_message_at_a_zero_window_too() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
+        c.set(t0, None, StatusTone::Error, "it went wrong");
+        c.set(t0, None, StatusTone::Info, "and then this happened");
+        assert_eq!(line(&c).as_deref(), Some("and then this happened"));
+        assert_eq!(
+            run(&mut c, t0 + Duration::from_secs(3600)).as_deref(),
+            Some("and then this happened"),
+            "and nothing is left queued behind it"
+        );
+    }
+
+    #[test]
+    fn a_sticky_error_still_waits_for_the_user() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set_scoped(
+            t0,
+            None,
+            StatusTone::Error,
+            "half-done, and you must act",
+            super::StatusScope::All,
+            true,
+        );
+        c.set(t0, None, StatusTone::Info, "something else happened");
+        assert_eq!(
+            line(&c).as_deref(),
+            Some("half-done, and you must act"),
+            "sticky is the flag that says this one waits for a person"
+        );
+    }
+
+    /// The other half of the same guard: a PINNED unkeyed error is not retired
+    /// by an arrival either. The pin is how a producer says "this one is still
+    /// true and still needs acting on", and it is the only thing standing
+    /// between such a message and the next thing anybody says.
+    #[test]
+    fn a_pinned_error_is_not_retired_by_an_arrival() {
+        let t0 = Instant::now();
+        for window in [WINDOW, Duration::ZERO] {
+            let mut c = KeyedStatusController::with_clear_after(window);
+            c.set(t0, None, StatusTone::Error, "your config will not load");
+            c.pin();
+            c.set(t0, Some("other".into()), StatusTone::Info, "something else");
+            assert_eq!(
+                line(&c).as_deref(),
+                Some("your config will not load"),
+                "a pinned error waits for the user, at a {window:?} window"
+            );
+            assert_eq!(
+                run(&mut c, t0 + Duration::from_secs(3600)).as_deref(),
+                Some("your config will not load")
+            );
+        }
+    }
+
+    #[test]
+    fn clearing_one_unkeyed_message_by_generation_leaves_the_others_alone() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        let theirs = c.set(t0, None, StatusTone::Warning, "Restart dux to apply.");
+        c.pin();
+        let mine = c.set(t0, None, StatusTone::Warning, "Project path not found.");
+
+        // The second producer retires ITS OWN message and nothing else. Clearing
+        // "the unkeyed line" would have taken the restart warning with it, which
+        // is a message about something the user still has to do.
+        assert!(c.clear_anonymous_generation(mine));
+        assert_eq!(
+            line(&c).as_deref(),
+            Some("Restart dux to apply."),
+            "the other producer's warning is still on the line"
+        );
+        assert_eq!(
+            c.anon_generation(),
+            Some(theirs),
+            "and it is what the unkeyed slot names again"
+        );
+        assert!(
+            !c.clear_anonymous_generation(mine),
+            "a generation that is no longer there removes nothing"
+        );
+    }
+
+    #[test]
+    fn an_empty_unkeyed_message_retires_only_the_newest_unkeyed_entry() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Warning, "Restart dux to apply.");
+        c.set(t0, None, StatusTone::Info, "Saved.");
+        c.set(t0, None, StatusTone::Info, "");
+        assert_eq!(
+            line(&c).as_deref(),
+            Some("Restart dux to apply."),
+            "one producer's retraction is not a claim about every other one's"
+        );
+    }
+
+    #[test]
+    fn a_background_busy_timing_out_leaves_the_queue_behind_the_line_alone() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(
+            t0,
+            Some("background".into()),
+            StatusTone::Busy,
+            "background",
+        );
+        c.set(t0, None, StatusTone::Info, "still worth reading");
+        // A newer busy takes the line, so the timing-out one is not on it.
+        let later = t0 + BUSY_TIMEOUT - Duration::from_secs(1);
+        c.set(
+            later,
+            Some("foreground".into()),
+            StatusTone::Busy,
+            "in front",
+        );
+
+        let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
+        assert_eq!(changes.upgraded.len(), 1, "{changes:?}");
+        assert_eq!(line(&c).as_deref(), Some("in front"));
+        assert!(c.clear("foreground", None));
+        assert_eq!(
+            run(&mut c, t0 + BUSY_TIMEOUT).as_deref(),
+            Some("timed out — check dux.log"),
+            "the upgraded warning takes the line it was queued for"
+        );
+        // And the info is still there: a background operation going quiet says
+        // nothing about whether an unrelated message is still worth reading.
+        assert!(c.clear("background", None));
+        assert_eq!(
+            run(&mut c, t0 + BUSY_TIMEOUT).as_deref(),
+            Some("still worth reading")
+        );
+    }
+
+    #[test]
+    fn a_full_queue_of_warnings_drops_the_oldest_of_them() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        for i in 1..=8 {
+            c.set(
+                t0,
+                Some(format!("w{i}")),
+                StatusTone::Warning,
+                format!("w{i}"),
+            );
+        }
+        // Warnings pre-empt, so they stack newest-first: evicting by POSITION
+        // would take the second newest and keep the oldest backlog.
+        let held: Vec<String> = c.snapshot().into_iter().map(|s| s.message).collect();
+        assert_eq!(held.len(), MAX_QUEUED_STATUSES + 1);
+        assert!(!held.contains(&"w1".to_string()), "{held:?}");
+        assert!(!held.contains(&"w2".to_string()), "{held:?}");
+        for kept in 3..=8 {
+            assert!(held.contains(&format!("w{kept}")), "{held:?}");
+        }
+    }
+
+    #[test]
+    fn a_busy_arriving_while_infos_wait_drops_none_of_them() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "one");
+        c.set(t0, None, StatusTone::Info, "two");
+        c.set(t0, None, StatusTone::Info, "three");
+        c.set(t0, Some("op".into()), StatusTone::Busy, "working");
+        assert_eq!(line(&c).as_deref(), Some("working"));
+
+        // The busy is live state, not an outcome: it says nothing about whether
+        // what is queued behind it is still worth reading.
+        assert!(c.clear("op", None));
+        let mut seen = vec![run(&mut c, t0).expect("a line")];
+        seen.push(run(&mut c, t0 + WINDOW).expect("a line"));
+        seen.push(run(&mut c, t0 + WINDOW * 2).expect("a line"));
+        assert_eq!(seen, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn a_duplicate_set_never_moves_a_queued_key_to_the_back() {
+        let t0 = Instant::now();
+        let mut c = tui();
+        c.set(t0, None, StatusTone::Info, "showing");
+        c.set(t0, Some("middle".into()), StatusTone::Info, "middle");
+        c.set(t0, None, StatusTone::Info, "last");
+        // Re-setting the middle entry must not send it behind "last".
+        c.set(t0, Some("middle".into()), StatusTone::Info, "middle");
+        assert_eq!(run(&mut c, t0 + WINDOW).as_deref(), Some("middle"));
+        assert_eq!(run(&mut c, t0 + WINDOW * 2).as_deref(), Some("last"));
+
+        // And the same at the front, where a re-queue would put the busy behind
+        // the infos it is meant to be running in front of.
+        let mut c = tui();
+        c.set(t0, Some("op".into()), StatusTone::Busy, "working");
+        c.set(t0, None, StatusTone::Info, "waiting");
+        c.set(t0, Some("op".into()), StatusTone::Busy, "working, still");
+        assert_eq!(line(&c).as_deref(), Some("working, still"));
+    }
+
+    #[test]
+    fn retiring_the_newest_busy_takes_a_keyed_spinner_down() {
+        let t0 = Instant::now();
+        let live = LiveStatusKeys::default();
+        let mut c = tui().with_live_keys(live.clone());
+        c.set(t0, None, StatusTone::Info, "queued behind it");
+        live.register("op");
+        c.set(t0, Some("op".into()), StatusTone::Busy, "working");
+
+        assert!(c.retire_newest_busy());
+        assert!(!live.is_live("op"), "the operation is over, so is its key");
+        assert_eq!(line(&c).as_deref(), Some("queued behind it"));
+        assert!(
+            !c.retire_newest_busy(),
+            "an info on the line is not a spinner to take down"
+        );
+    }
+
+    /// The spinner that most needs taking down is exactly the one that is NOT on
+    /// the line: work that ran long enough for a warning to arrive over it, and
+    /// then ended with nothing to say. A front-only retirement leaves it for the
+    /// busy timeout to call timed out, which it was not.
+    #[test]
+    fn a_spinner_pushed_off_the_line_by_a_warning_is_still_retired() {
+        let t0 = Instant::now();
+        let live = LiveStatusKeys::default();
+        let mut c = tui().with_live_keys(live.clone());
+        live.register("launch");
+        c.set(
+            t0,
+            Some("launch".into()),
+            StatusTone::Busy,
+            "Launching\u{2026}",
+        );
+        c.set(t0, None, StatusTone::Warning, "something else went wrong");
+        assert_eq!(line(&c).as_deref(), Some("something else went wrong"));
+
+        assert!(c.retire_newest_busy(), "the spinner is behind the warning");
+        assert!(!live.is_live("launch"));
+        assert_eq!(
+            line(&c).as_deref(),
+            Some("something else went wrong"),
+            "and the warning keeps the line it took"
+        );
+
+        // Nothing is left to time out into a false "timed out".
+        let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
+        assert!(changes.upgraded.is_empty(), "{changes:?}");
+    }
+
+    #[test]
+    fn a_zero_window_is_most_recent_wins_for_every_tone_but_busy() {
+        let t0 = Instant::now();
+
+        // Auto-clear off means no window to wait out, so queueing would freeze
+        // the line for the life of the process. Every tone yields to the next
+        // message instead, which is the "until the next one" the setting
+        // promises. A warning was the one that froze: it has a window, so the
+        // info rule did not cover it, and nothing else retired it either.
+        for held in [StatusTone::Info, StatusTone::Warning, StatusTone::Error] {
+            let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
+            c.set(t0, None, held, "first");
+            c.set(t0, None, StatusTone::Info, "second");
+            assert_eq!(
+                line(&c).as_deref(),
+                Some("second"),
+                "a {held:?} must not hold the line at a zero window"
+            );
+            assert_eq!(
+                c.snapshot().len(),
+                1,
+                "and nothing is left queued: {:?}",
+                c.snapshot()
+            );
+        }
+
+        // Ten more messages after a warning are all read, none evicted unseen.
+        let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
+        c.set(t0, None, StatusTone::Warning, "Already serving.");
+        for i in 0..10 {
+            c.set(t0, None, StatusTone::Info, format!("step {i}"));
+            assert_eq!(line(&c).as_deref(), Some(format!("step {i}").as_str()));
+        }
+    }
+
+    /// The exception, and it is deliberate: a spinner is live state rather than
+    /// an outcome, so at a zero window an arrival queues behind it and waits for
+    /// the operation's own final. Whatever queued behind then takes the line as
+    /// soon as that final lands, with no window to wait out.
+    #[test]
+    fn a_zero_window_still_lets_a_live_busy_keep_the_line_until_its_final() {
+        let t0 = Instant::now();
+        let live = LiveStatusKeys::default();
+        let mut c =
+            KeyedStatusController::with_clear_after(Duration::ZERO).with_live_keys(live.clone());
+        live.register("op");
+        c.set(t0, Some("op".into()), StatusTone::Busy, "working");
+        c.set(t0, None, StatusTone::Info, "meanwhile");
+        assert_eq!(line(&c).as_deref(), Some("working"));
+        // Well past the busy timeout, so this is the liveness heartbeat holding
+        // the spinner rather than the timeout simply not having come due.
+        assert_eq!(
+            run(&mut c, t0 + BUSY_TIMEOUT * 3).as_deref(),
+            Some("working"),
+            "a registered operation keeps its spinner however long it runs"
+        );
+
+        c.set(t0, Some("op".into()), StatusTone::Info, "finished");
+        assert_eq!(line(&c).as_deref(), Some("finished"));
+        assert_eq!(
+            run(&mut c, t0).as_deref(),
+            Some("meanwhile"),
+            "and what waited behind it takes the line with no window to wait out"
+        );
+    }
+
+    #[test]
+    fn the_web_emit_path_is_untouched_by_the_queue() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals();
+        c.set(t0, None, StatusTone::Info, "first");
+        c.set(t0, None, StatusTone::Info, "second");
+        assert_eq!(
+            c.most_recent().map(|s| s.message).as_deref(),
+            Some("second"),
+            "the web stacks and dismisses; it must stay most-recent-wins"
+        );
+        c.set(t0, Some("k".into()), StatusTone::Warning, "careful");
+        assert_eq!(
+            c.snapshot().len(),
+            2,
+            "a warning must drop nothing on the web"
         );
     }
 }

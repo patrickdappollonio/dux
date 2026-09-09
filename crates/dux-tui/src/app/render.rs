@@ -12704,6 +12704,63 @@ mod tests {
             .collect()
     }
 
+    /// Two messages posted between one pair of frames are BOTH readable: the
+    /// footer shows the first for its whole window and the second afterwards.
+    /// Before the status line became a queue the second overwrote the first and
+    /// nobody ever saw it.
+    #[test]
+    fn two_infos_in_one_tick_are_read_one_after_the_other_on_the_footer() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let window = Duration::from_secs(6);
+        let mut app = test_app(default_bindings());
+        app.status.set_clear_after(window);
+        app.set_info("the first thing that happened");
+        app.set_info("the second thing that happened");
+
+        let footer_text = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let buffer = terminal.backend().buffer().clone();
+            let width = buffer.area.width as usize;
+            buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol().to_string())
+                .collect::<Vec<_>>()
+                .chunks(width)
+                .map(|row| row.concat())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let screen = footer_text(&mut app);
+        assert!(
+            screen.contains("the first thing that happened"),
+            "the first message takes the line:\n{screen}"
+        );
+        assert!(
+            !screen.contains("the second thing that happened"),
+            "and the second waits its turn rather than replacing it:\n{screen}"
+        );
+
+        let now = Instant::now();
+        app.status
+            .tick(now + window, dux_core::statusline::BUSY_TIMEOUT);
+        let screen = footer_text(&mut app);
+        assert!(
+            screen.contains("the second thing that happened"),
+            "one window on, the second message has the line:\n{screen}"
+        );
+        assert!(
+            !screen.contains("the first thing that happened"),
+            "and the first is gone:\n{screen}"
+        );
+    }
+
     /// The chooser's footer names whichever key actually reaches dux from the
     /// state it is in: the bare letter while the list is being walked, the
     /// chord once the filter owns the letters.

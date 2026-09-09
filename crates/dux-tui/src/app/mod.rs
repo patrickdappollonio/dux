@@ -79,6 +79,16 @@ pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
 /// Maximum agent-passthrough bytes written to the host terminal per tick. A larger
 /// burst is split, with the remainder carried to the next tick, so one oversized
 /// forward can never stall the single-threaded run loop on a blocking `write_all`.
+/// Status key shared by every hint that describes what the interface is doing
+/// right now (a chrome toggle's new state, the palette opening, a redraw). One
+/// key, because there is only one current state to describe: see
+/// [`App::set_ui_hint`].
+pub(crate) const UI_HINT_KEY: &str = "tui-ui-hint";
+
+/// Status key for the instruction an open modal puts on the line. See
+/// [`App::set_prompt_hint`].
+pub(crate) const PROMPT_HINT_KEY: &str = "tui-prompt-hint";
+
 const HOST_FORWARD_MAX_PER_TICK: usize = 32 * 1024;
 
 /// Minimum interval between logged host-forward write failures, so a persistently
@@ -4084,6 +4094,11 @@ impl App {
         self.reconcile_scroll_mode();
         self.announce_slow_changed_files_read(Instant::now());
         self.announce_slow_diff(Instant::now());
+        // The backstop for the modal instruction: whichever way a prompt closed,
+        // its sentence is about something no longer on screen by now.
+        if matches!(self.prompt, PromptState::None) {
+            self.clear_prompt_hint();
+        }
         self.status.tick(Instant::now(), BUSY_TIMEOUT);
     }
 
@@ -4333,6 +4348,9 @@ impl App {
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
+        // Whatever layer this closes, an instruction describing an open modal is
+        // no longer describing anything on screen.
+        self.clear_prompt_hint();
         // The agent-list filter is the top-most dismissible layer on the Left pane.
         // Esc clears the query and restores the full list without activating a row,
         // routed here so filter dismissal stays uniform with prompt dismissal.
@@ -4554,6 +4572,58 @@ impl App {
             .set(Instant::now(), None, StatusTone::Info, message);
     }
 
+    /// Put a HINT on the status line: a sentence describing the state a toggle
+    /// has just put the interface into, or how to drive what is now on screen.
+    ///
+    /// Deliberately keyed, and all of them under one key. A hint is not news: it
+    /// is an answer to "what is the interface doing right now", and there is only
+    /// ever one current answer. Unkeyed, three chrome toggles in a row would
+    /// queue three descriptions of a state that only the last of them still
+    /// describes, and the user would read two wrong ones first. On one key the
+    /// newer hint replaces the older in place, keeping the position it already
+    /// holds on the line.
+    pub(crate) fn set_ui_hint(&mut self, message: impl Into<String>) {
+        self.status.set(
+            Instant::now(),
+            Some(UI_HINT_KEY.to_string()),
+            StatusTone::Info,
+            message,
+        );
+    }
+
+    /// The same slot, for a hint that has to warn: the toggle worked but left
+    /// the user somewhere they need to know about.
+    pub(crate) fn set_ui_hint_warning(&mut self, message: impl Into<String>) {
+        self.status.set(
+            Instant::now(),
+            Some(UI_HINT_KEY.to_string()),
+            StatusTone::Warning,
+            message,
+        );
+    }
+
+    /// Put the instruction for the modal that is now open on the status line.
+    ///
+    /// Keyed for the same reason a chrome hint is, and cleared rather than left
+    /// to expire: this sentence is about the prompt in front of you, so once the
+    /// prompt is gone it is describing something that is not on screen, and a
+    /// line still holding it is a line the prompt's own outcome is queued behind.
+    pub(crate) fn set_prompt_hint(&mut self, message: impl Into<String>) {
+        self.status.set(
+            Instant::now(),
+            Some(PROMPT_HINT_KEY.to_string()),
+            StatusTone::Info,
+            message,
+        );
+    }
+
+    /// Retire the open modal's instruction. Called from every close, confirm and
+    /// cancel alike, and from the run loop's maintenance pass as the backstop for
+    /// any close path that forgets.
+    pub(crate) fn clear_prompt_hint(&mut self) {
+        self.status.clear(PROMPT_HINT_KEY, None);
+    }
+
     /// Open one address in the user's browser, off the interface thread.
     ///
     /// The launcher is another process and may take a moment (or a lock, or a
@@ -4652,11 +4722,12 @@ impl App {
         // move, so a tone check ("the line holds a warning") also matched the
         // pinned restart and theme warnings, and a move in the agent list wiped
         // a message the user still had to act on. The generation names the exact
-        // message, so a slot somebody else has since written is left alone.
-        if let Some(generation) = self.missing_project_warning_gen.take()
-            && self.status.anon_generation() == Some(generation)
-        {
-            self.set_info(String::new());
+        // message, and the controller removes that message wherever it is: asking
+        // whether it is the NEWEST unkeyed one and then clearing "the unkeyed
+        // line" is two guesses, and on a queued line the second one takes another
+        // producer's standing warning with it.
+        if let Some(generation) = self.missing_project_warning_gen.take() {
+            self.status.clear_anonymous_generation(generation);
         }
     }
 
@@ -8755,6 +8826,11 @@ leading_branch = "main"
             .keys
             .bindings
             .insert("focus_next".to_string(), vec!["ctrl-o".to_string()]);
+        // The first reload's warning is a real warning about the user's config,
+        // not a hint, so the queue is right to still be showing it and the
+        // pre-clear stays: it is how "the second reload said nothing" can be
+        // asserted at all.
+        app.set_info(String::new());
         app.set_info("nothing to report");
         app.apply_reloaded_config(config)
             .expect("apply reloaded config again");
@@ -8992,6 +9068,61 @@ mod pinned_warning_tests {
 
     const WINDOW: Duration = Duration::from_secs(6);
 
+    /// The helper retires ITS OWN message and nobody else's. It runs on every
+    /// selection move, so "clear the unkeyed line" is far too broad a gesture
+    /// for it: another producer's standing warning about something the user
+    /// still has to do would go with it every time they pressed Down.
+    #[test]
+    fn retiring_the_missing_project_warning_leaves_another_producers_warning_alone() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.status.set_clear_after(WINDOW);
+        app.engine.projects[0].path_missing = true;
+        let elsewhere = standalone_row(&mut app);
+        let missing_row = missing_project_row(&mut app);
+
+        app.set_pinned_warning("Restart dux to apply the new settings.");
+        app.select_left_agent_item(missing_row);
+        app.select_left_agent_item(elsewhere);
+
+        let message = app.status.message();
+        assert!(
+            message.contains("Restart dux to apply"),
+            "the other producer's warning must still be on the line: {message}"
+        );
+    }
+
+    /// And it retires its own message wherever that message has ended up. Asking
+    /// "is mine the newest unkeyed one" and then clearing the unkeyed line is two
+    /// guesses: the moment somebody else writes, the first guess says no, the
+    /// clear never runs, and a warning about a project the user is no longer
+    /// looking at stays queued.
+    #[test]
+    fn the_missing_project_warning_is_retired_even_once_another_message_has_arrived() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.status.set_clear_after(WINDOW);
+        app.engine.projects[0].path_missing = true;
+        let elsewhere = standalone_row(&mut app);
+        let missing_row = missing_project_row(&mut app);
+
+        app.select_left_agent_item(missing_row);
+        app.set_info("Something else happened.");
+        app.select_left_agent_item(elsewhere);
+
+        let message = app.status.message();
+        assert!(
+            !message.contains("Project path not found"),
+            "the warning is about a row the user has left: {message}"
+        );
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .all(|entry| !entry.message.contains("Project path not found")),
+            "and it is not queued behind anything either: {:?}",
+            app.status.snapshot()
+        );
+    }
+
     /// A warning that stays true for as long as the user leaves a row selected
     /// is not a transient: the row is still there, so the reason is too. And
     /// moving off the row is what retires it, through the real selection path.
@@ -9029,9 +9160,12 @@ mod pinned_warning_tests {
         // Moving to a row with no missing project is what retires it, and the
         // move goes through the same path a Down key takes.
         app.select_left_agent_item(elsewhere);
+        // The empty message the clear writes now empties the line outright
+        // rather than leaving an empty entry sitting on it: with a queue behind
+        // the line, an empty message is a clear and not a thing to read.
         assert_eq!(
             app.status.most_recent_tui().map(|(_, message)| message),
-            Some(String::new()),
+            None,
             "leaving the row must clear the warning"
         );
     }

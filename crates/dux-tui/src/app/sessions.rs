@@ -1383,7 +1383,7 @@ impl App {
             selected,
             mode: ChangeAgentProviderMode::NewTab,
         });
-        self.set_info(
+        self.set_prompt_hint(
             "Choose a provider for the new tab. It starts fresh; a new tab does not resume a prior conversation.",
         );
         Ok(())
@@ -2387,7 +2387,7 @@ impl App {
             selected: 0,
             mode: ChangeAgentProviderMode::Retarget,
         });
-        self.set_info(
+        self.set_prompt_hint(
             "Choose a provider for this worktree. The change takes effect on the next launch; dux resumes each provider's prior session on this worktree when available.",
         );
         Ok(())
@@ -2398,6 +2398,10 @@ impl App {
             PromptState::ChangeAgentProvider(prompt) => prompt.clone(),
             _ => return Ok(()),
         };
+        // The picker's instruction goes with the picker, so the outcome below
+        // takes the line rather than queueing behind a sentence about a modal
+        // the user just confirmed.
+        self.clear_prompt_hint();
         let Some(selected) = prompt.options.get(prompt.selected).cloned() else {
             self.prompt = PromptState::None;
             self.set_error("Select a provider first.");
@@ -2538,7 +2542,7 @@ impl App {
             options,
             selected,
         });
-        self.set_info(
+        self.set_prompt_hint(
             "Choose the global default provider for newly created agent sessions. Projects with an explicit project provider keep their override, and existing agents keep their current provider.",
         );
         Ok(())
@@ -2574,7 +2578,7 @@ impl App {
                 options,
                 selected,
             });
-        self.set_info(
+        self.set_prompt_hint(
             "Choose the selected project's default provider for future agents. Choose \"inherit global default\" to remove a project-specific override. Existing agents keep their current provider.",
         );
         Ok(())
@@ -2585,6 +2589,7 @@ impl App {
             PromptState::ChangeDefaultProvider(prompt) => prompt.clone(),
             _ => return Ok(()),
         };
+        self.clear_prompt_hint();
         let Some(selected) = prompt.options.get(prompt.selected).cloned() else {
             self.prompt = PromptState::None;
             self.set_error("Select a provider first.");
@@ -2625,6 +2630,7 @@ impl App {
             PromptState::ChangeProjectDefaultProvider(prompt) => prompt.clone(),
             _ => return Ok(()),
         };
+        self.clear_prompt_hint();
         let Some(selected) = prompt.options.get(prompt.selected).cloned() else {
             self.prompt = PromptState::None;
             self.set_error("Select a provider first.");
@@ -3935,7 +3941,7 @@ impl App {
             editors,
             selected,
         };
-        self.set_info("Choose an editor and press Enter to open the selected worktree.");
+        self.set_prompt_hint("Choose an editor and press Enter to open the selected worktree.");
         Ok(())
     }
 

@@ -247,8 +247,14 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         )),
         fullscreen_overlay: FullscreenOverlay::None,
         startup_log_viewer: None,
-        status: KeyedStatusController::with_clear_after(std::time::Duration::ZERO)
-            .with_live_keys(app_live_status_keys),
+        // The production default from `ui.status_clear_seconds`, deliberately
+        // NOT zero: zero switches the status line out of its queue and into
+        // most-recent-wins, so a test app built that way exercises a path almost
+        // no user runs and would let a queueing bug through untouched.
+        status: KeyedStatusController::with_clear_after(std::time::Duration::from_secs(
+            dux_core::config::Config::default().ui.status_clear_seconds as u64,
+        ))
+        .with_live_keys(app_live_status_keys),
         missing_project_warning_gen: None,
         prompt: PromptState::None,
         input_target: InputTarget::None,

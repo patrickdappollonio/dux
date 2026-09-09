@@ -1409,17 +1409,19 @@ impl App {
                 // The session vanished between dispatch and launch. Resolve any
                 // open reconnect busy so its spinner doesn't linger (a create
                 // launch never reaches SessionMissing — it commits unconditionally
-                // — so only the reconnect op needs clearing here), then clear a
-                // still-showing anon launch busy as a final fallback.
+                // — so only the reconnect op needs clearing here), then take down
+                // whatever launch spinner is still ON THE LINE as a final
+                // fallback. Writing an empty message used to do that job and no
+                // longer can: the line is a queue, so an empty unkeyed message
+                // retires an unkeyed entry and leaves a keyed spinner up until
+                // the busy timeout calls it timed out, which it was not.
                 if let Some(op) = self.pending_reconnect_ops.remove(&outcome.session.id) {
                     self.apply_reaction(
                         op.resolve(&dux_core::engine::LaunchOutcome::Missing)
                             .into_reaction(),
                     );
                 }
-                if matches!(self.status.most_recent_tui(), Some((StatusTone::Busy, _))) {
-                    self.set_info(String::new());
-                }
+                self.status.retire_newest_busy();
             }
             AgentLaunchReadyView::Reconnect { status_message } => {
                 self.show_agent_surface();
@@ -1568,10 +1570,12 @@ impl App {
             dux_core::engine::Final::Message { tone, text, .. } => {
                 self.status.set(std::time::Instant::now(), None, tone, text);
             }
+            // Nothing to say, so the only job left is taking the spinner down.
+            // The line is a queue, so this must retire the busy that is actually
+            // on it: an empty unkeyed message would leave a KEYED spinner up
+            // until the busy timeout mislabelled it as timed out.
             dux_core::engine::Final::Clear => {
-                if matches!(self.status.most_recent_tui(), Some((StatusTone::Busy, _))) {
-                    self.set_info(String::new());
-                }
+                self.status.retire_newest_busy();
             }
         }
     }
@@ -2905,6 +2909,33 @@ mod tests {
         assert!(
             failure.contains("leading branch \"main\" no longer exists locally"),
             "creation fails on the real problem instead: {failure}"
+        );
+    }
+
+    /// A launch that ends with nothing to say still has to take its spinner
+    /// down, and the spinner it has to take down is usually KEYED. Writing an
+    /// empty unkeyed message did that back when the line was most-recent-wins;
+    /// against a keyed busy on a queued line it does nothing at all, and the
+    /// spinner sits there until the busy timeout calls it timed out, which it
+    /// was not.
+    #[test]
+    fn a_launch_with_nothing_to_say_takes_the_keyed_spinner_down() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.status.set(
+            std::time::Instant::now(),
+            Some("reconnect:session-1".to_string()),
+            StatusTone::Busy,
+            "Reconnecting\u{2026}",
+        );
+        assert_eq!(app.status.tone(), StatusTone::Busy);
+
+        app.resolve_reconnect_op_or("session-1", dux_core::engine::LaunchOutcome::Missing);
+
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "the spinner must be gone, not waiting on the busy timeout: {:?}",
+            app.status.most_recent_tui()
         );
     }
 }

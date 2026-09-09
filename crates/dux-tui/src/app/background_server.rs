@@ -501,7 +501,7 @@ impl App {
             selected,
             serving,
         });
-        self.set_info(if serving {
+        self.set_prompt_hint(if serving {
             "Choose whether dux binds your Tailscale address. The choice is saved to config.toml \
              and applied to the listener that is serving right now."
                 .to_string()
@@ -522,6 +522,9 @@ impl App {
             _ => return,
         };
         self.prompt = PromptState::None;
+        // The picker's instruction goes with the picker, so the outcome below
+        // takes the line rather than queueing behind it.
+        self.clear_prompt_hint();
         let Some(mode) = picked else {
             self.set_error("Choose a Tailscale mode first.".to_string());
             return;
@@ -2030,6 +2033,54 @@ pub(crate) mod tests {
             tailscale_status(&app).contains("the next time a listener starts"),
             "with nothing serving the picker must say the choice is for next time: {}",
             tailscale_status(&app)
+        );
+    }
+
+    /// A chrome toggle's message describes the state the interface is in NOW,
+    /// and there is only ever one current state to describe. Unkeyed, flipping a
+    /// toggle twice would queue two descriptions and make the user read the
+    /// superseded one first; on one key the newer replaces the older in place.
+    #[test]
+    fn chrome_hints_replace_each_other_rather_than_queueing_up() {
+        let mut app = test_app(default_bindings());
+        app.toggle_always_show_tab_strip();
+        app.toggle_always_show_tab_strip();
+
+        let message = app.status.message();
+        assert!(
+            message.contains("Always-show tab strip disabled"),
+            "the line describes the state the second toggle left: {message}"
+        );
+        app.status.tick(
+            std::time::Instant::now() + std::time::Duration::from_secs(3600),
+            dux_core::statusline::BUSY_TIMEOUT,
+        );
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "and the superseded description is not queued behind it: {:?}",
+            app.status.most_recent_tui()
+        );
+    }
+
+    /// A modal's instruction is not news, it is a description of the modal in
+    /// front of you, so it leaves with the modal. Left to expire on its own it
+    /// would hold the line for a whole window and the outcome of the very act it
+    /// was describing would queue behind it.
+    #[test]
+    fn a_modal_instruction_leaves_the_line_when_the_modal_closes() {
+        let mut app = test_app(default_bindings());
+        app.open_set_tailscale_mode_prompt();
+        assert!(
+            app.status.message().contains("Choose whether dux binds"),
+            "the picker explains itself while it is open: {}",
+            app.status.message()
+        );
+
+        app.close_top_overlay();
+        assert!(
+            !app.status.message().contains("Choose whether dux binds"),
+            "a sentence about a closed modal is not on the line: {}",
+            app.status.message()
         );
     }
 

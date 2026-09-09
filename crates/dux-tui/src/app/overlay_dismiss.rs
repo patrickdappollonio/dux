@@ -222,6 +222,11 @@ impl App {
         // A press cannot outlive the modal it was made in.
         self.pressed_button = None;
 
+        // Nor can the modal's own instruction, which describes a thing that is
+        // about to stop being on screen. This sets no status of its own (see
+        // above); it retires one the modal itself put up.
+        self.clear_prompt_hint();
+
         match &self.prompt {
             PromptState::None => return false,
 

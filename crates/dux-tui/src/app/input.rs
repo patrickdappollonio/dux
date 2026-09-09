@@ -1078,13 +1078,13 @@ impl App {
         if self.resize_mode {
             let grow = self.bindings.labels_for(Action::ResizeGrow);
             let shrink = self.bindings.labels_for(Action::ResizeShrink);
-            self.set_info(format!(
+            self.set_ui_hint(format!(
                 "Resize mode on: {shrink}/{grow} resize side panes."
             ));
         } else {
             self.persist_pane_widths();
             let key = self.bindings.label_for(Action::ToggleResizeMode);
-            self.set_info(format!(
+            self.set_ui_hint(format!(
                 "Resize mode off. Pane widths saved. Press {key} to re-enter."
             ));
         }
@@ -1098,7 +1098,7 @@ impl App {
             }
             Action::ForceRedraw => {
                 self.force_redraw = true;
-                self.set_info("Interface redrawn. All screen contents have been repainted.");
+                self.set_ui_hint("Interface redrawn. All screen contents have been repainted.");
             }
             Action::OpenPalette => self.open_command_palette(),
             Action::FocusNext => self.focus_next_pane(),
@@ -2655,7 +2655,7 @@ impl App {
             input: TextInput::new(),
             selected: 0,
         };
-        self.set_info("Command palette opened.");
+        self.set_ui_hint("Command palette opened.");
     }
 
     fn open_macro_bar(&mut self) {
@@ -4406,7 +4406,11 @@ impl App {
             return None;
         };
         match self.bindings.lookup(&key, BindingScope::Palette) {
-            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::CloseOverlay) => {
+                self.prompt = PromptState::None;
+                // The picker's instruction goes with the picker.
+                self.clear_prompt_hint();
+            }
             Some(Action::MoveDown) if *selected + 1 < editors.len() => *selected += 1,
             Some(Action::MoveUp) if *selected > 0 => *selected -= 1,
             Some(Action::Confirm) => self.open_selected_pick_editor(),
@@ -4497,6 +4501,10 @@ impl App {
         match palette_action.or(dialog_action) {
             Some(Action::CloseOverlay) => {
                 self.prompt = PromptState::None;
+                // The picker's instruction goes with the picker, so this cancel
+                // message takes the line instead of queueing behind a sentence
+                // about a modal that is no longer open.
+                self.clear_prompt_hint();
                 self.set_info(
                     "Left the Tailscale mode as it was; config.toml is untouched.".to_string(),
                 );
@@ -5434,6 +5442,8 @@ impl App {
         match action {
             Some(Action::CloseOverlay) => {
                 self.prompt = PromptState::None;
+                // The picker's instruction goes with the picker.
+                self.clear_prompt_hint();
             }
             Some(Action::MoveDown) => self.move_provider_picker_selection(true),
             Some(Action::MoveUp) => self.move_provider_picker_selection(false),
@@ -7392,6 +7402,10 @@ impl App {
             return;
         };
         self.prompt = PromptState::None;
+        // The picker's instruction goes with the picker, so whatever the open
+        // says below takes the line rather than queueing behind a sentence about
+        // a modal the user has just confirmed.
+        self.clear_prompt_hint();
         if let Some(editor) = editor
             && let Err(e) = self.open_worktree_in_editor(&worktree, &label, &editor)
         {
@@ -9864,7 +9878,7 @@ impl App {
             .save_lazy(self.engine.config.clone());
         let state = if next { "enabled" } else { "disabled" };
         let palette_key = self.bindings.label_for(Action::OpenPalette);
-        self.set_info(format!(
+        self.set_ui_hint(format!(
             "Always-show tab strip {state}. Press {palette_key} to open the palette and toggle back."
         ));
     }
@@ -9881,7 +9895,7 @@ impl App {
             .save_lazy(self.engine.config.clone());
         let palette_key = self.bindings.label_for(Action::OpenPalette);
         if !next {
-            self.set_info(format!(
+            self.set_ui_hint(format!(
                 "Tab moves between panes again. Press {palette_key} to open the palette and toggle back."
             ));
             return;
@@ -9898,15 +9912,15 @@ impl App {
             .label_for_typeable_center(Action::FocusPrev, true);
         let handed_over = "Tab and Shift-Tab now reach the agent in the center pane.";
         match (next_pane, prev_pane) {
-            (Some(next_pane), Some(prev_pane)) => self.set_info(format!(
+            (Some(next_pane), Some(prev_pane)) => self.set_ui_hint(format!(
                 "{handed_over} Use {next_pane} and {prev_pane} to move between panes. Press {palette_key} to open the palette and toggle back."
             )),
-            (Some(only), None) | (None, Some(only)) => self.set_info(format!(
+            (Some(only), None) | (None, Some(only)) => self.set_ui_hint(format!(
                 "{handed_over} Use {only} to move between panes. Press {palette_key} to open the palette and toggle back."
             )),
             (None, None) => {
                 let advice = crate::keybindings::NO_PANE_CHORD_ADVICE;
-                self.set_warning(format!(
+                self.set_ui_hint_warning(format!(
                     "{handed_over} But {advice} Press {palette_key} to open the palette and toggle back."
                 ))
             }
@@ -21954,6 +21968,13 @@ not_a_real_action = ["x"]
         assert!(app.engine.pr_suppressions.contains("session-1"));
 
         // And the palette carries the way back out.
+        //
+        // The pre-clear stays here on purpose, unlike the picker tests: the
+        // detach message is NEWS about something that happened, not a hint about
+        // what is on screen, so the queue is right to keep showing it and the
+        // resume message is right to wait its turn. This test wants to read the
+        // second message without waiting a window for it.
+        app.set_info(String::new());
         app.execute_command("resume-pull-request-autodetection".to_string())
             .expect("resume");
         assert!(app.engine.pr_suppressions.is_empty());
@@ -36324,5 +36345,43 @@ cyan = "#00ffff"
             ),
             other => panic!("expected the reload failure, got {other:?}"),
         }
+    }
+
+    /// Confirming the editor picker must take its instruction off the line in the
+    /// same act, not a frame later when the run loop's backstop notices. The
+    /// outcome of the very thing the instruction was describing is what goes
+    /// there next, and on a queued line it would otherwise wait behind it.
+    #[test]
+    fn confirming_the_editor_picker_puts_its_outcome_on_the_line_at_once() {
+        // Deliberately the SUCCESS path, with a harmless real binary standing in
+        // for an editor. A failure would prove nothing here: an error pre-empts
+        // and drops the waiting infos, so it would take the instruction off the
+        // line whether or not this path clears it. Only a success queues, and a
+        // success is where the user would have read "Choose an editor" for six
+        // seconds after already choosing one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::PickEditor {
+            session_label: "agent-branch".to_string(),
+            worktree_path: dir.path().to_string_lossy().to_string(),
+            editors: vec![dux_core::editor::DetectedEditor {
+                kind: dux_core::editor::EditorKind::VsCode,
+                label: "Visual Studio Code",
+                config_key: "vscode",
+                command: "true".to_string(),
+            }],
+            selected: 0,
+        };
+        app.set_prompt_hint("Choose an editor and press Enter to open the selected worktree.");
+        assert!(app.status.message().contains("Choose an editor"));
+
+        app.open_selected_pick_editor();
+
+        assert!(matches!(app.prompt, PromptState::None), "the picker closes");
+        let message = app.status.message();
+        assert!(
+            message.contains("Opened agent"),
+            "the outcome is on the line with no tick in between: {message}"
+        );
     }
 }

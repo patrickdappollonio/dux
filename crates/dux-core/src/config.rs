@@ -1396,14 +1396,21 @@ pub struct UiConfig {
     /// above the internal ceiling are clamped with a warning. Default 20.
     pub agent_tabs_max: u16,
     /// Seconds before a transient status-line message (a success/info
-    /// confirmation) auto-clears. In the TUI's status line, busy/pending and
-    /// warning/error messages are unaffected: they persist until replaced. The
-    /// web's toasts use this as a base for every tone (warning 2x, error 4x),
+    /// confirmation) auto-clears. The TUI has one status line, so messages take
+    /// turns on it rather than overwriting each other: each confirmation gets
+    /// this window to itself and the next one waits, while a warning or an error
+    /// jumps the queue and drops the confirmations still waiting behind it. A
+    /// busy/pending message stays until its operation finishes and an error
+    /// until the next message arrives, so neither is governed by this number.
+    /// The web's toasts use this as a base for every tone (warning 3x, error 4x,
+    /// matching `WARNING_DURATION_FACTOR` and `ERROR_DURATION_FACTOR` in
+    /// `crates/dux-web/web/src/lib/notify.ts`),
     /// because a toast you have to click away is friction a status line is not.
     /// On the web that grading is applied entirely in the browser: the setting
     /// has no server-side clearing effect there, and the few messages marked
     /// sticky (they wait for the user) ignore it. 0 disables auto-clear
-    /// entirely.
+    /// entirely; with no window to wait out, the TUI line stops queueing and
+    /// shows the most recent message until the next one arrives.
     pub status_clear_seconds: u16,
     pub branch_sync_interval: u16,
     pub show_diff_line_numbers: bool,
