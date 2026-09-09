@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { insetHeaderChips } from "./insetHeaderView"
+import { insetHeaderChips, insetHeaderPaneSubject } from "./insetHeaderView"
 import type { DuxState, SelectedTarget } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 
@@ -112,5 +112,58 @@ describe("insetHeaderChips", () => {
       owner: { kind: "session", sessionId: "s1" },
     })
     expect(chips).toEqual([])
+  })
+})
+
+describe("insetHeaderPaneSubject", () => {
+  it("names the selected agent when no terminal is focused", () => {
+    const session = agent("s1", "feature-x")
+    expect(insetHeaderPaneSubject(spineWith(), session, null)).toEqual({
+      kind: "agent",
+      session,
+    })
+  })
+
+  it("hands a session-owned terminal its agent's menu", () => {
+    const session = agent("s1", "feature-x")
+    expect(
+      insetHeaderPaneSubject(spineWith(), session, {
+        kind: "terminal",
+        terminalId: "t1",
+        owner: { kind: "session", sessionId: "s1" },
+      }),
+    ).toEqual({ kind: "agent", session })
+  })
+
+  it("keeps a project terminal on its own menu even with an agent selected", () => {
+    expect(
+      insetHeaderPaneSubject(spineWith(), agent("s1", "feature-x"), {
+        kind: "terminal",
+        terminalId: "t2",
+        owner: { kind: "project", projectId: "p1" },
+      }),
+    ).toEqual({
+      kind: "terminal",
+      terminalId: "t2",
+      owner: { kind: "project", projectId: "p1" },
+    })
+  })
+
+  it("falls back to the terminal itself when its owning agent is gone", () => {
+    expect(
+      insetHeaderPaneSubject(spineWith(), undefined, {
+        kind: "terminal",
+        terminalId: "t3",
+        owner: { kind: "session", sessionId: "vanished" },
+      }),
+    ).toEqual({
+      kind: "terminal",
+      terminalId: "t3",
+      owner: { kind: "session", sessionId: "vanished" },
+    })
+  })
+
+  it("has no subject with nothing selected", () => {
+    expect(insetHeaderPaneSubject(spineWith(), undefined, null)).toBeNull()
   })
 })

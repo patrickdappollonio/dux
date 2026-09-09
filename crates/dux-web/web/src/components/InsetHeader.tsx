@@ -2,9 +2,12 @@ import { PanelRightOpen } from "lucide-react"
 
 import { AppMenu } from "@/components/AppMenu"
 import { MacroPopover } from "@/components/MacroPopover"
-import { PaneMenu, type PaneMenuSubject } from "@/components/PaneMenu"
+import { PaneMenu } from "@/components/PaneMenu"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
-import { insetHeaderChips } from "@/components/insetHeaderView"
+import {
+  insetHeaderChips,
+  insetHeaderPaneSubject,
+} from "@/components/insetHeaderView"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TheaterToggle } from "@/components/TheaterToggle"
 import { Button } from "@/components/ui/button"
@@ -17,7 +20,6 @@ import {
   showChangesPane,
   useDux,
 } from "@/lib/store"
-import { matchOwner } from "@/lib/terminalOwner"
 
 // The desktop center-pane top bar: one row of chips naming what you are looking
 // at, each a glyph followed by its value, then the pane's controls on the right.
@@ -55,47 +57,10 @@ function Chip({ chip }: { chip: HeaderChip }) {
 export function InsetHeader() {
   const dux = useDux()
   const { spine, selectedSessionId, selectedTarget } = dux
-  const focusedTerminal =
-    selectedTarget?.kind === "terminal" ? selectedTarget : undefined
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
   const chips = insetHeaderChips(spine, session, selectedTarget)
 
-  // What the pane menu is about, decided the same way the chips are: the agent
-  // when one is behind the pane, the terminal itself when nothing is. A
-  // session-owned terminal takes the agent's menu, and its own Close and editor
-  // entries ride along as a labelled group because the menu is handed the pane
-  // as well as the subject.
-  //
-  // Read off the target, not `selectedSessionId`, which can still name the
-  // agent a project terminal was reached from, and matched exhaustively on the
-  // owner so a fourth kind must answer for itself rather than falling into the
-  // terminal arm.
-  const paneSubject: PaneMenuSubject | null = focusedTerminal
-    ? matchOwner<PaneMenuSubject>(focusedTerminal.owner, {
-        session: (owner) => {
-          const agent = spine?.sessions.find((s) => s.id === owner.sessionId)
-          return agent
-            ? { kind: "agent", session: agent }
-            : {
-                kind: "terminal",
-                terminalId: focusedTerminal.terminalId,
-                owner: focusedTerminal.owner,
-              }
-        },
-        project: () => ({
-          kind: "terminal",
-          terminalId: focusedTerminal.terminalId,
-          owner: focusedTerminal.owner,
-        }),
-        standalone: () => ({
-          kind: "terminal",
-          terminalId: focusedTerminal.terminalId,
-          owner: focusedTerminal.owner,
-        }),
-      })
-    : session
-      ? { kind: "agent", session }
-      : null
+  const paneSubject = insetHeaderPaneSubject(spine, session, selectedTarget)
 
   // The width the header must hold back on its right so that whatever sits just
   // before it lands on the terminal pane's RIGHT EDGE rather than the window's.

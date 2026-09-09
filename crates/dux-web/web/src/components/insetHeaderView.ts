@@ -5,6 +5,7 @@ import {
   type AgentChipsInput,
   type HeaderChip,
 } from "@/lib/headerSubject"
+import type { PaneMenuSubject } from "@/components/PaneMenu"
 import type { TerminalTarget } from "@/lib/editorRoot"
 import type { DuxState, SelectedTarget } from "@/lib/store"
 import { matchOwner } from "@/lib/terminalOwner"
@@ -157,4 +158,37 @@ export function insetHeaderChips(
       "agent",
     ),
   )
+}
+
+// What the pane menu is about, decided the same way the chips are: the agent
+// when one is behind the pane, the terminal itself when nothing is. A
+// session-owned terminal takes the agent's menu, and its own Close and editor
+// entries ride along as a labelled group because the menu is handed the pane as
+// well as the subject.
+//
+// Read off the target, not the selected session, which can still name the agent
+// a project terminal was reached from, and matched exhaustively on the owner so
+// a fourth kind must answer for itself rather than falling into the terminal
+// arm.
+export function insetHeaderPaneSubject(
+  spine: Spine,
+  session: SessionView | undefined,
+  selectedTarget: SelectedTarget | null,
+): PaneMenuSubject | null {
+  if (selectedTarget?.kind !== "terminal") {
+    return session ? { kind: "agent", session } : null
+  }
+  const ownTerminal: PaneMenuSubject = {
+    kind: "terminal",
+    terminalId: selectedTarget.terminalId,
+    owner: selectedTarget.owner,
+  }
+  return matchOwner<PaneMenuSubject>(selectedTarget.owner, {
+    session: (owner) => {
+      const agent = spine?.sessions.find((s) => s.id === owner.sessionId)
+      return agent ? { kind: "agent", session: agent } : ownTerminal
+    },
+    project: () => ownTerminal,
+    standalone: () => ownTerminal,
+  })
 }
