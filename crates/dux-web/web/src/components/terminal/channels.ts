@@ -25,17 +25,6 @@ export function channel<T>(initial: T): Channel<T> {
   }
 }
 
-/// Build a channel over an existing React ref, for a channel whose value the
-/// render must also read.
-export function refChannel<T>(ref: { current: T }): Channel<T> {
-  return {
-    read: () => ref.current,
-    write: (next) => {
-      ref.current = next
-    },
-  }
-}
-
 /// THE MODIFIER LATCH. The accessory bar's sticky Ctrl/Alt, one-shot.
 /// OWNER: the input surface, which writes the visible state and this together.
 /// READERS: the key handler and the `onData` transform, which must see a latch
