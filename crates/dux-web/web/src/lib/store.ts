@@ -2117,69 +2117,70 @@ export function useDux(): DuxState {
 // correction, both of which name a position the browser is already parked on.
 
 // Parse a deep-link hash into a target, or null when it is absent/malformed.
+// The three shapes are mutually exclusive, so the first one that MATCHES
+// answers, malformed contents included.
+//
+// The patterns are function-local rather than module constants: this runs at
+// module init, where a constant declared further down the file is still in the
+// temporal dead zone.
 function parseSelectionHash(hash: string): SelectedTarget | null {
-  // Three mutually exclusive shapes: the bare agent (its session-slot tab), an
-  // extra tab, or a companion terminal, disambiguated by the literal `tab` or
-  // `terminal` keyword so a tab named "tab" cannot be confused. A project
-  // terminal has its own grammar, because the agent shapes embed a session id
-  // and it has none.
-  const pm = hash.match(/^#\/project\/([^/]+)\/terminal\/([^/]+)$/)
-  if (pm) {
-    try {
-      const projectId = decodeURIComponent(pm[1])
-      const terminalId = decodeURIComponent(pm[2])
-      if (!projectId || !terminalId) return null
-      return {
-        kind: "terminal",
-        terminalId,
-        owner: { kind: "project", projectId },
-      }
-    } catch {
-      return null
-    }
-  }
-  // A standalone terminal deep-links as `#/terminal/<tid>`: no owner segment,
-  // because it has no owner. It cannot be confused with the two nested shapes,
-  // which both begin `#/agent/` or `#/project/`.
-  const sm = hash.match(/^#\/terminal\/([^/]+)$/)
-  if (sm) {
-    try {
-      const terminalId = decodeURIComponent(sm[1])
-      if (!terminalId) return null
-      return { kind: "terminal", terminalId, owner: { kind: "standalone" } }
-    } catch {
-      return null
-    }
-  }
-  const m = hash.match(/^#\/agent\/([^/]+)(?:\/(tab|terminal)\/([^/]+))?$/)
-  if (!m) return null
-  // `decodeURIComponent` throws a URIError on malformed percent-encoding (e.g.
-  // `#/agent/%ZZ`). This runs at module init, so an unguarded throw would blank
-  // the whole app. Treat any decode failure as no/invalid deep link.
+  // A project terminal has its own grammar, because the agent shapes embed a
+  // session id and it has none.
+  const project = hash.match(/^#\/project\/([^/]+)\/terminal\/([^/]+)$/)
+  if (project) return projectTerminalTarget(project)
+  // A standalone terminal deep-links with no owner segment, because it has no
+  // owner. It cannot be confused with the two nested shapes, which both begin
+  // `#/agent/` or `#/project/`.
+  const standalone = hash.match(/^#\/terminal\/([^/]+)$/)
+  if (standalone) return standaloneTerminalTarget(standalone)
+  // The bare agent (its session-slot tab), an extra tab, or a companion
+  // terminal, disambiguated by the literal `tab` or `terminal` keyword so a tab
+  // named "tab" cannot be confused.
+  const agent = hash.match(/^#\/agent\/([^/]+)(?:\/(tab|terminal)\/([^/]+))?$/)
+  return agent ? agentTarget(agent) : null
+}
+
+// One decoded path segment, or null when it is empty or its encoding is
+// malformed. `decodeURIComponent` throws a URIError on `%ZZ`, and parsing runs
+// at module init, where an unguarded throw would blank the whole app.
+function decodeSegment(raw: string): string | null {
   try {
-    const sessionId = decodeURIComponent(m[1])
-    if (!sessionId) return null
-    if (m[2] === "terminal") {
-      const terminalId = decodeURIComponent(m[3])
-      if (!terminalId) return null
-      return {
-        kind: "terminal",
-        terminalId,
-        owner: { kind: "session", sessionId },
-      }
-    }
-    if (m[2] === "tab") {
-      const tabId = decodeURIComponent(m[3])
-      if (!tabId) return null
-      // A self-aliased `#/agent/<sid>/tab/<sid>` is the session-slot tab written
-      // the long way — `selectionHash` normalizes it back to the canonical bare
-      // form on the way out, so there is only ever one representation of it.
-      return { kind: "agent", sessionId, tabId }
-    }
-    return { kind: "agent", sessionId, tabId: slotTabTargetId(sessionId) }
+    return decodeURIComponent(raw) || null
   } catch {
     return null
   }
+}
+
+function projectTerminalTarget(m: RegExpMatchArray): SelectedTarget | null {
+  const projectId = decodeSegment(m[1])
+  const terminalId = decodeSegment(m[2])
+  if (!projectId || !terminalId) return null
+  return { kind: "terminal", terminalId, owner: { kind: "project", projectId } }
+}
+
+function standaloneTerminalTarget(m: RegExpMatchArray): SelectedTarget | null {
+  const terminalId = decodeSegment(m[1])
+  if (!terminalId) return null
+  return { kind: "terminal", terminalId, owner: { kind: "standalone" } }
+}
+
+function agentTarget(m: RegExpMatchArray): SelectedTarget | null {
+  const sessionId = decodeSegment(m[1])
+  if (!sessionId) return null
+  if (m[2] === "terminal") {
+    const terminalId = decodeSegment(m[3])
+    if (!terminalId) return null
+    return { kind: "terminal", terminalId, owner: { kind: "session", sessionId } }
+  }
+  if (m[2] === "tab") {
+    const tabId = decodeSegment(m[3])
+    if (!tabId) return null
+    // A self-aliased `#/agent/<sid>/tab/<sid>` is the session-slot tab written
+    // the long way — `selectionHash` normalizes it back to the canonical bare
+    // form on the way out, so there is only ever one representation of it.
+    return { kind: "agent", sessionId, tabId }
+  }
+  return { kind: "agent", sessionId, tabId: slotTabTargetId(sessionId) }
 }
 
 // The hash for a target (or the bare path when nothing is selected). The `/tab/`
