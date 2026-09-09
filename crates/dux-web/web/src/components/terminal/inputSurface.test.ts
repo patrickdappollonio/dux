@@ -80,7 +80,10 @@ class TermFake {
   paste(text: string) {
     this.pastes.push(text)
   }
-  scrollPages() {}
+  pagesScrolled: number[] = []
+  scrollPages(n: number) {
+    this.pagesScrolled.push(n)
+  }
 }
 
 function decode(b: Uint8Array): string {
@@ -475,5 +478,91 @@ describe("the right-click paste", () => {
     })
 
     expect(term.pastes).toEqual(["from the clipboard"])
+  })
+})
+
+// The accessory bar's page keys scroll xterm's own scrollback on the normal
+// buffer, where there is one, and forward a page to a full-screen app on the
+// alt-screen, where there is not.
+describe("the accessory page-scroll", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it("scrolls the local viewport on the normal buffer", () => {
+    const { view, term, sent } = setup()
+
+    act(() => {
+      view.result.current.onScroll("pageUp")
+      view.result.current.onScroll("pageDown")
+    })
+
+    expect(term.pagesScrolled).toEqual([-1, 1])
+    expect(sent).toEqual([])
+  })
+
+  it("sends the page keys to a keyboard-only full-screen app", () => {
+    const { view, term, sent } = setup()
+    term.buffer.active.type = "alternate"
+
+    act(() => {
+      view.result.current.onScroll("pageUp")
+      view.result.current.onScroll("pageDown")
+    })
+
+    expect(sent).toEqual([`${ESC}[5~`, `${ESC}[6~`])
+    expect(term.pagesScrolled).toEqual([])
+  })
+
+  it("replays a page of wheel notches while the app tracks the mouse", () => {
+    const { view, term, sent } = setup()
+    term.buffer.active.type = "alternate"
+    term.modes.mouseTrackingMode = "any"
+    const wheels: number[] = []
+    term.element.addEventListener("wheel", (e) => {
+      wheels.push((e as WheelEvent).deltaY)
+    })
+
+    act(() => {
+      view.result.current.onScroll("pageUp")
+    })
+
+    expect(wheels).toEqual(Array(term.rows - 1).fill(-1))
+    expect(sent).toEqual([])
+  })
+
+  it("falls back to the local scroll on the alt-screen when it is not the owner", () => {
+    const { view, term, sent } = setup({ owner: false })
+    term.buffer.active.type = "alternate"
+
+    act(() => {
+      view.result.current.onScroll("pageUp")
+    })
+
+    expect(sent).toEqual([])
+    expect(term.pagesScrolled).toEqual([-1])
+  })
+
+  it("drops focus on a touch device so the soft keyboard can go", () => {
+    const { view, term } = setup()
+    vi.stubGlobal("navigator", { maxTouchPoints: 5 })
+    term.textarea.focus()
+
+    act(() => {
+      view.result.current.onScroll("pageDown")
+    })
+
+    expect(document.activeElement).not.toBe(term.textarea)
+  })
+
+  it("keeps terminal focus for a mouse user paging a narrow window", () => {
+    const { view, term } = setup()
+    term.textarea.focus()
+
+    act(() => {
+      view.result.current.onScroll("pageDown")
+    })
+
+    expect(document.activeElement).toBe(term.textarea)
   })
 })

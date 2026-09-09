@@ -332,9 +332,8 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
 
   // Scroll the xterm viewport from the accessory bar. On the normal buffer these
   // drive xterm's own scrollback; on the alt-screen there is none, so PgUp/PgDn
-  // forward a page to the app itself (wheel events while it tracks the mouse,
-  // the keys otherwise) and jump-to-top/bottom, which has no wheel equivalent,
-  // stays scrollback-only.
+  // forward a page to the app itself: wheel events while it tracks the mouse,
+  // the keys otherwise.
   //
   // Scrolling is a read gesture, so it drops focus and lets the soft keyboard
   // go: on iOS the textarea stays focused after a keyboard swipe-down, so a
@@ -343,15 +342,11 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
   function onScroll(dir: ScrollDir) {
     const term = termRef.current
     if (!term) return
+    const up = dir === "pageUp"
     const altScreen = term.buffer.active.type !== "normal"
-    // Forwarding is input, so it is owner-gated; top and bottom fall through to
-    // the local scroll, which is a no-op on the alt-screen.
-    if (
-      altScreen &&
-      ownership.read() &&
-      (dir === "pageUp" || dir === "pageDown")
-    ) {
-      const up = dir === "pageUp"
+    // Forwarding is input, so it is owner-gated; a watcher falls through to the
+    // local scroll, which is a no-op on the alt-screen.
+    if (altScreen && ownership.read()) {
       if (term.modes.mouseTrackingMode !== "none") {
         // Replayed as real wheel events so xterm encodes them the way the app
         // asked (see `lib/termmouse.ts`); with no finger to take a point from,
@@ -373,23 +368,12 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
         // Keyboard-only full-screen app: send the actual PgUp/PgDn key.
         ptyRef.current?.sendInput(encoder.encode(pageKeySeq(up ? "up" : "down")))
       }
-      if (navigator.maxTouchPoints > 0) {
-        term.textarea?.blur()
-        // A page-scroll is a reading gesture on either typing surface.
-        composeInputRef.current?.blur()
-      }
-      return
-    }
-    switch (dir) {
-      case "pageUp":
-        term.scrollPages(-1)
-        break
-      case "pageDown":
-        term.scrollPages(1)
-        break
+    } else {
+      term.scrollPages(up ? -1 : 1)
     }
     // Only a touch device has a soft keyboard to dismiss; without the gate a
-    // narrow-window mouse user silently loses terminal focus when paging.
+    // narrow-window mouse user silently loses terminal focus when paging. A
+    // page-scroll is a reading gesture on either typing surface.
     if (navigator.maxTouchPoints > 0) {
       term.textarea?.blur()
       composeInputRef.current?.blur()
