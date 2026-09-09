@@ -134,22 +134,27 @@ async fn add_project(
     // A direct add resolves synchronously (first poll wins); the checkout-default
     // add goes through a worker, so the poll covers it.
     match await_new_project(&state.engine, &pre, CREATE_AWAIT_TIMEOUT).await {
-        Some(id) => {
-            if let Some(key) = key {
-                state.idempotency.record(key, id.clone());
-            }
-            let location = format!("/api/v1/projects/{id}");
-            let body = match state.engine.spine().await {
-                Some(spine) => match spine.projects.into_iter().find(|p| p.id == id) {
-                    Some(project) => Json(project).into_response(),
-                    None => Json(CreatedRef { id }).into_response(),
-                },
-                None => Json(CreatedRef { id }).into_response(),
-            };
-            (StatusCode::CREATED, [(header::LOCATION, location)], body).into_response()
-        }
+        Some(id) => created_project_response(&state, id, key).await,
         None => StatusCode::ACCEPTED.into_response(),
     }
+}
+
+/// Build the `201 Created` response for a resolved new project id: record the
+/// idempotency key (so a retry replays this project), set `Location`, and return
+/// the full project view when the spine still carries it, else the bare id.
+async fn created_project_response(state: &AppState, id: String, key: Option<String>) -> Response {
+    if let Some(key) = key {
+        state.idempotency.record(key, id.clone());
+    }
+    let location = format!("/api/v1/projects/{id}");
+    let body = match state.engine.spine().await {
+        Some(spine) => match spine.projects.into_iter().find(|p| p.id == id) {
+            Some(project) => Json(project).into_response(),
+            None => Json(CreatedRef { id }).into_response(),
+        },
+        None => Json(CreatedRef { id }).into_response(),
+    };
+    (StatusCode::CREATED, [(header::LOCATION, location)], body).into_response()
 }
 
 #[derive(Serialize)]
@@ -501,6 +506,59 @@ mod tests {
             create_initial_commit,
             init_repo,
         }
+    }
+
+    #[tokio::test]
+    async fn a_created_project_answers_with_its_location_body_and_idempotency_replay() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_with_commit(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+        let keyed = |path: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/projects")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "k1")
+                .body(Body::from(format!(
+                    r#"{{"path":{}}}"#,
+                    serde_json::to_string(path).unwrap()
+                )))
+                .unwrap()
+        };
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app.clone().oneshot(keyed(&path)).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        let location = resp
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let id = json["id"].as_str().expect("created id").to_string();
+        assert_eq!(location, format!("/api/v1/projects/{id}"));
+        assert_eq!(
+            json["path"].as_str(),
+            Some(path.as_str()),
+            "the full project view is returned, not the bare id"
+        );
+
+        let resp = app.oneshot(keyed(&path)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "a replayed key returns the recorded project"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["id"].as_str(), Some(id.as_str()));
     }
 
     #[test]
