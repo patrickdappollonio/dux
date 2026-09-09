@@ -1600,15 +1600,9 @@ impl Engine {
                 // Surface Added explicitly and relay rollback errors verbatim.
                 let core = self.wire_to_command(command)?;
                 let reaction = self.apply(core)?;
-                let status = match &reaction {
-                    EventReaction::ProjectPersistenceOutcome(outcome) => match &outcome.view {
-                        ProjectPersistenceView::Added { status_message, .. } => {
-                            Some(WireStatus::new("info", status_message.clone()))
-                        }
-                        _ => wire_status_from_reaction(&reaction),
-                    },
-                    _ => wire_status_from_reaction(&reaction),
-                };
+                let status = added_status_message(&reaction)
+                    .map(|message| WireStatus::new("info", message))
+                    .or_else(|| wire_status_from_reaction(&reaction));
                 return Ok(WireCommandOutcome::with_optional_status(status));
             }
             _ => {}
