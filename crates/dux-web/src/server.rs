@@ -1912,29 +1912,11 @@ impl AttachedPtySocket<'_> {
             // Handle each received value inside its selected branch. A combined
             // receive-and-handle future could consume a value and then be cancelled.
             let action = tokio::select! {
-                _ = ping.tick() => {
-                    if send_ping(self.sink).await.is_err() {
-                        dux_core::logger::info(&crate::pty_log::describe_connection_reaped(
-                            self.conn_id,
-                            crate::pty_log::FailedSend::LivenessPing,
-                        ));
-                        PtyLoopAction::Break
-                    } else {
-                        PtyLoopAction::Continue
-                    }
-                }
+                _ = ping.tick() => self.send_liveness_ping().await,
                 change = grid_changes.recv() => {
                     self.handle_grid_change(change, &mut last_grid_seq).await
                 }
-                _ = &mut pty_forwarder => {
-                    let shutting_down = self
-                        .engine
-                        .shutdown_flag()
-                        .load(std::sync::atomic::Ordering::SeqCst);
-                    let mut guard = self.sink.lock().await;
-                    let _ = guard.send(forwarder_end_close(shutting_down)).await;
-                    PtyLoopAction::Break
-                }
+                _ = &mut pty_forwarder => self.close_after_forwarder_end().await,
                 next = stream.next() => match next {
                     Some(Ok(message)) => self.handle_client_message(message).await,
                     _ => PtyLoopAction::Break,
@@ -1946,6 +1928,32 @@ impl AttachedPtySocket<'_> {
         }
 
         pty_forwarder.abort();
+    }
+
+    /// A send-only liveness ping. Its failure is how a socket whose peer is gone
+    /// without a close frame is reaped, so it ends the loop.
+    async fn send_liveness_ping(&self) -> PtyLoopAction {
+        if send_ping(self.sink).await.is_ok() {
+            return PtyLoopAction::Continue;
+        }
+        dux_core::logger::info(&crate::pty_log::describe_connection_reaped(
+            self.conn_id,
+            crate::pty_log::FailedSend::LivenessPing,
+        ));
+        PtyLoopAction::Break
+    }
+
+    /// The forwarder has ended, so no more PTY bytes can arrive on this socket.
+    /// Close with the code that tells the client whether to reconnect: the server
+    /// shutting down is a different answer from the provider going away.
+    async fn close_after_forwarder_end(&self) -> PtyLoopAction {
+        let shutting_down = self
+            .engine
+            .shutdown_flag()
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let mut guard = self.sink.lock().await;
+        let _ = guard.send(forwarder_end_close(shutting_down)).await;
+        PtyLoopAction::Break
     }
 
     async fn handle_grid_change(
