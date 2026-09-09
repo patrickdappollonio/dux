@@ -4,18 +4,12 @@ import { AppMenu } from "@/components/AppMenu"
 import { MacroPopover } from "@/components/MacroPopover"
 import { PaneMenu, type PaneMenuSubject } from "@/components/PaneMenu"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
+import { insetHeaderChips } from "@/components/insetHeaderView"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TheaterToggle } from "@/components/TheaterToggle"
 import { Button } from "@/components/ui/button"
 import { useIsTruncated } from "@/hooks/use-truncated"
-import {
-  agentHeaderChips,
-  directoryChip,
-  focusedTerminalChip,
-  headerChipTooltip,
-  type AgentChipsInput,
-  type HeaderChip,
-} from "@/lib/headerSubject"
+import { headerChipTooltip, type HeaderChip } from "@/lib/headerSubject"
 import { changesSummary } from "@/lib/changesSummary"
 import {
   changesPaneEffectivelyHidden,
@@ -24,18 +18,11 @@ import {
   useDux,
 } from "@/lib/store"
 import { matchOwner } from "@/lib/terminalOwner"
-import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
-import type { SessionView, TerminalView } from "@/lib/types"
-import {
-  managedWorkspace,
-  sessionLabel,
-  workspaceLocation,
-} from "@/lib/agentWorkspace"
 
 // The desktop center-pane top bar: one row of chips naming what you are looking
 // at, each a glyph followed by its value, then the pane's controls on the right.
-// Which chips exist and what each says lives in `lib/headerSubject.ts`; this
-// module is how they are drawn.
+// Which chips exist and what each says lives in `lib/headerSubject.ts`, which
+// subject is asked in `insetHeaderView.ts`; this module is how they are drawn.
 
 // One glyph-and-value pair. The two shrink weights make the primary chip give
 // way last: every chip is `min-w-0`, but a non-primary chip's shrink factor is
@@ -68,141 +55,10 @@ function Chip({ chip }: { chip: HeaderChip }) {
 export function InsetHeader() {
   const dux = useDux()
   const { spine, selectedSessionId, selectedTarget } = dux
-  const allTerminals = spine?.terminals ?? []
   const focusedTerminal =
     selectedTarget?.kind === "terminal" ? selectedTarget : undefined
-
-  // The facts describing one AGENT. Shared by an agent selection, where the
-  // agent's own name is the primary chip, and by a session-owned terminal, where
-  // the terminal is primary and the agent's chips sit in front of it.
-  const agentFacts = (
-    agent: SessionView,
-    provider: string | undefined,
-    terminalCount: number,
-    primary: "agent" | "none",
-  ): AgentChipsInput => {
-    // A standalone agent has no project; it names its FOLDER in the same slot
-    // instead, through the chip a standalone terminal already uses.
-    const location = workspaceLocation(agent.workspace)
-    const owningProject =
-      location.kind === "project"
-        ? spine?.projects.find((p) => p.id === location.projectId)
-        : undefined
-    const managed = managedWorkspace(agent.workspace)
-    return {
-      name: sessionLabel(agent),
-      provider: provider ?? agent.provider,
-      projectName: owningProject?.name,
-      folderLabel: location.kind === "folder" ? location.label : undefined,
-      branchName: managed?.branch_name ?? null,
-      initialBranch: managed?.initial_branch ?? null,
-      terminalCount,
-      primary,
-    }
-  }
-
-  // Chosen by an exhaustive match on the terminal's owner, so a new kind of
-  // owner is a compile error rather than a blank bar. Each arm answers with the
-  // owner's chips plus that owner's terminals: the set `terminalTitle`
-  // disambiguates against, and the set the sibling count counts.
-  const ownerContext: { chips: HeaderChip[]; siblings: TerminalView[] } | null =
-    focusedTerminal
-      ? matchOwner<{ chips: HeaderChip[]; siblings: TerminalView[] }>(
-          focusedTerminal.owner,
-          {
-            session: (owner) => {
-              const agent = spine?.sessions.find(
-                (s) => s.id === owner.sessionId,
-              )
-              const siblings = terminalsForOwner(allTerminals, owner)
-              // The agent is no longer the primary chip here, and its terminal
-              // COUNT is suppressed: the focused terminal's own chip carries that
-              // count in its hover clause, and two terminal glyphs in one row
-              // would read as two different terminals.
-              return {
-                chips: agent
-                  ? agentHeaderChips(agentFacts(agent, undefined, 0, "none"))
-                  : [],
-                siblings,
-              }
-            },
-            project: (owner) => {
-              const owningProject = spine?.projects.find(
-                (p) => p.id === owner.projectId,
-              )
-              return {
-                chips: owningProject
-                  ? [
-                      {
-                        kind: "project" as const,
-                        label: "Project",
-                        value: owningProject.name,
-                      },
-                    ]
-                  : [],
-                siblings: terminalsForOwner(allTerminals, owner),
-              }
-            },
-            // No owner to name, so the context names where the terminal is. The
-            // label comes off this terminal's own wire owner: every standalone
-            // terminal shares one client-side reference, which carries no id
-            // and no label, and only the terminal knows its directory.
-            standalone: (owner) => {
-              const siblings = terminalsForOwner(allTerminals, owner)
-              const self = siblings.find(
-                (t) => t.id === focusedTerminal.terminalId,
-              )
-              const cwd =
-                self?.owner.kind === "standalone" ? self.owner.cwd_label : null
-              return {
-                chips: cwd ? [directoryChip(cwd)] : [],
-                siblings,
-              }
-            },
-          },
-        )
-      : null
-
-  // When an agent tab is focused, the assistant chip reflects the FOCUSED TAB
-  // (an extra tab can run a different provider than the session-slot tab), not
-  // the session-slot tab's own provider.
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
-  const focusedTabProvider =
-    selectedTarget?.kind === "agent"
-      ? session?.tabs.find((t) => t.id === selectedTarget.tabId)?.provider
-      : undefined
-
-  let chips: HeaderChip[] = []
-  if (ownerContext && focusedTerminal) {
-    const terminal = ownerContext.siblings.find(
-      (t) => t.id === focusedTerminal.terminalId,
-    )
-    if (terminal) {
-      // The terminal chip lands where a terminal chip always lands: after the
-      // branch, before the assistant. Its value is the terminal's own title
-      // rather than a count, because the terminal is the thing on screen.
-      const self = focusedTerminalChip(
-        terminalTitle(terminal, ownerContext.siblings),
-        ownerContext.siblings.length,
-      )
-      const before = ownerContext.chips.filter((c) => c.kind !== "assistant")
-      const after = ownerContext.chips.filter((c) => c.kind === "assistant")
-      chips = [...before, self, ...after]
-    }
-  } else if (session) {
-    const sessionTerminals = terminalsForOwner(allTerminals, {
-      kind: "session",
-      sessionId: session.id,
-    })
-    chips = agentHeaderChips(
-      agentFacts(
-        session,
-        focusedTabProvider,
-        sessionTerminals.length,
-        "agent",
-      ),
-    )
-  }
+  const chips = insetHeaderChips(spine, session, selectedTarget)
 
   // What the pane menu is about, decided the same way the chips are: the agent
   // when one is behind the pane, the terminal itself when nothing is. A
