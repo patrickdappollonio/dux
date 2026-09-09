@@ -111,7 +111,6 @@ impl StatusUpdate {
             sticky: false,
         }
     }
-    #[allow(dead_code)]
     pub fn warning(message: impl Into<String>) -> Self {
         Self {
             tone: StatusTone::Warning,
