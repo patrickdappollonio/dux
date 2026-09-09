@@ -31,12 +31,10 @@ import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
 import type { AgentTabView, SessionView } from "@/lib/types"
 
-// The Chrome-style provider-tab strip at the top of the center pane, rendered only
-// when a session has two or more tabs (App gates this). All tabs are generic and
-// render uniformly. Clicking a pill focuses it; the hover-revealed ⋯ menu retargets
-// the provider and closes the tab; the trailing + adds a tab (disabled at the cap or
-// while a create is in flight). This is web-only chrome; the TUI has its own themed
-// strip.
+// The provider-tab strip at the top of the center pane, rendered by App only
+// when a session has two or more tabs. All tabs render uniformly: clicking a
+// pill focuses it, the hover-revealed ⋯ retargets the provider and closes the
+// tab, and the trailing + adds one, disabled at the cap or mid-create.
 export function AgentTabsStrip({
   session,
   activeTabId,
@@ -71,9 +69,8 @@ export function AgentTabsStrip({
         />
       ))}
       {/* Split "+" control: the main button quick-adds the project default
-          provider (today's behavior, unchanged); the adjacent caret opens a
-          menu to pick a different configured provider. Misclick-safe spacing
-          between the two halves mirrors the per-pill ⋯ menu's gap conventions. */}
+          provider, the adjacent caret opens a menu to pick another configured
+          one. The gap between the halves is the misclick-safe spacing. */}
       <div className="flex shrink-0 items-center gap-0.5">
         <SimpleTooltip
           content={
@@ -170,19 +167,12 @@ function TabPill({
           select()
         }
       }}
-      // `max-md:min-h-9` (36px) is a deliberate, per-axis relaxation of the 40px
-      // touch-target floor, taken under the tenet's exemption and justified by
-      // naming the neighbours. The relaxed axis is VERTICAL: above the strip is
-      // the mobile header, whose own controls end at its bottom edge and which
-      // offers no tap target adjacent to a pill; below is the PTY. The PTY is
-      // not inert (a tap there focuses the compose box, and with mouse tracking
-      // on it forwards a click to the app), but both are CHEAP mis-taps: a
-      // keyboard you dismiss, or a click the app ignores. Nothing here is
-      // destructive and nothing switches what you are looking at. HORIZONTALLY
-      // the pill keeps its size, because its neighbours are OTHER TABS and
-      // landing on the wrong tab is a real mis-tap. The strip sits between the
-      // header and the terminal, where vertical space is the scarce resource on
-      // a phone.
+      // `max-md:min-h-9` (36px) relaxes the 40px touch-target floor on the
+      // vertical axis only. The neighbours there are the mobile header, whose
+      // controls end at its bottom edge, and the PTY, where a mis-tap costs a
+      // keyboard you dismiss or a click the app ignores. Horizontally the pill
+      // keeps its size, because its neighbours are other tabs and landing on
+      // the wrong one is a real mis-tap.
       className={cn(
         // `max-md:py-0` goes with it: the pill's own 4px padding would sit on
         // top of the 32px ⋯ hit area inside and overshoot the 36px again.
@@ -202,12 +192,11 @@ function TabPill({
           finished turn on this specific tab). */}
       {tab.needs_attention && <AttentionDot />}
       <span className="max-w-40 truncate">{label}</span>
-      {/* The ⋯ trigger consumes NO layout space at rest: the wrapper's max-width
-          collapses to zero (not opacity-only, which would still reserve the
-          fixed-size box's width) and animates open on hover, focus-within, or
-          while the menu is open (trigger `data-popup-open`, which Base UI does
-          NOT mirror onto `aria-expanded`) — mirroring ChangedFiles.tsx/Sidebar.tsx.
-          Always revealed on touch. */}
+      {/* The ⋯ trigger consumes no layout space at rest: the wrapper's
+          max-width collapses to zero rather than opacity alone, which would
+          still reserve the box's width, and animates open on hover,
+          focus-within, or `data-popup-open` (Base UI does not mirror that onto
+          `aria-expanded`). Always revealed on touch. */}
       <div
         className={cn(
           "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100",

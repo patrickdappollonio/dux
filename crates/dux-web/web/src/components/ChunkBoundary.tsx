@@ -2,18 +2,14 @@ import { Component, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
 
-// Why this exists: dux embeds a CONTENT-HASHED JS bundle in its Rust binary.
-// When the server is rebuilt and restarted while a tab is still open, that
-// stale tab's index.html still references the OLD hashed chunk URLs. Opening a
-// terminal then fires import() for a chunk that no longer exists; the server
-// 404s it, React.lazy rejects, and — with no error boundary — the entire React
-// tree unmounts into a white screen. This boundary catches that rejection.
+// dux embeds a content-hashed JS bundle in its Rust binary, so a tab left open
+// across a server rebuild still references the old hashed chunk URLs: a lazy
+// import then 404s and, with no error boundary, the whole React tree unmounts
+// into a white screen. This boundary catches that rejection.
 //
-// On the first error we attempt ONE automatic reload to pick up the new
-// bundle. The guard below prevents a reload loop if the page is genuinely
-// broken (e.g. the new bundle also fails): we only auto-reload when no reload
-// happened in the last RELOAD_WINDOW_MS. Otherwise we render a small branded
-// card asking the user to reload manually.
+// The first error attempts one automatic reload to pick up the new bundle,
+// guarded so a genuinely broken page cannot loop: an auto-reload only happens
+// when none did in the last RELOAD_WINDOW_MS. Otherwise the card asks the user.
 const RELOAD_KEY = "dux-chunk-reload"
 const RELOAD_WINDOW_MS = 30_000
 

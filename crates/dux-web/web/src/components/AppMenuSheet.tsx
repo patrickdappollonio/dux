@@ -13,16 +13,13 @@ import { appMenuModel, findSubmenu, type AppMenuEntry } from "@/lib/appMenu"
 import { useDux } from "@/lib/store"
 
 // The mobile app menu: the same `appMenuModel()` the desktop flyout renders,
-// presented as a bottom sheet with drill-down.
+// presented as a bottom sheet with drill-down, because a hover flyout cannot
+// work on touch. Sharing the model and differing only in presentation is what
+// keeps the two from drifting.
 //
-// Why a different renderer instead of the desktop's DropdownMenu: a hover flyout
-// cannot work on touch. So the MODEL is shared and only the presentation
-// differs, which is what keeps the two from drifting (pinned by
-// AppMenuSheet.test.tsx's "same top-level titles" test).
-//
-// ARIA is ours here. The desktop menu gets role/aria-haspopup from base-ui's
-// primitives; this is a hand-rolled list, so we supply them. `Sheet` still
-// provides the dialog role, the focus trap, and Escape.
+// The roles and aria-haspopup are supplied by hand here, since these rows are
+// not base-ui primitives. `Sheet` still provides the dialog role, the focus
+// trap, and Escape.
 
 function AppMenuRows({
   entries,

@@ -1,22 +1,14 @@
-// THE UPLOAD PIPELINE: the three-gesture file journey.
+// A drop, an image or long-text paste and the "Attach a file…" picker are one
+// journey entered by three gestures, and this is where it lives.
 //
-// A DROP, an IMAGE (or long text) PASTE and the "Attach a file…" PICKER are the
-// same journey entered by different gestures, and this is the one place it
-// lives: the sinks that say where a saved path is written, the sequential batch
-// loop that saves and delivers, the one toast per gesture, the clipboard
-// routing that decides which gesture a paste even is, and the capability the
-// row menus attach through.
+// A drop saves the file and pastes its path, never its bytes: no agent CLI
+// reads a file from its input stream, and injecting the text server-side would
+// bypass the input-ownership gate on the socket, so the browser pastes the
+// returned path over its own already-gated connection.
 //
-// THE PREMISE, settled: a drop saves the file and pastes its PATH, never its
-// bytes. No agent CLI reads a file from its input stream, and injecting the
-// text server-side would bypass the input-ownership gate on the socket, so the
-// browser pastes the returned path over its own already-gated connection.
-//
-// It is a pane-adjacent unit rather than part of the lifecycle because nothing
-// in it belongs to the terminal's lifetime: the drag handlers are rendered
-// props, the picker is a hidden input, and the clipboard listener is registered
-// by the pane (on the container, in the capture phase) and by the compose
-// textarea itself.
+// Nothing here belongs to the terminal's lifetime, so it sits beside the pane
+// rather than in the lifecycle: the drag handlers are rendered props, the
+// picker is a hidden input, and the pane registers the clipboard listener.
 import { useEffect, useRef } from "react"
 import type { Terminal } from "@xterm/xterm"
 
@@ -41,13 +33,11 @@ import type { PtySocket } from "@/lib/ptySocket"
 import type { LiveSettings } from "./liveValues"
 import type { ConnectionIdentity, OwnershipVerdict } from "./channels"
 
-// WHERE a saved file's path is written, and whether it can be written right
-// now. The upload loop below is identical for a drop and for a clipboard
-// paste; the only thing that differs is this, so it is the only thing passed
-// in. Two implementations exist (`terminalUploadSink`, `composeUploadSink`)
-// and `activeUploadSink` picks between them exactly as `focusTypingSurface`
-// picks a focus target, because the question is the same one: which surface
-// is the user typing into.
+// Where a saved file's path is written, and whether it can be written now. The
+// upload loop is identical for a drop and a paste, so the sink is the only
+// thing that differs and the only thing passed in; `activeUploadSink` picks
+// one by the same question `focusTypingSurface` answers, which surface the
+// user is typing into.
 export type UploadSink = {
   /// Fills `DropContext.delivery`, which is the one word the toast changes.
   delivery: "sent" | "draft"
@@ -140,15 +130,10 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
         }
         return null
       },
-      // xterm's own paste, which applies bracketed paste (DECSET 2004) when
-      // the running program asked for it and sends plain text when it did not.
-      // Building the bracket markers by hand here would be a second
-      // implementation of something that already works.
-      //
-      // This deliberately differs from the compose bar, which refuses
-      // bracketed paste. That rule exists because compose text has to keep a
-      // soft line break and a submitting Enter distinct on the wire. A saved
-      // file's path contains neither, so the reason does not apply here.
+      // xterm's own paste, so bracketed paste (DECSET 2004) is applied only
+      // when the running program asked for it. Unlike the compose bar, which
+      // refuses bracketed paste to keep a soft line break and a submitting
+      // Enter distinct, a path contains neither.
       deliver: (payload) => termRef.current?.paste(payload),
     }
   }
@@ -156,22 +141,14 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
   function composeUploadSink(): UploadSink {
     return {
       delivery: "draft",
-      // No socket check: nothing is going on the wire. The draft is text the
-      // user reviews and then Sends, and `sendCompose` does its own gating at
-      // that point. Ownership is still checked, because the compose bar only
-      // exists for the input owner and a demotion mid-upload must not quietly
-      // stage input at a session this device no longer drives.
-      //
-      // And the BAR ITSELF is checked, because it can go away mid-upload (a
-      // rotation past the mobile breakpoint, `ui.compose_bar` switched off).
-      // The draft state survives that, so the insert would still work; what
-      // would not survive is the REPORT, which would say the path was added to
-      // a message with no message box on screen to look at. Reporting the file
-      // as saved-but-not-sent, with its full path, is the truthful outcome.
-      // Deliberately not a fallback to the terminal sink: the toast's wording
-      // was fixed when the sink was chosen at the gesture, and a batch that
-      // quietly changed destination halfway would report the wrong one for
-      // every file either side of the switch.
+      // No socket check: nothing goes on the wire until Send, which gates
+      // itself in `sendCompose`. Ownership is still checked, so a demotion
+      // mid-upload cannot stage input at a session this device no longer
+      // drives, and so is the bar itself, which can go away mid-upload: the
+      // draft survives that but the report would claim a message box that is
+      // no longer on screen. Deliberately not a fallback to the terminal sink,
+      // because the toast's wording was fixed when the sink was chosen and a
+      // batch that changed destination halfway would misreport either side.
       unavailable: () => {
         if (!ownership.read()) return "another device took over input"
         if (!live.current.composeActive || composeInputRef.current === null) {
@@ -194,31 +171,18 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
 
   // Save each dropped or pasted file, then write its path to the sink.
   //
-  // Sequential on purpose. The list of outcomes is in DROPPED order, and that is
-  // also the order the paths are sent, which must not become whichever order the
-  // uploads happen to finish in. One toast reports the whole drop at the end, so
-  // a handful of files does not bury the screen.
+  // Sequential on purpose: outcomes and sent paths are both in dropped order,
+  // which must not become whichever order the uploads finish in.
   //
-  // The FORM each path takes is per-CLI, because the agent CLIs do not agree on
-  // how they read a pasted path (see `pastePayload`), and so is the length limit
-  // beside it. Both come out of ONE resolved profile: what the focused tab's live
-  // process launched with, off the spine (so a launch or a termination refreshes
-  // it), falling back to what config says for its provider, off the bootstrap
-  // document (so a `config.changed` refetch refreshes that).
+  // The form each path takes and the length limit beside it are per-CLI (see
+  // `pastePayload`), resolved immediately before each paste out of refs for the
+  // same reason the ownership and socket checks are: a config reload or a
+  // provider retarget can land between two files of one drop. A terminal runs a
+  // shell, so its path is always quoted (see `TERMINAL_PASTE_FORM`) and neither
+  // the setting nor the owning session's provider is consulted.
   //
-  // A TERMINAL is not a provider pane and never reads that setting: it runs a
-  // SHELL, which is exactly why its path is always quoted rather than left bare
-  // (see `TERMINAL_PASTE_FORM`). The owning session's provider is not consulted
-  // either, for the separate reason that a companion terminal is not that agent.
-  //
-  // The form is resolved IMMEDIATELY BEFORE EACH PASTE, out of refs, for the same
-  // reason the ownership and socket checks are: a drop's uploads are sequential,
-  // so a config reload or a provider retarget can land between two files, and a
-  // form snapshotted once at the top of the drop would silently outlive it.
-  //
-  // `toastId` is THIS batch's own sonner id, minted by `runUpload`. See
-  // `nextFileDropToastId`: two quick drops sharing one id lose the first one's
-  // report under the second one's spinner.
+  // `toastId` is this batch's own sonner id, minted by `runUpload`: two quick
+  // drops sharing one id lose the first one's report under the second's spinner.
   async function handleUploadedFiles(
     files: File[],
     toastId: string,
@@ -229,16 +193,10 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     const outcomes: DropOutcome[] = []
 
     for (const [i, file] of files.entries()) {
-      // A spinner for THIS file, before the request goes out. The drop overlay
-      // is already gone by now (`onDrop` clears it the moment the browser hands
-      // the files over), and an upload can wait a bounded but real amount of
-      // time for a server-side slot, so without this the interface returns to
-      // normal and nothing visibly happens. Uploads are sequential, so a
-      // multi-file drop counts through them rather than sitting on one message.
-      //
-      // Same sonner id as the report at the end of THIS drop, so the final
-      // REPLACES the spinner in place rather than stacking a second toast, and
-      // a concurrent drop cannot paint over either of them.
+      // The drop overlay is already gone and an upload can wait a real amount
+      // of time for a server-side slot, so without a spinner nothing visibly
+      // happens. Same sonner id as this drop's final report, so the final
+      // replaces the spinner rather than stacking a second toast.
       notifyBusy(
         files.length === 1
           ? `Uploading ${file.name}...`
@@ -269,11 +227,9 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
         })
         continue
       }
-      // The folder travels with THIS file, not with the drop. A terminal's
-      // directory changes the moment someone types `cd`, and these uploads are
-      // sequential, so two files dropped together really can land in two
-      // folders; keeping one label for the whole drop reported the last one for
-      // all of them.
+      // The folder travels with this file, not with the drop: a terminal's
+      // directory changes on any `cd`, and these uploads are sequential, so two
+      // files dropped together really can land in two folders.
       const where = {
         requestedName: saved.requested_name,
         savedName: saved.saved_name,
@@ -293,11 +249,10 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
         continue
       }
 
-      // Resolved here, per file, rather than once per drop: see the note above.
-      // The FORM and the CLI's character LIMIT come out together, keyed by the
-      // same target, so neither can be derived from the other: a terminal is a
-      // shell and has no limit whatever form it uses, and codex has its limit on
-      // every form it can be configured with.
+      // Resolved per file, as above. The form and the CLI's character limit
+      // come out together keyed by the same target, so neither is derived from
+      // the other: a terminal has no limit whatever form it uses, and codex has
+      // its limit on every form it can be configured with.
       const { form, charLimit } = dragDropPasteFor(
         live.current.configuredDropPaste,
         kind === "agent"
@@ -309,12 +264,10 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
           : { kind: "terminal" },
       )
       const payload = pastePayload(where.path, form)
-      // Too long for the receiving CLI to look at as a path. Codex files any
-      // paste over its threshold away as generic large content before it tries
-      // to recognize a path at all, so pasting this would put a placeholder in
-      // the prompt and attach nothing, while the toast claimed success. Report
-      // it as the stranded file it is: saved, here is the full path, go and
-      // reference it yourself.
+      // Too long for the receiving CLI to read as a path: codex files any paste
+      // over its threshold away as generic large content before it tries to
+      // recognize a path, so pasting would attach nothing. Reported as a
+      // stranded file, with its full path, instead.
       if (charLimit !== null && pasteExceedsAttachmentLimit(payload, charLimit)) {
         outcomes.push({
           kind: "saved-not-sent",
@@ -341,32 +294,21 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
       pastedTextChars,
     }
     const report = dropToastFor(outcomes, ctx)
-    // Through the ONE raiser, so the user's configured dismiss window applies.
-    // A bare sonner call would silently use the library default. It also retires
-    // the spinner's leak guard, since it lands on the same id.
+    // Through the one raiser, so the configured dismiss window applies and the
+    // spinner's leak guard is retired on the same id.
     //
-    // STICKY when a file was saved but never delivered. The report is then
-    // carrying the full path of a file sitting on disk that the agent has not
-    // been given, and that path exists nowhere else on screen: the user has to
-    // act outside the toast (type the path, or drop the file again) to finish
-    // what they started. A report that clears itself takes the only copy of
-    // that information with it.
+    // Sticky when a file was saved but never delivered: the report then carries
+    // the only copy on screen of a saved file's path, and the user must act
+    // outside the toast to finish what they started.
     notify(report.tone, report.message, { id: toastId, sticky: report.sticky })
   }
 
   /// Raise the batch's spinner and make sure something final always replaces it.
-  /// Shared by the drop gesture and the clipboard paste, which differ only in
-  /// the sink they hand over.
   ///
-  /// The loop's per-file failures are already outcomes, so the only way out
-  /// without a report is an unexpected throw. `handleUploadedFiles` is called
-  /// with `void`, so that throw would become an unhandled rejection and leave
-  /// the spinner on screen until its leak guard expires a minute later, still
-  /// claiming the upload is running.
-  ///
-  /// The id is minted HERE, once per drop, and handed to both halves, so a
-  /// second drop starting while this one is still uploading cannot land its
-  /// spinner on this drop's report.
+  /// Per-file failures are already outcomes, so the only way out without a
+  /// report is an unexpected throw, which would otherwise leave the spinner on
+  /// screen until its leak guard expires. The id is minted here, once per
+  /// batch, so a second drop cannot land its spinner on this drop's report.
   async function runUpload(
     files: File[],
     sink: UploadSink,
@@ -383,23 +325,14 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     }
   }
 
-  /// THE PICKER GESTURE, the third way into the same journey.
+  /// The picker gesture: the entry a phone or keyboard-only user has, since a
+  /// drag needs a desktop pointer and a paste needs the file on the clipboard.
+  /// Everything after the files arrive is shared with the other two gestures.
   ///
-  /// A drag needs a desktop pointer and a paste needs the file already on the
-  /// clipboard; this needs neither, which is why it is the only entry point a
-  /// phone or a keyboard-only desktop user has. Everything after the files
-  /// arrive is shared with the other two gestures: the route, the destination
-  /// (an agent's upload folder or a terminal's live directory), the naming, the
-  /// per-provider path form, the length cap and the one toast.
-  ///
-  /// The sink is resolved AFTER the picker settles, not before it opens: the
-  /// dialog can sit open for a while, and where a path should land is a
-  /// question about the moment it is delivered (`activeUploadSink` reads the
-  /// live compose state, and the sinks recheck ownership again per file).
-  ///
-  /// No `pastedTextChars`: that argument exists solely to word the long-text
-  /// paste toast, and passing it here would make the report describe a gesture
-  /// that did not happen.
+  /// The sink is resolved after the picker settles, not before it opens: the
+  /// dialog can sit open for a while, and where a path lands is a question
+  /// about the moment of delivery. No `pastedTextChars`, which words the
+  /// long-text paste toast and would describe a gesture that did not happen.
   function attachFromPicker(): void {
     void openFilePicker().then((files) => {
       if (files.length === 0) return
@@ -407,12 +340,10 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     })
   }
 
-  // Published to the agent and terminal ROW menus while this pane is mounted
-  // and owns the input, so a desktop or keyboard-only user has a path into the
-  // upload journey at all. Ownership is part of the registration rather than
-  // something the menu checks: a viewer's pane mounts completely, and an
-  // attach from one would strand every file as saved-but-not-sent. Uploads
-  // being switched off retires it for the same reason the drag surface goes.
+  // Published to the agent and terminal row menus while this pane is mounted
+  // and owns the input. Ownership is part of the registration rather than
+  // something the menu checks: a viewer's pane mounts completely, and an attach
+  // from one would strand every file as saved-but-not-sent.
   useEffect(() => {
     if (!(isOwner && fileDropEnabled)) return
     return registerAttachCapability(id, attachFromPicker)
@@ -422,40 +353,23 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, isOwner, fileDropEnabled])
 
-  // An image on the clipboard, pasted. The same journey as a drop, entered by
-  // the gesture people actually use: screenshot, paste, hand it to the agent.
+  // An image on the clipboard, pasted: the same journey as a drop.
   //
-  // WHY THE `paste` EVENT AND NOT `navigator.clipboard.read()`. dux is
-  // routinely served over plain HTTP on a Tailscale address, where the async
-  // Clipboard API's read is blocked outright; the paste event's `clipboardData`
-  // needs no secure context, because the user gesture IS the permission. Same
-  // constraint, same answer as the Ctrl+v path below (and the CLAUDE.md
-  // clipboard tenet).
+  // The `paste` event rather than `navigator.clipboard.read()`, because dux is
+  // routinely served over plain HTTP where the async Clipboard API's read is
+  // blocked, while `clipboardData` needs no secure context.
   //
-  // HOW THIS COEXISTS WITH THE Ctrl+v INTERCEPT, which is the fiddly part.
-  // `attachCustomKeyEventHandler` deliberately returns false WITHOUT
-  // preventDefault for a paste chord, precisely so the browser's native paste
-  // event still fires and xterm's own handler reads the text out of
-  // `clipboardData`. That is the text path and it must not change. So image
-  // handling cannot live in the key handler at all (a key event carries no
-  // clipboard contents); it lives in a `paste` listener registered on the
-  // CONTAINER in the CAPTURE phase. Capture runs on ancestors before the
-  // target, and xterm's handler is on the hidden textarea INSIDE the
-  // container, so dux sees every paste first and can decide. For an image it
-  // cancels the event and stops propagation, so xterm's handler never runs and
-  // the browser inserts nothing; for anything else it does nothing whatsoever
-  // and the event continues to xterm exactly as before. The image bytes never
-  // reach xterm on either path.
+  // The listener is on the container in the capture phase, so dux sees a paste
+  // before xterm's handler on the hidden textarea inside it. An image cancels
+  // the event and stops propagation; anything else continues to xterm
+  // untouched, which is the text path `attachCustomKeyEventHandler` keeps alive
+  // by returning false without preventDefault for a paste chord.
   ///
-  /// THE TEXT-PASTE HATCH. `Ctrl+v` is image-wins; `Ctrl+Shift+v` (and
-  /// `Cmd+Shift+v`) forces the text. The key handler arms the latch and this
-  /// consumes it, because a key event carries no clipboard contents and a paste
-  /// event carries no modifiers, so the two halves of the gesture can only meet
-  /// through a latch.
-  ///
-  /// Armed with a task-queue expiry rather than left to be consumed: a chord
-  /// that produces no paste event at all (an empty clipboard on some browsers,
-  /// a read the OS refuses) would otherwise leave the latch set and quietly
+  /// The text-paste hatch: `Ctrl+v` is image-wins, `Ctrl+Shift+v` (and
+  /// `Cmd+Shift+v`) forces the text. A key event carries no clipboard contents
+  /// and a paste event carries no modifiers, so the two halves meet through a
+  /// latch. It expires on the task queue rather than waiting to be consumed: a
+  /// chord that produces no paste event would otherwise leave it armed and
   /// disarm image handling for whatever pasted next.
   function armForcedTextPaste() {
     forcedTextPasteRef.current = true
@@ -472,11 +386,9 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     const items = Array.from(e.clipboardData?.items ?? [])
     const action = clipboardPasteAction(
       items,
-      // Read SYNCHRONOUSLY: the decision has to be made while the event is
-      // still cancellable, and a `DataTransferItem` of kind `string` only
-      // yields its contents through an async callback, by which time xterm has
-      // already pasted. `getData` on the event's own `clipboardData` needs no
-      // secure context, exactly like the image bytes beside it.
+      // Read synchronously: the decision must be made while the event is still
+      // cancellable, and a `DataTransferItem` of kind `string` only yields its
+      // contents through an async callback, by which time xterm has pasted.
       e.clipboardData?.getData("text/plain") ?? "",
       {
         uploadsEnabled: live.current.fileDropEnabled,
@@ -510,11 +422,9 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
       e.preventDefault()
       e.stopPropagation()
       notifyError(action.reason, {
-        // One id PER SUBJECT, not one for the whole listener. A refusal
-        // replaces whatever is already on its id, so an image refusal and a
-        // text refusal sharing one would erase each other: a viewer who pastes
-        // a screenshot and then a wall of text would be told about exactly one
-        // of them, with no way to know the other happened.
+        // One id per subject, not one for the whole listener: a refusal
+        // replaces whatever holds its id, so an image refusal and a text
+        // refusal sharing one would erase each other.
         id:
           action.subject === "text"
             ? "clipboard-text-paste"
@@ -526,22 +436,17 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     // an empty clipboard has nothing to do.
   }
 
-  // A drag from a non-owner, on a phone (where there is no drag), or while file
-  // drop is switched off is left entirely alone: no overlay and no
-  // preventDefault, so the browser does whatever it would normally do.
+  // A drag from a non-owner, on a phone, or while file drop is off is left
+  // entirely alone: no overlay and no preventDefault.
   //
-  // `[server] file_drop_max_bytes = 0` is documented as switching file drop off,
-  // and the server refuses every upload when it is. The server stays the real
-  // enforcement; this gate is what stops a disabled feature ADVERTISING a drop
-  // target, accepting the drop and only then reporting a refusal per file. It
-  // is closed while the setting is merely UNKNOWN too, so nothing is offered
-  // before dux can say the feature is there (see `fileDropEnabled`).
+  // The server refuses every upload under `[server] file_drop_max_bytes = 0`
+  // and stays the real enforcement; this gate stops a disabled feature from
+  // advertising a drop target and refusing per file afterwards. It is closed
+  // while the setting is merely unknown too (see `fileDropEnabled`).
   //
-  // Deliberately NOT called `dragCarriesFiles`: that name belongs to the one
-  // shared predicate in `lib/fileDrop.ts`, which answers only "is this drag
-  // carrying files", and the editor's file tree calls it under that name too.
-  // This one answers the wider question ("and may this pane act on it"), so it
-  // says so.
+  // Deliberately not named `dragCarriesFiles`, which is the shared predicate in
+  // `lib/fileDrop.ts` answering only whether a drag carries files; this answers
+  // the wider question of whether this pane may act on it.
   function paneAcceptsFileDrag(e: React.DragEvent): boolean {
     return (
       fileDropEnabled &&

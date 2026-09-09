@@ -22,20 +22,15 @@ import { openMacrosDialog, runMacro, useDux } from "@/lib/store"
 import { getTerminalFocusElement } from "@/lib/terminalFocus"
 import type { SelectedTarget } from "@/lib/store"
 
-// A small quick-picker for sending a text macro to the focused target. Mirrors
-// the TUI's Ctrl-\ macro bar: a filterable list of macros restricted to the
-// focused target's surface, run by Enter/click. There is deliberately NO
-// confirmation of any kind here: `runMacro` writes the payload straight to the
-// focused PTY socket — or, while the mobile compose bar is the typing surface,
-// splices it into the compose DRAFT — and emits no status, so nothing reaches
-// the toast lane. (The TUI's `Sent macro "<name>".` status line has no web
-// counterpart, because there is no server round trip to carry one; the
-// feedback is the macro text appearing at the prompt or in the draft.)
+// A quick-picker for sending a text macro to the focused target: a filterable
+// list restricted to that target's surface, run by Enter or click. There is
+// deliberately no confirmation and no status; `runMacro` writes the payload
+// straight to the focused PTY socket, or splices it into the compose draft
+// while that is the typing surface, and the feedback is the text appearing.
 //
-// LAYOUT SAFETY: the trigger button is rendered by `TerminalPane` as an
-// absolutely-positioned sibling of the xterm host (NOT inside the unpadded
-// `containerRef` xterm opens into), so it never changes the terminal's box
-// measurement. See the hostRef comment in `TerminalPane`.
+// The trigger is rendered as an absolutely-positioned sibling of the xterm
+// host, never inside the unpadded container xterm opens into, so it cannot
+// change the terminal's box measurement.
 export function MacroPopover({
   target,
   finalFocus,
@@ -52,20 +47,12 @@ export function MacroPopover({
   // This intentionally overrides the usual "return focus to the trigger" popover
   // convention because the trigger floats over a live terminal the user drives.
   finalFocus?: () => HTMLElement | null
-  // "labeled" is the desktop trigger ("Macros…" in the center pane's top bar);
-  // "icon" is the mobile terminal-screen header's icon button, matching the
-  // header's outline action-cluster idiom (see the trigger below). On phones
-  // the picker submits through
-  // the compose bar / a tap, so the icon variant passes no finalFocus and
-  // keeps the default return-focus-to-trigger behavior on a dismissal rather
-  // than popping the soft keyboard by focusing a terminal textarea. A PICK
-  // that landed in the compose draft is the one exception, resolved in
-  // `resolveFinalFocus` below: focus follows the macro into the draft.
-  // "pill" is the floating theater pill's round 40px ghost button: the pill is
-  // one rounded control, and a square outline button inside it would read as a
-  // second surface. It stays this component rather than being hand-rolled
-  // there, so the picker, its focus rules and its target filtering cannot drift
-  // into a copy.
+  // "labeled" is the desktop trigger; "icon" is the phone header's icon button,
+  // which passes no finalFocus so a dismissal returns focus to the trigger
+  // rather than popping the soft keyboard (a pick landing in the compose draft
+  // is the exception, in `resolveFinalFocus`); "pill" is the theater pill's
+  // round ghost button, since a square outline button inside that one rounded
+  // control would read as a second surface.
   variant?: "labeled" | "icon" | "pill"
 }) {
   const { bootstrap } = useDux()
@@ -80,31 +67,23 @@ export function MacroPopover({
   const macros = macrosForTarget(allMacros, target)
 
   function handleRun(name: string) {
-    // The macro's payload is written to the focused PTY socket (the
-    // `target` this picker is filtered for), resolved by name in the store —
-    // unless the mobile compose bar is the typing surface, in which case the
-    // store splices the text into the compose draft instead (the returned
-    // destination says which happened, steering the close focus below).
+    // The payload goes to the focused PTY socket, or into the compose draft
+    // while that bar is the typing surface. The returned destination says which
+    // happened, which steers the close focus below.
     pickedIntoComposeRef.current = runMacro(name) === "compose"
     setOpen(false)
   }
 
-  // Where focus lands when the popover closes. A pick that landed in the
-  // compose draft moves focus INTO that draft (the pane's insert already asked
-  // for it, but Base UI owns focus during a popover close and would otherwise
-  // hand it back to the trigger, yanking the keyboard away from the text the
-  // user is about to edit). Every other close keeps the existing behavior: the
-  // caller's finalFocus when given, else, for the DESKTOP labelled trigger,
-  // the mounted terminal pane's own typing surface, else Base UI's default
-  // return-to-trigger (`true`).
+  // Where focus lands when the popover closes: into the compose draft for a
+  // pick that landed there, because Base UI owns focus during a close and would
+  // otherwise yank the keyboard back to the trigger. Otherwise the caller's
+  // finalFocus, else the mounted terminal pane's typing surface for the desktop
+  // labelled trigger, else Base UI's return-to-trigger.
   //
-  // The desktop trigger sits in the header now, outside `TerminalPane`, so it
-  // has no ref to hand in; the pane registers its surface on the module-scope
-  // `terminalFocus` hand-off instead. That fallback is deliberately NOT applied
-  // to the `icon` variant: on a phone, focusing a terminal textarea on a plain
-  // dismissal pops the soft keyboard, so the mobile picker keeps Base UI's
-  // return-to-trigger (a PICK that landed in the compose draft is the one
-  // exception, handled above).
+  // The desktop trigger sits in the header outside `TerminalPane` and has no
+  // ref to hand in, so the pane registers its surface on the module-scope
+  // `terminalFocus` hand-off. That fallback is not applied to the `icon`
+  // variant, where focusing a terminal textarea pops the soft keyboard.
   function resolveFinalFocus(): HTMLElement | boolean | null {
     if (pickedIntoComposeRef.current) {
       pickedIntoComposeRef.current = false
@@ -118,27 +97,21 @@ export function MacroPopover({
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      {/* Ellipsis on the label signals the button opens a menu of choices
-          (rather than acting immediately). The icon variant drops the label:
-          it sits in the mobile terminal header among other icon-only controls,
-          and on a phone icon-only is the default because space is scarce. Do
-          not give it a label back.
+      {/* The ellipsis on the label says the button opens a menu of choices
+          rather than acting. The icon variant drops the label because it sits
+          among icon-only controls in the phone header; do not give it one back.
 
           The labeled and icon variants are `outline` to match the desktop
-          header's controls; the pill variant is deliberately not, because it
-          lives inside the floating theater pill, which is one rounded surface
-          and would read as two if a bordered button sat in it. Its height
-          comes from the button's default `h-8` token, which is exactly the
-          `size="icon"` (`size-8`) height of the icon-only buttons next to it,
-          so the label changes the WIDTH and nothing else.
+          header's controls. The pill variant is not, because it lives inside
+          the floating theater pill, one rounded surface that would read as two
+          with a bordered button in it. Its height is the button's default `h-8`
+          token, the same as the `size="icon"` buttons beside it, so the label
+          changes the width and nothing else.
 
-          The shape lives HERE rather than being overridden at the call site,
-          so the trigger cannot drift from the `±N` and `⋯` buttons it sits
-          between. All three are `outline` (the desktop AppMenu cog and the
-          Show-Changes button beside it already establish outline as the
-          one-family treatment for an action cluster), all three take their
-          height from `size="lg"`, and all three carry the same 44px width
-          floor. See MobileShell.tsx's header for the full justification. */}
+          The shape lives here rather than at the call site so the trigger
+          cannot drift from the `±N` and `⋯` buttons it sits between: all
+          outline, all sized from `size="lg"`, all on the same 44px width
+          floor. */}
       <PopoverTrigger
         render={
           variant === "pill" ? (

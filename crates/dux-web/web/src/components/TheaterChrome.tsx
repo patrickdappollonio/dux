@@ -4,27 +4,19 @@ import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { theaterTransitionMs } from "@/lib/theater"
 import { cn } from "@/lib/utils"
 
-// THE CHROME THAT LEAVES. Wraps a stack of dux's own chrome (the pane header,
-// the pull-request band and the tab strip on the desktop shell; the phone
-// shell's header and strip) and collapses it out of the layout when theater is
-// on, giving its height to the terminal underneath.
+// Wraps a stack of dux's own chrome and collapses it out of the layout when
+// theater is on, giving its height to the terminal underneath.
 //
-// The collapse animates from a MEASURED explicit height, never from
-// `height: auto`, which is not an interpolable value: written the obvious way
-// the chrome snaps and the mode change has no motion at all. So the natural
-// height is read once, written to the element, and replaced with zero on the
-// next frame; on the way back the pair runs in reverse and the inline height is
-// dropped at the end so the chrome is free to grow again (a PR banner
-// appearing, a tab strip gaining a row).
+// The collapse animates from a measured explicit height, never `height: auto`,
+// which is not interpolable: the natural height is read once, written to the
+// element, and replaced with zero on the next frame; the way back runs in
+// reverse and drops the inline height at the end so the chrome can grow again.
 //
-// The children are UNMOUNTED once the collapse finishes, rather than left in
-// the DOM at zero height: invisible chrome that keyboard focus and a screen
-// reader can still reach is not hidden, it is just hard to see.
+// The children are unmounted once the collapse finishes rather than left at
+// zero height, where keyboard focus and a screen reader could still reach them.
 //
-// It runs NO refit of its own. The single PTY refit for the whole gesture is
-// the layout gesture's (see `lib/layoutGesture.ts` and `useTheaterGesture`),
-// which holds the pane's coordinator across every frame of this transition and
-// releases it once at the end.
+// It runs no refit of its own: the single PTY refit for the whole gesture is
+// the layout gesture's (see `lib/layoutGesture.ts` and `useTheaterGesture`).
 export function TheaterChrome({
   hidden,
   children,
@@ -81,10 +73,9 @@ export function TheaterChrome({
       className={cn(
         "relative z-10 shrink-0 overflow-hidden",
         // `duration-300` is written out because Tailwind scans source text and
-        // a class built from a variable produces no CSS at all. It has to be
-        // the same number as `THEATER_TRANSITION_MS`, which is how long the
-        // gesture holds the terminal's refit for; a test pins the pair, because
-        // a drift here re-grids the terminal in the middle of the transition.
+        // a class built from a variable produces no CSS at all. It must match
+        // `THEATER_TRANSITION_MS`, which is how long the gesture holds the
+        // terminal's refit: a drift re-grids the terminal mid-transition.
         "motion-safe:transition-[height,opacity,transform] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.2,0,0,1)]",
         hidden && "-translate-y-3.5 opacity-0",
       )}

@@ -13,13 +13,11 @@ import {
   useDux,
 } from "@/lib/store"
 
-// Consent before a new agent ATTACHES to an existing branch's history. The
-// server refuses an unconfirmed create whose name matches a branch (the "no
-// silent attach" tenet) and returns a confirmable 409; the store opens this
-// dialog with the branch name + location. Confirm re-creates with
-// `use_existing_branch: true`; Cancel abandons the create so the user can pick a
-// different name. Mirrors the TUI's ConfirmUseExistingBranch prompt. Cancel is
-// the default focus, matching the other confirm dialogs.
+// Consent before a new agent attaches to an existing branch's history. The
+// server refuses an unconfirmed create whose name matches a branch and returns
+// a confirmable conflict; the store opens this dialog with the branch name and
+// location. Confirm re-creates with `use_existing_branch: true`, Cancel
+// abandons the create. Cancel is the default focus.
 export function ConfirmUseExistingBranchDialog() {
   const { existingBranchTarget } = useDux()
   const isOpen = existingBranchTarget !== null

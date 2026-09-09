@@ -5,27 +5,20 @@ import { CornerDownLeft } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { composeHardwareKeyForwards } from "@/lib/termkeys"
 
-// Typing straight into xterm's hidden textarea is hostile on a phone: the
-// soft keyboard's autocorrect/swipe/IME fight an input that must stay raw, and
-// there is no local editing before bytes hit the PTY. The compose bar is the
-// phone's typing surface instead: a real textarea (native keyboard assistance
-// ON, the whole point) that buffers the message locally, plus a Send button
-// that delivers it in one write. It renders as the third row of the mobile
-// shell, below the accessory bar's two key rows.
+// The phone's typing surface: a real textarea with native keyboard assistance
+// on, buffering the message locally, plus a Send that delivers it in one write.
+// Typing straight into xterm's hidden textarea is hostile on a phone, where
+// autocorrect, swipe and IMEs fight an input that must stay raw.
 //
-// Presentational and thin, like AccessoryBar: this component owns only the
-// textarea's autosizing, and emits `onSend(text)`. The buffer itself is
-// CONTROLLED (value/onChange) and lives in TerminalPane, so unmounting the bar
-// (a preference flip, a rotation to desktop width) never destroys in-progress
-// text. All behavior (payload encoding, bracketed paste, ownership gating,
-// PTY writes, scroll/selection side effects) lives in TerminalPane +
-// lib/composebar.
+// Presentational and thin: this owns only the textarea's autosizing and emits
+// `onSend(text)`. The buffer is controlled and lives in TerminalPane, so
+// unmounting the bar never destroys in-progress text, and every behavior
+// (payload encoding, ownership gating, PTY writes) lives there and in
+// `lib/composebar`.
 //
-// Enter inside the textarea is NOT intercepted: it inserts a newline in the
-// buffer (native textarea behavior). Only Send delivers-and-submits. The one
-// class of physical key that IS intercepted is the keys a textarea has no
-// meaning for, Escape and F1-F12, which forward to the PTY through
-// `onForwardKey` (see the prop and `composeHardwareKeyForwards`).
+// Enter inserts a newline; only Send delivers. The one class of physical key
+// intercepted is the keys a textarea has no meaning for, Escape and F1-F12,
+// forwarded through `onForwardKey`.
 
 interface ComposeBarProps {
   // The buffered message text, owned by the parent (controlled input).
@@ -54,27 +47,21 @@ interface ComposeBarProps {
   // rendered without an opinion is sitting under.
   placeholder?: string
   // Forward the bytes of a physical key the textarea has no meaning for
-  // (Escape and F1-F12, decided by the pure `composeHardwareKeyForwards` in
-  // lib/termkeys) to the PTY. A tablet with a keyboard case keeps the compose
-  // bar up, and its hardware Esc must interrupt a running agent the way the
-  // accessory bar's Esc key does; the parent routes this through the SAME
-  // write helper as that key (`sendSeq`), which owns the ownership gate and
-  // the modifier latch. Optional and presentational like everything else
-  // here: without it every keystroke keeps native textarea behavior.
+  // (Escape and F1-F12, decided by `composeHardwareKeyForwards`) to the PTY: a
+  // tablet with a keyboard case keeps the compose bar up, and its hardware Esc
+  // must interrupt a running agent the way the accessory Esc key does. The
+  // parent routes it through that key's own write helper, which owns the
+  // ownership gate. Without it every keystroke keeps native textarea behavior.
   onForwardKey?: (seq: string) => void
-  // The control in the row's LEADING slot, opposite Send. In practice this is
-  // always the input ⋯ menu, but the bar takes it as a node rather than naming
-  // it: the compose bar is presentational and the anchor matrix (which of the
-  // three input rows carries the menu) is the parent's decision, not this
-  // component's. Absent where the menu would render empty.
+  // The control in the row's leading slot, opposite Send: a node rather than a
+  // named menu, because which input row carries the `⋯` is the parent's
+  // decision. Absent where the menu would render empty.
   leading?: React.ReactNode
 }
 
-// The textarea grows with its content from one line up to this many, then
-// scrolls internally. Three lines: with the soft keyboard up the terminal is
-// already down to a handful of rows, and device testing showed a taller box
-// left too little PTY visible; three still shows enough of a draft to review,
-// and the box scrolls for anything longer.
+// The textarea grows with its content up to this many lines, then scrolls
+// internally. Three, because with the soft keyboard up the terminal is already
+// down to a handful of rows and a taller box leaves too little PTY visible.
 const MAX_ROWS = 3
 
 // The default hint: what the bar asks for when nobody says otherwise, and what
@@ -88,31 +75,22 @@ export const TERMINAL_PLACEHOLDER = "Type a command…"
 export const AGENT_PLACEHOLDER = "Write a message to the agent…"
 
 // Autosize by measurement, not CSS: `field-sizing: content` is unsupported on
-// OLDER iOS Safari (it shipped in 26.2, Dec 2025), so the JS measurement keeps
-// those devices working. We reset the height and read back scrollHeight (the
-// content's natural height), capping it at MAX_ROWS' worth of pixels. The
-// `|| 20` fallback covers environments whose computed line-height is not a
-// parseable pixel value ("normal", or empty under jsdom); the explicit
-// `leading-5` class below makes it parseable (20px) in real browsers.
+// older iOS Safari. The height is reset, `scrollHeight` read back, and capped
+// at MAX_ROWS' worth of pixels. The `|| 20` fallback covers a computed
+// line-height that is not a parseable pixel value ("normal", or empty under
+// jsdom); the `leading-5` class makes it parseable in real browsers.
 //
-// BORDER-BOX, load-bearing: Tailwind preflight sets `box-sizing: border-box`,
-// so the height style must cover content + padding + BORDER, while
-// `scrollHeight` is content + padding only. Setting height = scrollHeight
-// left the content area short by the border width and, with overflow-y
-// hidden, clipped the bottom of the last line on device. The border delta is
-// measured as `offsetHeight - clientHeight` (both include/exclude exactly the
-// border) and added to the height AND to the cap; the cap likewise adds the
-// vertical padding so it means "MAX_ROWS lines of CONTENT", not "MAX_ROWS
-// lines minus the box chrome".
+// Border-box is load-bearing: Tailwind preflight sets it, so the height style
+// must cover content plus padding plus border while `scrollHeight` covers only
+// the first two, and the shortfall clips the last line under overflow-y hidden.
+// The delta is `offsetHeight - clientHeight`, added to the height and to the
+// cap, which also adds the vertical padding so it means MAX_ROWS lines of
+// content rather than MAX_ROWS lines minus the box chrome.
 function autosize(el: HTMLTextAreaElement): void {
-  // AN EMPTY BUFFER IS ONE ROW BY DEFINITION, so it is not measured at all:
-  // the inline sizing is dropped and the class-level `min-h-10` owns the rest
-  // height, exactly as it does before the box has ever grown. This is the
-  // reported bug's fix (type a long message, Send, the text clears and the box
-  // stays tall) and it is deliberately a short circuit rather than a better
-  // measurement: the measured path could not be made to fail in a test, so
-  // rather than guess at which browser-side reflow quirk produced the stale
-  // read, the one state where the answer needs no reading stops reading.
+  // An empty buffer is one row by definition, so it is not measured: the
+  // inline sizing is dropped and the class-level `min-h-10` owns the rest
+  // height. Short-circuited rather than measured, because the measured read can
+  // come back stale after a send and leave the box tall with no text in it.
   if (el.value === "") {
     el.style.height = ""
     el.style.overflowY = ""
@@ -169,14 +147,11 @@ export function ComposeBar({
     trySend()
   }
 
-  // The physical-keyboard forward: consult the pure rule and, on a match,
-  // consume the event and hand the bytes to the parent. preventDefault is all
-  // the consumption needed; the draft and the focus are untouched, so the box
-  // keeps composing right through an Esc that interrupts the agent. The rule
-  // itself refuses anything modified or mid-IME-composition (Escape while
-  // composing keeps its native cancel-composition meaning), so a bail here is
-  // the browser's key exactly as before. `isComposing` lives on the native
-  // event, not React's synthetic one.
+  // The physical-keyboard forward. preventDefault is all the consumption
+  // needed: the draft and the focus are untouched, so the box keeps composing
+  // through an Esc that interrupts the agent. The rule refuses anything
+  // modified or mid-IME-composition, where Escape keeps its native
+  // cancel-composition meaning. `isComposing` lives on the native event.
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (!onForwardKey) return
     const seq = composeHardwareKeyForwards({
@@ -228,17 +203,12 @@ export function ComposeBar({
         autoCorrect="on"
         autoCapitalize="sentences"
         spellCheck={true}
-        // text-sm (14px) matches the xterm canvas next door in SIZE only
-        // (Terminal option fontSize: 14); the browser-default 16px visibly
-        // towered over the terminal text on a phone. The FACE is deliberately
-        // the app's sans, not the bundled terminal stack: this is a message
-        // box a person composes prose in, with autocorrect and an IME working
-        // on it, not a view of terminal content. An input font under 16px
-        // normally trips
-        // iOS Safari's auto-zoom-on-focus; index.html's viewport
-        // `maximum-scale=1` disables that zoom (see the comment there).
-        // leading-5 pins the line-height to a parseable 20px so `autosize`'s
-        // computed-style read never falls back to its jsdom-only default.
+        // text-sm matches the xterm canvas next door in size only; the face is
+        // the app's sans, because this is prose a person composes with
+        // autocorrect and an IME, not a view of terminal content. An input font
+        // under 16px normally trips iOS Safari's auto-zoom-on-focus, which
+        // index.html's viewport `maximum-scale=1` disables. leading-5 pins the
+        // line-height to a parseable 20px for `autosize`'s computed-style read.
         className="min-h-10 min-w-0 flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm leading-5 text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
       {/* Enabled even when the buffer is empty: an empty Send is a bare Enter

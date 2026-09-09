@@ -81,14 +81,11 @@ function TabPill({
             onActivate()
           }
         }}
-        // max-md:min-h-8.5 (34px) pins the phone pill to the header's
-        // File/Diff mode toggle's rendered height (an h-7 button inside
-        // p-0.5 plus the border), a settled decision that deliberately
-        // deviates from the 40px touch-target floor for this surface: the
-        // strip sits between the header and Monaco, where vertical space is
-        // the scarce resource on a phone. max-md:py-0 goes with it — the
-        // 32px close-button hit area inside would otherwise add the padding
-        // back on top and overshoot the 34px (measured 42px with py-1).
+        // max-md:min-h-8.5 pins the phone pill to the header File/Diff toggle's
+        // rendered height, deliberately under the 40px touch-target floor: the
+        // strip sits between the header and Monaco, where vertical space is the
+        // scarce resource on a phone. max-md:py-0 goes with it, or the close
+        // button's own hit area adds the padding back and overshoots.
         className={cn(
           "group/etab flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-8.5 max-md:py-0",
           active

@@ -10,21 +10,17 @@ import { editorRootForTarget } from "@/lib/editorRoot"
 import { openDeleteTerminal, openEditor, standaloneEditorHash } from "@/lib/store"
 import type { TerminalOwnerRef } from "@/lib/store"
 
-// THE TERMINAL'S OWN ACTIONS, the twin of `AgentActionsMenu`.
+// The terminal's own actions, the twin of `AgentActionsMenu`. Never rendered on
+// its own: `PaneMenuBody` is the menu and this is the group inside it about the
+// terminal, so the pane's input group lives in that wrapper, above these rows.
 //
-// It is never rendered on its own: `PaneMenuBody` is the menu, and this is the
-// group inside it that is about the terminal. The pane's INPUT group is
-// therefore not here but in the wrapper, once per menu, above these rows.
+// The wrapper uses it as the whole body of a project or standalone terminal's
+// menu, and as a labelled group beneath an agent's actions when the pane is one
+// of that agent's companion terminals.
 //
-// It appears twice over in that wrapper: as the whole body of a project or
-// standalone terminal's menu, and as a labelled group beneath an agent's actions
-// when the pane on screen is one of that agent's companion terminals.
-//
-// Streaming the terminal is the row's own click, so it is deliberately not
-// repeated here (a menu duplicate, "Stream", was removed as misleading). What
-// it carries is the two editor entries, matching the agent menu's pair exactly,
-// and Close, which stays in the menu rather than becoming an inline X so the
-// destructive action keeps its confirm flow and its misclick-safe treatment.
+// Streaming the terminal is the row's own click and is deliberately not
+// repeated here. Close stays in the menu rather than becoming an inline X, so
+// the destructive action keeps its confirm flow and misclick-safe treatment.
 export function TerminalActionsMenu({
   terminalId,
   owner,
@@ -32,11 +28,9 @@ export function TerminalActionsMenu({
 }: {
   terminalId: string
   owner: TerminalOwnerRef
-  /// A heading over the group, for the one menu that carries these rows beside
-  /// somebody else's: a companion terminal's pane wears its agent's menu, and
-  /// an unlabelled Close… under an agent's actions reads as closing the agent.
-  /// The whole menu is the terminal's everywhere else, so it has no label
-  /// there: a heading over every row in a menu says nothing.
+  /// A heading over the group, for the menu that carries these rows beside
+  /// somebody else's: an unlabelled Close… under an agent's actions reads as
+  /// closing the agent. Absent where the whole menu is the terminal's.
   label?: string
 }) {
   // The editor's root is the directory this terminal was SPAWNED in, and a

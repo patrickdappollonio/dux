@@ -45,16 +45,13 @@ export type TerminalOwnershipDeps = {
   /// can still be trusted.
   conn: ConnState
   ptyRef: { current: PtySocket | null }
-  /// Who the SPINE says drives this pty, refetched on every events-socket open.
-  /// `null` when the server says nobody, `undefined` when it has not answered
-  /// (an older server, or a view that carries no such field). It is the only
-  /// thing that can correct a device NAME kept across an outage; see the name's
-  /// own comment below.
+  /// Who the spine says drives this pty, refetched on every events-socket open.
+  /// `null` when the server says nobody, `undefined` when it has not answered.
+  /// The only thing that can correct a device name kept across an outage.
   spineInputOwner?: string | null
-  /// The pane's reconnect cue. The take-over bounce closes the socket
-  /// deliberately, which fires no `onReconnecting` of its own (see
-  /// `ReconnectingSocket.connect`), so the cue is raised here or the half-second
-  /// window reads as a dead terminal rather than a reconnecting one.
+  /// The pane's reconnect cue, raised by hand: the take-over bounce closes the
+  /// socket deliberately and so fires no `onReconnecting` of its own, and the
+  /// window would otherwise read as a dead terminal.
   setReconnecting: (value: boolean) => void
 }
 
@@ -69,14 +66,11 @@ export type TerminalOwnership = {
   /// The take-over intent, armed by `takeOver` and consumed by the one
   /// confirmed resize write in the lifecycle.
   takeoverIntent: TakeoverIntent
-  /// Re-seed the verdict from the `connected` handshake. Called by the
-  /// lifecycle, which is where the frame lands. `ownerEpoch` is the handshake's
-  /// `owner_epoch` stamp (undefined on an old server), which lets the seed
-  /// defer to a strictly newer `pty.owner` already applied for this pty.
-  /// `ownerDevice` is the handshake's `owner_device` (the owner's captured
-  /// User-Agent; undefined on an old server or when there is none to name),
-  /// which seeds the take-over card's device name for a watcher that merely
-  /// attached and will therefore hear no `pty.owner` broadcast.
+  /// Re-seed the verdict from the `connected` handshake. `ownerEpoch` is the
+  /// handshake's `owner_epoch`, which lets the seed defer to a strictly newer
+  /// `pty.owner` already applied; `ownerDevice` is its `owner_device`, which
+  /// names the card's device for a watcher that will hear no `pty.owner`
+  /// broadcast. Both are undefined on a server that sends neither.
   seedFromConnected: (
     myConnId: string,
     owner: HandshakeOwner,
@@ -132,37 +126,20 @@ export function useTerminalOwnership(
   )
 
   const myConnIdRef = useRef<string | null>(null)
-  // THE GHOSTS: EVERY id this pane has ever held, not merely the last one.
-  //
-  // A returning owner has to recognise its own dead connection in the next
-  // handshake's answer (see the self-succession rule in `seedFromConnected`),
-  // and a single previous id is not enough to do that reliably: a flapping radio
-  // can produce two handshakes in a row, and the second one may still name the
-  // connection from before the first. Matching against the whole set means a
-  // dropped intent between two handshakes cannot land the returning driver as a
-  // watcher of itself.
-  //
-  // Pane-local and re-derived per handshake, so it is bounded by this pane's own
-  // reconnect count and dies with the mount.
-  //
-  // Each id is STAMPED with the server run it was learned under, because a
-  // restarted server mints ids from zero again and another device's fresh id can
-  // equal one of ours (see `serverRun.ts`).
+  // Every id this pane has ever held, not merely the last: a returning owner
+  // recognises its own dead connection in the next handshake (see the
+  // self-succession rule in `seedFromConnected`), and a flapping radio can
+  // produce two handshakes where the second still names the connection from
+  // before the first. Each id is stamped with the server run it was learned
+  // under, because a restarted server mints ids from zero again and another
+  // device's fresh id can equal one of ours (see `serverRun.ts`).
   const heldConnIdsRef = useRef<Map<string, number>>(new Map())
-  // GHOSTS DO NOT SURVIVE A SERVER RESTART. Connection ids come from a
-  // process-global counter that starts again at zero, so an id this pane held
-  // against the previous run can be minted afresh for somebody else's
-  // connection, and self-succession would then hand this pane a pty it never
-  // owned.
-  //
-  // Only a confirmed server-run change retires them. An events reconnect is not
-  // evidence of a restart and may precede the PTY handshake naming the ghost.
-  //
-  // The stamp on each id is the other half, and it is what makes an UNPROVEN
-  // answer safe: a ghost is only ever ACTED ON while the current run is
-  // confirmed to be the one it was learned under, so a probe that cannot answer
-  // costs the returning driver one tap rather than letting it succeed onto an id
-  // a restarted server may have handed to somebody else.
+  // Ghosts do not survive a server restart: ids come from a process-global
+  // counter that starts at zero again, so self-succession onto a re-minted id
+  // would hand this pane a pty it never owned. Only a confirmed run change
+  // retires them, since an events reconnect is not evidence of a restart and
+  // may precede the handshake naming the ghost; an unproven answer is safe
+  // because a ghost is acted on only while its stamped run is confirmed.
   useEffect(() => onServerRunChanged(() => heldConnIdsRef.current.clear()), [])
   // May a handshake naming `id` be treated as this pane meeting its own ghost?
   const ownGhostOfThisRun = (id: string): boolean => {
@@ -187,13 +164,11 @@ export function useTerminalOwnership(
   // `expected_owner`. Undefined for a PRESSED take-over, which may take from
   // anyone.
   const takeoverExpectedRef = useRef<string | undefined>(undefined)
-  // A PRESSED take-over of ours is in flight and the server has not answered.
-  // Distinct from the intent, which is spent the moment the flagged frame goes
-  // out; this outlives it, until an ownership answer arrives. It exists for one
-  // job: keeping a spine document that predates the grant from flashing the card
-  // back over a pane the user has just taken. A press cannot be refused (it names
-  // no expected owner, so the server grants it unconditionally), so blocking on
-  // it costs nothing in correctness.
+  // A pressed take-over is in flight and unanswered. Distinct from the intent,
+  // which is spent when the flagged frame goes out; this outlives it until an
+  // ownership answer arrives, so a spine document predating the grant cannot
+  // flash the card back over a pane the user just took. A press names no
+  // expected owner and so cannot be refused, which is why blocking is safe.
   const pressedClaimRef = useRef(false)
   const takeoverIntent = useMemo<TakeoverIntent>(
     () => ({
@@ -220,13 +195,10 @@ export function useTerminalOwnership(
   // good as the owner it describes, so the two travel together and the spine's
   // `input_owner` is checked against this one rather than against nothing.
   const takeoverDeviceOwnerRef = useRef<string | null>(null)
-  // The name as of NOW, rather than as of the render whose closure a socket
-  // callback happens to be holding. `seedFromConnected` runs from the PTY
-  // socket, which is wired on the mount render, so reading the state variable
-  // there would pin it to that render forever: the superseded branch would see a
-  // permanently null prior name and downgrade a perfectly good "Active on Chrome
-  // on macOS" to the generic title. Refs are how every other read in this file
-  // crosses that boundary.
+  // The name as of now, not as of the render a socket callback closes over:
+  // `seedFromConnected` runs from the PTY socket wired on the mount render, so
+  // a state read there would see a permanently null prior name and downgrade a
+  // good device title to the generic one.
   const takeoverDeviceRef = useRef<string | null>(null)
   // One writer for the trio, so a name can never be set without the id it names
   // or cleared without clearing it.
@@ -258,20 +230,15 @@ export function useTerminalOwnership(
   // ownership verdict when a conditional self-succession was refused silently.
   // The demotion rule is:
   //
-  //   - The spine must NAME somebody. `undefined` is the server declining to
-  //     answer and `null` is nobody driving; neither is evidence against us.
-  //   - It must not name US.
-  //   - It must not name one of OUR OWN GHOSTS. A self-succession about to be
-  //     GRANTED is exactly the case where the pty is still recorded to this
-  //     pane's dead connection, so demoting on it would flash the card over the
-  //     returning driver a moment before the grant lands.
-  //   - No PRESSED claim of ours may be outstanding. A press names no expected
-  //     owner, so the server grants it unconditionally and the optimism is always
-  //     right; only a spine document rendered before the grant could disagree,
-  //     and that is staleness rather than refusal. A SELF-SUCCESSION deliberately
-  //     does NOT block the demotion, because refusal is exactly the answer it can
-  //     get, and the ghost clause above already protects the version of it that
-  //     will be granted.
+  //   - The spine must name somebody: `undefined` is the server declining to
+  //     answer and `null` is nobody driving, neither evidence against us.
+  //   - It must not name us.
+  //   - It must not name one of our own ghosts: a self-succession about to be
+  //     granted still has the pty recorded to this pane's dead connection.
+  //   - No pressed claim of ours may be outstanding, since a press cannot be
+  //     refused and only a stale document could disagree. A self-succession
+  //     deliberately does not block it, because refusal is an answer it can get
+  //     and the ghost clause already covers the version that will be granted.
   useEffect(() => {
     if (conn !== "open") return
     // The server has not answered the question: no evidence, so no correction.
@@ -321,19 +288,14 @@ export function useTerminalOwnership(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
-  // Publish this pane's verdict into the store ledger so surfaces OUTSIDE the
+  // Publish this pane's verdict into the store ledger so surfaces outside the
   // pane (the agent ⋯ menu) can disable mutating actions while another device
   // drives the agent. Agent PTYs only: a companion terminal taken over
-  // elsewhere says nothing about the agent itself. The verdict is the ledger's
-  // fast path in BOTH directions: "elsewhere" gates the menu the moment the
-  // handover frame lands, and "mine" un-gates it right after a take-over, while
-  // the spine's `input_owner` still names the previous owner until the refetch.
-  // "mine" starts as the same optimistic foreground guess `isOwner` itself
-  // starts from; it is corrected by the handovers. A pane whose socket has
-  // FAILED for good publishes NO verdict at all (the LOST state). The cleanup
-  // retires the verdict; it also runs between re-publishes (any dep flip),
-  // which is harmless because the new verdict lands in the same synchronous
-  // pass, and on unmount it is what hands the answer back to the
+  // elsewhere says nothing about the agent. The verdict is the ledger's fast
+  // path in both directions, gating the menu when a handover lands and
+  // un-gating it after a take-over, while the spine's `input_owner` still names
+  // the previous owner until the refetch. A pane whose socket has failed for
+  // good publishes no verdict, and the cleanup hands the answer back to the
   // server-published spine field alone.
   useEffect(() => {
     if (kind !== "agent") return
@@ -346,16 +308,12 @@ export function useTerminalOwnership(
   }, [kind, id, isOwner, connectionLost])
 
   // The connected handshake replaces the foreground guess unless a take-over is
-  // armed. It can be stale: it rides the PTY socket while `pty.owner`
-  // rides the events socket, and nothing orders the two connections. When a
-  // `pty.owner` with a strictly newer epoch has already been applied for this
-  // pty, the seed keeps the verdict that event wrote (rule 2 in the pure
-  // helper), and `ownerPresent` is likewise left as the newer event set it,
-  // gated on the SAME `handshakeSuperseded` comparison so the two cannot
-  // drift. Without the deferral, a slow `connected{owner:null}` landing after
-  // a fresh `pty.owner{owner:B}` would re-seed this client as a phantom owner
-  // that nothing ever corrects, because the stale-null direction emits no
-  // further event.
+  // armed. It can be stale, riding the PTY socket while `pty.owner` rides the
+  // events socket with nothing ordering the two, so a strictly newer applied
+  // `pty.owner` wins: verdict and `ownerPresent` both defer on the same
+  // `handshakeSuperseded` comparison. Without that, a slow
+  // `connected{owner:null}` after a fresh `pty.owner{owner:B}` would re-seed
+  // this client as a phantom owner that no further event corrects.
   function seedFromConnected(
     myConnId: string,
     owner: HandshakeOwner,
@@ -368,40 +326,25 @@ export function useTerminalOwnership(
     if (!superseded) {
       setOwnerPresent(owner === undefined ? true : owner !== null)
     }
-    // SELF-SUCCESSION, the blipped owner's half of "losing ownership is
-    // sticky". The server reaps a dead connection by send failure, which takes
-    // tens of seconds; a client whose wifi blipped is back in about one, with a
-    // freshly allocated connection id. Its handshake therefore names its OWN
-    // previous, dead id as the driver, and a plain id comparison would demote
-    // the returning owner to a watcher of its own ghost. Nothing would correct
-    // it either: by the time the reap runs, `release` finds a different owner
-    // recorded (or none) and broadcasts nothing at all.
+    // Self-succession, the blipped owner's half of "losing ownership is
+    // sticky". The server reaps a dead connection by send failure, tens of
+    // seconds later, while a blipped client is back in about one with a fresh
+    // id, so its handshake names its own dead id as the driver and a plain
+    // comparison would demote it to a watcher of its own ghost with nothing to
+    // correct it.
     //
-    // So the id is compared against EVERY id this pane has held, not merely the
-    // most recent one, and a match on a FOREGROUNDED page is treated as
-    // succeeding ourselves. The set matters: a flapping radio can produce two
-    // handshakes in a row, and the second may still name the connection from
-    // before the first, so a single-slot ghost would land the returning driver
-    // as a watcher of itself.
+    // The id is therefore matched against every id this pane has held, since a
+    // flapping radio can produce a handshake still naming the connection from
+    // before the previous one. The run must also be confirmed, because a
+    // restart mints ids from zero again: an unproven run means no succession
+    // and one tap for the returning driver (see `ownGhostOfThisRun`).
     //
-    // AND THE RUN MUST BE CONFIRMED. A ghost is only ours while the server is
-    // still the run that minted it: a restart mints ids from zero again, so an
-    // unproven run identity means no succession at all and the returning driver
-    // pays one tap. See `ownGhostOfThisRun` and `serverRun.ts`.
+    // The claim goes out as a take-over naming the ghost it expects to
+    // displace, so a frame delayed on a radio cannot steal a pty somebody
+    // legitimately claimed in the gap; the client lands as a watcher instead.
     //
-    // The claim goes out as a take-over, and it NAMES THE GHOST it expects to
-    // displace. The server refuses the transfer inside its own critical section
-    // when anybody else holds the pty by then, so a frame delayed on a mobile
-    // radio cannot steal a pty somebody legitimately claimed in the gap; the
-    // client then lands as a watcher with the card, exactly like a refused plain
-    // resize. That expectation is what makes self-succession safe enough to be
-    // the one press-less re-claim.
-    //
-    // A BACKGROUNDED page does not self-succeed: that is the C15/C16
-    // backgrounded-owner contract, which says a departed owner comes back as a
-    // watcher and presses the button. A superseded handshake does not either,
-    // for the same reason rule 2 of the seed exists: another device's newer
-    // claim has already been applied and this frame is stale.
+    // A backgrounded page never self-succeeds (a departed owner comes back as a
+    // watcher and presses the button), and neither does a superseded handshake.
     if (
       !superseded &&
       typeof owner === "string" &&
@@ -421,16 +364,13 @@ export function useTerminalOwnership(
       priorVerdict: ownership.read(),
     })
     ownership.write(mine)
-    // Seed the other device's NAME from the same frame, through the pure rule
-    // beside the verdict seed. A watcher that merely attached hears no
-    // `pty.owner` broadcast at all, so this is its only chance at a specific
-    // name; an owning pane never names another device, and a superseded
-    // handshake keeps whatever the newer applied event wrote (functional
-    // update, so the prior name is read at apply time rather than captured).
-    // Gated on the EVENTS socket being open: `pty.owner` broadcasts are the
-    // only thing that can ever correct a name, so a name planted while that
-    // socket is down could go stale with no correction coming. The verdict
-    // seed above is deliberately not gated; the generic title is never wrong.
+    // Seed the other device's name from the same frame: a watcher that merely
+    // attached hears no `pty.owner` broadcast, so this is its only chance at a
+    // specific name. Gated on the events socket being open, because those
+    // broadcasts are the only thing that can correct a name and one planted
+    // while the socket is down would go stale with no correction coming. The
+    // verdict seed above is deliberately not gated, since the generic title is
+    // never wrong.
     if (conn === "open") {
       const next = seedDeviceFromConnected({
         mine,
@@ -445,13 +385,11 @@ export function useTerminalOwnership(
 
   /// The PTY socket own connection state, delivered by the lifecycle.
   ///
-  /// Two things hang off it. `failed` is the hard stop that means LOST, and any
-  /// retry or reopen clears it. And ANY `closed` retires an armed take-over: the
-  /// intent never outlives the socket it was armed for, so a press whose bounce
-  /// failed is spent rather than parked, and the button works again. The
-  /// take-over own deliberate close does not reach here, because `connect()`
-  /// detaches the orphan handlers before closing it, which is precisely how the
-  /// intent survives the one bounce it is meant to ride.
+  /// `failed` is the hard stop that means LOST, cleared by any retry or reopen.
+  /// Any `closed` retires an armed take-over, so an intent never outlives the
+  /// socket it was armed for. The take-over's own deliberate close does not
+  /// reach here, because `connect()` detaches the orphan handlers first, which
+  /// is how the intent survives the one bounce it is meant to ride.
   function notePtyConn(state: ConnState) {
     if (state === "failed") {
       setConnectionLost(true)
@@ -485,11 +423,9 @@ export function useTerminalOwnership(
     setTakeoverDeviceFor(null, null)
     const pty = ptyRef.current
     if (pty) {
-      // The socket is deliberately going down for about half a second. Nothing
-      // else raises the cue for a deliberate `connect()` (`onReconnecting` fires
-      // only when a DROP schedules a retry), so raise it here or the window
-      // reads as a frozen terminal. `onOpen` clears it, as it does for any other
-      // reconnect.
+      // `onReconnecting` fires only when a drop schedules a retry, so nothing
+      // else raises the cue for a deliberate `connect()` and the window would
+      // read as a frozen terminal. `onOpen` clears it.
       setReconnecting(true)
       // One call, whatever state the socket is in: `connect()` detaches and
       // closes a live socket before reopening, and refills the retry budget of

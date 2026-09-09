@@ -1,20 +1,16 @@
 import type * as React from "react"
 
-// THE phone presentation for every anchored popup: on a small viewport a
-// dropdown/⋯ menu or a popover renders as a full-width bottom sheet instead of
-// an anchored popup (matching the cog's AppMenuSheet), because anchored popups
-// clip against the small viewport and hide the row they came from. These
-// constants are shared by ui/dropdown-menu.tsx and ui/popover.tsx so the two
-// primitives cannot drift; a new popup primitive that grows a mobile branch
-// should consume them rather than re-authoring the geometry.
+// The phone presentation for every anchored popup: on a small viewport a
+// dropdown or popover renders as a full-width bottom sheet, because an anchored
+// popup clips against the small viewport and hides the row it came from. Shared
+// by ui/dropdown-menu.tsx and ui/popover.tsx so the two cannot drift; a new
+// popup primitive with a mobile branch consumes these rather than re-authoring
+// the geometry.
 //
-// Mechanism, measured on @base-ui/react 1.5.0: a Popup cannot render outside
-// its Positioner (it requires the positioner context), but a caller-supplied
-// `style` on the Positioner wins over its computed floating styles
-// (usePositioner merges internal styles first and useRenderElement merges the
-// component's own style prop last). So the sheet keeps the Positioner and
-// overrides its geometry with the fixed bottom-edge styles below — a supported
-// prop, not an !important fight with inline styles.
+// On @base-ui/react 1.5.0 a Popup cannot render outside its Positioner, but a
+// caller-supplied `style` on the Positioner wins over its computed floating
+// styles, since useRenderElement merges the component's own style prop last. So
+// the sheet keeps the Positioner and overrides its geometry below.
 export const SHEET_POSITIONER_STYLE: React.CSSProperties = {
   position: "fixed",
   top: "auto",

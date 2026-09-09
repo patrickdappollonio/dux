@@ -12,13 +12,11 @@ import { cn } from "@/lib/utils"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 
 // One marker for a file's git status, shared by the changes pane and the
-// editor's tree/search so the marker reads identically everywhere. We use
-// GitHub's Octicons diff glyphs — the same icons GitHub renders in PR file lists
-// — colored GitHub-style, so the status is recognizable at a glance instead of
-// requiring an invented pictograph→meaning mapping. The pure, unit-tested
-// `fileStatusMeta` maps the raw status to a kind + label; the two Records below
-// (keyed by FileStatusKind) map the kind to its octicon and color, so adding a
-// kind is a compile error until both are supplied.
+// editor's tree and search so it reads identically everywhere. The glyphs are
+// GitHub's Octicons diff icons, colored GitHub-style, so the status is
+// recognizable rather than an invented mapping. `fileStatusMeta` maps the raw
+// status to a kind and label; the Records below map the kind to its icon and
+// color, so adding a kind is a compile error until both are supplied.
 const ICONS: Record<FileStatusKind, typeof DiffAddedIcon> = {
   modified: DiffModifiedIcon,
   added: DiffAddedIcon,

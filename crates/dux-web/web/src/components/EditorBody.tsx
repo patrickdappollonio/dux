@@ -288,12 +288,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   })
 
   // Markdown preview toggle: render the buffer instead of the Monaco editor.
-  // Kept per TAB ID (a Set of tabs currently showing the preview) rather than
-  // one shared boolean reset on tab-change via an effect, a Set read is just
-  // as simple, needs no reset effect (an effect that reset a plain boolean on
-  // every tab switch would call `setState` synchronously in its body, which
-  // the react-hooks/set-state-in-effect lint flags), and arguably reads better
-  // (each tab remembers its own preview/edit choice across switches).
+  // Kept per tab id rather than as one shared boolean, so each tab remembers
+  // its own choice and no effect has to reset it on every tab switch.
   const [previewOpenTabIds, setPreviewOpenTabIds] = useState<Set<string>>(
     () => new Set(),
   )
@@ -353,12 +349,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   function revalidateDirs(dirs: string[]): void {
     revalidateNonceRef.current += 1
     const nonce = revalidateNonceRef.current
-    // Functional update: unions `dirs` into whatever batch is already
-    // pending rather than overwriting it, so two mutations that each call
-    // `revalidateDirs` before React flushes a render between them (e.g. a
-    // rename's source + destination parent dirs) both survive. See
-    // `unionRevalidateBatch`'s doc comment for why a plain assignment drops
-    // the earlier batch under React's same-tick setState batching.
+    // Functional update: unions `dirs` into whatever batch is already pending
+    // rather than overwriting it, so two mutations calling `revalidateDirs`
+    // before React flushes a render between them both survive.
     setTreeRevalidate((prev) => unionRevalidateBatch(prev, dirs, nonce))
   }
   // The flat file list backing the "Search files…" box (fetched from the
@@ -374,13 +367,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
 
   // The language picker's two pieces of state.
   //
-  // The REGISTRY, read off Monaco once the editor surface is actually up. It
-  // is fetched through a DYNAMIC import so this module never pulls the
-  // multi-MB Monaco bundle into the main chunk; the import resolves to the
-  // same chunk CodeEditor and DiffViewer already lazy-load, so by the time a
-  // text tab is on screen it costs nothing extra. It is read in an effect
-  // rather than from CodeEditor's `onReady` because the picker must also work
-  // in DIFF mode, where CodeEditor never mounts.
+  // The registry, read off Monaco through a dynamic import so this module never
+  // pulls the Monaco bundle into the main chunk; it resolves to the chunk
+  // CodeEditor and DiffViewer already lazy-load. Read in an effect rather than
+  // from CodeEditor's `onReady`, because the picker must also work in diff
+  // mode, where CodeEditor never mounts.
   const [registeredLanguages, setRegisteredLanguages] = useState<
     RegisteredLanguage[]
   >([])
@@ -395,14 +386,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     Map<string, string>
   >(() => new Map())
 
-  // Explorer panel layout, persisted by dux rather than by the panel
-  // library's `useDefaultLayout`. That hook is the reuse-before-invent
-  // answer and it was the previous one, but what it persists is a `Layout`,
-  // which is percentages by definition, and a percentage is precisely what
-  // makes the explorer two different widths in the two shells. See
-  // lib/editorLayout.ts's header. Read ONCE, at mount, into state: the panel
-  // props below are only consulted at mount too, so a value that changed
-  // mid-session would be a lie either way.
+  // Explorer panel layout, persisted by dux rather than by the panel library's
+  // `useDefaultLayout`, which persists a percentage and so makes the explorer
+  // two different widths in the two shells (see lib/editorLayout.ts). Read once
+  // at mount, like the panel props below.
   const [storedExplorer] = useState(() =>
     parseExplorerLayout(readExplorerLayoutRaw()),
   )
@@ -457,14 +444,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     }
   }
 
-  // Belt-and-braces for the phone standalone's collapsed start: the mount
-  // layout above already mounts the explorer at a true 0%, so this is a
-  // no-op when that landed (collapse() bails when already at collapsedSize).
-  // It stays for the one gap defaultLayout has — the library ignores a
-  // defaultLayout when its keys don't cover every panel — so the explorer
-  // can never mount expanded on a phone through that route. Mount-only on
-  // purpose: a later resize or rotation must not re-collapse an explorer the
-  // user has since expanded.
+  // Covers the one gap the mount layout has: the library ignores a
+  // defaultLayout whose keys do not cover every panel, so the explorer could
+  // otherwise mount expanded on a phone. A no-op when the layout landed, since
+  // collapse() bails at collapsedSize. Mount-only, so a later resize or
+  // rotation cannot re-collapse an explorer the user has expanded.
   useEffect(() => {
     if (startExplorerCollapsed) explorerPanelRef.current?.collapse()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -561,18 +545,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     return map
   }, [slice])
 
-  // A per-file change-signal for the open file from the same slice: status +
-  // line counts move when the file's content changes (best-effort — an edit that
-  // keeps identical +/- counts won't move it). Used ONLY to flag a stale diff, not
-  // to key the cache, so it never drives a refetch. Scanning unstaged then staged
-  // avoids allocating a combined array on every tick.
-  // Not memoized: two small array scans over the changes slice is cheap, and
-  // wrapping it in `useMemo` here fought `eslint-plugin-react-hooks`'
-  // compiler-derived lint rules (it flagged the manual dependency array as
-  // stale relative to its analysis). Note the build does NOT run
-  // babel-plugin-react-compiler, so there is no runtime auto-memoization
-  // here. This expression genuinely re-evaluates on every render; the two
-  // scans are just cheap enough that that's fine.
+  // A per-file change-signal for the open file: status plus line counts, which
+  // move when the content changes, though an edit keeping identical +/- counts
+  // will not move it. Used only to flag a stale diff, never to key the cache,
+  // so it drives no refetch. Deliberately not memoized: it re-evaluates every
+  // render, and two small scans over the slice are cheap enough.
   const openFileSignal = changeSignalFor(slice, activeTabPath)
   const openFileSignalRef = useRef("")
   // The slice as of the last render, for the callbacks that resolve later and
@@ -753,27 +730,19 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setBuffers((prev) => pruneByIds(prev, liveIds))
     setPreviewOpenTabIds((prev) => pruneSetByIds(prev, liveIds))
-    // The language overrides are keyed by PATH, so they prune against the same
-    // open-path set the model disposal above uses, and for the same reason: an
-    // override is documented to last until the file is closed, and one left
-    // behind is re-applied when that path is reopened (or inherited by a
-    // different file that later takes it). This covers every way a tab leaves,
-    // the close action and the vanished-tab paths alike, because all of them
-    // end in `tabs` losing the entry. `pruneLanguageOverrides` returns the same
-    // map when nothing is stale, so this is a no-op setState otherwise.
+    // The overrides are keyed by path, so they prune against the same open-path
+    // set the model disposal above uses: an override lasts until the file is
+    // closed, and one left behind is re-applied when that path is reopened, or
+    // inherited by a different file that later takes it. Every way a tab leaves
+    // ends in `tabs` losing the entry, so this covers all of them.
     setLanguageOverrides((prev) => pruneLanguageOverrides(prev, currentPaths))
   }, [tabs])
 
-  // Dispose every retained model when the overlay body unmounts (overlay
-  // closed). @monaco-editor/react only disposes the CURRENT model on
-  // unmount, so we own the rest, i.e. every OTHER path's model this tab strip
-  // accumulated. One thing we deliberately do NOT chase down: the library
-  // also keeps its own module-level view-state cache (cursor/scroll position
-  // per path, in a Map that is never pruned), separate from the models we
-  // dispose here. We accept that small, unbounded cache since its per-entry
-  // cost is just cursor/scroll coordinates, and passing
-  // `saveViewState={false}` to avoid it would mean losing view-state restore
-  // (cursor/scroll position) when reopening a file.
+  // Dispose every retained model when the body unmounts: @monaco-editor/react
+  // disposes only the current one, so every other path's model this tab strip
+  // accumulated is dux's to reclaim. The library's own module-level view-state
+  // cache is deliberately left alone: its per-entry cost is cursor and scroll
+  // coordinates, and `saveViewState={false}` would lose view-state restore.
   useEffect(() => {
     return () => {
       const mon = monacoRef.current
@@ -939,13 +908,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       })
   }
 
-  // Move…: a move IS a rename on disk, so it goes to the same server route
-  // with a destination in a different folder, and reuses the rename's tab
-  // retargeting and two-directory revalidation. Overwriting is REFUSED rather
-  // than confirmed (see the dialog and CLAUDE.md): the server rejects an
-  // occupied destination and the toast says so. The composition itself lives
-  // in `lib/moveEntry`, so its ordering is testable without mounting the
-  // editor; this is only the wiring.
+  // A move is a rename on disk, so it takes the same route with a destination
+  // in another folder and reuses the rename's tab retargeting and
+  // two-directory revalidation. Overwriting is refused rather than confirmed:
+  // the server rejects an occupied destination and the toast says so. The
+  // ordering lives in `lib/moveEntry`; this is only the wiring.
   function handleMoveSubmit(destDir: string): Promise<void> {
     if (!moveEntryTarget) return Promise.resolve()
     return performMove(moveEntryTarget.path, destDir, {
@@ -962,17 +929,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     })
   }
 
-  // Delete…: fire-and-forget once confirmed, mirroring
-  // ConfirmDiscardFileDialog's handleConfirm (closes immediately rather than
-  // waiting on the request; the destructive confirm dialog already gated the
-  // action, and a failure (e.g. another client already deleted it) just
-  // toasts, matching the plan's "another client raced us" acceptance).
+  // Fire-and-forget once confirmed: the destructive dialog already gated the
+  // action, so this closes immediately rather than waiting on the request and a
+  // failure only toasts.
   //
-  // Defensively re-checks `savingPaths` even though the Delete button in
-  // `DeleteEntryDialog` is already disabled via `blockedBySave` while a save
-  // for this path is in flight: the dialog computes that from the render at
-  // which it was opened, so this is a belt-and-braces guard against a race
-  // between a save starting and the click handler firing.
+  // `savingPaths` is re-checked even though `DeleteEntryDialog`'s button is
+  // already disabled while a save for this path is in flight, because the
+  // dialog computes that from the render at which it opened.
   function handleDeleteConfirm(): void {
     const target = deleteEntryTarget
     if (!target || savingPaths.has(target.path)) return
@@ -991,12 +954,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       })
       .catch((e) => {
         notifyError(e instanceof Error ? e.message : "could not delete")
-        // A failed delete (e.g. a permission error mid-`remove_dir_all`, or
-        // another client racing the same path) can still leave the tree
-        // cache stale relative to whatever is actually left on disk after a
-        // PARTIAL removal. Revalidate the same dir(s) the success path
-        // would, so `FileTree` re-reads the real state instead of showing a
-        // listing from before the attempt.
+        // A failed delete can still have removed part of a directory, so the
+        // tree cache is stale either way. Revalidate the same directories the
+        // success path would, so `FileTree` re-reads what is really on disk.
         revalidateDirs(
           target.isDir
             ? [parentDir(target.path), target.path]
@@ -1026,10 +986,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       // Local, not wire: the upload is a fetch this tab awaits, so a
       // stranded spinner means a slow request rather than a quiet server.
       reportBusy: (message) => notifyBusy(message, { id: toastId, origin: "local" }),
-      // `sticky` is forwarded rather than dropped, so the decision stays in the
-      // one place that makes it (`editorDropToast`, where every rung says
-      // false, and says why). Hardcoding it here would put a second opinion
-      // next to the first; omitting it silently makes a tree drop unpinnable
+      // `sticky` is forwarded rather than dropped, so the decision stays in
+      // `editorDropToast`, the one place that makes it. Hardcoding it here
+      // would be a second opinion; omitting it makes a tree drop unpinnable
       // whatever the report asked for.
       reportFinal: (t) => notify(t.tone, t.message, { id: toastId, sticky: t.sticky }),
     })
@@ -1447,25 +1406,21 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             panelRef={explorerPanelRef}
             defaultSize={explorerMountSize(storedExplorer)}
             minSize={EXPLORER_MIN_SIZE_PROP}
-            // Keep the explorer's PIXEL width when the group resizes (a
-            // window drag, the phone rotating, the modal's cap kicking in),
-            // rather than rescaling it proportionally: a width that moved
-            // with the container would be back to meaning different things
-            // in the two shells. The content pane keeps the library's default
-            // relative behavior, which is also the "at least one relative
-            // panel" the group requires.
+            // Keep the explorer's pixel width when the group resizes rather
+            // than rescaling it proportionally, or the width means different
+            // things in the two shells. The content pane keeps the library's
+            // relative behavior, which is also the one relative panel the group
+            // requires.
             groupResizeBehavior="preserve-pixel-size"
             style={{ overflow: "hidden" }}
             collapsible
           >
             {/* min-w-0 so path truncation keeps working at narrow widths.
-                Deliberately NO border-r: the ResizableHandle beside this
-                panel already draws the 1px pane separator, and the app-wide
-                idiom (the terminal/changes split, the Changes pane's
-                border-0 Card) is panes bleeding to the shell edge with the
-                handle as the only divider. A border here doubled the left
-                edge of the editor content while its bottom/right had none,
-                which read as an unfinished frame. */}
+                Deliberately no border-r: the ResizableHandle beside this panel
+                already draws the pane separator, and the app-wide idiom is
+                panes bleeding to the shell edge with the handle as the only
+                divider. A border here doubles the editor content's left edge
+                while its bottom and right have none. */}
             <div className="flex h-full min-w-0 flex-col">
               <div className="flex items-center gap-1 border-b p-2">
                 <div className="relative flex-1">
@@ -2042,19 +1997,15 @@ function ErrorPane({
   )
 }
 
-// Read-only preview for a raster image tab: renders straight from /raw (no
-// /read, no buffer; see the isImageTab derivation in EditorBody). The /raw
-// 25 MiB cap governs; when the request is refused (or the bytes are not a
-// decodable image) the <img> errors and the pane swaps to the error text
-// with a Retry. Retry bumps `attempt`, which keys the <img>, so a FRESH
-// element re-fires the request at the SAME URL (no cache-busting param;
-// /raw already sends Cache-Control: no-cache). The caller keys the whole
-// pane by path so all of this state resets on a preview-replace.
+// Read-only preview for a raster image tab, rendered straight from /raw with no
+// /read and no buffer. A refused request or undecodable bytes error the <img>
+// and swap in the error text; Retry bumps `attempt`, which keys the <img>, so a
+// fresh element re-fires at the same URL (/raw already sends
+// Cache-Control: no-cache). The caller keys the pane by path, so this state
+// resets on a preview-replace.
 //
-// The caption shows path + pixel dimensions once loaded. The plan asked for
-// path + byte size, but the pane deliberately never fetches the file, so the
-// byte size is unknowable here; naturalWidth/naturalHeight are what the
-// render itself knows.
+// The caption shows the path and the pixel dimensions, because the pane never
+// fetches the file and so cannot know the byte size.
 function ImagePreviewPane({ src, path }: { src: string; path: string }) {
   const [failed, setFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)

@@ -7,16 +7,11 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 
-// The single shadcn-Tooltip wrapper used everywhere a browser-native `title=`
-// hover hint would otherwise go. Browser tooltips render irregularly across
-// platforms, so this is the standing replacement: one consistent, themed popup.
-//
-// Pass the hovered element through `children` (it becomes the TooltipTrigger via
-// base-ui's render prop) and the hint text/side via `content`/`side`. When
-// `content` is empty/nullish the trigger renders bare — callers that derive the
-// hint from possibly-absent data (a truncated path, an optional reason) get a
-// no-op tooltip instead of an empty popup, the same no-op a nullish `title=`
-// would give.
+// The single Tooltip wrapper used everywhere a browser-native `title=` hover
+// hint would otherwise go, since browser tooltips render irregularly across
+// platforms. `children` becomes the TooltipTrigger through base-ui's render
+// prop. An empty or nullish `content` renders the trigger bare, so a hint
+// derived from possibly-absent data is a no-op rather than an empty popup.
 export function SimpleTooltip({
   content,
   children,

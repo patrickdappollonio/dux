@@ -46,13 +46,11 @@ export type ResizeCoordinator = {
   /// no gesture and no socket yet, so it can never be held.
   fitAfterOpen: () => void
   /// Start observing the given element and subscribe to xterm's own resize
-  /// event, then take the mount-time fit and seed the dedupe from it. The
-  /// pane passes the HOST, never the container xterm opened into: the
-  /// relayout's below-floor overflow branch pins the container to the adopted
-  /// grid's pixel size, and a pinned box never moves with the window, so an
-  /// observer on it goes deaf exactly when the watcher needs a way out of pan
-  /// mode. The host is never pinned, and in every other state the two boxes
-  /// resize together, so nothing else changes.
+  /// event, then take the mount-time fit and seed the dedupe from it. The pane
+  /// passes the host, never the container xterm opened into: the below-floor
+  /// overflow branch pins the container to the adopted grid's pixel size, and
+  /// an observer on a pinned box goes deaf exactly when the watcher needs a way
+  /// out of pan mode.
   start: (observed: Element) => void
   /// A (re)open landed. `firstOpen` decides the first-frame plan: the very
   /// first open jiggles, every reconnect sends a single plain resize. This is
@@ -83,10 +81,8 @@ export type ResizeCoordinator = {
   /// The owner-gated, dedupe-recording send, for the first-frame plan's own use
   /// and for the foreground re-assert.
   sendOwned: (rows: number, cols: number) => boolean
-  /// The one FONT-driven refit that belongs to this module: the late refit
-  /// once the bundled faces land, whose right answer differs by mode (fit the
-  /// container, or recompute the watcher's shrink). The pane's relayout does
-  /// the same job for itself; see the module doc's stated font exception.
+  /// The late refit once the bundled faces land, whose right answer differs by
+  /// mode: fit the container, or recompute the watcher's font shrink.
   refitForFonts: () => void
   /// Record the PTY's own grid as the wire last reported it (the `connected`
   /// handshake, then every `size` event) and adopt it: always from the
@@ -111,10 +107,9 @@ export function createResizeCoordinator(
   const { term, fit, sendResize, isOwner, onViewerLayout } = deps
   const lastSendWasFlagged = deps.lastSendWasFlagged ?? (() => false)
 
-  // VIEWER MODE, derived and never latched: anybody who is not the driver.
-  // Written as its own name because it is asked at six decision points and
-  // "not the owner" is the reason at every one of them, not an accident of
-  // this expression.
+  // Viewer mode, derived and never latched: anybody who is not the driver.
+  // Named because "not the owner" is the reason at every decision point that
+  // asks it, not an accident of this expression.
   const viewerMode = () => !isOwner()
 
   let lastRows = 0
@@ -128,19 +123,17 @@ export function createResizeCoordinator(
   let ro: ResizeObserver | null = null
 
   // Set when the debounced PTY resize came due while a touch-scroll gesture was
-  // still in flight. A resize is a SIGWINCH, a full child repaint, and landing
-  // one in the middle of the forwarded wheel-report stream corrupts a
-  // mouse-tracking alt-screen pager's repaint (duplicated rows that PERSIST,
-  // since an alt-screen has no client scrollback and nothing reconnects to
-  // re-sync it). This is not exotic: the scroll-start blur collapses the soft
-  // keyboard, `interactive-widget=resizes-content` then grows the viewport, and
-  // the debounced resize fires under the finger.
+  // still in flight. A resize is a SIGWINCH, and landing one inside the
+  // forwarded wheel-report stream corrupts a mouse-tracking alt-screen pager's
+  // repaint with duplicated rows that persist, since an alt-screen has no
+  // client scrollback to re-sync from.
   let resizeHeldByGesture = false
-  // The LOCAL refit's half of the same hold. Holding only the SIGWINCH is not
-  // enough; see the module doc for the measured reason.
+  // The local refit's half of the same hold: a measured xterm resize resets the
+  // scrolling region on both buffers, so holding only the SIGWINCH is not
+  // enough.
   let fitHeldByGesture = false
   // The second hold source: the debounce window. Same atomic-pair rule as the
-  // gesture hold, and the same accepted tradeoff stated in the module doc.
+  // gesture hold.
   let fitHeldByDebounce = false
   // Whether a debounced send is armed and therefore holding the fit. Cleared at
   // the top of the settle, never by `clearTimeout` alone.
@@ -158,20 +151,16 @@ export function createResizeCoordinator(
   // the next `size` event.
   let remoteGrid: { rows: number; cols: number } | null = null
   // Set while this open has taken the pty's grid off the handshake and the
-  // replay drawn for it has not been parsed yet. ADOPTING IS NOT ENOUGH ON ITS
-  // OWN: the mount's own observer callback, the bundled-font refit and any
-  // container settling all fit the terminal back to this viewport, and one of
-  // them landing in the window puts the grid back exactly where the replay
-  // loses its lines (measured: roughly one load in five). So every local fit
-  // is refused for the width of the window, which is closed by
-  // `firstFrameLanded` (the replay's own write callback) and, for a session
-  // that emits no first frame at all, by the fallback timer behind it.
+  // replay drawn for it has not been parsed yet. Adopting alone is not enough:
+  // the mount's observer callback, the bundled-font refit and container
+  // settling all fit the terminal back to this viewport, which puts the grid
+  // back exactly where the replay loses its lines. So every local fit is
+  // refused for the width of the window, closed by `firstFrameLanded` or, for a
+  // session that emits no first frame, by the fallback timer behind it.
   let holdingAdoptedGrid = false
-  // Which open the hold and the fallback timer behind it belong to. Both are
-  // coordinator state, but each is owed to exactly ONE connection: a timer
-  // armed under the previous open, firing during this one, would release a
-  // hold it never took and drop this replay into the grid it was not drawn
-  // for. The attach machine keys its own replay state the same way.
+  // Which open the hold and the fallback timer behind it belong to: a timer
+  // armed under the previous open, firing during this one, would release a hold
+  // it never took and drop this replay into a grid it was not drawn for.
   let openEpoch = 0
   // Whether THIS open's replay has actually been parsed. Deliberately not
   // `initialResizeDone`, which the fallback latches too: the fallback coming
@@ -179,15 +168,13 @@ export function createResizeCoordinator(
   // and the hold is owed to the replay.
   let replayParsed = false
 
-  // EVERY local refit goes through here, because VIEWER mode has none. A
-  // watcher's grid is the PTY's, adopted from the wire; fitting it to this
-  // container is precisely the divergence the faithful view exists to remove,
-  // and a single stray `fit.fit()` would re-introduce it (and, through xterm's
-  // own resize event, tell the badge the grids agree when they no longer do).
+  // Every local refit goes through here, because viewer mode has none: a
+  // watcher's grid is the PTY's, adopted from the wire, and fitting it to this
+  // container is the divergence the faithful view exists to remove.
   //
-  // `evenAsViewer` is the one exception and it is not a way around the rule: a
-  // watcher the wire has named no grid for has nothing to be faithful TO, so
-  // its own viewport is the only geometry it has. It still sends nothing.
+  // `evenAsViewer` is the one exception: a watcher the wire has named no grid
+  // for has nothing to be faithful to, so its own viewport is the only geometry
+  // it has. It still sends nothing.
   const runFit = (opts?: { evenAsViewer?: boolean }) => {
     if (!opts?.evenAsViewer && viewerMode()) return
     if (holdingAdoptedGrid) return
@@ -198,15 +185,10 @@ export function createResizeCoordinator(
   const hasRemoteGrid = () =>
     !!remoteGrid && remoteGrid.rows > 0 && remoteGrid.cols > 0
 
-  // Take the recorded grid, whoever is driving. Idempotent: xterm fires
-  // `onResize` only on a real change, and the guard here keeps even the call
-  // off the hot path.
-  //
-  // Booking what it adopted is half of it. The re-grid comes back through
-  // xterm's own resize event and arms the debounced send, and a resize frame is
-  // a CLAIM: telling the child its own size back says nothing and costs it a
-  // SIGWINCH repaint. The record is what the dedupe compares against, and the
-  // pty's reported grid is exactly the truth it should hold.
+  // Take the recorded grid, whoever is driving. Idempotent, and it books what
+  // it adopted: the re-grid comes back through xterm's own resize event and
+  // arms the debounced send, and a resize frame is a claim, so telling the
+  // child its own size back says nothing and costs it a SIGWINCH repaint.
   const adoptRemoteGrid = () => {
     const grid = remoteGrid
     if (!grid) return
@@ -224,37 +206,24 @@ export function createResizeCoordinator(
     adoptRemoteGrid()
   }
 
-  // It records what the PTY has been told, and it records only what actually
-  // went out. TWO things can swallow a resize and neither raises anything: the
-  // owner gate here, and the socket, which discards a frame whenever the
-  // WebSocket is not OPEN (every reconnect passes through that state). A
-  // swallowed send booked as sent is worse than no send at all, because the
-  // dedupe then suppresses the re-assert forever and the child keeps drawing
-  // for a viewport nobody is looking at. What the server DOES with a frame it
-  // received is its own business, so this records "written to the socket" and
-  // claims nothing more.
+  // Records what the PTY has been told, and only what actually went out. The
+  // owner gate here and the socket (which discards a frame whenever the
+  // WebSocket is not OPEN) both swallow a resize silently, and a swallowed send
+  // booked as sent is worse than no send: the dedupe then suppresses the
+  // re-assert forever and the child keeps drawing for a viewport nobody sees.
+  // What the server does with a frame it received is its own business, so this
+  // records "written to the socket" and claims nothing more.
   //
-  // A steady-state resize by the current owner does NOT change the owner (no
-  // `pty.owner` echo), so it deliberately does not arm a handover; only an
-  // ownership-ACQUIRING claim does. Every claim now runs with the verdict
-  // ALREADY flipped to "mine" (a take-over flips it before bouncing the socket,
-  // and a self-succeeding owner flips it at the handshake), so claims pass this
-  // gate and are recorded like any other send.
+  // A steady-state resize by the current owner changes no owner and arms no
+  // handover; only an ownership-acquiring claim does, and a claim always runs
+  // with the verdict already flipped to "mine", so it passes this gate.
   //
-  // A FLAGGED FRAME IS BOOKED BY THE ANSWER, NOT BY THE SEND, and it is the one
-  // frame that gets that treatment. There are two refusable classes now: a plain
-  // resize whose ownership was lost between the gate and the wire, and a
-  // SELF-SUCCESSION whose named predecessor no longer holds the pty. The second
-  // is refused ROUTINELY (that is what its compare-and-swap is for) and refusing
-  // applies nothing at all, geometry included, so booking it would let the
-  // dedupe suppress every re-assert of that size and leave the child drawing for
-  // a viewport nobody is looking at. The confirmation is the pty's own reported
-  // grid, which arrives on the handshake and on every APPLIED resize; see
-  // `noteRemoteGrid`.
-  //
-  // The plain case keeps the older, accepted behavior: it records "written to
-  // the socket" and claims nothing about what the server did with it, with the
-  // foreground resync's forced re-send as the standing recovery.
+  // A flagged frame is the one frame booked by the answer rather than the send.
+  // A self-succession is refused routinely (that is what its compare-and-swap
+  // is for) and a refusal applies no geometry at all, so booking it would let
+  // the dedupe suppress every re-assert of that size. Its confirmation is the
+  // pty's own reported grid; see `noteRemoteGrid`. A plain refusable frame is
+  // still booked on the send, with the foreground resync as the recovery.
   const sendOwned = (rows: number, cols: number): boolean => {
     if (!isOwner()) return false
     if (!sendResize(rows, cols)) return false
@@ -328,11 +297,9 @@ export function createResizeCoordinator(
   const fitAndSend = (send: () => void) => {
     if (holding) {
       fitHeldByGesture = true
-      // FIRST one wins while held: plain resize sends are interchangeable
-      // (each re-reads the live geometry when it finally runs), but the
-      // first-open jiggle closure is not, and a later plain resize overwriting
-      // a parked jiggle would silently skip the redraw nudge for that open
-      // (`initialResizeDone` is already latched by then).
+      // First one wins while held: plain resize sends are interchangeable, each
+      // re-reading the live geometry, but a later one overwriting a parked
+      // first-open jiggle would skip the redraw nudge for that open.
       heldResizeSend = heldResizeSend ?? send
       return
     }
@@ -344,15 +311,11 @@ export function createResizeCoordinator(
     send()
   }
 
-  // Defer the initial PTY resize until the FIRST PTY frame after each (re)open
-  // has fully rendered. That frame is the server's repaint: a STATIC snapshot
-  // taken at the PTY's current size, which can differ from this viewport.
-  // Resizing too early (before the repaint has arrived, or mid-render) races a
-  // half-painted buffer and leaves the cursor and the bottom-anchored agent
-  // prompt in the wrong rows; only a later real resize fixed it. xterm's write
-  // callback fires once that frame is parsed, so the fit + resize happens right
-  // after it lands and the agent's SIGWINCH redraw cleanly replaces the
-  // snapshot at the true size.
+  // Defer the initial PTY resize until the first PTY frame after each (re)open
+  // has rendered. That frame is the server's repaint, a static snapshot at the
+  // PTY's current size, so resizing before it lands races a half-painted buffer
+  // and leaves the cursor and the bottom-anchored prompt in the wrong rows.
+  // xterm's write callback fires once the frame is parsed.
   let initialResizeDone = false
   // Whether the NEXT first-frame resize should jiggle (very first open) or send
   // a single plain resize (a reconnect). `noteOpen` sets it before the first
@@ -377,20 +340,16 @@ export function createResizeCoordinator(
       // needed here. A backgrounded observer is not the owner, so the sends
       // below no-op.
       if (firstFrameResizePlan(firstFrameIsFirstOpen) === "jiggle") {
-        // FIRST open only: force the agent to FULLY redraw at our size now that
-        // the first paint has landed. A same-size resize is a kernel no-op (no
-        // SIGWINCH), so when the PTY already matches this viewport the agent
-        // never repaints and the initial snapshot (imperfect for a tall buffer
-        // with a bottom-anchored prompt) stays on screen with the cursor and
-        // input box misplaced. Nudge the width down one column and back: each
-        // step is a real winsize change, so the kernel raises SIGWINCH and the
-        // agent redraws its true UI, ending at the correct size. This automates
-        // the manual divider-nudge that reliably fixed it.
+        // First open only. A same-size resize is a kernel no-op, so when the
+        // PTY already matches this viewport the agent never repaints and the
+        // initial snapshot stays on screen with the cursor and input box
+        // misplaced. Nudging the width down one column and back makes two real
+        // winsize changes, so the kernel raises SIGWINCH and the agent redraws
+        // at the correct size.
         //
-        // One jiggle per open, whatever else this open ends up owing: a slow
-        // handshake can re-owe the first-frame resize after the fallback has
-        // already run the plan once (see `noteRemoteGrid`), and the second
-        // pass is a plain resize rather than a second pair of repaints.
+        // One jiggle per open: a slow handshake can re-owe the first-frame
+        // resize after the fallback has run the plan once (see
+        // `noteRemoteGrid`), and that second pass is a plain resize.
         firstFrameIsFirstOpen = false
         sendOwned(term.rows, Math.max(1, term.cols - 1))
         jiggleTimer = setTimeout(() => {
@@ -400,14 +359,10 @@ export function createResizeCoordinator(
           fitAndSend(() => sendOwned(term.rows, term.cols))
         }, JIGGLE_STEP_MS)
       } else {
-        // RECONNECT: the server kept the PTY alive at its prior size and
-        // replays a fresh repaint as this first frame. Jiggling here would
-        // force TWO full-screen agent repaints (at two widths) on EVERY
-        // reconnect, and mobile reconnects constantly. Send a SINGLE resize to
-        // our true size instead: it still re-asserts ownership, it is a kernel
-        // no-op (no repaint) when the size is unchanged, and it raises exactly
-        // one natural SIGWINCH only when the viewport genuinely changed while
-        // disconnected.
+        // Reconnect: the PTY is still alive at its prior size. Jiggling would
+        // force two full-screen repaints on every reconnect, and mobile
+        // reconnects constantly. A single resize still re-asserts ownership and
+        // raises one SIGWINCH only if the viewport really changed.
         sendOwned(term.rows, term.cols)
       }
     })
@@ -440,21 +395,12 @@ export function createResizeCoordinator(
     },
     start(observed) {
       // Geometry is reported to the PTY from exactly one place: xterm's own
-      // resize event. A local re-grid has more causes than the ResizeObserver,
-      // and every one of them has to reach the child or it draws for a geometry
-      // the browser is not rendering. The case that shipped broken is the
-      // font-load refit: the bundled faces arrive after the terminal is already
-      // open, the cell metrics move, the terminal re-grids with no container
-      // resize anywhere, and nothing was watching, so the PTY kept the size the
-      // fallback metrics produced. On a phone that left a copy of the agent's
-      // cursor-relative status line behind on every redraw. Be precise about
-      // what did and did not heal: the SIZE MISMATCH fixed itself at the next
-      // container resize (the dedupe still held the pre-font values, so that
-      // fit sent); what never healed is the duplicated output already written
-      // into the scrollback. Subscribing here covers that cause and any future
-      // one, instead of teaching each call site to report. xterm fires this
-      // only when the grid really changed, and the debounce plus the dedupe
-      // keep a no-op fit off the wire.
+      // resize event. A local re-grid has more causes than the ResizeObserver
+      // (the bundled fonts landing re-grids the terminal with no container
+      // resize anywhere), and each must reach the child or it draws for a
+      // geometry the browser is not rendering, leaving duplicated output in the
+      // scrollback that no later resize heals. xterm fires this only on a real
+      // grid change, and the debounce plus the dedupe keep a no-op off the wire.
       resizeSub = term.onResize(() => armDebounce())
       // Local fit so the canvas matches this viewport right away, and seed the
       // dedupe so the ResizeObserver's initial observe callback does NOT send a
@@ -463,25 +409,18 @@ export function createResizeCoordinator(
       runFit()
       lastRows = term.rows
       lastCols = term.cols
-      // NO FALLBACK IS ARMED HERE. It is armed when the connection speaks
-      // (`noteOpen`, then restarted by the handshake), because the question it
-      // asks is "has this connection gone quiet" and the pane mounts before
-      // there is a connection to ask it about. Armed at mount it raced the
-      // handshake on a slow link and beat it: it latched the first-frame
-      // resize, the handshake then adopted the pty's grid with no hold behind
-      // it, and the replay landed in a grid it was not drawn for.
-      // (A background tab throttles rAF but not timers, so a resize received
-      // while hidden refits late or not at all and its debounced send dedupes
-      // to a no-op; the foreground resync is the designed recovery.)
+      // No fallback is armed here. It is armed when the connection speaks
+      // (`noteOpen`, restarted by the handshake), because it asks whether this
+      // connection has gone quiet and the pane mounts before there is one:
+      // armed at mount it can beat the handshake on a slow link, latch the
+      // first-frame resize, and leave the replay landing in a grid it was not
+      // drawn for.
       ro = new ResizeObserver(() => {
         cancelAnimationFrame(fitFrame)
-        // VIEWER mode: the observed box's size decides nothing about the
-        // grid, so there is no fit to run and nothing to tell the child. What
-        // it DOES decide is how small the font has to be for the PTY's grid
-        // to fit, so the pane recomputes that instead. Deliberately in the
-        // same callback the fit would have used: one layout signal, two
-        // answers, never two observers that could disagree about when a
-        // resize happened.
+        // Viewer mode: the observed box decides nothing about the grid, only
+        // how small the font must be for the PTY's grid to fit. In the same
+        // callback the fit would have used, so two observers can never
+        // disagree about when a resize happened.
         if (viewerMode()) {
           fitFrame = requestAnimationFrame(() => onViewerLayout())
           return
@@ -497,10 +436,9 @@ export function createResizeCoordinator(
       openEpoch++
       initialResizeDone = false
       sizeSentSinceOpen = false
-      // A new open owes a new handshake, so the previous one's hold is not
-      // this one's; the new handshake takes it again a moment later. Its timer
-      // goes with it, epoch guard and all: the clock this open runs on starts
-      // here, and is restarted by the handshake behind it.
+      // A new open owes a new handshake, so the previous one's hold is not this
+      // one's; the new handshake takes it again, and the clock this open runs
+      // on starts here.
       holdingAdoptedGrid = false
       replayParsed = false
       armInitialFallback()
@@ -511,15 +449,12 @@ export function createResizeCoordinator(
     needsFirstFrameResize: () => !initialResizeDone,
     firstFrameLanded,
     resyncToForeground() {
-      // Debounced (coalescing rapid focus/visibility flaps) and gated on xterm
-      // draining its write queue: a foreground return can coincide with the
-      // server's scrollback replay still streaming in, and resizing mid-replay
-      // corrupts the scroll position. The empty-write callback fires only once
-      // the queued writes have drained, so the fit lands against a settled
-      // buffer. The send is FORCED (not routed through the deduped `sendSize`)
-      // because the PTY's current size may have been set by ANOTHER client, so
-      // the cached record would wrongly suppress the re-assert; a same-size
-      // resize is a kernel no-op, so re-asserting costs nothing.
+      // Debounced and gated on xterm draining its write queue, because a
+      // foreground return can coincide with the replay still streaming and
+      // resizing mid-replay corrupts the scroll position. The send is forced
+      // rather than routed through the deduped `sendSize`: another client may
+      // have set the PTY's current size, so the cached record would wrongly
+      // suppress the re-assert, and a same-size resize is a kernel no-op.
       clearTimeout(resyncTimer)
       resyncTimer = setTimeout(() => {
         term.write("", () => {
@@ -534,11 +469,9 @@ export function createResizeCoordinator(
       holding = next
     },
     flushHeld() {
-      // Release the resize pair the gesture held back: the local refit runs
-      // exactly once, at the final container size, and the child's notification
-      // follows it immediately. Exactly one fit, whichever halves were held: a
-      // direct-send path does not fit for itself while held, precisely so this
-      // flush cannot double-fit.
+      // Release the resize pair the gesture held back: one refit, at the final
+      // container size, then the child's notification. A direct-send path does
+      // not fit for itself while held, so this flush cannot double-fit.
       const pendingSend = heldResizeSend
       heldResizeSend = null
       // Either hold is discharged by the one fit; leaving the debounce's flag
@@ -569,59 +502,46 @@ export function createResizeCoordinator(
         return
       }
       // Through the guard, not around it: the faces land while the attach is
-      // still in flight, so this is one of the fits that used to put the
-      // adopted grid back under the replay. The release fits for it.
+      // still in flight, so this fit would otherwise put the adopted grid back
+      // under the replay. The hold's release fits for it.
       runFit()
     },
     noteRemoteGrid(grid, fromHandshake) {
       // Null is "the server could not say", never "it matches": the last grid
       // it DID report stands, which is the same rule `gridsDiverge` applies.
       if (grid) remoteGrid = grid
-      // THE CONFIRMATION HALF of the flagged-send rule above. A reported grid is
-      // the pty's own geometry, so for the owner it is the answer to "was the
-      // size I asked for applied", and booking it here is what closes the loop a
-      // flagged send deliberately left open. It is the pty's truth even when it
-      // is not what this client last asked for, which is exactly what the dedupe
-      // should be comparing against.
+      // The confirmation half of the flagged-send rule above: a reported grid
+      // is the pty's own geometry, so for the owner it answers whether the size
+      // it asked for was applied, and it is what the dedupe should compare
+      // against even when it is not what this client last asked for.
       if (grid && isOwner()) {
         lastRows = grid.rows
         lastCols = grid.cols
       }
-      // THE HANDSHAKE IS THE ONE REPORT A REPLAY FOLLOWS, so it is the one the
-      // owner adopts too. The replay is a repaint DRAWN FOR the pty's grid,
-      // absolute cursor addressing and all: parsed in a taller terminal it
-      // parks the cursor short of the bottom, and the live bytes behind it
-      // overwrite the last rows the replay drew instead of scrolling past
-      // them. Exactly (ours - theirs) lines are destroyed, in the buffer and
-      // not merely on screen, and nothing ever heals them. Theater is where
-      // this bit hardest, because a pane with the chrome gone is reliably
-      // TALLER than whatever the last viewer left the pty at.
+      // The handshake is the one report a replay follows, so the owner adopts
+      // it too. The replay is a repaint drawn for the pty's grid, absolute
+      // cursor addressing and all: parsed in a taller terminal it parks the
+      // cursor short of the bottom and the live bytes behind it overwrite the
+      // last rows the replay drew, destroying them in the buffer for good.
       //
       // Adopting costs the owner nothing: its own first-frame resize follows
-      // the replay's write callback and fits straight back to this viewport,
-      // and xterm growing its rows pulls the lines it parked back out of
-      // scrollback. Every LATER report is this client's own resize echoed
-      // back, which only a viewer adopts, or the echo would undo the fit that
-      // asked for it.
+      // the replay's write callback and fits straight back to this viewport.
+      // Every later report is this client's own resize echoed back, which only
+      // a viewer adopts, or the echo would undo the fit that asked for it.
       //
-      // A NULL HANDSHAKE AUTHORIZES NOTHING. The server does report a null
-      // grid, and null is "it could not say": adopting whatever grid some
-      // earlier connection reported would re-grid this terminal on a report
-      // that named no geometry, and hold it for a replay drawn at a size this
-      // handshake never claimed. A viewer still re-asserts what it knows,
-      // which is the ordinary rule for every other report.
+      // A null handshake authorizes nothing: adopting some earlier
+      // connection's grid would re-grid on a report that named no geometry and
+      // hold it for a replay drawn at a size this handshake never claimed.
       if (fromHandshake && grid) {
         adoptRemoteGrid()
         // Only while a replay is still owed. A handshake whose replay is
         // already on screen has nothing left to protect, and a hold nobody
         // releases would stop this pane fitting for the rest of its life.
         //
-        // The question is the REPLAY, never `initialResizeDone`: on a slow
-        // link the fallback can come due before the handshake arrives, and
-        // reading its latch as "the replay is on screen" is what left the
-        // adopted grid unheld on exactly the connections where the loss was
-        // seen. So this open re-owes its first-frame resize, and the replay's
-        // own write callback fits back and tells the child, as ever.
+        // The question is the replay, never `initialResizeDone`: on a slow link
+        // the fallback can come due before the handshake arrives, and its latch
+        // does not mean the replay is on screen. So this open re-owes its
+        // first-frame resize.
         if (!replayParsed) {
           holdingAdoptedGrid = true
           initialResizeDone = false

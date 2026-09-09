@@ -49,14 +49,11 @@ function TipText({ tip }: { tip: string }) {
 // one act that starts it. A slot rather than a second component, because the
 // logo, the wordmark and the tip rotation are the thing that must not be copied.
 //
-// WITH an action the pane SCROLLS instead of clipping. The idle screen alone is
-// decoration and a short viewport may crop it harmlessly, but an action is
-// something the user has to reach, and on a phone in landscape (or with the
-// keyboard up) the logo, wordmark, tip and button together are taller than the
-// pane. `my-auto` inside a scrolling column is what gives both behaviours from
-// one rule: content that fits is centred, content that does not scrolls from the
-// top with the button reachable at the bottom. The no-action screen keeps its
-// original clipping look exactly.
+// With an action the pane scrolls instead of clipping: the idle screen alone is
+// decoration a short viewport may crop harmlessly, but a button has to be
+// reachable, and on a phone in landscape the whole stack is taller than the
+// pane. `my-auto` inside a scrolling column gives both behaviours from one
+// rule: content that fits is centred, content that does not scrolls.
 export function Welcome({ action }: { action?: ReactNode } = {}) {
   const tips = useDux().bootstrap?.welcome_tips ?? []
   // Pick a stable random fraction once per visit to the welcome screen (the

@@ -16,16 +16,14 @@ import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 // like any other: the session slot is a pointer, so closing the tab holding it
 // hands the slot to the next tab in strip order rather than being refused.
 //
-// Two gestures deliberately do not come here. An agent's ONLY tab has no
-// successor, so the server refuses that close and the tab strip's menu item is
-// disabled with the reason rather than opening a dialog that would promise a
-// detach and then 400. And the Task Manager's row for the first tab is a Stop,
-// because a process monitor ends a process rather than deleting the row it is
-// showing numbers for (ConfirmStopAgentDialog).
+// Two gestures deliberately do not come here. An agent's only tab has no
+// successor, so the strip's menu item is disabled with the reason rather than
+// opening a dialog the server would refuse. The Task Manager's row for the
+// first tab is a Stop, because a process monitor ends a process rather than
+// deleting the row it shows numbers for (ConfirmStopAgentDialog).
 //
-// Closing always confirms (matching the TUI), the copy states only the
-// consequences that apply (`closeTabConsequences`), and Cancel is the default
-// focus.
+// The copy states only the consequences that apply (`closeTabConsequences`),
+// and Cancel is the default focus.
 export function ConfirmCloseTabDialog() {
   const { closeTabTarget, spine } = useDux()
 
@@ -35,11 +33,10 @@ export function ConfirmCloseTabDialog() {
   const tab = closeTabTarget
     ? session?.tabs.find((t) => t.id === closeTabTarget.tabId)
     : undefined
-  // The successor is named the way the strip labels it, upper-cased for prose:
-  // the disambiguating suffix matters when two tabs share a provider ("Codex 2"
-  // is a pill the user can point at, "codex" is two of them). The status message
-  // the server sends back after the close is built from the same rule in Rust,
-  // so the confirmation and the toast that follows it cannot name different tabs.
+  // The successor is named the way the strip labels it, so the disambiguating
+  // suffix survives when two tabs share a provider. The server builds its
+  // post-close status from the same rule, so the confirmation and the toast
+  // after it cannot name different tabs.
   const { sessionLabel, willDetach, successorLabel } = closeTabConsequences(
     session,
     tab,

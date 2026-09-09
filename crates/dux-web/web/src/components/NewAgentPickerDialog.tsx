@@ -29,15 +29,13 @@ import { cn } from "@/lib/utils"
 import type { ProjectView } from "@/lib/types"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 
-// The New-agent picker: the home for agent creation AND every project action now
-// that the flat list has no project headers. A searchable list of ALL projects
-// (agent-less ones included, since this is where their first agent is created),
-// each keeping its full menu (ProjectMenuItems verbatim). Clicking a project row
-// in the "new" intent opens the shared create-agent name dialog for that project
-// (honoring the pet-name/copy-changes config, exactly like the TUI and the
-// per-project "New agent" menu item). Provider is no longer chosen at creation on
-// the web: a new agent launches on the project's default_provider and is
-// retargeted afterward via the agent menu's change-provider action.
+// The New-agent picker: the home for agent creation and every project action,
+// since the flat list has no project headers. A searchable list of all
+// projects, agent-less ones included because this is where their first agent is
+// created, each keeping its full `ProjectMenuItems` menu. A row click in the
+// "new" intent opens the shared create-agent name dialog for that project.
+// Provider is not chosen at creation on the web: an agent launches on the
+// project's default_provider and is retargeted from the agent menu.
 export function NewAgentPickerDialog() {
   const { newAgentPickerOpen } = useDux()
   return (
@@ -47,14 +45,11 @@ export function NewAgentPickerDialog() {
         if (!open) dismissNewAgentPicker()
       }}
     >
-      {/* Flex column, and deliberately NOT overflow-hidden: the popup's base
-          max-h caps it to the dynamic viewport, and when the soft keyboard
-          shrinks 100dvh the list below shrinks with it (min-h-0 flex child)
-          instead of the popup clipping. The earlier overflow-hidden override
-          left NO scrollable element when the cap bit — a finger drag anywhere
-          on the dialog moved nothing and the bottom rows were unreachable on
-          phones. The base overflow-y-auto stays as the last-resort scroll for
-          viewports too short for even the shrunken layout. */}
+      {/* Flex column, deliberately not overflow-hidden: the popup's base max-h
+          caps it to the dynamic viewport, and when the soft keyboard shrinks
+          100dvh the list shrinks with it as a min-h-0 flex child rather than
+          the popup clipping with nothing left to scroll. The base
+          overflow-y-auto stays as the last-resort scroll. */}
       <DialogContent className="flex flex-col gap-0 p-0 sm:max-w-lg">
         {/* Mount the stateful body only while open so its useState initializers
             re-run on each open (a fresh search / selection / provider) without a
@@ -189,10 +184,9 @@ function PickerBody() {
                 const count = agentCounts.get(project.id) ?? 0
                 // In the worktree intent the row is a doorway into that
                 // project's worktree list, so it is labelled with what is
-                // BEHIND the door. An empty project reads "none" and stays
-                // clickable: it is a choice, not a surprise, and disabling it
-                // would give no reason and read as broken. A count that has
-                // not arrived (or could not be fetched) shows no label at all
+                // behind the door. An empty project reads "none" and stays
+                // clickable, because disabling it would give no reason and read
+                // as broken; a count that has not arrived shows no label at all
                 // rather than a misleading zero.
                 const worktreeCount = projectWorktreeCounts?.[project.id]
                 const rowLabel =

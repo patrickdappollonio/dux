@@ -26,17 +26,13 @@ import {
 import { DUX_TERMINAL_FONT_STACK } from "@/lib/terminalFont"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
-// View startup-command logs (the web counterpart to the TUI's
-// `read-startup-command-logs`). Each run of the project startup command writes a
-// timestamped log file; this lists them (newest first) and shows the selected
-// file's contents. The list + contents are fetched into the store when the viewer
-// opens (see `openStartupLogs` / `openProjectStartupLogs`); a Select switches
-// between runs.
+// View startup-command logs. Each run of the project startup command writes a
+// timestamped log file; this lists them newest first and shows the selected
+// file's contents, fetched into the store when the viewer opens.
 //
-// ONE dialog serves both scopes of `StartupCommandLogScope`. Only the naming
-// differs, and it MUST differ: a user who opens an agent's runs and then a
-// project's could not otherwise tell the two lists apart, so the title says
-// which entity and the subtitle says how wide the list is.
+// One dialog serves both scopes of `StartupCommandLogScope`, and only the
+// naming differs: the title says which entity and the subtitle says how wide
+// the list is, or an agent's runs and a project's would look identical.
 function StartupLogsBody({
   scope,
   targetId,

@@ -11,25 +11,19 @@ import { openChangesScreen, toggleTheater, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
-// THE PANE'S ONE ACTION CLUSTER, in every place it is ever painted.
-//
-// It is the same controls at every dock: the theater toggle, Macros, the
-// changed-file count where there is an agent to have one, and the surface `⋯`.
+// The pane's one action cluster, wherever it is painted: the theater toggle,
+// Macros, the changed-file count where an agent has one, and the surface `⋯`.
 // The phone's docked flap renders it, and so does the floating theater pill on
-// BOTH form factors, because the two are not merely similar: the phone's detach
-// animation flies one into the other as a single object, and a computer whose
-// pill looked like something else was a second design for one control.
+// both form factors, because the detach animation flies one into the other as a
+// single object.
 //
-// WHICH CONTROLS RENDER IS A PARAMETER, never a form factor. A pane with no
-// agent behind it carries no count, on a phone and on a computer alike; the
-// `⋯` is handed in because only the surface knows which pane it is over. What
-// is NOT a parameter is how any of them look: every control that appears here
-// wears the same treatment wherever the cluster is painted.
+// Which controls render is a parameter, never a form factor, and the `⋯` is
+// handed in because only the surface knows which pane it is over. How they look
+// is not a parameter: every control wears the same treatment at every dock.
 //
-// The geometry is therefore load-bearing, not decorative. Every control is
-// 40px tall (the touch-target floor), the row's gap is 2px, and the count is
-// the only control that is wider than it is tall, because a count is DATA and
-// stays legible text on a phone.
+// The geometry is load-bearing. Every control is 40px tall (the touch-target
+// floor), the row's gap is 2px, and the count is the only control wider than it
+// is tall, because a count is data and must stay legible on a phone.
 
 /// The shared button treatment: a bare 40px circle on whichever rounded surface
 /// the cluster is sitting on. Not `outline`, deliberately: the flap and the pill
@@ -50,11 +44,9 @@ export function PaneActionCluster({
   /// The theater toggle's node, so the surface around it can hand focus back
   /// when the OTHER surface's press brought it on screen.
   theaterRef?: React.RefObject<HTMLButtonElement | null>
-  /// The surface's own `⋯`. It is the SAME menu at both docks, which is what
-  /// makes the flight honest: a button that changed what it opens on arrival
-  /// would be the one thing the animation says cannot happen. It is a prop
-  /// rather than something this component builds because only the surface knows
-  /// which pane it is over and what that pane is about.
+  /// The surface's own `⋯`, the same menu at both docks so the flight is
+  /// honest. A prop rather than something this component builds, because only
+  /// the surface knows which pane it is over and what that pane is about.
   ellipsis: ReactNode
 }) {
   return (
@@ -67,20 +59,15 @@ export function PaneActionCluster({
   )
 }
 
-// THE TOGGLE THAT MORPHS RATHER THAN SWAPS.
+// The toggle morphs rather than swaps: both icons are stacked in one grid cell
+// and `aria-pressed` picks the settled one, because the detach and re-dock
+// flights rotate one out while the other rotates in (see the `dux-flight-*`
+// rules in index.css). A conditional pair of icons has nothing to animate
+// between, and the control reads as two buttons rather than one changing state.
 //
-// It stacks both icons in one grid cell and lets `aria-pressed` pick the
-// settled one, because the detach and re-dock flights ROTATE one out while the
-// other rotates in (see the `dux-flight-*` rules in index.css). A conditional
-// `{on ? <Minimize2/> : <Maximize2/>}` has nothing to animate between: the old
-// node is gone in the same frame the new one appears, and the control reads as
-// two different buttons rather than one changing state.
-//
-// IT IS ALSO THE WAY OUT, wherever the cluster is floating: the pill only
-// exists while theater is on, so this toggle is always painted, labelled and
-// announced as "Leave theater mode" there. The computer's pill used to carry a
-// separate exit button beside it, which made the mode's one control two
-// different-looking things depending on which machine you were sitting at.
+// It is also the way out wherever the cluster is floating: the pill exists only
+// while theater is on, so this toggle is always painted there, labelled and
+// announced as "Leave theater mode".
 function TheaterMorphButton({
   buttonRef,
 }: {
@@ -114,18 +101,14 @@ function TheaterMorphButton({
   )
 }
 
-// THE CHANGED-FILE COUNT, as its own control rather than a badge on the `⋯`.
+// The changed-file count, its own control rather than a badge on the `⋯`. The
+// diff glyph already draws the `±`, so the text beside it is the bare count.
+// Content-sized on the shared 40px height, the one control wider than it is
+// tall, because the number is data.
 //
-// The diff glyph already draws the `±`, so the text beside it is the BARE
-// count: printing "±3" next to a plus-minus icon says the same thing twice.
-// Content-sized on the shared 40px height, the one control in the cluster that
-// is wider than it is tall, because the number is data.
-//
-// It ACTS rather than reports: it opens the changed files. On a phone that is
-// the changes screen; on a computer the same call gives the chrome back, which
-// is where the Changes pane theater unmounted lives, and pushes a history entry
-// so Back returns. One call, because "show me the changed files" is one intent
-// and a second implementation is a second thing to keep in step.
+// It acts rather than reports: one call opens the changed files, which is the
+// changes screen on a phone and the restored chrome on a computer, pushing a
+// history entry so Back returns.
 function ChangesCountButton({ sessionId }: { sessionId: string | undefined }) {
   const { changes } = useDux()
   const summary = changesSummary(changes, sessionId)

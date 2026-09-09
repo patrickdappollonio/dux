@@ -63,14 +63,12 @@ function DialogContent({
         // portals to document.body (outside the keyboard-pinned mobile root), so
         // this cap is what keeps tall dialogs usable on phones.
         //
-        // grid-cols-[minmax(0,1fr)]: without it, the grid's implicit column is
-        // min-content sized, so ONE child with a long unbreakable string (a
-        // branch name, a path) silently widens the column past max-w, every
-        // sibling stretches with it, and the popup grows a horizontal scrollbar
-        // (overflow-y auto computes overflow-x to auto too). Capping the column
-        // at the popup's width is what makes children's min-w-0/truncate chains
-        // actually engage; measured on the worktrees dialog with a 61-char
-        // branch (724px of content in a 576px dialog before, none after).
+        // grid-cols-[minmax(0,1fr)]: without it the grid's implicit column is
+        // min-content sized, so one child with a long unbreakable string (a
+        // branch name, a path) widens the column past max-w, every sibling
+        // stretches with it, and the popup grows a horizontal scrollbar. Capping
+        // the column at the popup's width is what makes children's
+        // min-w-0/truncate chains engage.
         className={cn(
           "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 grid-cols-[minmax(0,1fr)] gap-4 overflow-y-auto rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className

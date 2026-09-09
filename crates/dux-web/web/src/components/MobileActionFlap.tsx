@@ -9,53 +9,41 @@ import { FLAP_FILL_VAR, registerFlapElement } from "@/lib/theaterFlight"
 import type { SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
-// THE DOCKED FLAP: where the phone's pane actions live when theater is off.
+// Where the phone's pane actions live when theater is off: a flap hanging from
+// the band above the terminal, taking the colour of whichever band that is
+// (usually the header, since the tab strip is only on screen for an agent with
+// two or more tabs).
 //
-// It hangs from the band above the terminal at the top right, a browser tab
-// turned upside down. THE BAND IS USUALLY THE HEADER, not the tab strip: the
-// strip is only on screen for an agent with two or more tabs, so a single-tab
-// agent (and anyone who hid the top bar) is the common case, and the flap takes
-// the colour of whichever one it is actually hanging from. The
-// header it came out of is now Back, the pane's identity across the whole
-// remaining width, and the pull-request chip: on a phone the identity is the
-// thing worth reading and four buttons were eating it.
-//
-// EVERY PANE SCREEN HAS ONE, agent or terminal. A project or standalone
+// Every pane screen has one, agent or terminal. A project or standalone
 // terminal has no changed-file count and no pull request, so its cluster is one
-// control shorter and its `⋯` opens the terminal's menu; everything else about
-// it (the band it hangs from, the silhouette measured off the cluster, the
-// flight into the pill) is the same component doing the same thing.
+// control shorter and its `⋯` opens the terminal's menu; everything else is the
+// same component doing the same thing.
 //
-// It is dux's own chrome painted OVER the terminal, not part of the terminal,
-// so a press on it is never forwarded to the PTY. It sits outside the pane's
-// overlay slot deliberately: the overlay is withheld while a full-pane cover
-// owns the pane, and the flap is the only surface carrying the `⋯`, the changed
-// files and the way into theater. A watcher looking at somebody else's terminal
-// still gets to reach them.
+// It is dux's own chrome painted over the terminal, so a press on it is never
+// forwarded to the PTY, and it sits outside the pane's overlay slot: that slot
+// is withheld while a full-pane cover owns the pane, and the flap is the only
+// surface carrying the `⋯`, the changed files and the way into theater.
 export function MobileActionFlap({
   target,
   subject,
   band,
   hidden = false,
 }: {
-  /// THE PANE ON SCREEN, which is what Macros writes to and what the `⋯` reads
-  /// its INPUT group under. It is a different question from `subject` below: a
-  /// companion terminal's pane wears its agent's menu.
+  /// The pane on screen, which is what Macros writes to and what the `⋯` reads
+  /// its input group under. A different question from `subject`: a companion
+  /// terminal's pane wears its agent's menu.
   target: SelectedTarget
-  /// WHAT THE PANE IS ABOUT, which decides the menu the `⋯` opens and whether
-  /// there is a changed-file count at all. An agent has one; a project or
-  /// standalone terminal has neither a count nor a pull request, so its flap is
-  /// three controls wide instead of four and the silhouette is measured from
-  /// whatever the cluster turns out to be.
+  /// What the pane is about, which decides the menu the `⋯` opens and whether
+  /// there is a changed-file count at all. A project or standalone terminal has
+  /// neither a count nor a pull request, so its cluster is one control shorter.
   subject: PaneMenuSubject
   /// What the flap is hanging from, which decides its body color: the tab
   /// strip's own composited tone, or the plain app background when the strip is
   /// not on screen (a single-tab agent, or a hidden top bar).
   band: "strip" | "plain"
-  /// MOUNTED BUT NOT PAINTED, which is what the flap is for the whole return
-  /// flight: it IS the dock the capsule is flying onto, so the choreography
-  /// measures the real element rather than reconstructing where it would have
-  /// been, and the final swap therefore moves nothing.
+  /// Mounted but not painted, which is what the flap is for the whole return
+  /// flight: it is the dock the capsule flies onto, so the choreography
+  /// measures the real element and the final swap moves nothing.
   hidden?: boolean
 }) {
   const ref = useRef<HTMLDivElement | null>(null)
@@ -78,19 +66,14 @@ export function MobileActionFlap({
       // body starts ON the band's bottom hairline, so the fill covers that line
       // for the flap's own width and the two are visibly one shape.
       //
-      // TOP RIGHT, over the few cells where xterm paints its own scrollbar. That
-      // is accepted rather than worked around: this is dux's chrome painted over
-      // the terminal, exactly as the desktop's floating pill is, and the pill is
-      // draggable precisely because covering output is the cost of floating
-      // chrome. The flap is not draggable because it belongs to the band.
+      // Top right, over the few cells where xterm paints its own scrollbar,
+      // which is the accepted cost of chrome painted over the terminal.
       //
-      // `z-30` clears the chrome stack's own `z-10` and the pane's full-pane
-      // covers, which sit at `z-20` in this same stacking context. The flap has
-      // to paint over the band's border to interrupt it, and it is the only
-      // surface carrying these controls while a cover owns the terminal, which
-      // is exactly the state a watcher reaches them from; at the covers' own
-      // level the later element in the document won and buried it. Same level as
-      // the floating pill it becomes: the two are never painted at once.
+      // `z-30` clears the chrome stack's `z-10` and the pane's full-pane covers
+      // at `z-20`: the flap paints over the band's border to interrupt it, and
+      // it is the only surface carrying these controls while a cover owns the
+      // terminal. Same level as the floating pill it becomes, which is never
+      // painted at the same time.
       className={cn(
         "absolute -top-px right-3 z-30 flex items-center gap-0.5 p-[5px]",
         hidden && "invisible",
@@ -140,10 +123,9 @@ export function MobileActionFlap({
             subject={subject}
             pane={target}
             side="bottom"
-            // A phone pane screen's header is Back and identity only: the cog
-            // stayed behind on the hub, so the drill is the way to the app's
-            // own actions from here. It is also what keeps this `⋯` the same
-            // menu the pill opens when the cluster flies into theater.
+            // A phone pane screen's header is Back and identity only, and the
+            // cog stayed behind on the hub, so the drill is the way to the
+            // app's own actions from here.
             settingsDrill
           />
         }
@@ -152,12 +134,9 @@ export function MobileActionFlap({
   )
 }
 
-/// Measure the flap's own box and turn it into a silhouette.
-///
-/// The shape is generated rather than drawn once, because the cluster's width
-/// is not a constant: the count grows a digit, and a pane with no agent behind
-/// it carries no count at all. A fixed path would leave the outline half a
-/// button adrift of the buttons it is supposed to be wrapped around.
+/// Measure the flap's own box and turn it into a silhouette. Generated rather
+/// than drawn once, because the cluster's width is not a constant: the count
+/// grows a digit, and a pane with no agent behind it carries no count at all.
 function useFlapShape(ref: React.RefObject<HTMLDivElement | null>) {
   const [box, setBox] = useState({ width: 0, height: 0 })
   useLayoutEffect(() => {

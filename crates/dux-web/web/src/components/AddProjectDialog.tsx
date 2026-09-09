@@ -137,20 +137,15 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
   )
 }
 
-// A read-only field for a full filesystem path. It is scrolled to the END
-// whenever the value changes so the most specific (rightmost) segment stays
-// visible by default, which is what matters when paths are long; the field
-// remains scrollable back to the start and selectable so the path can be
-// copied. Styling mirrors the app Input in a compact text-xs form. Used for
-// both the current-directory header and the selected-target line so the two
-// render identically.
+// A read-only field for a full filesystem path, scrolled to the end on every
+// change so the rightmost segment stays visible, and still scrollable and
+// selectable so the path can be copied. Shared by the current-directory header
+// and the selected-target line so the two render identically.
 function PathField({ value }: { value: string }) {
   const ref = useRef<HTMLInputElement>(null)
-  // useLayoutEffect (not useEffect) so the scroll-to-end happens before paint:
-  // otherwise the browser paints the leading segment for one frame and snaps to
-  // the tail, which is exactly the flash this feature exists to avoid. Runs on
-  // every value change so navigation re-reveals the tail. scrollWidth is 0 under
-  // jsdom (no layout), so this is a harmless no-op in tests.
+  // useLayoutEffect so the scroll-to-end happens before paint: otherwise the
+  // browser paints the leading segment for one frame and snaps to the tail.
+  // scrollWidth is 0 under jsdom, so this is a no-op in tests.
   useLayoutEffect(() => {
     const el = ref.current
     if (el) el.scrollLeft = el.scrollWidth

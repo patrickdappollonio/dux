@@ -18,18 +18,13 @@ export function FolderPill({ name }: { name: string }) {
 }
 
 /**
- * The server-side directory browser's LIST: a pinned "commit this folder" row,
+ * The server-side directory browser's list: a pinned "commit this folder" row,
  * a divider, then the navigable entries.
  *
- * Extracted because two dialogs pick a folder this way and the picking itself
- * is identical: only what happens to the chosen folder differs (adding a
- * project runs an inspection ladder; a standalone agent runs in whatever is
- * there). Everything decision-shaped stays with the caller; this owns the
- * rows, the touch targets, the git badge and the parent affordance, so the two
- * pickers cannot drift into looking like different features.
- *
- * `commitLabel` is the pinned row's verb, because it is the one word that says
- * what the picker is for.
+ * Everything decision-shaped stays with the caller; this owns the rows, the
+ * touch targets, the git badge and the parent affordance, so the dialogs that
+ * pick a folder cannot drift into looking like different features.
+ * `commitLabel` is the pinned row's verb, which says what the picker is for.
  */
 export function FolderBrowseList({
   path,
@@ -58,12 +53,11 @@ export function FolderBrowseList({
         </div>
       ) : (
         <div className="flex flex-col">
-          {/* Pinned, client-synthesized row: the ONLY way the current directory
-              becomes the target. The footer stays strictly selection-driven, so
-              the primary button never acts on wherever the user happens to be
-              standing. The pinned band (a faint elevated tint plus a neutral
-              left accent rule) and the monospace target pill read this as a
-              commit action, distinct from the ordinary folder rows below. */}
+          {/* Pinned, client-synthesized row: the only way the current directory
+              becomes the target, so the footer stays selection-driven and the
+              primary button never acts on wherever the user is standing. The
+              tint, the left accent rule and the monospace pill read this as a
+              commit action rather than another folder row. */}
           <button
             type="button"
             onClick={() => onCommit(path)}
@@ -81,11 +75,10 @@ export function FolderBrowseList({
             Browse
           </div>
           {entries.map((entry) => {
-            // The synthetic parent ("../") row reads as an "up" action, not a
-            // folder: a distinct glyph and the parent's basename. It shows no
-            // path, because the header field above is the authoritative path
-            // for where you are and repeating it here only widened the row and
-            // duplicated that path. No git badge.
+            // The synthetic parent row reads as an "up" action rather than a
+            // folder: a distinct glyph and the parent's basename, no path
+            // (the header field above is the authoritative one) and no git
+            // badge.
             if (entry.is_parent) {
               return (
                 <button

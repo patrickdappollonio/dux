@@ -32,23 +32,15 @@ import {
   workspaceLocation,
 } from "@/lib/agentWorkspace"
 
-// The desktop center-pane top bar: ONE ROW OF CHIPS naming what you are looking
+// The desktop center-pane top bar: one row of chips naming what you are looking
 // at, each a glyph followed by its value, then the pane's controls on the right.
-// WHICH chips exist and what each says lives in `lib/headerSubject.ts`; this
+// Which chips exist and what each says lives in `lib/headerSubject.ts`; this
 // module is how they are drawn.
-//
-// Extracted from App.tsx into its own module so it can be unit-tested in
-// isolation without pulling in `GlobalOverlays` -> `ConfigEditorDialog`, whose
-// eager Monaco import cannot initialize under vitest (see `TerminalArea`).
 
-// One glyph-and-value pair.
-//
-// The two shrink weights are the "the name gives way LAST" rule. Every chip is
-// `min-w-0` and can shrink, but a non-primary chip's shrink factor is thousands
-// of times the primary one's, so overflow is distributed in proportion and the
-// rest of the row yields to nothing before the thing you navigate by loses its
-// first character. `overflow-hidden` on the chip is what lets the glyph clip
-// too: the chips yield ALL the way, and a lone floating glyph with no value
+// One glyph-and-value pair. The two shrink weights make the primary chip give
+// way last: every chip is `min-w-0`, but a non-primary chip's shrink factor is
+// thousands of times the primary one's, so the rest of the row yields first.
+// `overflow-hidden` lets the glyph clip too, because a lone glyph with no value
 // beside it says nothing.
 function Chip({ chip }: { chip: HeaderChip }) {
   const Glyph = CHIP_GLYPHS[chip.kind]
@@ -109,12 +101,10 @@ export function InsetHeader() {
     }
   }
 
-  // A focused terminal's context chips are chosen by an EXHAUSTIVE match on its
-  // OWNER, because their whole job is to name the thing the terminal belongs to.
-  // A two-bucket lookup keeps compiling when a new kind of owner arrives and
-  // hands it an empty header, which is a blank bar rather than an error. Each
-  // arm answers with the owner's own chips plus that owner's terminals: the set
-  // `terminalTitle` disambiguates against, and the set the sibling count counts.
+  // Chosen by an exhaustive match on the terminal's owner, so a new kind of
+  // owner is a compile error rather than a blank bar. Each arm answers with the
+  // owner's chips plus that owner's terminals: the set `terminalTitle`
+  // disambiguates against, and the set the sibling count counts.
   const ownerContext: { chips: HeaderChip[]; siblings: TerminalView[] } | null =
     focusedTerminal
       ? matchOwner<{ chips: HeaderChip[]; siblings: TerminalView[] }>(
@@ -153,11 +143,10 @@ export function InsetHeader() {
                 siblings: terminalsForOwner(allTerminals, owner),
               }
             },
-            // No owner to name, so the context names WHERE the terminal is. The
-            // label is read off this terminal's own wire owner rather than the
-            // client-side reference, which carries no id and no label precisely
-            // because there is no owner: every standalone terminal shares one
-            // reference, and only the terminal itself knows its directory.
+            // No owner to name, so the context names where the terminal is. The
+            // label comes off this terminal's own wire owner: every standalone
+            // terminal shares one client-side reference, which carries no id
+            // and no label, and only the terminal knows its directory.
             standalone: (owner) => {
               const siblings = terminalsForOwner(allTerminals, owner)
               const self = siblings.find(
@@ -215,17 +204,16 @@ export function InsetHeader() {
     )
   }
 
-  // WHAT THE PANE MENU IS ABOUT, decided the same way the chips above are: the
-  // agent when one is behind the pane, and the terminal itself when nothing is.
-  // A session-owned terminal takes the agent's menu because this whole header is
-  // that agent's; the terminal's own Close and editor entries ride along as a
-  // labelled group, because the menu is handed the PANE as well as the subject.
+  // What the pane menu is about, decided the same way the chips are: the agent
+  // when one is behind the pane, the terminal itself when nothing is. A
+  // session-owned terminal takes the agent's menu, and its own Close and editor
+  // entries ride along as a labelled group because the menu is handed the pane
+  // as well as the subject.
   //
-  // Read off the TARGET rather than off `selectedSessionId`, which can still
-  // name the agent a project terminal was reached from. An EXHAUSTIVE match on
-  // the owner, not `ownerSessionId`: this decides what is RENDERED, so a fourth
-  // kind of owner has to answer for itself here rather than falling into the
-  // terminal arm because the lossy helper returned null for it.
+  // Read off the target, not `selectedSessionId`, which can still name the
+  // agent a project terminal was reached from, and matched exhaustively on the
+  // owner so a fourth kind must answer for itself rather than falling into the
+  // terminal arm.
   const paneSubject: PaneMenuSubject | null = focusedTerminal
     ? matchOwner<PaneMenuSubject>(focusedTerminal.owner, {
         session: (owner) => {
@@ -270,24 +258,16 @@ export function InsetHeader() {
   return (
     <header className="relative flex h-12 shrink-0 items-center gap-2 border-b px-3">
       {/* The upward continuation of the changes-panel divider. Absolutely
-          positioned on purpose, and this replaced a border-l on the control
-          cluster: the cluster's width percentage resolves against the header's
-          PADDED interior while the panel divider below sits at the same
-          percentage of the FULL width, so the border drew a few pixels left of
-          the line it claims to continue (reported from a real screenshot). An
-          absolute offset resolves against the header's full box, so this
-          hairline lands on the divider at every split, width, and zoom. It is
-          also outside the flex flow, so it collects no `gap-2` and cannot push
-          the pane's own controls off the pane edge. Same visibility rule as before:
-          only while the Changes pane is actually on screen, because hidden
-          there is no divider below to continue.
+          positioned so the offset resolves against the header's full box: a
+          border on the control cluster resolves against the header's padded
+          interior instead, and lands a few pixels left of the line it claims to
+          continue. Being outside the flex flow, it also collects no `gap-2` and
+          cannot push the pane's controls off the pane edge.
 
-          The calc's pixel term compensates for the panel HANDLE: the group
-          lays out as terminal, a 1px handle, changes, so the two panes split
-          the full width MINUS that pixel and a pure percentage of the full
-          width lands spacer/100 px left of the real divider. Sub-pixel at
-          100 percent zoom, a visible one-pixel step under browser zoom
-          (reported from a zoomed screenshot). */}
+          The calc's pixel term compensates for the panel handle: the group lays
+          out as terminal, a 1px handle, changes, so a pure percentage of the
+          full width lands spacer/100 px left of the real divider, which is a
+          visible one-pixel step under browser zoom. */}
       {!changesPaneEffectivelyHidden(dux) && (
         <span
           aria-hidden="true"
@@ -297,16 +277,13 @@ export function InsetHeader() {
         />
       )}
       {/* The chips share one shrink budget so the header clips instead of
-          pushing the right-hand controls off the edge. Buttons win: the chips
-          yield, all the way to nothing, and the controls never move or reflow.
-          The header stays exactly 48px at every width.
+          pushing the right-hand controls off the edge: the chips yield all the
+          way to nothing and the controls never move.
 
-          The gap is wider than the header's own `gap-2` on purpose. There are
-          deliberately NO hairline dividers between the fields: a glyph already
-          announces where one field stops and the next begins, so a rule would
-          only spend pixels, and the wider gap does the same work for free. One
-          font (sans) throughout, at one size: the fields are peers, so nothing
-          here is distinguished by font or by type scale. */}
+          The gap is wider than the header's own `gap-2` because it replaces the
+          hairline dividers a field list would otherwise need; the glyphs
+          already say where one field stops. One font at one size throughout,
+          because the fields are peers. */}
       <div className="flex min-w-0 flex-1 items-center gap-3.5 overflow-hidden">
         {chips.map((chip) => (
           <Chip key={chip.kind} chip={chip} />
@@ -322,28 +299,19 @@ export function InsetHeader() {
           the two are the pane's own controls, and the mode change is the one
           the eye should land on first. Same `h-8` token as its neighbours. */}
       <TheaterToggle />
-      {/* THE PANE'S OWN PAIR, rendered together or not at all. They answer the
-          same question (what is in front of you), and gating them separately
-          let Macros paint alone for the frame between a target being selected
-          and its agent arriving in the spine, which resized the cluster and
-          shifted every control in it. */}
+      {/* The pane's own pair, rendered together or not at all: gating them
+          separately lets Macros paint alone for the frame between a target
+          being selected and its agent arriving in the spine, which resizes the
+          cluster and shifts every control in it. */}
       {paneSubject && selectedTarget ? (
         <>
           <MacroPopover target={selectedTarget} />
-          {/* THE PANE'S TOP MENU on a computer, the twin of the phone flap's
-              `⋯`. It opens the WHOLE menu, the same body the sidebar row's `⋯`
-              opens, rather than a header-sized subset: a pane in front of you
-              and a row in a list are two anchors on one thing, and two menus
-              about it are two things that can disagree. It sits with the pane's
-              own controls, on the pane's right edge, and not in the cog beside
-              it, because the cog's menu is the app's and this one is about one
-              pane.
-
-              WHICH menu is the same question the header's own chips answer: an
-              agent's when there is an agent behind the pane (a session-owned
-              terminal included, whose whole header is that agent's), and the
-              terminal's own for a project or standalone terminal, which has no
-              agent to be about. */}
+          {/* The pane's top menu on a computer, the twin of the phone flap's
+              `⋯`. It opens the whole menu, the same body the sidebar row's `⋯`
+              opens, rather than a header-sized subset, and it sits with the
+              pane's own controls rather than in the cog beside it, whose menu
+              is the app's. Which body it opens is the question the header's own
+              chips answer. */}
           <PaneMenu
             subject={paneSubject}
             // The pane it is painted over, which is what the INPUT group is
@@ -351,39 +319,28 @@ export function InsetHeader() {
             // TERMINAL's id while the menu around it is the agent's.
             pane={selectedTarget}
             appearance="header"
-            // NO SETTINGS DRILL HERE: the cog is mounted in this very header,
-            // on the window's right edge a couple of controls along, for as
-            // long as this `⋯` exists at all. Drilling into the app menu from
-            // here would be the same body offered twice on one strip of chrome.
+            // No drill: the cog is mounted in this same header for as long as
+            // this `⋯` exists, so drilling would offer one body twice.
             settingsDrill={false}
           />
         </>
       ) : null}
 
-      {/* The spacer IS the control cluster, rather than an empty box in front of
-          it, and that is the whole trick. An empty spacer followed by the
-          controls would push the pane's own cluster left by the controls' own
-          width, so it would land well short of the divider and only pixel math
-          could correct it. Sizing the cluster itself to the Changes panel's
-          percentage and right-aligning its contents puts the cog on the window's
-          right edge and the pane's `⋯`, which is the last control before this
-          box, on the terminal pane's, out of one number and no measurement.
+      {/* The spacer IS the control cluster, not an empty box in front of it: an
+          empty spacer would push the pane's cluster left by the controls' own
+          width, landing short of the divider. Sizing the cluster to the Changes
+          panel's percentage and right-aligning it puts the cog on the window's
+          right edge and the pane's `⋯` on the terminal pane's, out of one
+          number and no measurement.
 
-          `min-w-fit` is what makes the hidden case work: at 0% the box collapses
-          to its buttons instead of crushing them, so the pane's controls simply
-          slide right with the terminal pane that just grew under them. It is also the floor
-          that keeps the buttons intact if the user drags the Changes pane
-          narrower than they are. */}
-      {/* The rule at the pane boundary. It is a BORDER ON THE CLUSTER rather
-          than a `<Separator>` element in front of it, and that is deliberate:
-          the cluster's leading edge is exactly the Changes panel's left edge
-          (that is the whole point of sizing it to the panel's percentage).
-          The visible divider continuation is NOT drawn here though: this
-          cluster's percentage resolves against the header's padded interior,
-          which is a few pixels narrower than the panel group below, so a
-          border on this edge misses the real divider line. The hairline at
-          the top of the header (absolutely positioned, full-box percentage)
-          owns that job; see its comment. */}
+          `min-w-fit` is what makes the hidden case work: at 0% the box
+          collapses to its buttons instead of crushing them, and it is the floor
+          if the user drags the Changes pane narrower than they are. */}
+      {/* The pane-boundary rule is a border on this cluster rather than a
+          `<Separator>` in front of it, because the cluster's leading edge is
+          the Changes panel's left edge. The visible divider continuation is not
+          drawn here: this percentage resolves against the header's padded
+          interior, so a border on this edge misses the real line. */}
       <div
         data-testid="changes-pane-spacer"
         className="flex min-w-fit shrink-0 items-center justify-end gap-2"
@@ -399,19 +356,15 @@ export function InsetHeader() {
 
             It carries the same +/- summary the phone's changes control does,
             out of the one shared helper, because while the pane is away nothing
-            else on this surface says how much the agent has changed. The count
-            is DATA rather than a label, so it is the deliberate exception to
-            keeping transient chrome icon-only: it widens the control and leaves
-            the cluster's one height token alone. With no agent in view there is
-            nothing for a count to be about, and the control is the bare icon it
-            has always been, which is also what the phone draws there.
+            else here says how much the agent has changed. The count is data
+            rather than a label, so it is the deliberate exception to keeping
+            transient chrome icon-only: it widens the control and leaves the
+            cluster's one height token alone.
 
-            It shows for a ZERO-WIDTH pane as well, not just a hidden one. A
-            divider dragged off the edge leaves the pane at 0% with the
-            preference still reading "visible"; if this button hid then,
-            nothing on screen could bring the pane back (its own hide item is
-            inside the zero). `showChangesPane` is the healing form, which
-            restores a width as well as the preference. */}
+            It shows for a zero-width pane as well as a hidden one: a divider
+            dragged off the edge leaves the pane at 0% with the preference still
+            reading "visible", and its own hide item is inside that zero.
+            `showChangesPane` restores a width as well as the preference. */}
         {changesPaneEffectivelyHidden(dux) && (
           <SimpleTooltip content="Show Changes pane">
             <Button
