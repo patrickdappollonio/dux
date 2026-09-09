@@ -2651,38 +2651,16 @@ fn recover_config(raw: &str) -> Config {
         if section_solo_ok(section, value.clone()) {
             continue;
         }
-        if let toml::Value::Table(tbl) = value {
-            let mut fixed = tbl.clone();
-            let mut reset_fields: Vec<String> = Vec::new();
-            for _ in 0..tbl.len() {
-                if section_solo_ok(section, toml::Value::Table(fixed.clone())) {
-                    break;
-                }
-                let field_keys: Vec<String> = fixed.keys().cloned().collect();
-                let mut removed = false;
-                for fk in field_keys {
-                    let mut trial = fixed.clone();
-                    trial.remove(&fk);
-                    if section_solo_ok(section, toml::Value::Table(trial.clone())) {
-                        reset_fields.push(fk);
-                        fixed = trial;
-                        removed = true;
-                        break;
-                    }
-                }
-                if !removed {
-                    break;
-                }
+        if let toml::Value::Table(tbl) = value
+            && let Some((fixed, reset_fields)) = prune_invalid_fields(section, tbl)
+        {
+            for fk in &reset_fields {
+                crate::logger::warn(&format!(
+                    "config [{section}] {fk} is invalid; resetting it to its default"
+                ));
             }
-            if section_solo_ok(section, toml::Value::Table(fixed.clone())) {
-                for fk in &reset_fields {
-                    crate::logger::warn(&format!(
-                        "config [{section}] {fk} is invalid; resetting it to its default"
-                    ));
-                }
-                pruned.insert(section.clone(), toml::Value::Table(fixed));
-                continue;
-            }
+            pruned.insert(section.clone(), toml::Value::Table(fixed));
+            continue;
         }
         crate::logger::warn(&format!(
             "config section [{section}] is invalid; resetting it to defaults"
@@ -2698,6 +2676,37 @@ fn recover_config(raw: &str) -> Config {
             Config::default()
         }
     }
+}
+
+/// The section with its offending fields dropped, and the names of what was
+/// dropped, or `None` when no set of single fields explains the failure and the
+/// caller must reset the whole section. Fields are removed one at a time, each
+/// one kept out only if the section deserializes without it, so a section loses
+/// the least it can.
+fn prune_invalid_fields(section: &str, tbl: &toml::Table) -> Option<(toml::Table, Vec<String>)> {
+    let mut fixed = tbl.clone();
+    let mut reset_fields: Vec<String> = Vec::new();
+    for _ in 0..tbl.len() {
+        if section_solo_ok(section, toml::Value::Table(fixed.clone())) {
+            break;
+        }
+        let field_keys: Vec<String> = fixed.keys().cloned().collect();
+        let mut removed = false;
+        for fk in field_keys {
+            let mut trial = fixed.clone();
+            trial.remove(&fk);
+            if section_solo_ok(section, toml::Value::Table(trial.clone())) {
+                reset_fields.push(fk);
+                fixed = trial;
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+    section_solo_ok(section, toml::Value::Table(fixed.clone())).then_some((fixed, reset_fields))
 }
 
 /// True if a document containing only `section = value` deserializes into a
@@ -3996,6 +4005,71 @@ mod tests {
     #[test]
     fn expand_path_rejects_empty_braced_var_name() {
         assert!(expand_path("${}/foo").is_none());
+    }
+
+    #[test]
+    fn recover_config_keeps_the_settings_around_one_invalid_field() {
+        let recovered = recover_config(
+            "[ui]\nagent_tabs_max = -1\nleft_width_pct = 33\n\n[server]\nport = 4321\n",
+        );
+        assert_eq!(
+            recovered.ui.agent_tabs_max,
+            Config::default().ui.agent_tabs_max,
+            "the offending field goes back to its default"
+        );
+        assert_eq!(recovered.ui.left_width_pct, 33, "its neighbour survives");
+        assert_eq!(recovered.server.port, 4321, "other sections survive");
+    }
+
+    #[test]
+    fn recover_config_resets_a_section_whose_fields_cannot_be_isolated() {
+        let recovered = recover_config("ui = 5\n\n[server]\nport = 4321\n");
+        assert_eq!(
+            recovered.ui.left_width_pct,
+            Config::default().ui.left_width_pct,
+            "a section that is not even a table resets whole"
+        );
+        assert_eq!(recovered.server.port, 4321);
+    }
+
+    #[test]
+    fn recover_config_falls_back_to_defaults_on_unparseable_toml() {
+        let recovered = recover_config("[ui\nnot toml at all");
+        assert_eq!(recovered.server.port, Config::default().server.port);
+    }
+
+    #[test]
+    fn prune_invalid_fields_drops_only_what_it_has_to() {
+        let mut section = toml::Table::new();
+        section.insert("agent_tabs_max".to_string(), toml::Value::Integer(-1));
+        section.insert("left_width_pct".to_string(), toml::Value::Integer(33));
+        let (fixed, reset) = prune_invalid_fields("ui", &section).expect("the field is isolated");
+        assert_eq!(reset, vec!["agent_tabs_max".to_string()]);
+        assert!(fixed.contains_key("left_width_pct"));
+
+        let mut clean = toml::Table::new();
+        clean.insert("left_width_pct".to_string(), toml::Value::Integer(33));
+        let (fixed, reset) = prune_invalid_fields("ui", &clean).expect("a clean section is kept");
+        assert!(reset.is_empty());
+        assert_eq!(fixed, clean);
+
+        let mut two_bad = toml::Table::new();
+        two_bad.insert("agent_tabs_max".to_string(), toml::Value::Integer(-1));
+        two_bad.insert(
+            "left_width_pct".to_string(),
+            toml::Value::String("wide".to_string()),
+        );
+        assert_eq!(
+            prune_invalid_fields("ui", &two_bad),
+            None,
+            "no single removal rescues it, so the caller resets the section"
+        );
+    }
+
+    #[test]
+    fn recover_config_keeps_a_clean_document_intact() {
+        let recovered = recover_config("[ui]\nleft_width_pct = 21\n");
+        assert_eq!(recovered.ui.left_width_pct, 21);
     }
 
     #[test]
