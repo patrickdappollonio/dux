@@ -5680,7 +5680,8 @@ mod tests {
                         .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
                         .as_str(),
                     42,
-                    None
+                    None,
+                    || {}
                 )
                 .allowed
         );

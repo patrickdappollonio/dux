@@ -216,18 +216,62 @@ impl App {
         };
         let allowed = seat.owners.is_owner(pty_id, seat.conn_id);
         if !allowed {
-            // The two refusals are one rung with two stories, and the card over
-            // the pane is already telling whichever is true.
-            let (owner, _, _) = seat.owners.current_owner(pty_id);
-            let reason = if owner.is_some() {
-                "another device currently owns its input"
-            } else {
-                "nobody is driving it yet, and typing does not claim one: press the card's \
-                 Take over button"
-            };
-            dux_core::logger::debug(&format!("keystroke for pty {pty_id} dropped: {reason}"));
+            self.log_refused_pty_write(pty_id, &seat);
         }
         allowed
+    }
+
+    /// Write `bytes` into the focused terminal surface's PTY through the gate,
+    /// and report whether they reached the child.
+    ///
+    /// The verdict and the enqueue are ONE critical section
+    /// ([`dux_core::pty_owners::PtySizeOwners::write_if_owner`]), so a take-over
+    /// landing between two keystrokes cannot let the second one through. That is
+    /// the whole difference from [`Self::may_type_into_pty`], which stays the
+    /// predicate for a decision taken before a batch of bytes exists; the
+    /// contract it answers is unchanged here, an unowned pty included.
+    ///
+    /// With nothing serving there is no seat and no gate, and the write is
+    /// exactly the write this surface has always made.
+    pub(crate) fn write_into_focused_pty(&mut self, bytes: &[u8]) -> bool {
+        let Some(pty_id) = self.selected_terminal_surface_id() else {
+            return false;
+        };
+        let seat = self.pty_ownership();
+        let Some(provider) = self.selected_terminal_surface_client() else {
+            return false;
+        };
+        let Some(seat) = seat else {
+            let _ = provider.write_bytes(bytes);
+            return true;
+        };
+        // The enqueue leaves a full queue unreported, because logging takes the
+        // log-file mutex and writes to disk under the ownership lock.
+        let mut queue_full = false;
+        let wrote = seat.owners.write_if_owner(&pty_id, seat.conn_id, || {
+            queue_full = !provider.enqueue_bytes(bytes);
+        });
+        if queue_full {
+            dux_core::pty::log_dropped_pty_write();
+        }
+        if !wrote {
+            self.log_refused_pty_write(&pty_id, &seat);
+        }
+        wrote
+    }
+
+    /// Say at debug why a write was dropped. The two refusals are one rung with
+    /// two stories, and the card over the pane is already telling whichever is
+    /// true.
+    fn log_refused_pty_write(&self, pty_id: &str, seat: &TuiOwnership) {
+        let (owner, _, _) = seat.owners.current_owner(pty_id);
+        let reason = if owner.is_some() {
+            "another device currently owns its input"
+        } else {
+            "nobody is driving it yet, and typing does not claim one: press the card's \
+             Take over button"
+        };
+        dux_core::logger::debug(&format!("keystroke for pty {pty_id} dropped: {reason}"));
     }
 
     /// Claim `pty_id` because this surface just started the child behind it.
@@ -244,7 +288,7 @@ impl App {
         };
         let claim = seat
             .owners
-            .may_write(pty_id, seat.conn_id, Some(TUI_DEVICE_LABEL));
+            .may_write(pty_id, seat.conn_id, Some(TUI_DEVICE_LABEL), || {});
         if claim.claimed_new
             && let Some(epoch) = claim.epoch
         {
@@ -628,7 +672,7 @@ mod tests {
         let browser = seat.owners.next_conn_id();
         assert!(
             seat.owners
-                .may_write("s1", browser, Some(REAL_CHROME_UA))
+                .may_write("s1", browser, Some(REAL_CHROME_UA), || {})
                 .claimed_new,
             "the browser claims the pty by typing into it first"
         );
@@ -2768,6 +2812,45 @@ mod tests {
             recorded.lock().expect("not poisoned").published.is_empty(),
             "a refusal changes nothing, so it announces nothing"
         );
+    }
+
+    /// A take-over landing between two keystrokes takes the second one with it.
+    /// This pins the verdict this surface writes under; that the verdict and the
+    /// write are ONE critical section is held in `write_if_owner`'s own core
+    /// test, which is where the closure can be paused mid-lock.
+    #[test]
+    fn a_takeover_between_two_keystrokes_refuses_the_second() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        app.focus = FocusPane::Center;
+        seat.owners.claim("session-1-slot", seat.conn_id);
+
+        assert!(
+            app.write_into_focused_pty(b"a"),
+            "the driver's own keystroke reaches its child"
+        );
+
+        let browser = seat.owners.next_conn_id();
+        seat.owners.claim("session-1-slot", browser);
+
+        assert!(
+            !app.write_into_focused_pty(b"b"),
+            "the next keystroke belongs to a pty this surface no longer drives"
+        );
+        assert!(
+            seat.owners.is_owner("session-1-slot", browser),
+            "a refused write leaves the new driver in place"
+        );
+    }
+
+    /// Coupling the verdict to the write does not soften the verdict: a pty
+    /// nobody drives is still refused, and the write claims it for nobody.
+    #[test]
+    fn writing_into_a_free_pty_still_reaches_nothing_and_claims_nothing() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        app.focus = FocusPane::Center;
+
+        assert!(!app.write_into_focused_pty(b"a"));
+        assert!(!seat.owners.is_owner("session-1-slot", seat.conn_id));
     }
 
     /// With nothing serving none of this exists: no seat, no card, and typing

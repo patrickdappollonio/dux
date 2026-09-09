@@ -518,18 +518,28 @@ enum PtyWriteMsg {
     Shutdown,
 }
 
-/// Push a chunk onto a PTY write queue without ever blocking. A full queue (the
-/// child is not draining its terminal) logs and drops the chunk rather than
-/// blocking the caller: a child that is not reading would discard the bytes
-/// anyway. A disconnected channel (the writer thread is gone) is a no-op. Shared
-/// by [`PtyWriter::send`] (user input) and the reader thread (terminal parser
-/// replies) so both log drops identically.
-fn pty_queue_send(tx: &std::sync::mpsc::SyncSender<PtyWriteMsg>, bytes: Vec<u8>) {
-    if let Err(std::sync::mpsc::TrySendError::Full(_)) = tx.try_send(PtyWriteMsg::Bytes(bytes)) {
-        logger::debug(
-            "PTY write queue full; dropping bytes for a child that is not draining its terminal",
-        );
-    }
+/// Push a chunk onto a PTY write queue without ever blocking, reporting whether
+/// it was taken. A full queue (the child is not draining its terminal) drops the
+/// chunk rather than blocking the caller, since a child that is not reading would
+/// discard the bytes anyway. A disconnected channel (the writer thread is gone)
+/// is a no-op and not a drop worth reporting.
+///
+/// The drop is reported rather than logged so a caller enqueuing inside a
+/// critical section can say so once it is out of it: [`log_dropped_pty_write`]
+/// is the one sentence every drop site uses.
+fn pty_queue_send(tx: &std::sync::mpsc::SyncSender<PtyWriteMsg>, bytes: Vec<u8>) -> bool {
+    !matches!(
+        tx.try_send(PtyWriteMsg::Bytes(bytes)),
+        Err(std::sync::mpsc::TrySendError::Full(_))
+    )
+}
+
+/// Report a chunk dropped by a full PTY write queue. One sentence for user input
+/// and parser replies alike, so the two can never drift.
+pub fn log_dropped_pty_write() {
+    logger::debug(
+        "PTY write queue full; dropping bytes for a child that is not draining its terminal",
+    );
 }
 
 /// Owns the PTY master writer on a dedicated thread and accepts outbound byte
@@ -588,12 +598,13 @@ impl PtyWriter {
             .clone()
     }
 
-    /// Queue bytes for the child. Never blocks: a full queue (child not draining)
-    /// drops the chunk (logged), and a gone writer thread (child exited) is a
-    /// no-op.
-    fn send(&self, bytes: Vec<u8>) {
-        if let Some(tx) = self.tx.as_ref() {
-            pty_queue_send(tx, bytes);
+    /// Queue bytes for the child, reporting whether the queue took them. Never
+    /// blocks: a full queue (child not draining) drops the chunk, and a gone
+    /// writer thread (child exited) is a no-op.
+    fn send(&self, bytes: Vec<u8>) -> bool {
+        match self.tx.as_ref() {
+            Some(tx) => pty_queue_send(tx, bytes),
+            None => true,
         }
     }
 }
@@ -994,8 +1005,8 @@ impl ReaderLoopState {
             !self.has_output.load(Ordering::Acquire) && terminal.has_visible_output();
         // Never hold the terminal lock while handing replies to the writer.
         drop(terminal);
-        if !replies.is_empty() {
-            pty_queue_send(&self.writer_tx, replies);
+        if !replies.is_empty() && !pty_queue_send(&self.writer_tx, replies) {
+            log_dropped_pty_write();
         }
         if newly_visible {
             self.has_output.store(true, Ordering::Release);
@@ -1244,9 +1255,24 @@ impl PtyClient {
         // stay responsive for every other session. Delivery is best-effort: a
         // full queue drops the chunk (logged) rather than blocking. The `Result`
         // is retained for API stability with existing callers.
-        self.writer.send(bytes.to_vec());
-        self.dirty.store(true, Ordering::Release);
+        if !self.enqueue_bytes(bytes) {
+            log_dropped_pty_write();
+        }
         Ok(())
+    }
+
+    /// The same write with the drop left unreported, so the caller can report it
+    /// after whatever it is holding is released.
+    ///
+    /// [`crate::logger`] takes the log-file mutex and writes to disk, which must
+    /// not happen inside the PTY-ownership critical section that
+    /// [`crate::pty_owners::PtySizeOwners::write_if_owner`] runs its enqueue in.
+    /// Returns whether the write queue took the bytes; a `false` is the same
+    /// dropped chunk [`write_bytes`](Self::write_bytes) logs for itself.
+    pub fn enqueue_bytes(&self, bytes: &[u8]) -> bool {
+        let queued = self.writer.send(bytes.to_vec());
+        self.dirty.store(true, Ordering::Release);
+        queued
     }
 
     /// Get an owned snapshot of the currently visible terminal viewport.

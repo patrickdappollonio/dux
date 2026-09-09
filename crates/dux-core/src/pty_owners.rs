@@ -75,7 +75,7 @@ pub enum GridApplyOutcome<T> {
 /// one another connection holds it is refused whole, resize included (see
 /// [`Self::claim_for_resize`]). Only a resize carrying the take-over flag
 /// transfers ownership, and a non-owner's stdin is dropped by
-/// [`Self::may_write`].
+/// [`Self::write_if_owner`] and [`Self::may_write`].
 #[derive(Default)]
 pub struct PtySizeOwners {
     pub owners: std::sync::Mutex<OwnersState>,
@@ -236,8 +236,8 @@ impl PtySizeOwners {
 
     /// Whether `conn_id` is the current owner of `pty_id`; an unowned PTY is
     /// false. Read-only, unlike [`Self::claim`]. Never use it to gate a write or
-    /// a resize: those go through [`Self::may_write`] and
-    /// [`Self::claim_for_resize`], which decide and act under one lock, and a
+    /// a resize: those go through [`Self::write_if_owner`], [`Self::may_write`]
+    /// and [`Self::claim_for_resize`], which decide and act under one lock, and a
     /// check here followed by an action leaves a TOCTOU window open.
     pub fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
         self.owners
@@ -248,9 +248,15 @@ impl PtySizeOwners {
             .is_some_and(|record| record.conn_id == conn_id)
     }
 
-    /// May `conn_id` write stdin to `pty_id`? Resolved ATOMICALLY under the
-    /// owners lock, so no concurrent claim can slip between the decision and the
-    /// write and let a just-demoted connection's keystroke through.
+    /// May `conn_id` write stdin to `pty_id`, and does writing claim it?
+    ///
+    /// `enqueue` runs under the owners lock, exactly when the answer is
+    /// "allowed", so a take-over cannot land between the verdict and the bytes
+    /// the way it can when a caller writes after this returns. It carries the
+    /// same contract [`Self::write_if_owner`] states: a cheap enqueue that never
+    /// blocks and never panics. A caller with nothing to enqueue here (a launch
+    /// claiming its own child, a test) passes an empty closure and this is the
+    /// decision alone.
     ///
     ///   - no current owner -> `conn_id` claims it, as an uncontested first
     ///     writer, reported via `claimed_new` so the caller emits exactly one
@@ -262,9 +268,15 @@ impl PtySizeOwners {
     /// the one frame that transfers ownership is a resize flagged as a take-over
     /// (see [`Self::claim_for_resize`]). `device` is the writing connection's
     /// captured `User-Agent`, recorded only on the claim.
-    pub fn may_write(&self, pty_id: &str, conn_id: u64, device: Option<&str>) -> WriteClaim {
+    pub fn may_write(
+        &self,
+        pty_id: &str,
+        conn_id: u64,
+        device: Option<&str>,
+        enqueue: impl FnOnce(),
+    ) -> WriteClaim {
         let mut owners = self.owners.lock().unwrap();
-        match owners.map.get(pty_id) {
+        let claim = match owners.map.get(pty_id) {
             Some(record) if record.conn_id == conn_id => WriteClaim {
                 allowed: true,
                 claimed_new: false,
@@ -291,7 +303,36 @@ impl PtySizeOwners {
                     epoch: Some(owners.epoch),
                 }
             }
+        };
+        if claim.allowed {
+            enqueue();
         }
+        claim
+    }
+
+    /// Write into `pty_id` as `conn_id`, deciding and enqueuing in ONE critical
+    /// section, and report whether the bytes were handed over.
+    ///
+    /// It is allowed only for the connection that already owns the pty: it never
+    /// claims and never transfers, so an unowned pty is refused here and claimed
+    /// only through [`Self::may_write`] or [`Self::claim_for_resize`].
+    ///
+    /// `write` runs with the owners lock held, so it must be the cheap enqueue a
+    /// keystroke already is (a channel send), never blocking I/O, and it must not
+    /// panic: this mutex guards every pty in the process, and a panic through it
+    /// poisons ownership for all of them. That is what closes the window a
+    /// separate check leaves open, in which a take-over lands between the verdict
+    /// and the write and one keystroke reaches a pty the writer no longer owns.
+    pub fn write_if_owner(&self, pty_id: &str, conn_id: u64, write: impl FnOnce()) -> bool {
+        let owners = self.owners.lock().unwrap();
+        let allowed = owners
+            .map
+            .get(pty_id)
+            .is_some_and(|record| record.conn_id == conn_id);
+        if allowed {
+            write();
+        }
+        allowed
     }
 
     /// Release ownership of `pty_id` if `conn_id` still holds it (called when the
@@ -1084,7 +1125,7 @@ mod tests {
         assert_eq!(owners.current_owner("p"), (None, cleared, None));
 
         // A first-writer claim records the device too, exactly like a resize claim.
-        let write = owners.may_write("p", a, Some("Phone UA"));
+        let write = owners.may_write("p", a, Some("Phone UA"), || {});
         assert!(write.claimed_new, "the first writer claims the unowned pty");
         let (owner, _, device) = owners.current_owner("p");
         assert_eq!(owner, Some(a));
@@ -1120,7 +1161,7 @@ mod tests {
             "a release that removed the owner must bump the generation"
         );
 
-        let claim = owners.may_write("s2", a, None);
+        let claim = owners.may_write("s2", a, None, || {});
         assert!(claim.claimed_new, "first write claims the unowned pty");
         assert!(
             owners.ownership_generation() > g3,
@@ -1141,9 +1182,12 @@ mod tests {
         let g = owners.ownership_generation();
 
         assert!(owners.claim("s1", a).is_none(), "same-owner re-claim");
-        assert!(owners.may_write("s1", a, None).allowed, "owner keystroke");
         assert!(
-            !owners.may_write("s1", b, None).allowed,
+            owners.may_write("s1", a, None, || {}).allowed,
+            "owner keystroke"
+        );
+        assert!(
+            !owners.may_write("s1", b, None, || {}).allowed,
             "denied non-owner write"
         );
         let _ = owners.release("s1", b);
@@ -1324,5 +1368,125 @@ mod tests {
         );
         assert!(!applied);
         assert!(owners.is_owner("p", a));
+    }
+
+    /// The owner's write must be decided and enqueued under one lock, or a
+    /// take-over landing in the gap lets one keystroke through to a pty the
+    /// writer no longer holds.
+    #[test]
+    fn a_takeover_cannot_land_between_the_verdict_and_the_owners_write() {
+        let owners = std::sync::Arc::new(PtySizeOwners::default());
+        let driver = owners.next_conn_id();
+        let taker = owners.next_conn_id();
+        owners.claim("p", driver);
+
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let racer = {
+            let owners = owners.clone();
+            let order = order.clone();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                gate.wait();
+                owners.claim_for_resize("p", taker, true, None, None, |_| {});
+                order.lock().unwrap().push("takeover");
+            })
+        };
+
+        let wrote = owners.write_if_owner("p", driver, || {
+            // The racing take-over is running by now, and the pause hands it
+            // every chance to record itself first: only the lock this closure
+            // runs under can keep it behind the write.
+            gate.wait();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            order.lock().unwrap().push("write");
+        });
+        racer.join().expect("racing take-over thread");
+
+        assert!(wrote, "the recorded owner's write is delivered");
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["write", "takeover"],
+            "the take-over must serialize after the write it raced"
+        );
+        assert!(owners.is_owner("p", taker), "the take-over still lands");
+    }
+
+    /// The first writer's claim has the same seam: the bytes that earned the
+    /// claim must be enqueued under the lock that granted it, or a take-over
+    /// racing the claim leaves them travelling to a pty already handed on.
+    #[test]
+    fn a_takeover_cannot_land_between_a_first_writer_claim_and_its_enqueue() {
+        let owners = std::sync::Arc::new(PtySizeOwners::default());
+        let first = owners.next_conn_id();
+        let taker = owners.next_conn_id();
+
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let racer = {
+            let owners = owners.clone();
+            let order = order.clone();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                gate.wait();
+                owners.claim_for_resize("p", taker, true, None, None, |_| {});
+                order.lock().unwrap().push("takeover");
+            })
+        };
+
+        let claim = owners.may_write("p", first, None, || {
+            gate.wait();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            order.lock().unwrap().push("enqueue");
+        });
+        racer.join().expect("racing take-over thread");
+
+        assert!(claim.claimed_new, "an unowned pty's first writer claims it");
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["enqueue", "takeover"],
+            "the take-over must serialize after the enqueue its claim raced"
+        );
+        assert!(owners.is_owner("p", taker));
+    }
+
+    /// A take-over that lands BEFORE the next keystroke drops it: the write is
+    /// refused with no bytes handed over, which is the point of coupling them.
+    #[test]
+    fn a_write_after_a_takeover_hands_over_nothing() {
+        let owners = PtySizeOwners::default();
+        let driver = owners.next_conn_id();
+        let taker = owners.next_conn_id();
+        owners.claim("p", driver);
+
+        let first = std::cell::Cell::new(false);
+        assert!(owners.write_if_owner("p", driver, || first.set(true)));
+        assert!(first.get(), "the first keystroke reaches the child");
+
+        owners.claim("p", taker);
+
+        let second = std::cell::Cell::new(false);
+        assert!(!owners.write_if_owner("p", driver, || second.set(true)));
+        assert!(
+            !second.get(),
+            "the second keystroke must not reach a pty the writer lost"
+        );
+    }
+
+    /// Writing through this operation claims nothing, so an unowned pty stays
+    /// unowned and the bytes go nowhere.
+    #[test]
+    fn writing_to_an_unowned_pty_is_refused_and_claims_it_for_nobody() {
+        let owners = PtySizeOwners::default();
+        let conn = owners.next_conn_id();
+
+        let wrote = std::cell::Cell::new(false);
+        assert!(!owners.write_if_owner("p", conn, || wrote.set(true)));
+        assert!(!wrote.get());
+        assert_eq!(
+            owners.current_owner("p").0,
+            None,
+            "an unowned pty is claimed by a deliberate act, never by a write"
+        );
     }
 }

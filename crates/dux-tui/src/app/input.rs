@@ -467,28 +467,30 @@ impl RawInputDispatch {
         self.forward_batch.extend_from_slice(bytes);
     }
 
-    fn flush(&mut self, provider: Option<&crate::pty::PtyClient>) {
+    /// `may_write_pty` is the batch's up-front verdict, which decides what the
+    /// keys mean; the write asks again in its own critical section, so a
+    /// take-over landing mid-batch keeps the rest of it off the child.
+    fn flush(&mut self, app: &mut App) {
         if self.forward_batch.is_empty() {
             return;
         }
         self.needs_selection_clear = true;
         if !self.is_scrolled_back
             && self.may_write_pty
-            && let Some(provider) = provider
+            && app.write_into_focused_pty(&self.forward_batch)
         {
-            let _ = provider.write_bytes(&self.forward_batch);
             self.forwarded.note(&self.forward_batch);
         }
         self.forward_batch.clear();
     }
 
     fn flush_and_stamp(&mut self, app: &mut App) {
-        self.flush(app.selected_terminal_surface_client());
+        self.flush(app);
         app.stamp_forwarded_input(&mut self.forwarded);
     }
 
     fn finish(&mut self, app: &mut App, normalized_paste_forwarded: bool) {
-        self.flush(app.selected_terminal_surface_client());
+        self.flush(app);
         if self.needs_selection_clear {
             app.terminal_selection = None;
         }
@@ -1620,12 +1622,6 @@ impl App {
     /// `stamp_forwarded_input` resolves from `input_target`, which is `None` in
     /// this mode. A key the legacy protocol cannot encode is silently dropped.
     fn forward_typing_key_to_center(&mut self, key: &KeyEvent) {
-        // Ownership first: while a background web server is serving, another
-        // device can be the one driving this pty, and then this keystroke is
-        // dropped rather than written. Nothing serving, no gate at all.
-        if !self.may_type_into_focused_pty() {
-            return;
-        }
         let Some(provider) = self.selected_terminal_surface_client() else {
             return;
         };
@@ -1636,7 +1632,11 @@ impl App {
         let Some(bytes) = crate::key_encode::key_event_to_pty_bytes(key, app_cursor) else {
             return;
         };
-        let _ = provider.write_bytes(&bytes);
+        // Ownership rides with the write: a pty another device is driving takes
+        // the keystroke rather than the child.
+        if !self.write_into_focused_pty(&bytes) {
+            return;
+        }
         self.terminal_selection = None;
         if let Some(id) = self.selected_terminal_surface_id() {
             self.engine.note_pty_input(&id);
@@ -1880,10 +1880,6 @@ impl App {
     /// Stamped as typing (`note_pty_input`) so the echo the paste provokes is
     /// not read as the agent working.
     fn paste_to_center_pty(&mut self, text: &str) {
-        // A paste is a write, so it asks the same question a keystroke does.
-        if !self.may_type_into_focused_pty() {
-            return;
-        }
         let Some(provider) = self.selected_terminal_surface_client() else {
             return;
         };
@@ -1896,7 +1892,11 @@ impl App {
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
         };
-        let _ = provider.write_bytes(&bytes);
+        // A paste is a write, so it asks the same question a keystroke does, and
+        // asks it in the same breath as the write.
+        if !self.write_into_focused_pty(&bytes) {
+            return;
+        }
         self.terminal_selection = None;
         if let Some(id) = self.selected_terminal_surface_id() {
             self.engine.note_pty_input(&id);
@@ -2518,11 +2518,7 @@ impl App {
                             ))
                         }
                         None => {
-                            if self.may_type_into_focused_pty()
-                                && let Some(provider) = self.selected_terminal_surface_client()
-                            {
-                                let _ = provider.write_bytes(&payload);
-                            }
+                            let _ = self.write_into_focused_pty(&payload);
                             self.set_info(format!("Sent macro \"{name}\"."));
                         }
                     }
@@ -3157,6 +3153,10 @@ impl App {
         }
     }
 
+    /// The batch's up-front verdict, which decides what its keys MEAN; each
+    /// write then asks again in its own critical section. A take-over landing
+    /// between two stdin batches therefore cuts a host paste mid-sequence, which
+    /// is what losing the pty mid-paste has always done.
     fn raw_input_batch_may_write(
         &mut self,
         actions: &[RawSeqAction],
@@ -3178,16 +3178,13 @@ impl App {
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) {
-        dispatch.flush(self.selected_terminal_surface_client());
+        dispatch.flush(self);
         let forward_scroll = self.selected_surface_forward_scroll();
         let alt_screen = self
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.is_alt_screen());
         if should_forward_page(forward_scroll, alt_screen) {
-            if self.may_type_into_focused_pty()
-                && let Some(provider) = self.selected_terminal_surface_client()
-            {
-                let _ = provider.write_bytes(raw);
+            if self.write_into_focused_pty(raw) {
                 dispatch.forwarded.note(raw);
             }
         } else if self.last_pty_size.0 > 0 {
@@ -3206,7 +3203,7 @@ impl App {
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
         if conditional && has_scrollback && self.last_pty_size.0 > 0 {
-            dispatch.flush(self.selected_terminal_surface_client());
+            dispatch.flush(self);
             self.scroll_pty(direction, 1);
         } else {
             dispatch.queue(raw);
@@ -3223,7 +3220,7 @@ impl App {
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
         if conditional && has_scrollback {
-            dispatch.flush(self.selected_terminal_surface_client());
+            dispatch.flush(self);
             self.reset_pty_scrollback();
         } else {
             dispatch.queue(raw);
@@ -3240,7 +3237,7 @@ impl App {
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
         if conditional && has_scrollback {
-            dispatch.flush(self.selected_terminal_surface_client());
+            dispatch.flush(self);
             self.set_pty_scrollback_max();
         } else {
             dispatch.queue(raw);
@@ -3253,7 +3250,7 @@ impl App {
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
-        dispatch.flush(self.selected_terminal_surface_client());
+        dispatch.flush(self);
         if self.handle_takeover_card_mouse(&mouse) || self.handle_dormant_card_mouse(&mouse) {
             return RawInputFlow::Continue;
         }
@@ -3284,10 +3281,7 @@ impl App {
             .unwrap_or((false, false));
         if should_forward_wheel(forward_scroll, alt_screen, mouse_mode) {
             self.terminal_selection = None;
-            if self.may_type_into_focused_pty()
-                && let Some(provider) = self.selected_terminal_surface_client()
-            {
-                let _ = provider.write_bytes(raw);
+            if self.write_into_focused_pty(raw) {
                 dispatch.forwarded.note(raw);
             }
         } else if self.handle_mouse(mouse_event) {
@@ -3392,17 +3386,14 @@ impl App {
             .contains(crossterm::event::KeyModifiers::SHIFT);
         if !child_wants_mouse || shift_held {
             self.handle_terminal_selection_mouse(mouse);
-        } else if !dispatch.is_scrolled_back
-            && self.may_type_into_focused_pty()
-            && let Some(provider) = self.selected_terminal_surface_client()
-        {
+        } else if !dispatch.is_scrolled_back {
             // SGR coordinates are screen-absolute; the child expects them
             // relative to the embedded terminal grid.
             if let Some(term_area) = self.mouse_layout.agent_term
                 && let Some(translated) =
                     crate::raw_input::translate_sgr_mouse(raw, term_area.x, term_area.y)
+                && self.write_into_focused_pty(&translated)
             {
-                let _ = provider.write_bytes(&translated);
                 dispatch.forwarded.note(&translated);
             }
         }
@@ -9223,11 +9214,8 @@ impl App {
             let forwarded = if let Some(term_area) = self.mouse_layout.agent_term
                 && let Some(translated) =
                     crate::raw_input::translate_sgr_mouse(&screen_seq, term_area.x, term_area.y)
-                && self.may_type_into_focused_pty()
-                && let Some(provider) = self.selected_terminal_surface_client()
             {
-                let _ = provider.write_bytes(&translated);
-                true
+                self.write_into_focused_pty(&translated)
             } else {
                 false
             };
@@ -9611,13 +9599,9 @@ impl App {
         };
         // A pointer report is a write: a device that may not type may not make
         // the child repaint either.
-        if !self.may_type_into_focused_pty() {
+        if !self.write_into_focused_pty(&translated) {
             return;
         }
-        let Some(provider) = self.selected_terminal_surface_client() else {
-            return;
-        };
-        let _ = provider.write_bytes(&translated);
         if let Some(report) = dux_core::pty::decode_mouse_report(&translated)
             && let Some(id) = self.selected_terminal_surface_id()
         {

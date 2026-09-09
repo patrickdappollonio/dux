@@ -1995,7 +1995,21 @@ impl AttachedPtySocket<'_> {
 
     fn handle_input(&self, bytes: &[u8]) {
         let pty_id = self.target.pty_id();
-        let claim = self.owners.may_write(pty_id, self.conn_id, self.user_agent);
+        // The owner's write decides and enqueues under one lock, so a take-over
+        // racing this frame cannot let one keystroke through after it landed.
+        let owned = self.owners.write_if_owner(pty_id, self.conn_id, || {
+            self.engine.write_pty(pty_id.to_string(), bytes.to_vec());
+        });
+        if owned {
+            return;
+        }
+        // The claiming path enqueues under the lock too, so a first writer's own
+        // bytes cannot be overtaken between the claim and the send.
+        let claim = self
+            .owners
+            .may_write(pty_id, self.conn_id, self.user_agent, || {
+                self.engine.write_pty(pty_id.to_string(), bytes.to_vec());
+            });
         if !claim.allowed {
             dux_core::logger::debug(&format!(
                 "PTY stdin from non-owner conn {} dropped for pty {pty_id} \
@@ -2020,7 +2034,6 @@ impl AttachedPtySocket<'_> {
                 self.user_agent,
             ));
         }
-        self.engine.write_pty(pty_id.to_string(), bytes.to_vec());
     }
 
     async fn handle_text_frame(&self, text: &str) {
@@ -4300,7 +4313,7 @@ mod tests {
         // A size-frame claim on one pty: epoch 1.
         assert_eq!(owners.claim("pty-a", conn_a), Some(1));
         // A first-writer claim on another pty (the `may_write` path): epoch 2.
-        let w = owners.may_write("pty-b", conn_b, None);
+        let w = owners.may_write("pty-b", conn_b, None, || {});
         assert_eq!(
             w,
             WriteClaim {
@@ -4314,7 +4327,7 @@ mod tests {
         assert_eq!(owners.claim("pty-a", conn_b), Some(3));
         // A same-owner re-write on pty-b does not advance the epoch and emits none.
         assert_eq!(
-            owners.may_write("pty-b", conn_b, None),
+            owners.may_write("pty-b", conn_b, None, || {}),
             WriteClaim {
                 allowed: true,
                 claimed_new: false,
@@ -4343,7 +4356,7 @@ mod tests {
 
         // The handler forwards a stdin frame only when `may_write` allows it.
         assert_eq!(
-            owners.may_write(pty, conn_b, None),
+            owners.may_write(pty, conn_b, None, || {}),
             WriteClaim {
                 allowed: true,
                 claimed_new: false,
@@ -4352,7 +4365,7 @@ mod tests {
             "the owner B's stdin is forwarded without re-claiming"
         );
         assert_eq!(
-            owners.may_write(pty, conn_a, None),
+            owners.may_write(pty, conn_a, None, || {}),
             WriteClaim {
                 allowed: false,
                 claimed_new: false,
@@ -4382,7 +4395,7 @@ mod tests {
         // Unowned PTY: the first writer is allowed and NEWLY claims ownership,
         // taking the first ownership epoch so its `pty.owner` handover is ordered.
         assert_eq!(
-            owners.may_write(pty, conn_a, None),
+            owners.may_write(pty, conn_a, None, || {}),
             WriteClaim {
                 allowed: true,
                 claimed_new: true,
@@ -4398,7 +4411,7 @@ mod tests {
         // The same owner writing again is allowed without re-claiming (so the
         // caller does not re-emit a `pty.owner` for steady-state typing).
         assert_eq!(
-            owners.may_write(pty, conn_a, None),
+            owners.may_write(pty, conn_a, None, || {}),
             WriteClaim {
                 allowed: true,
                 claimed_new: false,
@@ -4409,7 +4422,7 @@ mod tests {
 
         // A different connection is denied and does not steal ownership by typing.
         assert_eq!(
-            owners.may_write(pty, conn_b, None),
+            owners.may_write(pty, conn_b, None, || {}),
             WriteClaim {
                 allowed: false,
                 claimed_new: false,
@@ -4420,6 +4433,58 @@ mod tests {
         assert!(
             owners.is_owner(pty, conn_a),
             "a denied write never wrests ownership from the active owner"
+        );
+    }
+
+    /// The stdin ladder the socket handler runs: the owner's bytes are decided
+    /// and enqueued in one critical section, and only a pty that answers "not
+    /// yours" falls through to the claiming path, so a browser typing into a pty
+    /// nobody drives still becomes its driver.
+    #[test]
+    fn the_owners_stdin_is_enqueued_atomically_and_a_free_pty_is_still_claimed() {
+        let owners = PtySizeOwners::default();
+        let pty = "session-42";
+        let conn = owners.next_conn_id();
+        let other = owners.next_conn_id();
+
+        let enqueued = std::cell::Cell::new(0);
+        let enqueue = || enqueued.set(enqueued.get() + 1);
+
+        assert!(
+            !owners.write_if_owner(pty, conn, enqueue),
+            "an unowned pty is not the atomic path's to write"
+        );
+        assert_eq!(enqueued.get(), 0);
+        let claim = owners.may_write(pty, conn, None, enqueue);
+        assert!(
+            claim.claimed_new,
+            "the fallback still claims a free pty for its first writer"
+        );
+        assert_eq!(
+            enqueued.get(),
+            1,
+            "and enqueues that first writer's bytes under the claim's own lock"
+        );
+
+        assert!(
+            owners.write_if_owner(pty, conn, enqueue),
+            "the recorded owner's next keystroke takes the atomic path"
+        );
+        assert_eq!(enqueued.get(), 2);
+
+        owners.claim(pty, other);
+        assert!(
+            !owners.write_if_owner(pty, conn, enqueue),
+            "a take-over that landed first takes the keystroke with it"
+        );
+        assert!(
+            !owners.may_write(pty, conn, None, enqueue).allowed,
+            "and the fallback refuses it too, rather than re-claiming"
+        );
+        assert_eq!(
+            enqueued.get(),
+            2,
+            "a refusal on either path enqueues nothing at all"
         );
     }
 
