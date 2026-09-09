@@ -52,12 +52,6 @@ export function setStatusClearSeconds(secs: number | null | undefined): void {
   configuredStatusClearSeconds = secs
 }
 
-/// The window every raise is currently measured against. `null`/`undefined`
-/// means the bootstrap document has not landed yet.
-export function currentStatusClearSeconds(): number | null | undefined {
-  return configuredStatusClearSeconds
-}
-
 /// Resolve the sonner `duration` for a notification of `tone`. `null`/`undefined`
 /// `statusClearSeconds` is the pre-bootstrap window; a configured `0` disables
 /// auto-clear for final tones only, since busy always keeps its leak guard.
