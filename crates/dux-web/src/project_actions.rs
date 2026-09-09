@@ -73,6 +73,32 @@ struct AddProjectBody {
     init_repo: bool,
 }
 
+/// Pick the add command the body's flags ask for.
+///
+/// A strict precedence ladder: `init_repo` subsumes `create_initial_commit`, which
+/// outranks `checkout_default`, since an unborn repo has no default branch to check
+/// out. The engine validates the path, serializes per repo path and runs the commit
+/// on a worker, so no mutating git work runs on the async reactor and a failure
+/// surfaces through the keyed status stream.
+fn add_project_command(body: AddProjectBody) -> WireCommand {
+    let AddProjectBody {
+        path,
+        name,
+        checkout_default,
+        create_initial_commit,
+        init_repo,
+    } = body;
+    if init_repo {
+        WireCommand::AddProjectInitRepo { path, name }
+    } else if create_initial_commit {
+        WireCommand::AddProjectCreateInitialCommit { path, name }
+    } else if checkout_default {
+        WireCommand::AddProjectCheckoutDefault { path, name }
+    } else {
+        WireCommand::AddProject { path, name }
+    }
+}
+
 async fn add_project(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -94,32 +120,7 @@ async fn add_project(
         None => return engine_unavailable(),
     };
 
-    // A strict precedence ladder: `init_repo` subsumes `create_initial_commit`,
-    // which outranks `checkout_default`, since an unborn repo has no default branch
-    // to check out. The engine validates the path, serializes per repo path and runs
-    // the commit on a worker, so no mutating git work runs on the async reactor and
-    // a failure surfaces through the keyed status stream.
-    let cmd = if body.init_repo {
-        WireCommand::AddProjectInitRepo {
-            path: body.path,
-            name: body.name,
-        }
-    } else if body.create_initial_commit {
-        WireCommand::AddProjectCreateInitialCommit {
-            path: body.path,
-            name: body.name,
-        }
-    } else if body.checkout_default {
-        WireCommand::AddProjectCheckoutDefault {
-            path: body.path,
-            name: body.name,
-        }
-    } else {
-        WireCommand::AddProject {
-            path: body.path,
-            name: body.name,
-        }
-    };
+    let cmd = add_project_command(body);
 
     match state
         .engine
@@ -486,6 +487,97 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body))
             .unwrap()
+    }
+
+    fn add_body(
+        checkout_default: bool,
+        create_initial_commit: bool,
+        init_repo: bool,
+    ) -> super::AddProjectBody {
+        super::AddProjectBody {
+            path: "/repo".to_string(),
+            name: String::new(),
+            checkout_default,
+            create_initial_commit,
+            init_repo,
+        }
+    }
+
+    #[test]
+    fn add_project_command_follows_the_flag_precedence_ladder() {
+        use dux_core::wire::WireCommand;
+        assert!(matches!(
+            super::add_project_command(add_body(true, true, true)),
+            WireCommand::AddProjectInitRepo { .. }
+        ));
+        assert!(matches!(
+            super::add_project_command(add_body(true, true, false)),
+            WireCommand::AddProjectCreateInitialCommit { .. }
+        ));
+        assert!(matches!(
+            super::add_project_command(add_body(true, false, false)),
+            WireCommand::AddProjectCheckoutDefault { .. }
+        ));
+        assert!(matches!(
+            super::add_project_command(add_body(false, false, false)),
+            WireCommand::AddProject { .. }
+        ));
+    }
+
+    fn post_add_flags(path: &str, flags: &str) -> Request<Body> {
+        let body = format!(
+            r#"{{"path":{}{}}}"#,
+            serde_json::to_string(path).unwrap(),
+            flags
+        );
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/projects")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn init_repo_outranks_the_other_add_flags() {
+        // The precedence ladder: a plain folder sent with every flag set must be
+        // initialized as a repository, which only `init_repo` can do.
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().to_string_lossy().to_string();
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(post_add_flags(
+                &path,
+                r#","init_repo":true,"create_initial_commit":true,"checkout_default":true"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        assert!(
+            folder.path().join(".git").exists(),
+            "init_repo must win and initialize the folder"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_initial_commit_outranks_checkout_default() {
+        // An unborn repo has no default branch to check out, so the birth flag
+        // must win over `checkout_default` when both arrive.
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_no_commit(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(post_add_flags(
+                &path,
+                r#","create_initial_commit":true,"checkout_default":true"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        assert!(dux_core::git::repo_has_commits(repo.path()));
     }
 
     #[tokio::test]
