@@ -5,13 +5,9 @@ type CharMapFn = fn(&str, usize, char) -> Option<char>;
 
 /// Reusable text input with cursor tracking and optional multiline support.
 ///
-/// Handles character-level and word-level editing, cursor movement, and
-/// common key dispatch. All cursor positions are byte indices into the
-/// underlying UTF-8 string.
-///
-/// By default operates in single-line mode. Call [`TextInput::with_multiline`]
-/// to enable multiline editing where Enter inserts newlines and Up/Down
-/// navigate between lines.
+/// All cursor positions are byte indices into the underlying UTF-8 string.
+/// Single-line by default; [`TextInput::with_multiline`] enables multiline
+/// editing, where Enter inserts newlines and Up/Down navigate between lines.
 #[derive(Clone, Debug)]
 pub struct TextInput {
     pub text: String,
@@ -19,10 +15,8 @@ pub struct TextInput {
     multiline: Option<MultilineState>,
     /// Optional placeholder text shown when the input is empty.
     placeholder: Option<String>,
-    /// Optional mapper consulted before each character insertion. Receives
-    /// the current text, the cursor byte-offset where the character would be
-    /// inserted, and the candidate character. Return `Some(c)` to insert `c`
-    /// (which may differ from the input), or `None` to silently reject.
+    /// Consulted before each insertion with the current text, the cursor
+    /// byte-offset, and the candidate character; `None` rejects it silently.
     char_map: Option<CharMapFn>,
 }
 
@@ -75,10 +69,9 @@ impl TextInput {
         self.placeholder.as_deref()
     }
 
-    /// Set a character mapper that is consulted before each insertion.
-    /// The mapper receives the current text, cursor byte-offset, and candidate
-    /// character. Return `Some(c)` to insert `c` (which may differ from the
-    /// input for transparent substitution), or `None` to silently reject.
+    /// Set a character mapper consulted before each insertion with the current
+    /// text, cursor byte-offset, and candidate character. `Some(c)` inserts `c`,
+    /// which may differ from the input; `None` silently rejects.
     pub fn with_char_map(mut self, map: fn(&str, usize, char) -> Option<char>) -> Self {
         self.char_map = Some(map);
         self
@@ -94,15 +87,11 @@ impl TextInput {
         self
     }
 
-    /// Whether this field is a FULL-TEXT (multiline) field rather than a simple
-    /// single-line one.
-    ///
-    /// This is the flag the "two kinds of text field" tenet is about: what makes
-    /// a field full-text is [`TextInput::with_multiline`] having been called at
-    /// construction, not its rendered height, its label, or the modal it sits
-    /// in. Exposed because the dual-mode rule in [`crate::app::modal`] has to
-    /// ask a LIVE instance the question, "is there a multiline field in this
-    /// modal?" is a runtime fact, not a type-level one.
+    /// Whether this field is a full-text (multiline) field rather than a simple
+    /// single-line one, decided by [`TextInput::with_multiline`] having been
+    /// called at construction and not by its rendered height, its label, or the
+    /// modal it sits in. Public because the dual-mode rule in
+    /// [`crate::app::modal`] has to ask a live instance.
     pub fn is_multiline(&self) -> bool {
         self.multiline.is_some()
     }
@@ -150,14 +139,12 @@ impl TextInput {
     /// Insert pasted text at the caret, leaving the caret after the inserted
     /// text.
     ///
-    /// A MULTILINE field takes the text verbatim, with line endings
-    /// normalized to `\n` (`\r\n` and a lone `\r` each become one newline,
-    /// the form the field's own Enter inserts). A SINGLE-LINE field collapses
-    /// each INTERIOR newline run into one space, and drops leading/trailing
-    /// runs outright: that deliberately keeps every pasted word visible and
-    /// editable instead of silently truncating at the first line break (the
-    /// conservative choice; no content is discarded), while the trailing
-    /// newline most copied lines carry adds no stray space.
+    /// A multiline field takes the text verbatim, with `\r\n` and a lone `\r`
+    /// each normalized to the one `\n` its own Enter inserts. A single-line
+    /// field collapses each interior newline run into one space and drops
+    /// leading and trailing runs, so a paste stays whole and editable rather
+    /// than truncating at the first line break, and a trailing newline adds no
+    /// stray space.
     ///
     /// Goes through [`TextInput::insert_char`] per character so the optional
     /// `char_map` filters a paste exactly as it filters typing.
@@ -634,10 +621,6 @@ fn next_word_boundary(text: &str, index: usize) -> usize {
 }
 
 // ── Word-aware wrapping ────────────────────────────────────────────
-//
-// These functions wrap text preferring to break at word boundaries (spaces).
-// When a word is longer than the available width, it falls back to hard
-// character-level splitting.
 
 /// Split a single logical line (no `\n`) into visual rows, preferring
 /// breaks at the last space within `width`. Returns a vec of

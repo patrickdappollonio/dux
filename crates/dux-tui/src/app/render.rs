@@ -14,15 +14,13 @@ use std::path::Path;
 /// refuse a layout too narrow for it) and by the painter (to place it), so the
 /// two can never disagree about whether the label fits.
 ///
-/// Sized to the label rather than `button_width_for`'s dialog minimum, for the
-/// take-over card's reason: one column of padding each side plus the borders
-/// leaves an odd inner width around an odd-length label, so it centres exactly
-/// instead of leaning one cell to the left.
+/// Sized to the label rather than `button_width_for`'s dialog minimum: one column
+/// of padding each side plus the borders leaves an odd inner width around an
+/// odd-length label, so it centres exactly instead of leaning one cell left.
 ///
-/// Measured in DISPLAY COLUMNS, like every other measurement on the card: a
-/// label with a wide glyph in it occupies more cells than it has characters, and
-/// a width that counted characters would hand the planner a number the painter
-/// cannot honour.
+/// Measured in display columns, like every other measurement on the card: a
+/// width that counted characters would hand the planner a number the painter
+/// cannot honour for a label holding a wide glyph.
 fn pane_card_button_width(label: &str) -> u16 {
     let columns: usize = label
         .chars()
@@ -34,12 +32,10 @@ fn pane_card_button_width(label: &str) -> u16 {
 /// A pane card block's lines, cut to the rows it was given, marking the cut when
 /// the planner says the block did not fit whole.
 ///
-/// The mark replaces the END of the last surviving row rather than being
-/// appended to it, because that row is usually already full. The cut is by
-/// DISPLAY COLUMN, through the same measurement the wrapper uses: counting
-/// characters against a column budget let a row of CJK come back twice as wide
-/// as the card, which pushed the very ellipsis that says "there is more" off the
-/// right edge.
+/// The mark replaces the end of the last surviving row rather than being appended
+/// to it, because that row is usually already full. The cut is by display column,
+/// through the same measurement the wrapper uses: counting characters against a
+/// column budget lets a row of CJK come back twice as wide as the card.
 fn cut_card_lines(
     lines: &[Line<'static>],
     rows: u16,
@@ -92,14 +88,13 @@ struct ErrorDialogLayout {
 /// visible within `avail` display columns.
 ///
 /// Pure, so the renderer can ask it twice: once at the full strip width to learn
-/// whether anything ends up hidden to the left (which costs a column for the
-/// leading `…`), then again at the narrowed width. Narrowing `avail` can only
-/// move the answer LATER in the list, never back to 0, which is what makes that
-/// two-pass reservation stable.
+/// whether anything ends up hidden to the left, then again at the narrowed width.
+/// Narrowing `avail` can only move the answer later in the list, never back to 0,
+/// which is what makes that two-pass reservation stable.
 ///
-/// `seg_w` holds each tab's total width (box borders and inter-box gap
-/// included). Never scrolls further than it must: the answer is 0 whenever the
-/// focused tab is already reachable from the left edge.
+/// `seg_w` holds each tab's total width, box borders and inter-box gap included.
+/// The answer is 0 whenever the focused tab is already reachable from the left
+/// edge.
 fn tab_strip_start_index(seg_w: &[u16], avail: u16, focused_idx: usize) -> usize {
     let mut start = 0usize;
     loop {
@@ -129,22 +124,15 @@ fn tab_strip_start_index(seg_w: &[u16], avail: u16, focused_idx: usize) -> usize
     start.min(focused_idx)
 }
 
-/// The ordinal cell a tab pill carries in its own SEGMENT, left of the label
-/// and behind a full-height divider (`│ 1 │ codex │`): one space, the tab's
-/// strip POSITION (1-based), one space, so the cell's width follows the
-/// number's own width (` 1 `, ` 10 `). The ordinal is the tab's switch-key
-/// address (the Ctrl-1..9 defaults, and the count Ctrl-Left/Right walks
-/// through), so it follows strip order (session-slot tab first, then extra
-/// tabs in creation order) and RENUMBERS when a tab closes: it is a
-/// position, never a stable id. Every pill is numbered, including positions
-/// past 9 (which have no Ctrl-N default but are still an address for
-/// Ctrl-Left/Right counting and for rebinding): a mixed strip where some
-/// pills carry a numbered segment and some don't reads like two kinds of
-/// tab, and the disambiguation suffix (`codex 2`) would make an un-numbered
-/// tenth pill genuinely ambiguous next to a numbered second one. Position 4
-/// is not special-cased either: `select_tab_4` ships unbound (legacy
-/// terminals send the same byte for Ctrl-4 and the macro bar's Ctrl-\), but
-/// the pill is still the address users rebind to and count against.
+/// The ordinal cell a tab pill carries in its own segment, left of the label and
+/// behind a full-height divider (`│ 1 │ codex │`): one space, the tab's 1-based
+/// strip position, one space, so the cell's width follows the number's.
+///
+/// The ordinal is the tab's switch-key address, so it follows strip order and
+/// renumbers when a tab closes: a position, never a stable id. Every pill is
+/// numbered, positions past 9 included, because a mixed strip reads like two
+/// kinds of tab and the disambiguation suffix would make an un-numbered pill
+/// ambiguous beside a numbered one.
 fn tab_pill_ordinal_cell(position: usize) -> String {
     format!(" {position} ")
 }
@@ -170,13 +158,10 @@ enum TabActivityGlyph {
 
 /// Resolve a tab pill's glyph slot from that tab's snapshot.
 ///
-/// The precedence copies `render_agent_row`: attention beats the working
-/// spinner, because a flagged tab may still be streaming the very prompt it
-/// wants answered. Typing is deliberately absent, matching the web strip, whose
-/// pills carry no typing cue either.
-///
-/// Pure so the state table is testable without a `TestBackend`, and allocation
-/// free so it can run once per pill per frame.
+/// The precedence copies `render_agent_row`: attention beats the working spinner,
+/// because a flagged tab may still be streaming the prompt it wants answered.
+/// Typing is deliberately absent, matching the web strip. Pure and allocation
+/// free, so it can run once per pill per frame.
 fn tab_activity_glyph(
     working: bool,
     needs_attention: bool,
@@ -248,11 +233,10 @@ pub(crate) fn project_tag_kind(project: Option<&Project>) -> ProjectTagKind {
 /// What an agent row's second line says about where the agent lives: its
 /// project, or (for a standalone agent) the folder it runs in.
 ///
-/// A standalone agent takes the [`AgentRowOwnerTag::Folder`] arm and can never
-/// take a project arm, which matters most for `Orphan`: that arm means "this
-/// agent's project record is gone", and a standalone agent has not lost a
-/// project, it never had one. Rendering it as a removed project would be a
-/// warning about nothing.
+/// A standalone agent takes the [`AgentRowOwnerTag::Folder`] arm and never a
+/// project arm, which matters most for `Orphan`: that arm means the agent's
+/// project record is gone, and a standalone agent never had one, so rendering it
+/// there would warn about nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AgentRowOwnerTag {
     Project(ProjectTagKind, String),
@@ -292,16 +276,14 @@ pub(crate) fn agent_row_branch_segment(session: &AgentSession) -> Option<String>
     (title != branch).then(|| branch.to_string())
 }
 
-/// The colored "state word" shown on an agent row's second line, the honest,
-/// field-backed stand-in for an activity string (dux has no such field). It reads
-/// off the same flags that drive the working spinner and the attention pulse, so
-/// the word can never disagree with the motion cue. Mirrors the web's `stateWord`
-/// (`crates/dux-web/web/src/lib/flatList.ts`) exactly. Pure and unit-tested.
+/// The colored state word on an agent row's second line, read off the same flags
+/// that drive the working spinner and the attention pulse so the word cannot
+/// disagree with the motion cue. Mirrors the web's `stateWord`
+/// (`crates/dux-web/web/src/lib/flatList.ts`), which must stay in lockstep.
 ///
-/// Priority for an Active session (kept in lockstep with the web's `stateWord`
-/// so the two surfaces never disagree): `needs_attention` -> "Needs you", else
-/// `typing` -> "Typing", else `working` -> "Working", else "Idle". Typing and
-/// working never apply to a non-Active session, so Detached/Exited win outright.
+/// Priority for an Active session: `needs_attention`, else `typing`, else
+/// `working`, else "Idle". Typing and working never apply to a non-Active
+/// session, so Detached and Exited win outright.
 pub(crate) fn agent_state_word(
     status: crate::model::SessionStatus,
     working: bool,
@@ -570,17 +552,15 @@ struct MetaLineStyle<'q> {
 }
 
 /// Fit one flexible meta-line field into `alloc` cells and, when a live search
-/// query is supplied, overlay the match emphasis on the EXACT text that will
-/// render. The plain fit runs first (`ellipsize_spans` on the single field
-/// span), so characters and widths are byte-identical with the unhighlighted
-/// path; the highlight is a pure styling split on top. Recomputing
-/// `match_char_range` against the fitted text (instead of clamping a
-/// full-field range) is what makes truncation safe: a match the ellipsis
-/// swallowed simply is not present in the rendered text, so nothing highlights
-/// and nothing can land misaligned. The trailing `…` is re-styled with the
-/// field's base style explicitly, so even a match cut mid-way never bleeds its
-/// emphasis onto the ellipsis. All splitting is char-based (see
-/// `search_highlight_spans`), never byte offsets.
+/// query is supplied, overlay the match emphasis on the exact text that will
+/// render.
+///
+/// The plain fit runs first, so characters and widths match the unhighlighted
+/// path, and the highlight is a pure styling split on top. `match_char_range` is
+/// recomputed against the fitted text rather than clamped from the full field,
+/// so a match the ellipsis swallowed highlights nothing. The trailing `…` is
+/// re-styled with the field's base style explicitly. All splitting is char-based,
+/// never byte offsets.
 fn ellipsize_field_highlighted(
     field: Span<'static>,
     alloc: u16,
@@ -613,15 +593,11 @@ fn ellipsize_field_highlighted(
 /// The line-two segment naming how many browsers have an agent open, or `None`
 /// when none do.
 ///
-/// "Remote" rather than "viewers" or "watching", for two reasons: the reader is
-/// sitting at this terminal, so the interesting half is that somebody ELSEWHERE has
-/// the same agent open, and one of those somebodies may be the device currently
-/// driving it, which "watching" would deny. Absent at zero rather than "0 remote",
-/// which is the state almost every row is in almost all the time.
-///
-/// No singular form, deliberately: "remote" is not a countable noun here, so "1
-/// remote" and "4 remote" are the same shape and a singular arm would only imply a
-/// plural rule that does not exist.
+/// "Remote" rather than "viewers" or "watching": the reader is at this terminal,
+/// so the interesting half is that somebody elsewhere has the same agent open,
+/// and one of them may be the device driving it, which "watching" would deny.
+/// Absent at zero rather than "0 remote". No singular form, because "remote" is
+/// not a countable noun here.
 fn remote_viewers_segment(count: usize) -> Option<String> {
     if count == 0 {
         return None;
@@ -630,25 +606,23 @@ fn remote_viewers_segment(count: usize) -> Option<String> {
 }
 
 /// Assemble the agent row's second line (`<marker> project · State [· branch]
-/// [· trailing…]`) so it matches the web sidebar: the marker, the state word, and
-/// every `trailing` segment are FIXED and stay fully visible, while the project
-/// name and the branch truncate (each ending in `…`) to share whatever width is
-/// left. This mirrors the web's per-field flex-shrink instead of ellipsizing the
-/// whole line from the right, which would drop the tab count first. `marker`
-/// already includes the leading indent (e.g. `"  ※ "`); `sep_style` styles the
-/// `" · "` separators.
+/// [· trailing…]`) so it matches the web sidebar: the marker, the state word and
+/// every `trailing` segment are fixed and stay fully visible, while the project
+/// name and the branch truncate to share whatever width is left, mirroring the
+/// web's per-field flex-shrink rather than ellipsizing the whole line from the
+/// right, which would drop the tab count first. `marker` already includes the
+/// leading indent; `sep_style` styles the `" · "` separators.
 ///
 /// `trailing` is the short fixed tail (the tab count, the remote-viewer count),
 /// each segment separated from the one before it. A list rather than one slot per
 /// fact: two adjacent `Option<Span>` parameters of the same type are a swap the
 /// compiler cannot catch.
 ///
-/// `style.highlight` is the live search query plus the match style: the
-/// project name and the branch are searched fields the line renders, so a hit
-/// inside either gets the emphasis (via `ellipsize_field_highlighted`,
-/// computed on the final fitted text). `None` (no filter, or the terminal row,
-/// whose fields the TUI search does not filter) renders byte-identically to
-/// the pre-highlight code.
+/// `style.highlight` is the live search query plus the match style: the project
+/// name and the branch are searched fields, so a hit inside either gets the
+/// emphasis through `ellipsize_field_highlighted`, computed on the final fitted
+/// text. `None` means no filter, or a terminal row, whose fields the TUI search
+/// does not filter.
 fn fit_agent_meta_line(
     total_w: u16,
     marker: Span<'static>,
@@ -723,35 +697,16 @@ fn fit_agent_meta_line(
     ellipsize_spans(out, total_w)
 }
 
-/// Column budget for the resource monitor table, computed from the inner
-/// content width so every column stays readable instead of colliding on a
-/// hardcoded per-column `Constraint`.
+/// Column budget for the resource monitor table, computed from the inner content
+/// width rather than from per-column `Constraint`s.
 ///
-/// The old layout hardcoded `[Constraint::Min(30), Length(8), Length(6),
-/// Length(8), Length(12)]` for `[Name, PID, Procs, CPU %, RSS]`, on the
-/// assumption that `Min` is a soft lower bound and `Length` is rigid, so a
-/// narrow terminal would squeeze the flexible `Min(30)` Name column down to
-/// a couple of characters. Instrumenting the actual render with a
-/// `TestBackend` (see the `resource_monitor_*_legible_at_narrow_width`
-/// tests) showed the opposite: ratatui's `Table` constraint solver treats a
-/// `Min` column as free to grow and greedily claims the available width,
-/// while `Length` columns compress far below their stated size once the
-/// total no longer fits. At a 50-column terminal the old layout kept a
-/// generous ~31-character Name column while PID/Procs/CPU/RSS were crushed
-/// to unreadable slivers (the header rendered as `"PI P CP R"`, a 5.0% CPU
-/// reading as `"5."`, a 1.0 MiB RSS reading as `"1"`) - exactly backwards
-/// from this monitor's purpose, since CPU and RSS are the numbers the user
-/// opened the popup to read.
-///
-/// Fix: stop asking the constraint solver to guess and compute an exact
-/// column plan from the real inner width instead. CPU and RSS always keep
-/// their full width; they are never dropped or shrunk. PID is the least
-/// actionable column at a glance (a raw number) so it is dropped first when
-/// space runs out, then Procs. Name always keeps at least
-/// `RESOURCE_MONITOR_NAME_MIN_WIDTH` columns once PID/Procs are gone; if a
-/// name is still too long for that width, the caller truncates it with an
-/// ellipsis (`truncate_status_text`, character-based) rather than letting
-/// the table hard-chop it mid-character.
+/// ratatui's `Table` solver lets a `Min` column grow greedily while `Length`
+/// columns compress far below their stated size once the total no longer fits,
+/// which crushes exactly the numbers this monitor exists to show. So the plan is
+/// computed here: CPU and RSS always keep their full width and are never dropped,
+/// PID is dropped first when space runs out, then Procs, and Name keeps at least
+/// `RESOURCE_MONITOR_NAME_MIN_WIDTH` columns, with the caller truncating a longer
+/// name by character rather than letting the table hard-chop it.
 struct ResourceMonitorColumns {
     show_pid: bool,
     show_procs: bool,
@@ -829,13 +784,10 @@ fn resource_monitor_columns(inner_width: u16) -> ResourceMonitorColumns {
 
 /// The delete-agent worktree checkbox label.
 ///
-/// It no longer mentions the branch: the branch is its own decision and its own
-/// box, so a label that promised or denied a branch deletion here would be
-/// describing a control that is right underneath it.
-///
-/// ONE constant because the label is used twice: once in the measurement pass
-/// that sizes the dialog and once in the render pass. Two copies of the string
-/// would drift and the dialog's height would stop matching its contents.
+/// It does not mention the branch: the branch is its own decision and its own box
+/// right underneath. One constant because the label is used twice, in the
+/// measurement pass that sizes the dialog and in the render pass, and two copies
+/// would drift until the height stopped matching the contents.
 pub(super) const DELETE_AGENT_WORKTREE_LABEL: &str = "Also delete the worktree";
 
 /// The delete-agent branch checkbox label, naming every branch it would delete.
@@ -854,18 +806,14 @@ pub(super) fn delete_agent_branch_checkbox_label(branches: &[&str]) -> String {
 
 /// Whether the branch box needs a warning under it, and what it says.
 ///
-/// Two reasons to warn, either enough on its own. The branch predates the
-/// agent, so it was never dux's to delete; or the agent has drifted, so the
-/// tick removes a second branch and the user should know which and why. A
-/// branch dux created for an agent that stayed on it gets nothing: it is dux's
-/// own, and a sentence there would be noise on the one screen that has to be
-/// read carefully.
+/// Two reasons to warn, either enough on its own: the branch predates the agent,
+/// so it was never dux's to delete, or the agent has drifted, so the tick removes
+/// a second branch. A branch dux created for an agent that stayed on it gets
+/// nothing.
 ///
-/// The danger lives in this sentence rather than in a red checkbox: the box is
-/// an ordinary control and the prose is what says what is at stake. `unpushed`
-/// is `None` while the count is still being computed and when git could not
-/// answer, and that sentence is simply absent in both cases: the dialog warns
-/// about what it knows and never guesses a number.
+/// The danger lives in this sentence rather than in a red checkbox. `unpushed` is
+/// `None` both while the count is being computed and when git could not answer,
+/// and the sentence is absent in both cases: the dialog never guesses a number.
 pub(super) fn delete_agent_branch_warning(
     provenance: dux_core::model::BranchProvenance,
     branches: &[&str],
@@ -952,14 +900,9 @@ pub(super) fn delete_worktree_checkbox_label(branch: Option<&str>) -> String {
 }
 
 // The worktree-removal confirmation's copy, sentence for sentence the web
-// dialog's (`WorktreesDialog.tsx`).
-//
-// Written out as named constants rather than inline in the render, because
-// that is the only thing that makes the parity checkable: the two dialogs are
-// parallel implementations of one piece of copy, each pinned by a test in its
-// own suite. The first version of this dialog claimed the parity in a comment
-// and quietly dropped three sentences, which is exactly what a comment cannot
-// catch and a test can.
+// dialog's (`WorktreesDialog.tsx`). Named constants rather than inline in the
+// render, because that is what makes the parity checkable: each suite pins its
+// own half against these strings.
 
 /// The question, naming the worktree by its ROW LABEL (the branch when there
 /// is one, the "detached <sha>" stand-in when there is not), so the sentence
@@ -996,11 +939,10 @@ pub(super) fn delete_worktree_branch_line(branch: &str, delete_branch: bool) -> 
 /// A paragraph of dialog body text as one string per rendered row, each
 /// carrying the body's one-space indent.
 ///
-/// The dialog bodies hand-split their fixed sentences into lines that each
-/// start with a space. A sentence assembled at runtime has no fixed length, so
-/// it is wrapped here instead: handing the whole thing to the `Paragraph` would
-/// indent the first row and leave every continuation flush against the frame,
-/// which is the hanging indent this exists to prevent.
+/// The dialog bodies hand-split their fixed sentences into lines each starting
+/// with a space; a sentence assembled at runtime has no fixed length, so it is
+/// wrapped here instead of by the `Paragraph`, which would indent the first row
+/// and leave every continuation flush against the frame.
 ///
 /// Widths are counted in characters, never bytes, and a word too long for the
 /// line is hard-broken rather than pushed past the frame.
@@ -1276,14 +1218,11 @@ impl App {
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         self.redraw.renders = self.redraw.renders.wrapping_add(1);
-        // Pre-fill the whole frame with the theme's app background. Cells
-        // that no widget paints over (gutters, modal interiors, the strip
-        // under the PR banner caps) inherit this color, so light themes
-        // actually look light end-to-end. Widgets that explicitly set
-        // `Color::Reset` override this and still pass through to the
-        // user's terminal default — that path is preserved for PTY cells
-        // that emit a "reset background" SGR, so the embedded agent
-        // terminal keeps rendering the CLI's own colors unchanged.
+        // Pre-fill the whole frame with the theme's app background, so cells no
+        // widget paints over inherit it and a light theme looks light end to end.
+        // A widget that sets `Color::Reset` still overrides this and passes
+        // through to the terminal default, which is what lets a PTY cell emitting
+        // a reset-background SGR keep the CLI's own colors.
         let frame_area = frame.area();
         frame
             .buffer_mut()
@@ -1359,23 +1298,17 @@ impl App {
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ),
         ];
-        // FIRST crumb, and OUTSIDE the two selection arms below. Outside because a
-        // listener is a fact about the process rather than about whatever row is
-        // selected, so it has to be said with nothing selected at all. First
-        // because this header does not ellipsize: it is a plain paragraph, so a
-        // narrow terminal simply clips the tail, and appending it would make the
-        // one crumb that must never vanish silently the first one to go. Its
-        // siblings are recoverable from the panes; a running network listener is
-        // not visible anywhere else.
+        // First, and outside the two selection arms below: a listener is a fact
+        // about the process rather than about the selected row, so it must be
+        // said with nothing selected. First because this header clips its tail
+        // rather than ellipsizing, and a running network listener is not visible
+        // anywhere else, while its siblings are recoverable from the panes.
         self.push_live_header_chip(&mut spans, self.serving_chip());
-        // A STANDALONE agent has no project and no branch, so it gets the one
-        // crumb that IS true of it: the folder it runs in, home-collapsed. It
-        // takes the slot the project crumb occupies, which is the same fact
-        // ("which thing am I in") for the other kind of agent.
-        //
-        // Its own arm rather than a hole in the project arm: wrapping the bar's
-        // whole body in "a project is selected" would cost a project-less agent
-        // the provider and terminal-count crumbs too, which it does have.
+        // A standalone agent has no project and no branch, so it gets the folder
+        // it runs in, home-collapsed, in the slot the project crumb occupies.
+        // Its own arm rather than a hole in the project arm: gating the bar's
+        // whole body on a selected project would cost a project-less agent the
+        // provider and terminal-count crumbs, which it does have.
         if let Some(folder) = self
             .selected_session()
             .and_then(|session| session.folder_path())
@@ -1422,18 +1355,13 @@ impl App {
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
             if let Some(session) = self.selected_session() {
-                // Two independent reasons to show the agent crumb:
-                //  - the agent sits on a different branch than the project's
-                //    current branch, or
-                //  - the agent's branch has DRIFTED from the branch it was
-                //    created on (`initial_branch`).
-                // The drift note must surface even when the agent happens to be on
-                // the project's current branch, so it is gated on the drift alone —
-                // not nested inside the project-current-branch comparison.
-                //
-                // A STANDALONE agent has no branch, so there is no crumb to
-                // show. It cannot reach here at all: the folder arm above
-                // handles it, and that arm names its folder instead.
+                // Two independent reasons to show the agent crumb: the agent sits
+                // on a different branch than the project's current one, or its
+                // branch has drifted from `initial_branch`. The drift note must
+                // surface even on the project's current branch, so it is gated on
+                // the drift alone rather than nested inside the comparison. A
+                // standalone agent has no branch and never reaches here; the
+                // folder arm above names its folder instead.
                 if let Some(managed) = session.workspace.as_managed()
                     && let drifted = branch_drifted(&managed.branch_name, &managed.initial_branch)
                     && let differs_from_project = managed.branch_name != project.current_branch
@@ -1680,8 +1608,8 @@ impl App {
             .agent_filter
             .as_ref()
             .and_then(|input| dux_core::agent_search::match_char_range(&label, &input.text));
-        // Otherwise the name shimmers while the agent is operating (a live cue
-        // that replaces the old state coloring), or renders as one plain span.
+        // Otherwise the name shimmers while the agent is operating, or renders as
+        // one plain span.
         let name_spans: Vec<Span<'static>> = if let Some(range) = search_range {
             search_highlight_spans(
                 &label,
@@ -1730,17 +1658,14 @@ impl App {
         let found = session
             .project_id()
             .and_then(|project_id| self.engine.projects.iter().find(|p| p.id == project_id));
-        // The project is marked with `※` (a folder stand-in) rather than a word,
-        // and the marker sits directly under the agent name (two-space indent, so
-        // the glyph column lines up with the name on line one). The marker span
-        // includes that indent; the project NAME is a separate, truncatable span.
+        // The project is marked with `※` rather than a word, indented so the
+        // glyph column lines up with the name on line one. The marker span
+        // includes that indent; the project name is a separate, truncatable span.
         //
-        // A STANDALONE agent names its folder here instead, marked with the
-        // standalone star in the standalone identity tone: "this agent lives
-        // in your folder". Identity, not state, so the tone stays on line two.
-        // The standalone terminal row wears the same star; owned terminal rows
-        // keep their return arrow, where it means "owned by". Same indent,
-        // same column.
+        // A standalone agent names its folder here instead, marked with the
+        // standalone star in the standalone identity tone. Identity, not state,
+        // so the tone stays on line two. The standalone terminal row wears the
+        // same star at the same indent; owned terminal rows keep their arrow.
         let (marker, name_span) = self.agent_row_owner_spans(session, found, muted);
         let word = agent_state_word(session.status, working, typing, needs_attention);
         let word_color = self.agent_row_state_color(word, deleting, steady_color);
@@ -1811,16 +1736,15 @@ impl App {
         framed_row_item(Line::from(line1), Line::from(line2))
     }
 
-    /// Paint the left-pane selection by hand (the List widget renders with no
-    /// highlight): a half-cell frame in the theme's faint selection tint — a `▄`
-    /// top edge and a `▀` bottom edge on the boundary rows above/below the agent,
-    /// and the same tint filling the two content rows edge to edge (both gutters
-    /// included). The tint only sets the background, so the row keeps its own text
-    /// colors (state word, PR badge, project) rather than being flattened by a
-    /// full-flood highlight. The Inactive toggle marks only its label row (tint,
-    /// no frame). `left_row_to_item` (already rebuilt for this frame) maps screen
-    /// rows to items; `top_pad_y` is the reserved top-margin row for the very
-    /// first agent's top edge.
+    /// Paint the left-pane selection by hand, since the List widget renders with
+    /// no highlight: a half-cell frame in the theme's faint selection tint, with
+    /// the same tint filling the content rows edge to edge. The tint sets only
+    /// the background, so the row keeps its own text colors rather than being
+    /// flattened. The Inactive toggle marks only its label row, with no frame.
+    ///
+    /// `left_row_to_item`, already rebuilt for this frame, maps screen rows to
+    /// items; `top_pad_y` is the reserved top-margin row for the first agent's
+    /// top edge.
     fn paint_left_selection(
         &self,
         buf: &mut ratatui::buffer::Buffer,
@@ -1920,11 +1844,10 @@ impl App {
     /// rule at the slot the dragged row would land in, and the row that is moving
     /// in the muted tone so the reader can see what is being carried.
     ///
-    /// The rule rides the blank spacer row above the slot (the reserved top
-    /// margin for the very first one), the same boundary row the framed selection
-    /// draws its top edge on, so it never covers a row's text. A gesture that has
-    /// not become a drag yet, or one with no drop target under the pointer,
-    /// paints nothing.
+    /// The rule rides the blank spacer row above the slot, the same boundary row
+    /// the framed selection draws its top edge on, so it never covers a row's
+    /// text. A gesture that has not become a drag, or one with no drop target
+    /// under the pointer, paints nothing.
     fn paint_row_drag_marker(
         &self,
         buf: &mut ratatui::buffer::Buffer,
@@ -2302,9 +2225,9 @@ impl App {
             frame.buffer_mut(),
             &mut state,
         );
-        // Agent rows are three lines tall, so a click row no longer maps 1:1 to a
-        // list item. Rebuild the reverse map from the post-render scroll offset
-        // and each item's rendered height (computed above).
+        // Agent rows are three lines tall, so a click row does not map 1:1 to a
+        // list item: rebuild the reverse map from the post-render scroll offset
+        // and each item's rendered height.
         self.mouse_layout.left_row_to_item =
             left_row_to_item(state.offset(), &item_heights, geometry.content.height);
         // When an overlay is about to grayscale the body (a modal, the help page,
@@ -2876,9 +2799,9 @@ impl App {
     /// launches it.
     ///
     /// Launching picks up that provider's most recent conversation in the
-    /// worktree when this is the sole live-or-launching tab of that provider
-    /// (`Engine::tab_resume_decision`), and starts fresh otherwise; the copy
-    /// states that rule rather than promising either outcome.
+    /// worktree only when this is its sole live-or-launching tab
+    /// (`Engine::tab_resume_decision`); the copy states that rule rather than
+    /// promising either outcome.
     fn render_dormant_extra_tab(&mut self, frame: &mut Frame, area: Rect, tab_id: Option<&str>) {
         self.welcome_logo_visible = false;
         self.mouse_layout.dormant_tab_button = None;
@@ -3165,21 +3088,15 @@ impl App {
         let labels: Vec<String> =
             tab_labels(&providers.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let seg_ordinal: Vec<String> = (1..=labels.len()).map(tab_pill_ordinal_cell).collect();
-        // Per-tab activity, snapshotted here so the `&mut buf` work below
-        // borrows nothing from the engine. Both predicates are keyed by TAB id,
-        // so each pill answers for itself and never for its siblings.
+        // Per-tab activity, snapshotted here so the `&mut buf` work below borrows
+        // nothing from the engine. Both predicates are keyed by tab id, so each
+        // pill answers for itself.
         //
-        // The working flag carries the same Active guard `any_row_animating`
-        // uses to raise the run loop's poll cadence: a recently exited or
-        // detached tab whose PTY activity is still inside the streaming window
-        // would otherwise spin at the lazy cadence, which looks broken.
-        //
-        // The attention flag carries that same Active guard, for the same
-        // reason: the dot BLINKS, and a blink nothing is polling fast enough to
-        // drive freezes mid-cycle. `render_agent_row` gates its own attention
-        // glyph identically, so the pill and the agent list always agree. The
-        // line-two state word is deliberately NOT gated (it is static text, and
-        // its ladder is shared with the web).
+        // Both carry the same Active guard `any_row_animating` uses to raise the
+        // run loop's poll cadence: an animation nothing is polling fast enough to
+        // drive freezes mid-cycle. `render_agent_row` gates its attention glyph
+        // identically, so the pill and the agent list agree; the line-two state
+        // word is static text and is deliberately not gated.
         let session_active = matches!(session.status, crate::model::SessionStatus::Active);
         let attention_on = self.engine.config.ui.attention_indicator && session_active;
         let glyph_tone = self.theme.session_dot(&session.status).1;
@@ -3211,18 +3128,13 @@ impl App {
         // needed (decided below, once the segment widths are known).
         let strip_width = strip_area.width;
 
-        // Label-cell text per tab (the content right of the ordinal segment's
-        // divider). Every pill, focused or not, is laid out identically: a
-        // one-column ACTIVITY slot ahead of the label, mirrored by an equal
-        // gutter after it so the text sits centered rather than hugging the
-        // right border. The slot's content is written cell-by-cell after the
-        // label (it is a state cue with a style of its own), so the text here
-        // reserves it as a plain space and the pill's width never depends on
-        // what the tab is doing, nor on whether it is focused: the strip
-        // cannot reflow or jitter as focus moves or work starts.
-        //
-        // The active tab is marked by its highlight alone (focused border,
-        // focused title color, BOLD), which is why no marker is prefixed here.
+        // Label-cell text per tab, right of the ordinal segment's divider. Every
+        // pill is laid out identically: a one-column activity slot ahead of the
+        // label, mirrored by an equal gutter after it so the text sits centered.
+        // The slot is reserved here as a plain space and written cell-by-cell
+        // later with a style of its own, so the pill's width never depends on
+        // what the tab is doing and the strip cannot reflow or jitter. The active
+        // tab is marked by its highlight alone, so no marker is prefixed here.
         const GLYPH_SLOT: &str = " ";
         let mut seg_content: Vec<String> = items
             .iter()
@@ -3251,19 +3163,14 @@ impl App {
         // Choose a start index so the focused tab is visible within `avail`.
         let focused_idx = items.iter().position(|i| i.id == focused_id).unwrap_or(0);
 
-        // Tabs can be hidden to the LEFT as well as to the right: the
-        // scroll-into-view choice below advances the start index to reach a
-        // focused tab further along. That needs its own leading truncation mark
-        // (mirroring the trailing `…`), and the mark needs a column of its own so
-        // it never sits under the first box.
+        // Tabs can be hidden to the left as well as to the right, so the leading
+        // truncation mark needs a column of its own.
         //
         // Deciding it takes two passes over the same pure choice, because the
-        // column it costs can itself change where the strip has to start. The
-        // first pass asks the question at the full width; the second re-asks it
-        // with the narrower strip. Narrowing can only push the start LATER
-        // (unit-tested in `tab_strip_start_index_scrolls_only_far_enough…`), so
-        // the two passes agree on whether anything is hidden and the reservation
-        // cannot oscillate.
+        // column it costs can itself change where the strip has to start: the
+        // first pass asks at the full width, the second at the narrowed one.
+        // Narrowing can only push the start later, so the two passes agree on
+        // whether anything is hidden and the reservation cannot oscillate.
         let leading_hidden = tab_strip_start_index(&seg_w, strip_width, focused_idx) > 0;
         let avail = strip_width.saturating_sub(u16::from(leading_hidden));
         let strip_x = strip_area.x + u16::from(leading_hidden);
@@ -3366,17 +3273,11 @@ impl App {
                 .set_symbol(ratatui::symbols::line::VERTICAL)
                 .set_style(border_style);
             buf.set_string(x + 2 + ord_w, mid_y, &seg_content[i], label_style);
-            // The activity slot: the label cell's second column, right after
-            // its leading pad. Painted as one cell rather than spliced into
-            // `seg_content` because each glyph carries a tone of its own.
-            //
-            // The guard is the truncation path's floor: a focused label squeezed
-            // to one column would put this write on the box's right border. It
-            // is not reachable today (the widest ordinal the tab cap allows is
-            // ` 100 `, which still leaves 2 columns at the 12-column minimum
-            // strip width) but the margin is exactly zero, so the guard stays
-            // and `the_activity_slot_stays_inside_the_narrowest_possible_pill`
-            // holds that boundary down.
+            // The activity slot: the label cell's second column, right after its
+            // leading pad. Painted as one cell rather than spliced into
+            // `seg_content` because each glyph carries a tone of its own. The
+            // guard is the truncation path's floor: a focused label squeezed to
+            // one column would put this write on the box's right border.
             if label_w >= 2 {
                 let glyph_cell = &mut buf[(x + 2 + ord_w + 1, mid_y)];
                 match tab_activity_glyph(
@@ -3422,13 +3323,10 @@ impl App {
     /// interactive: it says that keystrokes are being dropped and names the key
     /// that returns to the live edge.
     ///
-    /// The drop itself is deliberate (scroll mode routes keys to the mode, as
-    /// tmux's copy mode does), what is not acceptable is doing it silently. The
-    /// wording never hardcodes a key: every binding is user-configurable, so the
-    /// labels come from `RuntimeBindings` and stay right after a rebind. The
-    /// colors come from `Theme`: `nudge_border` is the existing semantic
-    /// "something needs your attention in this pane" field, so no new theme
-    /// token is needed.
+    /// The drop is deliberate, as tmux's copy mode does it; doing it silently
+    /// would not be. The wording never hardcodes a key: the labels come from
+    /// `RuntimeBindings` so they stay right after a rebind. The colors come from
+    /// `Theme`, reusing `nudge_border`.
     pub(crate) fn scroll_mode_cue_line(&self) -> Line<'static> {
         let warn_style = Style::default().fg(self.theme.nudge_border);
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -3474,9 +3372,8 @@ impl App {
     ///
     /// With `[ui] tab_reaches_agent` on, Tab is the agent's and the pane chords
     /// are the only way out, so both are named and a flush-right cue says where
-    /// the tabs went. `width` is the pane's inner width: the cue is what gives
-    /// way when there is not room for both, because the chords are the way out
-    /// and the cue only explains something the pane already demonstrates.
+    /// the tabs went. `width` is the pane's inner width, and the cue is what
+    /// gives way when there is not room for both.
     pub(crate) fn typeable_hint_line(
         &self,
         active_surface: SessionSurface,
@@ -3560,14 +3457,13 @@ impl App {
     /// while the card is up this keyboard is not reaching the child, so a line
     /// listing the child's keys would be a lie.
     ///
-    /// It names the key that presses the card's button first, because that is
-    /// the one gesture the card offers; then the pane chords, which the card
-    /// deliberately leaves alone; then, in fullscreen, the way back to the
-    /// windowed layout, because there the line is the only dux chrome on screen.
+    /// It names the key that presses the card's button first, because that is the
+    /// one gesture the card offers; then the pane chords, which the card leaves
+    /// alone; then, in fullscreen, the way back to the windowed layout.
     ///
-    /// `width` is the room the line really has, which is the inner width of the
-    /// center pane and NOT the window's. Items are appended only while they fit,
-    /// so what a narrow pane gives up is the chords rather than the way out.
+    /// `width` is the inner width of the center pane, not the window's. Items are
+    /// appended only while they fit, so what a narrow pane gives up is the chords
+    /// rather than the way out.
     pub(crate) fn takeover_hint_line(&self, width: u16) -> Line<'static> {
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
         // Tab is dux's again while the card is up, whatever `tab_reaches_agent`
@@ -3625,20 +3521,17 @@ impl App {
         Line::from(spans)
     }
 
-    /// THE TAKE-OVER CARD: the web's card, painted over this pane's grid
-    /// whenever the child underneath it is not this surface's to type into.
+    /// The take-over card: the web's card, painted over this pane's grid whenever
+    /// the child underneath it is not this surface's to type into.
     ///
     /// Word for word the same card a browser puts over its own terminal (see
-    /// `TerminalPane.tsx`), because it is the same fact on both surfaces and a
-    /// user who learns it in one place should recognise it in the other. Built
-    /// from the modal primitives but deliberately NOT a modal: it must not block
-    /// pane or tab navigation, so it has no `PromptState`, no entry in the modal
-    /// registry, and no rect in the click-outside dismissal engine.
+    /// `TerminalPane.tsx`). Built from the modal primitives but deliberately not
+    /// a modal: it must not block pane or tab navigation, so it has no
+    /// `PromptState`, no registry entry, and no click-outside rect.
     ///
-    /// `card` carries which of the web's three truths this is. A driver that
-    /// gave dux no name gets the title that needs none, and a pty nobody drives
-    /// gets the title that names the ACT: neither prints a stand-in string where
-    /// a device name goes.
+    /// `card` carries which of the web's three truths this is. A driver that gave
+    /// dux no name gets the title that needs none, and a pty nobody drives gets
+    /// the title that names the act, so neither prints a stand-in device name.
     pub(crate) fn render_takeover_card(
         &mut self,
         frame: &mut Frame,
@@ -4125,16 +4018,12 @@ impl App {
         term_area: Rect,
         context: &AgentTerminalContext,
     ) {
-        // WHICH DORMANT TABS GET THE CARD. An extra tab always has: it has no
-        // other surface of its own. The SLOT tab normally keeps the welcome logo,
-        // because "this agent is not running" is the ordinary resting state of a
-        // workspace and a card saying so on every idle agent would be noise.
-        //
-        // But a slot tab with a recorded VERDICT is not resting, it FAILED, and
-        // it is the single-tab agent that needs the diagnosis most: a lone codex
-        // tab whose resume was refused had nowhere at all to say so, while the
-        // browser showed the whole story for the same tab. So the card is shown
-        // for any dormant tab that has something to report.
+        // An extra tab always gets the card, having no other surface of its own.
+        // The slot tab normally keeps the welcome logo, because "this agent is
+        // not running" is the ordinary resting state and a card on every idle
+        // agent would be noise. A slot tab with a recorded verdict failed rather
+        // than rested, and a single-tab agent needs that diagnosis most, so the
+        // card is shown for any dormant tab that has something to report.
         let show_card = match (&context.session_id, &context.focused_tab) {
             (Some(session_id), Some(tab_id)) => {
                 !self
@@ -4519,13 +4408,11 @@ impl App {
     /// The quiet changes region: the pane's own "Changes" frame, and a pane card
     /// inside it carrying why the region is quiet.
     ///
-    /// The reason is the card's prose and the folder is its dim detail block, so
-    /// the sentence the user must read is not the same weight as the path it is
-    /// about. Wrapped rather than truncated, because the reason tells the user
-    /// what to do next and a clipped one tells them nothing.
-    ///
-    /// The card is untitled: the pane frame already says "Changes", and a second
-    /// title two rows below the first would be the same word twice.
+    /// The reason is the card's prose and the folder its dim detail block, so the
+    /// sentence the user must read is not the same weight as the path it is
+    /// about. Wrapped rather than truncated, because a clipped reason tells the
+    /// user nothing about what to do next. The card is untitled, since the pane
+    /// frame already says "Changes".
     fn render_quiet_changes(&mut self, frame: &mut Frame, area: Rect, reason: &str) {
         let focused = self.focus == FocusPane::Files;
         let block = self.themed_block("Changes", focused);
@@ -4946,12 +4833,10 @@ impl App {
 
     /// The help overlay's content, as unwrapped logical lines.
     ///
-    /// [`Self::render_help`] pre-wraps these lines itself (see the call site for
-    /// why). Exposing them unwrapped is what lets a test paint the same content
-    /// under ratatui's own `Wrap { trim: false }` and compare, which is the only
-    /// way to know that pre-wrapping did not change the page's appearance.
-    ///
-    /// `content_width` sizes the full-width section banners, nothing else.
+    /// [`Self::render_help`] pre-wraps these lines itself. Exposing them
+    /// unwrapped lets a test paint the same content under ratatui's own
+    /// `Wrap { trim: false }` and compare. `content_width` sizes the full-width
+    /// section banners, nothing else.
     fn help_content_lines(&self, content_width: usize) -> Vec<Line<'static>> {
         // Build help content lines.
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -5250,18 +5135,10 @@ impl App {
 
         let lines = self.help_content_lines(content_area.width as usize);
 
-        // Wrap the content HERE rather than letting the `Paragraph` do it with
-        // `Wrap { trim: false }`.
-        //
-        // This is the fix for a real bug: the clamp below is built from the line
-        // count, but a wrapping paragraph renders MORE rows than it has lines and
-        // does not report how many. On an 80-column terminal the help pane's
-        // content column is ~55 wide while its keybinding rows run to 70+, so
-        // they wrapped and the bottom of the page was simply unreachable — the
-        // whole Reference section included. Pre-wrapping makes `wrapped.len()`
-        // the RENDERED height by construction (every line is at most
-        // `content_area.width` wide, so it occupies exactly one row), instead of
-        // a guess that has to match ratatui's internal algorithm.
+        // Wrap the content here rather than letting the `Paragraph` do it: the
+        // clamp below is built from the line count, and a wrapping paragraph
+        // renders more rows than it has lines without reporting how many.
+        // Pre-wrapping makes `wrapped.len()` the rendered height by construction.
         let wrapped = wrap_styled_lines(&lines, content_area.width as usize);
 
         // Track content size for scroll clamping in input handler.
@@ -8843,12 +8720,11 @@ impl App {
     /// The standalone-agent name field, the terminal-UI twin of the web
     /// dialog's name input.
     ///
-    /// The folder's own name is the promise the field makes when it is left
-    /// empty, so it is written into the label rather than left implicit, the
-    /// way the web dialog's placeholder spells it out. The folder itself is on
-    /// its own line underneath, home-collapsed, because the browser is gone by
-    /// the time this modal is up and the path is what says which folder was
-    /// picked.
+    /// The folder's own name is what an empty field resolves to, so it is written
+    /// into the label rather than left implicit, the way the web dialog's
+    /// placeholder spells it out. The folder is on its own line underneath,
+    /// home-collapsed: the browser is gone by the time this modal is up, and the
+    /// path is what says which folder was picked.
     fn render_name_standalone_agent_prompt(&mut self, frame: &mut Frame) {
         let PromptState::NameStandaloneAgent { folder, input } = &self.prompt else {
             return;
@@ -10782,13 +10658,11 @@ impl App {
 
     /// Draw one modal text field's border and return its inner area.
     ///
-    /// The focused field is drawn by the shared `overlay_field_border_style`
-    /// (`button_active_fg` plus BOLD), never from `border_focused`: that token
-    /// is exactly what `overlay_border` defaults to, so a focused/unfocused
-    /// pair built from the two is one colour in every shipped theme.
-    ///
-    /// `engaged_exit_key`, when present, marks the field as ENGAGED (taking
-    /// keystrokes) and names the key that leaves edit mode.
+    /// The focused field is drawn by the shared `overlay_field_border_style`,
+    /// never from `border_focused`: that token is what `overlay_border` defaults
+    /// to, so a focused and unfocused pair built from the two is one colour in
+    /// every shipped theme. `engaged_exit_key`, when present, marks the field as
+    /// engaged and names the key that leaves edit mode.
     fn render_modal_text_field_frame(
         &self,
         frame: &mut Frame,
@@ -10896,26 +10770,19 @@ impl App {
     /// The project chooser's footer, in its two states.
     ///
     /// Search mode takes over most of this vocabulary: the vertical and search
-    /// keys are plain characters that the filter now swallows, and the close
-    /// key leaves search instead of cancelling. Only the confirm key still
-    /// means what it says. The two filterable peers (the project browser and
-    /// the kill-running dialog) swap the same way; they say `done` where this
-    /// one says `choose`, because their confirm ends the search while this one
-    /// PICKS the highlighted row.
+    /// keys are plain characters the filter swallows, and the close key leaves
+    /// search instead of cancelling. Only the confirm key still means what it
+    /// says, and it says `choose` because it picks the highlighted row, where the
+    /// filterable peers say `done`.
     ///
-    /// The standalone segment is the one whose key changes with the state, so
-    /// it is resolved through the same predicate the input layer suppresses on
-    /// ([`RuntimeBindings::label_for_text_field_dialog`]) while the filter is
-    /// typing: the bare letter idle, the chord engaged, and NOTHING at all if a
-    /// rebinding leaves only keys the filter would swallow. Built through
-    /// `modal_hint_line` for exactly that drop, rather than by hand. It is also
-    /// the LAST segment in both states, because this footer is a `title_bottom`
-    /// with no width logic of its own: what clips is what comes last, and the
-    /// keys that must survive are the ones the modal exists for.
-    ///
-    /// The segment appears only for the new-agent intent, matching the key's
-    /// own gate in `super::input`: the other intents ask a different question,
-    /// and a footer must never name a key that does nothing.
+    /// The standalone segment's key changes with the state, so it is resolved
+    /// through the same predicate the input layer suppresses on
+    /// ([`RuntimeBindings::label_for_text_field_dialog`]): the bare letter idle,
+    /// the chord engaged, and nothing at all if a rebinding leaves only keys the
+    /// filter would swallow. It is last in both states, because this footer is a
+    /// `title_bottom` with no width logic of its own and what clips is what comes
+    /// last. It appears only for the new-agent intent, matching the key's own
+    /// gate in `super::input`.
     fn project_chooser_hint_line(
         &self,
         searching: bool,
@@ -10952,9 +10819,8 @@ impl App {
         modal_hint_line(&self.theme, &hints)
     }
 
-    /// The macro LIST's footer. Every key is resolved through the bindings,
-    /// so a rebind moves the hint with it; the four labels used to be the
-    /// literals `Enter`, `n`, `d` and `Esc`.
+    /// The macro list's footer. Every key is resolved through the bindings, so a
+    /// rebind moves the hint with it.
     fn macro_list_hints(&self) -> Vec<Hint> {
         vec![
             Hint::key(self.bindings.label_for(Action::Confirm), "edit"),
@@ -11381,24 +11247,18 @@ impl App {
     }
 
     /// Reset `area` to a blank surface and fill it with the modal overlay
-    /// background. Use this in place of a bare `Clear.render(area, ..)` for
-    /// every modal popup so the entire popup — including any strip outside
-    /// the inner `themed_overlay_block` (footer hints, gaps between stacked
-    /// blocks, etc.) — tracks the active theme rather than reading whatever
-    /// `Color::Reset` falls through to in the user's terminal.
+    /// background. Use this instead of a bare `Clear.render(area, ..)` for every
+    /// modal popup, so the whole popup, footer hints and inter-block gaps
+    /// included, tracks the active theme rather than whatever `Color::Reset`
+    /// falls through to. Fullscreen surfaces want `app_bg` and stay open-coded;
+    /// a strip that is not a modal of its own uses
+    /// [`Self::clear_overlay_bar_area`].
     ///
-    /// Fullscreen surfaces (the agent and terminal fullscreen overlays) want
-    /// `app_bg` instead of `overlay_bg` and stay open-coded.
-    ///
-    /// This is also where the modal's outer rect is RECORDED for the
-    /// click-outside dismissal engine (`overlay_dismiss`): a modal rect is a
-    /// render-local value that is gone by the time a click arrives, so the one
-    /// chokepoint every modal already passes through is what stores it. Last
-    /// write wins, so a nested modal (painted after its parent) is the rect
-    /// that ends up stored — see [`OverlayMouseLayoutState::frame`].
-    ///
-    /// Use [`Self::clear_overlay_bar_area`] instead for a strip that is NOT a
-    /// modal of its own.
+    /// This is also where the modal's outer rect is recorded for the
+    /// click-outside dismissal engine: a modal rect is a render-local value that
+    /// is gone by the time a click arrives, so the chokepoint every modal already
+    /// passes through is what stores it. Last write wins, so a nested modal is
+    /// the rect that ends up stored, see [`OverlayMouseLayoutState::frame`].
     pub(super) fn clear_overlay_area(&self, frame: &mut Frame, area: Rect) {
         self.overlay_layout.frame.set(Some(area));
         self.paint_modal_surface(frame, area, self.theme.overlay_bg);
@@ -11440,13 +11300,10 @@ impl App {
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             // The border ring doubles as the modal's refusal cue: while the
-            // one-shot blink armed by an outside click on a modal that cannot
-            // be dismissed (see `overlay_dismiss`) is in a highlight phase, the
-            // ring flashes `overlay_border_refused`. Reusing the border rather
-            // than adding an overlay keeps the cue on the one element that
-            // already outlines "this window", and nothing inside the modal
-            // moves. `refusal_blink_highlight` is false once the cue is over,
-            // so the ring returns to `overlay_border` and stays there.
+            // one-shot blink armed by an outside click on an undismissable modal
+            // (see `overlay_dismiss`) is in a highlight phase, the ring flashes
+            // `overlay_border_refused`. Reusing the border keeps the cue on the
+            // element that already outlines the window and moves nothing inside.
             .border_style(if self.refusal_blink_highlight() {
                 Style::default()
                     .fg(self.theme.overlay_border_refused)
@@ -11462,15 +11319,13 @@ impl App {
             .style(Style::default().bg(self.theme.overlay_bg))
     }
 
-    /// Lay out and paint the scrollable message pane the two error dialogs share
-    /// (`ConfigReloadFailed`, `AddProjectFailed`), and hand back the geometry the
-    /// caller needs for the controls below it.
+    /// Lay out and paint the scrollable message pane the error dialogs share, and
+    /// hand back the geometry the caller needs for the controls below it.
     ///
-    /// `extra_inner_rows` is everything the caller lays out INSIDE the border ring
-    /// below the message (a spacer, a checkbox, a button row). The message pane
-    /// takes as many rows as the message needs, capped at what the terminal can
-    /// show, so the buttons never get squeezed out by a long error; anything that
-    /// does not fit is reached by scrolling.
+    /// `extra_inner_rows` is everything the caller lays out inside the border ring
+    /// below the message. The message pane takes as many rows as the message
+    /// needs, capped at what the terminal can show, so the buttons are never
+    /// squeezed out by a long error and the rest is reached by scrolling.
     fn render_error_dialog_body(
         &self,
         frame: &mut Frame,
@@ -11657,14 +11512,11 @@ impl App {
                 VisualRow::Parent(idx) => {
                     let stat = &rows[*idx];
                     let pid_str = stat.pid.map(|p| p.to_string()).unwrap_or_default();
-                    // `~` marks a genuinely different, real measurement: the
-                    // collector had to re-establish its CPU baseline for this
-                    // sample (freshly opened, or reopened after a gap), so
-                    // the reading spans only sysinfo's short
-                    // MINIMUM_CPU_UPDATE_INTERVAL window rather than the
-                    // monitor's normal ~2s poll interval. Real numbers, just
-                    // noisier because they cover less wall-clock time; see
-                    // `ResourceCollector::sample`'s `was_baseline`.
+                    // `~` marks a sample the collector had to re-establish its CPU
+                    // baseline for, so the reading spans only sysinfo's short
+                    // `MINIMUM_CPU_UPDATE_INTERVAL` window rather than the
+                    // monitor's poll interval: real numbers, noisier because they
+                    // cover less wall-clock time. See `ResourceCollector::sample`.
                     let cpu_str = if short_window_sample {
                         format!("~{:.1}%", stat.cpu_percent)
                     } else {
@@ -11867,23 +11719,18 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
 /// to an agent row and the two lists space evenly.
 ///
 /// Line one: a state glyph plus the primary label. The glyph follows the same
-/// typing -> working -> idle rule the agent row uses, minus the detached and
-/// attention states a terminal can never be in: `TYPING_GLYPH` in
-/// `session_typing` while typing, the shared spinner in `session_working` while
-/// working, else a steady dot in `session_active`. The primary label is the foreground command when
-/// something is running, otherwise a plain "Terminal".
+/// typing, working, idle rule the agent row uses, minus the detached and
+/// attention states a terminal can never be in. The label is the foreground
+/// command when something is running, otherwise a plain "Terminal".
 ///
-/// Line two: an owner marker, the owner's display name (the agent's title or
-/// branch, or the project's name), and the colored state word — reusing
-/// `fit_agent_meta_line` so the marker and word stay fixed while the owner name
-/// truncates char-safely. The state word wording matches the agent row exactly
-/// ("Typing" / "Working" / "Idle").
+/// Line two: an owner marker, the owner's display name, and the colored state
+/// word, through `fit_agent_meta_line` so the marker and word stay fixed while
+/// the owner name truncates char-safely. The wording matches the agent row.
 ///
-/// A STANDALONE terminal has no owner to mark, so its marker is the standalone
+/// A standalone terminal has no owner to mark, so its marker is the standalone
 /// star in the standalone identity tone, with the directory label wearing the
-/// tone alongside it: the same indicator a standalone agent's folder line
-/// wears, meaning "this one lives in your folder". Owned terminals keep the
-/// muted return arrow, where it means "owned by".
+/// tone alongside it. Owned terminals keep the muted return arrow, where it
+/// means "owned by".
 #[allow(clippy::too_many_arguments)]
 fn terminal_row_lines(
     theme: &crate::theme::Theme,
@@ -11924,8 +11771,8 @@ fn terminal_row_lines(
         Some(title) if !title.is_empty() => title,
         _ => "Terminal",
     };
-    // The label shimmers while the terminal is Running (a live cue that replaces
-    // the old state coloring); otherwise it is a single plain span.
+    // The label shimmers while the terminal is Running; otherwise it is a single
+    // plain span.
     let name_spans: Vec<Span<'static>> = match (working, base_color) {
         (true, Color::Rgb(r, g, b)) => {
             crate::shimmer::shimmer_spans(primary, (r, g, b), elapsed_ms)
@@ -12024,18 +11871,14 @@ fn companion_terminal_status_color(theme: &Theme, status: CompanionTerminalStatu
     }
 }
 
-/// Format additions/deletions as right-aligned colored spans.
-/// Returns an empty vec when both counts are zero for text files.
-/// The first row a single-line-item list shows, reproducing what ratatui's
-/// `List` computes for a fresh `ListState`: the list scrolls only as far as it
-/// must to keep the selected row on screen, and not at all when nothing is
-/// selected.
+/// The first row a single-line-item list shows, reproducing what ratatui's `List`
+/// computes for a fresh `ListState`: the list scrolls only as far as it must to
+/// keep the selected row on screen, and not at all when nothing is selected.
 ///
-/// dux computes this itself so row BUILDING can be sliced to the viewport. A
-/// list widget only paints what fits, but it is handed every item first, so a
-/// pane listing thousands of changed files built thousands of rows per frame to
-/// show a couple of dozen. Keep this in step with the widget: it holds only
-/// while every item is exactly one line tall and no scroll padding is set.
+/// dux computes this itself so row building can be sliced to the viewport: a list
+/// widget paints only what fits but is handed every item first. Keep this in step
+/// with the widget; it holds only while every item is exactly one line tall and
+/// no scroll padding is set.
 pub(crate) fn list_window_start(len: usize, selected: Option<usize>, viewport: usize) -> usize {
     if len == 0 || viewport == 0 {
         return 0;
@@ -12085,12 +11928,10 @@ pub(crate) fn format_line_stats(
 /// thousand up it reads in thousands with one decimal, trimmed when that
 /// decimal is zero (1000 → "1k", 1300 → "1.3k", 12345 → "12.3k").
 ///
-/// The decimal is TRUNCATED rather than rounded, so the figure never claims
-/// more lines than there are: 1999 reads "1.9k", never "2k". Only line sums
-/// abbreviate, and only in a recap; the per-row `+N -N` badges stay raw. There
-/// is deliberately no "M" step above this: a diff that large is already far
-/// past the point where the exact figure matters, and one unit is one thing to
-/// learn.
+/// The decimal is truncated rather than rounded, so the figure never claims more
+/// lines than there are: 1999 reads "1.9k", never "2k". Only line sums
+/// abbreviate, and only in a recap; the per-row badges stay raw. There is
+/// deliberately no "M" step above this.
 pub(crate) fn format_recap_count(n: usize) -> String {
     if n < 1000 {
         return n.to_string();
@@ -12108,18 +11949,15 @@ pub(crate) fn format_recap_count(n: usize) -> String {
 /// aggregate recap of what those files hold — the lines they add and remove
 /// between them, and a quiet marker for the binaries among them.
 ///
-/// Binary files carry no line counts, so they contribute nothing to the sums
-/// and are counted apart instead; a group of nothing but binaries reads as
-/// "2 bin" rather than claiming "+0 -0". The figures wear the same diff colors
-/// the rows below them use, so a group's title and its rows cannot drift into
-/// two vocabularies, but the sums are abbreviated past a thousand (see
-/// `format_recap_count`) where the rows below stay raw: a row's figure is data
-/// beside a path, while a title's is a sense of scale competing for a narrow
-/// line. The file count is a count of files, not of lines, so it stays raw too.
+/// Binary files carry no line counts, so they are counted apart and a group of
+/// nothing but binaries reads as "2 bin" rather than claiming "+0 -0". The
+/// figures wear the same diff colors the rows below use, but the sums are
+/// abbreviated past a thousand (see `format_recap_count`) where the rows stay
+/// raw: a title's figure is a sense of scale competing for a narrow line. The
+/// file count stays raw too, being a count of files rather than of lines.
 ///
-/// The recap describes exactly the rows visible beneath it. The TUI's list
-/// never filters (its search jumps to a match rather than hiding the rest), so
-/// here that is the whole list.
+/// The recap describes exactly the rows visible beneath it, which in the TUI is
+/// the whole list, since its search jumps to a match rather than hiding the rest.
 pub(crate) fn changed_files_group_title(
     prefix: &str,
     files: &[ChangedFile],
@@ -12238,13 +12076,11 @@ fn active_provider_marker_span(is_active: bool, theme: &Theme) -> Span<'static> 
 /// Marks the provider row that is ALREADY in effect, so picking it would do
 /// nothing.
 ///
-/// There is no Apply button to grey out (a picker confirms by picking, see the
-/// `Picker` family in `super::modal`), so the cue lives on the row that owns the
-/// information. It is a marker IN THE TEXT rather than a dimmed style on
-/// purpose: the moment the cue matters most is when that row is HIGHLIGHTED,
-/// and `Theme::selection_style` sets fg, bg
-/// and BOLD, so any style the row set for itself is patched away underneath the
-/// selection. A glyph in the string survives.
+/// There is no Apply button to grey out (a picker confirms by picking), so the
+/// cue lives on the row. It is a marker in the text rather than a dimmed style,
+/// because the cue matters most when that row is highlighted and
+/// `Theme::selection_style` patches away any style the row set for itself. A
+/// glyph in the string survives.
 pub(crate) const ACTIVE_PROVIDER_MARKER: &str = "\u{2713}";
 
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -12291,14 +12127,13 @@ fn truncate_macro_preview(text: &str, max_len: usize) -> String {
 
 /// Column offset, in DISPLAY CELLS, of a single-line field's caret.
 ///
-/// `cursor` is a BYTE offset into `text` (that is what `TextInput` stores) and
-/// `prefix_width` is the cell width of whatever the renderer pads the field
-/// with. Neither a byte offset nor a character count is a column: a CJK glyph
-/// or an emoji is two cells wide, and a byte offset is wider still. Placing the
-/// hardware caret from either drifts right of the glyph it belongs to.
+/// `cursor` is a byte offset into `text`, which is what `TextInput` stores, and
+/// `prefix_width` is the cell width of the renderer's padding. Neither a byte
+/// offset nor a character count is a column, and placing the hardware caret from
+/// either drifts right of the glyph it belongs to.
 ///
-/// This is the exact inverse of `input::cursor_from_single_line_position`, so a
-/// click and the caret it produces agree about where the caret is.
+/// The exact inverse of `input::cursor_from_single_line_position`, so a click and
+/// the caret it produces agree about where the caret is.
 fn single_line_caret_column(text: &str, cursor: usize, prefix_width: u16) -> u16 {
     let mut cursor = cursor.min(text.len());
     while cursor > 0 && !text.is_char_boundary(cursor) {
@@ -12314,10 +12149,8 @@ fn single_line_caret_column(text: &str, cursor: usize, prefix_width: u16) -> u16
 /// than one control pass whether focus actually sits on the field. Callers that
 /// own the only control pass `true`.
 ///
-/// The caret offset is a BYTE offset and is clamped to a character boundary
-/// before any slicing. Hand-rolled copies of this that split by byte panicked
-/// on any name holding an accent or an emoji; that is why they were removed in
-/// favour of this function.
+/// The caret offset is a byte offset and is clamped to a character boundary
+/// before any slicing, so a name holding an accent or an emoji cannot panic.
 fn render_single_line_cursor_input(
     prefix: &str,
     text: &str,
@@ -12392,22 +12225,13 @@ fn runtime_context_spans(
 
 /// The scrollback badge painted at the top-right of the PTY view.
 ///
-/// The badge names the DISTANCE FROM THE LIVE EDGE, and says so in words. That
-/// is a deliberate decision, not the incidental shape of the old label, so here
-/// is the reasoning. The number is a distance to a moving end, not a position in
-/// a fixed document: while the user holds perfectly still, the child keeps
-/// printing and the live edge keeps receding, so the number climbs on its own.
-/// That is something the user really sees, not a theoretical case: scrolling
-/// back holds the VIEW still and nothing else, the reader parses every chunk
-/// regardless, so reading history during a busy build means watching this
-/// number rise without touching anything. The old
-/// `41/800 lines` form reads as a progress ratio through a document of 800
-/// lines, and against that reading a numerator that climbs by itself looks like
-/// the view scrolling under the user. `41 lines below` reads as "the live edge
-/// is 41 lines below you", and a number that climbs is then exactly what the
-/// user expects: more output arrived beneath them. The total is dropped for the
-/// same reason: it is a moving denominator, and printing it only invites the
-/// ratio reading it cannot honestly support.
+/// The badge names the distance from the live edge, in words, because that is a
+/// distance to a moving end rather than a position in a fixed document: the
+/// child keeps printing while the user holds still, so the number climbs on its
+/// own. "41 lines below" reads as "the live edge is 41 lines below you", where a
+/// ratio form would read as the view scrolling under the user. The total is
+/// dropped for the same reason: a moving denominator only invites the ratio
+/// reading it cannot support.
 fn scrollback_indicator_label(scrolled: usize) -> Option<String> {
     if scrolled == 0 {
         return None;
@@ -12434,16 +12258,14 @@ impl App {
     /// half-block characters for the caps and a solid background:
     /// `▐ owner/repo#1234 │ PR title ellipsized… ▌`
     ///
-    /// The left cap `▐` (U+2590) paints the right half of the cell in the
-    /// state color; the right cap `▌` (U+258C) paints the left half. This
-    /// creates a pill-like shape without requiring Powerline/Nerd Fonts.
-    /// The `│` divider uses terminal default colors so it blends with the
-    /// user's background.
+    /// The caps are half-block characters in the state color, which gives the
+    /// pill shape without requiring Powerline or Nerd Fonts. The `│` divider uses
+    /// terminal default colors so it blends with the user's background.
     ///
-    /// The band is a click target: it publishes its painted rect so a left
-    /// press on it opens the pull request, the way the web banner is one link
-    /// across the whole strip. The rect is published only where the band is
-    /// actually painted, so every early return below leaves it unset.
+    /// The band is a click target: it publishes its painted rect so a left press
+    /// opens the pull request, the way the web banner is one link across the
+    /// whole strip. The rect is published only where the band is actually
+    /// painted, so every early return below leaves it unset.
     fn render_pr_banner(&mut self, frame: &mut Frame, area: Rect, pr: &crate::model::PrInfo) {
         use crate::model::PrState;
 

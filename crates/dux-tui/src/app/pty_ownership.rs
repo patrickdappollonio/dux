@@ -3,44 +3,36 @@
 //! ## What ownership means here
 //!
 //! One PTY has one driver. While a background web server is serving, a browser
-//! is a possible driver and so is this terminal, so "who may type into this
-//! child, and who decides its grid" stops being a question this surface can
-//! answer by itself. It asks
-//! [`dux_core::pty_owners::PtySizeOwners`] instead, through the seat the
-//! background-serve seam hands it, and obeys the answer: a refusal drops the
-//! keystroke rather than writing it, and a refused resize leaves the child alone.
+//! is a possible driver and so is this terminal, so this surface asks
+//! [`dux_core::pty_owners::PtySizeOwners`] through the seat the background-serve
+//! seam hands it, and obeys the answer: a refusal drops the keystroke rather
+//! than writing it, and a refused resize leaves the child alone.
 //!
-//! WRITING IS WHAT IS GATED. Ownership is about who may type into a child and
-//! who decides its grid, and nothing else: the pty keeps streaming, and a
+//! Writing is what is gated, and nothing else: the pty keeps streaming, and a
 //! surface that is not driving one still receives every byte of it.
 //!
-//! What that surface SHOWS is a separate decision, and this one is the web's:
-//! whenever the terminal in the center pane is NOT this surface's, the pane is
-//! covered by the take-over card, the same card and the same words a browser
-//! puts over its own terminal. All three of the web's states, word for word:
+//! Whenever the terminal in the center pane is not this surface's, the pane is
+//! covered by the take-over card, with the web's own three sentences:
 //! `Active on {device}` and `Active on another device` for a pty somebody else
-//! drives, and `Running in the background` for one nobody drives. One deviation
-//! from the
-//! web's, deliberate: the web suppresses its card while its socket is lost,
-//! which has no counterpart here, because there is no socket between this
-//! surface and its own engine to lose.
+//! drives, and `Running in the background` for one nobody drives. The web
+//! suppresses its card while its socket is lost, which has no counterpart here,
+//! because there is no socket between this surface and its own engine to lose.
 //!
 //! ## Nothing serving, nothing to ask
 //!
 //! With no background server up there is no registry, no seat and no gate: every
 //! helper here short-circuits to "allowed" before it touches anything. That is
-//! not an optimisation, it is the contract: with the setting off this surface
-//! behaves exactly as it did before any of this existed, and the tests below pin
-//! both halves.
+//! the contract rather than an optimisation: with the setting off this surface
+//! behaves exactly as it did before any of this existed.
 //!
 //! ## Losing ownership is sticky
 //!
-//! Exactly as it is for a browser. Once another device is driving a pty, nothing
-//! passive takes it back: not selecting the agent, not looking at it, not the
-//! other device going quiet, and not typing into it either. The one way back is
-//! the card's button, which is also the only way IN to a pty nobody drives. The
-//! web's socket-specific self-succession rule has no counterpart here, because
-//! this surface has no socket to have a ghost of.
+//! Once another device is driving a pty, nothing passive takes it back: not
+//! selecting the agent, not looking at it, not the other device going quiet, and
+//! not typing into it either. The one way back is the card's button, which is
+//! also the only way in to a pty nobody drives. The web's socket-specific
+//! self-succession rule has no counterpart here, because this surface has no
+//! socket to have a ghost of.
 //!
 //! ## Drawing a pane claims nothing
 //!
@@ -49,34 +41,22 @@
 //! be one; but this surface draws every agent the workspace grows, including the
 //! ones a browser just created and is a heartbeat away from attaching to. So a
 //! render's resize applies only for a pty this surface already drives, or one an
-//! armed take-over is transferring, and the FIRST claim always comes from a
-//! deliberate act. There are exactly two of them: the card's button, and a
-//! LAUNCH this surface started (creating an agent, forking one, opening a pull
-//! request, adding a tab, spawning a terminal). Each clears the resize dedupe,
-//! so the geometry follows on the next frame through the ordinary apply order.
+//! armed take-over is transferring, and the first claim always comes from a
+//! deliberate act: the card's button, or a launch this surface started. Each
+//! clears the resize dedupe, so the geometry follows on the next frame through
+//! the ordinary apply order.
 //!
-//! TYPING IS NOT ONE OF THEM. A keystroke into a pty this surface does not drive
-//! is dropped, whoever holds it and even when nobody does, because the card is
-//! already covering that pane and asking for the press. The cost is stated
-//! rather than hidden: the startup auto-reopen sweep claims nothing, so every
-//! agent reopened at startup shows `Running in the background` until somebody
-//! presses it,
-//! which is exactly what a browser shows for a terminal it did not start. An
-//! agent launched from this keyboard is this surface's immediately, with no card
-//! over it at all.
+//! Typing is not one of them: a keystroke into a pty this surface does not drive
+//! is dropped, whoever holds it and even when nobody does. So the startup
+//! auto-reopen sweep claims nothing and every agent reopened at startup shows
+//! `Running in the background` until somebody presses it, while an agent
+//! launched from this keyboard is this surface's immediately.
 //!
-//! WHICH LAUNCHES COUNT, decided in [`launch_claims_its_pty`]. A launch claims
-//! when somebody at this keyboard asked for it: creating an agent (a fork, a
-//! pull request and a standalone agent included, which are all creates),
-//! reconnecting or force-reconnecting a dormant one, opening a tab, and
-//! spawning a terminal. The startup auto-reopen sweep does NOT: nobody has
-//! touched anything yet, the web server's own startup pass claims nothing
-//! either, and claiming there would hand this terminal every reopened agent in
-//! the workspace at once, each of which a browser would then have to take back
-//! by hand. A create is armed by a flag rather than by id, because its session
-//! id is minted in a worker, and it is armed only once the engine has ACCEPTED
-//! the dispatch: a refused create that armed anyway would spend its arm on the
-//! create that really was in flight, which is the browser's.
+//! Which launches count is decided in [`launch_claims_its_pty`]. A create is
+//! armed by a flag rather than by id, because its session id is minted in a
+//! worker, and it is armed only once the engine has accepted the dispatch: a
+//! refused create that armed anyway would spend its arm on the create that
+//! really was in flight, which is the browser's.
 
 use dux_core::background_serve::{PtyOwnershipEvent, TUI_DEVICE_LABEL, TuiOwnership};
 
@@ -86,35 +66,30 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PtyDriver {
     /// Nobody has claimed it, or nothing is serving so the question does not
-    /// arise. While something IS serving this is a card state like any other
-    /// (`Running in the background`), and the two acts that claim it are the
-    /// card's button
-    /// and a launch started from here. Typing does not, merely looking does
-    /// not, and neither does the resize that drawing its pane would send.
+    /// arise. While something is serving this is a card state like any other
+    /// (`Running in the background`), claimed only by the card's button or a
+    /// launch started from here.
     Free,
     /// This surface holds it.
     Mine,
     /// Another device holds it. Typing and resizing are refused until an
     /// explicit take-over.
     ///
-    /// `device` is `None` when the driver gave dux no name for itself, which a
-    /// browser that presented no `User-Agent` at its upgrade really does. The
-    /// ABSENCE is carried rather than a stand-in string, because the card has a
-    /// different title for it: a screen that prints a sentinel where a device
-    /// name goes reads as a device called that.
+    /// `device` is `None` when the driver gave dux no name for itself, as a
+    /// browser that presented no `User-Agent` at its upgrade does. The absence is
+    /// carried rather than a stand-in string, because the card has a different
+    /// title for it, and a screen printing a sentinel where a device name goes
+    /// reads as a device called that.
     ///
-    /// A name that is there is SHORT. The registry records what the driver
-    /// presented, which for a browser is a raw `User-Agent` of well over a
-    /// hundred characters; this carries the label
-    /// [`dux_core::device_label::short_device_label`] made of it, because the
-    /// place it is rendered is the title bar of a card inside the center pane.
+    /// A name that is there is the short label
+    /// [`dux_core::device_label::short_device_label`] makes of the raw
+    /// `User-Agent`, because it is rendered in a card's title bar.
     Elsewhere { device: Option<String> },
 }
 
 /// What the take-over card over the shown pane is saying, when there is one.
 ///
-/// One variant per title the web's card has (see `TerminalPane.tsx`), because
-/// the two surfaces show the same three truths about the same registry. `None`
+/// One variant per title the web's card has (see `TerminalPane.tsx`). `None`
 /// from [`App::focused_pty_takeover_card`] is the whole absence of a card: this
 /// surface drives the pty, nothing is serving, or there is no live pty here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,44 +103,33 @@ pub(crate) enum PtyTakeoverCard {
     Free,
 }
 
-/// Whether a launch of this kind claims the child it produces for this surface.
-///
-/// A launch claims when somebody at this keyboard asked for it, and only then.
-/// Matched exhaustively rather than by a `matches!` at the call site, so a new
-/// launch kind does not compile until somebody has said which it is.
+/// Whether a launch of this kind claims the child it produces for this surface:
+/// it does when somebody at this keyboard asked for it, and only then. Matched
+/// exhaustively rather than by a `matches!` at the call site, so a new launch
+/// kind does not compile until somebody has said which it is.
 pub(crate) fn launch_claims_its_pty(kind: &dux_core::worker::AgentLaunchKind) -> bool {
     use dux_core::worker::AgentLaunchKind;
     match kind {
-        // NOBODY ACTED. The startup sweep reopens what was running last time,
-        // before the user has touched anything, and the web server's own startup
-        // pass claims nothing either. Claiming here would hand this terminal
-        // every auto-reopened agent in the workspace the moment it starts, and
-        // ownership is sticky, so a browser would have to take each one back by
-        // hand. Each of them wears the `Running in the background` card instead,
-        // and the
-        // press on it is what claims, exactly as it is for any other free pty.
+        // The startup sweep reopens what was running last time, before the user
+        // has touched anything. Claiming here would hand this terminal every
+        // auto-reopened agent in the workspace at once, and ownership is sticky,
+        // so a browser would have to take each one back by hand.
         AgentLaunchKind::StartupAutoReopen => false,
-        // A person asked for each of these: a create (including a fork, a pull
-        // request and a standalone agent, which are all Create-kind), a
-        // reconnect or forced reconnect of a dormant agent, and a new or
-        // relaunched tab.
+        // A person at this keyboard asked for each of these.
         AgentLaunchKind::Create { .. }
         | AgentLaunchKind::Reconnect { .. }
         | AgentLaunchKind::ForceReconnect { .. }
         | AgentLaunchKind::Tab { .. } => true,
-        // The tail of a launch somebody DID ask for: the provider refused to
+        // The tail of a launch somebody did ask for: the provider refused to
         // resume, so dux relaunches it fresh. dux-core dispatches this one
-        // directly, so it never reaches this surface's dispatch and the answer
-        // is moot in practice; it is `true` because the act it finishes was the
-        // user's, not because anything here acts on it.
+        // directly, so it never reaches this surface's dispatch.
         AgentLaunchKind::ResumeFallback { .. } => true,
     }
 }
 
-/// What PROSE calls a driver that gave dux no name for itself.
-///
-/// The status line has to finish its sentence, so it needs a noun phrase where
-/// the card simply changes its title. Naming it honestly beats naming it wrongly.
+/// What prose calls a driver that gave dux no name for itself. The status line
+/// has to finish its sentence, so it needs a noun phrase where the card simply
+/// changes its title.
 pub(crate) const UNNAMED_DEVICE: &str = "another device";
 
 impl App {
@@ -176,12 +140,10 @@ impl App {
             .and_then(|companion| companion.ownership())
     }
 
-    /// Who is driving `pty_id` right now.
-    ///
-    /// A live read every time it is asked, never a latched flag: ownership moves
-    /// between devices while nothing on this surface happens at all, and a cached
-    /// verdict is how a screen ends up telling the user about a browser tab that
-    /// closed ten minutes ago.
+    /// Who is driving `pty_id` right now. A live read every time it is asked,
+    /// never a latched flag: ownership moves between devices while nothing on
+    /// this surface happens, and a cached verdict is how a screen ends up telling
+    /// the user about a browser tab that closed.
     pub(crate) fn pty_driver(&self, pty_id: &str) -> PtyDriver {
         let Some(seat) = self.pty_ownership() else {
             return PtyDriver::Free;
@@ -190,10 +152,9 @@ impl App {
         match owner {
             None => PtyDriver::Free,
             Some(conn) if conn == seat.conn_id => PtyDriver::Mine,
-            // The recorded identity is SHORTENED here, at the one place it
-            // becomes something a screen renders, rather than at the card: every
-            // reader of this verdict (the card today, anything later) then gets
-            // a label that fits by construction.
+            // Shortened here, at the one place the recorded identity becomes
+            // something a screen renders, so every reader of this verdict gets a
+            // label that fits by construction.
             Some(_) => PtyDriver::Elsewhere {
                 device: device
                     .as_deref()
@@ -202,13 +163,11 @@ impl App {
         }
     }
 
-    /// WHICH CARD, if any, is over the shown pane.
+    /// Which card, if any, is over the shown pane.
     ///
-    /// The whole rule in one place: while a seat exists, every pty that is not
-    /// this surface's is covered, and which sentence it is covered with follows
-    /// from who holds it. With no seat there is no registry, no question and no
-    /// card, which is what keeps this surface exactly what it was before it
-    /// joined the ownership model.
+    /// While a seat exists, every pty that is not this surface's is covered, and
+    /// which sentence it is covered with follows from who holds it; with no seat
+    /// there is no registry, no question and no card.
     ///
     /// Asked of the live registry on every frame rather than of a latched flag:
     /// ownership moves between devices while nothing on this surface happens.
@@ -228,22 +187,18 @@ impl App {
         self.focused_pty_takeover_card().is_some()
     }
 
-    /// THE TYPING CHOKEPOINT: may this surface write to the focused terminal
+    /// The typing chokepoint: may this surface write to the focused terminal
     /// surface's PTY right now?
     ///
-    /// Every path on this surface that puts bytes into a PTY asks this first, and
-    /// there is deliberately one of it rather than one per path: a keystroke, a
-    /// paste, a macro and a forwarded pointer report are all writes, and a path
-    /// that forgot to ask would be a hole in the gate that only shows up as one
-    /// device stealing another's prompt.
+    /// Every path on this surface that puts bytes into a PTY asks this first,
+    /// deliberately one gate rather than one per path: a keystroke, a paste, a
+    /// macro and a forwarded pointer report are all writes.
     ///
-    /// It CLAIMS NOTHING. While a seat exists this surface may write only to a
-    /// pty it already drives; every other write is DROPPED (logged at debug,
-    /// like the web's dropped non-owner keystroke), and the take-over card
-    /// covering the pane is what tells the user why. That is true of a pty
-    /// nobody drives as well as one another device holds: the card is up in both
-    /// states, and pressing its button is the deliberate act that claims. With
-    /// nothing serving there is no seat and no gate, and every write is allowed.
+    /// It claims nothing. While a seat exists this surface may write only to a
+    /// pty it already drives; every other write is dropped and logged at debug,
+    /// whether another device holds it or nobody does, and the take-over card
+    /// covering the pane is what tells the user why. With nothing serving there
+    /// is no seat and no gate, and every write is allowed.
     pub(crate) fn may_type_into_focused_pty(&mut self) -> bool {
         match self.selected_terminal_surface_id() {
             Some(pty_id) => self.may_type_into_pty(&pty_id),
@@ -275,15 +230,12 @@ impl App {
         allowed
     }
 
-    /// Claim `pty_id` because THIS surface just started the child behind it.
+    /// Claim `pty_id` because this surface just started the child behind it.
     ///
     /// A launch is a deliberate act by the person at this keyboard, so it claims
-    /// the pty, which is what spares them the card over a terminal they just
-    /// started here: unclaimed, an agent launched from this keyboard would come
-    /// up asking to be taken control of, and no window resize would reach its
-    /// child until they had pressed the button.
+    /// the pty and spares them a card over a terminal they just started here.
     ///
-    /// It never steals. A pty another device already drives is left alone, so a
+    /// It never steals: a pty another device already drives is left alone, so a
     /// relaunch of a terminal a browser is driving does not quietly move the
     /// driver's seat to this window.
     pub(crate) fn claim_launched_pty(&mut self, pty_id: &str) {
@@ -296,17 +248,11 @@ impl App {
         if claim.claimed_new
             && let Some(epoch) = claim.epoch
         {
-            // A launch's claim TRANSFERS the pty to this surface, so it gets the
-            // same treatment the explicit take-over gets: the resize dedupe is
-            // cleared, which is what makes the next render send this pane's
-            // geometry to a child a previous driver may have re-gridded.
-            //
-            // Without it the trap is: a browser re-grids the child to a phone's
-            // shape and disconnects, this surface relaunches and claims, and the
-            // dedupe sees the same pane size against the same target and sends
-            // nothing. The terminal then owns a phone-sized child indefinitely,
-            // with nothing on screen to say so, because the take-over card is gone
-            // the moment the claim succeeds.
+            // A launch's claim transfers the pty, so it clears the resize dedupe
+            // the way an explicit take-over does. Without it, a child a previous
+            // driver re-gridded keeps that grid indefinitely: the dedupe sees the
+            // same pane size against the same target and sends nothing, and the
+            // card that would have said so is gone once the claim succeeds.
             self.last_pty_resize_target = None;
             self.publish_ownership(&[PtyOwnershipEvent::Claimed {
                 pty_id: pty_id.to_string(),
@@ -317,27 +263,24 @@ impl App {
         }
     }
 
-    /// THE SIZING CHOKEPOINT: may this surface resize `pty_id` to `rows` x
+    /// The sizing chokepoint: may this surface resize `pty_id` to `rows` x
     /// `cols`, is that resize still the newest one, and if both, do it.
     ///
-    /// Three things in one call because they are decided together and the third
-    /// is what makes the first two mean anything. The claim (may I) is resolved
-    /// under the owners lock; the apply order (is mine still the newest) is
-    /// resolved by the same gate a queued browser resize passes through, so one
-    /// pty can never be sized for a device that no longer drives it; and the
-    /// child is resized HERE rather than by the caller, so the grid announcement
-    /// that follows can be made only about a resize that actually happened.
+    /// The claim is resolved under the owners lock; the apply order goes through
+    /// the same gate a queued browser resize passes, so one pty can never be
+    /// sized for a device that no longer drives it; and the child is resized here
+    /// rather than by the caller, so the grid announcement that follows can be
+    /// made only about a resize that actually happened.
     ///
-    /// It never CLAIMS on its own. An unowned pty is refused here exactly as an
-    /// owned one is, because the caller is the render pass and drawing a pane is
-    /// not a decision to drive what is in it; the deliberate acts (the card's
-    /// button and [`Self::claim_launched_pty`]) are what take a free pty, and
-    /// only a take-over armed by that button takes one from another device.
+    /// It never claims on its own. An unowned pty is refused exactly as an owned
+    /// one is, because the caller is the render pass; the card's button and
+    /// [`Self::claim_launched_pty`] are what take a free pty, and only a
+    /// take-over armed by that button takes one from another device.
     ///
     /// Returns whether the resize was granted, which is the caller's cue to
     /// record its dedupe. A refusal records nothing: the pane renders the
-    /// authoritative grid instead, which it already does safely, and the card
-    /// covering it names the device whose grid that is.
+    /// authoritative grid instead, and the card covering it names the device
+    /// whose grid that is.
     pub(crate) fn resize_pty_if_permitted(&mut self, pty_id: &str, rows: u16, cols: u16) -> bool {
         let Some(seat) = self.pty_ownership() else {
             // Nothing serving means no registry, no gate and no apply order to
@@ -361,22 +304,17 @@ impl App {
         if takeover {
             self.pending_pty_takeover = None;
         }
-        // MERELY DRAWING A PANE IS NOT A CLAIM. This is asked from the render
-        // pass, which runs whenever the pane's geometry or its target changes,
-        // and a browser starting an agent changes both here: the new agent
-        // arrives, the selection moves onto it, and this surface draws it. A
-        // resize that claimed an unowned pty would make this terminal the driver
-        // of a child the browser is about to attach to, and attaching never
-        // steals, so the person who started the agent would be handed a take-over
-        // card over their own new terminal.
+        // Drawing a pane is not a claim. This is asked from the render pass,
+        // which runs whenever the pane's geometry or its target changes, and a
+        // browser starting an agent changes both here; a resize that claimed an
+        // unowned pty would make this terminal the driver of a child the browser
+        // is about to attach to, and attaching never steals.
         //
-        // So a plain resize applies only for a pty this surface ALREADY drives,
-        // or one an armed take-over is about to transfer. This surface's first
-        // claim of a free pty is a deliberate act instead: pressing the card's
-        // button, or starting the child from here (`claim_launched_pty`). Typing
-        // is not one of them and reaches nothing while the card is up. Both acts
-        // clear the resize dedupe, so the very next render sends this pane's
-        // geometry through the ordinary apply order below.
+        // So a plain resize applies only for a pty this surface already drives,
+        // or one an armed take-over is about to transfer. The first claim of a
+        // free pty is the card's button or a child started from here
+        // (`claim_launched_pty`); both clear the resize dedupe, so the very next
+        // render sends this pane's geometry through the apply order below.
         if !takeover && !seat.owners.is_owner(pty_id, seat.conn_id) {
             self.log_refused_resize_once(&seat, pty_id, rows, cols);
             return false;
@@ -411,8 +349,7 @@ impl App {
         self.last_refused_pty_resize = None;
         // The one apply order. This surface applies immediately while a browser's
         // resize waits in the engine actor's queue, so a resize stamped before
-        // this one can still be sitting there. The core helper owns the complete
-        // accept/apply/heal sequence shared with the actor.
+        // this one can still be sitting there.
         let seq = outcome.seq.unwrap_or_default();
         let client = self.pty_client_for(pty_id);
         let had_client = client.is_some();
@@ -456,17 +393,13 @@ impl App {
         true
     }
 
-    /// Say in the log why a resize was not sent, but only when it is NEW
-    /// information.
+    /// Say in the log why a resize was not sent, but only when it is new
+    /// information: this is asked from the render pass, which repeats for as long
+    /// as the pane is on screen, and a refused resize deliberately does not record
+    /// the resize dedupe (recording it makes a stale geometry permanent).
     ///
-    /// This is asked from the render pass, which repeats for as long as the pane
-    /// is on screen, and a refused resize deliberately does not record the resize
-    /// dedupe (recording it makes a stale geometry permanent). Without the guard
-    /// that is tens of identical lines a second.
-    ///
-    /// The two refusals are different facts and get different sentences. Both are
-    /// under a card, but reporting a pty nobody drives as another device's doing
-    /// would be a lie about the user's own setup.
+    /// The two refusals get different sentences: reporting a pty nobody drives as
+    /// another device's doing would be a lie about the user's own setup.
     fn log_refused_resize_once(&mut self, seat: &TuiOwnership, pty_id: &str, rows: u16, cols: u16) {
         let refusal = (pty_id.to_string(), rows, cols);
         if self.last_refused_pty_resize.as_ref() == Some(&refusal) {
@@ -484,11 +417,9 @@ impl App {
     }
 
     /// The PTY behind a pty id, agent tab or companion terminal, in the same
-    /// order the web actor's own lookup uses.
-    ///
-    /// Resolved from the ID rather than from the selection, because the sizing
-    /// chokepoint is given a target and must resize THAT child, not whatever the
-    /// cursor happens to be on by the time it runs.
+    /// order the web actor's own lookup uses. Resolved from the id rather than
+    /// from the selection, because the sizing chokepoint must resize the child it
+    /// was given, not whatever the cursor is on by the time it runs.
     fn pty_client_for(&self, pty_id: &str) -> Option<&PtyClient> {
         // A pty id of unknown kind: which map answers is the classification.
         self.engine
@@ -506,11 +437,10 @@ impl App {
     /// user, quietly.
     ///
     /// An arm carries no geometry of its own: it waits for the render pass that
-    /// measures the pane. So it has to be spent or dropped at the FIRST render
+    /// measures the pane, so it must be spent or dropped at the first render
     /// after arming, or it survives a change of selection and fires later on a
-    /// pty the user has stopped thinking about, taking it away from whichever
-    /// device is driving it by then. `rendered` is the target that render pass is
-    /// actually about, `None` when the center pane is showing something with no
+    /// pty the user has stopped thinking about. `rendered` is the target that
+    /// render pass is about, `None` when the center pane shows something with no
     /// pty behind it at all.
     pub(crate) fn expire_stale_pty_takeover(&mut self, rendered: Option<&str>) {
         let Some(armed) = self.pending_pty_takeover.as_deref() else {
@@ -533,21 +463,18 @@ impl App {
     ///
     /// Arms the claim rather than making it, because the claim has to carry this
     /// pane's real geometry and the render pass is what measures that. Clearing
-    /// `last_pty_resize_target` is the other half: without it a take-over of a pty
-    /// whose pane happens to measure exactly what it measured last time would be
-    /// deduped away, and the claim would never be sent at all.
+    /// `last_pty_resize_target` is the other half: without it a take-over of a
+    /// pty whose pane measures exactly what it measured last time is deduped
+    /// away, and the claim is never sent at all.
     ///
-    /// ONE STATE CAN REACH THIS: the card's button, and the card is on screen
-    /// exactly while the shown pty is not this surface's. So a pty this surface
-    /// already drives, and a pane with no pty at all, return QUIETLY rather than
-    /// explaining themselves. There is no palette command behind this any more,
-    /// so a status line about a terminal that is already yours would be dux
-    /// answering a question nobody asked.
+    /// Only the card's button reaches this, and the card is on screen exactly
+    /// while the shown pty is not this surface's, so a pty this surface already
+    /// drives, and a pane with no pty at all, return quietly rather than
+    /// explaining themselves.
     ///
-    /// BOTH CARD STATES ARRIVE HERE and arm the same intent, because both are
-    /// the same act against the registry: a flagged claim, which an unowned pty
-    /// grants outright and an owned one transfers. Only the sentence differs,
-    /// because only one of them takes something away from somebody.
+    /// Both card states arm the same intent, because both are the same act
+    /// against the registry: a flagged claim, which an unowned pty grants
+    /// outright and an owned one transfers. Only the sentence differs.
     pub(crate) fn take_over_focused_pty(&mut self) {
         let Some(card) = self.focused_pty_takeover_card() else {
             return;
@@ -571,14 +498,9 @@ impl App {
                 )
             }
             // Nobody is losing anything here, so the sentence says what this
-            // window gains rather than who it was taken from.
-            //
-            // The arm is still a FLAGGED claim, which matters in the one race
-            // this state has: a browser's plain attach can land between the
-            // press and the render that carries it, and the flag transfers the
-            // pty anyway rather than losing to it. That is parity, not a
-            // special power, because the web flags its own take-over claim for
-            // exactly the same reason.
+            // window gains rather than who it was taken from. The arm is still a
+            // flagged claim, so a browser's plain attach landing between the
+            // press and the render that carries it does not win the pty.
             PtyTakeoverCard::Free => "Taking control of this terminal. Nobody was driving it, so \
                  typing here reaches it now and its size follows this window."
                 .to_string(),
@@ -590,15 +512,14 @@ impl App {
 
     /// Let go of every pty this surface is driving, and say so to the browsers.
     ///
-    /// Called when the participation itself ends: the background server stops, the
-    /// terminal is handed over to the flip, or dux quits. Deliberately NOT called
-    /// when the user merely selects a different agent: this surface has no socket
-    /// to close, so only a deliberate end is an end, which is the same rule that
-    /// keeps a backgrounded browser tab's ownership alive.
+    /// Called when the participation itself ends: the background server stops,
+    /// the terminal is handed over to the flip, or dux quits. Deliberately not
+    /// called when the user merely selects a different agent: this surface has no
+    /// socket to close, so only a deliberate end is an end.
     ///
-    /// Runs BEFORE the serve is torn down, because the announcements ride the
-    /// serve's own buses: after the stop there is nothing left to announce on, and
-    /// every browser's take-over card would keep naming this terminal.
+    /// Runs before the serve is torn down, because the announcements ride the
+    /// serve's own buses: after the stop there is nothing left to announce on,
+    /// and every browser's take-over card would keep naming this terminal.
     pub(crate) fn release_owned_ptys(&mut self) {
         self.pending_pty_takeover = None;
         let Some(seat) = self.pty_ownership() else {

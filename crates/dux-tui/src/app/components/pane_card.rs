@@ -1,58 +1,32 @@
-//! THE PANE CARD: an in-pane empty state drawn as a card rather than as loose
-//! lines floating in the middle of a pane.
+//! An in-pane empty state drawn as a card: a titled border ring, a comfortable
+//! measure capped by the pane, one column of padding inside the ring, blocks
+//! separated by one blank row, and an optional button on the bottom edge.
 //!
-//! Every in-pane empty state dux has was hand-drawn, and no two of them agreed:
-//! one centred bare prose with a one-column gap, another boxed its content and
-//! put a button in it, a third did neither. They are the same object, a short
-//! explanation of why this pane has nothing in it and sometimes the one act
-//! that changes that, so they are one component here: a titled border ring, a
-//! comfortable measure capped by the pane, one column of padding inside the
-//! ring, blocks separated by one blank row, and an optional button on the
-//! bottom edge.
+//! It is not a modal: no [`crate::app::PromptState`], no entry in the modal
+//! registry, and no rect in the click-outside dismissal engine, so pane and tab
+//! navigation keep working over it.
 //!
-//! IT IS NOT A MODAL, and that is deliberate. It has no [`crate::app::PromptState`],
-//! no entry in the modal registry, and no rect in the click-outside dismissal
-//! engine: pane and tab navigation keep working over it, because it is a state
-//! of the pane rather than a dialog in front of the app.
+//! Degradation, as the pane shrinks, in order:
 //!
-//! THE THIRD CALLER IS STILL OUTSIDE. `App::render_takeover_card` is the same
-//! shape (ring, measure, padding, button, the same degradation) and is
-//! deliberately not folded in yet: it carries its own press-tracking and mouse
-//! semantics and its own test suite. The drift is named here rather than hidden,
-//! so whoever touches that card next knows where it belongs.
-//!
-//! DEGRADATION, because a pane can be any size. The ORDER of the content is the
-//! CALLER's, given as a rank per block: only the caller knows which of its own
-//! sentences is the point of the card, and a fixed order by kind got that
-//! backwards on the first two callers at once (a diagnosis card must keep the
-//! run's last output and drop the standing explanation beside it, which is the
-//! opposite of what "an excerpt is secondary" would say). The planner drops the
-//! highest rank first; then the border ring, because two rows and two columns of
-//! chrome are worth less than the sentence they surround; then the last ranked
-//! block; and the BUTTON last, and only when it cannot be drawn WHOLE, because
-//! it is the way out. A card down to its button alone takes the ring back, since
-//! nothing is left for those columns to hold. A pane too narrow for the button
-//! at any measure gives the button up rather than the whole card: the key hint
-//! and the sentence still say how to launch, and a card that painted nothing at
-//! all said less than a card with no button on it.
-//!
-//! THE FLOOR: a card that is down to one block, with no button behind it, and
-//! still does not fit is TRUNCATED to the rows it has rather than dropped. Half
-//! an explanation is worth more than an empty frame, and a pane that painted
-//! nothing at all inside its own border was this component's first bug.
+//! - Blocks by the caller's own rank, highest first; only the caller knows which
+//!   of its sentences is the point of the card.
+//! - Then the border ring, then the last ranked block.
+//! - The button last, and only when it cannot be drawn whole, because it is the
+//!   way out. A card down to its button alone takes the ring back.
+//! - A pane too narrow for the button at any measure gives up the button rather
+//!   than the whole card.
+//! - One block left, no button behind it, still not fitting: truncated to the
+//!   rows there are rather than dropped.
 //!
 //! Blocks are measured per candidate width rather than once, because giving up
-//! the ring WIDENS the content: measuring at the ring's narrower measure and
-//! laying the result out bare made every sentence look taller than it was.
+//! the ring widens the content.
 
 use ratatui::layout::{Alignment, Rect};
 
 use super::button::ButtonState;
 
-/// One block, as the caller hands it over: its drop rank and its content.
-///
-/// The paint lives on `App`, which is what owns the theme; everything here is
-/// content and priority.
+/// One block, as the caller hands it over: its drop rank and its content. The
+/// paint lives on `App`, which owns the theme.
 pub(crate) struct PaneCardBlock {
     /// Higher drops first. See [`CardBlockPlan::rank`].
     pub rank: u16,
@@ -112,12 +86,10 @@ pub(crate) const MIN_INNER: u16 = 12;
 /// One block, as the pure planner sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CardBlockPlan {
-    /// DROP RANK: the highest rank is dropped first. Supplied by the caller,
-    /// because only the caller knows which of its own sentences is the point of
-    /// the card. On a diagnosis card the run's last output outranks the standing
-    /// explanation printed beside it; on another card the same two kinds would
-    /// rank the other way round, so a fixed order by kind was wrong. Ties drop
-    /// the LATER block first, so the reading order of what survives is unchanged.
+    /// The highest rank is dropped first. Supplied by the caller, because only
+    /// the caller knows which of its own sentences is the point of the card.
+    /// Ties drop the later block first, so the reading order of what survives is
+    /// unchanged.
     pub rank: u16,
     /// A button is never dropped and sits on the card's bottom edge.
     pub is_button: bool,
@@ -156,26 +128,19 @@ fn bare_content_width(area: Rect) -> u16 {
 /// Plan a card into `area`.
 ///
 /// `button_width` is the width the caller's button paints at, or `None` for a
-/// card with no button. It decides two things the card cannot get wrong: the
-/// narrowest ring worth drawing (a ring that cannot hold the way out is chrome
-/// in place of the act), and whether the button can be painted AT ALL.
-/// `Button::render` does not clip, so a button laid out one column too narrow
-/// paints a truncated label ("Start sess") with no sign anything is missing.
-/// Rather than paint that, or refuse the whole card and leave the pane blank,
-/// a pane too narrow for the button DROPS it and keeps the words.
+/// card with no button. It decides the narrowest ring worth drawing and whether
+/// the button can be painted at all: `Button::render` does not clip, so a pane
+/// too narrow for the button drops it and keeps the words rather than painting a
+/// truncated label.
 ///
-/// `measure` answers "how many rows does block `i` need at `width` columns".
-/// It is asked once per candidate width rather than once overall, because
-/// giving up the ring WIDENS the content: measuring at the ring's narrower
-/// measure and then laying the result out bare made a sentence look taller than
-/// it really was and dropped it for want of rows it did not need.
+/// `measure` answers "how many rows does block `i` need at `width` columns". It
+/// is asked once per candidate width rather than once overall, because giving up
+/// the ring widens the content.
 ///
-/// PRECONDITION: a button, if present, is the LAST block, and `button_width` is
+/// Precondition: a button, if present, is the last block and `button_width` is
 /// its painted width. The layout puts it on the card's bottom edge and the
 /// height arithmetic assumes it ends the stack, so a mid-list button would
-/// silently mis-size the card. Checked with a `debug_assert!` rather than
-/// handled: no card wants one anywhere else, and making the layout general would
-/// be code with no caller.
+/// silently mis-size the card. Checked with a `debug_assert!`.
 ///
 /// Returns `None` only when not even one row of one block fits.
 pub(crate) fn plan_pane_card(
@@ -199,12 +164,8 @@ pub(crate) fn plan_pane_card(
     if bare_w == 0 {
         return None;
     }
-    // CAN THE BUTTON BE PAINTED AT ALL? The ring is always NARROWER than the bare
-    // layout (it spends two columns on the border), so a button the bare width
-    // cannot hold is a button no layout can hold. Such a button is given up here
-    // and the card carries on without it: the key hint and the sentence still say
-    // how to launch, and a card that painted nothing said less than one with no
-    // button on it.
+    // The ring is always narrower than the bare layout, so a button the bare
+    // width cannot hold is one no layout can hold: give it up and keep the words.
     let paintable_button = button_width.filter(|width| bare_w >= *width);
     let button_unpaintable = button_width.is_some() && paintable_button.is_none();
     // The narrowest INNER measure worth a ring. The button's own width plus the
@@ -242,12 +203,9 @@ pub(crate) fn plan_pane_card(
                 return Some(place(area, Some(ring_inner), &kept, blocks, &heights));
             }
         }
-        // The RING is only given up once every block the caller ranked above the
-        // last one has already gone: dropping it buys two rows AND the border's
-        // two columns, which is usually the difference between showing the
-        // sentence and showing nothing but the button. Once that last block has
-        // gone too there is nothing left for those columns to hold, so a
-        // button-only card takes its ring back above.
+        // The ring is given up only once every block ranked above the last one
+        // has gone; a button-only card takes it back above, since nothing is
+        // left for those columns to hold.
         let extras = kept
             .iter()
             .filter(|index| !blocks[**index].is_button)
@@ -258,10 +216,8 @@ pub(crate) fn plan_pane_card(
                 return Some(place(area, None, &kept, blocks, &heights));
             }
         }
-        // LAST RESORT, and only where the alternative is painting nothing: one
-        // block left, no button behind it, and it does not fit whole. A pane
-        // with any rows at all must show the FIRST rows of the sentence,
-        // because half an explanation is worth more than an empty frame.
+        // Last resort, where the alternative is painting nothing: one block left,
+        // no button behind it, not fitting whole. Show its first rows.
         if kept.len() == 1 && !blocks[kept[0]].is_button {
             let rows = area.height.saturating_sub(TOP_PADDING * 2).max(1);
             let y = area.y + (area.height.saturating_sub(rows)) / 2;
@@ -348,10 +304,9 @@ fn place(
     }
 }
 
-/// The rows a stack of blocks occupies, padding and gaps included.
-///
-/// A block ending the card gets a blank row under it EXCEPT a button, which
-/// sits on the bottom edge the way every dialog's button row does.
+/// The rows a stack of blocks occupies, padding and gaps included. A block
+/// ending the card gets a blank row under it except a button, which sits on the
+/// bottom edge.
 fn stack_height(kept: &[usize], blocks: &[CardBlockPlan], heights: &[u16]) -> u16 {
     let bodies: u16 = heights.iter().sum();
     let gaps = BLOCK_GAP * u16::try_from(kept.len().saturating_sub(1)).unwrap_or(0);

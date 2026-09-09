@@ -1,51 +1,27 @@
 //! The focus order of a modal, as data.
 //!
-//! Every modal with more than one focusable control needs an explicit focus
-//! concept (the "movement keys move focus" tenet), and every one of them then
-//! needs the same thing: given where focus is now and which way the user
-//! moved, where does it go? Three modals already answer that question with a
-//! hand-written match whose arms multiply, because one of their stops is
-//! CONDITIONAL:
-//!
-//! * `ConfirmDeleteAgent` hides the "also delete the worktree" checkbox when
-//!   the worktree is shared with another session;
-//! * `ConfirmNonDefaultBranch` hides its checkbox on the heuristic path;
-//! * `NameNewAgent` shows the "copy uncommitted changes" checkbox only for a
-//!   fresh project agent.
-//!
-//! Conditional stops are therefore not a hypothetical this module is built
-//! for; they are the reason it exists. A ring is the DECLARED order of every
-//! stop the modal can ever have, each paired with whether it is reachable
-//! right now, and [`next_focus`] walks it.
+//! A ring is the declared order of every stop a modal can ever have, each
+//! paired with whether it is reachable right now, and [`next_focus`] walks it.
+//! Conditional stops (a checkbox hidden in some states) are why it exists:
+//! hand-written focus matches multiply arms over them.
 //!
 //! Pure and `App`-free, like the rest of `components`: callers hand in their
 //! own focus enum.
 
 /// Where focus goes when the user moves it.
 ///
-/// `stops` is the modal's full DECLARED order, every stop it can ever
-/// present, in visual order, paired with whether that stop is reachable in
-/// the current state. `forward` is the direction of travel.
+/// `stops` is the modal's full declared order, every stop it can ever present,
+/// in visual order, paired with whether that stop is reachable in the current
+/// state. `forward` is the direction of travel.
 ///
 /// Semantics, in the order they are checked:
 ///
-/// 1. No stop is enabled: focus cannot move, so `current` is returned. (A
-///    modal in this state has nothing to focus and should not be published as
-///    focusable at all, but returning `current` beats panicking.)
+/// 1. No stop is enabled: focus cannot move, so `current` is returned.
 /// 2. `current` is a declared stop: walk from its declared index in the
-///    requested direction, wrapping, and stop at the first ENABLED entry. This
+///    requested direction, wrapping, and stop at the first enabled entry. This
 ///    holds whether or not `current` itself is enabled, which is what gives a
 ///    focus stranded on a stop that just disappeared a defined way out.
 /// 3. `current` is not declared at all: return the first enabled stop.
-///
-/// Rule 2's "walk from the disabled stop's own index" is not arbitrary, it is
-/// what `ConfirmDeleteAgent` and `ConfirmNonDefaultBranch` already do by hand
-/// today, so the ring reproduces them exactly (see the tests). `NameNewAgent`
-/// is the one place that differs, and only in a state it cannot reach: it
-/// sends a stranded copy-changes focus back to the input in BOTH directions,
-/// where the ring would send a reverse move to the checkbox above. Nothing
-/// can observe that difference, since the copy stop is only ever focused when
-/// it is enabled.
 pub(crate) fn next_focus<T: Copy + PartialEq>(stops: &[(T, bool)], current: T, forward: bool) -> T {
     if !stops.iter().any(|&(_, enabled)| enabled) {
         return current;

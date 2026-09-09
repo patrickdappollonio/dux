@@ -1,18 +1,12 @@
 //! The TUI worktree manager: the manual override for removing a worktree, and
 //! the branch with it.
 //!
-//! Deleting an agent keeps a branch dux did not create (see
-//! [`dux_core::model::BranchProvenance`]). This surface is where the user says
-//! "delete that one anyway": its checkbox is honored whatever the branch's
-//! origin, exactly as the web's Worktrees dialog is, because the user is
-//! pointing at one specific worktree.
-//!
-//! The rules (which worktrees the manager owns, which are removable, what a
-//! removal does to the branch) all live in
-//! [`dux_core::worktree_manager`], shared with the web route so the two
-//! surfaces cannot drift. What lives here is the TUI's half: opening the
-//! picker, opening the confirmation, and dispatching the removal onto a
-//! background worker with a keyed status.
+//! Its checkbox is honored whatever the branch's origin (see
+//! [`dux_core::model::BranchProvenance`]), because the user is pointing at one
+//! specific worktree. Which worktrees the manager owns, which are removable and
+//! what a removal does to the branch live in [`dux_core::worktree_manager`],
+//! shared with the web route; what lives here is opening the picker and the
+//! confirmation and dispatching the removal onto a background worker.
 
 use super::*;
 
@@ -70,10 +64,9 @@ impl App {
 
     /// Open the removal confirmation for the manager's selected row.
     ///
-    /// A row an agent holds is refused here with the same sentence the web
-    /// route answers its 409 with: the worktree is still listed (hiding it
-    /// would leave the user hunting for a directory they can see), but the
-    /// supported route is deleting the agent.
+    /// A row an agent holds is refused with the same sentence the web route's
+    /// 409 carries; the worktree stays listed, since hiding it would leave the
+    /// user hunting for a directory they can see.
     pub(crate) fn confirm_delete_selected_worktree(&mut self) -> Result<()> {
         let PromptState::ManageWorktrees(prompt) = &self.prompt else {
             return Ok(());
@@ -111,16 +104,9 @@ impl App {
     /// (nothing was touched); confirming closes every overlay and dispatches
     /// the removal.
     ///
-    /// Confirming deliberately does NOT put the manager back, even though the
-    /// user may well want to remove a second worktree, and the web's dialog
-    /// (which closes onto a list that is still there) is not the same shape.
-    /// The reason is the status line. The removal opens a keyed Busy and
-    /// finishes with a verbose final saying what actually happened to the
-    /// branch, and that report is the whole point of the operation; relisting
-    /// would immediately open a SECOND keyed Busy for the fresh listing, and
-    /// on a single most-recent-wins status line the listing's chatter would
-    /// bury the removal's answer. The user reopens the manager when they want
-    /// another one, and it lists what is actually there now.
+    /// Confirming deliberately does not put the manager back: relisting opens a
+    /// second keyed Busy, and on a single most-recent-wins status line the
+    /// listing's chatter buries the removal's own final report.
     pub(super) fn resolve_confirm_delete_worktree(&mut self, confirm: bool) -> bool {
         let PromptState::ConfirmDeleteWorktree(prompt) = &self.prompt else {
             return false;

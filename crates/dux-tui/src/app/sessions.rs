@@ -10,11 +10,9 @@ impl App {
     /// Palette command (`new-standalone-agent`): pick a folder you already
     /// have and run a provider in it.
     ///
-    /// It reuses the same folder browser as adding a project, with the purpose
-    /// switched: the listing already includes plain directories, and the only
-    /// difference is that picking one goes nowhere near the add-project
-    /// validator, which rejects exactly the plain folder that is the ordinary
-    /// case here.
+    /// Reuses the add-project folder browser with the purpose switched: picking
+    /// a folder here goes nowhere near the add-project validator, which rejects
+    /// exactly the plain folder that is the ordinary case.
     pub(crate) fn open_standalone_agent_browser(&mut self) -> Result<()> {
         self.open_folder_browser(BrowsePurpose::StandaloneAgent)
     }
@@ -26,10 +24,9 @@ impl App {
     /// the terminal UI asks the same question in the same place rather than
     /// creating straight from the picker.
     ///
-    /// Deliberately does NOT go through `validate_project_add_path`: that
-    /// validator rejects a folder which is not a repository root, and a plain
-    /// folder is the ordinary case here. Nothing is initialized in the user's
-    /// directory either; dux just runs the provider in it.
+    /// Deliberately not through `validate_project_add_path`, which rejects a
+    /// folder that is not a repository root: a plain folder is the ordinary case
+    /// here, and nothing is initialized in the user's directory.
     pub(crate) fn open_standalone_agent_name_prompt(&mut self, path: String) {
         self.prompt = PromptState::NameStandaloneAgent {
             folder: path,
@@ -40,10 +37,9 @@ impl App {
     /// What the open standalone name prompt would create right now: the folder
     /// it was opened for, and the name exactly as typed.
     ///
-    /// `None` when that prompt is not open. The `Err` is the engine's own
-    /// refusal (a relative path, a folder that already hosts an agent), which
-    /// is shared with the web so the two surfaces cannot answer the same
-    /// question differently.
+    /// `None` when that prompt is not open. The `Err` is the engine's own refusal
+    /// (a relative path, a folder that already hosts an agent), shared with the
+    /// web so the two surfaces cannot answer differently.
     pub(crate) fn planned_standalone_agent_create(
         &self,
     ) -> Option<Result<(CreateAgentRequest, String)>> {
@@ -119,12 +115,11 @@ impl App {
         };
         logger::info(&format!("attempting to add project {}", path.display()));
 
-        // Run the git probes, then let the CORE-owned `add_project_plan` decide
-        // the action + warning (the single-source decision the web's inspect
-        // endpoint also consumes, pinned by the shared vector matrix). The TUI
-        // renders its own dialog copy from the returned typed codes. `validate_`
-        // `project_add_path` above already rejected blocked/non-repo paths, so
-        // only the unborn-commit and branch-warning rungs are reachable here.
+        // Run the git probes, then let the core-owned `add_project_plan` decide
+        // the action and warning, which the web's inspect endpoint consumes too;
+        // the TUI renders its own dialog copy from the returned typed codes.
+        // `validate_project_add_path` above already rejected blocked and non-repo
+        // paths, so only the unborn-commit and branch-warning rungs get here.
         let branch = git::current_branch_opt(&path)?.unwrap_or_default();
         let branch_warning = (!branch.is_empty())
             .then(|| git::branch_warning_kind(&path, &branch))
@@ -133,11 +128,9 @@ impl App {
             path_kind: git::repo_path_kind(&path),
             current_branch: (!branch.is_empty()).then(|| branch.clone()),
             branch_warning,
-            // A CONFIRMED unborn HEAD needs the initial-commit path; an
-            // indeterminate git result fails OPEN (treated as having commits) so
-            // a transient failure never hijacks a normal add with the commit
-            // dialog. `repo_has_commits` returns true unless the repo is
-            // definitively unborn.
+            // Only a confirmed unborn HEAD takes the initial-commit path; an
+            // indeterminate git result fails open, so a transient failure never
+            // hijacks a normal add with the commit dialog.
             has_commits: git::repo_commit_state(&path) != git::CommitState::Unborn,
         };
         let plan = dux_core::add_project_plan::add_project_plan(&inspection);
@@ -189,12 +182,10 @@ impl App {
         self.finish_add_project(path_str, name, branch, leading_branch)
     }
 
-    /// Saves the project to SQLite and config.toml INLINE (no background worker):
-    /// the engine writes both synchronously, rolling back the SQLite row if the
-    /// config write fails, and the project is in the runtime list with a final
-    /// status (success or rollback error) by the time this returns.
-    /// Called directly when no branch warning is needed, or after the user
-    /// confirms "Add Anyway" in the non-default-branch dialog.
+    /// Saves the project to SQLite and config.toml inline, with no background
+    /// worker: the engine writes both synchronously, rolling back the SQLite row
+    /// if the config write fails, so the project is in the runtime list with a
+    /// final status by the time this returns.
     pub(crate) fn finish_add_project(
         &mut self,
         path: String,
@@ -470,11 +461,9 @@ impl App {
             selected: None,
             error: None,
         });
-        // Declare the loading→final states together. The final is decided in the
-        // completion handler (it depends on whether the picker is still open and
-        // matching when the worktrees arrive, which the worker can't see), so use
-        // a HandlerStatusOp with a 3-way outcome. The failure name matches the
-        // handler's prompt name (same project, resolved here at dispatch).
+        // A `HandlerStatusOp` with a three-way outcome, because the final depends
+        // on whether the picker is still open and matching when the worktrees
+        // arrive, which the worker cannot see.
         let project_name = project.name.clone();
         let op = dux_core::engine::status_op("Loading git worktrees for the selected project...")
             .resolve_in_handler(move |o: &WorktreesFinalOutcome| match o {
@@ -500,11 +489,9 @@ impl App {
             self.set_error("Select an agent session first to fork.");
             return Ok(());
         };
-        // Forking copies a BRANCH into a new worktree, which is the half a
-        // standalone agent does not have. The same gate the HTTP route uses, so
-        // a keystroke, a palette command and a curl refuse for the same reason
-        // and in the same words; without it this fell through to "Select an
-        // agent session first to fork." with an agent plainly selected.
+        // Forking copies a branch into a new worktree, which is the half a
+        // standalone agent does not have. The same gate the HTTP route uses, so a
+        // keystroke, a palette command and a curl refuse in the same words.
         if let Err(err) = self.engine.branch_git_workspace(
             &source_session.id,
             "fork",
@@ -608,12 +595,11 @@ impl App {
     /// Confirm on the reference field with NO project chosen: parse what was
     /// typed, then resolve it against every project's configured address.
     ///
-    /// Parsing happens HERE, inline, because it is pure and instant and its
-    /// refusals are the ones the user most needs immediately: a bare number
-    /// names no repository at all, so it is refused with a pointer at the
-    /// secondary action rather than sent off to a worker that could only come
-    /// back empty-handed. Only a reference that really names a repository is
-    /// worth a git call per project, and that goes on a worker.
+    /// Parsing happens here, inline, because it is pure and instant: a bare
+    /// number names no repository at all and is refused with a pointer at the
+    /// secondary action rather than sent to a worker that could only come back
+    /// empty-handed. Only a reference that names a repository is worth a git call
+    /// per project, and that goes on a worker.
     pub(crate) fn dispatch_pull_request_reference(&mut self, raw_input: String) -> Result<()> {
         let reference = match dux_core::pr_reference::parse_typed_reference(&raw_input) {
             Ok(reference) => reference,
@@ -630,13 +616,10 @@ impl App {
             return Ok(());
         }
         let policy = self.engine.github_host_policy();
-        // The typed host is gated BEFORE any per-project git work, exactly as
-        // the web gates it. Without this a reference on a host `gh` is not
-        // signed in to matched nothing (every project is on some other host),
-        // so the user was told no project in dux had that repository, sent to
-        // the picker, made to choose one, and only then shown the real
-        // authentication error. The first message dux shows should be the true
-        // one.
+        // The typed host is gated before any per-project git work, exactly as the
+        // web gates it: a reference on a host `gh` is not signed in to otherwise
+        // matches nothing, and the user is told no project has that repository
+        // instead of being shown the real authentication error.
         if let Some(host) = reference.host.as_deref()
             && !policy.allows(host)
         {
@@ -652,7 +635,7 @@ impl App {
             return Ok(());
         };
 
-        // A resubmit supersedes whatever was already out: the old reply must
+        // A resubmit supersedes whatever was already out: an earlier reply must
         // not be allowed to act on this screen.
         self.invalidate_pull_request_resolution();
         self.prompt = PromptState::None;
@@ -666,10 +649,9 @@ impl App {
         let pending = self.engine.begin_status_op(&op);
         let op_id = op.id().to_string();
         self.pending_pr_lookup_ops.insert(op_id.clone(), op);
-        // The op id IS the generation stamp. It is already unique per
-        // operation and already rides through the worker and back, so there is
-        // nothing to invent: a reply whose id is no longer the current one
-        // belongs to a screen the user has left.
+        // The op id is the generation stamp: it is unique per operation and
+        // already rides through the worker and back, so a reply whose id is not
+        // the current one belongs to a screen the user has left.
         self.pending_pr_reference_op = Some(op_id.clone());
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
 
@@ -695,11 +677,10 @@ impl App {
                 dux_core::logger::error(&format!(
                     "pull-request-reference resolution worker panicked: {reason}"
                 ));
-                // A panic must still complete the event, or the busy strands
-                // and the modal never comes back. It is reported as a FAILURE,
-                // not as an empty match set: dux never found out whether any
-                // project is a checkout of that repository, and saying it did
-                // would be a lie the user cannot see through.
+                // A panic must still complete the event, or the busy strands and
+                // the modal never comes back. Reported as a failure rather than
+                // an empty match set: dux never found out whether any project is
+                // a checkout of that repository.
                 let _ = tx_panic.send(WorkerEvent::PullRequestReferenceResolved {
                     raw_input: raw_panic,
                     repository: repository_panic,
@@ -711,14 +692,11 @@ impl App {
         Ok(())
     }
 
-    /// Forget the resolution this screen was waiting for, so its reply (which
-    /// may already be in flight and cannot be recalled) lands on nothing, and
-    /// dismiss its busy rather than leaving a spinner over a screen that is no
-    /// longer waiting for anything.
-    ///
-    /// Called on every close, retarget and resubmit. An abort mechanism would
-    /// be a fine addition on top; it could never replace this, because a reply
-    /// already on the channel still arrives.
+    /// Forget the resolution this screen was waiting for, so its reply lands on
+    /// nothing, and dismiss its busy rather than leaving a spinner over a screen
+    /// that is no longer waiting. Called on every close, retarget and resubmit:
+    /// a reply already on the channel still arrives, so an abort could not
+    /// replace this.
     pub(crate) fn invalidate_pull_request_resolution(&mut self) {
         let Some(op_id) = self.pending_pr_reference_op.take() else {
             return;
@@ -756,12 +734,9 @@ impl App {
             }
             0 => {
                 self.pending_pr_reference = Some(raw_input);
-                // What dux may claim depends on whether it managed to look at
-                // everything. With a project it could not inspect, "no project
-                // is a checkout of this" is a certainty dux does not have, and
-                // the one project that mattered may be exactly the unreadable
-                // one. dux does not clone, and neither wording may imply it
-                // might.
+                // With a project it could not inspect, "no project is a checkout
+                // of this" is a certainty dux does not have. dux does not clone,
+                // and neither wording may imply it might.
                 match resolution.uninspected_summary() {
                     None => self.set_warning(format!(
                         "No project in dux is a checkout of {repository}. Choose a project that \
@@ -822,11 +797,8 @@ impl App {
         thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             // The TUI resolves the PR first and then prompts for a name, so it
-            // carries no custom name through the lookup (the prompt seeds the
-            // head branch as the default).
-            //
-            // `worker_tx` is moved into the job; `tx_panic` is kept outside
-            // `catch_unwind` so it remains valid if the job panics.
+            // carries no custom name through the lookup. `tx_panic` is kept
+            // outside `catch_unwind` so it stays valid if the job panics.
             let tx_panic = worker_tx.clone();
             let op_id_panic = op_id.clone();
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -920,12 +892,10 @@ impl App {
     /// `WorkerEvent::NonDefaultBranchCheckoutCompleted` handler continues the
     /// selected action; on failure it surfaces the git error.
     ///
-    /// `carried_op_id` lets the checkout-default-branch chain (worker 1) keep ONE
-    /// `pending_checkout_inspect_ops` op spanning the inspect→switch sequence: when
-    /// `Some`, the op already lives in the map and its busy text was already
-    /// re-emitted as a `progress` by the chain handler, so this only forwards the
-    /// id into worker 2. When `None` (the standalone add-project / checkout-default
-    /// entry points), this mints a fresh op, shows its keyed busy, and stashes it.
+    /// `carried_op_id` keeps one `pending_checkout_inspect_ops` op spanning the
+    /// inspect and switch steps: `Some` forwards an op that already lives in the
+    /// map and has had its busy text re-emitted, `None` mints a fresh op, shows
+    /// its keyed busy, and stashes it.
     pub(crate) fn dispatch_non_default_branch_checkout(
         &mut self,
         action: NonDefaultBranchAction,
@@ -985,20 +955,16 @@ impl App {
         });
     }
 
-    /// Dispatch the "create an empty initial commit, then add the project"
-    /// flow to a background worker (the commit can hit slow filesystem/lock
-    /// work, so it must stay off the UI thread). Serializes per repo path via
-    /// `InFlightKey::InitialCommit` so a repeat confirm can't double-commit.
-    /// Worker completion posts `InitialCommitCreated`, whose
-    /// `AddProjectAfterInitialCommit` reaction registers the project.
+    /// Dispatch the "create an empty initial commit, then add the project" flow
+    /// to a background worker, since the commit can hit slow filesystem or lock
+    /// work. Serialized per repo path through `InFlightKey::InitialCommit` so a
+    /// repeat confirm cannot double-commit.
     pub(crate) fn dispatch_create_initial_commit(&mut self, path: String, name: String) {
-        // Real branch the commit will land on. Propagate a git error rather than
-        // silently defaulting the branch (which would mis-tag the project and
-        // break the next agent creation). We register on this branch directly and
-        // DELIBERATELY skip the non-default-branch heuristic warning (`git init -b
-        // trunk` etc.): for a repo the user just created, "this doesn't look like
-        // main" is noise, not a helpful heads-up (contrast adding a pre-existing
-        // repo, where the warning earns its keep).
+        // Real branch the commit will land on. A git error propagates rather than
+        // silently defaulting the branch, which would mis-tag the project and
+        // break the next agent creation. The non-default-branch heuristic warning
+        // is deliberately skipped: for a repo the user just created, "this does
+        // not look like main" is noise.
         let branch = match git::current_branch_opt(Path::new(&path)) {
             Ok(b) => b.unwrap_or_default(),
             Err(e) => {
@@ -1087,12 +1053,9 @@ impl App {
     }
 
     /// Dispatch the adopt-a-folder flow (git init, seed a starter .gitignore,
-    /// create the initial commit, then add the project) to a background
-    /// worker, mirroring `dispatch_create_initial_commit`. Shares
+    /// initial commit, then add the project) to a background worker. Shares
     /// `InFlightKey::InitialCommit` so init-and-commit and commit-only on the
-    /// same path are mutually exclusive. Worker completion posts
-    /// `InitialCommitCreated`, whose `AddProjectAfterInitialCommit` reaction
-    /// registers the project.
+    /// same path are mutually exclusive.
     pub(crate) fn dispatch_init_repo(&mut self, path: String, name: String) {
         if !self
             .engine
@@ -1153,9 +1116,8 @@ impl App {
     pub(crate) fn dispatch_create_agent_branch_inspection(&mut self, project: Project) {
         // The keyed busy is dismissed by the op's `Final::Clear` when
         // `CreateAgentBranchInspected` returns carrying this id; the visible final
-        // is authored elsewhere (the `ContinueCreateAgentAfterInspection` view
-        // handler's `set_info` on success, the engine's error `Status` on failure),
-        // byte-for-byte unchanged.
+        // is authored elsewhere, by the continuation handler on success and by the
+        // engine's error `Status` on failure.
         let op = dux_core::engine::status_op(format!(
             "Checking the current branch for project \"{}\" before creating an agent...",
             project.name
@@ -1209,12 +1171,10 @@ impl App {
             return Ok(());
         }
 
-        // ONE op spans the whole chain. Worker 1's short-circuit terminals
-        // (already-leading / heuristic / inspect-failed) resolve it to a clear in
-        // `drain_events` (the engine's unkeyed `Status` carries the visible
-        // message); the Known case forwards this id into worker 2 and re-emits the
-        // busy text via `progress`, so the spinner is continuous with changing text
-        // until worker 2's `NonDefaultBranchCheckoutCompleted` clears it.
+        // One op spans the whole chain: the short-circuit terminals resolve it to
+        // a clear in `drain_events`, while the Known case forwards this id into
+        // the switch worker and re-emits the busy text through `progress`, so the
+        // spinner is continuous until `NonDefaultBranchCheckoutCompleted`.
         let op = dux_core::engine::status_op(format!(
             "Checking the default branch for project \"{}\"...",
             project.name
@@ -1262,13 +1222,11 @@ impl App {
         busy_message: String,
     ) -> Result<()> {
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
-        // ARMED ONLY ONCE THE DISPATCH IS KNOWN ACCEPTED, and the in-flight key
-        // is what says so. The engine allows one create at a time and REFUSES a
-        // second one with an ordinary status rather than an error, so arming
-        // before the dispatch left the arm standing after a refusal, waiting to
-        // land on whichever create really was in flight, which is exactly the
-        // browser's. Taking the key is the one thing only an accepted dispatch
-        // does; an `Err` returns before this line and arms nothing either.
+        // Armed only once the dispatch is known accepted, and taking the
+        // in-flight key is what says so. The engine allows one create at a time
+        // and refuses a second with an ordinary status rather than an error, so
+        // arming earlier would leave the arm standing after a refusal, waiting to
+        // land on whichever create really was in flight.
         let was_in_flight = self
             .engine
             .is_in_flight(&dux_core::engine::InFlightKey::CreateAgent);
@@ -1297,14 +1255,9 @@ impl App {
     }
 
     /// Create a fresh extra tab for `session_id` running `provider`, focus it,
-    /// and report the outcome via the status line. Shared by the
-    /// new-agent-tab picker's single-provider skip and its Apply branch, so
-    /// the status copy and focus behavior never drift between the entry
-    /// points. Both new-tab entry points (the `new-agent-tab` palette command
-    /// and the `Action::NewTab` key) route through
-    /// `open_new_tab_provider_prompt` first, which calls this. The TUI strip
-    /// deliberately draws no `+` button (see `render.rs`), so there is no
-    /// third entry point.
+    /// and report the outcome via the status line. Shared by the new-agent-tab
+    /// picker's single-provider skip and its Apply branch, so the status copy and
+    /// focus behavior cannot drift between them.
     fn spawn_tab_with_provider(&mut self, session_id: &str, provider: ProviderKind) {
         let pty_size = self.pty_size_for_launch();
         match self.engine.create_tab(session_id, provider, pty_size) {
@@ -1325,11 +1278,9 @@ impl App {
 
     /// Open the new-agent-tab provider picker (reuses `ChangeAgentProviderPrompt`
     /// in `NewTab` mode). Refuses at the per-agent tab cap with a keyed error
-    /// status instead of opening the modal (`create_tab` also enforces the cap
-    /// as a backstop). When exactly one provider is configured, skips the
-    /// modal entirely and creates the tab directly with it: a one-option radio
-    /// list is pure friction. That early branch is kept separate and clearly
-    /// commented so it is trivial to flip if that decision changes.
+    /// status instead of opening the modal, and `create_tab` enforces the cap as
+    /// a backstop. With exactly one provider configured it skips the modal and
+    /// creates the tab directly: a one-option radio list is pure friction.
     pub(crate) fn open_new_tab_provider_prompt(&mut self) -> Result<()> {
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select an agent session first.");
@@ -1399,11 +1350,10 @@ impl App {
         tab_id: &str,
         seek_fullscreen: bool,
     ) -> Result<()> {
-        // Resolution, per-provider resume decision, message wording, and the
+        // Resolution, per-provider resume decision, message wording and the
         // request build are the single-source `Engine::dormant_tab_launch_request`
-        // (shared with the web `launch_agent`) so the two surfaces cannot drift.
-        // `None` (unknown tab / gone session) is a silent no-op, matching the
-        // previous early return.
+        // shared with the web, so the two surfaces cannot drift. `None` (unknown
+        // tab or gone session) is a silent no-op.
         let pty_size = self.pty_size_for_launch();
         if let Some(mut request) = self.engine.dormant_tab_launch_request(tab_id, pty_size) {
             request.wants_fullscreen = self.launch_seeks_fullscreen(seek_fullscreen);
@@ -1413,21 +1363,18 @@ impl App {
     }
 
     /// Whether a launch dispatched right now should land fullscreen on
-    /// completion. `seek_fullscreen` is the caller's explicit
-    /// intent (the fullscreen toggle on a dormant tab); on top of that, any
-    /// launch initiated while the fullscreen relaunch screen is up (e.g.
-    /// ReconnectAgent pressed on the dormant fullscreen surface) keeps the
-    /// user fullscreen rather than yanking them down to the 3-pane layout.
+    /// completion. `seek_fullscreen` is the caller's explicit intent; on top of
+    /// that, a launch started while the fullscreen relaunch screen is up keeps
+    /// the user fullscreen rather than dropping them to the 3-pane layout.
     pub(crate) fn launch_seeks_fullscreen(&self, seek_fullscreen: bool) -> bool {
         seek_fullscreen || !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
     }
 
-    /// Close-tab entry point. Every tab opens the confirmation dialog, the tab
-    /// in the session slot included: closing that one hands the slot to the
-    /// next tab in strip order, and the dialog names the successor. The one
-    /// close there is no dialog for is an agent's ONLY tab, because an agent
-    /// always has a slot and the engine refuses it; that gesture says so on the
-    /// status line rather than confirming something that cannot happen.
+    /// Close-tab entry point. Every tab opens the confirmation dialog, the tab in
+    /// the session slot included: closing that one hands the slot to the next tab
+    /// in strip order, and the dialog names the successor. An agent's only tab
+    /// gets no dialog, because the engine refuses that close; it says so on the
+    /// status line instead.
     pub(crate) fn close_focused_tab_prompt(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
@@ -1483,11 +1430,9 @@ impl App {
             .build_agent_launch_request(session, resume, self.pty_size_for_launch(), kind)
     }
 
-    /// Build the keyed status op for a reconnect / fresh-restart launch. The
+    /// Build the keyed status op for a reconnect or fresh-restart launch. The
     /// resolver reads the terminal message straight off the launch reaction's
-    /// [`dux_core::engine::LaunchOutcome`] (the engine computes the success line; the failure
-    /// arms carry branch + message), so it captures no dispatch-time state and
-    /// reproduces the TUI's exact wording for every outcome.
+    /// [`dux_core::engine::LaunchOutcome`], so it captures no dispatch-time state.
     pub(super) fn build_reconnect_status_op(
         &self,
         busy_message: String,
@@ -1498,12 +1443,11 @@ impl App {
     }
 
     pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
-        // Every launch SOMEBODY ASKED FOR here arms an ownership claim on its own
-        // tab, spent when the child appears. This method is this surface's only
-        // launch dispatch; a browser's launches go through the web layer's own and
-        // arm nothing, which is what leaves their ptys free for the browser to
-        // attach to. The startup sweep comes through here too and deliberately
-        // arms nothing either: see `launch_claims_its_pty`.
+        // Every launch somebody asked for here arms an ownership claim on its own
+        // tab, spent when the child appears. A browser's launches go through the
+        // web layer's dispatch and arm nothing, which leaves their ptys free to
+        // attach to; the startup sweep comes through here and arms nothing
+        // either. See `launch_claims_its_pty`.
         let tab_id = super::pty_ownership::launch_claims_its_pty(&request.kind)
             .then(|| request.tab_id.clone());
         let reaction = match self.engine.apply(Command::DispatchAgentLaunch {
@@ -1535,12 +1479,10 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
     }
 
-    /// Landing for a COMPLETED agent launch: fullscreen only
-    /// when the launch was fullscreen-seeking (the request's
-    /// `wants_fullscreen` bit, stamped at dispatch); every other launch lands
-    /// focused-but-minimized so the center pane is immediately typeable.
-    /// Callers run `show_agent_surface` first, which already put focus on the
-    /// Center agent surface with no overlay.
+    /// Landing for a completed agent launch: fullscreen only when the request's
+    /// `wants_fullscreen` bit was stamped at dispatch; every other launch lands
+    /// focused but minimized so the center pane is immediately typeable. Callers
+    /// run `show_agent_surface` first.
     pub(crate) fn land_completed_launch(&mut self, wants_fullscreen: bool) {
         if wants_fullscreen {
             self.input_target = InputTarget::Agent;
@@ -1551,12 +1493,10 @@ impl App {
         }
     }
 
-    /// Extend an engine-composed launch-completion message with the TUI's
-    /// landing note. The engine's message is shared with the web (which has no
-    /// modes and no keybindings), so the note about where the launch landed
-    /// and how to go fullscreen is appended TUI-side, with the key resolved
-    /// through the bindings. A fullscreen-seeking launch gets the opposite
-    /// note: it landed fullscreen, and the same toggle is the way back.
+    /// Extend an engine-composed launch-completion message with the TUI's landing
+    /// note. The engine's message is shared with the web, which has no modes and
+    /// no keybindings, so the note about where the launch landed and how to go
+    /// fullscreen is appended here with the key resolved through the bindings.
     pub(crate) fn launch_completion_message(
         &self,
         engine_message: String,
@@ -1654,10 +1594,9 @@ impl App {
     /// Palette command (`new-standalone-terminal`): always spawns a new
     /// standalone terminal in the user's home directory.
     ///
-    /// A standalone terminal belongs to nothing, so unlike the other two this
-    /// needs nothing selected and nothing to exist: no agent, no project, not
-    /// even a project on disk. It also runs no `startup_command`, for the same
-    /// reason a project terminal does not.
+    /// A standalone terminal belongs to nothing, so it needs nothing selected and
+    /// nothing to exist: no agent, no project. It runs no `startup_command`, for
+    /// the same reason a project terminal does not.
     pub(crate) fn show_standalone_terminal(&mut self) -> Result<()> {
         // Shared core creator (see `show_companion_terminal`): single-sources the
         // id, the "Terminal N" label, and the deterministic `sort_order`.
@@ -1672,11 +1611,9 @@ impl App {
         let where_it_is =
             dux_core::home_path::shorten_home(&dux_core::home_path::standalone_terminal_dir());
         self.activate_new_terminal(terminal_id);
-        // The lifetime, stated truthfully: dux's own shutdown closes every
-        // terminal, so "nothing closes it but you" was an overstatement. What is
-        // actually special about this kind is that no OTHER event does: removing
-        // a project or deleting an agent closes their terminals and leaves this
-        // one alone.
+        // dux's own shutdown closes every terminal. What is special about this
+        // kind is that no other event does: removing a project or deleting an
+        // agent closes their terminals and leaves this one alone.
         self.set_info(format!(
             "Launched a standalone terminal in {where_it_is}. It belongs to no project and no agent, so it keeps running until it exits, you close it, or dux shuts down."
         ));
@@ -1783,11 +1720,9 @@ impl App {
     }
 
     /// Palette command (`new-terminal-for-agent`): spawns a new companion
-    /// terminal for the SELECTED AGENT only. Project terminals have their own
-    /// explicit command (`new-terminal-for-project`) that routes through the
-    /// project chooser, so this no longer guesses at a project when no agent is
-    /// selected (which made project terminals unreachable with an agent
-    /// selected). Uses a yellow warning when no agent is selected.
+    /// terminal for the selected agent only, warning when none is selected.
+    /// Project terminals have their own command (`new-terminal-for-project`), so
+    /// this never guesses at a project.
     pub(crate) fn new_companion_terminal(&mut self) -> Result<()> {
         if self.selected_session().is_some() {
             return self.show_companion_terminal();
@@ -1906,11 +1841,10 @@ impl App {
             delete_branch,
             unpushed_commits: None,
         };
-        // Asked wherever the warning could use it, which is where a branch
-        // predates the agent OR where the agent drifted and the tick therefore
-        // takes a second branch with it. A branch dux created for an agent that
-        // stayed on it warns about nothing, so counting its commits would buy a
-        // git call per open to say nothing new. Never on the UI thread.
+        // Asked only where the warning could use it: a branch that predates the
+        // agent, or an agent that drifted so the tick takes a second branch with
+        // it. A branch dux created for an agent still on it warns about nothing,
+        // so counting its commits would buy a git call to say nothing new.
         let drifted = matches!(
             &self.prompt,
             PromptState::ConfirmDeleteAgent { target, .. } if target.warned_branches().len() > 1
@@ -1926,12 +1860,9 @@ impl App {
     /// through a one-shot channel that `drain_unpushed_count` reads.
     ///
     /// Every branch at once, because a drifted delete removes two and a number
-    /// covering one of them understates what the tick costs.
-    ///
-    /// One-shot rather than a stored fact: the number is only ever rendered by
-    /// the dialog that asked for it, and it goes stale the moment the user
-    /// commits or pushes, so caching it would mean showing a stale count on the
-    /// one screen that must be right.
+    /// covering one of them understates what the tick costs. One-shot rather than
+    /// a stored fact: the number goes stale the moment the user commits or
+    /// pushes, and it is rendered only by the dialog that asked for it.
     fn spawn_unpushed_commit_count(&mut self, session_id: &str) {
         let Some(inputs) = self.engine.branch_delete_inputs(session_id) else {
             return;
@@ -1951,10 +1882,10 @@ impl App {
 
     /// Fold a landed unpushed-commit count into the dialog that asked for it.
     ///
-    /// Tagged with the session id and dropped when it does not match, because
-    /// the user can close this dialog and open another one while the git call
-    /// is still running, and a count from the previous branch rendered against
-    /// this one is a number about the wrong thing.
+    /// Tagged with the session id and dropped when it does not match: the user
+    /// can close this dialog and open another while the git call is still
+    /// running, and a count from the previous branch would be about the wrong
+    /// thing.
     pub(crate) fn drain_unpushed_count(&mut self) {
         let Some(rx) = self.unpushed_count_rx.as_ref() else {
             return;
@@ -1975,18 +1906,15 @@ impl App {
         }
     }
 
-    /// Delete the agent session identified by `session_id`, blocking the
-    /// calling thread for any git work. Project deletion now cascades through
-    /// the core `Command::DeleteProject`, so this thin wrapper survives only as
-    /// a synchronous test entry point for the `Command::DoDeleteSession`
-    /// behavior; production single-agent deletes go through
+    /// Delete the agent session identified by `session_id`, blocking the calling
+    /// thread for any git work. A synchronous test entry point for the
+    /// `Command::DoDeleteSession` behavior; production deletes go through
     /// [`begin_delete_session`] so git work runs off the UI thread.
     ///
-    /// When `delete_worktree` is true AND no other sessions share the worktree,
-    /// the git worktree and branch are removed first. If the git removal fails,
-    /// the session record is preserved so the caller can retry without losing
-    /// the agent. When `delete_worktree` is false, the worktree and branch
-    /// are always preserved.
+    /// When `delete_worktree` is true and no other sessions share the worktree,
+    /// the git worktree and branch are removed first; a failed git removal
+    /// preserves the session record so the caller can retry. When it is false,
+    /// the worktree and branch are always preserved.
     #[cfg(test)]
     pub(crate) fn do_delete_session(
         &mut self,
@@ -2003,21 +1931,12 @@ impl App {
         Ok(())
     }
 
-    /// Kick off deletion of `session_id` from the user-facing modal.
+    /// Build the keyed status op for an async worktree deletion.
     ///
-    /// When the git worktree needs to be removed, the `git worktree remove`
-    /// call is dispatched to a background thread and the session record is
-    /// left in place until the worker reports success via
-    /// [`WorkerEvent::WorktreeRemoveCompleted`]. This keeps the UI responsive
-    /// even when git stalls (slow disk, held lock, large worktree). When no
-    /// git work is required the session is cleaned up synchronously — that
-    /// path only touches in-memory state and SQLite, which is effectively
-    /// instantaneous.
-    /// Build the keyed status op for an async worktree deletion. The resolver
-    /// captures the dispatch-time session facts (provider / project name / branch
-    /// name / display name) — the session is still present at dispatch because
-    /// cleanup is deferred until git succeeds — and reproduces the TUI's exact
-    /// wording for every terminal [`TuiDeleteOutcome`].
+    /// The resolver captures the dispatch-time session facts (provider, project
+    /// name, branch name, display name), which are still present because cleanup
+    /// is deferred until git succeeds, and reproduces the TUI's wording for every
+    /// terminal [`TuiDeleteOutcome`].
     pub(super) fn build_delete_status_op(
         &self,
         session_id: &str,
@@ -2030,11 +1949,9 @@ impl App {
             .find(|s| s.id == session_id)
             .map(|s| {
                 let provider = s.provider.as_str().to_string();
-                // A standalone agent has no branch, and none of the
-                // branch-naming arms below can be reached for one: its delete
-                // resolves to the folder outcome, whose copy names the folder
-                // instead. Empty strings here are therefore unreachable
-                // placeholders, not values any sentence renders.
+                // A standalone agent has no branch and none of the branch-naming
+                // arms below is reachable for one, so an empty string here is an
+                // unreachable placeholder rather than a value a sentence renders.
                 let branch_name = s.branch_name().unwrap_or_default().to_string();
                 // Captured here, with the session still present, because the
                 // removal's report can name a SECOND branch (the one the agent
@@ -2059,12 +1976,10 @@ impl App {
             });
         dux_core::engine::status_op(busy_message).resolve_in_handler(
             move |o: &TuiDeleteOutcome| match o {
-                // The keep path: nothing was deleted, so the line names the
-                // branches that stayed and why, plus the manual way out (the
-                // worktree is gone, so no dux surface can reach them now). The
-                // reason is not always "they were not dux's to delete": a
-                // branch dux made and the user unticked is kept too, and says
-                // so in its own words.
+                // Nothing was deleted, so the line names the branches that stayed,
+                // why, and the manual way out: the worktree is gone, so no dux
+                // surface can reach them now. The reason is not always "not dux's
+                // to delete"; a branch dux made and the user unticked is kept too.
                 TuiDeleteOutcome::SucceededPresent {
                     branches: dux_core::engine::RemovedBranches::Kept(kept_reason),
                 } => dux_core::engine::Final::info(format!(
@@ -2143,18 +2058,15 @@ impl App {
         }
     }
 
-    /// Remove all local bookkeeping for a session whose git side has already
-    /// been handled (or does not need handling). Idempotent — if the session
-    /// is no longer present this is a no-op, which matters for the async path
-    /// where the user may have deleted the project before the worker replies.
+    /// Remove all local bookkeeping for a session whose git side has already been
+    /// handled (or does not need handling). Idempotent: a session that is no
+    /// longer present is a no-op, which matters on the async path where the user
+    /// may have deleted the project before the worker replies.
     ///
-    /// `removal` records what happened to the worktree; it drives the success
-    /// message variant.
-    /// `update_status` controls whether the method writes a success message
-    /// to the status line. The async worker handler passes `false` when the
-    /// status line has already been overwritten by an unrelated operation
-    /// (push, pull, etc.) to avoid clobbering it. Synchronous callers and
-    /// the handler's "our Busy is still showing" path pass `true`.
+    /// `removal` records what happened to the worktree and drives the success
+    /// message variant. `update_status` says whether to write that message at
+    /// all: the async worker handler passes `false` when an unrelated operation
+    /// has already overwritten the status line.
     pub(crate) fn finish_delete_session(
         &mut self,
         session_id: &str,
@@ -2186,24 +2098,18 @@ impl App {
             project_still_has_sessions: _,
         } = outcome;
 
-        // View-side cleanup the engine couldn't do. The activity, input and
-        // pointer maps are NOT part of it: they are tab-keyed engine state that
-        // `finish_delete_session_memory` already cleared for every tab of this
-        // agent through `clear_session_tab_runtime`, before any of these
-        // outcomes reached a surface. Removing them again here by SESSION id
-        // read like the cleanup for those maps while in fact covering only one
-        // of the agent's tabs, so the honest version is to leave the engine's
-        // documented half to the engine.
+        // View-side cleanup the engine could not do. The activity, input and
+        // pointer maps are not part of it: they are tab-keyed engine state that
+        // `finish_delete_session_memory` already clears for every tab through
+        // `clear_session_tab_runtime`, and clearing them again by session id here
+        // would cover only one of the agent's tabs.
         self.clear_companion_terminals_for_session(session_id);
         self.clear_focused_tab_for_session(session_id);
 
-        // Derived view state. In the flat list, the deleted session is already
-        // gone from `engine.sessions`, so the row that slid into the freed slot
-        // now sits at the SAME display index. Keep the cursor where it is and let
-        // `rebuild_left_items` (which calls `ensure_selectable_left_item`)
-        // re-clamp it to a selectable row. The old `saturating_sub(1)` was
-        // leftover nested-model logic that double-adjusted and jumped the cursor
-        // up one row past the survivor.
+        // The deleted session is already gone from `engine.sessions`, so the row
+        // that slid into the freed slot sits at the same display index: keep the
+        // cursor where it is and let `rebuild_left_items` re-clamp it to a
+        // selectable row.
         self.rebuild_left_items();
         self.ensure_selectable_left_item();
         self.reload_changed_files();
@@ -3129,14 +3035,12 @@ impl App {
 
     /// Move the picker's selection onto `selected` and load that run's output.
     ///
-    /// The selection moves NOW and the body follows: the read is a worker hop
-    /// (see [`App::spawn_startup_command_log_content_load`]), so walking the
-    /// list never blocks the UI thread on a log that could be megabytes of
-    /// captured `npm install` output on a cold or networked filesystem.
+    /// The selection moves now and the body follows: the read is a worker hop
+    /// (see [`App::spawn_startup_command_log_content_load`]), so walking the list
+    /// never blocks the UI thread on a log that could be megabytes.
     ///
     /// Re-selecting the row that is already selected is a no-op, so a click on
-    /// the current row, or a filter keystroke whose first match does not move,
-    /// does not re-read the file.
+    /// the current row does not re-read the file.
     pub(crate) fn select_startup_command_log(&mut self, selected: usize) {
         let Some((path, display_name, count, already_selected)) = (match &self.prompt {
             PromptState::StartupCommandLogs(prompt) => prompt.entries.get(selected).map(|entry| {
@@ -3194,11 +3098,9 @@ impl App {
     /// Promote the picker's selected run to the fullscreen viewer.
     ///
     /// No I/O: the body the picker is already showing is the body the viewer
-    /// gets, so this is instant and cannot disagree with what was on screen.
-    ///
-    /// The picker itself rides along on the viewer as its `return_to` ticket,
-    /// so closing the viewer restores this exact run list rather than dropping
-    /// the user out of the journey (see [`App::close_top_overlay`]).
+    /// gets. The picker rides along as the viewer's `return_to` ticket, so
+    /// closing the viewer restores this exact run list (see
+    /// [`App::close_top_overlay`]).
     pub(crate) fn promote_startup_command_log_to_fullscreen(&mut self) {
         let PromptState::StartupCommandLogs(prompt) = &self.prompt else {
             return;
@@ -3268,12 +3170,8 @@ impl App {
 
     /// The log file the "open in the OS" actions act on.
     ///
-    /// Both surfaces bind those actions, so both have to be asked, and the
-    /// PICKER wins when it is open because it is the one on top. Resolving only
-    /// from the viewer was a real bug: the picker reported "No startup command
-    /// log is selected." with a row plainly highlighted. It went unnoticed
-    /// because nothing outside tests could open the picker; opening it on the
-    /// read-logs journey is what makes the path reachable.
+    /// Both surfaces bind those actions, so both have to be asked, and the picker
+    /// wins when it is open because it is the one on top.
     pub(crate) fn selected_startup_command_log_path(&self) -> Option<PathBuf> {
         match &self.prompt {
             PromptState::StartupCommandLogs(prompt) => prompt
@@ -3424,12 +3322,10 @@ impl App {
         Ok(())
     }
 
-    /// Live-preview the theme at the prompt's current selection. Called every
-    /// time the user moves the cursor in the picker (keyboard or mouse) so
-    /// the whole UI repaints with the highlighted theme without having to
-    /// commit anything yet. Failures are swallowed — a theme that won't load
-    /// just leaves the previously-previewed theme in place; the picker stays
-    /// open so the user can pick a different one.
+    /// Live-preview the theme at the prompt's current selection, on every cursor
+    /// move in the picker, so the whole UI repaints without committing. Failures
+    /// are swallowed: a theme that will not load leaves the previous preview in
+    /// place and the picker stays open.
     pub(crate) fn preview_change_theme_selection(&mut self) {
         let id = match &self.prompt {
             PromptState::ChangeTheme(prompt) => prompt
@@ -3556,11 +3452,10 @@ impl App {
             self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
             return Ok(());
         }
-        // No real project is selected. If an ORPHANED session is selected (its
-        // project record is gone), clear the whole ghost group: Command::RemoveProject
-        // cascades the orphaned session records and keeps their worktrees on disk.
-        // A STANDALONE agent is not an orphan: it has no project record to
-        // have lost, so there is no ghost group to clear for it.
+        // No real project is selected. An orphaned session, whose project record
+        // is gone, clears the whole ghost group: `Command::RemoveProject` cascades
+        // the orphaned session records and keeps their worktrees on disk. A
+        // standalone agent is not an orphan and has no ghost group to clear.
         if let Some(session) = self.selected_session().cloned()
             && let Some(project_id) = session.project_id().map(str::to_string)
         {
@@ -3585,12 +3480,11 @@ impl App {
             return Ok(());
         };
 
-        // The whole delete (guards for in-flight worktree removals / launching
-        // tabs, the per-session cascade with worktree removal, and the project
-        // record + config removal) is owned by the core `Command::DeleteProject`
-        // so the TUI and the web can never disagree on the sequencing. This path
-        // is synchronous exactly as before (the cascade runs `git worktree remove`
-        // inline), so no async status op is needed.
+        // The whole delete (guards, the per-session cascade with worktree
+        // removal, and the project record and config removal) is owned by the
+        // core `Command::DeleteProject`, so the two surfaces cannot disagree on
+        // the sequencing. It is synchronous, running `git worktree remove`
+        // inline, so no async status op is needed.
         logger::info(&format!("deleting project {}", project.path));
         let reaction = self.engine.apply(Command::DeleteProject {
             project_id: project.id.clone(),
@@ -3618,11 +3512,9 @@ impl App {
         self.dispatch_reconnect_plan(&session_id, true, false)
     }
 
-    /// `seek_fullscreen` marks a fullscreen-seeking relaunch:
-    /// only the fullscreen toggle passes `true`; every other caller lands the
-    /// completed launch focused-but-minimized (a relaunch initiated FROM the
-    /// fullscreen relaunch screen still lands fullscreen; see
-    /// `launch_seeks_fullscreen`).
+    /// `seek_fullscreen` marks a fullscreen-seeking relaunch: only the fullscreen
+    /// toggle passes `true`, and every other caller lands the completed launch
+    /// focused but minimized. See `launch_seeks_fullscreen`.
     pub(crate) fn reconnect_selected_session(&mut self, seek_fullscreen: bool) -> Result<()> {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error("Select a stopped agent first to reconnect.");
@@ -3634,11 +3526,10 @@ impl App {
 
     /// Shared TUI reconnect dispatch: build the single-source
     /// `Engine::reconnect_plan` (guards, the collision-aware resume decision, the
-    /// message, and the pre-dispatch mutations all in core) and render each
-    /// variant. `reconnect_selected_session` (`force == false`) and
-    /// `force_reconnect_agent` (`force == true`) both route here so neither
-    /// recomputes the resume decision (a second, collision-blind computation can
-    /// promise a resume that launches fresh).
+    /// message and the pre-dispatch mutations all in core) and render each
+    /// variant. Both the plain and forced entry points route here so neither
+    /// recomputes the resume decision: a second, collision-blind computation can
+    /// promise a resume that launches fresh.
     fn dispatch_reconnect_plan(
         &mut self,
         session_id: &str,
@@ -3683,10 +3574,9 @@ impl App {
             return Ok(());
         };
         // Through the same gate every other changes-panel action uses, rather
-        // than reading the session's directory raw. The two answers are
-        // identical today; the gate is what stops a folder with no repository
-        // from rendering every file as fully added (the base version comes back
-        // empty, which a diff reads as "new file").
+        // than reading the session's directory raw: the gate is what stops a
+        // folder with no repository from rendering every file as fully added,
+        // since an empty base version reads as a new file.
         let Some(worktree_path) = self.diff_worktree_for_selection() else {
             return Ok(());
         };
@@ -3710,9 +3600,9 @@ impl App {
     /// Re-generate the currently displayed diff (e.g. after toggling line
     /// numbers, or after a config reload changed the tab width).
     ///
-    /// The already-rendered lines stay on screen until the new ones land: this
-    /// is a re-render of something the user is already reading, not an opening,
-    /// so blanking the pane would be a flicker rather than an explanation.
+    /// The already-rendered lines stay on screen until the new ones land: this is
+    /// a re-render of something the user is already reading, so blanking the pane
+    /// would be a flicker rather than an explanation.
     pub(crate) fn refresh_current_diff(&mut self) {
         let (worktree_path, rel_path, scroll) = match &self.center_mode {
             CenterMode::Diff {
@@ -3728,10 +3618,9 @@ impl App {
 
     /// Dispatch one diff computation to a worker, superseding any in flight.
     ///
-    /// The busy is deferred by [`SLOW_DIFF_READ`] for the same reason a
-    /// selection-driven changed-files read defers its own: most diffs land
-    /// before anyone could read a spinner, and writing over the status line on
-    /// every file the user arrows through would bury whatever it was saying.
+    /// The busy is deferred by [`SLOW_DIFF_READ`]: most diffs land before anyone
+    /// could read a spinner, and writing over the status line on every file the
+    /// user arrows through would bury whatever it was saying.
     fn begin_diff_computation(&mut self, worktree_path: String, rel_path: String, scroll: u16) {
         self.diff_request_seq = self.diff_request_seq.wrapping_add(1);
         let key = crate::diff::DiffRequestKey {
@@ -3777,10 +3666,9 @@ impl App {
 
     /// Drop the in-flight diff because the pane it was for is gone.
     ///
-    /// Retiring the spinner here rather than waiting for the worker matters:
-    /// the wait it was explaining is over from the user's point of view the
-    /// moment the pane closes, and a busy nobody retires expires to a warning
-    /// about work that was abandoned rather than lost.
+    /// The spinner is retired here rather than on the worker's reply: the wait it
+    /// explained is over the moment the pane closes, and a busy nobody retires
+    /// expires to a warning about work that was abandoned rather than lost.
     pub(crate) fn abandon_pending_diff(&mut self) {
         if self.pending_diff.take().is_some() {
             self.status.clear(DIFF_STATUS_KEY, None);
@@ -3789,10 +3677,9 @@ impl App {
 
     /// Fold a landed diff into the pane that asked for it.
     ///
-    /// The answer is dropped unless its key is still the pending one. A diff of
-    /// a multi-megabyte file can easily outlast the user's interest in it, and
-    /// painting a superseded answer over the pane would show one file's diff
-    /// under another file's name.
+    /// The answer is dropped unless its key is still the pending one: a diff can
+    /// outlast the user's interest in it, and painting a superseded answer would
+    /// show one file's diff under another file's name.
     pub(crate) fn drain_pending_diff(&mut self) {
         let Some(pending) = self.pending_diff.as_ref() else {
             return;
@@ -4029,11 +3916,10 @@ impl App {
         Ok(())
     }
 
-    /// `detach-pull-request`: the selected agent has no pull request, as of
-    /// now. Drops a pin if there is one, clears the badge, and stops
-    /// autodetection for the agent until it is attached by hand or detection
-    /// is resumed. Synchronous and reversible both ways, so no modal and no
-    /// confirmation.
+    /// `detach-pull-request`: the selected agent has no pull request as of now.
+    /// Drops a pin if there is one, clears the badge, and stops autodetection
+    /// until it is attached by hand or detection is resumed. Synchronous and
+    /// reversible both ways, so no modal and no confirmation.
     pub(crate) fn detach_pull_request(&mut self) -> Result<()> {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error(
@@ -4326,15 +4212,12 @@ impl App {
 
         for target_id in target_ids {
             match target_id {
-                // Both the session-slot tab (Agent) and an extra tab (Tab) tear
-                // down through the single-source `Engine::kill_tab_runtime`: it
-                // SIGKILLs the provider, clears every runtime map (including the
-                // in-flight `AgentLaunch` key),
-                // detaches the agent only when this was its last live tab, and
-                // clears `desired_running` on detach so the startup auto-reopen
-                // pass does not relaunch the agent the user just killed. Killing
-                // an extra tab KEEPS its `agent_tabs` row (the tab goes dormant;
-                // row deletion is `close_tab`'s job).
+                // Both kinds of tab tear down through `Engine::kill_tab_runtime`,
+                // which detaches the agent only when this was its last live tab
+                // and clears `desired_running` on detach, so the startup
+                // auto-reopen pass does not relaunch what the user just killed.
+                // Killing an extra tab keeps its `agent_tabs` row: the tab goes
+                // dormant, and row deletion is `close_tab`'s job.
                 RuntimeTargetId::Agent(session_id) => {
                     // An `Agent` target is the agent's session-slot tab; its
                     // extra tabs are listed as `Tab` targets of their own.
@@ -4355,11 +4238,10 @@ impl App {
                     }
                 }
                 RuntimeTargetId::Terminal(terminal_id) => {
-                    // Graceful teardown (SIGTERM + background reap via
+                    // Graceful teardown (SIGTERM plus a background reap through
                     // `begin_close_companion_terminal`), matching the shared
-                    // `Command::DeleteTerminal` path and the Terminals tenet: a
-                    // bare `companion_terminals.remove` here hard-SIGKILLed the
-                    // child and skipped `clear_terminal_runtime`.
+                    // `Command::DeleteTerminal` path: a bare map removal would
+                    // SIGKILL the child and skip `clear_terminal_runtime`.
                     if self
                         .engine
                         .begin_close_companion_terminal(terminal_id)
@@ -4402,35 +4284,28 @@ impl App {
     }
 
     /// Palette action: tear down the TUI and serve the web UI in the same
-    /// process. LOCAL MODE only — loopback plus (when enabled) the machine's
+    /// process. Local mode only, loopback plus (when enabled) the machine's
     /// Tailscale address; the flip never reads the configurable [server] host.
     ///
     /// The pre-flight (Tailscale detection via `tailscale ip`, then an actual
-    /// `TcpListener::bind` of each address) runs on a WORKER thread because the
-    /// CLI call would otherwise block the UI loop. The worker reports back via
-    /// `WorkerEvent::ServerFlipPreflightReady`; the main loop stashes the flip on
-    /// success or surfaces the (actionable) error on failure, so a port collision
-    /// or a missing Tailscale daemon keeps the TUI exactly where it was.
+    /// `TcpListener::bind` of each address) runs on a worker thread because the
+    /// CLI call would otherwise block the UI loop. It reports back through
+    /// `WorkerEvent::ServerFlipPreflightReady`, so a port collision or a missing
+    /// Tailscale daemon keeps the TUI exactly where it was.
     ///
-    /// In-flight guarded: a second invocation while a pre-flight worker is still
-    /// pending — or while a successful flip is already stashed waiting for the run
-    /// loop to act on it — is refused instead of spawning a second worker. Without
-    /// the guard, two quick triggers would race to `bind` the same LOCAL MODE
-    /// ports and the loser would surface a confusing EADDRINUSE.
+    /// In-flight guarded: a second invocation while a pre-flight is pending, or
+    /// while a successful flip is stashed waiting for the run loop, is refused
+    /// rather than racing to bind the same ports and reporting EADDRINUSE.
     pub(crate) fn start_web_server(&mut self) {
         if self.server_flip_preflight_pending || self.pending_server_flip.is_some() {
             self.set_warning("Web server start already in progress.".to_string());
             return;
         }
-        // The flip and the background server bind the same LOCAL MODE addresses,
-        // so with one already serving the flip's pre-flight would fail on its own
-        // required loopback bind and report a port collision against dux itself.
-        // Refuse with the honest reason instead, and point at the two ways out.
-        //
-        // A background start that is still in its own pre-flight counts: that
-        // worker has the ports, and the collision would be the same one with a
-        // more confusing message. This is the mirror of the guard
-        // `start_background_server` already applies to the flip.
+        // The flip and the background server bind the same local-mode addresses,
+        // so with one already serving the flip's pre-flight would report a port
+        // collision against dux itself. Refuse with the honest reason instead,
+        // and point at the two ways out. A background start still in its own
+        // pre-flight counts, because that worker already has the ports.
         if self.background_server_preflight_pending {
             self.set_warning(
                 "dux is already starting the web server in the background. Wait for it to \
@@ -4473,12 +4348,11 @@ impl App {
         let tailscale = self.engine.config.server.tailscale_mode();
         let tx = self.engine.worker_tx.clone();
         std::thread::spawn(move || {
-            // Detect the Tailscale address off the UI thread (the CLI call is the
-            // reason this runs on a worker). When detection fails but the user
-            // opted in, carry a non-fatal warning that says what happens next,
-            // which differs by mode: on "auto" dux keeps watching and binds the
-            // leg by itself when the interface shows up, on "yes" this run is
-            // loopback-only for good.
+            // Detect the Tailscale address off the UI thread; the CLI call is the
+            // reason this runs on a worker. A failed detection the user opted in
+            // to carries a non-fatal warning whose wording differs by mode: on
+            // "auto" dux keeps watching and binds the leg when the interface
+            // shows up, on "yes" this run is loopback-only for good.
             let (tailscale_ip, detect_warning) = if tailscale.wants_tailscale() {
                 match dux_core::tailscale::detect_ip() {
                     Ok(ip) => (Some(ip), None),

@@ -1,18 +1,13 @@
-//! The modal registry: what kind of thing each modal IS, and what it owes.
+//! The modal registry: what kind of thing each modal is, and what it owes.
 //!
-//! dux has about thirty-five modals. Left to itself, each one grows its own
-//! key handling, its own focus concept, and its own idea of what Enter means,
-//! and the drift is invisible until a user hits it. This module is the place
-//! that stops that, and it is deliberately built the same way
-//! [`super::overlay_dismiss::outside_click_policy`] is, an EXHAUSTIVE match
-//! with no `_` arm, because that is the one anti-drift device in this codebase
-//! that has actually held. A new [`PromptState`] variant does not compile until
-//! someone has answered, on purpose, "what family is this, and does it need a
-//! confirm button?".
+//! Built as an exhaustive match with no `_` arm, the way
+//! [`super::overlay_dismiss::outside_click_policy`] is: a new [`PromptState`]
+//! variant does not compile until someone has answered "what family is this, and
+//! does it need a confirm button?".
 //!
 //! # The four families
 //!
-//! Derived from what a keystroke MEANS in the modal, not from how it looks:
+//! Derived from what a keystroke means in the modal, not from how it looks:
 //!
 //! | Family | Shape | Up/Down | Left/Right | Enter | Space |
 //! |---|---|---|---|---|---|
@@ -21,56 +16,33 @@
 //! | [`ModalFamily::Picker`] | rows with a selection cursor, maybe a filter | move the SELECTION (a value, not focus) |, | pick the selected row | typed into the filter |
 //! | [`ModalFamily::Form`] | fields plus buttons |, | belongs to the CARET; never reaches the binding lookup | see the dual-mode rule below | typed when a field has focus |
 //!
-//! The two easy-to-blur distinctions are worth stating outright. A Picker's
-//! Up/Down changes a VALUE (which row is selected); a Confirm's Left/Right
-//! changes FOCUS and nothing else, wiring a movement key straight to a value
-//! is the bug the "movement keys move focus" tenet exists to prevent. And a
-//! Form's horizontal arrows belong to the text caret, which is why
-//! [`crate::keybindings::text_field_owns_key`] has to gate the binding lookup
-//! there (see [`binding_lookup_is_suppressed`]).
+//! A Picker's Up/Down changes a value (which row is selected); a Confirm's
+//! Left/Right changes focus and nothing else. A Form's horizontal arrows belong
+//! to the text caret, which is why [`crate::keybindings::text_field_owns_key`]
+//! gates the binding lookup there (see [`binding_lookup_is_suppressed`]).
 //!
-//! # What this registry actually enforces, and what it only documents
+//! # What this registry enforces, and what it only declares
 //!
-//! Be precise about this, because the difference decides how much a green
-//! suite is worth.
+//! The compiler enforces the exhaustive matches in [`modal_spec`] and
+//! [`prompt_text_inputs`]: adding a [`PromptState`] variant is a build error
+//! until somebody classifies it. That gate holds whether or not any code reads
+//! the result, which is why every item here carries `#[allow(dead_code)]`.
 //!
-//! **Genuinely enforced by the compiler:** the exhaustive match in
-//! [`modal_spec`] (and the one in [`prompt_text_inputs`]). Adding a
-//! [`PromptState`] variant is a build error until somebody classifies it. That
-//! gate holds whether or not any code reads the result, and it is the reason
-//! every item in this module carries `#[allow(dead_code)]` rather than being
-//! deleted.
+//! [`ModalSpec`], [`ModalFamily`], [`KNOWN_DUAL_MODE_VIOLATIONS`] and
+//! [`ModalSpec::satisfies_dual_mode_rule`] are read by the guard tests and by
+//! nothing on the render or input path, so a misdeclared family or a dual-mode
+//! violation is caught only by `cargo test`, and only as far as the fixtures in
+//! `every_prompt` reach.
 //!
-//! **Enforced only by the guard tests below:** everything else. [`ModalSpec`],
-//! [`ModalFamily`], [`KNOWN_DUAL_MODE_VIOLATIONS`] and
-//! [`ModalSpec::satisfies_dual_mode_rule`] are read by `mod tests` and by
-//! nothing on the render or input path. `cargo test` is what catches a family
-//! misdeclared or a dual-mode violation, so those checks are as strong as the
-//! fixtures in `every_prompt` are complete, and no stronger.
+//! The families themselves are enforced nowhere: no dispatcher consults
+//! `spec.family` before routing a key, so a modal declared `Report` whose
+//! handler moves a selection cursor compiles and ships. Declare the family
+//! honestly, and change the declaration in the same edit as the key behaviour.
 //!
-//! **Not enforced at all:** the four families are a DESCRIPTION of what a
-//! keystroke should mean. No dispatcher consults `spec.family` before routing
-//! a key. A modal declared `Report` whose handler moves a selection cursor
-//! compiles, renders and ships; only a human reading both halves will notice.
-//! Write the family down honestly, and when you change a modal's key
-//! behaviour, change its declaration in the same edit.
-//!
-//! # What this registry cannot see
-//!
-//! **Coverage is `PromptState`, not "every typing surface in dux."** Two real
-//! dual-mode text surfaces are NOT `PromptState` variants and are therefore
-//! invisible here:
-//!
-//! * the **commit-message pane** (`App::commit_input`, a `with_multiline(4)`
-//!   field living in the files pane), and
-//! * the **startup-log viewer** (`App::startup_log_viewer`, a fullscreen
-//!   overlay with its own search row).
-//!
-//! Neither is reachable from any function in this module, and no test here says
-//! anything about them. Do not read a green suite as "every modal in dux is
-//! covered"; read it as "every `PromptState` variant is covered". If either of
-//! those surfaces is ever routed through `PromptState`, it joins the registry
-//! automatically, and until then, changing them is unguarded.
+//! Coverage is `PromptState`, not every typing surface in dux: the
+//! commit-message pane (`App::commit_input`) and the startup-log viewer
+//! (`App::startup_log_viewer`) are dual-mode text surfaces that are not
+//! `PromptState` variants, so nothing here guards them.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -86,11 +58,9 @@ use crate::keybindings::{Action, text_field_owns_key};
 ///
 /// See the module docs for the full table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// Not called from the render or input paths, and that is correct: the
-// registry is a DECLARATION whose value is the exhaustive match itself, which
-// the compiler checks whether or not anything reads the result. Its consumers
-// are the guard tests below and in `render.rs`, and the modal migration phase
-// that follows. Do not "clean it up" by deleting an unread arm.
+// Not called from the render or input paths: the registry is a declaration
+// whose value is the exhaustive match the compiler checks whether or not
+// anything reads the result. Do not "clean it up" by deleting an unread arm.
 #[allow(dead_code)]
 pub(crate) enum ModalFamily {
     /// Read-only and scrollable. No focus concept, because there is nothing to
@@ -106,30 +76,23 @@ pub(crate) enum ModalFamily {
     Form,
 }
 
-/// Everything the registry declares about one open modal.
-///
-/// Deliberately ONE struct behind ONE match rather than a family match plus a
-/// fields match: two exhaustive matches over the same enum are two places to
-/// forget, and the whole value of the device is that forgetting is impossible.
+/// Everything the registry declares about one open modal, as one struct behind
+/// one match: two exhaustive matches over the same enum would be two places to
+/// forget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct ModalSpec {
     /// Which of the four families this modal belongs to.
     pub(crate) family: ModalFamily,
-    /// Whether the modal contains a FULL-TEXT (multiline) field.
-    ///
-    /// Declared here, but not knowable from the type: multiline-ness is a
-    /// runtime flag set by [`TextInput::with_multiline`] at construction. This
-    /// field is therefore a CLAIM, and `modal_spec_matches_a_real_instance` is
-    /// what turns the claim into a guard, by building the variant for real and
-    /// asking [`prompt_text_inputs`].
+    /// Whether the modal contains a full-text (multiline) field. Not knowable
+    /// from the type, since multiline-ness is a runtime flag set at construction
+    /// by [`TextInput::with_multiline`], so this is a claim the guard tests check
+    /// against a real instance through [`prompt_text_inputs`].
     pub(crate) multiline_field: bool,
-    /// Whether the modal publishes a button that COMMITS it (Apply, Save,
-    /// Delete, Quit, …) as opposed to one that merely dismisses it (Close, OK).
-    ///
-    /// Also a claim, checked the same way, by rendering the variant and asking
-    /// [`layout_publishes_confirm_button`] what reached
-    /// `OverlayMouseLayoutState::active`.
+    /// Whether the modal publishes a button that commits it (Apply, Save,
+    /// Delete, Quit) as opposed to one that merely dismisses it (Close, OK).
+    /// Also a claim, checked by rendering the variant and asking
+    /// [`layout_publishes_confirm_button`].
     pub(crate) confirm_button: bool,
 }
 
@@ -146,17 +109,11 @@ impl ModalSpec {
     /// The dual-mode rule: **a modal containing a multi-line text field must
     /// have a confirm button.**
     ///
-    /// With a button, Enter is unambiguous at every moment: it ENGAGES the
-    /// field while the field is unengaged, inserts a NEWLINE while it is, and
-    /// ACTIVATES whatever the focus is on when focus is on a button. Without
-    /// one there is no third meaning for Enter to land on, and the modal has to
-    /// invent something.
-    ///
-    /// A modal with only single-line fields needs no button, because Enter
-    /// submits and nothing competes for it.
-    ///
-    /// This is a DESIGN choice, not a logical necessity, see the note on
-    /// [`KNOWN_DUAL_MODE_VIOLATIONS`] and the counterexample recorded there.
+    /// With a button, Enter engages the field while it is unengaged, inserts a
+    /// newline while it is engaged, and activates the control focus is on.
+    /// Without one there is no third meaning for Enter to land on. A modal with
+    /// only single-line fields needs no button, because Enter submits and
+    /// nothing competes for it. House style for modals, not a logical necessity.
     pub(crate) fn satisfies_dual_mode_rule(self) -> bool {
         !self.multiline_field || self.confirm_button
     }
@@ -164,36 +121,18 @@ impl ModalSpec {
 
 /// The modals that break the dual-mode rule today, by title.
 ///
-/// **Empty, and it must stay that way.** It held the three configure modals
-/// (startup command, project environment, global environment), each a
-/// single-control form with a `with_multiline` field and no button at all;
-/// they were given the Cancel/Save pair in the same change that redefined
-/// their Enter to ENGAGE the field. **The test asserts this set EXACTLY**, so
-/// a new violator cannot be added without writing its name here and defending
-/// it in review.
-///
-/// This list should only ever shrink.
-///
-/// ---
-///
-/// The rule these three break is a product decision, and it is worth being
-/// honest that it is not forced by logic: dux already ships a dual-mode field
-/// with no confirm button whose Enter is perfectly unambiguous. The
-/// commit-message pane binds "submit" to a different key entirely, so Enter is
-/// only ever a newline there and no third meaning is needed. (It is also not a
-/// `PromptState` variant, so it is outside this registry, see the module
-/// docs.) The rule is the house style for MODALS, chosen because a modal's
-/// Enter is otherwise overloaded, not a claim that no other design can work.
+/// Empty, and it must stay that way. The test asserts this set exactly, so a new
+/// violator cannot be added without writing its name here and defending it in
+/// review. The list should only ever shrink.
 #[allow(dead_code)]
 pub(crate) const KNOWN_DUAL_MODE_VIOLATIONS: &[&str] = &[];
 
 /// The registry. `None` means "no modal is open" ([`PromptState::None`]).
 ///
-/// The match is EXHAUSTIVE with no `_` arm, and that is the entire point: a new
-/// `PromptState` variant is a compile error here until its family and its two
-/// obligations are declared. **Do not add a catch-all arm**, and do not group a
-/// new variant into an existing arm without checking that all three answers
-/// really are the same.
+/// The match is exhaustive with no `_` arm: a new `PromptState` variant is a
+/// compile error here until its family and its two obligations are declared. Do
+/// not add a catch-all arm, and do not group a new variant into an existing arm
+/// without checking that all three answers really are the same.
 #[allow(dead_code)]
 pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
     use ModalFamily::{Confirm, Form, Picker, Report};
@@ -208,29 +147,17 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::FirstLoad(_)
         | PromptState::DebugInput { .. } => ModalSpec::new(Report, false, false),
 
-        // The startup-log modal was declared a Report on the same mistake, and
-        // for the same reason it was never caught: while nothing outside tests
-        // could open it, no user could notice that its keys did not mean what
-        // Report says they mean. They never did. It renders a `ListState`
-        // cursor over the runs, its vertical keys move that SELECTION (the
-        // OUTPUT pane scrolls on the paging keys, which is why the vertical
-        // keys are free), it carries a filter, and its confirm key acts on the
-        // selection by promoting that run to the fullscreen viewer. Rows plus a
-        // selection cursor plus a confirm key that acts on the selection is a
-        // Picker. Its one button is a Close, a way out and not a commit, which
-        // is why the confirm-button claim stays false.
+        // A Picker despite reading like a report: a `ListState` cursor over the
+        // runs, vertical keys that move that selection (the output pane scrolls
+        // on the paging keys), a filter, and a confirm key that promotes the
+        // selected run to the fullscreen viewer. Its one button is a Close, a way
+        // out and not a commit, so the confirm-button claim stays false.
         PromptState::StartupCommandLogs(_) => ModalSpec::new(Picker, false, false),
 
-        // The resource monitor LOOKS like a report and was declared one, but
-        // the declaration did not match the code. It renders a `ListState`
-        // selection cursor, its vertical keys move that cursor (a value, not a
-        // scroll offset and not focus), and its confirm key acts on the
-        // selected row by expanding it. Rows plus a selection cursor plus a
-        // confirm key that acts on the selection is this registry's own
-        // definition of a Picker, so Picker is what it is. It is the one
-        // picker whose confirm key EXPANDS the selected row instead of
-        // choosing it and closing, which is a legitimate variation on
-        // "Enter acts on the selection", not a different family.
+        // A Picker despite reading like a report: a `ListState` selection cursor,
+        // vertical keys that move that cursor (a value, not a scroll offset and
+        // not focus), and a confirm key that acts on the selected row by
+        // expanding it rather than choosing it and closing.
         PromptState::ResourceMonitor { .. } => ModalSpec::new(Picker, false, false),
 
         // ── Confirm ─────────────────────────────────────────────────────
@@ -250,17 +177,11 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::ConfigReloadFailed { .. } => ModalSpec::new(Confirm, false, true),
 
         // ── Picker ──────────────────────────────────────────────────────
-        // A selection cursor over rows; Enter picks. The filter rows these
-        // carry are deliberately type-immediately and are single-line, so no
-        // dual-mode question arises.
-        //
-        // **A picker gets no Cancel and no Apply.** Its footer already names
-        // the keys, resolved through the bindings, and a button LABEL cannot
-        // stay truthful once a user rebinds. The provider pickers'
-        // active-provider cue lives on the row itself (see
-        // `render::ACTIVE_PROVIDER_MARKER`), and their keys share one handler,
-        // `App::handle_provider_picker_key`, reached through
-        // `super::input::provider_picker_kind`.
+        // A selection cursor over rows; Enter picks. Their filter rows are
+        // type-immediately and single-line, so no dual-mode question arises.
+        // A picker gets no Cancel and no Apply: its footer names the keys
+        // through the bindings, and a button label cannot stay truthful once a
+        // user rebinds.
         PromptState::Command { .. }
         | PromptState::BrowseProjects { .. }
         | PromptState::PickEditor { .. }
@@ -278,11 +199,9 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // nothing else, so no buttons and no focus concept.
         | PromptState::SetTailscaleMode(_) => ModalSpec::new(Picker, false, false),
 
-        // Kill-running is the ONE picker that keeps its buttons, and it is not
-        // an oversight to finish. Its three footer buttons are DISTINCT ACTIONS
-        // (kill the hovered runtime, kill the marked ones, kill everything the
-        // filter shows), not a confirm/cancel pair restating what Enter does,
-        // so "a picker confirms by picking" says nothing about them. Do not
+        // The one picker that keeps its buttons: they are distinct actions (kill
+        // the hovered runtime, kill the marked ones, kill everything the filter
+        // shows), not a confirm/cancel pair restating what Enter does. Do not
         // remove them for consistency.
         PromptState::KillRunning(_) => ModalSpec::new(Picker, false, true),
 
@@ -306,11 +225,8 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
 
         // ── The one variant that is two modals ──────────────────────────
         // `EditMacros` serves two families depending on its own state, so the
-        // registry answers as a FUNCTION OF STATE rather than of the variant.
-        // The three arms below must stay ordered most-specific first.
-        //
-        // The nested delete-confirm paints over whichever of the two is
-        // underneath, and is an ordinary confirmation.
+        // registry answers as a function of state rather than of the variant.
+        // The arms below must stay ordered most-specific first.
         PromptState::EditMacros {
             pending_delete: Some(_),
             ..
@@ -321,20 +237,17 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         PromptState::EditMacros {
             editing: Some(_), ..
         } => ModalSpec::new(Form, true, true),
-        // The list underneath: rows with a selection cursor, no buttons. It
-        // resolves every key through the bindings and publishes its rows as
-        // `OverlayMouseLayout::EditMacroList`, so it is a Picker in behaviour
-        // and not only in the table.
+        // The list underneath: rows with a selection cursor, no buttons,
+        // publishing its rows as `OverlayMouseLayout::EditMacroList`.
         PromptState::EditMacros { .. } => ModalSpec::new(Picker, false, false),
     };
     Some(spec)
 }
 
 /// Every [`TextInput`] the open modal owns, so the registry's `multiline_field`
-/// claim can be checked against a LIVE instance instead of trusted.
-///
-/// Exhaustive for the same reason [`modal_spec`] is: a new variant that quietly
-/// grows a text field would otherwise sail past the dual-mode check.
+/// claim can be checked against a live instance instead of trusted. Exhaustive
+/// for the same reason [`modal_spec`] is: a new variant that quietly grows a
+/// text field would otherwise sail past the dual-mode check.
 #[allow(dead_code)]
 pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
     match prompt {
@@ -397,12 +310,11 @@ pub(crate) fn prompt_has_multiline_field(prompt: &PromptState) -> bool {
         .any(|input| input.is_multiline())
 }
 
-/// Whether a published mouse layout carries a button that COMMITS the modal.
+/// Whether a published mouse layout carries a button that commits the modal.
 ///
-/// The distinction the dual-mode rule turns on is commit versus dismiss: an
-/// `ok_button` on an error report or a `close_button` on a log viewer is a way
-/// out, not a third meaning for Enter to land on, so neither counts. Exhaustive
-/// with no `_` arm, so a new layout variant has to answer the question too.
+/// Commit versus dismiss: an `ok_button` on an error report or a `close_button`
+/// on a log viewer is a way out, not a third meaning for Enter to land on, so
+/// neither counts. Exhaustive with no `_` arm.
 #[allow(dead_code)]
 pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bool {
     match layout {
@@ -474,18 +386,14 @@ impl App {
     /// Open a modal: dim the app behind it, clear and claim its rect, and paint
     /// the titled border ring.
     ///
-    /// These three steps open EVERY modal in dux, always in this order and
-    /// always together, and two of them are load-bearing in ways a copy can get
-    /// wrong. [`App::clear_overlay_area`] is the one chokepoint that records
-    /// the topmost modal's rect for the click-outside engine, which FAILS
-    /// CLOSED, a modal that clears its area some other way becomes
-    /// undismissable by mouse. And [`App::themed_overlay_block`]'s border ring
-    /// doubles as the refusal cue for an outside click that is answered with a
-    /// blink rather than a close.
+    /// [`App::clear_overlay_area`] is the one chokepoint that records the
+    /// topmost modal's rect for the click-outside engine, which fails closed, so
+    /// a modal that clears its area some other way becomes undismissable by
+    /// mouse. [`App::themed_overlay_block`]'s border ring doubles as the refusal
+    /// cue for an outside click answered with a blink rather than a close.
     ///
-    /// `area` stays the caller's: modals size themselves by percentage, by
-    /// exact cells, or by content, and folding that in would mean an enum of
-    /// sizing modes with one arm per modal.
+    /// `area` stays the caller's: modals size themselves by percentage, by exact
+    /// cells, or by content.
     pub(crate) fn open_modal_frame(
         &self,
         frame: &mut Frame,
@@ -506,15 +414,12 @@ impl App {
 /// Which published control a click landed on, or `None` for a click that hit
 /// no control.
 ///
-/// The caller's job on a hit is always the SAME TWO STEPS, in this order:
-/// **move focus to that control, then act on it.** Not "act on it" alone, the
-/// two surfaces have to agree about where focus is afterwards, or a click
-/// leaves the modal's visible focus pointing somewhere the next keystroke will
-/// act on instead. (`toggle_rename_session_branch` already does exactly this:
-/// it sets `focus` to the checkbox before flipping it.)
+/// On a hit the caller moves focus to that control and then acts on it, in that
+/// order: acting alone leaves the modal's visible focus pointing somewhere the
+/// next keystroke will act on instead.
 ///
 /// `targets` is the modal's published rects in any order; overlapping rects
-/// resolve to the FIRST match, so publish the topmost control first.
+/// resolve to the first match, so publish the topmost control first.
 pub(crate) fn click_target<T: Copy>(targets: &[(Rect, T)], column: u16, row: u16) -> Option<T> {
     targets
         .iter()
@@ -524,11 +429,8 @@ pub(crate) fn click_target<T: Copy>(targets: &[(Rect, T)], column: u16, row: u16
 
 // ── The key ladder ──────────────────────────────────────────────────────────
 
-/// One rung of the ladder every modal's key handler walks.
-///
-/// The order is the ladder: close, then move focus, then act on focus, then
-/// fall through to whatever text field has focus. Reproduced by hand in a
-/// dozen modals today; this is the shape they all have.
+/// One rung of the ladder every modal's key handler walks: close, then move
+/// focus, then act on focus, then fall through to whatever text field has focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModalKeyStep {
     /// Dismiss the modal, through its real cancel path (never a bare
@@ -536,14 +438,11 @@ pub(crate) enum ModalKeyStep {
     Close,
     /// Move focus. `true` is forwards.
     MoveFocus(bool),
-    /// The confirm key. What it means is the FAMILY's business, and the two
-    /// answers really do differ: a `Confirm` or `Picker` modal acts on whatever
-    /// has focus, while a `Form` whose fields are all single-line submits the
-    /// form no matter which control has focus (that is the whole reason such a
-    /// form needs no confirm button, see [`ModalSpec::satisfies_dual_mode_rule`]).
-    /// Collapsing this into [`ModalKeyStep::ActivateFocus`] would silently
-    /// change the rename-agent modal, where Enter submits while the checkbox
-    /// has focus and Space toggles it.
+    /// The confirm key. What it means is the family's business: a `Confirm` or
+    /// `Picker` acts on whatever has focus, while a `Form` whose fields are all
+    /// single-line submits whichever control has focus. Collapsing this into
+    /// [`ModalKeyStep::ActivateFocus`] would change the rename-agent modal,
+    /// where Enter submits while the checkbox has focus and Space toggles it.
     Confirm,
     /// Space, with focus NOT on a text field: act on the focused control,
     /// activate a button, toggle a checkbox.
@@ -552,15 +451,13 @@ pub(crate) enum ModalKeyStep {
     FallThroughToField,
 }
 
-/// Whether the binding lookup must be SKIPPED for this key.
+/// Whether the binding lookup must be skipped for this key.
 ///
-/// True exactly when a text field has focus and the field owns the key. This is
-/// the gate that keeps plain characters and the horizontal arrows away from the
-/// bindings, and it is not cosmetic: the movement action's default key set
-/// includes the horizontal arrows, so without this gate pressing Left in the
-/// rename-agent modal flips the "also rename the git branch" checkbox instead
-/// of moving the caret, a shipped bug, and the reason
-/// [`text_field_owns_key`] exists.
+/// True exactly when a text field has focus and the field owns the key, which
+/// keeps plain characters and the horizontal arrows away from the bindings: the
+/// movement action's default key set includes the horizontal arrows, so without
+/// this gate Left in the rename-agent modal flips the "also rename the git
+/// branch" checkbox instead of moving the caret.
 ///
 /// The renderer must ask the same question when it picks the footer's key
 /// (`RuntimeBindings::label_for_text_field_dialog`), so the hint can never name
@@ -573,10 +470,9 @@ pub(crate) fn binding_lookup_is_suppressed(key: KeyEvent, text_field_focused: bo
 /// (or `None`, whether because nothing is bound or because
 /// [`binding_lookup_is_suppressed`] said not to look).
 ///
-/// `text_field_focused` only affects Space: Space is CONTENT in both kinds of
-/// text field, so it may only act on focus when focus is actually sitting on a
-/// button or a checkbox. That is the "Space acts on what has focus" tenet,
-/// which is about focus and never about the modal merely containing a button.
+/// `text_field_focused` only affects Space: Space is content in both kinds of
+/// text field, so it may only act on focus when focus is sitting on a button or
+/// a checkbox.
 pub(crate) fn modal_key_step(
     action: Option<Action>,
     key: KeyEvent,
@@ -591,12 +487,10 @@ pub(crate) fn modal_key_step(
     }
 }
 
-/// Whether a focus-movement key means "backwards".
-///
-/// The movement action carries no direction of its own, so the key that
-/// triggered it supplies one. Mirrors `super::input::focus_move_is_reverse`;
-/// kept here so the ladder stays a pure function the tests can drive without an
-/// `App`.
+/// Whether a focus-movement key means "backwards". The movement action carries
+/// no direction of its own, so the key that triggered it supplies one. Mirrors
+/// `super::input::focus_move_is_reverse`, kept here so the ladder stays a pure
+/// function the tests can drive without an `App`.
 fn focus_move_is_reverse(key: KeyEvent) -> bool {
     use ratatui::crossterm::event::KeyModifiers;
     matches!(key.code, KeyCode::BackTab)

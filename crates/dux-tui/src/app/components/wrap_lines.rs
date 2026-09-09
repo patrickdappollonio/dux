@@ -1,32 +1,23 @@
 //! Pre-wrapping styled lines so a scroll clamp can be exact.
 //!
-//! A `Paragraph` rendered with `Wrap { trim: false }` produces MORE rows than it
-//! was given lines, and it does not say how many. A surface that clamps its
-//! scroll offset with `lines.len()` therefore stops short of its own bottom the
-//! moment anything wraps — the help overlay did exactly that, on any terminal
-//! narrow enough to wrap a keybinding row.
+//! A `Paragraph` rendered with `Wrap { trim: false }` produces more rows than
+//! it was given lines and does not say how many, so a surface clamping its
+//! scroll offset with `lines.len()` stops short of its own bottom whenever
+//! anything wraps. Callers wrap here, render the result without `Wrap`, and
+//! clamp with the returned length, which is then the row count by construction.
 //!
-//! The fix is not to predict ratatui's wrapping: a prediction has to match its
-//! algorithm exactly or the clamp is still wrong, just differently. Instead the
-//! caller wraps the content HERE, renders the result WITHOUT `Wrap`, and clamps
-//! with the returned length — which is then the row count by construction,
-//! because every returned line renders on exactly one row.
-//!
-//! [`wrap_styled_lines`] deliberately reproduces `Wrap { trim: false }`:
+//! [`wrap_styled_lines`] reproduces `Wrap { trim: false }`:
 //!
 //! - Greedy word wrapping at whitespace, in display columns.
-//! - The leading whitespace of a line is kept (that is what `trim: false`
-//!   means); continuation rows are NOT re-indented, because ratatui does not
-//!   re-indent them either.
+//! - The leading whitespace of a line is kept; continuation rows are not
+//!   re-indented, because ratatui does not re-indent them either.
 //! - Whitespace at a break point is dropped, as ratatui's `WordWrapper` drops
-//!   the whitespace that fits in the row it just ended. Invisible either way,
-//!   except under a background color, where it would be trailing padding.
+//!   the whitespace that fits in the row it just ended.
 //! - A word too long to fit a row is hard-broken at the row edge.
 //! - Every span keeps its own style; a wrapped row can carry several.
 //!
-//! This is NOT [`crate::diff::wrap_diff_lines`], which is diff-specific: it
-//! re-emits the line-number gutter on every continuation row and indents past
-//! it. Prose must not be indented that way.
+//! Not [`crate::diff::wrap_diff_lines`], which is diff-specific: it re-emits
+//! the line-number gutter on every continuation row and indents past it.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -40,10 +31,9 @@ fn display_width(s: &str) -> usize {
 
 /// Display width of one character, in terminal cells.
 ///
-/// Reachable from outside the wrapper because the pane card's truncation must
-/// cut by the same measure the wrapper wraps by: two functions that disagree
-/// about how wide a CJK glyph is produce a line that overflows the box it was
-/// measured for, and the first casualty is the ellipsis at the end of it.
+/// Shared with the pane card's truncation so both cut by the measure the
+/// wrapper wraps by: two functions that disagree about how wide a CJK glyph is
+/// produce a line that overflows the box it was measured for.
 pub(crate) fn char_display_width(c: char) -> usize {
     let mut buf = [0u8; 4];
     display_width(c.encode_utf8(&mut buf))
@@ -51,11 +41,10 @@ pub(crate) fn char_display_width(c: char) -> usize {
 
 /// Wrap `lines` to `width` display columns, preserving per-span styling.
 ///
-/// The returned lines are each at most `width` columns wide, so rendering them
-/// WITHOUT `Wrap` puts exactly one on each row: `result.len()` is the rendered
-/// height, which is the whole point.
-///
-/// A `width` of 0 yields nothing, matching a `Paragraph` given no room.
+/// Each returned line is at most `width` columns wide, so rendering them
+/// without `Wrap` puts exactly one on each row and `result.len()` is the
+/// rendered height. A `width` of 0 yields nothing, matching a `Paragraph`
+/// given no room.
 pub(crate) fn wrap_styled_lines(lines: &[Line<'_>], width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
@@ -69,10 +58,8 @@ pub(crate) fn wrap_styled_lines(lines: &[Line<'_>], width: usize) -> Vec<Line<'s
 
 /// Append the wrapped rows of a single line.
 fn wrap_one(line: &Line<'_>, width: usize, out: &mut Vec<Line<'static>>) {
-    // Already fits: emit it verbatim, spans and all. This keeps the common case
-    // byte-identical to what the un-wrapped paragraph drew, including styled
-    // trailing padding (the help banners are a background-colored run of
-    // spaces).
+    // Already fits: emit it verbatim, spans and all, so the common case stays
+    // byte-identical to the un-wrapped paragraph, styled trailing padding included.
     if line.width() <= width {
         out.push(owned_line(line));
         return;
@@ -161,11 +148,8 @@ impl LineWrapper {
             self.row.extend(word);
             return;
         }
-        // The row has content and the word does not fit in what is left, so the
-        // row ends here. This holds even for a word too long for ANY row:
-        // ratatui breaks BEFORE such a word and hard-breaks it on the fresh row,
-        // rather than filling the rest of this one with its first few
-        // characters.
+        // The row ends here even for a word too long for any row: ratatui breaks
+        // before such a word and hard-breaks it on the fresh row.
         if self.row_width > 0 {
             self.break_row();
         }

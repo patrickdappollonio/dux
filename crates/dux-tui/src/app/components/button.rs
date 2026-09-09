@@ -1,12 +1,9 @@
 //! Reusable rounded-border button widget for modal dialogs.
 //!
-//! Modals across the app render confirm/cancel rows by hand: a `Paragraph`
-//! with a centered bold label inside a `Block` with rounded borders, with
-//! border and label colors swapped based on focus and intent. This module
-//! folds that boilerplate into a single [`Button`] type, keeps button
-//! widths consistent via [`button_width_for`] / [`shared_button_width`],
-//! and centralizes the focus-color mapping so future theme changes have a
-//! single place to update.
+//! [`Button`] draws the confirm/cancel row shape: a centered bold label inside
+//! a `Block` with rounded borders, its border and label colors swapped by focus
+//! and intent. Widths come from [`button_width_for`] / [`shared_button_width`]
+//! so a row of buttons stays aligned.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -17,28 +14,21 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::theme::Theme;
 
-/// Standard minimum button width used across modal dialogs. Short labels
-/// like "Cancel" and "Delete" sit comfortably inside this with whitespace
-/// to spare, so most buttons in the app are this wide regardless of their
-/// label length. Buttons with longer labels grow past it via
-/// [`button_width_for`] / [`shared_button_width`].
+/// Standard minimum button width used across modal dialogs. Longer labels grow
+/// past it via [`button_width_for`] / [`shared_button_width`].
 pub(crate) const MIN_BUTTON_WIDTH: u16 = 16;
 
 /// Width that fits `label` between two rounded borders with one column of
-/// padding on each side, never narrower than [`MIN_BUTTON_WIDTH`]. The
-/// formula is `label_chars + 1 left pad + 1 right pad + 2 borders`. Uses
-/// `chars().count()` so multi-byte characters (CJK, emoji, box-drawing)
-/// measure by visible width rather than UTF-8 byte length.
+/// padding on each side, never narrower than [`MIN_BUTTON_WIDTH`]. Counted in
+/// chars, not UTF-8 bytes.
 pub(crate) fn button_width_for(label: &str) -> u16 {
     let label_chars = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
     MIN_BUTTON_WIDTH.max(label_chars.saturating_add(4))
 }
 
-/// Largest [`button_width_for`] across `labels`. Use this when several
-/// buttons share a row and must keep the same width so the layout doesn't
-/// shift if a label changes (e.g. a confirm button whose text depends on a
-/// checkbox state). Returns [`MIN_BUTTON_WIDTH`] when given an empty
-/// slice.
+/// Largest [`button_width_for`] across `labels`, so buttons sharing a row keep
+/// one width and the layout does not shift when a label changes. Returns
+/// [`MIN_BUTTON_WIDTH`] for an empty slice.
 pub(crate) fn shared_button_width(labels: &[&str]) -> u16 {
     labels
         .iter()
@@ -47,13 +37,9 @@ pub(crate) fn shared_button_width(labels: &[&str]) -> u16 {
         .unwrap_or(MIN_BUTTON_WIDTH)
 }
 
-/// Visual focus state of a button. Maps to the border + label color pair
-/// used at render time: `Focused` highlights via the theme's button
-/// colors, `Disabled` dims and drops the bold modifier so the button
-/// reads as unavailable, and `Normal` falls back to the standard hint
-/// text color. `Disabled` overrides any focus state — callers should set
-/// it when the underlying action can't be taken right now (e.g. an apply
-/// button when the current selection is already applied).
+/// Visual focus state of a button, mapped at render time to a border and label
+/// color pair. `Disabled` overrides any focus state: set it when the underlying
+/// action cannot be taken right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ButtonState {
     Normal,
@@ -61,13 +47,10 @@ pub(crate) enum ButtonState {
     Disabled,
 }
 
-/// Identifier for every modal button that can be activated by mouse. Lives
-/// next to [`Button`] so the press-tracking type is colocated with the
-/// widget it describes. The conversion from the broader hit-test target
-/// `PromptMouseTarget` is implemented in `app::input` (where that enum
-/// lives) and returns `None` for non-button targets — list rows, text
-/// inputs, and checkboxes — so the press machinery cannot accidentally
-/// arm those cases.
+/// Identifier for every modal button that can be activated by mouse. The
+/// conversion from the broader hit-test target `PromptMouseTarget` lives in
+/// `app::input` and returns `None` for non-button targets, so the press
+/// machinery cannot arm a list row, text input, or checkbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ButtonPressedTarget {
     RuntimeKillCancel,
@@ -117,30 +100,24 @@ pub(crate) enum ButtonPressedTarget {
     PullRequestChooseProject,
     AgentInfoClose,
     StartupCommandLogsClose,
-    /// The first-load modal's two pill buttons. Unlike every other entry here
-    /// they are NOT drawn by [`Button`] — the approved first-load design uses
-    /// one-row accent-filled pills, not the 3-row bordered widget — but they ride
-    /// the same press machinery so a mouse click behaves identically.
+    /// The first-load modal's two pill buttons. Not drawn by [`Button`] (they
+    /// are one-row accent-filled pills), but they ride the same press machinery.
     FirstLoadPrimary,
     FirstLoadSecondary,
-    /// The take-over card's single button. The card is deliberately NOT a modal
-    /// (it must not block pane or tab navigation), so its press is tracked in a
-    /// field of its own rather than in `App::pressed_button`, which the modal
-    /// machinery owns and wipes on every non-prompt mouse event. What it shares
-    /// with every other button here is [`button_state_for`], so the pressed look
-    /// cannot drift from the rest of the app.
+    /// The take-over card's single button. The card is not a modal (it must not
+    /// block pane or tab navigation), so its press is tracked in a field of its
+    /// own rather than in `App::pressed_button`, which the modal machinery wipes
+    /// on every non-prompt mouse event.
     TakeOverCard,
     /// The dormant-tab card's single button. Not a modal either, for the same
     /// reason as the take-over card above, and tracked in its own field.
     DormantTabCard,
 }
 
-/// In-flight state for a button the user is currently pressing. `target`
-/// records which button received the original mouse-down; `inside` tracks
-/// whether the cursor is still over that same button right now. The
-/// release handler fires the button's action only when `inside` is true,
-/// matching the universal GUI convention where dragging off a button
-/// before release cancels the click.
+/// In-flight state for a button the user is currently pressing: `target` is the
+/// button that received the mouse-down, `inside` whether the cursor is still
+/// over it. The release handler fires only when `inside`, so dragging off a
+/// button before release cancels the click.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PressedButton {
     pub(crate) target: ButtonPressedTarget,
@@ -149,17 +126,13 @@ pub(crate) struct PressedButton {
 
 /// Resolve the [`ButtonState`] for a given button at render time.
 ///
-/// `pressed` is the app-wide press state (set on mouse-down, cleared on
-/// release or any keystroke). When the press matches `target` *and* the
-/// cursor is still inside the original button, the button shows the
-/// focused look — providing immediate feedback that the press registered
-/// without changing the keyboard-focus model. Dragging off the button
-/// drops the override so the caller's regular `focused` signal takes
-/// over again.
+/// `pressed` is the app-wide press state (set on mouse-down, cleared on release
+/// or any keystroke). A press matching `target` with the cursor still inside the
+/// original button shows the focused look without changing keyboard focus;
+/// dragging off drops the override for the caller's own `focused` signal.
 ///
-/// `enabled` always wins: a disabled button stays disabled even while
-/// pressed, so a button that becomes unactivatable mid-drag does not
-/// pretend it is still armed.
+/// `enabled` always wins, so a button that becomes unactivatable mid-drag does
+/// not pretend it is still armed.
 pub(crate) fn button_state_for(
     target: ButtonPressedTarget,
     pressed: Option<PressedButton>,
@@ -194,11 +167,9 @@ pub(crate) enum ButtonKind {
     Danger,
 }
 
-/// Builder-style button widget. Owns a label and its focus/intent state;
-/// renders itself in a single call given a theme reference. Width is
-/// derived from the label via [`button_width_for`] so callers can either
-/// query the width (`.width()`) before laying out the row, or use
-/// [`shared_button_width`] for a row of equal-width buttons.
+/// Builder-style button widget: owns a label and its focus/intent state and
+/// renders itself given a theme. Width derives from the label via
+/// [`button_width_for`]; use [`shared_button_width`] for equal-width rows.
 #[derive(Clone, Debug)]
 pub(crate) struct Button<'a> {
     label: &'a str,
@@ -225,11 +196,9 @@ impl<'a> Button<'a> {
         self
     }
 
-    /// Render into `area` using the theme's button colors. Always draws a
-    /// rounded-border block 3 rows tall with the label centered on the
-    /// middle row. Caller is responsible for sizing `area` (see
-    /// [`Button::width`] / [`shared_button_width`]) — the widget does not
-    /// clip or wrap.
+    /// Render into `area` using the theme's button colors: a rounded-border
+    /// block 3 rows tall with the label centered on the middle row. The caller
+    /// sizes `area` (see [`Button::width`]); the widget does not clip or wrap.
     pub(crate) fn render(self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let (border_color, fg) = match self.state {
             ButtonState::Focused => match self.kind {
@@ -251,17 +220,11 @@ impl<'a> Button<'a> {
             .border_style(Style::default().fg(border_color));
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
-        // CENTERED BY HAND, not by `Alignment::Center`. Ratatui centers with
-        // `(area_width / 2) - (label_width / 2)`, which halves each width on its
-        // own and so rounds an odd label's offset UP: a nine-character label in a
-        // fourteen-column button got three columns of padding on the left and two
-        // on the right, one cell right of centre. Splitting the slack itself puts
-        // the odd column on the right instead, which is where every other centred
-        // thing in the app puts it, and leaves every even case exactly where it
-        // already was.
-        //
-        // Measured in chars, the same unit `button_width_for` sizes the button in,
-        // so the two cannot disagree about where the label ends.
+        // Centred by hand, not by `Alignment::Center`: ratatui halves each width
+        // on its own, so an odd label's offset rounds up and lands one cell right
+        // of centre. Splitting the slack puts the odd column on the right, where
+        // every other centred thing in the app puts it. Measured in chars, the
+        // unit `button_width_for` sizes the button in.
         let label_w = u16::try_from(self.label.chars().count()).unwrap_or(u16::MAX);
         let pad = inner.width.saturating_sub(label_w) / 2;
         let label_area = Rect {

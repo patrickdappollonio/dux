@@ -5,32 +5,18 @@ use chrono::Local;
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
 use dux_core::statusline::StatusTone;
 use ratatui::buffer::CellWidth;
-/// Lines moved per mouse-wheel tick for LOCAL scrolling: the PTY pane's
-/// scrollback (inline center pane and the fullscreen surface alike), the diff
-/// view, the help overlay, the startup-log viewers, and the commit input all
-/// share this step through their wheel handlers, so wheel speed feels uniform
-/// across the app. Deliberately NOT applied where the wheel is forwarded to the
-/// child instead of scrolled locally (`handle_center_mouse_wheel`'s
-/// `should_forward_wheel` branch sends exactly one SGR wheel report per tick, a
-/// 1:1 forward, so a mouse-tracking app is never over-scrolled). Keyboard
-/// scrolling is unaffected: arrows stay one line, PgUp/PgDn stay a page. The
-/// web surface matches via xterm's `scrollSensitivity: 3` in TerminalPane.tsx.
+/// Lines moved per mouse-wheel tick for local scrolling, shared by every wheel
+/// handler so wheel speed is uniform. Deliberately not applied where the wheel
+/// is forwarded to the child, which sends exactly one SGR report per tick so a
+/// mouse-tracking app is never over-scrolled. Keyboard scrolling is unaffected.
+/// Must match xterm's `scrollSensitivity` in the web's TerminalPane.tsx.
 const MOUSE_WHEEL_LINES: usize = 3;
 
-/// How many grid COLUMNS one snapshot cell occupies.
-///
-/// A snapshot cell's symbol is one base character plus any zero-width marks
-/// folded onto it, and the emulator drops the spacer cell that follows a wide
-/// glyph, so the cell count is decided by the base character alone: the marks
-/// add nothing, however many there are. Anything unmeasurable falls back to one,
-/// because a cell that exists occupies at least one column.
 /// What a successful commit says, and whether it points at the push key.
 ///
 /// `push_key` is `Some` only when this agent can actually push, which a
-/// standalone agent cannot: it has no branch, so `push_to_remote` refuses it,
-/// and naming the key here walked the user into that refusal one keystroke
-/// after a successful commit. Pure, so the decision is testable without a git
-/// repository behind it.
+/// standalone agent cannot: it has no branch, so `push_to_remote` refuses it and
+/// naming the key would walk the user into that refusal.
 fn commit_success_message(push_key: Option<&str>) -> String {
     match push_key {
         Some(key) => format!("Changes committed successfully. Press {key} to push to remote."),
@@ -53,15 +39,13 @@ fn snapshot_cell_columns(symbol: &str) -> u16 {
 ///
 /// `selected` carries each cell already translated into the selection's own row
 /// frame and already filtered to the highlighted region. The start and end
-/// coordinates are needed only to reproduce the gaps: a run that begins to the
-/// right of where the highlight started keeps that indent, and rows the
-/// highlight covered but nothing painted come out as empty lines.
+/// coordinates reproduce the gaps: a run beginning right of where the highlight
+/// started keeps that indent, and rows the highlight covered but nothing painted
+/// come out as empty lines.
 ///
-/// The column bookkeeping is a running COLUMN, never the length of the text
-/// built so far, because a cell is not a char. The snapshot omits the spacer
-/// cell of a wide glyph and folds combining marks into the cell they modify, so
-/// measuring by chars invented a space after every CJK glyph ("日本語" copied as
-/// "日 本 語") and lost one after every combined cell.
+/// The column bookkeeping is a running column, never the length of the text
+/// built so far, because a cell is not a char: the snapshot omits the spacer
+/// cell of a wide glyph and folds combining marks into the cell they modify.
 fn assemble_selection_text(
     selected: &[(u16, u16, &str)],
     start_row: u16,
@@ -432,13 +416,11 @@ pub(super) fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
 /// What kinds of user input a raw-input batch actually delivered to the focused
 /// PTY. Two fields rather than one boolean, because the engine keeps two windows
 /// with opposite membership rules: a keystroke is typing and suppresses its own
-/// echo, while a forwarded pointer report is NOT typing (design tenet:
-/// selecting or scrolling a terminal is not typing) but still has to suppress
-/// the repaint the child answers it with. Tracking one boolean is exactly how
-/// scrolling an alt-screen agent came to read as Typing.
+/// echo, while a forwarded pointer report is not typing but still has to
+/// suppress the repaint the child answers it with.
 ///
-/// The classification itself lives in `dux_core::pty`, so this cannot drift
-/// from what the web decides about the same bytes.
+/// The classification itself lives in `dux_core::pty`, so this cannot drift from
+/// what the web decides about the same bytes.
 #[derive(Default)]
 pub(super) struct ForwardedInput {
     typing: bool,
@@ -550,11 +532,10 @@ fn raw_action_can_reach_pty(
 /// Decide whether a mouse-wheel event should be forwarded to the embedded
 /// child process instead of scrolling dux's own host scrollback.
 ///
-/// `None` = auto (forward when the child asked for mouse reporting: an app
-/// that takes the mouse owns the wheel, alt screen or not); `Some(true)` =
-/// always forward; `Some(false)` = never forward. Page keys have their own
-/// rule below, keyed on the alt screen, because a normal-buffer app has host
-/// scrollback for them to page through.
+/// `None` is auto: forward when the child asked for mouse reporting, alt screen
+/// or not. `Some(true)` always forwards, `Some(false)` never does. Page keys have
+/// their own rule below, keyed on the alt screen, because a normal-buffer app has
+/// host scrollback for them to page through.
 fn should_forward_wheel(forward_scroll: Option<bool>, _alt_screen: bool, mouse_mode: bool) -> bool {
     match forward_scroll {
         Some(v) => v,
@@ -592,16 +573,13 @@ fn relative_point_clamped(rect: Rect, column: u16, row: u16) -> (u16, u16) {
 ///
 /// A character index is not a column: a CJK glyph or an emoji occupies two
 /// cells, so walking `char_indices().nth(col)` drifts one character further
-/// right for every wide glyph left of the click. On the rename field holding
-/// `"日本語abc"` a click on the letter `a` used to land the caret at the end of
-/// the string.
+/// right for every wide glyph left of the click.
 ///
-/// A click on the SECOND cell of a wide glyph resolves to the caret position
-/// BEFORE that glyph, not after it. That is deliberate: the renderer
+/// A click on the second cell of a wide glyph resolves to the caret position
+/// before that glyph, deliberately: the renderer
 /// ([`super::render::render_single_line_cursor_input`]) paints the caret as an
-/// inverted cell over the WHOLE character at the caret, so "before the glyph"
-/// is the only offset that highlights the glyph the user actually clicked on.
-/// Rounding to the nearest boundary would highlight the NEXT glyph instead.
+/// inverted cell over the whole character at the caret, so "before the glyph" is
+/// the only offset that highlights the glyph the user clicked on.
 ///
 /// A click past the end of the text yields `text.len()`.
 fn cursor_from_single_line_position(
@@ -657,11 +635,9 @@ fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
 /// What one mouse press over the embedded terminal grid means, once the OSC 8
 /// link under the pressed cell is known.
 ///
-/// The whole rule lives here, pure, because two very different code paths ask
-/// it: the windowed [`App::handle_mouse`] and the fullscreen raw-input path,
-/// which never passes through `handle_mouse` at all. A rule written twice is a
-/// rule that diverges. It is the cross-language twin of the web's
-/// `linkPressAction`, and the two must be read together.
+/// The rule lives here, pure, because two code paths ask it: the windowed
+/// [`App::handle_mouse`] and the fullscreen raw-input path, which never passes
+/// through `handle_mouse`. Cross-language twin of the web's `linkPressAction`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalPressAction {
     /// dux has taken an interest in this press. The decision says what to
@@ -700,12 +676,10 @@ pub(crate) struct LinkPressDecision {
 /// carries no link or hyperlinks are off), and `child_wants_mouse` says whether
 /// the child has mouse reporting on.
 ///
-/// Shift is deliberately absent from the rule on this surface, and this is the
-/// one place dux and the browser part company: Shift is the terminal UI's
-/// force-a-local-selection modifier and the host terminal's own link gesture
-/// while dux holds the mouse, so a Shift gesture must never end in a browser
-/// tab. The web lets it open with tracking off because there it is the ordinary
-/// browser modifier and xterm's own linkifier answers the mouseup.
+/// Shift is deliberately absent from the rule on this surface, unlike the web:
+/// Shift is the terminal UI's force-a-local-selection modifier and the host
+/// terminal's own link gesture while dux holds the mouse, so a Shift gesture
+/// must never end in a browser tab.
 pub(crate) fn decide_terminal_press(
     kind: MouseEventKind,
     modifiers: KeyModifiers,
@@ -1122,13 +1096,10 @@ impl App {
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         // A keystroke retires a live row drag: the pointer and the keyboard must
-        // not both be moving the sidebar, and a gesture that outlived the press
-        // would drop a row somewhere the user stopped looking at. The
-        // close-overlay key is the advertised way out of a DRAG, so it is consumed
-        // only when the gesture actually became one; a press that has not left its
-        // row is a click in progress, and swallowing the cancel key there would
-        // steal it from whatever it normally closes. Every other key retires the
-        // gesture and then does its own job as usual.
+        // not both be moving the sidebar. The close-overlay key is the advertised
+        // way out of a drag, so it is consumed only once the gesture became one;
+        // a press that has not left its row is a click in progress, and
+        // swallowing the cancel key there would steal it from whatever it closes.
         if self.row_drag.take().is_some_and(|drag| drag.promoted)
             && self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
         {
@@ -1174,9 +1145,7 @@ impl App {
     ///
     /// The sidebar is one list with two sections, so this owns the whole
     /// traversal and both callers share it: ordinary Left-pane navigation and
-    /// the agent-list filter, whose rows ARE these rows. Duplicating half of it
-    /// into the filter is how a filtered result set became visible but
-    /// unreachable when the only matches were terminals.
+    /// the agent-list filter, whose rows are these rows.
     pub(crate) fn move_left_cursor_down(&mut self) {
         if self.left_section == LeftSection::Terminals {
             if self.selected_terminal_index + 1 < self.terminal_items().len() {
@@ -1304,21 +1273,19 @@ impl App {
     }
 
     /// Route a key while agent-list filter mode is active (Left pane focused).
-    /// Returns `true` when the key was consumed by the filter (typed into the
-    /// query or moved/activated a filtered row), `false` when it should fall
-    /// through to normal handling (e.g. Tab, the palette chord). Esc is not seen
-    /// here: it is dismissed one level up via `close_top_overlay`, matching prompts.
+    /// Returns `true` when the key was consumed by the filter, `false` when it
+    /// should fall through to normal handling. Esc is not seen here: it is
+    /// dismissed one level up through `close_top_overlay`, matching prompts.
     ///
     /// Printable characters and Backspace edit the live query and re-filter the
-    /// list; Up/Down move the selection over the filtered rows; Enter activates the
-    /// selected row and exits filter mode, keeping that row selected in the
+    /// list; Up/Down move the selection over the filtered rows; Enter activates
+    /// the selected row and exits filter mode, keeping it selected in the
     /// restored full list.
     ///
-    /// The rows are the WHOLE sidebar, agents and terminals alike, because the
-    /// query prunes both. So Up/Down go through the shared traversal that
-    /// crosses the section boundary, and Enter opens whichever KIND of row the
-    /// cursor is on. Anything narrower leaves a result set that renders and
-    /// cannot be used: a query matching only terminals was exactly that.
+    /// The rows are the whole sidebar, agents and terminals alike, because the
+    /// query prunes both: Up/Down go through the shared traversal that crosses
+    /// the section boundary, and Enter opens whichever kind of row the cursor is
+    /// on, so a query matching only terminals still has a usable result set.
     fn handle_agent_filter_key(&mut self, key: KeyEvent) -> Result<bool> {
         if self.agent_filter.is_none() {
             return Ok(false);
@@ -1406,12 +1373,10 @@ impl App {
     /// Open the standalone folder browser from the Left pane, dropping the
     /// agent filter first if one is engaged.
     ///
-    /// The filter is a live query over the very pane the browser covers, so a
-    /// surviving one is a pruned list waiting behind a modal, carrying a query
-    /// the user will have forgotten typing by the time they see it again. The
-    /// chord reaches dux while the filter has the keystrokes (its text input
-    /// rejects modifier chords), which is exactly the state this exists for.
-    /// Both Left handlers route through here so the two cannot drift.
+    /// The filter is a live query over the pane the browser covers, so a
+    /// surviving one is a pruned list waiting behind a modal under a query the
+    /// user has forgotten typing. Both Left handlers route through here so the
+    /// two cannot drift.
     fn leave_pane_for_standalone_browser(&mut self) -> Result<()> {
         if self.agent_filter.is_some() {
             self.close_agent_filter();
@@ -1648,15 +1613,12 @@ impl App {
         should_forward_page(fs, alt)
     }
 
-    /// Encode one typed key for the focused center surface's PTY, write it,
-    /// and stamp the typing window so the echo it provokes is not read as the
-    /// agent working (and the sidebar Typing glyph fires). The minimized twin
-    /// of the raw interactive forward path: the stamp goes under the SURFACE
-    /// id (focused tab or companion terminal), resolved explicitly here
-    /// because `stamp_forwarded_input` resolves from `input_target`, which is
-    /// `None` in this mode. A key the legacy protocol cannot encode is
-    /// silently dropped, and a forwarded keystroke retires any terminal
-    /// selection exactly as the raw path's forward flush does.
+    /// Encode one typed key for the focused center surface's PTY, write it, and
+    /// stamp the typing window so the echo it provokes is not read as the agent
+    /// working. The minimized twin of the raw interactive forward path: the stamp
+    /// goes under the surface id, resolved explicitly here because
+    /// `stamp_forwarded_input` resolves from `input_target`, which is `None` in
+    /// this mode. A key the legacy protocol cannot encode is silently dropped.
     fn forward_typing_key_to_center(&mut self, key: &KeyEvent) {
         // Ownership first: while a background web server is serving, another
         // device can be the one driving this pty, and then this keystroke is
@@ -1681,14 +1643,13 @@ impl App {
         }
     }
 
-    /// Route a host-terminal paste (`Event::Paste`, bracketed paste captured
-    /// by crossterm) to whichever surface owns typing right now, mirroring
-    /// `handle_key`'s routing ladder rung for rung. With paste capture on,
-    /// text fields no longer receive pastes as a burst of key events, so
-    /// EVERY typing surface must be reachable from here; a paste with no
-    /// typing surface focused is deliberately dropped (pasting at a list is
-    /// not typing, and feeding the characters to the binding lookup would
-    /// fire hotkeys).
+    /// Route a host-terminal paste (`Event::Paste`, bracketed paste captured by
+    /// crossterm) to whichever surface owns typing right now, mirroring
+    /// `handle_key`'s routing ladder rung for rung. With paste capture on, text
+    /// fields no longer receive pastes as key events, so every typing surface
+    /// must be reachable from here; a paste with no typing surface focused is
+    /// dropped, because feeding the characters to the binding lookup would fire
+    /// hotkeys.
     pub(crate) fn handle_paste(&mut self, text: &str) {
         if text.is_empty() {
             return;
@@ -1958,12 +1919,9 @@ impl App {
         }
         // A snap to the live edge is a user action, so scroll mode ends here
         // rather than in `reconcile_scroll_mode`: landing at the bottom because
-        // you asked to is not a surprise and does not deserve a status message.
-        //
-        // Scoped to the surface whose offset was just zeroed. Clearing the mode
-        // wholesale zeroed one surface's offset while retiring every surface's
-        // mode, so an agent left parked in its scrollback kept the frozen view
-        // and lost the cue that its keystrokes were being held.
+        // you asked to is not a surprise and needs no status message. Scoped to
+        // the surface whose offset was just zeroed, so an agent parked in its own
+        // scrollback keeps both its frozen view and its cue.
         if let Some(id) = self.selected_terminal_surface_id() {
             self.scroll_mode.remove(&id);
         }
@@ -1981,18 +1939,14 @@ impl App {
     /// the live edge enters scroll mode on the selected surface, at the live
     /// edge leaves it silently.
     ///
-    /// This is the only place the mode is ENTERED, and it is the only offset
-    /// read that can turn it on. It runs strictly in the same breath as a
-    /// scroll the user just performed, so the sample describes their own
-    /// gesture rather than whatever the child has been doing. (The one other
-    /// offset read, in `reconcile_scroll_mode`, can only turn the mode OFF; see
-    /// the field docs on `App::scroll_mode` for why that split matters.)
+    /// This is the only place the mode is entered, and the only offset read that
+    /// can turn it on. It runs in the same breath as a scroll the user just
+    /// performed, so the sample describes their own gesture rather than whatever
+    /// the child has been doing; the other offset read, in
+    /// `reconcile_scroll_mode`, can only turn the mode off.
     ///
-    /// Every production entry into scroll mode goes through here:
-    /// `scroll_pty`, `set_pty_scrollback_max` and the wheel handler. Each of
-    /// those three call sites is pinned by its own test that drives a real key
-    /// or a real wheel event, because a helper that re-implemented this
-    /// sequence by hand left the whole feature deletable with the suite green.
+    /// Every production entry into scroll mode goes through here: `scroll_pty`,
+    /// `set_pty_scrollback_max` and the wheel handler.
     pub(crate) fn note_user_scroll(&mut self) {
         let Some(id) = self.selected_terminal_surface_id() else {
             return;
@@ -2018,28 +1972,20 @@ impl App {
     /// End scroll mode OUT LOUD when the child pulled the grid back to the live
     /// edge underneath the user.
     ///
-    /// Measured against the pinned terminal library, starting from a
-    /// scrolled-back grid, each of `ESC [ ? 1049 h` (alternate screen),
-    /// `ESC [ 3 J` (erase scrollback) and `ESC c` (full reset) leaves
-    /// `scrollback_offset()` at 0. Any of them therefore hands typing back to
-    /// the child, and doing that silently is the whole hazard: the pane looks
-    /// alive, the cue is gone, and the next keystroke reaches the agent. So the
-    /// mode is retired with a status message that says what happened and how to
-    /// get back.
+    /// Against the pinned terminal library, `ESC [ ? 1049 h` (alternate screen),
+    /// `ESC [ 3 J` (erase scrollback) and `ESC c` (full reset) each leave
+    /// `scrollback_offset()` at 0 from a scrolled-back grid, so any of them hands
+    /// typing back to the child. Doing that silently is the hazard, so the mode
+    /// is retired with a status saying what happened and how to get back.
     ///
-    /// Only reconciles the surface the user is actually looking at. A
-    /// background agent whose grid moved is not worth interrupting for, and it
-    /// gets reconciled the moment the user returns to it.
+    /// Only the surface the user is looking at is reconciled; a background agent
+    /// is reconciled the moment the user returns to it.
     ///
-    /// The wording is deliberately about the EFFECT and not about a cause. The
-    /// child is the interesting case but it is not the only one: dux resizes
-    /// the PTY from the render path whenever the pane geometry changes, and
-    /// growing the viewport pulls the offset down, so merely resizing the dux
-    /// window while reading scrollback lands here. A message naming "the
-    /// program in this pane" was accusing an agent that had done nothing.
-    /// Likewise the promise that keystrokes now reach the program is only made
-    /// when the input target actually IS the PTY: in non-interactive mode the
-    /// keys are dux's own commands and never reached the child at all.
+    /// The wording is about the effect and not a cause: dux resizes the PTY from
+    /// the render path whenever the pane geometry changes, so merely resizing the
+    /// dux window while reading scrollback lands here too. The promise that
+    /// keystrokes now reach the program is made only when the input target really
+    /// is the PTY.
     pub(crate) fn reconcile_scroll_mode(&mut self) {
         if self.scroll_mode.is_empty() {
             return;
@@ -2103,27 +2049,20 @@ impl App {
     /// Retire a terminal selection whose text this can no longer FIND.
     ///
     /// `TerminalSelection::to_origin_row` corrects viewport rows by reading
-    /// history growth as the grid's advancing bottom, and that reading holds
-    /// only while history can still grow. Once the ring is at capacity the two
-    /// come apart (see the KNOWN LIMITS on `to_origin_row`), and the correction
-    /// under-counts by however many lines have been produced: measured on a
-    /// 5-line ring, a selection on `L30` copies `L33` after three lines arrive.
-    /// With the default 10,000-line scrollback that regime is where any long
-    /// session spends its time, so the failure is the normal case rather than
-    /// a corner, and it is silent: the highlight still looks deliberate.
+    /// history growth as the grid's advancing bottom, which holds only while
+    /// history can still grow. Once the ring is at capacity the two come apart
+    /// (see the known limits on `to_origin_row`) and the correction under-counts
+    /// silently, so a selection stamped at capacity survives only while the grid
+    /// has not moved at all. Gated on saturation rather than on "output arrived",
+    /// because below capacity the correction is exact and following the text
+    /// through output is what the translation exists for.
     ///
-    /// So a selection stamped at capacity survives only while the grid has not
-    /// moved at all. It is gated on saturation and not on "output arrived",
-    /// because BELOW capacity the correction is exact and following the text
-    /// through output is the behaviour the translation exists for.
-    ///
-    /// A scroll dux performed itself is not drift: its arithmetic is exact at
-    /// any history depth, so the scroll paths re-stamp the selection through
-    /// [`Self::note_selection_survives_own_scroll`] rather than losing it. The
-    /// residual race is that the grid's dirty flag is one bit, so output that
-    /// lands between dux's scroll and its re-read is folded into the same
-    /// rebuild and re-stamped along with it. That window is a frame wide and
-    /// fails toward the old behaviour, which is the safer of the two.
+    /// A scroll dux performed itself is not drift: its arithmetic is exact at any
+    /// history depth, so the scroll paths re-stamp the selection through
+    /// [`Self::note_selection_survives_own_scroll`]. The residual race is that
+    /// the grid's dirty flag is one bit, so output landing between dux's scroll
+    /// and its re-read is re-stamped along with it: a frame-wide window that
+    /// fails toward keeping the selection.
     pub(crate) fn drop_drifted_selection(&mut self) {
         let live_cols = self.snapshot_buf.cols;
         let drifted = self.terminal_selection.as_ref().is_some_and(|sel| {
@@ -2187,26 +2126,17 @@ impl App {
     /// Retire startup-log state that only made sense at the width it was
     /// computed at, called once per frame after the layout is known.
     ///
-    /// Everything this surface remembers is an index into text WRAPPED to the
+    /// Everything this surface remembers is an index into text wrapped to the
     /// body width: the search result's scroll offset is a visual-line index, and
-    /// a selection's rows and columns are positions in those wrapped lines. Widen
-    /// or narrow the pane and every one of them names different text, silently.
-    /// The copy path then re-wraps at the NEW width and hands back whatever now
-    /// sits at those coordinates.
+    /// a selection's rows and columns are positions in those wrapped lines, so a
+    /// width change makes every one of them name different text.
     ///
-    /// The cheap, honest answer, rather than absolute logical coordinates the
-    /// whole viewer would have to be rebuilt around: drop the selection, because
-    /// a highlight the user can no longer see the origin of is not worth
-    /// preserving, and recompute the scroll from the thing that IS width
-    /// independent, the search query. The rebase is owed only while the offset
-    /// is still the one the search itself set (the match's visual index at the
-    /// OLD width): a user who searched and then scrolled somewhere else has
-    /// overridden the search, and snapping them back to the match on a resize
-    /// would discard that choice, so their offset is only clamped. With no
-    /// query the offset is likewise only clamped, so an ordinary scroll
-    /// position survives a resize approximately rather than exactly. Silent on
-    /// purpose: a resize is not an error, so a query that stops matching
-    /// leaves the offset where it is instead of raising a status.
+    /// So the selection is dropped, and the scroll is recomputed from the one
+    /// width-independent thing, the search query. That rebase is owed only while
+    /// the offset is still the one the search set: a user who searched and then
+    /// scrolled elsewhere has overridden it, so their offset is merely clamped,
+    /// as it is with no query at all. Silent on purpose: a resize is not an
+    /// error, so a query that stops matching leaves the offset where it is.
     pub(crate) fn reconcile_startup_log_wrap_width(&mut self) {
         if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
             && let Some(area) = self.mouse_layout.agent_term
@@ -2334,16 +2264,11 @@ impl App {
                     }
                     return;
                 }
-                // Which keys the search row owns is not a list to hand-write:
-                // it is exactly the set `TextInput::handle_key` consumes, and
-                // asking it is the only way that set cannot drift. A written
-                // list ("plain characters, the horizontal arrows, Backspace and
-                // Delete") is what dropped `Home`, `End` and the word-erase
-                // chord, and `Home` then reached the scroll ladder and scrolled
-                // the log out from under the query. A single-line field
-                // consumes none of the vertical or paging keys, so those still
-                // fall through to the viewer's own ladder below, which is what
-                // makes the arrows scroll while searching.
+                // Which keys the search row owns is exactly the set
+                // `TextInput::handle_key` consumes, asked rather than listed, so
+                // the two cannot drift. A single-line field consumes none of the
+                // vertical or paging keys, so those fall through to the viewer's
+                // own ladder below and the arrows scroll while searching.
                 _ => {
                     let Some(viewer) = self.startup_log_viewer.as_mut() else {
                         return;
@@ -2793,18 +2718,16 @@ impl App {
         Ok(())
     }
 
-    /// The directory a CHANGES-PANEL action may run git in: a managed worktree,
+    /// The directory a changes-panel action may run git in: a managed worktree,
     /// or a standalone agent's folder when that folder is itself a repository.
     ///
-    /// Folder driven, not agent driven, which is the whole point: a standalone
-    /// agent pointed at a repository stages and commits exactly like any other.
-    /// When it is not one, the refusal carries the FOLDER's own sentence, never
-    /// a git error about a repository nobody named. Sets the status itself and
-    /// answers `None`, so every caller is one `let Some(...) else` away from
-    /// doing the right thing.
+    /// Folder driven, not agent driven, so a standalone agent pointed at a
+    /// repository stages and commits like any other; when it is not one, the
+    /// refusal carries the folder's own sentence rather than a git error about a
+    /// repository nobody named. Sets the status itself and answers `None`.
     ///
-    /// The web twin is `git_routes::resolve_changes_worktree`; both read the one
-    /// engine verdict, so the two surfaces cannot disagree about a folder.
+    /// The web twin is `git_routes::resolve_changes_worktree`, and both read the
+    /// one engine verdict.
     fn changes_worktree_for_selection(&mut self) -> Option<PathBuf> {
         self.selection_changes_directory(true)
     }
@@ -3598,12 +3521,10 @@ impl App {
     /// [`Engine::note_pty_pointer`]) because only one of them is the user
     /// typing. Tab and terminal ids are disjoint and both key those maps.
     ///
-    /// The accumulator is CONSUMED, so this is safe to call more than once in a
-    /// drain. That is what the early-return paths in `process_raw_input_bytes`
-    /// need: they flush pending bytes to the PTY and then leave the function
-    /// before its tail, and they must stamp BEFORE they move `input_target`,
-    /// since the id below is resolved from it. Bytes flushed on those paths used
-    /// to stamp nothing at all.
+    /// The accumulator is consumed, so this is safe to call more than once in a
+    /// drain, which the early-return paths in `process_raw_input_bytes` need.
+    /// They must stamp before they move `input_target`, since the id is resolved
+    /// from it.
     fn stamp_forwarded_input(&mut self, forwarded: &mut ForwardedInput) {
         if !forwarded.any() {
             return;
@@ -3641,17 +3562,15 @@ impl App {
     /// attention" rule (typing is handled separately via `note_pty_input`).
     ///
     /// The `CenterMode::Agent` guard matters: while the Center shows a diff the
-    /// agent's live terminal is off-screen, so viewing the diff must NOT be taken
-    /// as looking at the agent, or attention would be suppressed for a prompt the
-    /// user cannot see.
+    /// agent's live terminal is off-screen, so viewing the diff must not count as
+    /// looking at the agent, or attention is suppressed for a prompt the user
+    /// cannot see.
     ///
-    /// The terminal-focus gate matters just as much: viewing only counts while
-    /// the host terminal window is focused. While it is unfocused we stop
-    /// stamping so a new attention request can rise, and for
-    /// `ui.attention_grace_seconds` after refocus we still hold off so the user
-    /// has time to see which agent(s) wanted them before the flag clears. Until
-    /// the first focus report of the run arrives the gate fails open, preserving
-    /// the pre-feature behavior on terminals that never report focus.
+    /// Viewing also counts only while the host terminal window is focused. While
+    /// it is unfocused nothing is stamped, so a new attention request can rise,
+    /// and `ui.attention_grace_seconds` after refocus still holds off so the user
+    /// can see which agents wanted them. Until the first focus report of the run
+    /// arrives the gate fails open, for terminals that never report focus.
     pub(crate) fn note_focused_agent_viewed(&mut self) {
         let grace = Duration::from_secs(self.engine.config.ui.attention_grace_seconds);
         if !self
@@ -5515,12 +5434,10 @@ impl App {
 
         // ── List view: an ordinary Picker ─────────────────────────────────
         //
-        // Every key is resolved through the bindings, exactly as the provider
-        // and theme pickers resolve theirs. The list used to hardcode `Esc`,
-        // `j`/`k`, `Enter`, `n` and `d`, so a user who rebound any of them got
-        // a footer naming one key and a modal answering another. The modal's
-        // own scope is consulted first (it owns the two macro-specific
-        // actions), then the shared picker vocabulary.
+        // Every key is resolved through the bindings, exactly as the provider and
+        // theme pickers resolve theirs, so a rebind cannot leave the footer
+        // naming one key and the modal answering another. The modal's own scope
+        // is consulted first, then the shared picker vocabulary.
         let action = self
             .bindings
             .lookup(&key, BindingScope::MacroList)
@@ -5635,13 +5552,10 @@ impl App {
         }
 
         // A focused text field owns the plain characters and the horizontal
-        // arrows, so those never reach the bindings and can never be read as a
-        // movement key. Same predicate the rename/new-agent modals use, and the
-        // same one the footer picks its hint keys with.
-        //
-        // `owns_keys` and not `is_text_field`: the UNENGAGED body takes no
-        // keystrokes at all, so it owns none of them, and the movement keys
-        // must keep working while focus is parked on it.
+        // arrows, so those never reach the bindings and cannot be read as a
+        // movement key. `owns_keys` and not `is_text_field`: an unengaged body
+        // takes no keystrokes, so the movement keys keep working while focus is
+        // parked on it.
         let owned_by_field = focus.owns_keys(self.macro_text_engaged()) && text_field_owns_key(key);
         let action = if owned_by_field {
             None
@@ -5663,10 +5577,9 @@ impl App {
                 return Ok(false);
             }
             Some(Action::ClearTextField) if focus == MacroEditFocus::Text => {
-                // "Empty the FOCUSED full-text field", which the body is
-                // whether or not it is engaged. It used to answer only from
-                // inside the engaged branch, so the key was dead on exactly the
-                // state the modal opens the body in.
+                // "Empty the focused full-text field", which the body is whether
+                // or not it is engaged, so this arm sits outside the engaged
+                // branch.
                 if let Some(state) = self.macro_edit_state_mut() {
                     state.text_input.clear();
                 }
@@ -5721,11 +5634,10 @@ impl App {
     /// The three `Configure*` modals' key handling: an ordinary modal with a
     /// focus model over one full-text field and a Cancel/Save pair.
     ///
-    /// Built to read exactly like [`App::handle_macro_editor_key`], because
-    /// they are the same shape: an engaged full-text field owns every key but
-    /// the exit binding, movement keys move focus and change nothing, Space
-    /// acts on whatever has focus, and Escape abandons (or, inside the engaged
-    /// field, only leaves edit mode).
+    /// The same shape as [`App::handle_macro_editor_key`]: an engaged full-text
+    /// field owns every key but the exit binding, movement keys move focus and
+    /// change nothing, Space acts on whatever has focus, and Escape abandons or,
+    /// inside the engaged field, only leaves edit mode.
     fn handle_configure_modal_key(
         &mut self,
         key: KeyEvent,
@@ -5737,10 +5649,9 @@ impl App {
             return Ok(false);
         }
 
-        // "Empty the FOCUSED full-text field": the body has to have focus. It
-        // used to answer from every stop, which read as a modal-wide "clear"
-        // and disagreed with both the help text and the macro editor, whose
-        // body is one focus stop among five.
+        // "Empty the focused full-text field": the body has to have focus.
+        // Answering from every stop would read as a modal-wide clear and
+        // disagree with both the help text and the macro editor.
         if focus == ConfigureFieldFocus::Input
             && matches!(
                 self.bindings.lookup(&key, BindingScope::Dialog),
@@ -6796,14 +6707,10 @@ impl App {
             }
         }
 
-        // Horizontal dividers inside the right pane.
-        //
-        // The inner content rects (unstaged_list, staged_list) exclude the
-        // surrounding block borders, so the gap between two adjacent rects is
-        // typically only 1-2 rows of border chrome.  We extend the hit zone
-        // outward from each content rect by 1 row to cover the border that
-        // belongs to each block, making the target at least 3 rows wide
-        // (bottom border + gap + top border) without overlapping the content.
+        // Horizontal dividers inside the right pane. The inner content rects
+        // exclude the surrounding block borders, so each hit zone extends one row
+        // outward to cover its block's border, making the target at least three
+        // rows tall without overlapping the content.
 
         // Between Unstaged and Staged.
         if let (Some(unstaged), Some(staged)) = (
@@ -6885,11 +6792,10 @@ impl App {
     /// The command the palette's cursor is actually ON, which is the row the
     /// renderer highlights.
     ///
-    /// `selected` is stored state and the match list is recomputed on every
-    /// read, so availability can shrink the list out from under it: a pull
-    /// request that closes, a terminal that exits. The renderer clamps the
-    /// highlight, so resolving the raw index here instead would run (or fail
-    /// to find) a different command than the one the user can see selected.
+    /// `selected` is stored state and the match list is recomputed on every read,
+    /// so availability can shrink the list out from under it. The renderer clamps
+    /// the highlight, so resolving the raw index instead would run a different
+    /// command than the one the user can see selected.
     fn palette_command_at(
         &self,
         input: &str,
@@ -7322,11 +7228,9 @@ impl App {
     /// Apply `key` to the open error dialog's message scroll, reporting whether
     /// it was a scroll key (and so must not fall through to the dialog's buttons).
     ///
-    /// The two error dialogs (`ConfigReloadFailed`, `AddProjectFailed`) share
-    /// this: both carry a message that can outgrow the screen, and both are how a
-    /// user learns something is broken, so every line has to be reachable. The
-    /// vocabulary is the Help scope's, the same one the first-load screens reuse,
-    /// so it stays rebindable and consistent.
+    /// Shared by the error dialogs, whose messages can outgrow the screen and are
+    /// how a user learns something is broken, so every line has to be reachable.
+    /// The vocabulary is the Help scope's, so it stays rebindable.
     pub(crate) fn scroll_error_dialog_for(&mut self, key: &KeyEvent) -> bool {
         let Some(action) = self.bindings.lookup(key, BindingScope::Help) else {
             return false;
@@ -7636,14 +7540,10 @@ impl App {
             });
         match self.engine.close_tab(&session_id, &tab_id) {
             Ok(outcome) => {
-                // A promotion decides where the user lands: the tab that took
-                // the session slot is the one the gesture was about, running or
-                // not. Otherwise prefer a live sibling so the user lands on
-                // something running, falling back to whichever tab holds the
-                // slot when nothing else is live. Either way this resets the
-                // snapshot so the target tab's PTY renders immediately, and
-                // keeps the next fullscreen toggle (activate) from relaunching a
-                // dormant tab.
+                // A promotion decides where the user lands: the tab that took the
+                // session slot, running or not. Otherwise prefer a live sibling,
+                // falling back to whichever tab holds the slot. Either way the
+                // snapshot resets so the target tab's PTY renders immediately.
                 let target = match &outcome.promoted {
                     Some(promoted) => promoted.as_str().to_string(),
                     None => self.engine.first_live_tab(&session_id).unwrap_or_else(|| {
@@ -9053,20 +8953,16 @@ impl App {
         false
     }
 
-    /// Activate the selected Projects-pane item. `allow_launch` distinguishes
-    /// the explicit activate action (`FocusAgent`/Enter, always launches a
-    /// dormant agent) from `ToggleFullscreen` (Ctrl-g by default), which must
-    /// never launch a dormant agent per the Agent Tabs tenet ("in the TUI ...
-    /// focus alone never launches, only an explicit action launches"). When
-    /// `allow_launch` is false and the target agent is dormant, this either
-    /// minimizes a (defensively possible) fullscreen overlay or is a no-op.
+    /// Activate the selected Projects-pane item. `allow_launch` distinguishes the
+    /// explicit activate action, which always launches a dormant agent, from the
+    /// fullscreen toggle, which never does: focus alone never launches. With
+    /// `allow_launch` false and the target dormant, this minimizes a fullscreen
+    /// overlay or is a no-op.
     ///
-    /// The two callers also part ways on a LIVE agent: the
-    /// explicit activate action (`allow_launch`, i.e. Enter and the sidebar
-    /// double-click) focuses the windowed TYPEABLE center pane, while the
-    /// fullscreen toggle reopens fullscreen, matching its meaning everywhere
-    /// else. `InteractAgent` keeps its own jump-straight-to-fullscreen path
-    /// in `handle_left_key`.
+    /// The two callers also part ways on a live agent: the explicit activate
+    /// focuses the windowed typeable center pane, while the fullscreen toggle
+    /// reopens fullscreen. `InteractAgent` keeps its own jump-straight-to-
+    /// fullscreen path in `handle_left_key`.
     fn activate_selected_left_item(&mut self, allow_launch: bool) -> Result<()> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(_)) => {
@@ -9116,16 +9012,13 @@ impl App {
     }
 
     /// Activate the focused tab of the Center pane's selected agent.
-    /// `allow_launch` distinguishes the explicit activate action
-    /// (`FocusAgent`/Enter and `ReconnectAgent`, which always launch a
-    /// dormant tab) from `ToggleFullscreen` (Ctrl-g by default), which must
-    /// never launch a dormant tab per the Agent Tabs tenet. See
-    /// `activate_selected_left_item` for the same distinction in the
-    /// Projects pane.
-    /// `seek_fullscreen` marks a fullscreen-seeking activation:
-    /// when it launches a dormant tab, the completed launch lands fullscreen
-    /// instead of focused-but-minimized. Only the fullscreen toggle (and the
-    /// double-click maximize gesture) pass `true`.
+    ///
+    /// `allow_launch` distinguishes the explicit activate actions, which always
+    /// launch a dormant tab, from the fullscreen toggle, which never does. See
+    /// `activate_selected_left_item` for the same distinction in the Projects
+    /// pane. `seek_fullscreen` marks a fullscreen-seeking activation: a launch it
+    /// starts lands fullscreen rather than focused but minimized, and only the
+    /// fullscreen toggle and the double-click maximize gesture pass `true`.
     pub(crate) fn activate_center_agent(
         &mut self,
         allow_launch: bool,
@@ -9368,13 +9261,10 @@ impl App {
     /// hyperlinks are off (with `capabilities.hyperlinks = false` the snapshot
     /// interns no links at all, so there is nothing here to find).
     ///
-    /// Read from the LAST RENDERED snapshot, which is exactly the picture the
-    /// user clicked on: its cell coordinates are already viewport-relative, so
-    /// a scrolled-back view resolves the link the user can see and no
-    /// scrollback offset is ever added. The match is span-aware, because the
-    /// emulator drops the spacer cell after a wide glyph: a click on the second
-    /// column of a CJK link cell must find the cell that starts one column to
-    /// its left.
+    /// Read from the last rendered snapshot, whose cell coordinates are already
+    /// viewport-relative, so a scrolled-back view resolves the link the user can
+    /// see and no scrollback offset is ever added. The match is span-aware,
+    /// because the emulator drops the spacer cell after a wide glyph.
     fn link_at_screen_point(&self, column: u16, row: u16) -> Option<&str> {
         // THE SNAPSHOT MUST BE THIS PANE'S. `snapshot_buf` is a reusable buffer
         // that keeps whatever was last painted into it, so a pane with no live
@@ -9444,11 +9334,10 @@ impl App {
     /// to can no longer be completed: the host lost focus, the terminal resized
     /// under the pointer, the surface went away.
     ///
-    /// The repeat-open guard goes with it. That guard is a screen CELL and a
+    /// The repeat-open guard goes with it: that guard is a screen cell and a
     /// clock, which only mean "the same link, clicked twice" while the same
-    /// picture is still on screen: after a resize, a surface switch, or a trip
-    /// to another window, the same coordinates are a different agent's link,
-    /// and refusing to open it would be refusing a first click.
+    /// picture is on screen. After a resize or a surface switch the same
+    /// coordinates are a different agent's link.
     pub(crate) fn retire_pending_link_click(&mut self) {
         self.pending_link_click = None;
         self.last_link_open = None;
@@ -9461,16 +9350,13 @@ impl App {
     /// Answer one mouse event against a pending press on the pull-request
     /// banner. Returns whether the event was consumed.
     ///
-    /// The RELEASE opens, like the link lane beside it and like the web banner
-    /// it mirrors, which is an anchor: a browser opens an anchor when the
-    /// button comes up on it, and a press that slides off the strip opens
-    /// nothing. (The plan said the press opens; parity with the web's anchor
-    /// is the release, and this is the same press-decides, release-acts idiom
-    /// the link click already established.)
+    /// The release opens, like the link lane beside it and like the web banner it
+    /// mirrors, which is an anchor: a browser opens an anchor when the button
+    /// comes up on it, and a press that slides off the strip opens nothing.
     ///
-    /// The band the press claimed has to still be the band on screen: a lane
-    /// that moved, went away or now belongs to another agent is not the control
-    /// the gesture began on.
+    /// The band the press claimed has to still be the band on screen: a lane that
+    /// moved, went away or now belongs to another agent is not the control the
+    /// gesture began on.
     fn handle_pending_pr_banner_mouse(&mut self, mouse: &MouseEvent) -> bool {
         let Some(pressed) = self.pending_pr_banner_press else {
             return false;
@@ -9501,18 +9387,16 @@ impl App {
     /// Answer one mouse event against a pending link press. Returns whether the
     /// event was swallowed (kept from the child AND from the ordinary arms).
     ///
-    /// The RELEASE is where an open happens, matching the web: a press and a
-    /// release in the same cell is a click, a gesture that travelled has to end
-    /// on the link it started on, and anything else opens nothing. While the
-    /// child tracks the mouse the whole gesture is withheld from it; with
-    /// tracking off nothing was going to be forwarded anyway, so the press and
-    /// drag pass through and become dux's own selection, which is how a user
-    /// still selects a URL to copy.
+    /// The release is where an open happens, matching the web: a press and a
+    /// release in the same cell is a click, a gesture that travelled has to end on
+    /// the link it started on, and anything else opens nothing. While the child
+    /// tracks the mouse the whole gesture is withheld from it; with tracking off
+    /// the press and drag pass through and become dux's own selection, which is
+    /// how a user still selects a URL to copy.
     ///
-    /// A NEW press retires the record instead of being swallowed, so a release
-    /// that never arrived (the pointer left the window, the host ate it) cannot
-    /// strand the next click. A surface change under the pending press retires
-    /// it the same way.
+    /// A new press retires the record instead of being swallowed, so a release
+    /// that never arrived cannot strand the next click. A surface change under
+    /// the pending press retires it the same way.
     fn handle_pending_link_mouse(&mut self, mouse: &MouseEvent) -> bool {
         let Some(pending) = self.pending_link_click.clone() else {
             return false;
@@ -9587,26 +9471,23 @@ impl App {
         }
     }
 
-    /// Begin forwarding a pressed mouse button to the WINDOWED center child.
-    /// Returns `true` when the press was forwarded: focus moves
-    /// to Center, the translated SGR press is written to the focused
-    /// surface's PTY, and the button is held in `center_mouse_forward` so the
-    /// drag's motion reports and the eventual release follow it. Returns
-    /// `false` (leaving the click to the ordinary focus/double-click
-    /// handling) when any gate fails:
+    /// Begin forwarding a pressed mouse button to the windowed center child.
+    ///
+    /// Returns `true` when the press was forwarded: focus moves to Center, the
+    /// translated SGR press is written to the focused surface's PTY, and the
+    /// button is held in `center_mouse_forward` so the drag's motion reports and
+    /// the eventual release follow it. Returns `false`, leaving the click to the
+    /// ordinary focus and double-click handling, when any gate fails:
     /// - not windowed (fullscreen keeps its raw-input mouse path),
     /// - the center pane is not showing the agent surface,
-    /// - the click carries a modifier (Shift/Alt clicks stay dux's
-    ///   host-selection story, exactly as in a real terminal emulator; the one
-    ///   exception is the Ctrl hatch over a linked cell, which comes in
-    ///   through `begin_center_mouse_forward_ignoring_modifiers` instead),
+    /// - the click carries a modifier (Shift and Alt clicks stay dux's own
+    ///   selection, as in a real terminal emulator; the Ctrl hatch over a linked
+    ///   cell comes in through `begin_center_mouse_forward_ignoring_modifiers`),
     /// - the click lands outside the terminal content area,
     /// - the pane is scrolled back (the scroll vocabulary owns it),
-    /// - a modal surface owns the pane (macro bar, resize mode), matching
-    ///   the keyboard's `center_typeable()` gates: while those are up the
-    ///   pane is suspended for the mouse exactly as it is for keys,
-    /// - the surface is dormant or the child has no mouse tracking on
-    ///   (a click then just focuses, today's behavior).
+    /// - a modal surface owns the pane (macro bar, resize mode), matching the
+    ///   keyboard's `center_typeable()` gates,
+    /// - the surface is dormant or the child has no mouse tracking on.
     fn begin_center_mouse_forward(&mut self, mouse: &MouseEvent) -> bool {
         if !mouse.modifiers.is_empty() {
             return false;
@@ -9616,15 +9497,12 @@ impl App {
 
     /// The same forward, minus the modifier gate: the Ctrl hatch's press is a
     /// plain click as far as the child is concerned. Every other gate still
-    /// applies, so the hatch cannot forward where an ordinary click could not
-    /// (scrolled back, no mouse-tracking child, a modal surface owning the
-    /// pane). The report itself is rebuilt from the button code alone in
-    /// `write_center_mouse_report`, so no modifier bit ever reaches the child.
+    /// applies, and the report is rebuilt from the button code alone in
+    /// `write_center_mouse_report`, so no modifier bit reaches the child.
     ///
-    /// A refused gate is NOT a fall-through: the caller claims the press
-    /// either way, so a hatch click on a scrolled-back pane does nothing at all
-    /// rather than focusing the pane and half-arming a double click. The
-    /// fullscreen path behaves the same, and the two are tested together.
+    /// A refused gate is not a fall-through: the caller claims the press either
+    /// way, so a hatch click on a scrolled-back pane does nothing rather than
+    /// focusing the pane and half-arming a double click.
     fn begin_center_mouse_forward_ignoring_modifiers(&mut self, mouse: &MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
@@ -10153,18 +10031,16 @@ impl App {
 
     /// Anchor a local text selection on the MINIMIZED agent grid.
     ///
-    /// The maximized pane reads its mouse through the raw interactive path,
-    /// which selects whenever the child is not tracking the mouse; the
-    /// minimized pane is the same live surface and answers the same way. Only a
-    /// press the child will never see reaches here: `handle_center_link_press`
-    /// and `begin_center_mouse_forward` have already claimed the presses that
-    /// belong to a mouse-tracking child, so what is left is a child with no
-    /// mouse mode, or the shift hatch that makes a press dux's selection even
-    /// over one that has it on.
+    /// The maximized pane reads its mouse through the raw interactive path, which
+    /// selects whenever the child is not tracking the mouse, and the minimized
+    /// pane answers the same way. Only a press the child will never see reaches
+    /// here: `handle_center_link_press` and `begin_center_mouse_forward` have
+    /// already claimed the presses belonging to a mouse-tracking child, leaving a
+    /// child with no mouse mode or the shift hatch.
     ///
-    /// The remaining gates are the forward's own, for the same reasons: a
-    /// surface that is not the agent grid, a dormant one, and the two modal
-    /// surfaces that suspend the pane have nothing to select.
+    /// The remaining gates are the forward's own: a surface that is not the agent
+    /// grid, a dormant one, and the modal surfaces that suspend the pane have
+    /// nothing to select.
     fn begin_windowed_terminal_selection(&mut self, mouse: &MouseEvent) {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
@@ -10252,14 +10128,11 @@ impl App {
     /// Track the pointer while a row drag is armed.
     ///
     /// The promotion threshold is the source row's own rect: the gesture stays a
-    /// click for as long as the pointer is still on the row it pressed, whichever
-    /// way it wanders inside it, and becomes a drag the moment it leaves in any
-    /// direction. An agent row is three screen rows tall, so the two or three
-    /// cells of travel a heavy hand adds to a click change nothing, while a pull
-    /// out of the list is a drag even before it finds somewhere to land. Once
-    /// promoted, `hover` follows the pointer and is `None` wherever a drop would
-    /// mean nothing: over the source row itself, over the Inactive tail, over
-    /// empty space, or outside the sidebar.
+    /// click while the pointer is still on the row it pressed, and becomes a drag
+    /// the moment it leaves in any direction, so the travel a heavy hand adds to
+    /// a click changes nothing. Once promoted, `hover` follows the pointer and is
+    /// `None` wherever a drop would mean nothing: over the source row, the
+    /// Inactive tail, empty space, or outside the sidebar.
     fn continue_row_drag(&mut self, mouse: &MouseEvent) {
         let Some(mut drag) = self.row_drag.clone() else {
             return;
@@ -10287,12 +10160,12 @@ impl App {
     /// Retire the row drag on release and, when it was a real drag that ended on
     /// a drop target, apply the reorder.
     ///
-    /// The move is computed the way the web computes a drop: take the COMPLETE
-    /// order of that list as the screen shows it, move the dragged row to the slot
-    /// the row it was dropped on occupies, and hand the whole list to the engine
-    /// (which accepts nothing less than the complete set). Agents and terminals
-    /// are separate orders and never mix. An unpromoted gesture, or one released
-    /// with no target under it, reorders nothing and says nothing.
+    /// The move is computed the way the web computes a drop: take the complete
+    /// order of that list as the screen shows it, move the dragged row to the
+    /// slot the row it was dropped on occupies, and hand the whole list to the
+    /// engine, which accepts nothing less. Agents and terminals are separate
+    /// orders and never mix; an unpromoted or untargeted gesture reorders
+    /// nothing and says nothing.
     fn finish_row_drag(&mut self) {
         let Some(drag) = self.row_drag.take() else {
             return;
@@ -10462,15 +10335,13 @@ impl App {
         Some(TermGridPos { row, col })
     }
 
-    /// THE DORMANT-TAB CARD's "Start session" button, pressed with a mouse.
+    /// The dormant-tab card's "Start session" button, pressed with a mouse.
     /// Returns whether the card consumed the event.
     ///
     /// Deliberately narrower than the take-over card's handler below: that card
-    /// COVERS a live grid, so it swallows every event over it; this one is drawn
-    /// where there is no process at all, so only the button's own gesture is
-    /// consumed and everything else still reaches the pane. The press/drag/release
-    /// convention is the same one every button in dux follows: a drag off the
-    /// button before release cancels it.
+    /// covers a live grid and swallows every event over it, while this one is
+    /// drawn where there is no process, so only the button's own gesture is
+    /// consumed. A drag off the button before release cancels it, as everywhere.
     pub(crate) fn handle_dormant_card_mouse(&mut self, mouse: &MouseEvent) -> bool {
         let Some(button) = self.mouse_layout.dormant_tab_button else {
             // The card can vanish under the pointer: the tab launched, or the
@@ -10524,18 +10395,15 @@ impl App {
         }
     }
 
-    /// THE TAKE-OVER CARD's answer to one mouse event. Returns whether the card
+    /// The take-over card's answer to one mouse event. Returns whether the card
     /// consumed it.
     ///
     /// The card covers the grid, so every event over the grid is the card's:
     /// pressing its button and releasing inside it takes the terminal over
-    /// (dragging off cancels, the convention every other button in dux
-    /// follows), and everything else over the covered area is SWALLOWED. That
-    /// last part is the deliberate one. A press there starts no selection,
-    /// because there is nothing readable underneath to select and a highlight
-    /// the user cannot see would still copy the child's cells on release; and a
-    /// wheel scrolls nothing, because the card covers the viewport exactly as
-    /// the web's card covers xterm's.
+    /// (dragging off cancels, as every other button in dux does), and everything
+    /// else over the covered area is swallowed. A press there starts no
+    /// selection, because a highlight the user cannot see would still copy the
+    /// child's cells on release, and a wheel scrolls nothing.
     ///
     /// An in-flight press is tracked wherever the pointer goes, so a drag that
     /// leaves the pane still ends in a released button rather than a stuck one.
@@ -10854,14 +10722,11 @@ impl App {
         let return_to_terminal_list =
             matches!(self.input_target, InputTarget::Terminal) && self.terminal_return_to_list;
         let return_to_projects = matches!(self.input_target, InputTarget::Agent);
-        // Snap the PTY to the live edge BEFORE the surface fields reset (the
-        // client resolves through the current surface). Scrolling back moves
-        // the display offset, and the terminal library holds that view still
-        // as new lines arrive, so an offset left behind froze the minimized
-        // pane on stale content until a later scroll walked it back to the
-        // bottom. The child's output kept landing in the grid the whole time;
-        // the user simply could not see any of it. Entering interactive mode
-        // already snaps to the live edge, so exiting mirrors it.
+        // Snap the PTY to the live edge before the surface fields reset, since
+        // the client resolves through the current surface. The terminal library
+        // holds a scrolled-back view still as new lines arrive, so an offset left
+        // behind freezes the minimized pane on stale content. Entering
+        // interactive mode already snaps to the live edge, so exiting mirrors it.
         self.reset_pty_scrollback();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
@@ -10878,14 +10743,11 @@ impl App {
             self.clamp_terminal_cursor();
             self.focus = FocusPane::Left;
         } else if return_to_projects {
-            // Snap the sidebar to Projects so the agent you are looking at is
-            // the visible selection, but do NOT take focus: minimizing lands
-            // on the focused, TYPEABLE center pane, so keystrokes keep
-            // reaching the agent and the fullscreen toggle re-enters from
-            // right here. The old single-tab exception (returning focus to the
-            // sidebar because the tab keys bought nothing there) is obsolete:
-            // with minimized typing the center pane is useful with one tab or
-            // ten, and yanking focus would silently end typeability.
+            // Snap the sidebar to Projects so the agent you are looking at is the
+            // visible selection, but do not take focus: minimizing lands on the
+            // focused, typeable center pane, so keystrokes keep reaching the
+            // agent and the fullscreen toggle re-enters from right here. Yanking
+            // focus to the sidebar would silently end typeability.
             self.left_section = LeftSection::Projects;
         }
         let key = self.bindings.label_for(Action::ToggleFullscreen);
@@ -10943,17 +10805,14 @@ impl App {
         false
     }
 
-    /// Scan parsed loading-phase sequences for terminal focus reports (DEC
-    /// mode 1004) and apply them to `terminal_focus`. Used during the loading
-    /// phase, where all input is suppressed from forwarding: without this a
-    /// focus change while an agent is starting up would go unobserved.
+    /// Scan parsed loading-phase sequences for terminal focus reports (DEC mode
+    /// 1004) and apply them to `terminal_focus`, since the loading phase
+    /// suppresses all input forwarding and would otherwise miss a focus change.
     ///
-    /// `sequences` must come from the shared `raw_input_parser` (the same
-    /// parser instance the interactive path uses via
-    /// `process_raw_input_bytes`), so each sequence's `in_bracket_paste` flag
-    /// is bracket-paste aware exactly like the interactive path: a literal
-    /// `ESC[I` / `ESC[O` pasted as content is forwarded as data and must never
-    /// be reinterpreted as a real focus report.
+    /// `sequences` must come from the shared `raw_input_parser`, so each
+    /// sequence's `in_bracket_paste` flag is bracket-paste aware: a literal
+    /// `ESC[I` or `ESC[O` pasted as content is data and must never be read as a
+    /// real focus report.
     pub(crate) fn scan_loading_phase_focus(
         &mut self,
         sequences: &[crate::raw_input::ParsedSequence],

@@ -2,10 +2,7 @@
 //!
 //! Each submodule defines a self-contained widget with its own state types,
 //! layout helpers, and rendering logic. Components do not know about
-//! [`super::App`] — callers wire focus state and theme colors in. Keeping
-//! components decoupled lets new modal dialogs reuse them without growing
-//! per-call rendering boilerplate, and leaves room to lift the directory
-//! into its own crate later if external consumers appear.
+//! [`super::App`]: callers wire focus state and theme colors in.
 
 pub(crate) mod button;
 pub(crate) mod checkbox;
