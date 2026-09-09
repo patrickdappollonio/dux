@@ -55,7 +55,7 @@ impl Engine {
     /// Returns:
     /// - `EventReaction::Status(already_running)` when the in-flight key was
     ///   already present and the worker was not spawned.
-    /// - `EventReaction::Nothing` on the happy path — status flows through
+    /// - `EventReaction::Nothing` on the happy path, since status flows through
     ///   `worker_tx`.
     /// - `EventReaction::Status(error)` when `thread::Builder::spawn`
     ///   returns `Err` (rare; PID / RLIMIT exhaustion). The in-flight key is

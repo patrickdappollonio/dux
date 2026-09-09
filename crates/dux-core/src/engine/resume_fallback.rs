@@ -63,7 +63,7 @@ pub(crate) fn resume_fallback_decision(
 }
 
 /// Outcome of an attempted resume-fallback retry. Three states because the
-/// caller must react differently to each — collapsing any two corrupts state.
+/// caller must react differently to each: collapsing any two corrupts state.
 pub enum ResumeFallbackOutcome {
     /// Engine removed the candidate, provider and pin and dispatched a fresh
     /// `resume:false` launch. `reaction` is the `DispatchAgentLaunchView`
@@ -636,7 +636,7 @@ mod tests {
         // Candidate and pin were torn down. The providers check is
         // documentation-only: PtyClient can't be seeded without spawning a
         // real process, so the map is always empty here and this assert can't
-        // fail — the load-bearing assertions are the candidate and pin removals.
+        // fail. The load-bearing assertions are the candidate and pin removals.
         assert!(
             !engine
                 .resume_fallback_candidates
@@ -683,8 +683,8 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
-        // The tab is pinned to "cat" (e.g. from a live run before this exit) —
-        // that pin must win the capture, not the row's own provider above.
+        // The tab is pinned to "cat" (e.g. from a live run before this exit).
+        // That pin must win the capture, not the row's own provider above.
         engine
             .running_provider_pins
             .insert(TabId::new("tab-1"), ProviderKind::new("cat"));

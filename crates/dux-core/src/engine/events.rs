@@ -30,7 +30,7 @@ use crate::worker::{
 
 /// Log line for an intentional branch rename: the session identifier plus the
 /// new branch, the branch it replaced, and the agent's immutable original branch
-/// (for lineage context). Past tense — this fires AFTER the git rename
+/// (for lineage context). Past tense: this fires AFTER the git rename
 /// succeeded (`BranchRenameCompleted { Ok }`). `label` carries the agent's
 /// display name (title, or branch when unnamed) for greppable context.
 pub(crate) fn branch_rename_log_line(
@@ -333,8 +333,8 @@ pub enum EventReaction {
 
     // -- Web-server flip pre-flight (App owns the listeners + flip state). --
     /// The worker that ran Tailscale detection + bound the LOCAL MODE listeners
-    /// finished. The Engine has no domain state to mutate here — the listeners
-    /// and flip are TUI concerns — so this passes straight through to the App,
+    /// finished. The Engine has no domain state to mutate here (the listeners
+    /// and flip are TUI concerns), so this passes straight through to the App,
     /// which stashes `pending_server_flip` (on `Ok`) or surfaces the error, and
     /// shows the non-fatal `warning` when present.
     ServerFlipPreflightReady {
@@ -368,7 +368,7 @@ pub enum EventReaction {
     },
 }
 
-/// Result of `Engine::detach_conflicting_worktree_session` — the App caller
+/// Result of `Engine::detach_conflicting_worktree_session`. The App caller
 /// uses `id` to clear the engine's `pty_activity` entry and `label` for status
 /// messages.
 #[derive(Clone, Debug)]
@@ -439,7 +439,7 @@ pub enum AgentLaunchFailedOutcome {
         message: String,
     },
     /// Reconnect-family failure. `session_id` is the pre-existing session that
-    /// was being relaunched — used by the wire layer to key the failure status
+    /// was being relaunched, used by the wire layer to key the failure status
     /// so it replaces the corresponding "launching…" busy toast.
     Reconnect {
         session_id: String,
@@ -651,7 +651,7 @@ pub fn standalone_delete_directory_refusal(agent_name: &str, folder: &str) -> St
 pub enum WorktreeRemoval {
     /// Deletion NOT requested; worktree shared with sibling sessions.
     PreservedShared,
-    /// Deletion NOT requested; no siblings — worktree left at its path.
+    /// Deletion NOT requested; no siblings: worktree left at its path.
     PreservedOrphan,
     /// Deletion requested but skipped because siblings still use the worktree.
     SkippedForSiblings,
@@ -733,10 +733,10 @@ pub struct DoDeleteSessionOutcome {
 /// original App method's control flow.
 #[derive(Debug)]
 pub enum BeginDeleteSessionOutcome {
-    /// `pending_deletions` already contains this session — App emits the
+    /// `pending_deletions` already contains this session: App emits the
     /// "already in progress" error.
     AlreadyInFlight,
-    /// Session or project lookup failed — silent no-op (preserves the
+    /// Session or project lookup failed: silent no-op (preserves the
     /// original early-return behaviour).
     NotFound,
     /// A tab of this session still has a launch in flight (marked in-flight but
@@ -811,7 +811,7 @@ pub struct DeleteTerminalView {
     pub label: Option<String>,
 }
 
-/// Display name for a session — title if present, branch name otherwise.
+/// Display name for a session: title if present, branch name otherwise.
 /// (Engine-internal helper; the binary keeps `App::session_label` for the
 /// ~8 view-side callers in `sessions.rs`.)
 fn session_label(session: &AgentSession) -> String {
@@ -853,7 +853,7 @@ impl Engine {
 
         let label = session_label(&conflicting);
         let provider = conflicting.provider.as_str().to_string();
-        // Tear down EVERY tab of the conflicting agent (Main + Support) — a
+        // Tear down EVERY tab of the conflicting agent (Main + Support): a
         // extra tab left running would keep holding the contested worktree.
         // Keep its `agent_tabs` rows: the session still exists, just detached.
         // This also drops the tabs' `pty_activity`/`pty_input` entries, so the
@@ -1438,8 +1438,8 @@ impl Engine {
     /// runtime maps for every tab, drop the session/companion-terminals/extra-tab
     /// records, and refresh derived state. Infallible. `finish_delete_session`
     /// calls this after persisting; `Command::RemoveProject` calls it directly,
-    /// because `remove_project_records` already deleted the rows transactionally —
-    /// re-running `delete_session` there (and letting a transient DB error abort
+    /// because `remove_project_records` already deleted the rows transactionally.
+    /// Re-running `delete_session` there (and letting a transient DB error abort
     /// the in-memory cleanup) would strand ghost sessions/tabs against an empty DB.
     pub(crate) fn finish_delete_session_memory(
         &mut self,
@@ -1660,7 +1660,7 @@ impl Engine {
             // the directory when `git::remove_worktree` runs. `finish_delete_session`
             // below then clears the remaining runtime map entries. (This is the
             // synchronous counterpart to `begin_delete_session`'s deferred group
-            // barrier — the project-delete loop that calls us is synchronous.)
+            // barrier: the project-delete loop that calls us is synchronous.)
             for tab_id in self.tab_ids_for_session(session_id) {
                 self.providers.remove(&tab_id);
             }
@@ -1725,8 +1725,8 @@ impl Engine {
         };
 
         let Some(finish) = self.finish_delete_session(session_id)? else {
-            // Should be unreachable — we just confirmed the session exists
-            // above — but if a concurrent path removed it, treat as no-op.
+            // Should be unreachable (we just confirmed the session exists
+            // above), but if a concurrent path removed it, treat as no-op.
             return Ok(None);
         };
         Ok(Some(DoDeleteSessionOutcome {
@@ -1801,7 +1801,7 @@ impl Engine {
     /// async path (spawns `git::remove_worktree` worker, posts
     /// `WorktreeRemoveCompleted` back to `worker_tx`) and the inline path
     /// (lets the App caller invoke `finish_delete_session` synchronously).
-    /// Never returns `Err` — failures route through the worker callback.
+    /// Never returns `Err`: failures route through the worker callback.
     pub fn begin_delete_session(
         &mut self,
         session_id: &str,
@@ -1828,7 +1828,7 @@ impl Engine {
         }
         // Blanket precondition: refuse while ANY tab of this session has a launch
         // in flight. Such a tab is marked in-flight but not yet in `providers`, so
-        // it is invisible to the `live_tabs` check below — a worktree-removing
+        // it is invisible to the `live_tabs` check below. A worktree-removing
         // delete could otherwise dispatch `git worktree remove` while the provider
         // is mid-spawn in that worktree (git-lock / cwd-deleted-under-fork). Must
         // run before ANY removal branch is selected.
@@ -2258,7 +2258,7 @@ impl Engine {
             }
         };
 
-        // Step 2: clear the barrier — resume the writer and stop deferring. Done
+        // Step 2: clear the barrier (resume the writer and stop deferring). Done
         // AFTER applying the reloaded config (so deferred re-applies write the
         // reloaded-plus-change config) and BEFORE the drain (so the re-applied
         // commands take the normal, non-deferred path).
@@ -2273,7 +2273,7 @@ impl Engine {
         }
 
         // Step 3: re-apply each deferred command now that the barrier is closed.
-        // Each re-mutates the current config and eager-writes — the deferred write
+        // Each re-mutates the current config and eager-writes. The deferred write
         // is therefore the LAST write to disk. On a failed reload the config is
         // unchanged/current, so re-applying against it is still correct: deferred
         // commands are never dropped. Collect status reactions so the
@@ -2306,7 +2306,7 @@ impl Engine {
             // status wins the surface's status line instead of being overwritten by
             // a deferred save's success message (the deferred saves did land against
             // the still-current config, but the headline state the user needs is
-            // "reload failed — review the modal").
+            // "reload failed, review the modal").
             reactions.push(failure);
         }
 
@@ -3358,7 +3358,7 @@ impl Engine {
                 EventReaction::StartupLogContentArrived { path, result }
             }
             WorkerEvent::ServerFlipPreflightReady { result, warning } => {
-                // No engine domain state to mutate — the listeners and the flip
+                // No engine domain state to mutate: the listeners and the flip
                 // are TUI concerns. Hand them straight to the App.
                 EventReaction::ServerFlipPreflightReady { result, warning }
             }
@@ -4283,7 +4283,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        // `cat` is always on PATH and simply echoes — a safe stand-in terminal.
+        // `cat` is always on PATH and simply echoes: a safe stand-in terminal.
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         engine
@@ -4651,7 +4651,7 @@ mod tests {
     #[test]
     fn branch_sync_skips_session_with_rename_in_flight() {
         // F-D: a session whose own rename is mid-flight must not be treated as
-        // external drift by the branch-sync poller — no mutation, no warn.
+        // external drift by the branch-sync poller: no mutation, no warn.
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "server-mode");
         session
@@ -4790,7 +4790,7 @@ mod tests {
         // The scoped guard's UNEXPECTED path: a branch that is neither the
         // pending old name nor the target new name appears while a rename is in
         // flight. The guard logs the anomaly but still defers (no mutation
-        // mid-rename — that would race `BranchRenameCompleted`).
+        // mid-rename, which would race `BranchRenameCompleted`).
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "old-branch");
         session
@@ -4830,7 +4830,7 @@ mod tests {
         // On a synchronous worker-spawn failure no `BranchRenameCompleted`
         // fires, so the call site must unwind the optimistic state itself.
         // `revert_optimistic_rename` restores the title, clears the in-flight
-        // marker, and drops the expected-branch stash — otherwise the Busy would
+        // marker, and drops the expected-branch stash. Otherwise the Busy would
         // hang forever and drift detection would be frozen for the session.
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "old-branch");
@@ -5605,7 +5605,7 @@ mod tests {
         engine.sessions.push(sample_session("s1", "p1", "feat/a"));
         engine.sessions.push(sample_session("s2", "p1", "feat/b"));
         // Pre-seed pr_statuses for s1 so the None path actually removes
-        // something (and flips `changed`). s2 has no PR — None for s2 leaves
+        // something (and flips `changed`). s2 has no PR, so None for s2 leaves
         // `changed` alone for s2 but its id must still get a timestamp in
         // `pr_last_checked`.
         let pr = PrInfo {
@@ -6160,7 +6160,7 @@ mod tests {
             Tone::Error,
             failure.message.clone(),
         );
-        // Still one entry on the same id — the busy was replaced, not stacked.
+        // Still one entry on the same id: the busy was replaced, not stacked.
         let snap = controller.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].key.as_deref(), Some(op_id.as_str()));
@@ -6579,7 +6579,7 @@ mod tests {
     fn process_agent_launch_failed_tab_is_silent_for_a_ghost_tab() {
         // An extra tab whose row was deleted (closed by the
         // user) while its launch was in flight must not be treated as a real
-        // failure — no ERROR log's worth of user-facing warning, and no
+        // failure: no ERROR log's worth of user-facing warning, and no
         // redundant `delete_agent_tab` call against a row that is already
         // gone. The engine has no `agent_tabs` row for "tab-1" here, exactly
         // like a tab closed mid-launch.
@@ -6901,7 +6901,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
         // Even requesting worktree removal, a missing project takes the inline
-        // path (we cannot run git worktree remove without the repo) — NOT NotFound,
+        // path (we cannot run git worktree remove without the repo), NOT NotFound,
         // which would silently no-op the user's delete.
         let outcome = engine.begin_delete_session("s1", true, None);
         assert!(matches!(outcome, BeginDeleteSessionOutcome::Inline { .. }));
@@ -6957,7 +6957,7 @@ mod tests {
             })
             .expect("remove project");
 
-        // Only p1 and its sessions are gone — from memory AND the store records,
+        // Only p1 and its sessions are gone, from memory AND the store records,
         // synchronously and atomically (sessions, PR rows, and the project row).
         let session_ids: Vec<String> = engine.sessions.iter().map(|s| s.id.clone()).collect();
         assert_eq!(session_ids, vec!["s3".to_string()]);
@@ -7009,7 +7009,7 @@ mod tests {
             })
             .expect("remove project");
 
-        // The guard refuses with an error and mutates nothing — the session row,
+        // The guard refuses with an error and mutates nothing: the session row,
         // the project, and the in-memory state all survive for a later retry.
         let status = unwrap_status(reaction);
         assert_eq!(status.tone, StatusTone::Error);
@@ -7128,7 +7128,7 @@ mod tests {
         // The in-flight guard must hold in release builds. If an async delete
         // worker is already running for this session, the
         // synchronous path must NOT proceed to `git::remove_worktree` or
-        // touch in-memory state — otherwise the two paths would race on
+        // touch in-memory state. Otherwise the two paths would race on
         // the worktree.
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/tmp/p1"));
@@ -7144,7 +7144,7 @@ mod tests {
             outcome.is_none(),
             "do_delete_session must soft-return Ok(None) when an async worker is in-flight",
         );
-        // The session must still be present — we soft-returned, did not delete.
+        // The session must still be present: we soft-returned, did not delete.
         assert!(
             engine.sessions.iter().any(|s| s.id == "s1"),
             "session should be untouched when the in-flight guard fires",
@@ -7154,7 +7154,7 @@ mod tests {
     #[test]
     fn do_delete_session_refuses_worktree_removal_while_a_tab_is_launching() {
         // Round-2 fix: a tab whose launch is in flight is marked in-flight but not
-        // yet in `providers`, so the pre-kill can't reach it — a worktree-removing
+        // yet in `providers`, so the pre-kill can't reach it. A worktree-removing
         // delete must refuse rather than race git::remove_worktree against the
         // spawning provider.
         let (mut engine, _tmp) = test_engine();
@@ -7269,7 +7269,7 @@ mod tests {
         );
         // The project must be in the in-memory list.
         assert!(engine.projects.iter().any(|p| p.id == "p1"));
-        // The worker channel must be empty — no background worker was dispatched.
+        // The worker channel must be empty: no background worker was dispatched.
         assert!(
             engine
                 .worker_rx
@@ -7446,7 +7446,7 @@ mod tests {
     #[test]
     fn apply_delete_terminal_returns_view_with_none_label_when_terminal_missing() {
         let (mut engine, _tmp) = test_engine();
-        // Without a real PtyClient we can't construct a CompanionTerminal —
+        // Without a real PtyClient we can't construct a CompanionTerminal, so
         // exercise only the "not present" path here. The label-present
         // path is covered by existing App-level tests (do_delete_terminal
         // is called from the confirm-delete-terminal flow).
@@ -7467,7 +7467,7 @@ mod tests {
     // apply arm spawns a detached thread that calls
     // `crate::startup::open_path` (which shells out to xdg-open / `open`),
     // and even though we only care about the synchronous Status reaction,
-    // the spawned thread still fires the real system handler — producing a
+    // the spawned thread still fires the real system handler, producing a
     // desktop notification on dev machines and a flaky failure in CI. The
     // status-message formatting is trivial and exercised end-to-end by the
     // App-level startup-command-log open flow.
@@ -7511,8 +7511,8 @@ mod tests {
         let before = Instant::now();
         engine.spawn_pr_check_for_session("s1", crate::engine::PR_CHECK_MIN_INTERVAL);
 
-        // The timestamp must be recorded synchronously — before the worker
-        // thread is spawned — so a burst of triggers within one tick cannot
+        // The timestamp must be recorded synchronously, before the worker
+        // thread is spawned, so a burst of triggers within one tick cannot
         // all bypass the rate-limit. The exact Instant value isn't observable
         // across threads cleanly, so just verify an entry now exists and
         // that it is no older than the call site.
@@ -7861,10 +7861,10 @@ mod tests {
             EventReaction::Status(status) => assert_eq!(status.message, "already"),
             other => panic!("expected Status, got {}", reaction_kind(&other)),
         }
-        // The pre-existing in-flight key must still be present — the
+        // The pre-existing in-flight key must still be present: the
         // primitive's guard does not clear keys it did not insert.
         assert!(engine.is_in_flight(&InFlightKey::CreateAgent));
-        // No worker event should arrive — the job was never spawned.
+        // No worker event should arrive: the job was never spawned.
         assert!(engine.worker_rx.try_recv().is_err());
     }
 
@@ -7951,7 +7951,7 @@ mod tests {
         );
 
         // Routing through the normal completion-event handler is what
-        // actually clears the in-flight key — the primitive does not
+        // actually clears the in-flight key: the primitive does not
         // double-up on the cleanup path.
         let _ = engine.process_worker_event(event);
         assert!(!engine.is_in_flight(&InFlightKey::CreateAgent));
@@ -8190,7 +8190,7 @@ mod tests {
         // the one-shot ones: a panicking iteration must NOT kill the
         // long-running watcher. The body panics on iteration 0, returns
         // `Break` on iteration 1, and would return `Continue` thereafter.
-        // The test passes if iteration 1 runs at all — that is only possible
+        // The test passes if iteration 1 runs at all: that is only possible
         // if the panic on iteration 0 was caught and the loop continued.
         let (engine, _tmp) = test_engine();
         let counter = Arc::new(AtomicUsize::new(0));

@@ -121,7 +121,7 @@ pub enum Command {
         path: String,
     },
 
-    /// Unstage a single file. Same shape as `StageFile` — synchronous git
+    /// Unstage a single file. Same shape as `StageFile`: synchronous git
     /// call, `EventReaction::Nothing` on success, `Err` on failure.
     UnstageFile {
         worktree_path: PathBuf,
@@ -1115,7 +1115,7 @@ impl Engine {
         }
 
         let payload = crate::macros::macro_payload_bytes(&entry.text);
-        // Unified PTY lookup: providers first, then companion terminals — the
+        // Unified PTY lookup: providers first, then companion terminals, the
         // same order the web actor's `pty_for` uses.
         let client = self
             .providers
@@ -1979,7 +1979,7 @@ mod tests {
             engine.sessions.push(session);
         }
 
-        // Global reorder: interleave across project boundaries — x (p2) between the
+        // Global reorder: interleave across project boundaries, with x (p2) between the
         // two p1 agents. Impossible under the old project-grouped model; the whole
         // point of the flat model.
         engine
@@ -2011,7 +2011,7 @@ mod tests {
             engine.session_store.upsert_session(&session).unwrap();
             engine.sessions.push(session);
         }
-        // Only one of the two sessions — not the complete set.
+        // Only one of the two sessions, not the complete set.
         let err = engine
             .apply(Command::ReorderAgents {
                 session_ids: vec!["a".into()],
@@ -2604,8 +2604,8 @@ mod tests {
         // Despite the failed write, the macros are still active in memory.
         assert!(engine.config.macros.entries.contains_key("greet"));
 
-        // The on-disk file is byte-for-byte the original — not truncated, emptied,
-        // or partially overwritten — and still parses as valid config.
+        // The on-disk file is byte-for-byte the original (not truncated, emptied,
+        // or partially overwritten) and still parses as valid config.
         let on_disk = std::fs::read_to_string(&engine.paths.config_path).expect("read back");
         assert_eq!(
             on_disk, original,
@@ -2672,7 +2672,7 @@ mod tests {
 
     /// Block on the engine's worker channel for the next `ChangedFilesReady`
     /// event (the one-shot refresh worker sends exactly one), then feed it back
-    /// through `process_worker_event` so the engine adopts the computed lists —
+    /// through `process_worker_event` so the engine adopts the computed lists,
     /// exactly what the actor loop / TUI drain does. Panics if no such event
     /// arrives within a few seconds.
     fn drain_changed_files_refresh(engine: &mut Engine) {
@@ -2813,7 +2813,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
 
-        // Before the watch the engine carries empty lists and no watched id —
+        // Before the watch the engine carries empty lists and no watched id,
         // exactly what the web saw (the pane showed nothing).
         assert!(engine.staged_files.is_empty());
         assert!(engine.unstaged_files.is_empty());

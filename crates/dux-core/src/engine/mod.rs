@@ -314,13 +314,13 @@ pub struct Engine {
     pub companion_terminals: HashMap<String, CompanionTerminal>,
     /// Persisted **extra tabs** (secondary provider tabs), keyed by tab id with
     /// the owning `session_id` carried in the value (mirrors `companion_terminals`
-    /// so ownership resolves O(1) with no side index). The session-slot tab has no entry —
+    /// so ownership resolves O(1) with no side index). The session-slot tab has no entry:
     /// it is reached through the session's stored pointer (see `AgentSession::slot_tab_id`). Seeded
     /// from `session_store.load_extra_agent_tabs()` at construction.
     pub agent_tabs: HashMap<TabId, AgentTab>,
     /// Agent/terminal PTYs that have been SIGTERMed on an individual delete or
     /// close and are being given a grace period to exit before they are
-    /// force-killed (SIGKILL) — the non-blocking, per-PTY analogue of
+    /// force-killed (SIGKILL): the non-blocking, per-PTY analogue of
     /// `shutdown_ptys`. They live here (not dropped from their maps) because
     /// `PtyClient::drop` hard-kills; `reap_terminating_ptys`, called each engine
     /// tick on both surfaces, drops them once they exit or their deadline passes.
@@ -431,8 +431,8 @@ pub struct Engine {
     /// Session IDs whose worktree-removing delete has committed to tearing down
     /// but whose worktree has not yet been removed (the whole grace window from
     /// `begin_delete_session` through `WorktreeRemoveCompleted`). Unlike
-    /// `pending_deletions` — which is only set once the async removal worker is
-    /// actually dispatched (after the PTYs reap) — this is set synchronously the
+    /// `pending_deletions`, which is only set once the async removal worker is
+    /// actually dispatched (after the PTYs reap), this is set synchronously the
     /// moment teardown begins, so `create_tab`/`launch_agent` can refuse to spawn a
     /// fresh provider into a worktree that is about to be removed.
     pub closing_sessions: HashSet<String>,
@@ -534,8 +534,8 @@ pub struct Engine {
     /// cleared, so the maps never drift.
     pub pty_pointer: HashMap<String, PointerStamp>,
     /// Tabs (keyed by tab id) that have raised a "needs attention" signal that
-    /// has not yet been looked at. Memory-only runtime state, never persisted —
-    /// like `working`/`has_output`, it does not survive a restart, by tenet.
+    /// has not yet been looked at. Memory-only runtime state, never persisted.
+    /// Like `working`/`has_output`, it does not survive a restart, by tenet.
     /// Populated by [`Engine::poll_agent_signals`] (which suppresses a signal on
     /// a tab the user is engaged with) and cleared when the user looks at or
     /// tears down the tab. The sidebar rolls this up across an agent's tabs.
@@ -602,7 +602,7 @@ pub struct Engine {
     /// Err handler. Mutually exclusive, so the op is consumed once.
     pub pending_web_add_project_ops: HashMap<String, HandlerStatusOp<WebAddProjectOutcome>>,
     /// New-agent-from-PR lookup: the SUCCESS handoff (the lookup resolved, the
-    /// create dispatch's busy — keyed by the shared create op's opaque id — takes
+    /// create dispatch's busy, keyed by the shared create op's opaque id, takes
     /// over) is resolved in `drive_pr_lookup_followup` as a `Final::Clear`; the
     /// lookup FAILURE is resolved in `process_worker_event`'s `PullRequestResolved`
     /// Err handler.
@@ -664,7 +664,7 @@ pub struct Engine {
     /// `DispatchCreateAgentRequest` dispatch within the current `apply_wire`
     /// call, surfaced to the caller as [`crate::wire::WireCommandOutcome::created_op_id`].
     /// `apply_wire` clears this to `None` before dispatching and reads (takes) it
-    /// after, so the value reflects exactly this command's create — the engine
+    /// after, so the value reflects exactly this command's create. The engine
     /// actor is single-threaded, so there is no cross-command race. It lets a REST
     /// create handler correlate ITS exact new session via
     /// [`Engine::created_session_for_op`] instead of a racy "first id not in the
@@ -754,7 +754,7 @@ pub fn launch_outcome_final(o: &LaunchOutcome) -> Final {
 /// already-gone fallback). The resolver (declared at dispatch) maps this to the
 /// final user message, byte-identical to the pre-op web wording.
 pub enum WebDeleteOutcome {
-    /// Git removal succeeded and the session was still present — the
+    /// Git removal succeeded and the session was still present: the
     /// `FinishDeleteSession` cascade ran and produced this status message.
     Succeeded { message: String },
     /// Git removal succeeded but the session was already gone (e.g. its project
@@ -1125,7 +1125,7 @@ pub const PR_FOREGROUND_DEBOUNCE: Duration = Duration::from_secs(3);
 const PR_QUOTA_STATUS_KEY: &str = "pr-quota";
 
 /// How long to pause a host's PR checks after a hard `gh` failure (spawn error,
-/// timeout, or an unparseable response) — the case the quota-number backoff can't
+/// timeout, or an unparseable response), the case the quota-number backoff can't
 /// see. Short, since a transient network/`gh` error usually clears quickly.
 const PR_HARD_FAILURE_BACKOFF_SECS: u64 = 60;
 
@@ -1295,7 +1295,7 @@ impl Engine {
     /// Poll each PTY provider for recent data and update the per-agent activity
     /// timestamp used by the streaming/"working" indicator. `take_received_data`
     /// is a consuming read (and suppresses the post-resize redraw burst), so
-    /// this must be the only poll site — both the TUI run loop and the web
+    /// this must be the only poll site: both the TUI run loop and the web
     /// engine actor call this exactly once per tick, and they never run at the
     /// same time.
     pub fn poll_pty_activity(&mut self) {
@@ -1322,7 +1322,7 @@ impl Engine {
 
     /// Refresh the `foreground_cmd` of every companion terminal by probing its
     /// PTY for the currently-running foreground process (`tcgetpgrp` vs the
-    /// shell PID — see [`crate::pty::PtyClient::foreground_process_name`]).
+    /// shell PID, see [`crate::pty::PtyClient::foreground_process_name`]).
     /// Throttled internally by wall-clock: the probe runs at most once per
     /// [`FOREGROUND_REFRESH_INTERVAL`], so callers may invoke this every tick
     /// and any extra calls within the interval are cheap no-ops. Both the TUI
@@ -1358,7 +1358,7 @@ impl Engine {
     /// the streaming indicator for [`AGENT_INPUT_SUPPRESSION_WINDOW`] so the
     /// terminal echo of the user's own typing isn't mistaken for the agent
     /// working. Stamp this only for agent PTYs, never companion terminals, and
-    /// never for programmatic writes (macros, startup commands) — those should
+    /// never for programmatic writes (macros, startup commands): those should
     /// keep showing the agent as working.
     pub fn note_pty_input(&mut self, tab_id: &str) {
         self.pty_input.insert(tab_id.to_string(), Instant::now());
@@ -1732,7 +1732,7 @@ impl Engine {
     /// Whether ANY tab of the session (session-slot or extra) is currently
     /// streaming output. The any-tab rollup the sidebar row's "working" spinner
     /// uses, mirroring `session_needs_attention` and the viewmodel's `working`
-    /// field — so an agent whose non-slot tab is streaming still reads as working.
+    /// field, so an agent whose non-slot tab is streaming still reads as working.
     pub fn session_is_streaming(&self, session_id: &str) -> bool {
         self.any_tab(session_id, |tab_id| self.is_agent_streaming(tab_id))
     }
@@ -2776,7 +2776,7 @@ impl Engine {
     pub fn spawn_project_branch_status_checks(&mut self) {
         // Not guarded against re-spawn: each project's check is a one-shot
         // background job (post per-branch events, exit). Re-running on a
-        // flip-back is harmless and desirable — a fresh check reflects branch
+        // flip-back is harmless and desirable: a fresh check reflects branch
         // movement that happened while the other surface was active.
         //
         // Snapshot the project list before iterating: `spawn_background_worker`
@@ -2861,7 +2861,7 @@ impl Engine {
                         return LoopControl::Break;
                     }
                     if interval_secs.load(Ordering::Relaxed) != secs {
-                        // Interval retuned (incl. 0<->N) — restart the wait.
+                        // Interval retuned (incl. 0<->N): restart the wait.
                         return LoopControl::Continue;
                     }
                 }
@@ -2989,7 +2989,7 @@ impl Engine {
                 }
                 None => {
                     // Host is healthy again: clear its backoff so it is queried
-                    // normally. No "resumed" message — the Info-toned pause notice
+                    // normally. No "resumed" message: the Info-toned pause notice
                     // already auto-cleared, so a fresh toast now would be stale.
                     let mut map = shared.lock().unwrap_or_else(|e| e.into_inner());
                     map.remove(&sig.host);
@@ -3149,7 +3149,7 @@ impl Engine {
                 already_running_status: None,
                 panic_event: Some(Box::new(|_reason| {
                     // No error variant exists for resource stats; an empty
-                    // refresh is the most defensible signal — the in-flight
+                    // refresh is the most defensible signal: the in-flight
                     // key clears and the next refresh runs normally.
                     WorkerEvent::ResourceStatsReady(Vec::new(), false)
                 })),
@@ -3595,7 +3595,7 @@ impl Engine {
     /// worker never started (a synchronous thread-spawn failure). Normally
     /// `BranchRenameCompleted` clears this state and reverts the title on both
     /// success and failure, but that event only fires if the worker actually
-    /// ran — so on a spawn failure the caller must unwind here or the Busy
+    /// ran, so on a spawn failure the caller must unwind here or the Busy
     /// hangs forever, `rename_expected` is orphaned, and the optimistic title
     /// is never reverted (permanently deferring drift detection). Removes the
     /// expected-branch stash, clears the in-flight marker, and restores
@@ -4329,7 +4329,7 @@ impl Engine {
 
     /// Provider currently driving the session's live PTY, if any. After an
     /// in-place provider swap while the agent is still running, this returns
-    /// the *original* provider until the user exits and relaunches — so the
+    /// the *original* provider until the user exits and relaunches, so the
     /// pane title doesn't lie about what's actually on screen.
     pub fn running_provider_for(&self, session: &AgentSession) -> ProviderKind {
         // The pin map is keyed by TAB id, so the agent's own pane reads the pin
@@ -4374,7 +4374,7 @@ impl Engine {
     /// The provider whose *live* conversation a tab currently owns, for
     /// resume-collision purposes. A retarget-while-running tab keeps owning its
     /// pinned (still-running) provider until it exits; otherwise it owns its
-    /// configured provider — the session-slot tab's is `session.provider`, an
+    /// configured provider: the session-slot tab's is `session.provider`, an
     /// extra tab's is its `agent_tabs` row provider.
     pub fn tab_running_provider(&self, session: &AgentSession, tab_id: &TabIdRef) -> ProviderKind {
         if let Some(pinned) = self.running_provider_pins.get(tab_id) {
@@ -4474,7 +4474,7 @@ impl Engine {
     }
 
     /// Every runtime-map key owned by a session: its session-slot tab plus every
-    /// extra tab id. The single source of truth for teardown fan-out — a
+    /// extra tab id. The single source of truth for teardown fan-out: a
     /// full-session teardown must clear all of these, not just the slot tab.
     ///
     /// The slot id comes from the session's stored pointer, and the extras from
@@ -4596,7 +4596,7 @@ impl Engine {
 
         // Pin the still-running provider so UI labels stay truthful until the
         // user exits and relaunches the agent. Only set on the first
-        // swap-while-running — later swaps don't change what's spawned.
+        // swap-while-running: later swaps don't change what's spawned.
         if running {
             self.running_provider_pins
                 .entry(updated.slot_tab_id().to_owned())
@@ -4622,7 +4622,7 @@ impl Engine {
 
     /// Create a new extra tab for `session_id` running `provider`, persist its
     /// row, and dispatch a FRESH launch (extra tabs never resume). Returns the
-    /// new tab id synchronously; the spawn itself is asynchronous — a spawn
+    /// new tab id synchronously; the spawn itself is asynchronous, so a spawn
     /// failure lands in `process_agent_launch_failed`'s `Tab` arm, which removes
     /// this just-created row (it is `is_fresh`). The per-agent cap is enforced
     /// here, in one synchronous call (the single-threaded engine makes the
@@ -4694,7 +4694,7 @@ impl Engine {
         // The launch itself runs on a worker (ready/failed arrives later), but the
         // dispatch is synchronous. If the worker thread fails to even start (e.g.
         // near an OS thread limit), no `WorkerEvent` is ever posted, so
-        // `process_agent_launch_failed`'s `Tab` cleanup never runs — leaving this
+        // `process_agent_launch_failed`'s `Tab` cleanup never runs, leaving this
         // just-inserted row a permanent ghost. Detect that synchronous failure and
         // clean up the fresh row here so the caller gets a real error instead.
         let reaction = self.apply(Command::DispatchAgentLaunch {
@@ -4733,7 +4733,7 @@ impl Engine {
     }
 
     /// Remove an extra tab's row (memory + session store) for a tab whose PTY
-    /// is already gone — the clean-exit auto-close used by both surfaces' exit
+    /// is already gone, the clean-exit auto-close used by both surfaces' exit
     /// paths (see `clean_exit_closes_tab_row`). Returns `true` when a row was
     /// actually removed. A store failure is logged, not fatal: the in-memory
     /// removal already happened and the stale row is re-reconciled on the next
@@ -4813,8 +4813,8 @@ impl Engine {
     }
 
     /// The tab that takes the slot when the tab currently in it is closed: the
-    /// FIRST extra tab in strip order — `sort_order`, then `created_at`, then
-    /// `id`, the same ordering the strip and [`Self::first_live_tab`] render —
+    /// FIRST extra tab in strip order (`sort_order`, then `created_at`, then
+    /// `id`, the same ordering the strip and [`Self::first_live_tab`] render),
     /// so the successor is the pill next to the one going away. Live or dormant
     /// makes no difference; a tab is a tab.
     ///
@@ -4938,7 +4938,7 @@ impl Engine {
         // Graceful PTY teardown (SIGTERM into the terminating set), then clear
         // every runtime map this tab keyed via the shared `clear_tab_runtime`
         // (begin_close_provider only drops `providers`, which clear_tab_runtime
-        // then finds already gone — a harmless no-op).
+        // then finds already gone, a harmless no-op).
         let label = self
             .sessions
             .iter()
@@ -5002,7 +5002,7 @@ impl Engine {
         let running = self.providers.contains_key(tab_id_ref);
         // Persist first: read the previous value read-only and verify ownership,
         // write the DB, and only mutate the in-memory row after the write
-        // succeeds — so a persistence failure leaves memory and SQLite in sync
+        // succeeds, so a persistence failure leaves memory and SQLite in sync
         // (mirroring `create_tab`/`close_tab`).
         let previous = self
             .agent_tabs
@@ -5046,7 +5046,7 @@ impl Engine {
     /// Remember (or clear) the tab the user last focused on `session_id`.
     /// Normalizes `tab_id` to `None` when it is absent, equal to `session_id`
     /// (the session-slot tab, represented as absence), or does not name a live
-    /// extra tab belonging to this session — so a stale/foreign id can never be
+    /// extra tab belonging to this session, so a stale/foreign id can never be
     /// persisted. DB-first (mirroring `ToggleAgentAutoReopen`): the storage
     /// write happens before the in-memory session is updated, so a persistence
     /// failure leaves memory and SQLite in sync.
@@ -6059,7 +6059,7 @@ mod tests {
 
         // Fresh output and no input: the terminal is working. Terminals never
         // emit OSC progress, so is_agent_streaming reduces to fresh, non-echo
-        // output — no terminal special-casing is needed.
+        // output. No terminal special-casing is needed.
         engine.pty_activity.insert(tid.to_string(), Instant::now());
         assert!(
             engine.is_agent_streaming(tid),
@@ -6131,7 +6131,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
 
         // Output is fresh, but the last keystroke is older than the suppression
-        // window — genuine ongoing output must read as streaming again.
+        // window: genuine ongoing output must read as streaming again.
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.pty_input.insert(
             "s1".to_string(),
@@ -6879,7 +6879,7 @@ mod tests {
         // requires a live PTY master fd to call `tcgetpgrp`. `cat` is spawned
         // directly (no shell), so tcgetpgrp == the child pid and the foreground
         // probe returns None (shell-is-foreground). We assert on the THROTTLE,
-        // not on the probe's value — faking tcgetpgrp is out of scope.
+        // not on the probe's value: faking tcgetpgrp is out of scope.
         let worktree = tempfile::tempdir().expect("worktree dir");
         engine.projects.push(sample_project(
             "p1",
@@ -7606,7 +7606,7 @@ mod tests {
 
         // Swap in a working writer pointed at the real config path and fire an
         // unrelated eager save (PersistGlobalEnv). This clones self.config and
-        // writes it — the ghost must NOT appear in the resulting file.
+        // writes it: the ghost must NOT appear in the resulting file.
         let config_path = tmp.path().join("config.toml");
         engine.config_writer = crate::config_queue::ConfigWriteQueue::new(config_path.clone());
         let mut env = std::collections::BTreeMap::new();
@@ -7653,7 +7653,7 @@ mod tests {
     fn config_mutating_commands_defer_while_reloading() {
         let (mut engine, _tmp) = test_engine();
         // Drive a REAL reload so the barrier is opened by the engine itself
-        // (quiesce + `reloading`), not hand-set — a missing-quiesce or
+        // (quiesce + `reloading`), not hand-set: a missing-quiesce or
         // wiring regression would then be visible. The surface's reload
         // posts immediately, but the engine only drains on the next
         // `process_worker_event`, so the command dispatched here still defers.
@@ -7863,7 +7863,7 @@ mod tests {
         assert!(engine.reloading);
         assert!(engine.reload_guard.is_some());
 
-        // A second reload while one is in flight must be refused — it must NOT
+        // A second reload while one is in flight must be refused: it must NOT
         // drop the live guard or spawn a second worker.
         let reaction = engine.apply(Command::ReloadConfig).expect("second reload");
         match reaction {
@@ -7912,7 +7912,7 @@ mod tests {
         // The reload completion guard guarantees a `ConfigReloadReady` is
         // posted even when the reload worker drops without calling `complete`.
         // Build the guard and drop it without completing (the panic/early-return
-        // shape) — it must post an Err completion.
+        // shape): it must post an Err completion.
         let (mut engine, _tmp) = test_engine();
         engine.apply(Command::ReloadConfig).expect("reload");
         assert!(engine.reloading);
@@ -10420,7 +10420,7 @@ mod tab_ops_tests {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let session = engine.sessions[0].clone();
-        // Note: NO agent_tabs row for "tab-1" — simulates a close that raced the
+        // Note: NO agent_tabs row for "tab-1": simulates a close that raced the
         // in-flight launch.
         let request = engine.build_tab_launch_request(
             TabId::new("tab-1"),

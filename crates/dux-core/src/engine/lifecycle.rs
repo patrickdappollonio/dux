@@ -120,7 +120,7 @@ pub enum PrunedPtyKind {
 }
 
 /// A request to remove an agent's worktree, deferred until that agent's PTY has
-/// actually exited — so files are never deleted out from under a still-running
+/// actually exited, so files are never deleted out from under a still-running
 /// process (which would also risk git-lock failures). Carried on the agent's
 /// [`TerminatingPty`] and dispatched by `reap_terminating_ptys` once the PTY is
 /// reaped. `None` for terminals and for keep-worktree deletes.
@@ -194,7 +194,7 @@ pub struct PrunedPty {
     /// session-owned companion terminal, `Project(pid)` for a project terminal,
     /// `None` only for an orphan whose owner could not be resolved.
     pub owner: Option<TerminalOwner>,
-    /// True when this exit detached the agent — i.e. it was the agent's LAST live
+    /// True when this exit detached the agent, i.e. it was the agent's LAST live
     /// tab, so the session is now Detached. Surfaces show the workspace-wide
     /// "Agent exited" notice for this; a tab exit that leaves siblings running
     /// (`false`) gets a quiet, scoped "tab exited" notice instead. Always `false`
@@ -218,7 +218,7 @@ pub struct PrunedPty {
     /// Always `None` for a companion terminal (its exit needs no status copy).
     pub exit_success: Option<bool>,
     /// True when the exited agent produced only minimal output (no scrollback,
-    /// few visible lines) — the "resume printed a short error and quit" shape
+    /// few visible lines), the "resume printed a short error and quit" shape
     /// the TUI embeds in its exit message. Captured at reap time, before
     /// `clear_tab_runtime` drops the client. Always `false` for a terminal.
     pub is_minimal: bool,
@@ -277,7 +277,7 @@ pub fn clean_exit_closes_tab_row(
 }
 
 /// A deferred worktree removal that must wait for a WHOLE GROUP of an agent's
-/// tab PTYs (Main plus every extra tab) to reap before it fires — closing the
+/// tab PTYs (Main plus every extra tab) to reap before it fires, closing the
 /// gap where removing the worktree after only the first tab exits could delete
 /// files out from under a still-running sibling tab (a git-lock race). Each of
 /// the session's terminating tab entries is listed in `pending_ids`;
@@ -301,7 +301,7 @@ pub struct ShutdownReport {
     pub terminals_exited: usize,
     pub elapsed: std::time::Duration,
     /// True when at least one child had to be force-killed (SIGKILL) because it
-    /// had not exited by the time the grace window was up — equivalently,
+    /// had not exited by the time the grace window was up. Equivalently,
     /// `agents_exited < agents_total || terminals_exited < terminals_total`. With
     /// a grace of `0` the wait is skipped, so any not-yet-exited child sets this.
     pub timed_out: bool,
@@ -356,7 +356,7 @@ fn force_survivors_and_count_exited<'a>(clients: impl Iterator<Item = &'a mut Pt
     exited
 }
 
-/// `"1 agent"` / `"2 agents"` — pluralize `word` for `n`.
+/// `"1 agent"` / `"2 agents"`: pluralize `word` for `n`.
 fn pluralize(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
@@ -408,7 +408,7 @@ impl Engine {
     /// Detect agent providers and companion terminals whose child PTY has exited,
     /// remove them from the engine, mark exited agents' sessions `Detached`, and
     /// return what was pruned (so callers can surface a status). Pure engine
-    /// state mutation — no UI, no network. Safe to call every tick.
+    /// state mutation: no UI, no network. Safe to call every tick.
     pub fn prune_exited_ptys(&mut self) -> Vec<PrunedPty> {
         let mut pruned = Vec::new();
 
@@ -830,7 +830,7 @@ impl Engine {
                 continue;
             }
             // Reaped: hand back any single-PTY deferred worktree removal, then
-            // drop the client (its `Drop` SIGKILL is a benign no-op now — already
+            // drop the client (its `Drop` SIGKILL is a benign no-op now, already
             // gone). Group removals are resolved below once every member reaps.
             reaped_ids.push(entry.id.clone());
             if let Some(req) = entry.worktree_removal.take() {
@@ -1082,7 +1082,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// Spawn a real `cat`-backed PtyClient in the given working directory.
-    /// `cat` echoes stdin and exits 0 on EOF, and exits on SIGTERM — making it
+    /// `cat` echoes stdin and exits 0 on EOF, and exits on SIGTERM, making it
     /// a safe stand-in for both clean-exit and shutdown tests.
     fn spawn_cat(cwd: &Path) -> PtyClient {
         PtyClient::spawn_with_env("cat", &[], cwd, 24, 80, 1000, &[]).expect("spawn cat")
@@ -1090,7 +1090,7 @@ mod tests {
 
     /// A clean exit (code 0) of an EXTRA tab is the user deliberately ending
     /// that conversation (e.g. typing /exit): prune closes the tab's row too,
-    /// so no dead pill lingers in the strip. Nothing of value is lost — the
+    /// so no dead pill lingers in the strip. Nothing of value is lost: the
     /// provider's conversation history lives in the worktree, not the row. A
     /// non-zero exit keeps the row: the dormant relaunch screen is the
     /// crash-diagnosis surface.
@@ -2203,7 +2203,7 @@ mod tests {
             .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
-        // `cat` echoes stdin and exits on EOF — a safe stand-in terminal.
+        // `cat` echoes stdin and exits on EOF: a safe stand-in terminal.
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
 
@@ -2271,7 +2271,7 @@ mod tests {
         // A clean-exiting agent provider (cat exits 0 on EOF).
         let client = spawn_cat(worktree.path());
         engine.providers.insert(TabId::new("s1-slot"), client);
-        // The activity and input stamps must die with the provider — a
+        // The activity and input stamps must die with the provider: a
         // long-running server would otherwise leak one entry per exited agent.
         engine
             .pty_activity
@@ -2816,7 +2816,7 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        // A provider that does not exit on its own — it must be SIGTERMed.
+        // A provider that does not exit on its own: it must be SIGTERMed.
         let client = spawn_cat(worktree.path());
         engine.providers.insert(TabId::new("s1-slot"), client);
 
@@ -2870,8 +2870,8 @@ mod tests {
     /// SIGHUP, which `terminate()` sends back to back) so it must be SIGKILLed,
     /// and never exits on its own. The `trap` makes the shell ignore both; the
     /// `echo` then emits a marker AFTER the trap is installed, so a caller can
-    /// poll `has_output()` to know the trap is live before signalling —
-    /// otherwise a signal that lands during shell startup (before `trap` runs)
+    /// poll `has_output()` to know the trap is live before signalling.
+    /// Otherwise a signal that lands during shell startup (before `trap` runs)
     /// would kill it by default and the test would not exercise the force-kill
     /// path. The busy loop keeps it alive.
     fn spawn_sigterm_ignorer(cwd: &Path) -> PtyClient {
@@ -3806,7 +3806,7 @@ mod tests {
         assert_eq!(req.managed.worktree_path, worktree.path().to_string_lossy());
 
         // Once the agent exits (SIGTERM), the reaper hands the removal back to be
-        // dispatched — never before.
+        // dispatched, never before.
         let deadline = Instant::now() + Duration::from_secs(3);
         let removals = loop {
             let r = engine.reap_terminating_ptys();
@@ -3844,7 +3844,7 @@ mod tests {
             BeginDeleteSessionOutcome::AsyncStarted { .. }
         ));
         // Nothing to reap (no PTY), and the removal was dispatched right away
-        // rather than lost — the in-flight guard proves the worker was spawned.
+        // rather than lost: the in-flight guard proves the worker was spawned.
         assert!(engine.terminating_ptys.is_empty());
         assert!(
             engine.pending_deletions.contains("s1"),
@@ -3870,7 +3870,7 @@ mod tests {
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
         // The session-slot tab is live (keyed by its own tab id) AND an extra tab
         // of s1 (agent_tabs row + a tab-keyed provider). Only the extra tab exits,
-        // so the agent must stay Active — no tab is privileged, but a live sibling
+        // so the agent must stay Active: no tab is privileged, but a live sibling
         // keeps the session up.
         engine
             .providers
@@ -4069,7 +4069,7 @@ mod tests {
             BeginDeleteSessionOutcome::AsyncStarted { .. }
         ));
         // Every live tab PTY (Main + Support) is now terminating, and the worktree
-        // removal is parked on ONE group barrier over both — not on any single
+        // removal is parked on ONE group barrier over both, not on any single
         // entry (which would fire when the first, not the last, tab reaps).
         assert_eq!(engine.terminating_ptys.len(), 2);
         assert!(
@@ -4151,7 +4151,7 @@ mod tests {
 
         // Two terminating tab PTYs under one group barrier. The "main" cat is
         // SIGTERMed (it will reap); the "support" cat is left running with a far
-        // deadline so it stays until we expire it by hand — a deterministic stand-in
+        // deadline so it stays until we expire it by hand, a deterministic stand-in
         // for a sibling tab that outlives the first.
         let main = spawn_cat(worktree.path());
         main.terminate();

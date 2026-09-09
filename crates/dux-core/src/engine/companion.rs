@@ -790,7 +790,7 @@ mod tests {
             .worktree_path = worktree.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
-        // `cat` is always on PATH and simply echoes — a safe stand-in terminal.
+        // `cat` is always on PATH and simply echoes: a safe stand-in terminal.
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
 
