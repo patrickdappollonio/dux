@@ -762,15 +762,6 @@ impl EngineHandle {
         self.workspace_rx.clone()
     }
 
-    /// Like [`emit_status`] but attaches a correlation key so a later success,
-    /// error, or clear on the same key replaces or dismisses the same toast.
-    /// Prefer this over `emit_status` for any operation that has a keyed lifecycle
-    /// (a "Working…" busy that should be replaced by an info on success and
-    /// dismissed by `StatusCleared`).
-    pub fn emit_keyed_status(&self, key: impl Into<String>, status: WireStatus) {
-        self.emit_status(status.with_key(key));
-    }
-
     /// Publish a status from a non-engine producer (the changed-files
     /// `ChangesService`) THROUGH the shared status controller — not directly onto
     /// the broadcast — so it auto-clears on the same tone-aware policy as every
