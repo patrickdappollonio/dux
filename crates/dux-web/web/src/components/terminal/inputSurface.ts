@@ -43,6 +43,33 @@ export type TypingSurfaceRefs = {
   termRef: { current: Terminal | null }
 }
 
+// Hand a full-screen app one page of scrolling in the shape it asked for: wheel
+// events while it tracks the mouse, the PgUp/PgDn key otherwise. The alt-screen
+// has no scrollback of its own, so this is what a page key means there.
+export function forwardPageToApp(
+  term: Terminal,
+  pty: PtySocket | null,
+  up: boolean,
+): void {
+  if (term.modes.mouseTrackingMode === "none") {
+    pty?.sendInput(new TextEncoder().encode(pageKeySeq(up ? "up" : "down")))
+    return
+  }
+  // Replayed as real wheel events so xterm encodes them the way the app asked
+  // (see `lib/termmouse.ts`); with no finger to take a point from, the
+  // terminal's centre stands in for one.
+  const element = term.element
+  if (!element) return
+  const lines = Math.max(1, term.rows - 1)
+  const { clientX, clientY } = rectCenter(element.getBoundingClientRect())
+  dispatchMouseReplay(
+    element,
+    wheelReplaySteps(up ? -lines : lines),
+    clientX,
+    clientY,
+  )
+}
+
 // Where typing focus belongs right now: the compose textarea while the compose
 // bar is up, xterm's hidden textarea otherwise.
 export function focusTypingSurfaceIn(refs: TypingSurfaceRefs): void {
@@ -347,27 +374,7 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
     // Forwarding is input, so it is owner-gated; a watcher falls through to the
     // local scroll, which is a no-op on the alt-screen.
     if (altScreen && ownership.read()) {
-      if (term.modes.mouseTrackingMode !== "none") {
-        // Replayed as real wheel events so xterm encodes them the way the app
-        // asked (see `lib/termmouse.ts`); with no finger to take a point from,
-        // the terminal's centre stands in for one.
-        const lines = Math.max(1, term.rows - 1)
-        const element = term.element
-        if (element) {
-          const { clientX, clientY } = rectCenter(
-            element.getBoundingClientRect(),
-          )
-          dispatchMouseReplay(
-            element,
-            wheelReplaySteps(up ? -lines : lines),
-            clientX,
-            clientY,
-          )
-        }
-      } else {
-        // Keyboard-only full-screen app: send the actual PgUp/PgDn key.
-        ptyRef.current?.sendInput(encoder.encode(pageKeySeq(up ? "up" : "down")))
-      }
+      forwardPageToApp(term, ptyRef.current, up)
     } else {
       term.scrollPages(up ? -1 : 1)
     }

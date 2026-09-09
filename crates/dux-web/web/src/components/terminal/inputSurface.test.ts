@@ -12,6 +12,7 @@ import type { OwnershipVerdict } from "./channels"
 import type { LiveSettings, TerminalLiveSettings } from "./liveValues"
 import {
   focusTypingSurfaceIn,
+  forwardPageToApp,
   nextTypingFocus,
   typingFocusAllowed,
   typingSurfaceHasFocusIn,
@@ -478,6 +479,60 @@ describe("the right-click paste", () => {
     })
 
     expect(term.pastes).toEqual(["from the clipboard"])
+  })
+})
+
+describe("forwardPageToApp", () => {
+  const call = (term: TermFake, up: boolean, sent: string[] = []) => {
+    forwardPageToApp(
+      term as unknown as Terminal,
+      { isOpen: true, sendInput: (b: Uint8Array) => sent.push(decode(b)) } as
+        unknown as PtySocket,
+      up,
+    )
+    return sent
+  }
+
+  it("sends the page key when the app does not track the mouse", () => {
+    const term = new TermFake()
+    expect(call(term, true)).toEqual([`${ESC}[5~`])
+    expect(call(term, false)).toEqual([`${ESC}[6~`])
+  })
+
+  it("replays one wheel notch per line, signed by direction", () => {
+    const term = new TermFake()
+    term.modes.mouseTrackingMode = "any"
+    const wheels: number[] = []
+    term.element.addEventListener("wheel", (e) => {
+      wheels.push((e as WheelEvent).deltaY)
+    })
+
+    const sent = call(term, false)
+
+    expect(wheels).toEqual(Array(term.rows - 1).fill(1))
+    expect(sent).toEqual([])
+  })
+
+  it("scrolls at least one line on a one-row terminal", () => {
+    const term = new TermFake()
+    term.modes.mouseTrackingMode = "any"
+    term.rows = 1
+    let wheels = 0
+    term.element.addEventListener("wheel", () => {
+      wheels++
+    })
+
+    call(term, true)
+
+    expect(wheels).toBe(1)
+  })
+
+  it("does nothing for an unopened terminal with no element", () => {
+    const term = new TermFake()
+    term.modes.mouseTrackingMode = "any"
+    term.element = undefined as unknown as HTMLDivElement
+
+    expect(() => call(term, true)).not.toThrow()
   })
 })
 
