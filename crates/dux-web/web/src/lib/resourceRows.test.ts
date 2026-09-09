@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { taskManagerRows, taskManagerSummary } from "./resourceRows"
+import { agentTabRows, taskManagerRows, taskManagerSummary } from "./resourceRows"
 import type { ResourceStatsView } from "./resourcesApi"
 import type { AgentTabView, ProjectView, SessionView, TerminalView } from "./types"
 
@@ -502,5 +502,58 @@ describe("taskManagerSummary", () => {
     const sessions = [session({ id: "s1" })]
     const rows = taskManagerRows(sessions, [], [], [])
     expect(taskManagerSummary(rows)).toBe("1 running")
+  })
+})
+
+describe("agentTabRows", () => {
+  const noStats = new Map<string, ResourceStatsView>()
+
+  it("emits no rows for an agent that is not active", () => {
+    expect(agentTabRows(session({ id: "s1", status: "detached" }), noStats)).toEqual([])
+  })
+
+  it("leads with the slot tab whatever order it carries", () => {
+    const s = session({
+      id: "s1",
+      slot_tab_id: "t2",
+      tabs: [tab({ id: "t1", order: 1 }), tab({ id: "t2", order: 9 })],
+    })
+    expect(agentTabRows(s, noStats).map((r) => r.key)).toEqual(["tab:t2", "tab:t1"])
+  })
+
+  it("names the slot tab for the agent and an extra tab for its provider", () => {
+    const s = session({
+      id: "s1",
+      slot_tab_id: "t1",
+      tabs: [tab({ id: "t1" }), tab({ id: "t2", provider: "codex", order: 1 })],
+    })
+    const rows = agentTabRows(s, noStats)
+    expect(rows[0]).toMatchObject({ name: "feat", detail: "claude", nested: false })
+    expect(rows[1]).toMatchObject({ name: "codex", detail: null, nested: true })
+  })
+
+  it("numbers same-provider extra tabs so their Stop labels differ", () => {
+    const s = session({
+      id: "s1",
+      slot_tab_id: "t1",
+      tabs: [tab({ id: "t1" }), tab({ id: "t2", order: 1 }), tab({ id: "t3", order: 2 })],
+    })
+    expect(agentTabRows(s, noStats).map((r) => r.stopLabel)).toEqual([
+      "Stop feat",
+      "Stop claude tab 1 in feat",
+      "Stop claude tab 2 in feat",
+    ])
+  })
+
+  it("joins the sample to a tab by its id and leaves an unsampled tab null", () => {
+    const s = session({
+      id: "s1",
+      slot_tab_id: "t1",
+      tabs: [tab({ id: "t1" }), tab({ id: "t2", order: 1 })],
+    })
+    const sampled = stat({ id: "t1", cpu_percent: 4 })
+    const rows = agentTabRows(s, new Map([["t1", sampled]]))
+    expect(rows[0].stats).toBe(sampled)
+    expect(rows[1].stats).toBeNull()
   })
 })

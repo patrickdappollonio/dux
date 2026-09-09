@@ -152,52 +152,7 @@ export function taskManagerRows(
   })
 
   for (const session of sessions) {
-    const label = sessionLabel(session)
-
-    // Only agent TABS gate on liveness: a detached/exited agent's tabs have no
-    // live PTY, so they are not a running task (matching the modal this
-    // replaces). This gate must NOT reach the terminals loop below.
-    if (session.status === "active") {
-      // The session-slot tab leads the group; extra tabs nest under it in
-      // creation order. `sort_order` is append-only, so `order` is a stable
-      // sort key.
-      const tabs = [...session.tabs].sort((a, b) => {
-        if (isFirstTab(session, a.id)) return -1
-        if (isFirstTab(session, b.id)) return 1
-        return a.order - b.order
-      })
-
-      // 1-based position among this session's EXTRA tabs, in the same stable
-      // order, so two same-provider tabs never share a Stop label.
-      let nestedIndex = 0
-
-      for (const tab of tabs) {
-        const isSlot = isFirstTab(session, tab.id)
-        if (!isSlot) nestedIndex += 1
-        rows.push({
-          key: `tab:${tab.id}`,
-          kind: "agent",
-          // The slot tab carries the agent's identity; an extra tab is
-          // identified by the provider running in it.
-          name: isSlot ? label : tab.provider,
-          detail: isSlot ? tab.provider : null,
-          nested: !isSlot,
-          // A dormant tab is still actionable, so it keeps its Stop control.
-          // WHICH act that is rides on `nested`, which `handleStop` reads
-          // rather than asking again: a first tab STOPS the agent, an extra tab
-          // is closed, because a process monitor's Stop ends a process rather
-          // than deleting the row it is showing numbers for.
-          stoppable: true,
-          stopLabel: isSlot
-            ? `Stop ${label}`
-            : `Stop ${tab.provider} tab ${nestedIndex} in ${label}`,
-          sessionId: session.id,
-          projectId: null,
-          targetId: tab.id,
-          stats: byId.get(tab.id) ?? null,
-        })
-      }
-    }
+    rows.push(...agentTabRows(session, byId))
 
     // Never move this inside the `status === "active"` gate: detaching an agent
     // DELIBERATELY leaves its terminals running, and every terminal in the
@@ -238,6 +193,57 @@ export function taskManagerRows(
   })
 
   return rows
+}
+
+// One agent's tab rows: the session-slot tab, then its extra tabs nested under
+// it in creation order.
+//
+// Only agent TABS gate on liveness: a detached/exited agent's tabs have no live
+// PTY, so they are not a running task (matching the modal this replaces). The
+// gate must NOT reach that agent's terminals, which the caller emits.
+export function agentTabRows(
+  session: SessionView,
+  byId: ReadonlyMap<string, ResourceStatsView>,
+): TaskRow[] {
+  if (session.status !== "active") return []
+  const label = sessionLabel(session)
+  // `sort_order` is append-only, so `order` is a stable sort key.
+  const tabs = [...session.tabs].sort((a, b) => {
+    if (isFirstTab(session, a.id)) return -1
+    if (isFirstTab(session, b.id)) return 1
+    return a.order - b.order
+  })
+
+  // 1-based position among this session's EXTRA tabs, in the same stable order,
+  // so two same-provider tabs never share a Stop label.
+  let nestedIndex = 0
+
+  return tabs.map((tab) => {
+    const isSlot = isFirstTab(session, tab.id)
+    if (!isSlot) nestedIndex += 1
+    return {
+      key: `tab:${tab.id}`,
+      kind: "agent" as const,
+      // The slot tab carries the agent's identity; an extra tab is identified
+      // by the provider running in it.
+      name: isSlot ? label : tab.provider,
+      detail: isSlot ? tab.provider : null,
+      nested: !isSlot,
+      // A dormant tab is still actionable, so it keeps its Stop control. WHICH
+      // act that is rides on `nested`, which `handleStop` reads rather than
+      // asking again: a first tab STOPS the agent, an extra tab is closed,
+      // because a process monitor's Stop ends a process rather than deleting
+      // the row it is showing numbers for.
+      stoppable: true,
+      stopLabel: isSlot
+        ? `Stop ${label}`
+        : `Stop ${tab.provider} tab ${nestedIndex} in ${label}`,
+      sessionId: session.id,
+      projectId: null,
+      targetId: tab.id,
+      stats: byId.get(tab.id) ?? null,
+    }
+  })
 }
 
 // Whether the Task Manager has anything to stop. The dux and TOTAL rows always
