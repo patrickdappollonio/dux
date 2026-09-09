@@ -1,24 +1,18 @@
-//! WHY A TAB'S LAST RUN ENDED, kept so the dormant card can say it.
+//! Why a tab's last run ended, kept so the dormant card can say it rather than
+//! only "something went wrong". The case this exists for is a provider that
+//! printed the answer on its way out, such as `codex resume --last` exiting 1 in
+//! a fifth of a second because the same conversation is open in a companion
+//! terminal.
 //!
-//! A dormant tab whose last run ended badly used to be one boolean, and a
-//! boolean can only ever produce one sentence: "something went wrong". The real
-//! case this exists for is a provider that printed the answer on its way out
-//! (`codex resume --last` exiting 1 in a fifth of a second because the same
-//! conversation is open in a companion terminal), where the user is one line of
-//! output away from knowing what to do and dux threw that line away.
-//!
-//! So the engine records a VERDICT instead: how the run ended, when, and the
-//! last lines it had on screen. The lifetime is the boolean's, unchanged:
-//! memory-only, never persisted, cleared when a launch is dispatched for the
-//! tab, and forgotten with the row. A DELIBERATE teardown clears it too, through
-//! `Engine::clear_tab_runtime`, because after a stop the tab deserves a clean
-//! slate; the one caller that must not lose it is the prune, which records the
-//! verdict AFTER that teardown for exactly that reason.
+//! The engine records a verdict: how the run ended, when, and the last lines it
+//! had on screen. Memory-only, never persisted, cleared when a launch is
+//! dispatched for the tab, and forgotten with the row. A deliberate teardown
+//! clears it too, through `Engine::clear_tab_runtime`, so the prune records its
+//! verdict after that teardown.
 //!
 //! The prose lives here rather than in either surface because both cards say it
 //! in the same words; the browser ports [`humanize_age_ago`] and
-//! [`ending_sentence`] rather than inventing a second wording, and its own unit
-//! tests pin the port.
+//! [`ending_sentence`] and pins the port in its own tests.
 
 use std::time::Instant;
 
@@ -116,7 +110,7 @@ impl TabRunVerdict {
     }
 }
 
-/// The LAST [`VERDICT_EXCERPT_MAX_LINES`] non-blank lines of a run's visible
+/// The last [`VERDICT_EXCERPT_MAX_LINES`] non-blank lines of a run's visible
 /// output, each cut to [`VERDICT_EXCERPT_MAX_CHARS`] characters.
 ///
 /// The tail rather than the head: a CLI that fails says so on its way out, and
@@ -161,10 +155,10 @@ pub fn humanize_age_ago(seconds: u64) -> String {
 
 /// A duration in words, for a sentence: "five seconds", "12 seconds".
 ///
-/// The rapid-exit window is a CONSTANT, and a sentence that spells it out by
+/// The rapid-exit window is a constant, and a sentence that spells it out by
 /// hand goes quietly wrong the day somebody tunes it. Small numbers are spelled
 /// because that is how the rest of dux's prose reads; past ten a digit is
-/// clearer than a word nobody expects to read.
+/// clearer.
 fn spell_seconds(seconds: u64) -> String {
     const WORDS: [&str; 11] = [
         "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",

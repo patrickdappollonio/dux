@@ -5,7 +5,7 @@
 //!
 //! The buffer is intentionally lossy: it keeps only the most recent
 //! [`ACTIVITY_CAP`] events and drops the oldest. There is deliberately no
-//! scrollback — the status screen shows a fixed tail.
+//! scrollback, because the status screen shows a fixed tail.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -72,13 +72,12 @@ impl ActivityRing {
     }
 
     /// Append an event, dropping the oldest if the buffer is at capacity, then
-    /// bump the generation — all while holding the lock so a concurrent
-    /// [`Self::snapshot`] can never observe the new event paired with the old
-    /// generation (which would make the reader miss a redraw for that event).
+    /// bump the generation, all while holding the lock so a concurrent
+    /// [`Self::snapshot`] cannot observe the new event with the old generation
+    /// and miss a redraw.
     ///
     /// A poisoned lock is recovered rather than propagated: this is a lossy,
-    /// display-only buffer, so a prior panic must not turn every later push into
-    /// a panic and kill the activity subsystem.
+    /// display-only buffer, so one panic must not kill the activity subsystem.
     pub fn push(&self, event: ActivityEvent) {
         let mut events = self
             .0
@@ -119,10 +118,8 @@ impl ActivityRing {
     ///
     /// The generation is read while the events lock is held, so it is always
     /// coherent with the events copied (see [`Self::push`]). The connection
-    /// counter is read here too; it is maintained outside this lock, so it is a
-    /// best-effort count that can momentarily lead or trail the events by a
-    /// frame — acceptable for a status display, and self-corrected within the
-    /// next wall-clock-second redraw.
+    /// counter is maintained outside that lock, so it is best-effort and may lead
+    /// or trail the events by a frame.
     pub fn snapshot(&self, max_events: usize) -> ActivitySnapshot {
         let events = self
             .0

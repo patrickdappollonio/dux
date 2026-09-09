@@ -1,8 +1,7 @@
 //! Project-browser and project-worktree intelligence helpers. Pure free
 //! functions used by the project-browser worker (`spawn_browser_entries`),
 //! the worktree picker (`spawn_project_worktrees_worker`), and the project
-//! branch-status worker (`spawn_project_branch_status_checks`). The spawn
-//! fns themselves move to `Engine` in T3b once these helpers are in core.
+//! branch-status worker (`spawn_project_branch_status_checks`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -89,13 +88,12 @@ pub fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Whether two stored paths name the SAME directory on disk.
+/// Whether two stored paths name the same directory on disk.
 ///
-/// Canonical, deliberately. Two agents can reach one directory by different
-/// spellings (a symlink, a `..` component, a trailing slash), and the places
-/// that ask this question are the guards standing between "delete this agent's
-/// worktree" and destroying a directory another agent is running in. A string
-/// compare answers "different" for the same directory, which is the wrong
+/// Canonical, deliberately: two agents can reach one directory by different
+/// spellings (a symlink, a `..` component, a trailing slash), and the callers are
+/// the guards between deleting one agent's worktree and destroying a directory
+/// another agent is running in, where answering "different" is the wrong
 /// direction to be wrong in.
 ///
 /// Falls back to the original path when canonicalization fails (a directory
@@ -201,12 +199,11 @@ pub fn classify_project_worktrees(
         .iter()
         .map(|session| {
             (
-                // "The directory this agent occupies", which for a
-                // STANDALONE agent is the user's folder. That is the whole
-                // guard: a standalone agent pointed at a directory under dux's
-                // managed area must show up here as occupied, or the worktree
-                // manager would offer to force-remove the ground out from
-                // under it. Compared canonically so a symlink cannot hide it.
+                // The directory this agent occupies, which for a standalone agent
+                // is the user's folder: one pointed inside dux's managed area
+                // must read as occupied here, or the worktree manager would offer
+                // to force-remove the ground out from under it. Canonical, so a
+                // symlink cannot hide it.
                 canonical_or_original(Path::new(session.directory())),
                 session.id.clone(),
             )

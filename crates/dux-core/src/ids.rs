@@ -1,62 +1,41 @@
-//! Distinct id types for the two keyspaces the tab machinery keeps confusing:
-//! **session ids** (an agent's primary key) and **tab ids** (a provider tab's
-//! key, which is also the key of every tab-scoped runtime map).
+//! Distinct id types for two keyspaces the engine must not confuse: **session
+//! ids** (an agent's primary key) and **tab ids** (a provider tab's key, and the
+//! key of every tab-scoped runtime map).
 //!
-//! An agent's first tab, its **session-slot tab**, is named by a stored pointer
-//! (see [`crate::model::AgentSession::slot_tab_id`]). Its id used to BE the
-//! session id, and while that held every `&str` id was silently
-//! interchangeable: passing a session id positionally into a tab-id parameter
-//! compiled, ran, and was invisible to a text search. The pointer ended the
-//! coincidence, and these types are what turned the remaining mix-ups into
-//! compile errors rather than runtime surprises.
+//! An agent's first tab is named by a stored pointer
+//! ([`crate::model::AgentSession::slot_tab_id`]), so a session id and a tab id
+//! are unrelated strings; these types make swapping them a compile error at the
+//! seams where two ids sit side by side.
 //!
-//! These types make that class of mistake a compile error at the seams where it
-//! is dangerous, and nowhere else. They are an **in-engine discipline**: the
-//! wire types, the HTTP routes and SQLite all keep plain strings, because an id
-//! arriving from outside has not been classified yet.
+//! # Scope
 //!
-//! # Scope, and the three maps deliberately left out
+//! An in-engine discipline only: the wire types, the HTTP routes and SQLite keep
+//! plain strings, because an id arriving from outside has not been classified
+//! yet. `pty_activity`, `pty_input` and `pty_pointer` also stay string-keyed:
+//! they are keyed by the wider PTY keyspace, which holds tab ids and companion
+//! terminal ids alike, and calling a terminal id a tab id is the lie this module
+//! exists to stop.
 //!
-//! The tab-keyed runtime maps carry [`TabId`] keys: `providers`,
-//! `running_provider_pins`, `agent_tabs`, `resume_fallback_candidates`,
-//! `launched_drop_paste`, `needs_attention`, `agent_viewed` and `pty_progress`.
-//!
-//! `pty_activity`, `pty_input` and `pty_pointer` deliberately do NOT, and they
-//! are the interesting case. They are keyed by the wider **PTY** keyspace: an
-//! agent tab id OR a companion terminal id, which is why `clear_tab_runtime` and
-//! `clear_terminal_runtime` both reach into them. Giving them a `TabId` key would
-//! have required calling every terminal id a tab id, which is the same class of
-//! lie this module exists to stop. They stay string-keyed until there is a
-//! `PtyId` worth minting.
-//!
-//! [`SessionId`] is applied narrowly, at the seams where two ids sit side by side
-//! and could be swapped without a word changing: `Engine::is_slot_tab_of` and
-//! `Engine::slot_tab_id_of`, and the transport-facing callers that feed them.
-//! Single-session-id functions (`session_by_id`, `tab_ids_for_session`) keep
-//! `&str`: with one id there is nothing to swap it with.
+//! [`SessionId`] is applied narrowly, where a session id and a tab id are
+//! adjacent parameters. A function taking a single id keeps `&str`: with one id
+//! there is nothing to swap it with.
 //!
 //! # Shape
 //!
-//! Each kind is an owned/borrowed pair modelled exactly on `String`/`str` and
-//! `PathBuf`/`Path`: [`TabId`] owns, [`TabIdRef`] borrows, and `TabId` derefs
-//! and borrows to `TabIdRef` so a `HashMap<TabId, V>` is looked up with a
-//! `&TabIdRef` at no allocation cost.
+//! Each kind is an owned/borrowed pair modelled on `String`/`str` and
+//! `PathBuf`/`Path`: [`TabId`] owns, [`TabIdRef`] borrows, and `TabId` derefs and
+//! borrows to `TabIdRef`, so a `HashMap<TabId, V>` is probed with a `&TabIdRef`
+//! at no allocation cost.
 //!
-//! # Crossing back to a plain string
-//!
-//! `as_str` is the one way out, and it is deliberately the only one: there is no
-//! `Deref<Target = str>`, no `From<&str>`, and no `AsRef<str>`. Constructing one
-//! of these from a bare string means naming the kind at the call site
-//! (`TabId::new(x)`, `SessionIdRef::new(x)`), which is the whole point: a
-//! conversion you had to write down is a conversion a reviewer can see. Reach
-//! for `as_str` at a storage or wire boundary, where the value stops being an id
-//! dux reasons about and becomes bytes somebody else stores.
+//! `as_str` is the one way back to a plain string: there is no
+//! `Deref<Target = str>`, no `From<&str>` and no `AsRef<str>`, so constructing an
+//! id names its kind at the call site. Reach for `as_str` at a storage or wire
+//! boundary, where the value stops being an id dux reasons about.
 //!
 //! # The guarantee, as a test
 //!
-//! The whole point is a compile error, which no ordinary `#[test]` can assert,
-//! so both halves are pinned as doctests. Handing a session id to something that
-//! wants a tab id is refused:
+//! The guarantee is a compile error, which no `#[test]` can assert, so both
+//! halves are pinned as doctests. A session id where a tab id belongs is refused:
 //!
 //! ```compile_fail
 //! use dux_core::ids::{SessionId, TabIdRef};

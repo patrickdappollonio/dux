@@ -1,48 +1,31 @@
 //! A small tokenized relevance scorer over [`PALETTE_COMMANDS`].
 //!
-//! ## Why this exists
-//!
-//! The palette's own matching (the direct tier of
-//! `RuntimeBindings::palette_matches`) is a contiguous phrase match: the
-//! query, with whitespace and dashes collapsed to one `-`, must appear as a
-//! substring of the command name or, failing that, of its description. That is
-//! precise and predictable, and it is the tier the user sees first. It also
-//! answers nothing at all for `new tab`, `toggle banner` or `kill agent`,
-//! because those words are real but not adjacent in that order.
-//!
-//! This module is the second tier: every query token must PREFIX-match some
-//! token of the command, in any order, and the hits are ranked. Mostly that
-//! catches multi-word queries, but not only: the two tiers tokenize
-//! differently, so a single word can land here too (the apostrophe rule
-//! below is one way in). It is a
-//! deliberately small BM25-shaped rule rather than a crate: at 77 records the
-//! ranking cost is irrelevant, and every candidate crate would still have
-//! needed custom splitting, prefix-AND semantics, field weights, subtraction of
-//! the first tier and a canonical tie-break, which is most of the code here.
+//! The palette's first tier (`RuntimeBindings::palette_matches`) is a contiguous
+//! phrase match, so a query whose words are real but not adjacent in that order,
+//! such as `new tab` or `kill agent`, finds nothing there. This module is the
+//! second tier: every query token must prefix-match some token of the command,
+//! in any order, and the hits are ranked.
 //!
 //! ## The rule
 //!
 //! * Tokens are runs of alphanumerics, lowercased, with `'` and `’` removed
-//!   first so `agent's` tokenizes as one `agents` rather than `agent` plus a
-//!   junk `s`. Lowercasing is per code point (`char::to_lowercase`): there is
-//!   no case folding and no Unicode normalization, so `ß` and `ss` are
-//!   different tokens. That is stated rather than fixed; the corpus is ASCII
-//!   command names and English descriptions.
+//!   first so `agent's` tokenizes as one `agents`. Lowercasing is per code point
+//!   (`char::to_lowercase`): no case folding and no Unicode normalization, so
+//!   `ß` and `ss` are different tokens. The corpus is ASCII command names and
+//!   English descriptions.
 //! * Repeated query tokens are deduplicated, so `agent agent` scores exactly
 //!   as `agent` does.
-//! * A command matches only when EVERY query token prefixes at least one of
+//! * A command matches only when every query token prefixes at least one of
 //!   its tokens. An empty or punctuation-only query matches nothing.
 //! * A command's score is the sum, over query tokens, of
 //!   `idf(token) * weight`, where `weight` is the best field hit that token
 //!   got: an exact name token beats a name prefix beats an exact description
 //!   token beats a description prefix.
 //! * `idf(t) = ln((N + 1) / (df(t) + 1)) + 1`, scaled by 1000 and rounded to
-//!   an integer so the sort key is a total order with no float in it. `df(t)`
-//!   is PREFIX-AWARE: the number of commands carrying a token that starts with
-//!   `t`, which is the number of documents the query token actually reaches.
-//!   Using the literal token's own document frequency instead would hand a
-//!   two-letter prefix like `ag` the rarest-token score while it matches half
-//!   the table.
+//!   an integer so the sort key is a total order with no float in it. `df(t)` is
+//!   prefix-aware: the number of commands carrying a token starting with `t`,
+//!   because the literal token's own document frequency would hand a two-letter
+//!   prefix like `ag` the rarest-token score while it matches half the table.
 //! * Ties are broken by table order, so the ranking is fully deterministic.
 
 use std::collections::HashSet;
@@ -135,10 +118,8 @@ impl Document {
 
 /// The tokenized palette, built once.
 ///
-/// Only the tokenization is memoized: `idf` depends on the QUERY token,
-/// because the document frequency it needs is prefix-aware, so there is no
-/// per-token table to precompute. Scanning 77 tokenized records per query
-/// token costs nothing at this size.
+/// Only the tokenization is memoized: the document frequency `idf` needs is
+/// prefix-aware, so it depends on the query token and has no table to precompute.
 struct Corpus {
     documents: Vec<Document>,
 }

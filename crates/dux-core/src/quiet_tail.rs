@@ -1,15 +1,13 @@
-//! The quiet/inactive-tail search-expansion decision, core-owned and shared by
-//! rule with the web's `FlatAgentList.tsx` QuietTail. Cross-language twin: the
-//! DECISION lives here in Rust, the TS keeps a mirror (`quietTailForcedOpen` in
-//! `flatList.ts`), and the two are pinned by SHARED TEST VECTORS.
+//! The quiet/inactive-tail search-expansion decision, core-owned and mirrored by
+//! hand in the web's `quietTailForcedOpen` (`flatList.ts`), the two pinned by
+//! shared test vectors.
 //!
 //! The tail auto-expands while a search matches something dormant, so the results
-//! are visible; a user who collapses it WHILE a matching query is active has made
+//! are visible; a user who collapses it while a matching query is active has made
 //! an explicit call, so that dismissal wins until the query changes. The
-//! dismissal is keyed on the NORMALIZED query (`agent_search::normalize_query`),
-//! not the raw text: the filter matches on the normalized query, so a
-//! whitespace-only or case-only variant is the SAME query and must not resurrect
-//! a tail the user just dismissed.
+//! dismissal is keyed on the normalized query (`agent_search::normalize_query`),
+//! not the raw text, because the filter matches on the normalized query, so a
+//! whitespace-only or case-only variant must not resurrect the tail.
 
 /// Whether the quiet tail should render forced-open for the current search.
 /// `normalized_query` is the trimmed/lowercased query (`None`/empty means no

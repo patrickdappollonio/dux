@@ -23,16 +23,13 @@ const LAUNCHER_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 /// leave it behind as a zombie.
 ///
 /// All three standard streams are `/dev/null`, never inherited: the terminal UI
-/// owns the terminal, and a launcher that decided to print a warning (or worse,
-/// read from stdin) would paint over the running interface or block behind a
-/// prompt nobody can see. dux never reads the child's output, so there is
-/// nothing to keep.
+/// owns the terminal, and a launcher that printed a warning or read from stdin
+/// would paint over the running interface or block behind an invisible prompt.
 ///
-/// The child is REAPED either way. Within the grace window a non-zero exit is
-/// reported as the failure it is, because "nothing happened and dux said it
-/// worked" is the worst outcome here; a launcher still running when the window
-/// closes is handed to a small thread whose only job is to wait for it, so
-/// clicking twenty links never accumulates twenty zombies.
+/// The child is reaped either way. Within the grace window a non-zero exit is
+/// reported as the failure it is; a launcher still running when the window closes
+/// is handed to a small thread whose only job is to wait for it, so clicking
+/// twenty links never accumulates twenty zombies.
 fn spawn_detached(launcher: &str, url: &str) -> Result<()> {
     let mut child = spawn_launcher(launcher, url)?;
 

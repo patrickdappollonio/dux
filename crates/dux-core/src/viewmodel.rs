@@ -16,14 +16,13 @@ use crate::worker::{ResourceKind, ResourceStats};
 /// `GET /api/v1/workspace` (and the thin per-resource reads
 /// `GET /api/v1/projects`, `GET /api/v1/sessions`, `GET /api/v1/sessions/:id`).
 ///
-/// The whole-document read is normally made ONCE, at boot: the web layer serves
-/// it from a cached serialization that it also PUSHES to every connected client
+/// The whole-document read is normally made once, at boot: the web layer serves
+/// it from a cached serialization that it also pushes to every connected client
 /// over `/ws/events` whenever it is rebuilt, carrying a revision so a client can
 /// order what it fetched against what it was pushed. The coarse
-/// `projects.changed` / `sessions.changed` events still fire alongside, and are
-/// what a page too old to read the push refetches on. Changed files are served
-/// separately via `GET /api/v1/sessions/:id/changes` (signaled by
-/// `session.changes`).
+/// `projects.changed` / `sessions.changed` events fire alongside, for a page too
+/// old to read the push. Changed files are served separately via
+/// `GET /api/v1/sessions/:id/changes`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SpineView {
     pub projects: Vec<ProjectView>,
@@ -46,22 +45,18 @@ pub struct BootstrapView {
     /// Configured provider command names, sorted. Surfaced so a client can
     /// populate a per-project default-provider picker.
     pub available_providers: Vec<String>,
-    /// What CONFIG currently says a dropped file's path should look like for each
-    /// configured provider, keyed by PROVIDER NAME (the `[providers.<name>]`
-    /// block).
+    /// What config currently says a dropped file's path should look like for each
+    /// configured provider, keyed by the `[providers.<name>]` block name.
     ///
-    /// This is the FALLBACK the browser uses for a pane with no live process to
-    /// read from: a dormant tab, a tab whose launch has not reached the client
-    /// yet, or an older server. It rides the bootstrap document with every other
-    /// config-derived value rather than on a channel of its own, so a config
-    /// reload refreshes it through the same `config.changed` refetch, which is
-    /// exactly the event that can change it.
+    /// The fallback the browser uses for a pane with no live process to read
+    /// from: a dormant tab, a tab whose launch has not reached the client yet, or
+    /// an older server. It rides the bootstrap document, so a config reload
+    /// refreshes it through the same `config.changed` refetch.
     ///
-    /// PURELY a projection of config: a live process never writes into it. What
-    /// a live process launched with is published per tab on the SPINE, in
-    /// [`AgentTabView::drop_paste`], because that is what a launch and a
-    /// termination refresh. A provider name absent from this map resolves to the
-    /// default form (`bare`) and no length limit.
+    /// Purely a projection of config: a live process never writes into it, and
+    /// what one launched with is published per tab on the spine in
+    /// [`AgentTabView::drop_paste`]. A provider name absent from this map
+    /// resolves to the default form (`bare`) and no length limit.
     pub provider_drop_paste: BTreeMap<String, DropPasteView>,
     /// Text macros from `[macros]` in `config.toml`, in config (IndexMap) order.
     /// The web surfaces these two ways: the terminal-pane quick-picker filters
@@ -123,26 +118,23 @@ pub struct BootstrapView {
     /// Mirrors `config.ui.upload_write_gitignore`: whether the agent upload
     /// directory keeps a `.gitignore` holding a single `*`, so a file dropped
     /// or pasted onto an agent stays invisible to git. Published so the web's
-    /// Preferences dialog can show the row's real current value rather than
-    /// its documented default. Its companion `ui.upload_directory` is
-    /// deliberately NOT exposed as a preference row: editing a path in a text
-    /// field is a poor affordance, and doing it properly needs a directory
-    /// picker. Web-only behavior, as the setting itself is.
+    /// Preferences dialog shows the row's real current value. Its companion
+    /// `ui.upload_directory` is deliberately not a preference row: editing a path
+    /// in a text field needs a directory picker to be worth offering. Web-only
+    /// behavior, as the setting itself is.
     pub upload_write_gitignore: bool,
-    /// Mirrors `config.ui.upload_pasted_text_chars`, already NORMALIZED: how
-    /// many characters a text paste onto an AGENT pane may run to before the
-    /// web saves it as a `.txt` file and pastes that file's path instead of
-    /// typing the text. `0` switches the behaviour off.
+    /// Mirrors `config.ui.upload_pasted_text_chars`, already normalized: how many
+    /// characters a text paste onto an agent pane may run to before the web saves
+    /// it as a `.txt` file and pastes that file's path instead of typing the
+    /// text. `0` switches the behaviour off.
     ///
-    /// Normalized here as well as at load, for the same reason
-    /// `terminal_font_size` is: `set_settings` and the raw config editor can
-    /// both put a fresh value in memory without going back through
-    /// `load_config`, and an out-of-range number reaching the browser would
-    /// turn every prompt into a file.
+    /// Normalized here as well as at load, like `terminal_font_size`, because
+    /// `set_settings` and the raw config editor both put a fresh value in memory
+    /// without going through `load_config`, and an out-of-range number reaching
+    /// the browser would turn every prompt into a file.
     ///
-    /// Not published for a TERMINAL to read, because a terminal has no use for
-    /// it: a long paste into a shell is a command or a heredoc, and dux never
-    /// files one away. Web-only behavior, as the setting itself is.
+    /// A terminal has no use for it: a long paste into a shell is a command or a
+    /// heredoc, and dux never files one away.
     pub upload_pasted_text_chars: usize,
     /// Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
     /// switch (default false). When on, agents that were running when dux last
@@ -169,14 +161,11 @@ pub struct BootstrapView {
     /// reaches the visitor's browser clipboard. Serialized as its canonical string
     /// (an unrecognized config value normalizes to "focused").
     ///
-    /// `config.capabilities.passthrough` is resolved INTO this value rather than
-    /// published beside it: the clipboard write is the only thing an agent
-    /// forwards outward on this surface, so the master switch has exactly one
-    /// web consequence and the browser reads one answer instead of combining
-    /// two. `passthrough = false` publishes "off" here. It deliberately does not
-    /// touch `web_notifications`, which is the only switch over browser desktop
-    /// notifications. Older servers omit this field, so the web client falls back
-    /// to "focused".
+    /// `config.capabilities.passthrough` is resolved into this value rather than
+    /// published beside it, so the browser reads one answer: `passthrough =
+    /// false` publishes "off" here. It deliberately does not touch
+    /// `web_notifications`, the only switch over browser desktop notifications.
+    /// Older servers omit this field, so the web falls back to "focused".
     pub clipboard_passthrough: String,
     /// Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop web
     /// places the PR banner lane above the terminal when "top" and below it when
@@ -265,11 +254,9 @@ pub struct BootstrapView {
     /// Older servers omit it, so the web falls back to "claude".
     pub global_default_provider: String,
     /// The first-run welcome screen's content, from `dux_core::welcome_screen`.
-    /// Projected UNCONDITIONALLY, not only when the welcome is pending: the app
-    /// menu can open the screen on demand at any time, and the content is
-    /// config-static (its last paragraph interpolates this machine's config
-    /// path), so the bootstrap document is exactly its home. Distinct from
-    /// `welcome_tips`, which is the rotating idle-pane tip list.
+    /// Projected unconditionally, because the app menu can open the screen on
+    /// demand and the content is config-static. Distinct from `welcome_tips`,
+    /// the rotating idle-pane tip list.
     pub welcome_screen: WelcomeScreenView,
     /// `dux_core::urls::WEBSITE` — where the welcome screen's secondary button
     /// goes. Projected rather than hardcoded client-side so the surfaces cannot
@@ -277,13 +264,11 @@ pub struct BootstrapView {
     pub website_url: String,
     /// The first-load screen this launch should show, or `None` for neither.
     ///
-    /// NOT engine state, and [`Engine::bootstrap`] always leaves it `None`. The
-    /// web server computes the plan ONCE at startup (`first_load::plan`, then
-    /// `after_fetch` when the release-notes worker returns), holds the result in
-    /// memory, and injects it into this document on every request — so a browser
-    /// that connects a minute after startup still receives the screen. The
-    /// version is stamped as seen when the user DISMISSES it, never when the
-    /// plan is computed (see the `first_load` module docs).
+    /// Not engine state, and [`Engine::bootstrap`] always leaves it `None`: the
+    /// web server computes the plan once at startup, holds it in memory and
+    /// injects it on every request, so a browser connecting a minute later still
+    /// receives the screen. The version is stamped as seen when the user
+    /// dismisses it, never when the plan is computed.
     pub pending_first_load: Option<PendingFirstLoadView>,
     /// Mirrors `config.ui.disable_automated_welcome_screen`: suppresses the
     /// AUTOMATIC first-run welcome only. The app menu's "Welcome screen…" still
@@ -296,26 +281,21 @@ pub struct BootstrapView {
     /// Mirrors `config.server.file_drop_max_bytes`: the per-file size cap for a
     /// file dropped onto a pane, where `0` switches the feature OFF.
     ///
-    /// Projected so a browser can tell whether the feature EXISTS. The server
-    /// stays the enforcement (it refuses the upload either way), but without
-    /// this the pane advertised a drop target and accepted a drop for a feature
-    /// that was switched off, and only then collected a refusal per file.
+    /// Projected so a browser can tell whether the feature exists at all; the
+    /// server stays the enforcement and refuses the upload either way.
     ///
-    /// NOT YET KNOWN IS NOT ENABLED. An older server omits the field, and the
-    /// browser renders before the bootstrap document has arrived at all, so the
-    /// web treats an absent value as OFF and offers nothing until dux has said
-    /// the feature exists. Defaulting that window to on would advertise a drop
-    /// target for a feature that may be switched off.
+    /// Not yet known is not enabled: an older server omits the field, and the
+    /// browser renders before the bootstrap document arrives, so an absent value
+    /// is treated as off rather than advertising a drop target for a feature that
+    /// may be switched off.
     pub file_drop_max_bytes: usize,
     /// Mirrors `config.server.replay_wait_seconds`: how long, in seconds of
     /// VISIBLE time, a terminal pane waits for its screen to arrive after its
     /// connection opens before it offers Reconnect.
     ///
-    /// One of four timings the browser's attach state machine needs and the
-    /// server never reads. They ride this document rather than a channel of
-    /// their own for the same reason every other config-derived value does: a
-    /// config reload refetches the bootstrap, so editing the file retimes every
-    /// open tab with no restart.
+    /// One of the timings the browser's attach state machine needs and the server
+    /// never reads. They ride this document like every other config-derived
+    /// value, so a config reload retimes every open tab with no restart.
     pub replay_wait_seconds: u32,
     /// Mirrors `config.server.reconnect_backoff_cap_seconds`: the longest gap
     /// the browser leaves between two automatic reconnect attempts.
@@ -335,11 +315,10 @@ pub struct BootstrapView {
     /// Whether the RUN was started with `--no-tailscale`, which outranks the
     /// saved mode for as long as it lasts.
     ///
-    /// NOT engine state, and [`Engine::bootstrap`] always leaves it `false`: the
+    /// Not engine state, and [`Engine::bootstrap`] always leaves it `false`: the
     /// flag belongs to the process that parsed the command line, so the web
-    /// server injects it per request the way it injects `pending_first_load`.
-    /// Without it the Preferences row would offer a mode the run will refuse and
-    /// say nothing about why.
+    /// server injects it per request, as it does `pending_first_load`. Without it
+    /// the Preferences row offers a mode the run will refuse.
     pub tailscale_forced_no: bool,
 }
 
@@ -462,17 +441,15 @@ pub struct ProjectView {
     pub created_at: String,
 }
 
-/// The serialized workspace of an agent: a TAGGED union, one variant per
+/// The serialized workspace of an agent: a tagged union, one variant per
 /// [`crate::model::AgentWorkspace`] variant, mirroring [`TerminalOwnerView`]'s
-/// shape exactly. Because the client receives the tag it can switch on it
-/// exhaustively (see `crates/dux-web/web/src/lib/agentWorkspace.ts`, whose
-/// switches end in `assertNever`) instead of inferring an agent's kind from
-/// whether some string happened to be empty.
+/// shape. Because the client receives the tag it can switch on it exhaustively
+/// (see `crates/dux-web/web/src/lib/agentWorkspace.ts`, whose switches end in
+/// `assertNever`) instead of inferring an agent's kind from whether some string
+/// happened to be empty.
 ///
-/// The git fields live INSIDE the managed variant, so there is no shape in
-/// which a standalone agent carries a branch name at all. That is the wire
-/// half of the same either/or the Rust model enforces: an empty string on the
-/// wire is a lie some screen eventually renders.
+/// The git fields live inside the managed variant, so there is no shape in which
+/// a standalone agent carries a branch name at all.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentWorkspaceView {
@@ -501,13 +478,11 @@ pub enum AgentWorkspaceView {
         folder_label: String,
         /// The live repository verdict for the folder: "working_repo" |
         /// "inside_repo_rooted_elsewhere" | "no_repo" | "indeterminate" |
-        /// "unprobed" (nobody has looked yet; it gates exactly as
-        /// "indeterminate" does, and its quiet reason reads as a wait rather
-        /// than as a fault, because a freshly created agent in a healthy
-        /// repository spends a moment there). The
-        /// changes region renders a real repository view for the first and its
-        /// quiet copy otherwise. Decided on the server so both surfaces show
-        /// the same answer the server acted on.
+        /// "unprobed" (nobody has looked yet; it gates as "indeterminate" does,
+        /// but its quiet reason reads as a wait rather than a fault). The changes
+        /// region renders a real repository view for the first and its quiet copy
+        /// otherwise. Decided on the server so both surfaces show the same answer
+        /// the server acted on.
         repo_status: String,
         /// The sentence explaining why the changes region is quiet, when it is.
         /// Carried rather than re-authored client-side so the TUI and the web
@@ -592,12 +567,10 @@ pub struct SessionView {
     /// readiness spinner until this is true.
     pub has_output: bool,
     /// Whether the agent is actively streaming output right now (PTY data within
-    /// [`crate::engine::AGENT_STREAMING_WINDOW`]). This is a *hysteresis boolean*,
-    /// not a timestamp: it stays `true` for the whole window after the latest
-    /// byte and flips back to `false` only once the window lapses. Coarse
-    /// `sessions.changed` events coalesce, so a steadily streaming agent produces
-    /// a stable `working: true` until a transition (idle→working or
-    /// working→idle) occurs.
+    /// [`crate::engine::AGENT_STREAMING_WINDOW`]). A hysteresis boolean, not a
+    /// timestamp: it stays `true` for the whole window after the latest byte, so
+    /// a steadily streaming agent produces a stable `working: true` until a
+    /// transition.
     pub working: bool,
     /// Whether the user is currently typing into any of this agent's tabs (a
     /// keystroke landed within [`crate::engine::AGENT_INPUT_SUPPRESSION_WINDOW`]).
@@ -643,13 +616,10 @@ pub enum TerminalOwnerView {
     /// A project terminal spawned at a project's repo root, with no agent.
     Project { project_id: String },
     /// A standalone terminal, belonging to no agent and no project. There is no
-    /// owner id to send, so it carries the thing its row names it by instead:
-    /// the directory it opened in, written with the home directory collapsed to
-    /// `~` ([`crate::home_path::shorten_home`]). That string is the row's second
-    /// line and is what the sidebar search matches. It travels on the wire
-    /// rather than being derived client-side because the browser is not
-    /// necessarily on the same machine as the server and has no home directory
-    /// of the server's to collapse against.
+    /// owner id to send, so it carries what its row names it by: the directory it
+    /// opened in, home collapsed to `~` ([`crate::home_path::shorten_home`]),
+    /// which is the row's second line and the sidebar search key. Collapsed
+    /// server-side because the browser may be on another machine.
     Standalone { cwd_label: String },
 }
 
@@ -659,11 +629,10 @@ impl crate::model::TerminalOwner {
     ///
     /// `cwd` is the directory the terminal was spawned in
     /// ([`crate::pty::PtyClient::spawn_dir`]); only the standalone kind uses it,
-    /// because only it names itself by where it is. Deliberately the SPAWN
-    /// directory rather than a live probe: this string is projected on every
-    /// spine build and feeds the coarse change fingerprint, so a value that
-    /// moved every time the user typed `cd` would churn the sidebar and make the
-    /// row's search key unstable.
+    /// because only it names itself by where it is. Deliberately the spawn
+    /// directory rather than a live probe: this string feeds the spine's change
+    /// fingerprint, so a value that moved on every `cd` would churn the sidebar
+    /// and make the row's search key unstable.
     pub fn to_view(&self, cwd: &std::path::Path) -> TerminalOwnerView {
         match self.as_ref() {
             crate::model::TerminalOwnerRef::Session(id) => TerminalOwnerView::Session {
@@ -728,17 +697,15 @@ pub struct TerminalView {
     /// The connection id currently holding input+sizing ownership of this
     /// terminal's PTY, or `None` when nobody drives it.
     ///
-    /// The exact mirror of [`AgentTabView::input_owner`], for the same reason
-    /// and with the same wire shape: ownership lives in the web layer's
-    /// registry, not in the engine, so the engine projects `None` here and the
-    /// web layer's spine overlay stamps the real value. Published as a STRING
-    /// so it compares directly against the `owner` field of the `pty.owner`
-    /// handover frames and the PTY handshake, which is what a client matches
-    /// against its own PTY-socket ids.
+    /// The exact mirror of [`AgentTabView::input_owner`], for the same reason and
+    /// with the same wire shape: ownership lives in the web layer's registry, not
+    /// in the engine, so the engine projects `None` here and the spine overlay
+    /// stamps the real value. A string, so it compares directly against the
+    /// `owner` field of the `pty.owner` handover frames and the PTY handshake,
+    /// which is what a client matches against its own PTY-socket ids.
     ///
-    /// A terminal pane's take-over card reads it to tell a stale driver name
-    /// from a fresh one, which is why it is published at all: for a while it
-    /// deliberately was not, because nothing consumed it.
+    /// A terminal pane's take-over card reads it to tell a stale driver name from
+    /// a fresh one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_owner: Option<String>,
 }
@@ -776,11 +743,10 @@ impl TabRunVerdictView {
 }
 
 /// One provider tab of an agent, projected for the tab strip. `order == 0` is
-/// the **session-slot tab**, the one named by the session's stored
-/// `SessionView::slot_tab_id` pointer. It is not privileged for CLOSING (closing
-/// it hands the slot to the next tab in strip order) and no tab is privileged
-/// for RESUME: that is decided per provider by liveness at launch
-/// (see `Engine::tab_resume_decision`), not by position.
+/// the session-slot tab, the one named by `SessionView::slot_tab_id`. Closing it
+/// hands the slot to the next tab in strip order, and no tab is privileged for
+/// resume, which is decided per provider by liveness at launch (see
+/// `Engine::tab_resume_decision`) rather than by position.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentTabView {
     /// Tab id. Matches `SessionView::slot_tab_id` for the session-slot tab.
@@ -808,77 +774,65 @@ pub struct AgentTabView {
     /// dormant card from this flag *without* subscribing, because subscribing
     /// would force-launch the provider.
     pub has_live_process: bool,
-    /// Whether this tab's LAST run ended badly: a launch that failed, or a
+    /// Whether this tab's last run ended badly: a launch that failed, or a
     /// process that exited non-zero. Only meaningful while `has_live_process` is
-    /// `false`, and it is what tells a surface apart the two kinds of dormant
-    /// tab: one that is simply not running yet (a restart, a stop) and one that
-    /// tried and failed. The web starts the first on selection and shows the
-    /// second its diagnosis card instead, so a tab that keeps failing cannot
-    /// relaunch itself every time the user looks at it.
+    /// `false`, and it separates a tab that is simply not running yet from one
+    /// that tried and failed: the web starts the first on selection and shows the
+    /// second its diagnosis card, so a failing tab cannot relaunch itself every
+    /// time the user looks at it.
     ///
-    /// Uniform across every tab; no slot special-casing lives in the data.
-    /// Memory-only, so a restart clears it (see [`crate::engine::Engine::failed_tab_runs`]).
+    /// Uniform across every tab, and memory-only, so a restart clears it (see
+    /// [`crate::engine::Engine::failed_tab_runs`]).
     ///
-    /// DERIVED from `last_run_verdict`: it is true exactly when a verdict
-    /// exists. Kept as its own field because every gate that reads it asks only
-    /// the yes/no question, and an older client knows nothing about verdicts.
+    /// Derived from `last_run_verdict`: true exactly when a verdict exists. Kept
+    /// as its own field because every gate that reads it asks only the yes/no
+    /// question.
     pub last_run_failed: bool,
-    /// WHY the last run ended badly, when it ended, and the last lines it had on
+    /// Why the last run ended badly, when it ended, and the last lines it had on
     /// screen: what the dormant card prints instead of "something went wrong".
     /// `None` exactly when `last_run_failed` is false.
     ///
-    /// `ended_seconds_ago` rather than a timestamp because the age is what the
-    /// sentence says, and the engine's clock is a monotonic `Instant` that has
-    /// no wall-clock spelling. It goes stale between spine refreshes by exactly
-    /// as much as the refresh interval, which a coarse age absorbs.
+    /// `ended_seconds_ago` rather than a timestamp: the age is what the sentence
+    /// says, and the engine's clock is a monotonic `Instant` with no wall-clock
+    /// spelling. It goes stale by one spine refresh interval, which a coarse age
+    /// absorbs.
     pub last_run_verdict: Option<TabRunVerdictView>,
-    /// What this tab's LIVE process launched with, for a file dropped onto its
+    /// What this tab's live process launched with, for a file dropped onto its
     /// pane; `None` when no process is live.
     ///
-    /// It rides the SPINE rather than the bootstrap document, and that is the
-    /// whole point of where it lives. It changes when a process LAUNCHES or
-    /// TERMINATES, and the spine is what a launch and a termination refresh
+    /// It rides the spine rather than the bootstrap document because it changes
+    /// when a process launches or terminates, which is what refreshes the spine
     /// (`sessions.changed`); the bootstrap document is refreshed by
-    /// `config.changed`, which is a different event entirely. Published there it
-    /// went stale in the browser for the whole life of a process: a client that
-    /// had refetched config before a relaunch kept resolving the OLD entry, so a
-    /// tab relaunched under a different provider was still quoted for the
-    /// previous one until a reconnect or a restart.
+    /// `config.changed` instead, so a tab relaunched under a different provider
+    /// stayed quoted for the previous one until a reconnect.
     ///
-    /// Per TAB rather than per provider name because a provider name cannot carry
-    /// the answer: launch a tab, edit `[providers.<name>] web_dragdrop_paste`,
-    /// launch a second tab, and both processes report the same provider name
-    /// while each needs the form it started with. It also answers after the user
-    /// renames or removes that block while the tab is still running, which the
-    /// config-keyed map cannot.
+    /// Per tab rather than per provider name: two tabs of one provider can have
+    /// launched either side of an edit to `[providers.<name>] web_dragdrop_paste`
+    /// and each needs the form it started with, and this still answers after the
+    /// user renames or removes that block while the tab runs.
     ///
-    /// The browser resolves a pane as: this, then
+    /// The browser resolves a pane as this, then
     /// [`BootstrapView::provider_drop_paste`] by provider name, then the
-    /// defaults. So the LAUNCHED profile wins for a live tab and a config edit
-    /// takes effect on that tab's next launch.
-    ///
-    /// Retired with the process by [`crate::engine::Engine::clear_tab_runtime`].
+    /// defaults, so a live tab keeps what it launched with and a config edit
+    /// takes effect on its next launch. Retired with the process by
+    /// [`crate::engine::Engine::clear_tab_runtime`].
     pub drop_paste: Option<DropPasteView>,
     /// The ownership-registry participant id that currently owns input for this
     /// tab's PTY, or `None` when nobody does.
     ///
-    /// The ENGINE never fills this field. The shared registry lives in
+    /// The engine never fills this field. The shared registry lives in
     /// [`crate::pty_owners`], and the serving layer overlays its live snapshot
-    /// onto every view it serves: the `/spine` document
-    /// (overlaid before fingerprinting, so an ownership flip fires
-    /// `sessions.changed` like any other spine change) and the
-    /// projects/sessions list and single-session REST reads (overlaid in their
-    /// request arms). A `SessionView` obtained from the engine DIRECTLY (the
-    /// TUI, or a dux-core test) always has `None` here.
+    /// onto the `/spine` document (before fingerprinting, so an ownership flip
+    /// fires `sessions.changed` like any other spine change) and onto the REST
+    /// reads. A `SessionView` obtained from the engine directly always has `None`
+    /// here.
     ///
-    /// The value is the owning registry connection id, stringified: either a
-    /// PTY socket's id or the background-serving TUI's seat. It is NOT the
-    /// events-socket `X-Connection-Id` UUID. Publishing the
-    /// identity rather than a per-client "elsewhere" boolean keeps the spine
-    /// one shared document: each client compares the id against its own live
-    /// PTY-socket ids and decides "owned, and not by me" locally, which is how
-    /// the agent list's row menus can disable mutating actions for an agent
-    /// another device is driving without this client ever attaching to it.
+    /// The value is the owning registry connection id, stringified: a PTY
+    /// socket's id or the background-serving TUI's seat, never the events-socket
+    /// `X-Connection-Id`. Publishing the identity rather than a per-client
+    /// "elsewhere" boolean keeps the spine one shared document: each client
+    /// compares the id against its own live PTY-socket ids and decides "owned,
+    /// and not by me" locally, without ever attaching to that agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_owner: Option<String>,
 }
@@ -896,18 +850,13 @@ pub struct DropPasteView {
     /// recognizes (a misspelled config value resolves to `"bare"` here, having
     /// already been warned about once at load).
     pub form: String,
-    /// The FILE NAME of the command being run, which is what identifies the CLI
-    /// receiving the paste, and which the browser keys its measured per-CLI
-    /// paste-length table by.
+    /// The file name of the command being run, which identifies the CLI receiving
+    /// the paste and keys the browser's measured per-CLI paste-length table.
     ///
-    /// The provider's BLOCK NAME is deliberately not what travels here. A
-    /// provider's name and the command it runs are independent, so
-    /// `[providers.myagent] command = "codex"` is a real Codex and
-    /// `[providers.codex] command = "something-else"` is not. Keying the table by
-    /// the name (which it was) was wrong in both directions at once: a real Codex
-    /// under any other name got no limit and was handed oversized paths it
-    /// silently ignores, and an unrelated CLI merely named codex had valid long
-    /// paths withheld from it. See
+    /// Deliberately not the provider's block name: a provider's name and the
+    /// command it runs are independent, so `[providers.myagent] command =
+    /// "codex"` is a real Codex and `[providers.codex] command =
+    /// "something-else"` is not, and keying by the name gets both wrong. See
     /// [`crate::config::ProviderCommandConfig::command_file_name`] for why it is
     /// the file name and not the whole string.
     pub command_name: String,
@@ -1211,12 +1160,9 @@ impl Engine {
     /// Every terminal owned by `owner`, in the same `sort_order` ascending order
     /// as the flat [`Engine::terminal_views`].
     ///
-    /// The flat, owner-tagged collection is what the BROWSER receives. The thin
-    /// REST reads (`GET /api/v1/sessions/:id`, `/api/v1/sessions`,
-    /// `/api/v1/projects`) are a separately documented programmability surface
-    /// that has always nested a terminal inside its owner, and they re-nest
-    /// through this rather than making every script reading them move to the
-    /// spine document. Public for that reason.
+    /// The flat, owner-tagged collection is what the browser receives. The thin
+    /// REST reads nest a terminal inside its owner instead, and re-nest through
+    /// this, which is why it is public.
     pub fn terminal_views_for_owner(
         &self,
         owner: crate::model::TerminalOwnerRef<'_>,
@@ -1261,14 +1207,11 @@ impl Engine {
         s: &AgentSession,
         extra_tabs: &[&crate::model::AgentTab],
     ) -> SessionView {
-        // The sidebar-facing status ORs over ANY live tab, session-slot or extra.
-        // The persisted `desired_running` auto-reopen intent stays agent-level and
-        // is set or cleared on the delete and detach paths, never by transient
-        // per-tab activity here.
-        // Tab ids come from the precomputed `extra_tabs` slice plus the
-        // session-slot id, never from `tab_ids_for_session`: that rescans the
-        // whole `agent_tabs` map, so calling it per session costs
-        // O(sessions * tabs) and undoes `spine`'s single grouping pass.
+        // The sidebar-facing status ORs over any live tab; the persisted
+        // `desired_running` intent stays agent-level and is never touched here.
+        // Tab ids come from the precomputed `extra_tabs` slice plus the slot id,
+        // never from `tab_ids_for_session`, which rescans the whole `agent_tabs`
+        // map and would cost O(sessions * tabs) per spine build.
         let has_output = std::iter::once(s.slot_tab_id())
             .chain(extra_tabs.iter().map(|t| TabIdRef::new(&t.id)))
             .any(|id| self.providers.get(id).is_some_and(|p| p.has_output()));
@@ -1335,11 +1278,9 @@ impl Engine {
             has_live_process: self.providers.contains_key(id),
             last_run_failed: self.tab_last_run_failed(id.as_str()),
             last_run_verdict: self.tab_run_verdict(id.as_str()).map(TabRunVerdictView::of),
-            // Read off the LIVE process's launch, so it appears when the tab
-            // launches and disappears when it is torn down. Both halves come out
-            // of the one recorded entry; neither is topped up from current
-            // config, because a live process is not affected by an edit made
-            // after it started.
+            // Read off the live process's launch: both halves come from the one
+            // recorded entry, never topped up from current config, because an
+            // edit after the launch does not reach a running process.
             drop_paste: self.launched_drop_paste.get(id).map(|l| DropPasteView {
                 form: l.form.as_str().to_string(),
                 command_name: l.command_name.clone(),
@@ -1421,10 +1362,8 @@ impl Engine {
                 self.config.ui.terminal_font_size,
             ),
             // Normalized rather than passed through: `set_settings` and the raw
-            // config editor both put a value in memory without going back
-            // through `load_config`, so this is the last place a typo can be
-            // caught before the browser has to act on it (the
-            // `upload_pasted_text_chars` precedent).
+            // config editor both put a value in memory without going through
+            // `load_config`, so this is the last place to catch a typo.
             compose_bar: crate::config::ComposeBarMode::from_config_str(
                 &self.config.ui.compose_bar,
             )
@@ -1440,10 +1379,8 @@ impl Engine {
             web_notifications: self.config.capabilities.web_notifications,
             hyperlinks: self.config.capabilities.hyperlinks,
             // Resolve the `passthrough` master switch here rather than publishing
-            // it beside this field: the clipboard write is the only thing an agent
-            // forwards outward on the web, so the switch has one web consequence
-            // and the browser gets one answer instead of two to combine. Browser
-            // notifications are NOT one of its consequences; `web_notifications`
+            // it beside this field, so the browser gets one answer. Browser
+            // notifications are not one of its consequences: `web_notifications`
             // is the only switch over those and is published untouched above.
             clipboard_passthrough: if self.config.capabilities.passthrough {
                 crate::config::ClipboardPassthroughMode::parse(

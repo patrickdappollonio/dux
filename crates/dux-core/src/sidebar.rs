@@ -38,15 +38,13 @@ pub fn short_project_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// Build the sidebar grouping. Mirrors the historical TUI ordering: projects in
-/// their stored order, and — only when `empty_separator_min_projects > 0` and
-/// the project count meets it — the projects with no agents are sunk below a
-/// separator. A project with a live project terminal counts as non-empty even
-/// with zero agents (`projects_with_terminals` carries the project ids that own
-/// at least one live project terminal), so a project the user is actively
-/// working in never sinks below the "no agents" separator. Sessions whose
-/// project no longer exists are surfaced as `orphaned` groups appended after
-/// the agent-bearing projects, so neither surface silently drops them.
+/// Build the sidebar grouping: projects in their stored order, and, only when
+/// `empty_separator_min_projects > 0` and the project count meets it, the
+/// projects with no agents sunk below a separator. A project owning a live
+/// project terminal (`projects_with_terminals`) counts as non-empty even with
+/// zero agents, so a project the user is working in never sinks. Sessions whose
+/// project no longer exists become `orphaned` groups appended after the
+/// agent-bearing projects, so neither surface silently drops them.
 pub fn build_sidebar(
     projects: &[Project],
     sessions: &[AgentSession],
@@ -61,11 +59,9 @@ pub fn build_sidebar(
     // Bucket sessions by project id in one O(sessions) pass, preserving engine
     // order within each project, so the per-project lookups below are O(1) and
     // the whole function is O(projects + sessions).
-    // A STANDALONE agent belongs to no project, so it is bucketed under
-    // nothing: it joins no project group and, crucially, mints no orphan group
-    // below either. The orphan arm exists for a session whose project record
-    // vanished; a project-less agent falling into it would put a phantom
-    // project in the sidebar named after an id that never existed.
+    // A standalone agent belongs to no project, so it joins no group and mints no
+    // orphan group either: the orphan arm is for a session whose project record
+    // vanished, and a project-less agent there would name a phantom project.
     let mut by_project: HashMap<&str, Vec<String>> = HashMap::new();
     for session in sessions {
         let Some(project_id) = session.project_id() else {

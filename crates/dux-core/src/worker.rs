@@ -207,16 +207,13 @@ impl ResourceStats {
     /// Whether this row's breakdown carries any information beyond the row
     /// itself, i.e. whether an expand affordance should be offered at all.
     ///
-    /// The threshold is `> 1`, not `> 0`, because `children` always contains
-    /// the root process itself. For a LEAF target (a provider that spawned no
-    /// subprocesses, which is the common case) that single entry is the root,
-    /// so expanding reveals nothing but a duplicate of the row just expanded.
+    /// The threshold is `> 1`, not `> 0`, because `children` always contains the
+    /// root process itself, so for a target that spawned no subprocesses an
+    /// expand would reveal a duplicate of the row just expanded.
     ///
-    /// This lives in core, and is projected onto the wire as
-    /// `ResourceStatsView::has_breakdown`, so the TUI and the web cannot drift
-    /// on it. The rule is a policy call ("one entry is not a breakdown"), not
-    /// a self-evident fact, and it is exactly the kind of off-by-one that a
-    /// second implementation in a second language gets subtly wrong.
+    /// It lives in core and is projected onto the wire as
+    /// `ResourceStatsView::has_breakdown`, so the two surfaces cannot drift on
+    /// what is a policy call rather than a self-evident fact.
     pub fn has_breakdown(&self) -> bool {
         self.children.len() > 1
     }
@@ -292,14 +289,11 @@ pub struct AgentLaunchRequest {
     pub pty_size: (u16, u16),
     pub scrollback_lines: usize,
     pub kind: AgentLaunchKind,
-    /// TUI-only landing hint: `true` when the launch was
-    /// initiated by a fullscreen-seeking gesture (the fullscreen toggle on a
-    /// dormant tab, or a relaunch started from the fullscreen relaunch
-    /// screen), so its completion should land fullscreen. Every other launch
-    /// lands focused-but-minimized. Core builders always construct this as
-    /// `false`; the TUI flips it on the built request before dispatch. The
-    /// web has no fullscreen concept and never reads it, so web-originated
-    /// launches keep the `false` default and behave exactly as before.
+    /// TUI-only landing hint: `true` when a fullscreen-seeking gesture started
+    /// the launch, so its completion lands fullscreen; every other launch lands
+    /// focused-but-minimized. Core builders always construct it `false` and the
+    /// TUI flips it before dispatch; the web has no fullscreen concept and never
+    /// reads it.
     pub wants_fullscreen: bool,
 }
 
@@ -353,13 +347,12 @@ pub enum CreateAgentRequest {
         source_branch: String,
         custom_name: Option<String>,
     },
-    /// A STANDALONE agent: run the provider in a folder the user already has.
+    /// A standalone agent: run the provider in a folder the user already has.
     ///
-    /// It carries NO project, because a standalone agent belongs to none, and
-    /// the job path for it provisions nothing: no branch, no worktree, no
-    /// startup command. On failure there is nothing on disk to roll back, only
-    /// the record, which is why `rollback_created_worktree` is never reachable
-    /// from this arm.
+    /// It carries no project, because a standalone agent belongs to none, and its
+    /// job path provisions nothing: no branch, no worktree, no startup command.
+    /// On failure there is nothing on disk to roll back, only the record, so
+    /// `rollback_created_worktree` is never reachable from this arm.
     Standalone {
         /// The folder to run in, exactly as the user chose it. Never created,
         /// moved or removed by dux.
@@ -420,12 +413,10 @@ pub enum WorkerEvent {
         /// facts, and reporting the first as the second tells the user nothing
         /// has changed when dux has no idea what is in the tree.
         outcome: Result<(Vec<ChangedFile>, Vec<ChangedFile>), String>,
-        /// The worktree these lists were computed for. The poller snapshots the
-        /// watched worktree, releases the lock, then runs `git::changed_files`
-        /// off-thread; by the time this event lands the watch may have moved to
-        /// a different session. Tagging the event lets the engine drop a stale
-        /// poll instead of overwriting the current session's files with a
-        /// different worktree's contents.
+        /// The worktree these lists were computed for. The poller runs
+        /// `git::changed_files` off-thread, so by the time this event lands the
+        /// watch may have moved; the tag lets the engine drop a stale poll rather
+        /// than overwrite the current session's files.
         worktree: PathBuf,
     },
     /// A standalone agent's folder was classified by
@@ -501,12 +492,10 @@ pub enum WorkerEvent {
     ResourceStatsReady(Vec<ResourceStats>, bool),
     /// One run of the `gh` host probe finished.
     ///
-    /// `generation` is stamped BEFORE the probe is spawned and travels on every
-    /// way it can finish, including the result synthesised when the worker
-    /// panics. The handler discards a stale generation FIRST, before the status
-    /// changes, before the host policy changes, before it is logged, and before
-    /// it can start the pull-request workers, so two probes launched close
-    /// together cannot let the older answer win.
+    /// `generation` is stamped before the probe is spawned and travels on every
+    /// way it can finish, the result synthesised on a worker panic included. The
+    /// handler discards a stale generation before anything else it would do, so
+    /// two probes launched close together cannot let the older answer win.
     GhStatusChecked {
         generation: u64,
         outcome: crate::gh::GhProbe,
@@ -521,16 +510,14 @@ pub enum WorkerEvent {
     /// when the answer changed (see
     /// [`crate::pr_reference::resolve_reference_projects`]).
     ///
-    /// The match list has three interesting shapes and the surface branches on
-    /// all three: exactly one project proceeds to the lookup, several mean the
-    /// repository is checked out twice and the user picks, and none means dux
-    /// found no project for `repository` and can only offer the project picker,
+    /// The surface branches on the shape of the match list: exactly one project
+    /// proceeds to the lookup, several mean the repository is checked out twice
+    /// and the user picks, and none means dux can only offer the project picker,
     /// because dux does not clone.
     ///
     /// `result` is a `Result` because a worker that fell over is not the same
-    /// answer as an empty match list. Reporting a panic as "no project is a
-    /// checkout of that repository" states, in dux's own voice, something dux
-    /// never found out.
+    /// answer as an empty match list: reporting a panic as "no project is a
+    /// checkout of that repository" states something dux never found out.
     PullRequestReferenceResolved {
         /// The text the user typed, carried through so the chosen project can
         /// be handed straight to the existing lookup.
@@ -642,24 +629,21 @@ pub enum WorkerEvent {
         path: std::path::PathBuf,
         result: Result<String, String>,
     },
-    /// The in-process web-server flip pre-flight finished on a worker thread.
-    /// LOCAL MODE resolution (loopback:port + optional Tailscale:port) plus the
-    /// actual `TcpListener::bind` of each address runs off the UI thread because
-    /// it shells out to `tailscale ip`. On success the bound listeners and their
-    /// display URLs are carried back so the main loop can stash the flip; on
-    /// failure the formatted error is surfaced and the TUI stays up. `warning` is
-    /// a non-fatal note to show (e.g. Tailscale enabled but not detected).
+    /// The in-process web-server flip pre-flight finished on a worker thread,
+    /// where local-mode address resolution and each `TcpListener::bind` run
+    /// because resolution shells out to `tailscale ip`. On success the bound
+    /// listeners and their display URLs come back so the main loop can stash the
+    /// flip; on failure the TUI stays up. `warning` is a non-fatal note.
     ServerFlipPreflightReady {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
     },
-    /// The BACKGROUND web server's bind pre-flight finished on a worker thread.
+    /// The background web server's bind pre-flight finished on a worker thread.
     ///
-    /// Same payload and same reason as `ServerFlipPreflightReady` (Tailscale
-    /// detection shells out, so it cannot run on the UI thread), and a separate
-    /// variant rather than a flag on that one because the two go to different
-    /// places: the flip's listeners end a TUI session, and these start a serve
-    /// alongside one. Keeping the flip's event untouched is deliberate.
+    /// Same payload and same reason as `ServerFlipPreflightReady`, and a separate
+    /// variant rather than a flag on it because the two go to different places:
+    /// the flip's listeners end a TUI session, and these start a serve alongside
+    /// one.
     BackgroundServerPreflightReady {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,

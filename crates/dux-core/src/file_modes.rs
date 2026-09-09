@@ -1,29 +1,21 @@
-//! The one place that decides what permissions dux's OWN files and directories
+//! The one place that decides what permissions dux's own files and directories
 //! get. Every file dux keeps for itself lives in the config directory, and the
 //! rule is the same for all of them: the owner, and nobody else.
 //!
-//! `config.toml` has always been `0600`, because it may hold tokens under
-//! `[env]`. The rest of the directory did not follow: `sessions.sqlite3` mirrors
-//! the same per-project `env` map, and it, its `-wal`/`-shm` sidecars, and
-//! `dux.log` were all created at the umask default, typically `0644`.
+//! The directory's own mode is what enforces that, which is why the rule lives
+//! here rather than at each call site: SQLite creates its `-wal`/`-shm` sidecars
+//! itself, at runtime, with no API to set their mode, and a directory another
+//! local user cannot traverse closes that whatever mode the files carry. The
+//! per-file modes below are defence in depth for a file copied out of the
+//! directory, or a directory whose mode is later loosened by hand.
 //!
-//! **The directory mode is what actually closes this**, and it is why the rule
-//! lives here rather than as three separate decisions at three call sites.
-//! SQLite creates the sidecar files ITSELF, at runtime, after the connection is
-//! open, and offers no API to set their mode, so there is no moment at which
-//! dux can get in front of them. A `0700` directory makes that moot: another
-//! local user who cannot traverse the directory cannot reach a file inside it
-//! whatever mode the file carries. The per-file modes below are defence in
-//! depth for the case where a file is copied out of the directory, or the
-//! directory's mode is later loosened by hand.
-//!
-//! Two rules hold everywhere in here. Tightening is **best effort**: a mode dux
+//! Two rules hold everywhere in here. Tightening is best effort: a mode dux
 //! cannot set is a warning, never a reason to stop logging, stop opening the
-//! database, or refuse to start. And dux **never chmods through a symlink**,
-//! because the mode it would change belongs to somebody else's file.
+//! database, or refuse to start. And dux never chmods through a symlink, because
+//! the mode it would change belongs to somebody else's file.
 //!
-//! Unix-only, deliberately. dux targets macOS and Linux (see CLAUDE.md), so
-//! there is no `cfg(windows)` branch here.
+//! Unix-only, deliberately: dux targets macOS and Linux, so there is no
+//! `cfg(windows)` branch here.
 
 use std::fs;
 use std::io;
@@ -44,34 +36,24 @@ const GROUP_AND_OTHER: u32 = 0o077;
 /// Strip every group and other permission bit from an existing path, leaving the
 /// owner bits exactly as they are.
 ///
-/// This TIGHTENS and never loosens, which is what makes it safe to run on every
-/// startup over an installation created before dux cared: a `0755` directory
-/// becomes `0700` and a `0644` file becomes `0600`, while a user who has
-/// deliberately made their config read-only at `0400` keeps it. It is
-/// idempotent, so the second startup changes nothing.
+/// Tightens and never loosens, so it is safe on every startup and idempotent: a
+/// `0755` directory becomes `0700` and a `0644` file `0600`, while a config
+/// deliberately left read-only at `0400` keeps its mode.
 ///
-/// A missing path is NOT an error: the caller often lists every file dux might
-/// keep (the sqlite sidecars in particular exist only sometimes), and a path
-/// that is not there needs no tightening. Any other error is returned.
+/// A missing path is not an error: callers list every file dux might keep, and
+/// the sqlite sidecars exist only sometimes. Any other error is returned.
 ///
-/// A SYMLINK is skipped, with a warning, and that is deliberate. Both
-/// `fs::metadata` and `fs::set_permissions` follow links, so tightening a
-/// symlinked path changed the mode of whatever it pointed at: measured, a
-/// config directory symlinked to a shared directory left the TARGET at `0700`,
-/// and a `config.toml` symlinked into a dotfiles repository had dux changing
-/// the mode of a file inside that repository. That is a common setup. The
-/// reasoning is the same one [`create_private_dir_all`] already gives for
-/// parents: quietly making somebody else's file owner-only is a surprising
-/// thing for dux to do, and the surprise is just as available at the root
-/// itself as it is one level up. Skipping is the right answer rather than
-/// following-and-tightening or refusing to start, because the user who made
-/// the link is the one who chose where the file really lives, and dux's actual
-/// enforcement is the config directory's own mode either way.
+/// A symlink is skipped, with a warning. Both `fs::metadata` and
+/// `fs::set_permissions` follow links, so tightening a symlinked path would
+/// change the mode of whatever it points at, which for a `config.toml` linked
+/// into a dotfiles repository is a file inside somebody else's repository; the
+/// same reasoning [`create_private_dir_all`] gives for parents. The config
+/// directory's own mode is dux's enforcement either way.
 ///
 /// The check and the chmod are two syscalls, so a path swapped for a symlink
-/// between them would still be followed. That is not defended against: dux is
-/// single-tenant and this is the user's own config directory, so the case
-/// requires an attacker who already has the access the mode is protecting.
+/// between them is still followed. Undefended: dux is single-tenant and this is
+/// the user's own config directory, so the case needs an attacker who already
+/// has the access the mode protects.
 pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
     // `symlink_metadata` does NOT follow, which is the whole point; for a
     // non-symlink it answers exactly what `metadata` would.
@@ -99,14 +81,12 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
 /// Tighten `path` if it can be tightened, and warn rather than fail if it
 /// cannot.
 ///
-/// Permissions are a hardening measure, never a precondition for dux working.
-/// A path dux can write to but cannot `chmod` is reachable through ordinary
+/// Permissions are a hardening measure, never a precondition for dux working. A
+/// path dux can write to but cannot `chmod` is reachable through ordinary
 /// configuration (a `logging.path` under `/var/log` owned by an admin, a
-/// Windows-mounted path under WSL2, a FAT or NFS volume), and on every one of
-/// those the alternative is worse than a loose mode: propagating the error
-/// turned "dux logs to a slightly loose file" into "dux does not log at all and
-/// says nothing", and turned an existing, working config directory into a
-/// refusal to start. `what` names the thing for the warning.
+/// Windows-mounted path under WSL2, a FAT or NFS volume), and a slightly loose
+/// mode beats not logging at all or refusing to start. `what` names the thing
+/// for the warning.
 pub fn restrict_to_owner_best_effort(path: &Path, what: &str) {
     if let Err(err) = restrict_to_owner(path) {
         crate::logger::warn(&format!(
@@ -128,8 +108,7 @@ pub fn restrict_to_owner_best_effort(path: &Path, what: &str) {
 ///
 /// Creation is fatal; the tightening is not. A directory that already exists
 /// and works must not become a startup failure because its mode could not be
-/// changed, and reporting that as `failed to create <path>` named the wrong
-/// thing entirely: the directory was there the whole time.
+/// changed.
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     restrict_to_owner_best_effort(path, "directory");

@@ -1,11 +1,10 @@
-//! THE content of the first-run welcome screen, so the TUI and the web UI say
+//! The content of the first-run welcome screen, so the TUI and the web UI say
 //! identical words.
 //!
-//! This is prose, not layout: each surface decides how to frame, wrap, and
-//! style it. Do NOT add a surface-local copy of any of this text.
+//! This is prose, not layout: each surface decides how to frame, wrap and style
+//! it. Never add a surface-local copy of any of this text.
 //!
-//! Distinct from [`crate::welcome`], which holds the rotating idle-pane TIPS.
-//! This module is the one-time screen a brand new install sees.
+//! Distinct from [`crate::welcome`], which holds the rotating idle-pane tips.
 
 use std::path::Path;
 
@@ -36,11 +35,9 @@ pub struct WelcomeScreen {
 
 /// The one bold line at the top of the screen.
 ///
-/// It names BOTH front ends on purpose. 0.7.0 is the release that announces the
-/// web UI, and this screen is the first thing a brand new install shows, before
-/// the user has any reason to visit the website: a headline that mentioned only
-/// a terminal would teach them dux is a terminal-only product and they would
-/// have no later prompt to unlearn it.
+/// It names both front ends on purpose: this screen is the first thing a brand
+/// new install shows, and a headline mentioning only a terminal would teach the
+/// user that dux is a terminal-only product with no later prompt to unlearn it.
 pub const TAGLINE: &str =
     "One git worktree per coding agent, watched from your terminal or your browser.";
 
@@ -78,20 +75,15 @@ pub fn welcome_screen(config_path: &Path) -> WelcomeScreen {
             "Each agent runs whatever AI CLI you point it at. There is no protocol layer \
              and no adapter to write: if a tool runs in a terminal, it can be a provider."
                 .to_string(),
-            // The two-front-ends paragraph. Deliberately worded from NEITHER
-            // surface's point of view (no "this terminal", no "this page"):
-            // the same `WelcomeScreen` is projected into the web UI's bootstrap
-            // (`viewmodel::BootstrapView::welcome_screen`), so a sentence that
-            // assumed a terminal reader would be false in a browser and the
-            // other way round. It follows the framing already used in README.md
-            // and website/docs/introduction.md rather than inventing a third
-            // description of the same thing.
+            // Worded from neither surface's point of view (no "this terminal",
+            // no "this page"): the same `WelcomeScreen` is projected into the web
+            // UI's bootstrap, so a sentence assuming a terminal reader would be
+            // false in a browser.
             //
             // The "or flip a running terminal UI over to it" clause is load
-            // bearing, not filler: one dux process owns the config directory
-            // (see `crate::lockfile`), so a reader who took "run dux server" as
-            // the only route would try it in a second shell alongside a running
-            // TUI and hit the lock. The hand-off is the honest instruction.
+            // bearing: one dux process owns the config directory (see
+            // `crate::lockfile`), so a reader who took `dux server` as the only
+            // route would hit the lock in a second shell.
             "dux has two front ends over one workspace: a terminal UI and a web UI. Both are \
              first class, and they share the same projects, the same agents, the same \
              worktrees and the same config file, so an agent you start in one is the same \

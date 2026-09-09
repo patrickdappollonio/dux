@@ -1,32 +1,31 @@
 //! The worktree manager's shared semantics: which of a project's git worktrees
 //! a user may remove by hand, and what removing one does to its branch.
 //!
-//! This is the MANUAL OVERRIDE for deleting a branch. Deleting an agent honors
+//! This is the manual override for deleting a branch. Deleting an agent honors
 //! [`crate::model::BranchProvenance`] and keeps a branch dux did not create; the
 //! worktree manager honors the checkbox the user ticked, whatever the branch's
 //! origin, because the user is pointing at one specific worktree and saying so.
-//! Both surfaces (the web's Worktrees dialog and the TUI's `manage-worktrees`
-//! palette command) drive the rules below, so the two cannot answer differently.
+//! Both surfaces drive the rules below, so the two cannot answer differently.
 //!
 //! The rules, in one place:
 //!
-//! * A worktree is MANAGEABLE when it lives under dux's worktrees root for that
+//! * A worktree is manageable when it lives under dux's worktrees root for that
 //!   project and is not the project checkout itself. An external worktree and
 //!   the source checkout are not the manager's to touch.
-//! * A manageable worktree is REMOVABLE when no agent holds it. An attached one
+//! * A manageable worktree is removable when no agent holds it. An attached one
 //!   is still listed (silently hiding it would leave the user hunting for a
 //!   worktree they can see on disk), and refused with "delete the agent
 //!   instead": removing it from under a live agent leaves a broken session.
 //! * Removal is forced (`git worktree remove --force`); dux has no trash.
-//! * The branch is deleted only when the caller asked AND the worktree is on
+//! * The branch is deleted only when the caller asked and the worktree is on
 //!   one. A detached worktree has no branch to delete, so nothing is attempted
 //!   and nothing may be claimed about one.
 //!
 //! Deciding is separated from doing ([`resolve_removal`] and
 //! [`branch_to_delete`] are pure over a classification) so the rules are
-//! testable without a git repository, and [`remove_managed_worktree`] does the
-//! classification and the removal in ONE hop so the decision is always made
-//! against a fresh listing rather than whatever a client last saw.
+//! testable without a git repository, and [`remove_managed_worktree`] classifies
+//! and removes in one hop, so the decision is always made against a fresh
+//! listing rather than whatever a client last saw.
 
 use std::path::{Path, PathBuf};
 
@@ -240,25 +239,16 @@ pub struct RemovalReport {
 
 /// The report for a successful removal.
 ///
-/// The branch half is honest about WHY a branch survived. When the user left
-/// the checkbox off, the branch is kept BY CHOICE, which is a different
-/// sentence from the agent-delete path's provenance wording
-/// ([`crate::model::BranchProvenance::kept_branches_note`], "existed before
-/// this agent and was kept"): here nothing was inferred about the branch's
-/// origin, the user simply did not ask for it. Do not reuse that helper on this
-/// path; it would attribute a reason dux does not have.
+/// The branch half is honest about why a branch survived: with the checkbox off
+/// it is kept by choice, so do not reuse
+/// [`crate::model::BranchProvenance::kept_branches_note`] here, which would
+/// attribute an origin dux never inferred.
 ///
-/// The web composes its own version of this ladder client-side
-/// (`lib/worktreeDelete.ts`), because its reply carries the branch outcome as
-/// JSON and the toast is built in the browser. Same rungs, and the same
-/// answers on the three that describe a branch, but NOT the same strings
-/// throughout: the no-branch rung differs deliberately. This one says the
-/// branch, if there was one, was kept because the caller did not ask for it,
-/// which is the whole truth for a request that may or may not have named a
-/// branch; the web's dialog knows whether the worktree had a branch before it
-/// sent anything, so its toast simply says the branch is still there. Each
-/// side pins its own strings in its own tests; treat neither as a copy of the
-/// other.
+/// The web composes its own version of this ladder (`lib/worktreeDelete.ts`),
+/// with the same rungs but deliberately not the same strings: the no-branch rung
+/// here covers a request that may or may not have named a branch, while the
+/// browser already knows whether the worktree had one. Each side pins its own
+/// strings in its own tests; treat neither as a copy of the other.
 pub fn removal_report(worktree_path: &str, branch: Option<&BranchOutcome>) -> RemovalReport {
     let Some(branch) = branch else {
         return RemovalReport {

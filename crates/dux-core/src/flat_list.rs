@@ -1,15 +1,13 @@
-//! The flat agent-list ORDERING decision, core-owned and shared by rule with the
-//! web's `crates/dux-web/web/src/lib/flatList.ts` + `sortSessions.ts`. This is a
-//! cross-language twin: the rule lives here in Rust (the source of truth), the TS
-//! keeps a hand-written mirror, and the two are pinned by SHARED TEST VECTORS
-//! (the cases below are duplicated in `flatList.test.ts` / `sortSessions.test.ts`,
-//! in the `agent_search.rs` / `agentSearch.ts` style) so a comparator change in
-//! one language that is not mirrored fails a test.
+//! The flat agent-list ordering decision, core-owned and mirrored by hand in the
+//! web's `crates/dux-web/web/src/lib/flatList.ts` and `sortSessions.ts`. The rule
+//! lives here; the two are pinned by shared test vectors duplicated in
+//! `flatList.test.ts` and `sortSessions.test.ts`, so an unmirrored comparator
+//! change fails a test.
 //!
-//! The list is a single globally-ordered agent list with no project grouping.
-//! Active agents form the MAIN bucket; detached/exited ("inactive"/"quiet") agents
-//! form a collapsible TAIL. This module owns only the ORDERING (which indices, in
-//! which order); each surface wraps the result into its own list-item type.
+//! The list is a single globally-ordered agent list with no project grouping:
+//! active agents form the main bucket and detached or exited ones a collapsible
+//! tail. This module owns only the ordering; each surface wraps the result into
+//! its own list-item type.
 
 use crate::model::{AgentSession, SessionStatus};
 
@@ -42,17 +40,17 @@ pub struct FlatOrder {
 
 /// Order the sessions for the flat list. `is_hot(index)` reports whether the
 /// session is working or needs attention (used only by `Active`'s float).
-/// `is_visible(index)` is a symmetric DISPLAY filter: an index that fails it never
+/// `is_visible(index)` is a symmetric display filter: an index that fails it never
 /// enters either bucket. `sessions` is never mutated.
 ///
 /// The partition always preserves incoming order first, then each bucket is
 /// ordered by `mode`:
-/// - `Active`: the main bucket floats `is_hot` indices up (a STABLE float keeping
-///   incoming order within each group); the inactive tail sorts by most recently
-///   updated (`Reverse(updated_at)`), most-recently-active-first.
-/// - `Updated` / `Created` / `NameAsc` / `NameDesc`: the MAIN bucket is sorted by
-///   that comparator; the inactive tail stays VERBATIM (only Active reorders the
-///   tail, so the two surfaces agree).
+/// - `Active`: the main bucket floats `is_hot` indices up, stably, keeping
+///   incoming order within each group; the inactive tail sorts by
+///   `Reverse(updated_at)`, most-recently-active first.
+/// - `Updated` / `Created` / `NameAsc` / `NameDesc`: the main bucket is sorted by
+///   that comparator and the inactive tail stays verbatim, since only `Active`
+///   reorders the tail.
 /// - `Manual`: both buckets verbatim (the stored global order).
 pub fn order_sessions(
     sessions: &[AgentSession],

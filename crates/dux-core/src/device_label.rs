@@ -1,31 +1,21 @@
-//! Turning a recorded driver identity into a SHORT label a surface can render.
+//! Turning a recorded driver identity into a short label a surface can render.
 //!
 //! The PTY-ownership registry records whatever a claiming connection presented
-//! at its upgrade: for a browser that is its raw `User-Agent`, which is
-//! routinely 120 to 200 characters long, and for the terminal UI it is the fixed
-//! [`TUI_DEVICE_LABEL`]. Both end up as COPY on a watcher's screen, and a real
-//! `User-Agent` does not fit where a surface has to put it: the title bar of a
-//! card inside a pane, or a card in a browser column, both of which are a name's
-//! worth of room and not a paragraph's.
+//! at its upgrade: a browser's raw `User-Agent`, or the terminal UI's fixed
+//! [`TUI_DEVICE_LABEL`]. Both end up as copy on a watcher's screen, where there
+//! is a name's worth of room and not a paragraph's.
 //!
-//! This is the terminal UI's twin of the web's `deviceLabel.ts`, and the two are
-//! deliberately kept in step: the same UA shapes must produce the same label on
-//! both surfaces, or one device is called two different things depending on which
-//! screen is looking at it. The tests below mirror the web's fixtures literally
-//! so a change to one parser that the other did not follow fails here rather
-//! than silently drifting.
+//! The terminal UI's twin of the web's `deviceLabel.ts`, kept in step with it:
+//! the same UA shapes must produce the same label on both surfaces, or one
+//! device is called two different things depending on which screen is looking at
+//! it. The tests below mirror the web's fixtures literally.
 //!
-//! ## Where the two deliberately differ
-//!
-//! `deviceLabel.ts` returns `null` for anything it cannot parse, and its caller
-//! renders a generic fallback. This returns a TRUNCATED, control-stripped prefix
-//! of the raw string instead. The reason is the surface: the web renders into
-//! HTML, where echoing an attacker-supplied string is a class of bug all by
-//! itself, while this renders into a fixed-width themed span whose contents are
-//! stripped of control bytes and bounded to [`SHORT_LABEL_MAX_CHARS`] display
-//! characters first. A truncated prefix is more use than "another device" when
-//! someone is trying to work out which of their own machines is holding a
-//! terminal, and it cannot corrupt the frame.
+//! The two deliberately differ on an unparseable string: `deviceLabel.ts`
+//! returns `null` because it renders into HTML, where echoing an
+//! attacker-supplied string is a bug class of its own, while this returns a
+//! control-stripped prefix bounded to [`SHORT_LABEL_MAX_CHARS`], which cannot
+//! corrupt a frame and is more use than "another device" to somebody working out
+//! which of their machines holds a terminal.
 
 use crate::background_serve::TUI_DEVICE_LABEL;
 
@@ -38,7 +28,7 @@ pub const SHORT_LABEL_MAX_CHARS: usize = 24;
 
 /// The operating system a `User-Agent` names, or `None`.
 ///
-/// ORDER MATTERS, and it is the same order `deviceLabel.ts` uses: an Android UA
+/// Order matters, and it is the same order `deviceLabel.ts` uses: an Android UA
 /// also contains "Linux" and an iOS UA also contains "like Mac OS X", so the
 /// more specific token has to be tested first.
 fn detect_os(ua: &str) -> Option<&'static str> {
@@ -62,14 +52,12 @@ fn detect_os(ua: &str) -> Option<&'static str> {
 
 /// The browser a `User-Agent` names, or `None`.
 ///
-/// ORDER MATTERS here too, for the same reason it does on the web side: Edge and
-/// Chrome both carry a "Chrome/" token and Chrome and Safari both carry a
-/// "Safari/" token, so each check has to exclude the engines layered above it.
-/// Edge's token is platform specific ("Edg/" on the desktop, "EdgA/" on Android,
-/// "EdgiOS/" on iOS) and none of the mobile spellings contain the bare desktop
-/// one, so they are matched explicitly or they fall through to Chrome.
-/// Chromium-based browsers (Opera, Brave, Vivaldi) are folded into Chrome, which
-/// is what the web side does as well.
+/// Order matters, and it matches `deviceLabel.ts`: Edge and Chrome both carry a
+/// "Chrome/" token and Chrome and Safari both carry a "Safari/" token, so each
+/// check excludes the engines layered above it. Edge's token is platform
+/// specific ("Edg/", "EdgA/", "EdgiOS/") and the mobile spellings must be matched
+/// explicitly or they fall through to Chrome, into which the other
+/// Chromium-based browsers are deliberately folded.
 fn detect_browser(ua: &str) -> Option<&'static str> {
     if ua.contains("Edg/") || ua.contains("EdgA/") || ua.contains("EdgiOS/") {
         return Some("Edge");
@@ -119,11 +107,9 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
 ///   - Anything else gives a control-stripped prefix, cut to
 ///     [`SHORT_LABEL_MAX_CHARS`].
 pub fn short_device_label(raw: &str) -> Option<String> {
-    // Control bytes first, before anything measures or matches: this value is
-    // rendered into a frame, and an escape sequence smuggled through a
-    // `User-Agent` would move the cursor rather than print. Stripping is the
-    // right answer rather than refusing, because the printable remainder is
-    // still the honest name of the device.
+    // Control bytes first, before anything measures or matches: this is rendered
+    // into a frame, and an escape sequence smuggled through a `User-Agent` would
+    // move the cursor rather than print.
     let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
     let ua = cleaned.trim();
     if ua.is_empty() {

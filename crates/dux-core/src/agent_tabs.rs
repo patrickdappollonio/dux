@@ -1,10 +1,7 @@
-//! Pure agent-tab derivations shared, by rule, with the web's
-//! `crates/dux-web/web/src/lib/agentTabs.ts`. These are cross-language TWINS:
-//! the DECISION lives here in Rust (the core-owned source of truth), the TS file
-//! keeps a hand-written mirror, and the two are pinned by SHARED TEST VECTORS
-//! (the cases in this module's tests are duplicated verbatim in
-//! `agentTabs.test.ts`, in the `agent_search.rs` / `agentSearch.ts` style) so a
-//! change to one language's rule that is not mirrored fails a test.
+//! Pure agent-tab derivations, core-owned and mirrored by hand in the web's
+//! `crates/dux-web/web/src/lib/agentTabs.ts`. The cases in this module's tests
+//! are duplicated verbatim in `agentTabs.test.ts`, so an unmirrored rule change
+//! fails a test.
 //!
 //! Keep these functions small and pure; anything needing engine state belongs on
 //! `Engine`, not here.
@@ -18,11 +15,10 @@ use std::collections::HashMap;
 /// pins the literal.
 pub const ONLY_TAB_CLOSE_REFUSAL: &str = "This is the agent's only tab, so closing it would leave the agent with no tab at all. Detach the agent instead to stop everything it is running, or add another tab first.";
 
-/// The way PROSE names a tab: the strip's label with its first character
-/// upper-cased. Pills are lower-case because they are chrome; a sentence names
-/// a tab the way a sentence names anything, and the disambiguating suffix rides
-/// along, so "Codex 2" in a confirmation is the pill the user is looking at.
-/// Mirrors the web's `tabProseLabel`.
+/// The way prose names a tab: the strip's label with its first character
+/// upper-cased. Pills stay lower-case because they are chrome, and the
+/// disambiguating suffix rides along, so "Codex 2" in a confirmation is the pill
+/// the user is looking at. Mirrors the web's `tabProseLabel`.
 pub fn prose_tab_label(strip_label: &str) -> String {
     let mut chars = strip_label.chars();
     match chars.next() {

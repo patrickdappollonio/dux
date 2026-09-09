@@ -36,23 +36,17 @@ enum HeadMismatch {
 /// Roll back a create that failed after its worktree existed.
 ///
 /// The worktree goes whenever dux made the directory (`owns_worktree`), but the
-/// BRANCH goes only when dux also minted it. Those are two different questions:
-/// attaching to `develop` makes dux the owner of the directory and of nothing
-/// else, and a rollback that deleted the branch too destroyed a branch the user
-/// had before the agent existed.
-///
-/// The provenance is read from the session rather than carried a second time
-/// beside `owns_worktree`, so the rollback and the delete can never disagree
-/// about who owns the branch.
+/// branch goes only when dux also minted it: attaching to `develop` makes dux the
+/// owner of the directory and of nothing else. The provenance is read from the
+/// session rather than carried a second time, so the rollback and the delete
+/// cannot disagree about who owns the branch.
 ///
 /// No drifted birth branch is ever passed: the agent was born moments ago and
 /// cannot have moved.
 ///
-/// It takes a [`ManagedWorkspace`], not a session, so a standalone agent's
-/// folder can never be handed to it: there is no worktree to remove and no
-/// branch to delete, and the user's folder must survive a failed create
-/// untouched. A caller holding a folder workspace cannot even name the
-/// argument.
+/// It takes a [`ManagedWorkspace`], not a session, so a standalone agent's folder
+/// cannot be handed to it: the user's folder must survive a failed create
+/// untouched, and a caller holding a folder workspace cannot name the argument.
 fn rollback_created_worktree(repo_path: &Path, managed: &ManagedWorkspace) {
     let worktree_path = Path::new(&managed.worktree_path);
     if managed.branch_provenance.dux_may_delete_branch() {
@@ -397,21 +391,15 @@ impl CreatePlanContext<'_> {
             // (Named `agent_title` to avoid shadowing the PR `title` above.)
             let agent_title = custom_name.clone();
             let resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
-            // Two separate questions, and conflating them is what made a PR
-            // agent report the user's branch back to them.
-            //
-            // `attach_existing` decides how the worktree is made: a name git
-            // already resolves (a local branch, or a remote-tracking ref left
-            // by an ordinary `git fetch` for a same-repo PR) is checked out
-            // rather than re-fetched, which is what keeps a same-repo PR branch
-            // tracking origin.
+            // Two separate questions. `attach_existing` decides how the worktree
+            // is made: a name git already resolves is checked out rather than
+            // re-fetched, which keeps a same-repo PR branch tracking origin.
             //
             // `local_branch_existed` decides whose branch it is. Against a
-            // remote-only ref, `git worktree add` DWIMs `refs/heads/<name>`
-            // into existence, so dux made that local branch just as surely as
-            // the fetch arm would have, and deleting the agent takes it. The
-            // branch on origin is a different ref and is never touched either
-            // way. Only a LOCAL branch that was there first is the user's.
+            // remote-only ref, `git worktree add` DWIMs `refs/heads/<name>` into
+            // existence, so dux made that local branch and deleting the agent
+            // takes it. Only a local branch that was there first is the user's,
+            // and the ref on origin is never touched either way.
             let local_branch_existed = git::local_branch_exists(&repo_path, &resolved_name);
             let attach_existing =
                 use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
@@ -460,18 +448,13 @@ impl CreatePlanContext<'_> {
                         "PR worktree creation failed for {} #{}: {err}",
                         owner_repo, number
                     ));
-                    // THE RESPONSIBILITY BOUNDARY. The fetch above minted
-                    // `refs/heads/<resolved_name>`, and the worktree that the
-                    // provenance-driven rollback keys off does not exist, so
-                    // nothing else in this job would ever remove that ref. From
-                    // the next line on (worktree created, session built) the
-                    // rollback owns the branch and this cleanup must not run,
-                    // or the two would both delete it.
+                    // The responsibility boundary: no worktree exists, so the
+                    // provenance-driven rollback will not run and nothing else
+                    // would remove the ref the fetch minted. Past this point the
+                    // rollback owns the branch and this cleanup must not run.
                     //
                     // Only when dux minted it: a local branch that was there
-                    // first is the user's and survives the failure. A branch
-                    // the fetch minted, or one the failed worktree add DWIMed
-                    // out of a remote-tracking ref, is dux's leftover.
+                    // first is the user's and survives the failure.
                     if !local_branch_existed {
                         git::delete_created_branch_best_effort(&repo_path, &resolved_name);
                     }
@@ -511,10 +494,9 @@ impl CreatePlanContext<'_> {
                 launch_with_resume: false,
                 pending_copy: None,
                 // Whether the fetch minted `refs/heads/<name>` or the worktree
-                // add DWIMed it out of `origin/<name>`, dux made the local
-                // branch and it is dux's to clean up (leaving it behind is what
-                // makes recreating the agent collide). Only a local branch that
-                // was already there is the user's and stays.
+                // add DWIMed it out of `origin/<name>`, dux made the local branch
+                // and it is dux's to clean up. Only a local branch that was
+                // already there is the user's and stays.
                 branch_provenance: if local_branch_existed {
                     BranchProvenance::AttachedExisting
                 } else {

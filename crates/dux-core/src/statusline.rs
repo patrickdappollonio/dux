@@ -5,22 +5,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Audience for a status update. `All` (the default) broadcasts to every
-/// connected client exactly as statuses behaved before scoping existed;
-/// `Connection(id)` restricts delivery to the single web connection whose
-/// command originated the operation, so one client's operation toasts
-/// (push/commit/launch) stop appearing on every other client.
+/// connected client; `Connection(id)` restricts delivery to the single web
+/// connection whose command originated the operation, so one client's operation
+/// toasts (push, commit, launch) stay off every other client.
 ///
-/// Carried from a status's creation all the way to the wire ([`WireStatus`]
-/// in `wire.rs`). The TUI ignores it entirely (it has a single status line and
-/// a single user); only the web's per-connection status forwarder filters on
-/// it. Engine-internal / spontaneous statuses (agent crash, branch move, config
-/// reload) and TUI-minted statuses default to `All`.
+/// Carried from a status's creation all the way to the wire ([`WireStatus`]).
+/// The TUI ignores it entirely (it has one status line and one user); only the
+/// web's per-connection status forwarder filters on it. Spontaneous engine
+/// statuses and TUI-minted ones default to `All`.
 ///
 /// [`WireStatus`]: crate::wire::WireStatus
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusScope {
-    /// Broadcast to every client (the default, and every pre-scoping status).
+    /// Broadcast to every client.
     #[default]
     All,
     /// Deliver only to the web connection with this server-assigned id.
@@ -34,36 +32,29 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Absolute ceiling on how long liveness may keep a `Busy` on screen.
 ///
-/// [`LiveStatusKeys`] turns the busy timeout from a guess into an answer, but it
-/// is a registry, and a registry can leak: an operation whose final never gets
-/// produced (a worker path that returns without resolving, a future spawn site
-/// that registers and forgets to retire) would otherwise hold a spinner on
-/// screen for the life of the process. A spinner must never be literally
-/// immortal, so past this age a `Busy` is upgraded whatever liveness says.
+/// [`LiveStatusKeys`] is a registry, and a registry can leak: an operation whose
+/// final never lands would otherwise hold a spinner on screen for the life of
+/// the process, so past this age a `Busy` is upgraded whatever liveness says.
 ///
-/// Generous on purpose. It is a backstop for a bug, not a timeout: any real
-/// operation dux runs finishes far inside it, and picking a value a slow clone
-/// or a long `git fetch` could plausibly cross would reintroduce the false
-/// "timed out" this whole mechanism exists to remove.
+/// Generous on purpose. It is a backstop for a bug, not a timeout: a value a
+/// slow clone or a long fetch could plausibly cross would reintroduce the false
+/// "timed out" this mechanism exists to remove.
 pub const BUSY_LIVE_CEILING: Duration = Duration::from_secs(30 * 60);
 
 /// The keys of status operations the engine is still running.
 ///
-/// The busy timeout exists to stop a LEAKED spinner claiming forever that work
+/// The busy timeout exists to stop a leaked spinner claiming forever that work
 /// is happening, and from inside [`KeyedStatusController`] it can only ever be a
 /// guess about silence: nothing there knows whether a clone on a slow network is
-/// thirty seconds into its work or was abandoned. Guessing wrong is not
-/// harmless; it replaced a truthful spinner with "timed out" while the clone was
-/// still running, and the user watched their agent creation apparently vanish
-/// and then succeed minutes later.
+/// thirty seconds into its work or was abandoned, and guessing wrong replaces a
+/// truthful spinner with "timed out".
 ///
-/// So the answer is recorded instead of inferred, in ONE set rather than per
-/// registry. A handle is shared (cheaply cloned) between the engine, which
-/// registers a key at the moment it starts the operation behind it, and the
-/// surface's controller, which retires the key at the one moment a final lands
-/// on it. That pairing is what makes it general: a final of ANY origin, from any
-/// of the engine's op registries or from a bare keyed `set`, retires liveness
-/// through the same door, and no registry has to be enumerated anywhere.
+/// So liveness is recorded rather than inferred, in one set rather than per
+/// registry. A cheaply cloned handle is shared between the engine, which
+/// registers a key when it starts the operation behind it, and the surface's
+/// controller, which retires it at the one place a final lands. A final of any
+/// origin therefore retires liveness through the same door, and no op registry
+/// has to be enumerated anywhere.
 ///
 /// Both halves fail safely if a future path forgets one:
 /// - forgetting to register gets the old behavior back for that operation (a
@@ -124,31 +115,22 @@ impl std::fmt::Debug for LiveStatusKeys {
     }
 }
 
-/// How long a FINAL stays replayable under [`StatusRetention::Emit`].
+/// How long a final stays replayable under [`StatusRetention::Emit`].
 ///
 /// A reconnect is the same user who watched the spinner start, so it must be
 /// told how the operation ended; a page load an hour later is a different
-/// session and must not be. This window is what separates the two.
+/// session and must not be. This window separates the two.
 ///
-/// Deliberately a fixed constant and NOT `ui.status_clear_seconds`. How long a
-/// final stays REPLAYABLE and how long a toast stays ON SCREEN are different
-/// questions, and that setting answers the second. Tying them would also mean a
-/// user who sets `0` (meaning "never auto-clear on screen") gets unbounded
-/// retention, which is the stale-replay bug restored through the back door.
+/// Deliberately a fixed constant and not `ui.status_clear_seconds`: how long a
+/// final stays replayable and how long a toast stays on screen are different
+/// questions, and a user who sets that setting to `0` would get unbounded
+/// retention.
 ///
-/// 30 seconds, derived rather than guessed, from the browser's own reconnect
-/// budget in `crates/dux-web/web/src/lib/reconnectingSocket.ts`: backoff starts
-/// at `RECONNECT_MIN_MS` (500) and doubles, capped at `RECONNECT_MAX_MS` (5000),
-/// for at most `MAX_RECONNECT_ATTEMPTS` (3) tries. Three tries are delayed 500,
-/// 1000 and 2000 ms, so the cap never even binds and the last attempt starts
-/// about 3.5 s after the drop; a socket that has not come back by then has given
-/// up, emitted `failed`, and handed the user a Reconnect affordance instead. 30 s
-/// clears that with an order of magnitude to spare while staying three orders of
-/// magnitude short of the hour-old error this window exists to stop.
-///
-/// The accepted consequence: a brand-new tab opened inside the window also sees
-/// the final. That is fine. A thirty-second-old outcome is current, and it is
-/// the price of the reconnect being honest.
+/// The value covers the browser's whole reconnect budget in
+/// `crates/dux-web/web/src/lib/reconnectingSocket.ts`, whose last attempt starts
+/// a few seconds after a drop, with an order of magnitude to spare. A brand-new
+/// tab opened inside the window also sees the final, which is accepted: a
+/// thirty-second-old outcome is current.
 pub const FINAL_REPLAY_WINDOW: Duration = Duration::from_secs(30);
 
 /// How many `ui.status_clear_seconds` windows a `Warning` stays up, relative to
@@ -160,18 +142,14 @@ pub const FINAL_REPLAY_WINDOW: Duration = Duration::from_secs(30);
 /// fails if they drift.
 pub const WARNING_CLEAR_FACTOR: u32 = 3;
 
-/// How many statuses may WAIT behind the one on the TUI's status line.
+/// How many statuses may wait behind the one on the TUI's status line.
 ///
-/// The line is a queue, not a transcript. A burst of work should be readable in
-/// full, but a user who looked away for a minute must not come back to a
-/// backlog of news that is no longer true, and a runaway producer must not be
-/// able to take unbounded memory through the status line. Five is a couple of
-/// screenfuls of reading at the default window and comfortably more than any
-/// single operation dux runs posts in one go.
+/// The line is a queue, not a transcript: a user who looked away for a minute
+/// must not come back to a backlog of news that is no longer true, and a runaway
+/// producer must not take unbounded memory through the status line.
 ///
-/// When the queue is full the OLDEST waiting `Info` is dropped, not the newest
-/// arrival: the newer message is the more current fact, and the older one has
-/// already been overtaken by everything queued behind it.
+/// When the queue is full the oldest waiting `Info` is dropped, not the newest
+/// arrival, because the newer message is the more current fact.
 pub const MAX_QUEUED_STATUSES: usize = 5;
 
 /// The storage key of the `n`th anonymous entry under [`StatusRetention::Retain`].
@@ -295,14 +273,12 @@ pub struct KeyedWireStatus {
     /// Whether the surface must keep this message up until the user dismisses
     /// it, rather than retiring it on a timer.
     ///
-    /// Deliberately ORTHOGONAL to tone. A catastrophic error is still visually
-    /// an error, so a `Critical` tone would have put every call site on a
-    /// spectrum with no clear line and duplicated every icon and colour
-    /// decision. This flag answers one crisp question instead: does this
-    /// message wait for the user, or does it leave on its own?
+    /// Deliberately orthogonal to tone: a catastrophic error is still visually an
+    /// error, so this answers one crisp question instead, does the message wait
+    /// for the user or leave on its own.
     ///
     /// The rule for setting it, and it is meant to stay rare: the user must act
-    /// OUTSIDE the toast to recover, or something may have been lost or left
+    /// outside the toast to recover, or something may have been lost or left
     /// half-done. Everything else self-dismisses.
     pub sticky: bool,
 }
@@ -317,36 +293,31 @@ pub struct StatusTickChanges {
     /// instead of upgraded. The caller must re-broadcast each one as a live
     /// `busy` status.
     ///
-    /// The re-broadcast is not decoration. A browser holds its own leak guard on
-    /// every spinner (`BUSY_TOAST_MAX_MS` in
-    /// `crates/dux-web/web/src/lib/notify.ts`), and the only thing that re-arms
-    /// it is another frame on the same key. Keeping the entry alive server-side
-    /// while saying nothing on the wire would move the silent disappearance from
-    /// the engine to the browser rather than fix it.
+    /// The re-broadcast is required: a browser holds its own leak guard on every
+    /// spinner (`BUSY_TOAST_MAX_MS` in `crates/dux-web/web/src/lib/notify.ts`),
+    /// and only another frame on the same key re-arms it.
     pub refreshed: Vec<KeyedWireStatus>,
     /// How many finals aged out of the replay window under
-    /// [`StatusRetention::Emit`]. These are deliberately NOT reported as keys:
-    /// the caller must refresh its published snapshot but must send NO frame for
-    /// them, because a `status_cleared` would dismiss the toast on every screen
-    /// showing it, `sticky` ones included. A count rather than a list, so there
-    /// is nothing here to accidentally turn into frames.
+    /// [`StatusRetention::Emit`]. Deliberately a count and not a key list: the
+    /// caller must refresh its published snapshot but send no frame for them,
+    /// because a `status_cleared` would dismiss the toast on every screen showing
+    /// it, `sticky` ones included.
     pub purged: usize,
 }
 
-/// What the controller does with a FINAL status (anything that is not
+/// What the controller does with a final status (anything that is not
 /// [`StatusTone::Busy`]: info/success, warning, error).
 ///
-/// The distinction exists because a `Busy` is live STATE while a final is an
-/// EVENT. A surface that can be joined late (the web, where every page load and
-/// every reconnect replays the snapshot) must be told about work still in
-/// flight, and must not still be told, an hour on, about an outcome that is
-/// long over.
+/// A `Busy` is live state while a final is an event. A surface that can be
+/// joined late (the web, where every page load and every reconnect replays the
+/// snapshot) must be told about work still in flight, and must not still be
+/// told, an hour on, about an outcome that is long over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusRetention {
     /// Store a final and keep it until its turn on the line is over. The TUI's
     /// single status line has no other way to show an outcome, and it is never
     /// "reconnected", so a message stays on screen rather than being broadcast
-    /// and forgotten. Because there is only one line, the entries QUEUE under
+    /// and forgotten. Because there is only one line, the entries queue under
     /// this policy instead of overwriting each other; the rules are on
     /// [`KeyedStatusController`].
     Retain,
@@ -355,19 +326,13 @@ pub enum StatusRetention {
     /// replayable for [`FINAL_REPLAY_WINDOW`], and then dropped by
     /// [`tick`](KeyedStatusController::tick).
     ///
-    /// The window is not a detail, it is the point. Without it a socket that
-    /// drops while an operation is running comes back to a snapshot holding
-    /// NOTHING: the busy was retired by its own final and the final was
-    /// broadcast to nobody, so the client sits on a spinner until its leak guard
-    /// silently retires it and the user is never told the operation failed. With
-    /// it, the reconnecting tab is handed the final it missed and the hour-old
-    /// error still never comes back.
+    /// The window is the point: without it, a socket that drops while an
+    /// operation is running comes back to a snapshot holding nothing, because the
+    /// busy was retired by its own final and that final was broadcast to nobody.
     ///
-    /// The expiry is SILENT: no cleared key is reported, because the on-screen
-    /// lifetime belongs to the client (which retires each toast on its own
-    /// timer, and deliberately never retires a `sticky` one). A `status_cleared`
-    /// at the thirty-second mark would dismiss exactly the messages that were
-    /// marked as needing to wait for the user.
+    /// The expiry is silent: no cleared key is reported, because the on-screen
+    /// lifetime belongs to the client, which retires each toast on its own timer
+    /// and never retires a `sticky` one.
     Emit,
 }
 
@@ -378,15 +343,14 @@ pub enum StatusRetention {
 /// generation token on its key so that a stale-success clear from a prior
 /// attempt can never silently dismiss a newer, live status.
 ///
-/// The two retention policies also render differently. Under
+/// The two retention policies render differently. Under
 /// [`StatusRetention::Emit`] the web stacks every open status as its own toast
 /// and dismisses them independently. Under [`StatusRetention::Retain`] the TUI
-/// has ONE line, so the entries form a short QUEUE rather than fighting over it:
-/// infos take the line in arrival order, each for its full
-/// `ui.status_clear_seconds` window from the moment it is SHOWN; a warning or an
-/// error pre-empts and drops the infos still waiting behind it; a busy takes the
-/// line at once and drops nothing. See [`Self::store_queued`] and
-/// [`Self::advance`].
+/// has one line, so the entries form a short queue: infos take the line in
+/// arrival order, each for its full `ui.status_clear_seconds` window from the
+/// moment it is shown; a warning or an error pre-empts and drops the infos still
+/// waiting behind it; a busy takes the line at once and drops nothing. See
+/// [`Self::store_queued`] and [`Self::advance`].
 pub struct KeyedStatusController {
     /// The anonymous slot; most-recent-wins. Written under
     /// [`StatusRetention::Emit`] only: the TUI's queue needs a per-message
@@ -409,28 +373,26 @@ pub struct KeyedStatusController {
     /// What happens to a final (non-`Busy`) status. See [`StatusRetention`].
     retention: StatusRetention,
     /// Which keys still have an operation running behind them. The controller
-    /// READS it to decide whether a timed-out busy is stranded or merely slow,
-    /// and RETIRES a key whenever a final lands on it, which is the one place
+    /// reads it to decide whether a timed-out busy is stranded or merely slow,
+    /// and retires a key whenever a final lands on it, which is the one place
     /// every final of every origin passes through.
     ///
-    /// Default-empty, so a controller nobody handed a shared set to (every test
-    /// that does not care, and any future surface before it is wired) behaves
-    /// exactly as it did before liveness existed.
+    /// Default-empty, so a controller nobody handed a shared set to falls back
+    /// to timing a busy out after [`BUSY_TIMEOUT`].
     live: LiveStatusKeys,
     /// The TUI's status queue: storage keys of [`Self::entries`] in the order
-    /// they take the single line, front first. Populated ONLY under
+    /// they take the single line, front first. Populated only under
     /// [`StatusRetention::Retain`]; the web stacks every open status as a toast
     /// and has nothing to queue, so under `Emit` this stays empty and every
     /// queue-aware path is skipped.
     queue: VecDeque<String>,
     /// Which entry is on the line and when it went there.
     ///
-    /// The instant is what gives an `Info` its FULL window from the moment it is
-    /// SHOWN rather than from the moment it was posted, which is the whole point
-    /// of the queue: a message that waited its turn still gets read. The key
-    /// travels with it so [`Self::advance`] can notice the front has changed
-    /// underneath it and re-stamp, rather than relying on every mutation
-    /// remembering to reset a bare instant.
+    /// The instant gives an `Info` its full window from the moment it is shown
+    /// rather than from the moment it was posted, so a message that waited its
+    /// turn still gets read. The key travels with it so [`Self::advance`] can
+    /// notice the front changed underneath it and re-stamp, rather than relying
+    /// on every mutation remembering to reset a bare instant.
     shown: Option<(String, Instant)>,
     /// Storage key of the newest anonymous entry under `Retain`, so [`Self::pin`],
     /// [`Self::anon_generation`] and [`Self::anon_busy_matches`] can still name
@@ -633,10 +595,8 @@ impl KeyedStatusController {
             return generation;
         }
 
-        // Both policies STORE the entry, including a final: `Emit` differs only
-        // in how long it keeps one, which is [`tick`](Self::tick)'s job. Storing
-        // is also what retires the `Busy` the final replaces, so no spinner is
-        // ever left behind on the slot.
+        // Both policies store the entry, a final included; `Emit` differs only in
+        // how long it keeps one. Storing is what retires the `Busy` it replaces.
         match key {
             None => {
                 self.anon = Some(entry);
@@ -645,11 +605,9 @@ impl KeyedStatusController {
                 self.anon_pinned = false;
             }
             Some(k) => {
-                // A final on a key is the one moment every finished operation
-                // passes through, whichever registry (or none) it came from, so
-                // this is where liveness is retired. A `Busy` is the opposite
-                // signal and leaves the registration alone: `progress` re-emits
-                // one on the same key mid-operation.
+                // A final is the one moment every finished operation passes
+                // through, so liveness is retired here; a `Busy` leaves the
+                // registration alone, because `progress` re-emits one mid-run.
                 if tone != StatusTone::Busy {
                     self.live.retire(&k);
                 }
@@ -664,22 +622,20 @@ impl KeyedStatusController {
     /// the TUI's queue.
     ///
     /// The tone rules the single line follows live here:
-    /// - an `Info` joins the BACK of the queue and waits its turn;
-    /// - a `Warning` or an `Error` PRE-EMPTS, taking the line at once and
-    ///   dropping every `Info` behind it, because an info the user has not read
-    ///   yet that has since been overtaken by a warning is stale news;
-    /// - a `Busy` also takes the line at once but drops NOTHING, because it is
+    /// - an `Info` joins the back of the queue and waits its turn;
+    /// - a `Warning` or an `Error` pre-empts, taking the line at once and
+    ///   dropping every `Info` behind it, which has been overtaken and is stale;
+    /// - a `Busy` also takes the line at once but drops nothing, because it is
     ///   live state rather than an outcome: the waiting infos resume after its
     ///   final.
     ///
-    /// An `Error` on the line is retired by the ARRIVAL of any newer message,
+    /// An `Error` on the line is retired by the arrival of any newer message,
     /// whatever its tone (see [`Self::retire_showing_error`]), which is what
     /// "until it is replaced" means on a queued line.
     ///
     /// A replacement on a key already in the queue keeps its position, whatever
-    /// its tone. The queue orders NEWS, and a producer restating itself on the
-    /// key it already holds has not produced any; this is what lets a keyed
-    /// `Busy`'s final replace it in place at the front.
+    /// its tone: the queue orders news, and a producer restating itself on the
+    /// key it already holds has produced none.
     fn store_queued(&mut self, now: Instant, key: Option<String>, entry: KeyedStatus) {
         let tone = entry.tone;
         let storage = match key {
@@ -723,11 +679,9 @@ impl KeyedStatusController {
             self.enforce_queue_bound();
         }
         if self.queue.front() == Some(&storage) {
-            // Stamped HERE and not left to the next tick: a message is on the
-            // line from the instant it is set, so its window has to start there
-            // too or the first frame after it appears would hand it a free one.
-            // A new message on the line is a new thing to read, so a replacement
-            // in place restarts the window rather than inheriting the old one's.
+            // Stamped here rather than at the next tick: a message is on the line
+            // from the instant it is set, and a replacement in place restarts the
+            // window rather than inheriting the old one's.
             self.shown = Some((storage, now));
         }
     }
@@ -766,33 +720,25 @@ impl KeyedStatusController {
         Some(key)
     }
 
-    /// Retire the entry on the line that this arrival REPLACES.
+    /// Retire the entry on the line that this arrival replaces.
     ///
     /// Two entries wait to be replaced rather than for a clock, and on a queued
     /// line nothing would ever replace them unless the arrival itself did:
     ///
-    /// - An `Error`, always. It is the one outcome the user must not be able to
-    ///   miss by looking away, so it has no dwell clock. On a most-recent-wins
-    ///   line the next message replaced it by definition; on a queue an unkeyed
-    ///   error would sit there for the rest of the session with everything
-    ///   behind it unreadable, because nothing can ever write the synthetic id
-    ///   it is stored under.
-    /// - EVERY tone but `Busy` when `clear_after` is zero. That setting means
-    ///   "never auto-clear", so there is no window for anything to wait out and
-    ///   the line is most-recent-wins, which is exactly what the setting has
-    ///   always promised. Without this a warning at a zero window held the line
-    ///   for the session and everything queued behind it was evicted unread.
+    /// - An `Error`, always. It has no dwell clock, so on a queue an unkeyed
+    ///   error would hold the line for the rest of the session with everything
+    ///   behind it unreadable.
+    /// - Every tone but `Busy` when `clear_after` is zero. That setting means
+    ///   "never auto-clear", so there is no window to wait out and the line is
+    ///   most-recent-wins.
     ///
     /// A `Busy` is the deliberate exception at a zero window: a spinner is live
-    /// state rather than an outcome, it says work is happening right now, and
-    /// the thing that replaces it is its own final on its own key. An arrival
-    /// therefore queues behind it, and if that final never comes the busy
-    /// timeout still upgrades the spinner to a warning, which the next arrival
-    /// may then replace.
+    /// state, and what replaces it is its own final on its own key. An arrival
+    /// queues behind it, and if that final never comes the busy timeout upgrades
+    /// the spinner to a warning, which the next arrival may replace.
     ///
     /// A `sticky` entry and a pinned one are never retired here whatever the
-    /// window: both flags mean "this one waits for a person", which is the whole
-    /// reason they exist.
+    /// window: both flags mean the message waits for a person.
     fn retire_replaced_by_arrival(&mut self, incoming: &str) {
         let Some(front) = self.queue.front().cloned() else {
             return;
@@ -814,12 +760,10 @@ impl KeyedStatusController {
         }
     }
 
-    /// Take the NEWEST unkeyed entry off the queue: the TUI's empty-message set
+    /// Take the newest unkeyed entry off the queue: the TUI's empty-message set
     /// is one producer saying it has nothing left to report, which is a claim
-    /// about its own message and not about every other unkeyed producer's.
-    /// A producer holding a generation should use
-    /// [`Self::clear_anonymous_generation`] instead, which names its message
-    /// exactly.
+    /// about its own message alone. A producer holding a generation should use
+    /// [`Self::clear_anonymous_generation`], which names its message exactly.
     fn drop_newest_anonymous(&mut self) {
         let Some(key) = self.anon_key.clone() else {
             return;
@@ -832,9 +776,8 @@ impl KeyedStatusController {
     /// The unkeyed producers share one identity and cannot tell each other's
     /// messages apart by tone or by text, so a producer that must retire its own
     /// message keeps the generation its [`set`](Self::set) returned and names it
-    /// here. Without this the only unkeyed retraction was "clear the unkeyed
-    /// line", which on a queued line takes somebody else's standing warning with
-    /// it.
+    /// here. The blunt alternative, clearing the unkeyed line, takes somebody
+    /// else's standing warning with it.
     ///
     /// Returns `true` when something was removed.
     pub fn clear_anonymous_generation(&mut self, generation: Generation) -> bool {
@@ -869,22 +812,17 @@ impl KeyedStatusController {
 
     /// Retire the newest open `Busy`, wherever it sits in the queue.
     ///
-    /// A worker that ends with nothing to say has to take its own spinner down.
-    /// Writing an empty message used to do that, because the line was
-    /// most-recent-wins and an empty unkeyed message covered whatever was under
-    /// it; against a KEYED busy that is now a no-op, and the spinner would sit
-    /// there until the busy timeout upgraded it to a false "timed out".
+    /// A worker that ends with nothing to say has to take its own spinner down,
+    /// and against a keyed busy an empty message is a no-op, so the spinner would
+    /// sit there until the busy timeout called it a false "timed out".
     ///
-    /// Deliberately NOT limited to the entry on the line. A spinner is pushed off
-    /// the front by any warning or error that arrives while the work is running,
-    /// and that is exactly the case where the operation ends quietly and nothing
-    /// else will ever take its spinner down; a front-only retirement leaves it to
-    /// be called timed out, which it was not.
+    /// Deliberately not limited to the entry on the line: a spinner is pushed off
+    /// the front by any warning or error arriving while the work runs, which is
+    /// exactly the case where the operation ends quietly and nothing else takes
+    /// its spinner down.
     ///
-    /// This is the FALLBACK, for the paths that hold no key. A caller that knows
-    /// its key must use [`Self::clear`] with it, which names one operation
-    /// exactly; the newest busy is a guess, and it is only defensible because a
-    /// caller reaching here has no better one.
+    /// This is the fallback, for paths that hold no key. A caller that knows its
+    /// key must use [`Self::clear`] with it; the newest busy is a guess.
     ///
     /// Returns `true` when a spinner was taken down.
     pub fn retire_newest_busy(&mut self) -> bool {
@@ -944,9 +882,8 @@ impl KeyedStatusController {
     fn enforce_queue_bound(&mut self) {
         while self.queue.len() > MAX_QUEUED_STATUSES + 1 {
             // Position 0 is on screen and is never taken out from under the
-            // reader. Among the waiters the oldest `Info` goes first; with no
-            // info left to drop the oldest waiter of any tone goes instead,
-            // because the bound has to hold whatever is queued.
+            // reader. Among the waiters the oldest `Info` goes first, and with
+            // none left the oldest waiter of any tone.
             let Some(doomed) = self
                 .oldest_waiter(true)
                 .or_else(|| self.oldest_waiter(false))
@@ -960,9 +897,9 @@ impl KeyedStatusController {
     /// The waiter that has been queued longest, optionally restricted to
     /// `Info`s.
     ///
-    /// Ordered by `seq`, the arrival counter, and never by queue POSITION: the
+    /// Ordered by `seq`, the arrival counter, and never by queue position: the
     /// pre-empting tones are pushed to the front, so position 1 is the second
-    /// NEWEST of them, and evicting it would drop the freshest news while
+    /// newest of them, and evicting it would drop the freshest news while
     /// keeping a backlog of older warnings nobody can reach.
     fn oldest_waiter(&self, only_infos: bool) -> Option<String> {
         self.queue
@@ -1039,15 +976,13 @@ impl KeyedStatusController {
 
     /// Whether the entry on the line has had its time.
     ///
-    /// An `Info`'s window runs from when it was SHOWN, so one that waited its
+    /// An `Info`'s window runs from when it was shown, so one that waited its
     /// turn is still readable for a full window. A `Warning`'s runs from when it
-    /// was POSTED, so one that waited behind a newer warning shows only the
-    /// retention it has left, and one that ran out while waiting never reaches
-    /// the line at all. A `Busy` and an `Error` have no dwell CLOCK: a busy
-    /// leaves when its final replaces it (or when the busy timeout upgrades it),
-    /// and an error when the next message arrives, which
-    /// [`Self::retire_showing_error`] does at the moment of arrival rather than
-    /// here.
+    /// was posted, so one that waited behind a newer warning shows only the
+    /// retention it has left. A `Busy` and an `Error` have no dwell clock: a busy
+    /// leaves when its final replaces it or the busy timeout upgrades it, and an
+    /// error when the next message arrives, which
+    /// [`Self::retire_showing_error`] handles.
     fn front_dwell_elapsed(&self, key: &str, shown_at: Instant, now: Instant) -> bool {
         let Some(entry) = self.entries.get(key) else {
             return true;
@@ -1060,13 +995,8 @@ impl KeyedStatusController {
         }
         if self.clear_after.is_zero() {
             // `status_clear_seconds = 0` means "never auto-clear", so there is no
-            // window for anything to wait out. An arrival already retires
-            // whatever it replaces (see [`Self::retire_replaced_by_arrival`]);
-            // this covers what is left behind a `Busy`, which an arrival does not
-            // touch: once that spinner has been replaced by its own final, or
-            // upgraded by the busy timeout, whatever queued behind it takes the
-            // line at the next tick rather than waiting out a window that does
-            // not exist.
+            // window to wait out. An arrival retires whatever it replaces; this
+            // covers what queued behind a `Busy`, which an arrival never touches.
             return entry.tone != StatusTone::Busy && self.queue.len() > 1;
         }
         match (entry.tone, entry.tone.clear_windows()) {
@@ -1076,37 +1006,29 @@ impl KeyedStatusController {
         }
     }
 
-    /// Remove a keyed entry IFF the carried generation matches the stored one
-    /// (the clear-race guard) AND the entry is not [`sticky`].
+    /// Remove a keyed entry only if the carried generation matches the stored one
+    /// (the clear-race guard) and the entry is not [`sticky`].
     ///
-    /// - `generation == None` skips the generation check (but NOT the sticky
-    ///   one).
+    /// `generation == None` skips the generation check, but not the sticky one.
     ///
-    /// A STICKY entry is never removed by a clear, whichever form is used. A
-    /// clear means "the operation ended with nothing to say"; a sticky final
-    /// means "something is half-done and is waiting for you". Those cannot both
-    /// be true of one key, and the sticky final is the newer, more specific
-    /// fact. Without this guard `sticky` would be decorative for every
-    /// engine-raised status, because a clear names nothing but a key and every
-    /// keyed final is reachable by one. If an operation genuinely supersedes a
-    /// sticky message it must SAY so with a new [`set`](Self::set) on the key,
-    /// which still replaces it; silently removing the message is not an option
-    /// the user can act on.
+    /// A sticky entry is never removed by a clear, whichever form is used: a
+    /// clear says the operation ended with nothing to say, while a sticky final
+    /// says something is half-done and waiting for the user, and the sticky final
+    /// is the newer, more specific fact. An operation that supersedes it must say
+    /// so with a new [`set`](Self::set) on the key, which still replaces it.
     ///
-    /// This cannot strand anything. Under [`StatusRetention::Emit`] the replay
-    /// window in [`tick`](Self::tick) still retires a sticky entry, and it does
-    /// so silently, so the snapshot does not grow and the toast on screen is
-    /// left for the user to dismiss.
+    /// This strands nothing: under [`StatusRetention::Emit`] the replay window in
+    /// [`tick`](Self::tick) still retires a sticky entry, silently, so the
+    /// snapshot does not grow and the toast is left for the user to dismiss.
     ///
     /// Returns `true` if anything was removed, so a caller that broadcasts a
     /// dismissal only does it when one actually happened.
     ///
     /// [`sticky`]: KeyedWireStatus::sticky
     pub fn clear(&mut self, key: &str, generation: Option<Generation>) -> bool {
-        // A clear is a final that had nothing to say, so it retires liveness the
-        // same way a message does. Unconditionally, and before the sticky and
-        // generation guards: those decide what stays ON SCREEN, while this
-        // records that the operation is over.
+        // A clear is a final that had nothing to say, so it retires liveness
+        // before the sticky and generation guards, which decide only what stays
+        // on screen.
         self.live.retire(key);
         if let Some(entry) = self.entries.get(key) {
             if entry.sticky {
@@ -1135,27 +1057,23 @@ impl KeyedStatusController {
     /// Under [`StatusRetention::Retain`]:
     /// - A final older than its tone's window ([`StatusTone::clear_windows`]:
     ///   one `clear_after` for `Info`, [`WARNING_CLEAR_FACTOR`] of them for
-    ///   `Warning`, never for `Error`) is removed AND reported in
+    ///   `Warning`, never for `Error`) is removed and reported in
     ///   `cleared_keys`. A `sticky` final and the pinned anonymous slot are
     ///   exempt, because both wait for the user rather than for a timer.
     ///
     /// Under [`StatusRetention::Emit`]:
-    /// - EVERY final (info, warning, error alike) older than
-    ///   [`FINAL_REPLAY_WINDOW`] is removed SILENTLY, with nothing reported. It
-    ///   is leaving the replay snapshot, not leaving the user's screen, and
-    ///   `clear_after` plays no part.
+    /// - Every final older than [`FINAL_REPLAY_WINDOW`] is removed silently,
+    ///   with nothing reported: it is leaving the replay snapshot, not the
+    ///   user's screen, and `clear_after` plays no part.
     ///
     /// Under both:
-    /// - `Busy` entries silent for longer than `busy_timeout` are upgraded
-    ///   in-place to a `Warning`, so a leaked busy is never immortal. The
-    ///   upgrade restamps `since`, so under `Emit` the resulting warning gets
-    ///   its own full replay window before it ages out. It is upgraded to a
-    ///   `Warning` with a "timed out" message, UNLESS [`LiveStatusKeys`] says an
-    ///   operation is still registered behind the key, in which case the entry
-    ///   is re-stamped and handed back in `refreshed` for re-broadcast. A slow
-    ///   clone therefore keeps its spinner for as long as it takes, and the
-    ///   timeout still fires for a spinner nothing is behind. Past
-    ///   [`BUSY_LIVE_CEILING`] the upgrade happens whatever liveness says.
+    /// - A `Busy` silent for longer than `busy_timeout` is upgraded in place to
+    ///   a "timed out" `Warning`, restamping `since` so it gets a full replay
+    ///   window, unless [`LiveStatusKeys`] says an operation is still registered
+    ///   behind the key, in which case it is re-stamped and handed back in
+    ///   `refreshed` for re-broadcast. A slow clone therefore keeps its spinner
+    ///   for as long as it takes. Past [`BUSY_LIVE_CEILING`] the upgrade happens
+    ///   whatever liveness says.
     ///
     /// Returns the set of changes the caller must broadcast.
     pub fn tick(&mut self, now: Instant, busy_timeout: Duration) -> StatusTickChanges {
@@ -1173,11 +1091,9 @@ impl KeyedStatusController {
         self.stall_keyed_busys(actions.stalled, now, &mut changes);
         self.heartbeat_keyed_busys(actions.heartbeat, now, &mut changes);
         if self.retention == StatusRetention::Retain {
-            // A busy that timed out into a warning is a warning taking the line,
-            // so the infos queued behind it are as stale as they would be behind
-            // one that arrived saying it. Only when it IS the one on the line,
-            // though: a background operation timing out somewhere down the queue
-            // says nothing about the message the user is reading now.
+            // A busy upgraded into a warning is a warning taking the line, so the
+            // infos behind it are stale; only when it is the front, though, since
+            // one timing out down the queue says nothing about what is on screen.
             if let Some(front) = self.queue.front().cloned()
                 && upgraded_keys.contains(&front)
             {

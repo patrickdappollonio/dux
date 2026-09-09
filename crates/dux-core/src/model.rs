@@ -130,34 +130,21 @@ impl SessionStatus {
 /// Where an agent's branch came from, and therefore whether deleting the agent
 /// may delete the branch.
 ///
-/// Deleting an agent with "also delete the worktree" ticked force-deletes the
-/// branches involved. That is right for a branch dux minted for the agent and
-/// wrong for one that existed before it: an agent attached to `develop`, or
-/// adopted from a worktree the user already had, must never take `develop` with
-/// it. Recorded once at creation and never mutated (see the storage layer's
-/// INSERT-but-not-UPDATE handling).
+/// A worktree-removing delete force-deletes only branches dux minted for the
+/// agent: one that existed before it, or came with an adopted worktree, must
+/// survive. Recorded once at creation and never updated afterwards.
 ///
-/// Separate variants rather than a bool because the delete copy wants the
-/// distinction: "existed before this agent" and "came with the worktree this
-/// agent adopted" are different sentences.
+/// What counts as "existed before" is per create arm. A plain create attaches to
+/// a branch the user typed and confirmed against a preflight naming its
+/// location, so a remote-only branch is still the branch they chose and keeps
+/// `AttachedExisting`. The PR arm's name comes from the pull request rather than
+/// the user, so it asks only whether `refs/heads/<name>` existed before dux ran:
+/// against a remote-only ref, `git worktree add` DWIMs the local branch into
+/// existence, which makes it dux's own work. Only local refs are ever in play.
 ///
-/// What counts as "existed before" is per create arm, because what the user
-/// pointed at differs. A plain create attaches to a branch the user TYPED and
-/// confirmed against a preflight that names its location, so a remote-only
-/// branch is still the branch they chose and it keeps its `AttachedExisting`.
-/// The PR arm's name comes from the pull request rather than from the user, so
-/// it asks the narrower question, and asks it whatever the user confirmed: did
-/// `refs/heads/<name>` exist before dux ran?
-/// Against a remote-only ref, `git worktree add` DWIMs the local branch into
-/// existence, which makes it dux's own work, and a PR agent that reported "this
-/// branch existed before the agent" about a branch dux had just created is the
-/// bug that split the two questions apart. Nothing here ever deletes a remote
-/// branch, so only local refs are in play.
-///
-/// There is deliberately no `Default`. The only sensible default would be
-/// `CreatedByDux`, and a struct-update literal that silently filled it in
-/// would be a force-delete of a user's branch decided by nobody. Every
-/// construction site says which one it means.
+/// There is deliberately no `Default`: a struct-update literal silently filling
+/// in `CreatedByDux` would be a force-delete of a user's branch decided by
+/// nobody.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchProvenance {
     /// dux created the branch for this agent: a fresh create, a fork, or a PR
@@ -263,21 +250,14 @@ impl BranchProvenance {
         }
     }
 
-    /// The sentence(s) naming every branch a worktree-removing delete
-    /// deliberately KEPT, with a per-branch reason.
+    /// The sentence(s) naming every branch a worktree-removing delete kept, with
+    /// a per-branch reason.
     ///
-    /// Drift matters here: when the agent moved off the branch it was born on,
-    /// two branches survive and only one of them predates the agent, so saying
-    /// "existed before this agent" of both would be false. The birth branch
-    /// carries the provenance reason; a distinct current branch is named as
-    /// what it is, a branch created inside the agent's worktree.
-    ///
-    /// Names `git branch -D` because the branch outlives the worktree and the
-    /// only surface that could delete it (a worktree manager) can no longer
-    /// reach it once the worktree is gone.
-    ///
-    /// Shared by the TUI status line and the web toast so both say the same
-    /// thing.
+    /// When the agent drifted off the branch it was born on, two branches
+    /// survive and only the birth one predates the agent, so each is named for
+    /// what it is. Names `git branch -D`, because once the worktree is gone no
+    /// dux surface can reach the branch. Shared by the TUI status line and the
+    /// web toast.
     pub fn kept_branches_note(&self, branch_name: &str, initial_branch: &str) -> String {
         let drifted = !initial_branch.is_empty() && initial_branch != branch_name;
         if drifted {
@@ -435,28 +415,21 @@ pub struct FolderWorkspace {
 /// Where an agent lives, and therefore what dux is allowed to do there: a
 /// working copy dux created and owns, or a folder the user already had.
 ///
-/// Faking the git fields with empty strings for the folder case would be a lie
-/// that some screen eventually believes, so the two shapes are exclusive by
-/// construction and every git field lives inside the managed one.
+/// The two shapes are exclusive by construction and every git field lives inside
+/// the managed one, so no screen can read a faked empty branch for a folder.
+/// Every question about an agent's home is answered by a method here whose body
+/// is an exhaustive match, never a `matches!` at the call site, which keeps
+/// compiling and silently answers "no" when a variant is added:
 ///
-/// **A comment is not a guard, so the decisions live on the type.** This is the
-/// same discipline [`TerminalOwner`] enforces for terminal ownership: every
-/// question code asks about an agent's home is answered by a method here whose
-/// body is an EXHAUSTIVE match, never by a `matches!` at the call site. A
-/// `matches!` keeps compiling when a variant is added and silently answers "no"
-/// for it, which is how a folder the user owns ends up in a code path written
-/// for a directory dux may delete. The families of decision are:
-///
-/// - **Location** ([`AgentWorkspace::directory`],
+/// - Location ([`AgentWorkspace::directory`],
 ///   [`AgentWorkspace::managed_worktree`]): where does this agent run, and is
 ///   that directory a git working copy dux owns?
-/// - **Capability** ([`AgentWorkspace::supports_branch_git`]): may the
-///   branch-identity git features (push, pull, fork, pull requests, branch
-///   rename, provenance, the worktree manager) run against this agent at all?
-/// - **Teardown** ([`AgentWorkspace::deletion_may_remove_directory`],
+/// - Capability ([`AgentWorkspace::supports_branch_git`]): may the
+///   branch-identity git features run against this agent at all?
+/// - Teardown ([`AgentWorkspace::deletion_may_remove_directory`],
 ///   [`AgentWorkspace::dux_may_delete_branch`]): what may deleting this agent
 ///   remove?
-/// - **Association** ([`AgentWorkspace::project_id`],
+/// - Association ([`AgentWorkspace::project_id`],
 ///   [`AgentWorkspace::project_path`]): which project owns this agent, if any?
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentWorkspace {
@@ -807,25 +780,19 @@ pub struct ChangedFile {
 /// home directory, belonging to no project and no agent). Ownership never
 /// changes after spawn.
 ///
-/// Deliberately no bare-id accessor: every consumer must `match` so the
-/// `Project` and `Standalone` variants can never be silently ignored by code
-/// written for the session-owned shape. `Standalone` in particular carries NO
-/// id, so any code reaching for one has to say what it does without.
+/// Deliberately no bare-id accessor: every consumer must `match`, and
+/// `Standalone` carries no id at all, so code reaching for one has to say what
+/// it does without. Every question about ownership is likewise answered by a
+/// method here whose body is an exhaustive match, never a `matches!` at the call
+/// site, which keeps compiling and silently answers "no" when a variant is
+/// added:
 ///
-/// **A comment is not a guard, so the decisions live on the type.** Every
-/// question code asks about ownership is answered by a method here whose body is
-/// an EXHAUSTIVE match, never by a `matches!` at the call site. A `matches!`
-/// keeps compiling when a variant is added and silently answers "no" for it,
-/// which is how a whole class of terminal could be left out of the projections,
-/// the routes and the teardown paths with no error anywhere. The three families
-/// of decision are:
-///
-/// - **Route membership** ([`TerminalOwner::is_at_route`]): may this terminal be
+/// - Route membership ([`TerminalOwner::is_at_route`]): may this terminal be
 ///   reached at a given nested REST/websocket address?
-/// - **Teardown** ([`TerminalOwner::closed_by_session_delete`],
+/// - Teardown ([`TerminalOwner::closed_by_session_delete`],
 ///   [`TerminalOwner::closed_by_project_removal`]): does removing that owner
 ///   close this terminal?
-/// - **Presentation** ([`TerminalOwner::as_ref`] and
+/// - Presentation ([`TerminalOwner::as_ref`] and
 ///   [`crate::viewmodel::TerminalOwnerView`]): how is the owner named to the
 ///   user, and what does the browser receive?
 #[derive(Clone, Debug, PartialEq, Eq)]

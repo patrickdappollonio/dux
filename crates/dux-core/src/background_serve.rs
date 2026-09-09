@@ -1,26 +1,19 @@
 //! The seam the terminal UI uses to keep a web server serving in its background.
 //!
-//! ## Why the seam is shaped like this
+//! The engine is `!Send` and the terminal UI owns it outright, holding borrows
+//! across whole render frames, so the web layer cannot own it, borrow it from
+//! another thread, or be handed it behind a mutex. What it gets is a turn: once
+//! per TUI loop iteration, and once per reaction the TUI drains, the TUI lends
+//! the engine to a companion to do the web layer's share of the work.
 //!
-//! The engine is `!Send` and the terminal UI owns it outright: hundreds of direct
-//! `self.engine.*` accesses, some holding borrows across whole render frames. So
-//! the web layer cannot own it, cannot borrow it from another thread, and cannot
-//! be handed it behind a mutex. What it CAN have is a turn: once per TUI loop
-//! iteration, and once per reaction the TUI drains, the TUI lends the engine to a
-//! companion and lets it do the web layer's share of the work.
+//! The trait lives in `dux-core` because that is the one crate both the terminal
+//! UI and the `dux` binary can see. `dux-tui` calls a trait object and never
+//! learns a web layer exists; the binary implements the trait over `dux-web` and
+//! is the only place the two surfaces meet.
 //!
-//! ## Crate direction
-//!
-//! The trait lives here, in `dux-core`, because that is the one crate both the
-//! terminal UI and the `dux` binary can see. `dux-tui` never learns that a web
-//! layer exists: it calls a trait object. The binary implements the trait over
-//! `dux-web`'s serving machinery, and remains the only place the two surfaces
-//! meet.
-//!
-//! ## Accepted hazard: a panic in either surface takes both down
-//!
-//! The TUI thread services the web layer's engine turns, so a panic in either
-//! surface can unwind the shared process. Background serving is opt-in.
+//! Accepted hazard: the TUI thread services the web layer's engine turns, so a
+//! panic in either surface unwinds the shared process. Background serving is
+//! opt-in.
 
 use std::sync::Arc;
 
@@ -29,11 +22,10 @@ use crate::pty_owners::PtySizeOwners;
 
 /// What the terminal UI calls itself when it holds a PTY's input.
 ///
-/// Every other participant in the ownership registry is a browser connection and
-/// records its raw `User-Agent`; this one is not a browser and has no such thing,
-/// so it presents a fixed label instead. It exists to be READ: it is what a
-/// watching browser's take-over card names as the device that is driving, so it
-/// is written as the copy it becomes rather than as an identifier.
+/// Every other participant in the ownership registry is a browser connection
+/// recording its raw `User-Agent`; this one has none, so it presents a fixed
+/// label, written as the copy it becomes on a watching browser's take-over card
+/// rather than as an identifier.
 ///
 /// One label for the whole terminal UI, not one per agent: a pty is driven by a
 /// device, and this process is one device.
@@ -61,11 +53,9 @@ pub struct TuiOwnership {
 ///
 /// The terminal UI can decide these (it holds a seat in the registry) but cannot
 /// announce them: the event bus and the per-PTY grid bus are web-layer types on a
-/// tokio runtime, and `dux-tui` never sees the web layer at all. So a claim, a
-/// release and an applied resize cross the seam as plain data and the binary's
-/// companion turns them into the same broadcasts a browser's own claim would have
-/// produced. Without that a browser watching a pty the terminal UI just took over
-/// would sit on a take-over card naming a device that let go minutes ago.
+/// tokio runtime, which `dux-tui` never sees. So a claim, a release and an
+/// applied resize cross the seam as plain data and the binary's companion turns
+/// them into the same broadcasts a browser's own claim would have produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtyOwnershipEvent {
     /// The terminal UI took (or was handed) input ownership of a pty: the
@@ -100,10 +90,9 @@ pub enum PtyOwnershipEvent {
 ///
 /// The sweeps have exactly one runner per process, and while the background
 /// server is on that runner is the terminal UI. Everything the web layer's own
-/// maintenance would have emitted for them (an "Agent exited." status, a
-/// "Terminal closed." status, the spine bump each implies) therefore has to
-/// travel this way, or a browser watching an agent die never sees the message and
-/// waits for the ~2s fingerprint backstop to notice the row is gone.
+/// maintenance would have emitted for them (the agent-exited and terminal-closed
+/// statuses, and the spine bump each implies) therefore travels this way, or a
+/// browser waits for the fingerprint backstop to notice the row is gone.
 #[derive(Debug, Clone, Default)]
 pub struct DrainedMaintenance {
     /// The PTYs the drainer's `prune_exited_ptys` reaped this iteration.
@@ -127,22 +116,19 @@ pub struct ServiceOutcome {
     /// A request the companion handled this iteration can have changed shared
     /// workspace state: an agent renamed, a project reordered, a terminal closed.
     ///
-    /// The terminal UI reads this to run its OWN post-mutation work (rebuild the
-    /// sidebar, clamp the cursors, notice that the selected entity vanished).
-    /// Without it a rename made in a browser would leave the TUI's sidebar stale
-    /// until something else happened to rebuild it.
+    /// The terminal UI reads this to run its own post-mutation work: rebuild the
+    /// sidebar, clamp the cursors, notice that the selected entity vanished.
     pub mutated: bool,
     /// The companion's request channel closed, or something asked its loop to
     /// stop. Informational: the terminal UI keeps running either way, and the
     /// companion is the one that decides what to do about it.
     pub stopped: bool,
-    /// The companion RETIRED itself this iteration: a required listener died, or
+    /// The companion retired itself this iteration: a required listener died, or
     /// its request channel closed, and it has stopped serving on its own.
     ///
     /// Carries the sentence to show the user, because only the companion knows
-    /// what died and how; the terminal UI puts it on the status line. Without
-    /// this the last thing the user was told is still "serving on ...", which by
-    /// then is a lie, and the truth only ever reached `dux.log`.
+    /// what died and how; the terminal UI puts it on the status line, replacing
+    /// the "serving on ..." message that is by then a lie.
     pub retirement: Option<String>,
 }
 
@@ -151,23 +137,21 @@ pub struct ServiceOutcome {
 /// Every method takes `&mut Engine` rather than holding one: the TUI owns the
 /// engine and lends it for the duration of the call.
 pub trait BackgroundServeCompanion {
-    /// Do the companion's share of ONE drained reaction, before the terminal UI
+    /// Do the companion's share of one drained reaction, before the terminal UI
     /// applies it.
     ///
-    /// Pre-consume on purpose. `EventReaction` is not `Clone` and the TUI's
-    /// `apply_reaction` takes it by value, so a companion that ran afterwards
+    /// Pre-consume on purpose: `EventReaction` is not `Clone` and the TUI's
+    /// `apply_reaction` takes it by value, so a companion running afterwards
     /// would have nothing to look at. Per-reaction rather than per-batch for the
-    /// same reason, and because it mirrors the order the web layer's own loop has
-    /// always fanned reactions out in.
+    /// same reason.
     fn on_reaction(&mut self, engine: &mut Engine, reaction: &EventReaction);
 
-    /// Emit the companion's share of the shared maintenance sweeps the DRAINER
+    /// Emit the companion's share of the shared maintenance sweeps the drainer
     /// just ran: the exit and close notices, and the change gate they open.
     ///
-    /// A narrow lane rather than a second sweep. The drainer already reaped these
-    /// PTYs and refreshed these foregrounds (doing it twice would reap twice), so
-    /// what crosses is the OUTCOME. Called once per iteration while serving, right
-    /// after the drainer's own sweeps.
+    /// A narrow lane rather than a second sweep: the drainer already reaped these
+    /// PTYs and refreshed these foregrounds, so what crosses is the outcome.
+    /// Called once per iteration while serving, after the drainer's own sweeps.
     fn note_maintenance(&mut self, maintenance: &DrainedMaintenance);
 
     /// Do the companion's per-iteration work, after the terminal UI has finished
@@ -197,9 +181,8 @@ pub trait BackgroundServeCompanion {
 
     /// How many browser tabs are connected right now. Zero when not serving.
     ///
-    /// "Connections", not "devices", and the terminal UI says so: one browser with
-    /// two tabs open is two of these, and nothing on this side of the wire can
-    /// honestly tell that they are the same laptop.
+    /// "Connections", not "devices": one browser with two tabs open is two of
+    /// these, and nothing on this side of the wire can tell they are one laptop.
     ///
     /// Read once per rendered frame, so it must stay a cheap load rather than a
     /// question that takes a lock or a turn.

@@ -1,16 +1,13 @@
 //! Resource statistics for the resource-monitor overlay. Uses `sysinfo` to
 //! sample CPU/RSS per process tree.
 //!
-//! ## Why this is a stateful collector, not a free function
-//!
-//! `sysinfo` derives per-process CPU from the DELTA between two refreshes of the
-//! same `System`. A freshly built `System` has no baseline, so the first refresh
-//! reports exactly `0.0` for every process. The original free function built a
-//! `System::new()` and refreshed once per call, which is why the resource monitor
-//! reported 0% CPU for everything: there was never a second refresh to diff
-//! against. [`ResourceCollector`] keeps the `System` alive across samples so each
-//! sample's delta spans the caller's natural poll interval (one process walk per
-//! sample), and self-baselines when it has no usable previous refresh.
+//! A stateful collector rather than a free function: `sysinfo` derives
+//! per-process CPU from the delta between two refreshes of the same `System`, and
+//! a freshly built one has no baseline, so its first refresh reports exactly
+//! `0.0` for every process. [`ResourceCollector`] keeps the `System` alive across
+//! samples so each sample's delta spans the caller's natural poll interval (one
+//! process walk per sample), and self-baselines when it has no usable previous
+//! refresh.
 //!
 //! Callers must sample from a background thread: a self-baselining sample sleeps
 //! for [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`]. The TUI samples from its
@@ -45,11 +42,10 @@ impl Default for ResourceCollector {
 
 /// Whether [`ResourceCollector::sample`] must re-establish its CPU baseline:
 /// there was no prior refresh, or the gap since the last one exceeded
-/// [`STALE_BASELINE`]. A back-to-back sample (a small gap) must NOT re-baseline:
-/// re-baselining resets sysinfo's delta window and can yield a near-zero
-/// short-window reading, so the collector would effectively fabricate a zero for
-/// a process that was busy a moment ago. Pure (takes `now` explicitly) so the
-/// decision is unit-tested deterministically, without a live process walk.
+/// [`STALE_BASELINE`]. A back-to-back sample must not re-baseline, because that
+/// resets sysinfo's delta window and can fabricate a near-zero reading for a
+/// process that was busy a moment ago. Pure in `now`, so the decision is
+/// unit-tested without a live process walk.
 fn needs_baseline(last_refresh: Option<Instant>, now: Instant) -> bool {
     match last_refresh {
         None => true,
@@ -85,17 +81,13 @@ impl ResourceCollector {
     /// than [`STALE_BASELINE`]); steady-state samples cost a single walk. Call it
     /// from a background thread.
     ///
-    /// Returns `(rows, was_baseline)`. `was_baseline` is `true` exactly when
-    /// THIS sample had to re-establish its CPU baseline, meaning its reading
-    /// spans only the short `MINIMUM_CPU_UPDATE_INTERVAL` window rather than
-    /// the caller's normal poll interval: real numbers, just noisier because
-    /// they cover less wall-clock time. Callers that surface a "this reading
-    /// is a short-window sample" marker to the user (the TUI's `~` prefix)
-    /// should show it exactly when this is `true`, not merely on the first
-    /// sample delivered to that UI session: a monitor closed and reopened
-    /// inside [`STALE_BASELINE`] does NOT re-baseline, so a UI-session-scoped
-    /// "first sample" flag would mark a normal steady-state reading as short-
-    /// window when it is not.
+    /// Returns `(rows, was_baseline)`. `was_baseline` is `true` exactly when this
+    /// sample had to re-establish its CPU baseline, so its reading spans only the
+    /// short `MINIMUM_CPU_UPDATE_INTERVAL` window: real numbers, noisier because
+    /// they cover less wall-clock time. A surface that marks such a reading (the
+    /// TUI's `~` prefix) must key the marker on this flag rather than on its own
+    /// first sample: a monitor reopened inside [`STALE_BASELINE`] does not
+    /// re-baseline.
     pub fn sample(&mut self, targets: Vec<ResourceTarget>) -> (Vec<ResourceStats>, bool) {
         use sysinfo::Pid;
 
@@ -199,13 +191,12 @@ fn is_descendant(
 }
 
 /// Aggregate CPU% and RSS across `root` and all its descendants over a plain
-/// list of process nodes. THREAD rows are skipped so they are never counted as
-/// processes nor summed as duplicated memory/CPU: a thread shares its process's
-/// address space, so its `rss_bytes` is the whole process's RSS and a process's
-/// own CPU already aggregates its threads. Returns `(total_cpu, total_rss,
-/// process_count, top_children)` with `top_children` the top 10 by RSS (root
-/// included). Pure and deterministic for a fixed input — this is where the
-/// thread-filtering logic is unit-tested, free of any live process table.
+/// list of process nodes. Thread rows are skipped so they are never counted as
+/// processes nor summed as duplicated memory or CPU: a thread shares its
+/// process's address space, so its `rss_bytes` is the whole process's RSS and a
+/// process's own CPU already aggregates its threads. Returns `(total_cpu,
+/// total_rss, process_count, top_children)` with `top_children` the top 10 by RSS
+/// (root included). Pure and deterministic for a fixed input.
 fn aggregate_proc_tree(nodes: &[ProcNode], root: u32) -> (f32, u64, usize, Vec<ProcessInfo>) {
     let parents: std::collections::HashMap<u32, Option<u32>> =
         nodes.iter().map(|n| (n.pid, n.parent)).collect();

@@ -1,20 +1,18 @@
-//! Load-time config migrations, applied by `config::load_config` IN MEMORY at
-//! EVERY entrypoint (the TUI, `dux server`, and the web bootstrap). Two kinds:
+//! Load-time config migrations, applied by `config::load_config` in memory at
+//! every entrypoint (the TUI, `dux server`, and the web bootstrap), because a
+//! migrated key can configure the server itself. Two kinds:
 //!
 //! - Deprecated-key migrations: an old key is rewritten to its replacement
-//!   (`[server] bind` -> host/port, `[defaults] prompt_for_name` -> the inverse
-//!   `enable_randomized_pet_name_by_default`). The migrated key configures the
-//!   SERVER itself, so applying it only in the TUI's `ensure_config` silently
-//!   dropped a non-loopback `bind` under `dux serve`; applying it in
-//!   `load_config` fixes that.
+//!   (`[server] bind` to host/port, `[defaults] prompt_for_name` to the inverse
+//!   `enable_randomized_pet_name_by_default`).
 //! - Retired-provider pruning: an untouched stock block for a provider dux no
-//!   longer ships (gemini) is removed so its picker stops offering it. A
-//!   user-CUSTOMIZED block of the same name is preserved (config wins for
-//!   explicit preferences).
+//!   longer ships is removed so its picker stops offering it. A user-customized
+//!   block of the same name is preserved, because config wins for explicit
+//!   preferences.
 //!
 //! These operate on a `toml_edit::DocumentMut` and return whether the document
-//! changed. The TUI ADDITIONALLY persists the migrated document to disk (a
-//! surface concern); `load_config` only applies the result in memory.
+//! changed. Persisting the migrated document to disk is a surface concern the
+//! TUI handles; `load_config` only applies the result in memory.
 
 use anyhow::{Result, bail};
 use toml_edit::{DocumentMut, Item, Table, Value};
@@ -160,13 +158,10 @@ fn migrate_server_bind(
     };
 
     let Ok(addr) = raw.trim().parse::<std::net::SocketAddr>() else {
-        // Not a valid IP:port -- nothing safe to migrate; let the new defaults
-        // apply. (An invalid bind would have failed the resolver anyway.)
-        //
-        // NOTE this also drops a hostname `bind` (e.g. "localhost:9000"):
-        // `SocketAddr` only parses literal IP:port. That is NOT a regression --
-        // the OLD resolver also parsed `bind` with `SocketAddr::from_str` and
-        // rejected hostnames (no DNS), so a hostname bind never worked.
+        // Not a valid IP:port, so there is nothing safe to migrate; the new
+        // defaults apply. This also drops a hostname bind such as
+        // "localhost:9000", which `SocketAddr` cannot parse and which the bind
+        // key never supported.
         return Ok(());
     };
 
@@ -199,10 +194,8 @@ fn migrate_server_bind(
 /// a boolean says bind it or do not, and neither of them says "keep watching for
 /// the interface", so neither becomes `"auto"`.
 ///
-/// The NEW key wins whenever both are present. That is the whole precedence
-/// rule: a user who has written the tri-state has said what they mean, and the
-/// leftover boolean is just an old line in the file. Either way the boolean is
-/// removed from the document, so the next canonical save stops carrying it.
+/// The new key wins whenever both are present, and the boolean is removed from
+/// the document either way, so the next canonical save stops carrying it.
 ///
 /// A non-boolean value is dropped silently rather than failing the load: the key
 /// no longer exists, so there is nothing to be strict about, and the new key's
@@ -243,12 +236,11 @@ fn migrate_tailscale_enabled(
 // ---------------------------------------------------------------------------
 // Retired providers
 //
-// A retired provider once shipped as a default but no longer does. It is no
-// longer rendered into new configs and no longer re-added by
-// `ProvidersConfig::ensure_defaults`. So existing users do not keep a dead stock
-// block forever, an untouched stock block is pruned from their config on load. A
-// user who customized the block (or added one back later) keeps it -- config
-// wins for explicit preferences.
+// A retired provider once shipped as a default but no longer does: it is not
+// rendered into new configs and not re-added by `ProvidersConfig::ensure_defaults`.
+// An untouched stock block is pruned on load so nobody keeps a dead one forever;
+// a customized block of the same name is kept, since config wins for explicit
+// preferences.
 // ---------------------------------------------------------------------------
 
 /// The retired providers and the exact stock block dux shipped for each (as its

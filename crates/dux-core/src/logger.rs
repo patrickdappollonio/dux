@@ -76,14 +76,12 @@ pub fn init(config: &LoggingConfig, paths: &DuxPaths) {
     }
 }
 
-/// Route every panic through the log file BEFORE the default hook prints it to
-/// stderr. Motivated by a real incident: the engine runs on a dedicated OS
-/// thread, so a panic there silently killed it (every later request answered
-/// "the engine is unavailable") while the only evidence, the panic message,
-/// went to a stderr nobody had captured. dux.log now records the thread,
-/// message, and location; the previous hook still runs so terminal users and
-/// `RUST_BACKTRACE` behavior are unchanged. Installed once, only after the
-/// logger has a file to write to.
+/// Route every panic through the log file before the default hook prints it to
+/// stderr: the engine runs on a dedicated OS thread, where a panic would
+/// otherwise leave its message on a stderr nobody captured. Records the thread,
+/// message and location, then runs the previous hook, so terminal users and
+/// `RUST_BACKTRACE` behavior are unchanged. Installed once, only after the logger
+/// has a file to write to.
 fn install_panic_hook() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     INSTALLED.get_or_init(|| {
@@ -169,24 +167,18 @@ fn log(level: LogLevel, message: &str) {
 /// this. Tightening runs on every open, so a log left `0644` by an older
 /// installation is corrected rather than left as it was.
 ///
-/// The tightening is BEST EFFORT and its failure is not this function's
-/// failure. `logging.path` accepts any absolute path, so a log under `/var/log`
-/// owned by an admin, on a Windows mount under WSL2, or on a FAT or NFS volume
-/// is a path dux can append to but cannot `chmod`. Propagating that error was
-/// swallowed whole by `init`'s `if let Ok(file)`, so the outcome was no logging
-/// at all and no message anywhere, from a configuration change alone. A
-/// slightly loose log is better than no log. This now matches what
-/// [`crate::storage`] has always done deliberately for the database.
+/// The tightening is best effort and its failure is not this function's failure.
+/// `logging.path` accepts any absolute path, so a log under `/var/log` owned by
+/// an admin, on a Windows mount under WSL2, or on a FAT or NFS volume is a path
+/// dux can append to but cannot `chmod`, and a slightly loose log beats no log
+/// at all. [`crate::storage`] does the same for the database.
 ///
 /// Separate from [`init`] because `init` installs a process-global logger and a
-/// panic hook, neither of which a test can do twice; this is the part with
-/// on-disk behaviour worth pinning.
+/// panic hook, neither of which a test can do twice.
 fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
-    // A warning about the log file itself may have nowhere to go, since the
-    // logger this warns through is installed by `init` just after this returns.
-    // That is inherent, and it is still better than the silent no-op it
-    // replaces: the mode is applied, or dux keeps logging.
+    // A warning about the log file itself may have nowhere to go: `init`
+    // installs the logger it warns through just after this returns.
     crate::file_modes::restrict_to_owner_best_effort(path, "log file");
     Ok(file)
 }

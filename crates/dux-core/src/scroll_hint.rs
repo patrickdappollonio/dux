@@ -1,29 +1,21 @@
 //! Whether a scrollable surface has more to show, and in which direction.
 //!
-//! Pure and shared: this is the semantics behind every "there is more below"
-//! affordance. Surfaces own the presentation (a glyph, a scrollbar, a badge) and
-//! the geometry; the decision of WHICH state applies lives here so the surfaces
-//! cannot drift, and so the degenerate cases (nothing to show, no room to show
-//! it in, an offset left over from a taller viewport) are settled once.
+//! Pure and shared: surfaces own the presentation (a glyph, a scrollbar, a
+//! badge) and the geometry, while which state applies is decided here, so the
+//! degenerate cases (nothing to show, no room to show it in, an offset left over
+//! from a taller viewport) are settled once.
 //!
 //! # Units are the caller's choice, and mixing them lies to the user
 //!
-//! [`scroll_hint`] is unit-agnostic: `offset`, `viewport`, and `total` only have
-//! to agree with each other. Two units are in play in a terminal UI and they are
-//! NOT interchangeable:
+//! [`scroll_hint`] is unit-agnostic: `offset`, `viewport` and `total` only have
+//! to agree with each other. Two units are in play, and they are not
+//! interchangeable:
 //!
-//! - **Wrapped visual lines** — paragraph surfaces (the help overlay, the diff
-//!   view, the first-load modal). `total` must be the count AFTER wrapping, not
-//!   the number of logical lines: a surface that wraps its text has more rows
-//!   than lines, and passing the pre-wrap count reports "at the bottom" while
-//!   rows are still hidden.
-//! - **Whole items** — list surfaces (the command palette). A `ListState`
-//!   offset counts items and never clips a partially visible top item, so
-//!   `offset`/`viewport`/`total` are all item counts.
-//!
-//! Passing a viewport measured in rows next to a total measured in items (or a
-//! pre-wrap line count) makes the marker lie, which is worse than having no
-//! marker at all.
+//! - Wrapped visual lines, for paragraph surfaces. `total` must be the count
+//!   after wrapping: a pre-wrap count reports "at the bottom" while rows are
+//!   still hidden.
+//! - Whole items, for list surfaces. A `ListState` offset counts items and never
+//!   clips a partially visible top item, so all three are item counts.
 
 /// The furthest offset that still fills the viewport: everything below is
 /// already on screen at this offset.

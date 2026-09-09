@@ -204,18 +204,16 @@ fn stored_pr_is_merged(known: Option<&StoredPr>) -> bool {
 /// A terminal row (MERGED or CLOSED) on an exited agent is free on the blind
 /// poll and on focus, and costs one discovery call on a deliberate trigger.
 ///
-/// It is not free forever, because a terminal row does not mean the BRANCH is
+/// It is not free forever, because a terminal row does not mean the branch is
 /// finished: a closed pull request can be reopened, and a branch name reused
-/// after a merge carries a brand new pull request. Discovery is the only thing
-/// that notices either, so a row that never asked again could never heal.
+/// after a merge carries a brand new pull request, which only discovery notices.
 ///
-/// It is not paid for on every focus either. Focusing an agent is a navigation
-/// keystroke, and a sidebar full of finished agents would spawn one `gh` process
-/// per agent tabbed past, for a branch nobody has pushed to in weeks. Boot, a
-/// refs change, an agent exit and an explicit ask are rare and each one means
-/// something plausibly moved, so those pay.
+/// It is not paid on every focus either, because focusing an agent is a
+/// navigation keystroke and a sidebar of finished agents would spawn one `gh`
+/// process per agent tabbed past. Boot, a refs change, an agent exit and an
+/// explicit ask are rare and each means something plausibly moved, so those pay.
 ///
-/// A terminal row on a RUNNING agent refreshes under every trigger.
+/// A terminal row on a running agent refreshes under every trigger.
 fn exited_entry_needs_no_network(known: Option<&StoredPr>, trigger: SyncTrigger) -> bool {
     stored_pr_is_terminal(known) && trigger != SyncTrigger::OneShot
 }
@@ -411,15 +409,11 @@ fn live_remote_resolver(worktree_path: &Path, policy: &GithubHostPolicy) -> git:
 /// reconstructed from SQLite) alongside the lookups still to be run.
 ///
 /// The remote resolver is a parameter so the planning can be exercised without
-/// git. In production it is always [`live_remote_resolver`], which is the real
-/// thing and shells out; a test supplies the answer directly. This is what stops
-/// a planning test from being decided by the DEVELOPER's git configuration: the
-/// resolver shells out with no isolation (deliberately, since dux wants
-/// `url.*.insteadOf` applied for real), so an inherited rewrite reaches
-/// straight into any test that uses it (measured, not supposed: a rewrite
-/// mapping the fixture's GitLab address onto github.com fails the negative
-/// test, and one mapping github.com onto gitlab.com fails the positive one;
-/// neither would be testing the remote spelling it names).
+/// git; in production it is always [`live_remote_resolver`]. That keeps a
+/// planning test from being decided by the developer's own git configuration:
+/// the live resolver shells out with no isolation, deliberately, so that
+/// `url.*.insteadOf` is applied for real, and an inherited rewrite would reach
+/// straight into any test that used it.
 fn plan_entries(
     entries: &[PrSyncEntry],
     resolve_remote: &dyn Fn(&Path) -> git::RemoteResolution,
@@ -430,13 +424,12 @@ fn plan_entries(
     let mut planned: Vec<Planned> = Vec::new();
 
     for entry in entries {
-        // A PINNED session short-circuits the remote-derived target entirely:
-        // the user named the PR, so the query goes to the pin's (host,
-        // owner_repo), the policy gates the PINNED host, and no worktree
-        // remote is resolved (a pin routinely lives on a fork the remote does
-        // not name). Every fallback below answers from the PIN's row, never
-        // from `known_pr` raw: a stale `session_prs` latest naming a different
-        // PR must not surface as a pinned session's answer.
+        // A pinned session short-circuits the remote-derived target: the query
+        // goes to the pin's (host, owner_repo), the policy gates the pinned host,
+        // and no worktree remote is resolved, since a pin routinely lives on a
+        // fork the remote does not name. Every fallback below answers from the
+        // pin's row rather than raw `known_pr`, or a stale row naming a different
+        // PR would surface as a pinned session's answer.
         if let Some(pin) = &entry.pinned {
             // The override row is the pin's known state. A `known_pr` naming a
             // DIFFERENT number is not the pin (a stale row from before the
@@ -486,15 +479,11 @@ fn plan_entries(
         // Resolve (host, owner_repo): live remote first, else the known PR's repo
         // (works even after the branch/remote is gone).
         //
-        // The live resolution has THREE outcomes and each wants its own
-        // handling. Only an UNRESOLVED address may fall back to a remembered
-        // host: nothing is known about where this agent pushes, so the last
-        // pull request is the best information there is. A DENIED address is
-        // the opposite case, and it used to be indistinguishable from the
-        // first: dux knows exactly where this agent pushes and knows it may not
-        // ask about it, so falling back sent the query to the stored host, a
-        // host this agent's address does not name. The gate below cannot catch
-        // that, because by then the live address is gone.
+        // Only an unresolved address may fall back to a remembered host: nothing
+        // is known about where this agent pushes, so the last pull request is the
+        // best information there is. A denied address must not fall back, because
+        // dux knows where this agent pushes and knows it may not ask, and the
+        // gate below cannot catch it once the live address is gone.
         let (host, owner_repo) = match resolve_remote(Path::new(&entry.worktree_path)) {
             git::RemoteResolution::Allowed(remote) => (remote.host, remote.owner_repo),
             git::RemoteResolution::Denied => {
@@ -600,10 +589,9 @@ fn num_alias(pos: usize) -> String {
 
 /// Which hosts dux may name when it calls `gh`.
 ///
-/// This replaces the name-based guess (`github.com` or `github.*`) that decided
-/// it before, which rejected a company server at `git.company.example` purely on
-/// the strength of its name. The policy is computed by asking `gh` which hosts it
-/// can actually serve; it is stored on the engine and passed explicitly to its
+/// Computed by asking `gh` which hosts it can actually serve, rather than
+/// guessing from the name, which rejects a company server at
+/// `git.company.example`. Stored on the engine and passed explicitly to its
 /// consumers rather than reached for through a process-global.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum GithubHostPolicy {
@@ -624,25 +612,17 @@ pub enum GithubHostPolicy {
 }
 
 impl GithubHostPolicy {
-    /// Whether `host` may be handed to `gh`. Compared lowercased, and compared
-    /// EXACTLY otherwise. An empty host never qualifies: callers that mean
-    /// github.com say so (see `normalize_github_host`), and treating "" as
-    /// github.com here would let an unparsed remote through the gate.
+    /// Whether `host` may be handed to `gh`. Compared lowercased, and exactly
+    /// otherwise. An empty host never qualifies: callers that mean github.com say
+    /// so (see `normalize_github_host`), and treating "" as github.com would let
+    /// an unparsed remote through the gate.
     ///
-    /// Lowercasing is a normalisation this function may perform because it
-    /// changes no answer: hostnames are case-insensitive, and every caller
-    /// lowercases before it gets here anyway. TRIMMING is not, and doing it
-    /// here WIDENED THE REMOTE GRAMMAR from the far side. `git@ github.com:o/r`
-    /// (a space after the at sign) is a literal address with an interior space,
-    /// so the scp-like branch reads the host as `" github.com"` and hands it
-    /// here; a trim made this answer for `github.com`, a DIFFERENT host, and
-    /// the caller then returned the host it was holding, spaces and all, to be
-    /// handed to `gh`. Whitespace in a host is a defect in the caller or in the
-    /// address, and the answer to a defect is no. It is refused OUTRIGHT rather
-    /// than left to each mode to fail on its own, because one of them would
-    /// not: `LegacyNameRule` accepts anything beginning `github.`, so
-    /// `"github.com "` matched the prefix on its own merits even with the trim
-    /// gone, and `git@github.com :o/r` resolved to a host with a space on it.
+    /// Lowercasing is safe here because hostnames are case-insensitive. Trimming
+    /// is not, and is deliberately absent: an address like `git@ github.com:o/r`
+    /// yields the host `" github.com"`, and answering for `github.com` would let
+    /// the caller hand `gh` the spelling it is actually holding. Whitespace or a
+    /// control character in a host is refused outright rather than left to each
+    /// mode, because `LegacyNameRule` would accept `"github.com "` on its own.
     pub fn allows(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
         if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -685,25 +665,19 @@ struct AuthStatusOutput {
 
 /// One account under one host key.
 ///
-/// `state`, `active` and `host` are REQUIRED, so a record missing one, or
-/// carrying null or the wrong type in one, fails to deserialize and takes the
-/// whole response down with it. That is deliberate, and it is the difference
-/// between "gh says no" and "dux could not read what gh said". Optional fields
-/// would instead produce two decisive-looking answers out of records that decide
-/// nothing: a missing or null `active` yields an empty but
-/// successfully parsed host set, which is a decisive "gh serves nothing" that
-/// turns every GitHub feature off and replaces the last known good policy; and a
-/// missing or null `host` alongside a successful, active record qualifies the MAP
-/// KEY on the strength of a record that never says which host it describes.
+/// `state`, `active` and `host` are required, so a record missing one, or
+/// carrying null or the wrong type, fails to deserialize and takes the whole
+/// response with it. That is the difference between "gh says no" and "dux could
+/// not read what gh said": optional fields would turn records that decide nothing
+/// into decisive-looking answers, an empty host set that turns every GitHub
+/// feature off, or a map key qualified by a record that never named a host.
 ///
 /// A response containing an unreadable record is therefore transient (see
 /// [`decide_gh_probe`]), which preserves the last known good policy. gh 2.95.0
 /// emits all three fields on every account.
 ///
-/// `error` is the exception and defaults, because gh tags it `omitempty` and so
-/// omits it entirely on a healthy account. Its ABSENCE therefore says nothing
-/// and must not be able to fail the parse; it is `state` that says whether the
-/// account works, and this only says why when it does not.
+/// `error` is the exception and defaults, because gh tags it `omitempty` and
+/// omits it on a healthy account, so its absence must not fail the parse.
 #[derive(serde::Deserialize)]
 struct AuthStatusAccount {
     state: String,
@@ -718,9 +692,8 @@ impl AuthStatusAccount {
     /// host dux may name when it calls `gh`.
     fn qualifies(&self, host_key: &str) -> bool {
         // Every call dux makes names a host and never an account, so `gh` uses
-        // that host's ACTIVE account: an account that is not the active one
-        // tells us nothing about the call dux is going to make, and a working
-        // sibling cannot vouch for a broken active account.
+        // that host's active account: a working sibling cannot vouch for a
+        // broken active one.
         if !self.active {
             return false;
         }
@@ -737,20 +710,19 @@ impl AuthStatusAccount {
 /// Parse the stdout of `gh auth status --active --json hosts` into the set of
 /// hosts whose active account works.
 ///
-/// Returns `None` when the output is not that shape. That is NOT on its own the
-/// older-`gh` signal any more: see [`decide_gh_probe`], where an unparseable
-/// answer selects the fallback only when `gh`'s own diagnostics say it did not
+/// Returns `None` when the output is not that shape, which is not on its own the
+/// older-`gh` signal: see [`decide_gh_probe`], where an unparseable answer
+/// selects the fallback only when `gh`'s own diagnostics say it did not
 /// understand the call.
 ///
 /// Measured against gh 2.95.0, whose output is one entry per account:
 /// `{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com",…}]}}`.
 /// Neither the map keys nor the exit code can stand in for `state`: `gh` lists
-/// every host it merely KNOWS, including one whose login has expired, and in
+/// every host it merely knows, including one whose login has expired, and in
 /// JSON mode it exits zero regardless.
 ///
-/// Test-only: the decision needs the failures behind an empty set too, so it
-/// calls [`parse_auth_status`]. This narrower view is what the qualification
-/// rules are asserted through.
+/// Test-only: the decision itself calls [`parse_auth_status`], which also carries
+/// the failures behind an empty set.
 #[cfg(test)]
 pub(crate) fn parse_auth_status_hosts(stdout: &str) -> Option<BTreeSet<String>> {
     parse_auth_status(stdout).map(|reading| reading.eligible)

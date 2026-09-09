@@ -1,28 +1,25 @@
 //! Pure resolution of the terminal identity dux presents to an embedded agent.
 //!
-//! dux runs each agent CLI inside a PTY and, by default, inherits its own
-//! environment wholesale. That is a problem: agents detect which terminal they
-//! run in from environment variables (`TERM_PROGRAM`, `KITTY_WINDOW_ID`, and so
-//! on), and several of them only enable their richer notification channels for a
-//! terminal they recognize. Under a kitty+tmux setup, for example, the agent sees
-//! `TERM_PROGRAM=tmux` and emits nothing, which is exactly why the attention
-//! feature saw no signal in that configuration.
+//! Agents detect which terminal they run in from environment variables
+//! (`TERM_PROGRAM`, `KITTY_WINDOW_ID`, and so on), and several enable their
+//! richer notification channels only for a terminal they recognize; under
+//! kitty+tmux an agent inheriting dux's own environment sees `TERM_PROGRAM=tmux`
+//! and emits nothing.
 //!
 //! This module computes, as a pure function of a small [`HostEnvProbe`] snapshot,
-//! the set of environment variables dux should add or remove before spawning an
-//! agent so the agent sees a useful, honest terminal identity. It is deliberately
-//! free of any PTY, engine, or `std::env` dependency (the probe is built once from
-//! `std::env` at engine construction) so it can be exhaustively unit-tested.
+//! the environment variables dux adds or removes before spawning an agent so the
+//! agent sees a useful, honest terminal identity. It is deliberately free of any
+//! PTY, engine or `std::env` dependency (the probe is built once at engine
+//! construction) so it can be exhaustively unit-tested.
 //!
 //! Two surfaces exist:
 //!
-//! - **TUI** (`SurfaceKind::Tui`): mirror the real host terminal, seeing through
-//!   tmux. If dux is not under tmux, change nothing (the inherited env is already
-//!   the real terminal). If dux is under tmux, probe the inherited env for the
-//!   OUTER terminal's marker and present that instead, and strip `TMUX`/`TMUX_PANE`
-//!   so the agent emits unwrapped escape sequences (dux re-wraps them itself when
-//!   forwarding, see `attention::tmux_wrap`).
-//! - **Web / headless server** (`SurfaceKind::WebHeadless`): there is no host
+//! - TUI (`SurfaceKind::Tui`): mirror the real host terminal, seeing through
+//!   tmux. Not under tmux, change nothing. Under tmux, probe the inherited env
+//!   for the outer terminal's marker and present that instead, and strip
+//!   `TMUX`/`TMUX_PANE` so the agent emits unwrapped escape sequences (dux
+//!   re-wraps them when forwarding, see `attention::tmux_wrap`).
+//! - Web / headless server (`SurfaceKind::WebHeadless`): there is no host
 //!   terminal to mirror, so force a concrete identity (ghostty by default) that
 //!   the browser terminal can honor.
 
