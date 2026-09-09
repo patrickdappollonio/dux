@@ -55,10 +55,9 @@ function rowTooltip(entry: ProjectWorktreeEntryView): ReactNode {
   )
 }
 
-// The shared row body: the folder icon plus the worktree's BRANCH stacked over
-// its PATH, with a marker when it holds uncommitted work. `heldBy` is the
-// display name of the agent attached to it, which turns the second line into
-// the pointer an attached row offers in place of a delete action.
+// The shared row body: the folder icon plus the worktree's branch over its path,
+// with a marker when it holds uncommitted work. `heldBy` is the display name of
+// the agent attached to it, which an attached row points at in place of a delete.
 function WorktreeRowBody({
   entry,
   heldBy,
@@ -97,18 +96,15 @@ function WorktreeRowBody({
   )
 }
 
-// The confirmation for removing a worktree. dux removes it with
-// `git worktree remove --force` and there is no trash, so this names the branch
-// and the FULL path, says what is lost, and says it cannot be undone. A dirty
-// worktree gets its own sentence rather than a generic warning, because "there
-// is work in here that exists nowhere else" is the whole reason to stop.
+// The confirmation for removing a worktree. The removal is forcible and there is
+// no trash, so this names the branch and the full path, says what is lost, and
+// says it cannot be undone; a dirty worktree gets its own sentence, because work
+// that exists nowhere else is the whole reason to stop.
 //
-// The branch checkbox DEFAULTS ON. Leaving a worktree's branch behind is what
-// makes recreating an agent under that name fail with "branch already exists",
-// and by the time someone is in this dialog they mean to be rid of the thing;
-// the dialog already says the removal is forcible and unrecoverable, so the
-// branch is not a bigger step than the one being confirmed. The SERVER still
-// defaults to false, so a request that says nothing never deletes a branch.
+// The branch checkbox defaults on: a leftover branch is what makes recreating an
+// agent under that name fail, and it is not a bigger step than the removal
+// already being confirmed. The server still defaults to false, so a request that
+// says nothing never deletes a branch.
 function ConfirmDeleteWorktree() {
   const { deleteWorktreeTarget, attachWorktreeEntries } = useDux()
   // The component stays mounted across opens, so every close path resets this
@@ -355,11 +351,9 @@ function WorktreesBody({ projectId }: { projectId: string }) {
                     To remove one of these, delete the agent holding it.
                   </span>
                 </div>
-                {/* Deliberately NO delete action here. Removing a worktree from
-                   under a live agent is how you get a broken session, and that
-                   path already exists and already confirms: delete the agent.
-                   A second, worse route to the same outcome is not worth
-                   having, so the row points at the agent instead. */}
+                {/* Deliberately no delete action: removing a worktree from under
+                  * a live agent breaks the session, and deleting the agent is
+                  * the path that already exists and already confirms. */}
                 {attached.map((entry) => (
                   <SimpleTooltip
                     key={entry.worktree_path}
@@ -428,10 +422,8 @@ function WorktreesBody({ projectId }: { projectId: string }) {
 }
 
 // The per-project worktree manager: it lists every worktree dux manages for a
-// project, adopts an unused one as an agent (the "Create agent" button), and
-// removes one that is no longer wanted. Its store surface uses "attach
-// worktree" naming: grep `attachWorktree` / `openAttachWorktree` /
-// `attachWorktreeTarget` (lib/store.ts) to find the wiring behind these labels.
+// project, adopts an unused one as an agent, and removes one no longer wanted.
+// Its store surface is named `attachWorktree` rather than after these labels.
 export function WorktreesDialog() {
   const { attachWorktreeTarget, spine } = useDux()
   const project = spine?.projects.find((p) => p.id === attachWorktreeTarget)

@@ -32,19 +32,15 @@ interface FileTreeProps {
   openPath: string | null
   // path → raw git status code, for marking changed files in the tree.
   changed: Map<string, string>
-  // A file whose ancestor chain should be fetched + expanded on mount (deep
-  // link / opened-from-elsewhere). Later changes to openPath also pull any
-  // not-yet-loaded parents so a freshly created file is revealed.
+  // A file whose ancestor chain is fetched and expanded on mount, and on every
+  // later change, so a freshly created or deep-linked file is revealed.
   initialPath: string | null
-  // Single click = preview open (`onOpen(path)`); double-click = permanent
-  // open / pin (`onOpen(path, { pin: true })`). A double-click also fires two
-  // preceding `onClick`s, harmless since `openFile` (lib/editorTabs.ts) is
-  // idempotent for an already-open path (it just activates), so the pin lands
-  // cleanly right after.
+  // Single click previews, double-click pins. A double-click also fires two
+  // preceding clicks, which is harmless because `openFile` (lib/editorTabs.ts)
+  // is idempotent for an already-open path.
   onOpen: (path: string, opts?: { pin?: boolean }) => void
-  // Right-click menu callbacks (New File…/New Folder…/Rename…/Delete…). All
-  // optional so tests exercising unrelated behavior don't need to wire them;
-  // production usage (EditorOverlay) always provides all four.
+  // Right-click menu callbacks. Optional so a caller exercising unrelated
+  // behavior need not wire them; `EditorOverlay` provides every one.
   onNewFile?: (dir: string) => void
   onNewFolder?: (dir: string) => void
   onRename?: (path: string, isDir: boolean) => void
@@ -54,28 +50,21 @@ interface FileTreeProps {
   // Bump the nonce (with the affected dir(s)) to force a refetch of those
   // directories after a create/rename/delete mutation lands.
   revalidate?: { dirs: string[]; nonce: number } | null
-  // Whether the server accepts uploads at all (`file_drop_max_bytes > 0`).
-  // With it off the tree does not highlight, does not accept a drop, and does
-  // not pretend a drop would work.
+  // Whether the server accepts uploads at all (`file_drop_max_bytes > 0`). With
+  // it off the tree does not highlight, accept a drop, or pretend it would work.
   fileDropEnabled?: boolean
-  // Things dropped from the DESKTOP onto the tree, with the worktree-relative
-  // directory they were dropped on ("" = the worktree root). This is the
-  // durable drop intent, "add this file to my project": the caller uploads
-  // them and refreshes, exactly as it does after a move.
+  // Things dropped onto the tree, with the worktree-relative directory they
+  // landed on ("" is the worktree root); the caller uploads and refreshes.
   //
-  // It carries a `DroppedItems` rather than a `File[]` because a drop can also
-  // be a FOLDER, which is a natural gesture on a file tree and is not something
-  // dux takes. The tree sorts the two apart (it is the only place that can see
-  // the `DataTransfer`) and the caller reports both.
+  // It carries a `DroppedItems` rather than a `File[]` because a drop can also be
+  // a folder, which dux does not take. The tree is the only place that can see
+  // the `DataTransfer`, so it sorts the two apart and the caller reports both.
   onFilesDropped?: (dir: string, dropped: DroppedItems) => void
 }
 
-// The key identifying which drop target is currently under the pointer.
-//
-// It is a ROW identity, not the destination directory, and the two are
-// genuinely different: a file row's destination is its PARENT, so several rows
-// and the root surface can all resolve to `""` while only the one the pointer
-// is actually over may light up.
+// Which drop target is under the pointer, as a row identity rather than a
+// destination directory: a file row's destination is its parent, so several rows
+// and the root can resolve to `""` while only one may light up.
 const ROOT_DROP_KEY = "\u0000root"
 
 export function FileTree({
@@ -94,14 +83,11 @@ export function FileTree({
   fileDropEnabled = false,
   onFilesDropped,
 }: FileTreeProps) {
-  // The picker behind "Upload here…". It feeds the SAME `onFilesDropped` the
-  // drag does, with the same per-row destination resolution, so the two
-  // gestures cannot land in two places.
-  //
-  // `folders: []` always: a file picker cannot produce a directory (no
-  // `webkitdirectory` here, deliberately), so the folder-refusal rung of the
-  // tree's outcome ladder is unreachable from this gesture. It is passed
-  // rather than made optional so the one shared reporter keeps one shape.
+  // The picker behind "Upload here…". It feeds the same `onFilesDropped` the
+  // drag does, with the same per-row destination, so the two gestures cannot
+  // land in two places. `folders` is always empty (no `webkitdirectory` here,
+  // deliberately) and is passed rather than optional so the reporter keeps one
+  // shape.
   const { input: pickerInput, open: openFilePicker } = useFilePicker()
   const uploadInto = (dir: string) => {
     void openFilePicker().then((files) => {
@@ -112,24 +98,19 @@ export function FileTree({
   // The lazy loaded-directory cache: dirPath ("" = root) → DirState.
   const [dirs, setDirs] = useState<Map<string, DirState>>(() => new Map())
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
-  // The tree owns its ScrollArea and windows rows against that viewport. The
-  // element arrives via a callback ref (state, not a plain ref) so the
-  // measuring effect below re-runs when it mounts — a mount-only effect would
-  // race the loading-spinner state and never attach.
-  // Which drop target the pointer is over, by row identity. `null` is "no drag
-  // in progress over the tree".
   const [dropKey, setDropKey] = useState<string | null>(null)
+  // The viewport arrives via a callback ref (state, not a plain ref) so the
+  // measuring effect below re-runs when it mounts; a mount-only effect would
+  // race the loading-spinner state and never attach.
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(400)
-  // The dirs already requested (loading OR resolved OR errored), so effects
-  // never auto-refetch a dir they've already tried. A ref: fetch bookkeeping,
-  // not render state. Deliberately NOT cleared on failure (see the .catch in
-  // fetchDir below): only the explicit Retry button refetches an errored dir.
+  // The dirs already requested, loading, resolved or errored alike, so effects
+  // never auto-refetch one they have tried. Not cleared on failure (see the
+  // `.catch` below): only the Retry button refetches an errored dir.
   const requestedRef = useRef<Set<string>>(new Set())
-  // Unmount guard plus a per-dir request counter, so a stale response (the
-  // same dir refetched again before the first call resolves, or the
-  // component having unmounted) never overwrites fresher state.
+  // Unmount guard plus a per-dir request counter, so a stale response never
+  // overwrites fresher state.
   const unmountedRef = useRef(false)
   const requestTokenRef = useRef<Map<string, number>>(new Map())
 
@@ -174,13 +155,10 @@ export function FileTree({
         .catch((e) => {
           if (unmountedRef.current || requestTokenRef.current.get(dir) !== token)
             return
-          // Deliberately do NOT delete `dir` from requestedRef here: doing so
-          // makes the automatic dirsToLoadFor("missing ancestors") effect
-          // below treat an errored dir as still-needing-a-fetch on every
-          // subsequent `dirs` change, retrying forever with no backoff.
-          // Leaving it in requestedRef means only an explicit Retry
-          // click (which calls fetchDir directly, bypassing requestedRef)
-          // refetches an errored dir.
+          // `dir` deliberately stays in `requestedRef`: dropping it makes the
+          // missing-ancestors effect below re-request an errored dir on every
+          // `dirs` change, retrying forever with no backoff. Only the Retry
+          // button, which calls `fetchDir` directly, refetches one.
           setDirs((prev) => {
             const next = new Map(prev)
             next.set(dir, {
@@ -209,31 +187,23 @@ export function FileTree({
         return next
       })
     }
-    // Mount-only: the editor body remounts per session/open, and initialPath is
-    // fixed for a mount.
+    // Mount-only: the editor body remounts per session and open, and
+    // `initialPath` is fixed for a mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // The open file's parent-refetch (below) is gated by this ref so it fires
-  // at most once per opened file, regardless of how many times the effect
-  // re-runs as `dirs` changes (guards against a refetch loop when the file
-  // genuinely isn't on disk, e.g. opened from a stale changed-files row). The
-  // "missing ancestors" fetch above it is separately guarded: fetchDir never
-  // clears a dir from requestedRef on failure (see its .catch), so
-  // dirsToLoadFor stops treating an errored ancestor as "missing" after its
-  // first attempt.
+  // Gates the parent-refetch below to once per opened file however often the
+  // effect re-runs, which is what stops a refetch loop for a file that is not on
+  // disk at all. The missing-ancestors fetch is guarded separately, by
+  // `fetchDir` never clearing a failed dir from `requestedRef`.
   const revealCheckedRef = useRef<string | null>(null)
-  // Auto-expanding the open file's ancestor chain is also one-shot per
-  // openPath: without this latch, every `dirs` change (e.g. fetching an
-  // unrelated sibling directory) re-runs this effect and re-adds the
-  // ancestors to `expanded`, silently overriding a user who had manually
-  // collapsed one of them. After the initial reveal, the user's collapse wins.
+  // One-shot per `openPath`: without the latch every `dirs` change re-adds the
+  // ancestors to `expanded`, overriding a user who collapsed one. After the
+  // initial reveal, the user's collapse wins.
   const autoExpandedRef = useRef<string | null>(null)
 
-  // When the open file changes to a path whose parents were never loaded (a
-  // file just created, or switched to from search), pull the missing ancestors
-  // and expand them so the file is visible in the tree. A parent that IS
-  // loaded but doesn't list the file (it was just created) is refetched once.
+  // Pull and expand the ancestors of an open file whose parents were never
+  // loaded. A parent that is loaded but does not list the file is refetched once.
   useEffect(() => {
     if (!openPath) return
     const missing = dirsToLoadFor(openPath, requestedRef.current)
@@ -259,19 +229,16 @@ export function FileTree({
     }
   }, [openPath, dirs, fetchDir])
 
-  // Post-mutation revalidation: a create/rename/delete landed on the server,
-  // so force-refetch the affected dir(s) (bypassing requestedRef, same escape
-  // hatch the Retry button uses) and make sure each is expanded so a newly
-  // created entry is actually visible without an extra click.
+  // Post-mutation revalidation: force-refetch the affected dirs, bypassing
+  // `requestedRef` as the Retry button does, and expand each so a newly created
+  // entry is visible without another click.
   useEffect(() => {
     if (!revalidate) return
     for (const d of revalidate.dirs) {
       requestedRef.current.delete(d)
-      // `fetchDir` seeds `{ status: "loading" }` via `setDirs` before it ever
-      // fetches. The lint's static call-graph tracing flags this as a
-      // set-state-in-effect even though it's the same escape-hatch pattern
-      // the Retry button already uses to force a refetch (see EditorOverlay
-      // for the identical, already-accepted disable).
+      // `fetchDir` seeds `{ status: "loading" }` before it fetches, which the
+      // lint's call-graph tracing reads as a set-state-in-effect; it is the same
+      // escape hatch the Retry button uses.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       fetchDir(d)
     }
@@ -283,18 +250,16 @@ export function FileTree({
       }
       return next
     })
-    // Only the nonce should retrigger this: `dirs` is intentionally excluded
-    // (it would refetch on every unrelated directory load) and `fetchDir` is
-    // stable per root.
+    // Only the nonce may retrigger this: `dirs` would refetch on every unrelated
+    // directory load, and `fetchDir` is stable per root.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revalidate?.nonce])
 
   const toggle = useCallback(
     (path: string, expandable: boolean) => {
       if (expanded.has(path)) {
-        // Collapsing: evict this dir's cached listing and any loaded/loading/
-        // errored descendants so a huge subtree doesn't linger in memory
-        // forever. Re-expanding later refetches fresh data.
+        // Collapsing evicts this dir's listing and every descendant's, so a huge
+        // subtree does not linger in memory; re-expanding refetches.
         const toEvict = [path, ...descendantDirPaths(dirs, path)]
         setDirs((prev) => {
           const next = new Map(prev)
@@ -319,11 +284,9 @@ export function FileTree({
     [fetchDir, dirs, expanded],
   )
 
-  // Re-flattens the whole visible tree on any `dirs`/`expanded` change,
-  // including ones unrelated to what's currently rendered (O(n) in loaded
-  // node count). Accepted cost: the list is virtualized below so render work
-  // is bounded by viewport size regardless of flatten cost, and collapse now
-  // evicts subtrees (see `toggle`), which keeps `dirs` itself bounded too.
+  // Re-flattens the whole visible tree on any `dirs` or `expanded` change, at a
+  // cost linear in loaded nodes. Accepted: the list below is virtualized, so
+  // render work is bounded by the viewport, and collapse evicts subtrees.
   const rows = useMemo(() => flattenLazy(dirs, expanded), [dirs, expanded])
 
   const rootState = dirs.get("")
@@ -337,23 +300,19 @@ export function FileTree({
   )
   const visibleRows = rows.slice(firstVisible, lastVisible + 1)
 
-  // The four native drag handlers one drop target needs, for the row
-  // identified by `key` delivering into `dir`.
+  // The native drag handlers one drop target needs, for the row identified by
+  // `key` delivering into `dir`.
   //
-  // `stopPropagation` is what keeps a row and the root filler underneath it
-  // from both claiming the same drag: the filler wraps every row, so without
-  // it the bubbling event would reach the filler LAST and the root would win
-  // every time, quietly retargeting a folder drop to the worktree root.
+  // `stopPropagation` keeps a row and the root filler that wraps it from both
+  // claiming the drag: the bubbling event reaches the filler last, so the root
+  // would win every time and retarget a folder drop to the worktree root.
   //
-  // `preventDefault` on dragover is not optional either: without it the
-  // browser refuses the drop and then NAVIGATES to the dropped file, throwing
-  // the editor away.
+  // `preventDefault` on dragover is required too, or the browser refuses the
+  // drop and navigates to the dropped file, throwing the editor away.
   //
-  // Clearing on dragleave without a depth counter is deliberate. A leave fired
-  // while crossing into a child element self-heals on the very next dragover
-  // (which fires continuously), so the worst case is one frame of missing
-  // highlight rather than the stuck highlight a mismatched counter leaves
-  // behind.
+  // Clearing on dragleave uses no depth counter: a leave fired while crossing
+  // into a child self-heals on the next dragover, so the worst case is one frame
+  // of missing highlight rather than a stuck one.
   const dropHandlers = useCallback(
     (key: string, dir: string) => {
       if (!fileDropEnabled || !onFilesDropped) return {}
@@ -380,10 +339,9 @@ export function FileTree({
         onDrop: (e: React.DragEvent) => {
           if (!claim(e)) return
           setDropKey(null)
-          // Sorted HERE because this is the only place the `DataTransfer` is
-          // reachable, and reported unconditionally: a drop that produced
-          // neither a file nor a folder still has to say so, or letting go of
-          // a folder looks like letting go of nothing.
+          // Sorted here because this is the only place the `DataTransfer` is
+          // reachable, and reported even when it produced neither a file nor a
+          // folder, or letting go of a folder looks like letting go of nothing.
           onFilesDropped(
             dir,
             classifyDroppedItems(
@@ -397,18 +355,15 @@ export function FileTree({
     [fileDropEnabled, onFilesDropped],
   )
 
-  // The highlight on the row the drop would land in. Returned as CLASSES so a
-  // caller can merge them into whatever the element already carries, and
-  // through tokens rather than literal colours.
+  // The highlight on the row the drop would land in, as classes a caller can
+  // merge into what the element already carries, through tokens.
   const dropClass = (key: string) =>
     dropKey === key && "bg-primary/10 ring-1 ring-primary"
 
-  // The tree renders inside its OWN ScrollArea and windows rows against that
-  // viewport. Virtualizing against any other element breaks silently: the
-  // window only moves on scroll events from the element it measures, so if an
-  // ancestor scrolls instead, everything past the first screenful renders as
-  // empty spacer. The loading/error/empty states render inside the same
-  // ScrollArea so the viewport element exists from the first paint.
+  // Rows are windowed against the tree's own ScrollArea. Virtualizing against
+  // any other element breaks silently, since the window only moves on scroll
+  // events from the element it measures. The loading, error and empty states
+  // render inside the same ScrollArea so the viewport exists from first paint.
   return (
     <ScrollArea
       className="min-h-0 flex-1"
@@ -421,22 +376,18 @@ export function FileTree({
       }}
     >
       {/* The picker's hidden input, mounted with the tree so a menu item's
-          click reaches it synchronously (the browser's user activation is
-          spent by the time a promise resolves). */}
+        * click reaches it synchronously: the browser's user activation is spent
+        * by the time a promise resolves. */}
       {pickerInput}
       <ContextMenu>
       <ContextMenuTrigger
         render={
           <div
             data-testid="file-tree-drop-surface"
-            // A right-click that lands directly on this filler (not bubbled
-            // up from a row's own trigger, which stops propagation before it
-            // gets here) opens the root menu: New File…/New Folder… at the
-            // worktree root. `min-h-full` covers the empty space below the
-            // last row so a click there still hits this trigger.
-            //
-            // It is the drop target for the same space and for the same
-            // reason: a drop on empty tree space means the worktree root.
+            // A right-click landing directly on this filler, rather than
+            // bubbling from a row's own trigger, opens the root menu.
+            // `min-h-full` covers the space below the last row so a click there
+            // still hits it, and a drop on that space means the worktree root.
             {...dropHandlers(ROOT_DROP_KEY, "")}
             className={cn("min-h-full rounded p-1", dropClass(ROOT_DROP_KEY))}
           />
@@ -483,19 +434,14 @@ export function FileTree({
                       <button
                         type="button"
                         onClick={() => toggle(row.path, row.expandable)}
-                        // Stop the native contextmenu event from bubbling to
-                        // the root trigger above: this row's own trigger
-                        // (attached to this same element) already opens its
-                        // menu, so without this the root menu would ALSO try
-                        // to open from the same right-click.
+                        // This row's own trigger already opens its menu, so the
+                        // event must not bubble to the root trigger above and
+                        // open that one from the same right-click.
                         onContextMenu={(e) => e.stopPropagation()}
                         aria-expanded={expanded.has(row.path)}
-                        // Dropping ON a folder puts the files IN it. Routed
-                        // through the same mapping the file row uses rather
-                        // than passing `row.path` straight in: it is the one
-                        // place that answers "which directory does this row
-                        // mean", and two rows answering it two ways is how the
-                        // two drift.
+                        // Dropping on a folder puts the files in it, routed
+                        // through the same mapping the file row uses: two rows
+                        // answering the destination question separately drift.
                         {...dropHandlers(
                           row.path,
                           targetDirForCreate({ kind: "dir", path: row.path }),
@@ -595,8 +541,7 @@ export function FileTree({
                         // row's right-click from also opening the root menu.
                         onContextMenu={(e) => e.stopPropagation()}
                         // A file is not a place to put a file, so a drop here
-                        // targets the folder the file is IN. The same mapping
-                        // every other destination-taking tree action uses.
+                        // targets the folder it is in, through the same mapping.
                         {...dropHandlers(
                           row.path,
                           targetDirForCreate({ kind: "file", path: row.path }),

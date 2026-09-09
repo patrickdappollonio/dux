@@ -144,14 +144,10 @@ function TerminalSurface({
   )
 }
 
-// The center pane: the agent's terminal (or a companion terminal's), the tab
-// strip above it, and the PR banner. Split into its own module (rather than
-// living inline in App.tsx) so it can be unit-tested without pulling in
-// `GlobalOverlays` -> `ConfigEditorDialog`, which eagerly imports the multi-MB
-// Monaco bundle that cannot initialize under vitest (see the note in
-// `lib/pathExt.ts`). `TerminalArea` itself only pulls in the terminal pane
-// behind `React.lazy`, so it mounts cleanly in tests (see `App.test.tsx`,
-// which covers the dormant-tab gating this component owns).
+// The center pane: the agent's terminal or a companion terminal's, the tab strip
+// above it, and the PR banner. Its own module rather than inline in App.tsx so it
+// can be mounted without `GlobalOverlays`, which eagerly imports Monaco; it pulls
+// the terminal pane in behind `React.lazy`.
 export function TerminalArea() {
   const {
     spine,
@@ -179,10 +175,9 @@ export function TerminalArea() {
     return <Welcome />
   }
 
-  // The PR belongs to the owning session, so it shows whether the agent or one
-  // of its companion terminals is focused (mirroring the TUI, which shares the
-  // session's PR across surfaces). Placement honours the same config the TUI
-  // does: "bottom" puts the lane below the terminal, anything else above.
+  // The PR belongs to the owning session, so it shows whether the agent or one of
+  // its companion terminals is focused, as in the TUI. Placement honours the same
+  // config: "bottom" puts the lane below the terminal, anything else above.
   const pr =
     spine?.sessions.find((s) => s.id === selectedSessionId)?.pr ?? null
   const bannerAtBottom = bootstrap?.pr_banner_position === "bottom"
@@ -200,12 +195,10 @@ export function TerminalArea() {
   const paneKey =
     selectedTarget.kind === "agent" ? `${targetId}:${terminalEpoch}` : targetId
 
-  // Resolve the owning session + (for an agent) the focused tab so we can render
-  // the tab strip and gate the dormant card. A project terminal has NO owning
-  // session; every session-scoped branch below is agent-only or tolerates
-  // `undefined`. The lossy `ownerSessionId` is right here because that IS the
-  // whole question: a terminal owned by anything other than a session has no tab
-  // strip and no dormant card, whichever kind of owner it turns out to be.
+  // The owning session, and for an agent the focused tab, which is what the tab
+  // strip and the dormant-card gate need. A project terminal has none, and every
+  // session-scoped branch below is agent-only or tolerates `undefined`, so the
+  // lossy `ownerSessionId` answers exactly the question asked.
   const ownerSessionId =
     selectedTarget.kind === "agent"
       ? selectedTarget.sessionId
@@ -228,28 +221,20 @@ export function TerminalArea() {
     slotTabId,
   )
 
-  // TerminalPane owns its own background and padding (via inline style) so the
-  // padding area is seamlessly part of the terminal surface.
-  // Suspense fallback is null: the lazy chunk loads fast and TerminalPane shows
-  // its own readiness spinner the moment it mounts, so a fallback spinner here
-  // would just double up.
-  // ChunkBoundary wraps Suspense (not inside it) so a failed lazy import after a
-  // server redeploy is caught and recovered instead of unmounting the tree.
+  // The Suspense fallback is null because TerminalPane shows its own readiness
+  // spinner on mount, and ChunkBoundary wraps Suspense rather than sitting inside
+  // it so a lazy import that fails after a redeploy is recovered.
   //
-  // overflow-hidden is load-bearing: during a divider/window resize the
-  // terminal keeps its previous size until the next-rAF refit, so for one
-  // frame it overflows this box. The ResizablePanel's inner wrapper is
-  // `overflow: auto` — left unclipped, that one-frame overflow sprouts real
-  // div scrollbars whose width shrinks the content box, which retriggers the
-  // ResizeObserver, which refits, which toggles the scrollbar again: a
-  // visible jitter loop. Clipping here means the transient overflow is
-  // simply invisible and the loop can never start.
+  // `overflow-hidden` is load-bearing: a resized terminal keeps its old size
+  // until the next-rAF refit, so for one frame it overflows this box. The
+  // ResizablePanel's inner wrapper is `overflow: auto`, so unclipped that frame
+  // sprouts scrollbars, which shrink the content box, which refits, which
+  // toggles them again: a visible jitter loop.
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* The pane's own chrome stack, and the one real loss theater costs: the
-          pull-request band is a status glance and a click target in the same
-          strip. It is one tap away again through the pill's exit, and theater
-          is a mode you enter deliberately. */}
+        * pull-request band is a status glance and a click target at once. It is
+        * one tap away again through the pill's exit. */}
       <TheaterChrome hidden={theater}>
         <PrLane pr={pr} atBottom={bannerAtBottom} position="top" />
         <AgentTabLane

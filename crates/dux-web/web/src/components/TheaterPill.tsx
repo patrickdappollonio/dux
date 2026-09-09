@@ -53,40 +53,13 @@ import {
 import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-// THE FLOATING PILL: the only chrome theater mode leaves on screen.
+// The only chrome theater mode leaves on screen. It carries controls that act
+// and nothing that reports, so no tab status rides here.
 //
-// It carries controls that ACT, and nothing that merely reports: the way out,
-// the macros trigger, the changed-file count where the pane's subject has one,
-// and the pane's own `⋯`. ONE CLUSTER, ONE LOOK, BOTH FORM FACTORS. The
-// computer's pill used to be its own arrangement (a 40px grip, macros, the
-// menu, a rule, and a separate exit button) purely because it was written
-// before the phone grew a docked flap; two designs for one control is a place
-// for the two to drift, and the phone's is the one with a dock to match, so
-// that is the one both wear. The `⋯` is the same merged menu on both, so
-// theater is not the state in which a computer loses the agent's actions along
-// with the sidebar that used to be the only other place to reach them.
-//
-// WHAT MAY STILL DIFFER IS WHAT IS IN IT, never how it looks: the count is
-// absent for a pane with no agent behind it, on a computer exactly as on a
-// phone, and that is the cluster's own rule rather than a variant of this
-// component (see `PaneActionCluster`).
-//
-// IT CARRIES NO TAB STATUS. It used to grow a status half that bobbed while a
-// hidden tab worked, wore an attention dot, and folded out a mini strip of tab
-// pills to switch between them. The agents list and the tab strip are where tab
-// status lives, and a second, smaller copy of it floating over the terminal was
-// a place for the two to disagree. The accepted cost is that in theater on a
-// phone, where both of those are off screen, a hidden tab needing attention has
-// no on-screen signal until the mode is left; see `lib/theater.ts` for why that
-// is not answered by a notification either.
-//
-// Bottom right, because that is the corner a thumb reaches on a held tablet and
-// the corner an agent CLI is least likely to be drawing something that must be
-// read. It is rendered INSIDE the terminal surface's own positioned box, never
-// beside it: the pane column holds the compose row and the terminal keys under
-// the terminal, and a pill anchored to that column lands on top of the Send
-// button. Structural placement rather than an offset measured off the input
-// rows, so a bar appearing or disappearing cannot move it onto a tap target.
+// One cluster, one look, both form factors: the phone's handoff overlays the
+// pill on the docked flap and translates, so any difference tears the flight.
+// Rendered inside the terminal surface's own positioned box, never beside it,
+// so an input row appearing cannot move the pill onto a tap target.
 export function TheaterPill({
   target,
   session,
@@ -96,17 +69,13 @@ export function TheaterPill({
   /// The focused pane's owning session, when it has one. A terminal pane passes
   /// `undefined`, which is what drops the changed-file count.
   session: SessionView | undefined
-  /// The flight stage, or `null` on a surface that does not fly. A computer's
-  /// pill mounts resting and never flies: there is no docked flap on that
-  /// surface to leave from or land on, so the stages have no dock to measure
-  /// and the cluster simply appears, which is also the reduced-motion answer.
+  /// The flight stage, or `null` on a surface with no docked flap to leave from
+  /// or land on, where the cluster simply appears.
   flight?: FlightPhase | null
 }) {
   const boxRef = useRef<HTMLDivElement | null>(null)
-  // THE WAY OUT IS THE CLUSTER'S THEATER TOGGLE, which is the control focus is
-  // handed to when the press that brought this pill on screen destroyed the one
-  // the user was on. The pill only exists while the mode is on, so the toggle is
-  // always painted, labelled and announced as "Leave theater mode" here.
+  // Focus lands on the cluster's theater toggle: the press that raised this pill
+  // destroyed the control the user was on.
   const exitRef = useRef<HTMLButtonElement | null>(null)
   useTheaterPillFocus(exitRef)
   const coarse = useIsCoarsePointer()
@@ -114,39 +83,26 @@ export function TheaterPill({
   const drag = usePillDrag(boxRef)
   usePillHint()
   const sessionId = session?.id
-  // The PTY behind the pane this pill is painted over, named the same way the
-  // shells key the pane itself, so the pill reads the input menu of the pane it
-  // is actually on rather than whichever one registered last.
+  // The PTY behind the pane this pill is painted over, keyed the way the shells
+  // key the pane, so the input menu read is that pane's and not the last registered.
   const paneId = target.kind === "agent" ? target.tabId : target.terminalId
-  // WHAT THE `⋯` IS ABOUT, resolved the same way the docked flap resolves it:
-  // the agent when there is one, otherwise the terminal on screen. A
-  // session-owned terminal is the agent's own screen, so it keeps the agent's
-  // menu, which is also what its identity, its count and its PR chip are about;
-  // the pane goes down with the subject, so that terminal's own verbs and its
-  // INPUT group come with it.
+  // What the `⋯` is about, resolved as the docked flap resolves it: the agent
+  // when there is one, otherwise the terminal on screen.
   const paneSubject: PaneMenuSubject | null = session
     ? { kind: "agent", session }
     : target.kind === "terminal"
       ? { kind: "terminal", terminalId: target.terminalId, owner: target.owner }
       : null
-  // The fillets belong to the FLIGHT, not to a form factor: they are the arcs
-  // the capsule wears for the two stages that are the flap's shape, and a
-  // surface with no dock never enters one. They are `display: none` outside
-  // those stages either way, so this decides DOM weight rather than looks.
+  // The fillets belong to the flight, not to a form factor, and are
+  // `display: none` outside its shape stages, so this decides DOM weight only.
   const flies = flight !== null
   const gripless = useFlightChoreography(boxRef, flight, drag.position)
-  // WHILE IT IS FLYING HOME the flight owns the box's coordinates outright: it
-  // pins the pill at the ones it is leaving and parks it on the flap's, neither
-  // of which is a place the drag state has any business holding.
+  // While it flies home the flight owns the box's coordinates outright, pinning
+  // the pill where it leaves and parking it on the flap's.
   const flightPlaces = flight !== null && flightOwnsPosition(flight)
-  // THE RETURNING CHROME'S RE-CLAMP IS A SNAP, NEVER A SETTLE. The top chrome
-  // coming back shrinks the surface out from under a resting pill, and a
-  // bottom-hugging one has to come up with it or it spends the whole chrome
-  // stage hanging below the surface, off screen, and the flight then enters
-  // from a place the user never saw it in. So the clamp still runs, instantly:
-  // it is the 150ms settle that made it look wrong, crawling the pill upward
-  // ahead of the gesture it belongs to. The flight leaves from wherever that
-  // clamp put it, which is where the pill is actually painted.
+  // The returning chrome's re-clamp snaps rather than settling: the top chrome
+  // shrinks the surface under a resting pill, and an eased clamp crawls the pill
+  // upward ahead of the gesture it belongs to.
   const positionSnaps = flightPlaces || flight === "expanding"
 
   return (
@@ -155,32 +111,17 @@ export function TheaterPill({
       data-testid="theater-pill"
       className={cn(
         "absolute z-30 flex items-center gap-0.5 rounded-full border p-1",
-        // THE BAND'S OWN COLOUR, OPAQUE, and not a glass panel. It used to be
-        // `bg-card/90` behind a backdrop blur, which is a different hue from the
-        // band the cluster docks on: the phone's handoff therefore changed
-        // colour halfway through a flight that is supposed to be one object
-        // moving, and on a computer the same pill read as a different material
-        // from every other piece of dux's chrome. `dux-pill-surface` paints the
-        // flap's published fill (see `FLAP_FILL_VAR`), so docked and floating
-        // are the same pixel colour and the flight has nothing left to morph
-        // there. The blur went with it, which is the point: a translucent
-        // surface over a terminal is exactly where a band colour cannot hold.
+        // Opaque, and the flap's own published fill (see `FLAP_FILL_VAR`), so
+        // docked and floating are the same pixel colour and the flight has no
+        // colour left to morph. A translucent surface over a terminal cannot
+        // hold a band colour, so there is no blur here.
         "dux-pill-surface shadow-lg",
-        // The corner it starts in, until a measurement gives it real
-        // coordinates. Keeping the CSS default for that frame is what stops the
-        // pill flashing at the origin on a pane that has not been laid out yet.
-        //
-        // It applies DURING A FLIGHT TOO, for the pane that remounts mid-return:
-        // a fresh pill has no coordinates of its own and the flight has not yet
-        // written any, and the two together used to leave it painted at the
-        // overlay's top-left corner. The two can never fight over the same edges,
-        // because the run that parks the box pins `right` and `bottom` to `auto`
-        // as it writes `left` and `top`.
+        // The corner it starts in until a measurement gives it real coordinates,
+        // including for a pill that mounts mid-flight. The two cannot fight over
+        // the same edges: parking the box pins `right` and `bottom` to `auto`.
         drag.position === null && "right-3.5 bottom-3.5",
-        // The settle after a nudge or a re-clamp. It is deliberately absent
-        // while a drag is live (the pointer already moves the pill, and easing
-        // toward the finger would lag it) and for a viewer who asked for less
-        // motion, who still gets every clamp, just instantly.
+        // The settle after a nudge or a re-clamp, absent while a drag is live
+        // (easing toward the finger lags it) and under reduced motion.
         !reducedMotion &&
           !drag.dragging &&
           !drag.justDropped &&
@@ -203,55 +144,28 @@ export function TheaterPill({
           variant="ghost"
           size="icon"
           data-testid="theater-pill-grip"
-          // The pill floats over the newest lines of output, so the answer to
-          // it covering something is to move it. The grip is where that gesture
-          // lives, and it is a dedicated control rather than the pill's whole
-          // body precisely because the body is buttons: a gesture that could
-          // start anywhere would make every tap ambiguous.
-          //
-          // IT IS STILL A NATIVE BUTTON, and that is a decision rather than an
-          // oversight. No ARIA role describes a handle that moves an object
-          // freely in two axes (`slider` is one axis and wants a value,
-          // `separator` is a splitter), and dnd-kit and the APG's own
-          // drag-handle guidance both reach for a real button because
-          // focusability, keyboard delivery and an announced control come free
-          // with it. The consequence, stated: a screen reader says "button" and
-          // Enter or Space does nothing, because a press on the grip is a tap
-          // and a tap on the grip is deliberately inert. The label names the
-          // gesture and the keys that stand in for it, so the affordance is
-          // spoken rather than left to the glyph.
-          //
-          // IT DOES NOT PAINT LIKE A BUTTON. A grab indicator that lights up on
-          // hover and sinks on press is promising an action it does not have,
-          // so the ghost variant's hover fill, its hover text colour and the
-          // base variant's active nudge are all turned off below. What stays is
-          // the focus ring, which is the keyboard user's only way to see where
-          // the arrow keys are pointed, and the grab/grabbing cursor pair.
+          // A native button, deliberately: no ARIA role describes a handle that
+          // moves an object in two axes, and focusability plus keyboard delivery
+          // come free. The consequence, accepted: a screen reader says "button"
+          // and Enter or Space does nothing, since a press on the grip is inert,
+          // so the label names the gesture and the keys that stand in for it.
           aria-label="Drag handle: drag, or use the arrow keys, to move the pill"
-          // `touch-none` is load-bearing twice over: it stops the browser
-          // scrolling or long-pressing the page out from under the drag, and it
-          // is what keeps the terminal's own long-press selection from starting
-          // under the finger. The handlers stop the events reaching the pane too.
+          // `touch-none` stops the browser scrolling or long-pressing the page
+          // out from under the drag, and keeps the terminal's own long-press
+          // selection from starting under the finger.
           //
           // `dux-pill-grip` is the slot the flight widens: the docked flap has
-          // no grip and reserves no blank space for one, so this width is what
-          // the cluster GAINS on the way out and gives back on the way home.
-          //
-          // The slot is 18px wide on every surface, a deliberate per-axis
-          // relaxation of the 40px floor. It keeps the full 40px HEIGHT; its
-          // horizontal neighbours are the pill's own padding edge on one side
-          // and the theater toggle on the other, and the pill has to be the
-          // flap's width plus exactly this slot for the phone's handoff to be a
-          // pure translation. A stray tap on it does nothing at all, which is
-          // the cheapest miss in the cluster. The computer's grip was 40px only
-          // because it was written before the flap existed; matching it here is
-          // what makes one pill wear one silhouette everywhere.
+          // no grip, so this width is what the cluster gains and gives back.
+          // Its 18px is a per-axis relaxation of the 40px floor, keeping the
+          // full height; the pill has to be the flap's width plus exactly this
+          // slot for the phone's handoff to be a pure translation, its
+          // horizontal neighbours are the padding edge and the theater toggle,
+          // and a stray tap on it does nothing at all.
           className={cn(
             "dux-pill-grip h-10 w-[18px] shrink-0 cursor-grab touch-none rounded-full px-0 text-muted-foreground select-none active:cursor-grabbing",
-            // INERT PAINT: it indicates a grab, it does not offer a press. The
-            // popup-open pair matters too: the grip's own tooltip opening
-            // stamps data-popup-open, and the shared button base would repaint
-            // the "pressed" fill for a state that is just a tooltip showing.
+            // Inert paint: it indicates a grab, it does not offer a press. The
+            // grip's own tooltip stamps data-popup-open, which the shared button
+            // base would otherwise repaint as a pressed fill.
             "hover:bg-transparent hover:text-muted-foreground dark:hover:bg-transparent",
             "data-[popup-open]:bg-transparent data-[popup-open]:text-muted-foreground",
             "active:not-aria-[haspopup]:translate-y-0",
@@ -262,43 +176,32 @@ export function TheaterPill({
           onPointerCancel={drag.onPointerCancel}
           onLostPointerCapture={drag.onLostPointerCapture}
           // A keyboard cannot hold and pull, so the arrow keys move the pill a
-          // step at a time. Without it a keyboard user has no way at all to
-          // clear a pill that sits over what they are reading.
+          // step at a time; without them it cannot be cleared at all.
           onKeyDown={drag.onKeyDown}
         >
           <GripVertical />
         </Button>
       </SimpleTooltip>
 
-      {/* THE FLAP'S OWN CLUSTER, in the air, on every surface. Same component,
-          same order, same offsets: on a phone the detach overlays the two
-          exactly and then translates, so anything that differed here would tear
-          at the handoff, and a computer that arranged the same controls
-          differently would be a second design for one control. The way out is
-          the theater toggle at its head rather than a separate exit, which is
-          what makes the toggle one control changing state rather than two
-          buttons trading places. */}
+      {/* The flap's own cluster, in the air: same component, order and offsets,
+        * because the phone's detach overlays the two exactly and then
+        * translates. The way out is the theater toggle at its head, so it is one
+        * control changing state rather than two buttons trading places. */}
       <PaneActionCluster
         target={target}
         sessionId={sessionId}
         theaterRef={exitRef}
-        // THE SAME `⋯` THE FLAP CARRIES, by the same name: the cluster flew
-        // here as one object, and a button that changed what it opens on
-        // arrival would make the animation a lie. It is also the only way to
-        // the pane's own actions while the mode is on, for a terminal exactly
-        // as for an agent, and on a computer it is what theater took the
-        // sidebar and the header away from. The app-menu fallback is for a pane
-        // that is neither an agent nor a terminal, which the types say cannot
-        // happen and the surface should survive anyway.
+        // The same `⋯` the flap carries, and the only way to the pane's own
+        // actions while the mode is on. The app-menu fallback is for a pane that
+        // is neither an agent nor a terminal, which the types say cannot happen.
         ellipsis={
           paneSubject ? (
             <PaneMenu
               subject={paneSubject}
               pane={target}
               side="top"
-              // THE DRILL IS THE POINT HERE. Theater unmounts the chrome the
-              // cog lives in on both form factors, so without it the mode is
-              // the one state in which the app's own actions are unreachable.
+              // Theater unmounts the chrome the cog lives in on both form
+              // factors, so without the drill the app's actions are unreachable.
               settingsDrill
             />
           ) : (
@@ -310,14 +213,9 @@ export function TheaterPill({
   )
 }
 
-// THE FLAP'S CONCAVE FILLETS, worn by the pill.
-//
-// They are the same arcs the docked flap draws, not an approximation of them:
-// the flight leaves a tab shape and re-forms one, and a gradient standing in
-// for an arc makes the two visibly different objects at the moment they are
-// supposed to be the same one. They are `display: none` except during the two
-// stages that need them (see the `dux-flight-*` rules in index.css), so the
-// floating pill is a plain capsule with nothing hanging off it.
+// The docked flap's concave fillets, worn by the pill: the same arcs, not an
+// approximation, or the flight's two ends read as different objects. They are
+// `display: none` outside the shape stages (`dux-flight-*` in index.css).
 function FlapFillets() {
   const left = filletShape("left")
   const right = filletShape("right")
@@ -336,11 +234,9 @@ function FlapFillets() {
           height={box}
           viewBox={`0 0 ${box} ${box}`}
         >
-          {/* The band's OWN colour, which the flight puts on the pill's root
-              for the two stages these are painted in. A single-tab agent's flap
-              hangs off the plain background rather than the strip's tone, and
-              fillets pinned to the strip's flashed the wrong colour at both
-              ends of the journey. */}
+          {/* The band's own colour, published by the flap and put on the pill's
+            * root by the flight: a single-tab agent's flap hangs off the plain
+            * background rather than the strip's tone. */}
           <path d={shape.fill} fill={`var(${FLAP_FILL_VAR}, var(--dux-flap-bg))`} />
           <path
             d={shape.stroke}
@@ -355,33 +251,25 @@ function FlapFillets() {
 }
 
 /**
- * THE FLIGHT ITSELF: the imperative half of the choreography.
+ * The imperative half of the flight choreography. It lives in the pill because
+ * it must run in a commit where the pill's own coordinates are already on the
+ * element; a parent's layout effect would read the box before React flushed it.
  *
- * It lives in the pill rather than in the shell that owns the phase because it
- * has to run in a commit where the pill's own coordinates are already ON the
- * element. The pill places itself in a layout effect and that placement is a
- * state write; a parent's layout effect in the same commit would read the box
- * before React had flushed it and fly the cluster to the corner the pill was
- * about to leave.
- *
- * Every stage runs exactly ONCE per entry into it: the effect re-fires when the
+ * Every stage runs once per entry into it: the effect re-fires when the
  * placement lands, and a detach that ran twice would measure its own transform.
  *
- * Returns whether the grip slot is collapsed right now, which is the one piece
- * of the animation React has to own: the slot's width is what the cluster gains
- * and gives back, and the transition needs the class to change AFTER the box
- * has been measured at the collapsed width.
+ * Returns whether the grip slot is collapsed right now, which React has to own
+ * because the transition needs the class to change after the box has been
+ * measured at the collapsed width.
  */
 function useFlightChoreography(
   boxRef: React.RefObject<HTMLDivElement | null>,
   flight: FlightPhase | null,
   /// Where the pill's own state says it sits, or `null` before anything has
-  /// been measured. The flights need a measured dock to fly from; the resting
-  /// stages need it to know whether React has coordinates of its own to write.
+  /// been measured. Every stage needs it: to fly from, or to know what to clear.
   position: PillPosition | null,
 ): boolean {
-  // The stage's own answer, until the stage's effect overrides it mid-flight.
-  // KEYED ON THE STAGE it was written for, so a new stage's default takes over
+  // Keyed on the stage it was written for, so a new stage's default takes over
   // by itself rather than needing a reset pass that would cost a render.
   const [override, setOverride] = useState<{
     phase: FlightPhase
@@ -402,9 +290,8 @@ function useFlightChoreography(
     if (ranRef.current === flight) return
 
     if (flight === "detaching" || flight === "returning") {
-      // Both flights need a real dock: one to leave, one to land on. Without a
-      // measured pill there is nothing to fly, so the cluster simply appears,
-      // which is also the reduced-motion answer.
+      // Both flights need a real dock, one to leave and one to land on; without
+      // a measured pill the cluster simply appears.
       if (!position) return
       const from = peekFlapRect()
       if (!from) return
@@ -427,15 +314,14 @@ function useFlightChoreography(
       return
     }
 
-    // A resting stage. Anything the flight wrote is over, and leaving it behind
-    // would pin the pill's shape at whatever the last frame happened to be.
+    // A resting stage: leaving the flight's inline writes behind would pin the
+    // pill's shape at whatever the last frame happened to be.
     ranRef.current = flight
     clearFlightStyles(box, position)
   }, [boxRef, flight, position, setStageGripless])
 
-  // The flap has no grip and reserves no space for one, so the two stages that
-  // are the flap's shape start collapsed; the two travels then open or close
-  // the slot from their own effects.
+  // The flap has no grip and reserves no space for one, so the shape stages
+  // start collapsed; the travels open or close the slot from their own effects.
   if (override && flight !== null && override.phase === flight) {
     return override.gripless
   }
@@ -443,14 +329,9 @@ function useFlightChoreography(
 }
 
 /// Everything the flight writes inline, in one place, so a stage that ends can
-/// hand the element back exactly as it found it.
-///
-/// LEFT AND TOP ARE REACT'S while the pill rests, and this is the one place that
-/// has to remember it. React writes them from the pill's own position state, and
-/// its next diff sees values that never changed, so a blanket clear here strands
-/// the settled pill at the overlay's top-left corner with nothing left to put it
-/// back. They are cleared only when the pill has no position of its own, which
-/// is also the state the fallback corner class paints.
+/// hand the element back exactly as it found it. `left` and `top` are React's
+/// while the pill rests (its next diff sees values that never changed), so they
+/// are cleared only when the pill has no position of its own.
 function clearFlightStyles(
   box: HTMLElement,
   position: PillPosition | null,
@@ -476,23 +357,17 @@ function clearFlightStyles(
   style.top = ""
 }
 
-/// The pill's box radius as a PIXEL value.
-///
-/// The morph's endpoint is the painted capsule's radius, never `999px`:
-/// transitioning to a clamped value spends the whole animation above the clamp,
-/// so the corners sit finished for most of it and then appear to snap.
+/// The pill's box radius as a pixel value. The morph's endpoint must never be
+/// `999px`: transitioning to a clamped value spends the whole animation above
+/// the clamp, so the corners sit finished and then appear to snap.
 function capsuleRadiusPx(box: HTMLElement): string {
   return `${box.offsetHeight / 2}px`
 }
 
-/// Park the box on real coordinates, and say so on BOTH axes.
-///
-/// The fallback corner is a class rather than an inline style, so a pill that
-/// has not been measured yet is holding `right` and `bottom` while a flight
-/// writes `left` and `top`; an absolutely positioned box given all four stops
-/// being content-sized and stretches. Overriding the pair the flight does not
-/// own is what makes the two safe to coexist for the commit it takes React to
-/// drop the class.
+/// Park the box on real coordinates, on both axes. An unmeasured pill holds the
+/// fallback corner class's `right` and `bottom`, and an absolutely positioned
+/// box given all four stops being content-sized and stretches, so the flight
+/// overrides the pair it does not own.
 function pinTopLeft(
   box: HTMLElement,
   here: { left: number; top: number },
@@ -533,10 +408,8 @@ function runDetach(
   box.style.transformOrigin = "top left"
   box.style.transform = `translate(${move.x}px, ${move.y}px)`
   // The shape it is leaving: the flap's square top and hanging corners, no
-  // shadow, and no top edge at all. THE BODY COLOUR IS NOT IN THIS LIST any
-  // more: the settled pill wears the band's fill too, so the two ends of the
-  // morph are the same value and the only thing left to say is which band's
-  // fill it is.
+  // shadow, no top edge. The body colour is not morphed, since both ends wear
+  // the band's fill; only which band's fill it is has to be said.
   box.style.borderRadius = `0 0 ${FLIGHT_TAB_RADIUS_PX}px ${FLIGHT_TAB_RADIUS_PX}px`
   box.style.setProperty(FLAP_FILL_VAR, peekFlapFill())
   box.style.borderTopColor = "transparent"
@@ -549,8 +422,7 @@ function runDetach(
     `transform ${FLIGHT_TRAVEL_MS}ms ${FLIGHT_EASE}`,
     `border-radius ${FLIGHT_SHAPE_MS}ms ${FLIGHT_EASE}`,
     `border-top-color ${FLIGHT_SHAPE_MS}ms ease`,
-    // The shadow rides the WHOLE travel: it belongs to the floating pill, so it
-    // arrives with it rather than appearing at pull-off.
+    // The shadow rides the whole travel, arriving with the floating pill.
     `box-shadow ${FLIGHT_TRAVEL_MS}ms ease`,
   ].join(", ")
   box.style.transform = ""
@@ -562,17 +434,12 @@ function runDetach(
   setGripless(false)
 }
 
-/// THE WAY HOME. Travel first, as a finished capsule; the shape morph is the
-/// separate arrival snap, so nothing flies through the air wearing a tab shape.
+/// The way home: travel first as a finished capsule, with the shape morph left
+/// to the arrival snap, so nothing flies wearing a tab shape.
 ///
-/// WHERE IT LEAVES FROM IS THE PILL'S OWN STATE, never a measurement taken here.
-/// The commit that hands the stage over is also the commit React stops writing
-/// the pill's inline coordinates in (the flight owns them from `returning`
-/// onward), so by the time this runs the element has already been let go to its
-/// static-layout corner and a box read now would fly the capsule home from a
-/// place the user never saw it in. The state is the truth, it is already in the
-/// offset-parent space `pinTopLeft` writes, and the viewport point the
-/// translation needs is that plus the parent's own origin.
+/// Where it leaves from is the pill's own state, never a box read here: React
+/// stops writing the inline coordinates in the commit that hands the stage over,
+/// so a measurement now reads the static-layout corner instead.
 function runReturn(
   box: HTMLElement,
   dock: DOMRect,
@@ -590,10 +457,8 @@ function runReturn(
 
   box.style.transition = "none"
   box.style.willChange = "transform"
-  // Pinned LEFT and TOP for the flight. The grip collapse shrinks the box, and
-  // a right-anchored one would slide its left edge out from under the
-  // translation; left-anchored, the buttons walk continuously toward that edge
-  // as the slot narrows and the translation lands it on the flap's.
+  // Pinned left and top for the flight: the grip collapse shrinks the box, and a
+  // right-anchored one would slide its left edge out from under the translation.
   pinTopLeft(box, here)
   box.style.transformOrigin = "top left"
   box.style.borderRadius = capsuleRadiusPx(box)
@@ -603,8 +468,8 @@ function runReturn(
     `transform ${FLIGHT_TRAVEL_MS}ms ${FLIGHT_EASE}`,
     `box-shadow ${FLIGHT_TRAVEL_MS}ms ease`,
   ].join(", ")
-  // The capsule must land SHADOWLESS: the flap has no shadow, so a swap while
-  // one was still painted would wipe a dark smear in a single frame.
+  // The capsule must land shadowless: the flap has none, so a swap with one
+  // still painted wipes a dark smear in a single frame.
   if (shadow) box.style.boxShadow = shadow
   box.style.transform = `translate(${move.x}px, ${move.y}px)`
   setGripless(true)
@@ -614,17 +479,14 @@ function runReturn(
 function runAttach(box: HTMLElement, dock: DOMRect): void {
   const here = surfaceOffset(box, dock)
   box.style.transition = "none"
-  // The colour it is arriving INTO, taken from the dock itself rather than
-  // assumed: the flap's body is the strip's tone or the plain background
-  // depending on what it is hanging from.
+  // The colour it arrives into, taken from the dock: the flap's body is the
+  // strip's tone or the plain background depending on what it hangs from.
   box.style.setProperty(FLAP_FILL_VAR, peekFlapFill())
   pinTopLeft(box, here)
   box.style.transform = ""
-  // A live fractional transform composites the pill's glyphs off the device
-  // pixel grid, half a pixel adrift of where the in-flow flap will paint them,
-  // and the final swap would nudge every icon. Parked on real coordinates with
-  // the transform cleared and the compositor layer dropped, the raster
-  // re-snaps and the swap moves nothing.
+  // A live fractional transform composites the glyphs off the device pixel grid,
+  // so the final swap would nudge every icon; dropping the compositor layer
+  // re-snaps the raster first.
   box.style.willChange = "auto"
   void box.offsetWidth
 
@@ -637,36 +499,14 @@ function runAttach(box: HTMLElement, dock: DOMRect): void {
   box.style.borderTopColor = "transparent"
 }
 
-// THE APP MENU, WHILE THE MODE HAS TAKEN EVERY OTHER ANCHOR AWAY.
+// The fallback `⋯` for a pane that is neither an agent nor a terminal, which the
+// types say cannot happen and the surface should survive anyway. Ordinarily the
+// merged pane menu carries this same body as its Settings drill.
 //
-// THE FALLBACK, not the ordinary case: both variants open the merged pane menu
-// (which carries this same body as its Settings drill) whenever there is a pane
-// subject to open one for. This is what is left for a pane that is neither an
-// agent nor a terminal, which the types say cannot happen and the surface should
-// survive anyway, and it keeps the app's own actions reachable there too.
-//
-// On a computer theater unmounts the sidebar (and with it the launcher corner's
-// `⋯`) and the whole header stack (and with it the cog); on a phone it takes
-// the top bar. Without this the mode is the one state in which Preferences, New
-// agent and every other global action are unreachable, which is exactly what
-// the "exactly one surface-scoped `⋯` is on screen whatever the surrounding
-// state" rule forbids. So the pill grows the app menu for the duration, and it
-// stays in the collapsed form too: a single-tab agent or a terminal pane folds
-// the tab strip away, never the way to the app's own actions.
-//
-// It renders `AppMenuBody`, the same body the header's cog renders, so the two
-// cannot offer different things; the wrapper adds only the theater exit, from
-// the shared item the input `⋯` uses, so the way out is inside the one `⋯` too.
-//
-// It also carries the pane's INPUT group at the top, the same group the phone's
-// pane menu and the sidebar row menus carry: in theater this is the ONE menu
-// on screen, so "Attach a file…" and the way back to the virtual input have to
-// be in it. The pane publishes what belongs there (see `lib/paneInputGroup.ts`)
-// and the group renders nothing when there is nothing to say.
-//
-// NAMED "Settings", like the control it stands in for: a user looking for the
-// cog's menu should find it under the name they know, and the pill's own
-// buttons already say what each of them does.
+// Theater unmounts every other anchor (the sidebar, the header stack, the phone's
+// top bar), so this is the one menu on screen: it renders `AppMenuBody` so it
+// cannot diverge from the cog's, plus the pane's input group and the theater
+// exit. Named "Settings" after the control it stands in for.
 function TheaterAppMenu({ paneId }: { paneId: string }) {
   return (
     <DropdownMenu>
@@ -684,9 +524,8 @@ function TheaterAppMenu({ paneId }: { paneId: string }) {
           <Ellipsis />
         </DropdownMenuTrigger>
       </SimpleTooltip>
-      {/* Anchored ABOVE the trigger, as the input `⋯` is: the pill lives in the
-          bottom corner of the pane, where a downward popup has nowhere to go.
-          On a phone the primitive renders it as a sheet and ignores this. */}
+      {/* Anchored above the trigger: the pill lives in the pane's bottom corner,
+        * where a downward popup has nowhere to go. A phone renders a sheet. */}
       <DropdownMenuContent side="top" align="end">
         <PaneInputGroup ptyIds={[paneId]} />
         <AppMenuBody />
@@ -698,33 +537,23 @@ function TheaterAppMenu({ paneId }: { paneId: string }) {
   )
 }
 
-// THE ONE-TIME "you can move this" HINT.
-//
-// Nothing about a floating pill says it can be dragged, and the whole point of
-// the drag is the user who is being covered by it right now. So the first time
-// theater is entered on a device the pill says so, once, through the one raiser,
-// on the ordinary display window. It is INFO and not sticky: nothing is lost if
-// it goes unread, the grip is still there, and a pinned toast over a mode whose
-// entire purpose is screen space would be its own joke.
-//
-// The latch is `localStorage` rather than the page-session flags the terminal's
-// two modifier hints use, because entering theater is rarer than dragging in a
-// mouse-reporting app: a page-lifetime latch would re-teach the same person on
-// every reload.
+// The one-time hint that the pill can be dragged: nothing about a floating pill
+// says so. Info and not sticky, since nothing is lost if it goes unread and a
+// pinned toast over a mode about screen space would be its own joke. The latch
+// is `localStorage` rather than a page-session flag, because entering theater is
+// rare enough that a page-lifetime latch would re-teach on every reload.
 function usePillHint(): void {
   useEffect(() => {
     if (!readPillHintPending()) return
-    // Marked BEFORE the raise, so a double-invoked effect (React's development
-    // strict mode) cannot produce two toasts.
+    // Marked before the raise, so a double-invoked effect cannot toast twice.
     markPillHintShown()
     notifyInfo("Drag the pill's grip to move it anywhere in the terminal.")
   }, [])
 }
 
-/// How much width the collapsed grip slot is about to give back, or zero for a
-/// pill whose slot is already open. Read from the element rather than threaded
-/// down from the choreography, because the class and the measurement have to be
-/// the same commit's answer and the class is what the browser is laying out.
+/// How much width the collapsed grip slot is about to give back, or zero for an
+/// open one. Read from the element, not threaded down, so the class and the
+/// measurement are the same commit's answer.
 function griplessSlotWidth(box: HTMLElement): number {
   return box.classList.contains(PILL_GRIPLESS_CLASS)
     ? THEATER_PILL_GRIP_SLOT_PX
@@ -736,9 +565,8 @@ interface PillDrag {
   position: PillPosition | null
   /// Whether a drag is live, which suppresses the settle animation.
   dragging: boolean
-  /// True for the single commit that lands a drop, which suppresses the settle
-  /// animation for the same reason a live drag does: the pill is already where
-  /// the pointer left it, and easing it there would come from the wrong place.
+  /// True for the single commit that lands a drop, suppressing the settle: the
+  /// pill is already where the pointer left it.
   justDropped: boolean
   onPointerDown: (ev: React.PointerEvent<HTMLElement>) => void
   onPointerMove: (ev: React.PointerEvent<HTMLElement>) => void
@@ -760,34 +588,25 @@ interface DragGesture {
 }
 
 /**
- * MOVING THE PILL, and everything that has to be true while it moves.
+ * Moving the pill. The position is live state because a restore from this
+ * device's memory, a drag, an arrow key and a surface re-clamp all set it, and
+ * all of them end in the same clamp, so every button stays reachable.
  *
- * The position is live state rather than a CSS corner because four different
- * things set it: a restore from this device's memory, a drag, an arrow key, and
- * a re-clamp when the surface changes shape under it. All four end in the same
- * clamp, so the pill is always somewhere every one of its buttons can be reached.
- *
- * WHILE A DRAG IS LIVE the pill is moved by a transform on the element, not by
- * React state: a re-render per pointer move would be a re-render per frame over
- * a terminal that is already painting. The state is written once, on release,
- * along with the memory. Pointer capture is what makes the gesture survive the
- * pointer leaving the 40px grip, and it is also what keeps the terminal
- * underneath from ever seeing the move; the handlers stop propagation as well,
- * so nothing in the pane's own tree can start a selection from this gesture.
+ * While a drag is live the pill is moved by a transform rather than React state:
+ * a re-render per pointer move is a re-render per frame over a painting
+ * terminal. State and storage are written once, on release. Pointer capture is
+ * what makes the gesture survive the pointer leaving the grip and keeps the
+ * terminal underneath from seeing the move; the handlers stop propagation too.
  */
 function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
   const [position, setPosition] = useState<PillPosition | null>(null)
   const [dragging, setDragging] = useState(false)
   const [justDropped, setJustDropped] = useState(false)
   const posRef = useRef<PillPosition | null>(null)
-  // WHERE THE USER ASKED FOR IT, which is a different question from where it
-  // fits today. Every clamp is against the surface and the pill OF THE MOMENT,
-  // and both change under it: folding the tab strip out widens the pill and
-  // shoves it left. Clamping the already-clamped value makes that shove
-  // permanent, because the place to come back to has been overwritten by the
-  // place it was pushed to. So the intent is what is kept, what is stored, and
-  // what every re-clamp is re-derived from. `null` means nobody has placed it,
-  // and the default corner is re-derived for whatever surface is there today.
+  // Where the user asked for it, which is not where it fits today: every clamp
+  // is against the surface and pill of the moment, and clamping an already
+  // clamped value makes a temporary shove permanent. So the intent is what is
+  // stored and what every re-clamp is re-derived from; `null` means unplaced.
   const intentRef = useRef<PillPosition | null>(null)
   // The device's memory is read once, at the first measurement; after that the
   // intent above is the live answer and storage is write-only.
@@ -805,9 +624,8 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     if (persist) writePillPosition(next)
   }, [])
 
-  // Read both boxes and settle on a position for them. The pill's SURFACE is
-  // its own offset parent by construction: the pane renders the overlay inside
-  // its positioned box, which is exactly the area the pill may roam.
+  // Read both boxes and settle on a position. The pill's surface is its own
+  // offset parent by construction, and is exactly the area it may roam.
   const measure = useCallback(() => {
     const box = boxRef.current
     const surfaceEl = box?.parentElement
@@ -816,13 +634,9 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     const p = box.getBoundingClientRect()
     const sizes = {
       surface: { width: s.width, height: s.height },
-      // MEASURED AT THE WIDTH IT WILL SETTLE AT, not the one it is passing
-      // through. The detach starts with the grip slot collapsed (that is what
-      // makes the handoff a pure translation), and a resting corner derived
-      // from that narrower box puts the pill's right edge outside the surface
-      // the moment the slot opens, which the re-clamp then yanks back with no
-      // transition on `left` to carry it. The class the slot is collapsed by is
-      // on the element in the same commit this reads, so the DOM answers.
+      // Measured at the width it will settle at, not the one it is passing
+      // through: a corner derived from the detach's collapsed box puts the right
+      // edge outside the surface the moment the slot opens.
       pill: {
         width: p.width + griplessSlotWidth(box),
         height: p.height,
@@ -842,11 +656,9 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     )
     if (!next) return
     const current = posRef.current
-    // EVERY SURFACE CHANGE RE-CLAMPS, the ones a flight home is about to run
-    // over included: a pill left hanging outside the surface is off screen,
-    // which is worse than any place inside it. What the flight stages change is
-    // whether the move is animated (see `positionSnaps`), never whether it
-    // happens.
+    // Every surface change re-clamps, mid-flight included: a pill hanging
+    // outside the surface is off screen. The flight stages change only whether
+    // the move is animated (see `positionSnaps`).
     if (current && current.x === next.x && current.y === next.y) return
     // Nothing here writes to storage. The user did not move the pill, a window
     // did, and the position they chose has to survive the window changing back.
@@ -867,10 +679,9 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       // A gesture that never lifted was a tap, and a tap on the grip does
       // nothing at all: the buttons beside it keep their own meanings.
       if (!commit || !g.lifted) return
-      // THE DROP IS NOT A SETTLE. One commit both swaps the transform for real
-      // coordinates and re-enables the settle animation, so an animated drop
-      // eases the pill from the corner it was dragged out of back to the finger
-      // that already left it here. Suppressed for this commit only.
+      // The drop is not a settle: one commit swaps the transform for real
+      // coordinates and re-enables the animation, which would then ease the pill
+      // from the corner it was dragged out of. Suppressed for this commit only.
       setJustDropped(true)
       place(g.last, true)
     },
@@ -882,20 +693,16 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     if (typeof ResizeObserver === "undefined") return
     const box = boxRef.current
     const surfaceEl = box?.parentElement
-    // Both boxes: the surface because a window resize or a rotation changes
-    // where the edges are, and the pill because folding the tab strip out
-    // changes how much of it has to fit inside them.
+    // Both boxes: the surface moves the edges, and the pill changes how much of
+    // it has to fit inside them.
     const ro = new ResizeObserver((entries) => {
-      // A SURFACE THAT CHANGES SHAPE MID-DRAG ENDS THE DRAG. The transform the
-      // pill is moved by is measured from the base it was pressed at, and the
-      // re-clamp below moves the coordinates that base is written in: applied
-      // together they move the pill twice. Rebasing a live gesture would mean
-      // re-projecting the pointer into a surface it was never pressed in, for a
-      // gesture whose causes (a rotation, a keyboard coming up) have already
-      // interrupted the user, so it ends instead, committing what it had.
+      // A surface that changes shape mid-drag ends the drag: the transform is
+      // measured from the press's base and the re-clamp below moves the
+      // coordinates that base is written in, so together they move the pill
+      // twice. It commits what it had rather than rebasing.
       //
-      // The PILL's own box is deliberately not that: the tab strip folds away on
-      // the lift itself, so every drag starts with the pill changing size.
+      // The pill's own box deliberately does not end it: the tab strip folds
+      // away on the lift, so every drag starts with the pill changing size.
       if (surfaceEl && entries.some((e) => e.target === surfaceEl)) {
         endGesture(true)
       }
@@ -906,9 +713,8 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     return () => ro.disconnect()
   }, [boxRef, measure, endGesture])
 
-  // The suppression lasts exactly one painted frame: long enough for the drop's
-  // own coordinates to land without easing, short enough that the next nudge or
-  // re-clamp still settles.
+  // One painted frame: long enough for the drop's coordinates to land without
+  // easing, short enough that the next nudge or re-clamp still settles.
   useEffect(() => {
     if (!justDropped) return
     const frame = requestAnimationFrame(() => setJustDropped(false))
@@ -941,9 +747,7 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     (ev: React.PointerEvent<HTMLElement>) => {
       if (!ev.isPrimary) return
       ev.stopPropagation()
-      // A pane that has never been measured (the very first frame) has no
-      // coordinates to drag from, so measure now rather than starting from a
-      // guess.
+      // A pane that has never been measured has no coordinates to drag from.
       measure()
       const base = posRef.current
       if (!base) return
@@ -953,9 +757,8 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
         // Some browsers refuse capture for a pointer that has already been
         // released. The gesture still works while the pointer is over the grip.
       }
-      // NOTHING IS ARMED ON A CLOCK. The grip lifts on the first move past its
-      // slop, for a finger exactly as for a mouse, so the press itself only has
-      // to record where it landed.
+      // Nothing is armed on a clock: the grip lifts on the first move past its
+      // slop, for a finger as for a mouse, so the press only records where it landed.
       const gesture: DragGesture = {
         pointerId: ev.pointerId,
         pointerType: ev.pointerType,
@@ -1003,10 +806,9 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       const g = gestureRef.current
       if (!g) return
       ev.stopPropagation()
-      // The release goes through the same classifier every move does, so tap
-      // versus drag is decided in exactly one place. A press that already lifted
-      // is a drag whatever the release looks like; one that has not is a tap,
-      // and a tap on the grip does nothing at all.
+      // The same classifier every move uses, so tap versus drag is decided in
+      // one place. A press that already lifted is a drag whatever the release
+      // looks like; a tap on the grip does nothing at all.
       const verdict = g.lifted
         ? "lift"
         : classifyPillGesture({
@@ -1028,14 +830,10 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     [endGesture],
   )
 
-  // A CAPTURE THAT GOES AWAY ENDS THE GESTURE, exactly as it does for the
-  // divider drags: the browser can hand the pointer to something else, and the
-  // element can be removed, and neither produces a pointerup. It COMMITS, the
-  // opposite of a cancel: the pill is already under the pointer, the user
-  // watched it get there, and reverting would undo a deliberate move after the
-  // fact. A press that never lifted still commits nothing, because that is a tap.
-  // An ordinary release fires this too, after `onPointerUp` has already retired
-  // the gesture, so it lands on nothing.
+  // A capture that goes away ends the gesture: neither the browser handing the
+  // pointer elsewhere nor the element being removed produces a pointerup. It
+  // commits rather than cancelling, because the user watched the pill get there.
+  // An ordinary release lands here after `onPointerUp` has retired the gesture.
   const onLostPointerCapture = useCallback(
     (ev: React.PointerEvent<HTMLElement>) => {
       const g = gestureRef.current
@@ -1045,14 +843,12 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     [endGesture],
   )
 
-  // A pill that goes away under the finger takes its gesture with it: the paint
-  // frame is the pill's and has nothing left to do. Nothing is committed,
-  // because an unmount is not a drop.
+  // A pill that goes away under the finger takes its gesture with it, committing
+  // nothing: an unmount is not a drop.
   useEffect(() => () => endGesture(false), [endGesture])
 
-  // The same rule for a window that loses focus. An alt-tab out of a live drag
-  // never delivers the release either, and the drag would otherwise still be
-  // armed when the user came back to a pill stuck under a transform.
+  // A window that loses focus never delivers the release either, and the drag
+  // would still be armed on return, with the pill stuck under a transform.
   useEffect(() => {
     const onBlur = () => endGesture(true)
     window.addEventListener("blur", onBlur)

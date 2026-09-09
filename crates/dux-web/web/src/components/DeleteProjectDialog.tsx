@@ -11,12 +11,10 @@ import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeDeleteProject, deleteProject, useDux } from "@/lib/store"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 
-// The destructive cascade counterpart to RemoveProjectDialog: this variant also
-// deletes every agent's worktree from disk, so its copy spells that out. Unlike
-// RemoveProjectDialog (which opens for ghost/orphaned projects with no live
-// record), this is only offered for a real project, so it routes its open state
-// through the vanish guard — if the project disappears from the live ViewModel
-// mid-open, the dialog closes itself rather than acting on a stale target.
+// The destructive cascade counterpart to `RemoveProjectDialog`: it also deletes
+// every agent's worktree from disk, so the copy spells that out. Offered only for
+// a real project, so its open state goes through the vanish guard and the dialog
+// closes itself rather than acting on a target the ViewModel no longer has.
 export function DeleteProjectDialog() {
   const { deleteProjectTarget, spine } = useDux()
 

@@ -1,42 +1,25 @@
-// THE RENDERER LADDER for the web terminal: WebGL first, the DOM renderer
+// The renderer ladder for the web terminal: WebGL first, the DOM renderer
 // underneath it, always.
 //
-// WHY WEBGL AT ALL. xterm's DOM renderer paints every cell as a styled span, so
-// a box-drawing or block glyph (U+2500-U+259F) is a real glyph from a real font
-// laid into a cell whose height is ceil'd from the TEXT face's metrics while the
-// block face paints taller, and whose width is fractional. The result is a
-// hairline seam at every cell boundary: a solid block banner drawn by a provider
-// arrives on screen as a grid of thin gaps. The webgl renderer's `customGlyphs`
-// path (on by default, and deliberately left on) does not use the font for those
-// code points at all. It rasterizes them itself as integer-snapped rectangles
-// filling the cell exactly, so adjacent blocks share an edge with nothing
-// between them. That is a structural fix rather than a nudge: no amount of
-// line-height or letter-spacing tuning makes a font glyph tile a fractional cell.
+// WebGL is what makes box-drawing and block glyphs (U+2500-U+259F) tile: the DOM
+// renderer lays a real font glyph into a cell of fractional width and ceil'd
+// height, leaving a hairline seam at every boundary, while the webgl renderer's
+// `customGlyphs` path rasterizes them itself as integer-snapped rectangles
+// filling the cell. No line-height or letter-spacing tuning substitutes.
 //
-// WHAT THIS MODULE DOES NOT CHANGE. The webgl renderer replaces the PAINT path
-// and nothing else. Everything dux reads off xterm keeps working because none of
-// it reads the painted output: the touch selection (`lib/termselect.ts`) drives
-// xterm's public selection API, the link hit test (`lib/termlink.ts`) and the
-// forwarded touch gestures (`lib/termmouse.ts`) dispatch DOM events at
-// `.xterm-screen`, which the webgl canvas is a child of rather than a
-// replacement for, and the viewer-report suppression
-// (`lib/suppressViewerReports.ts`) sits on the parser. Nothing anywhere reads
-// xterm's per-row spans.
+// It replaces the paint path and nothing else: the touch selection, the link hit
+// test, the forwarded touch gestures and the viewer-report suppression all go
+// through xterm's public API, `.xterm-screen` or the parser, never the painted
+// output, so none of them reads xterm's per-row spans.
 //
-// THE FALLBACK LADDER, in order:
-//  1. No WebGL2 context available (an old browser, a blocklisted GPU, a
-//     software-rendering flag): the addon is never loaded and the pane renders
-//     exactly as it did before this module existed.
-//  2. The addon throws on activation: caught, and the same DOM path is kept.
-//  3. The context is LOST at runtime (a GPU driver reset, a tab the browser
-//     evicted a context from): the addon is disposed and xterm falls back to
-//     the DOM renderer on its own. The terminal, the socket and the pane are
-//     untouched, so a context loss costs a repaint and nothing else.
+// The fallback ladder, in order:
+//  1. No WebGL2 context available: the addon is never loaded.
+//  2. The addon throws on activation: caught, and the DOM path is kept.
+//  3. The context is lost at runtime: the addon is disposed and xterm falls back
+//     on its own, so a loss costs a repaint and nothing else.
 //
-// A rung-2 or rung-3 failure is remembered for the whole page, not just for the
-// pane that hit it. Both say something is wrong with this browser's GL, and a
-// pane that remounts (a target switch, a reconnect) would otherwise walk
-// straight back into it and lose its context again.
+// A failure at either of the last two is remembered for the whole page: both say
+// this browser's GL is wrong, and a remounting pane would walk back into it.
 import { WebglAddon } from "@xterm/addon-webgl"
 import type { Terminal } from "@xterm/xterm"
 
@@ -80,11 +63,9 @@ export function resetGlGaveUpForTests(): void {
   glGaveUp = false
 }
 
-/// Probes for a WebGL2 context on a throwaway canvas, and releases it again
-/// immediately: browsers cap the number of live GL contexts per page and drop
-/// the oldest when the cap is hit, so a probe that kept its context would
-/// eventually evict a terminal's. Any throw (a browser that refuses the context
-/// type outright) reads as "no WebGL2".
+/// Probes for a WebGL2 context on a throwaway canvas and releases it at once:
+/// browsers cap live GL contexts per page and drop the oldest, so a probe that
+/// kept one would evict a terminal's. Any throw reads as no WebGL2.
 export function detectWebgl2(): boolean {
   try {
     const canvas = document.createElement("canvas")
@@ -99,19 +80,16 @@ export function detectWebgl2(): boolean {
 
 type Disposable = { dispose: () => void }
 
-/// The slice of the addon the context-loss wiring needs, named so the wiring
-/// can be tested against a stand-in: constructing a real `WebglAddon` needs a
-/// real GL context, which is exactly what a lost-context test cannot have.
+/// The slice of the addon the context-loss wiring needs, named so the wiring can
+/// be tested against a stand-in: a real `WebglAddon` needs a real GL context.
 export type ContextLossSource = Disposable & {
   onContextLoss: (listener: () => void) => unknown
 }
 
-/// WHAT A LOST CONTEXT COSTS: a repaint. The addon is disposed, xterm falls
-/// back to its DOM renderer on its own, and the terminal, its socket and the
-/// pane around it are untouched. GL is marked as having given up, so nothing
-/// re-creates the renderer here or in the next pane to mount: a context that
-/// was taken once will be taken again, and a loop of context churn is worse
-/// than a seam.
+/// A lost context costs a repaint: the addon is disposed and xterm falls back to
+/// its DOM renderer, leaving the terminal and socket untouched. GL is marked as
+/// given up so no pane re-creates the renderer: a context taken once will be
+/// taken again, and a loop of context churn is worse than a seam.
 export function wireContextLoss(
   addon: ContextLossSource,
   onLoss?: () => void,
@@ -126,71 +104,43 @@ export function wireContextLoss(
   })
 }
 
-/// PROMOTE THE TERMINAL SO ITS DEVICE-PIXEL BOX STOPS MOVING UNDER IT.
+/// Promote the terminal so its device-pixel box stops moving under it.
 ///
 /// The webgl addon watches its canvas with a `device-pixel-content-box`
 /// ResizeObserver and answers every callback by assigning `canvas.width` and
-/// `canvas.height` (`WebglRenderer.ts:610-619` in `@xterm/addon-webgl@0.19.0`),
-/// which is what corrects the blurry rendering a fractional device pixel ratio
-/// would otherwise cause. Assigning either one CLEARS the GL drawing buffer,
-/// and the repaint it then asks for arrives on a later animation frame, so each
-/// callback costs one blank frame.
-///
+/// `canvas.height`, which clears the GL drawing buffer and costs a blank frame.
 /// That box is snapped to the device pixel grid, so it depends on where the
-/// canvas IS and not only on how big it is. A canvas of a fixed CSS size that
-/// slides across the screen by fractional device pixels therefore reports a box
-/// that flips by one pixel and back, over and over, for the length of the slide.
-/// Measured at a device pixel ratio of 2.625 on the phone shell, entering
-/// theater mode churned the buffer five times and leaving it six, while the
-/// canvas's CSS size never changed at all. That is the flicker: it is WebGL
-/// only, because the DOM renderer has no drawing buffer to clear, and it is
-/// phones only, because a whole-number ratio maps a fixed CSS size to the same
-/// device size wherever it sits.
+/// canvas is and not only on how big it is: at a fractional device pixel ratio,
+/// a canvas of fixed CSS size sliding across the screen reports a box that flips
+/// by a pixel and back for the length of the slide. Promoting it to a
+/// compositing layer snaps against the layer instead, and the box holds still.
 ///
-/// The layout gesture (`lib/layoutGesture.ts`) does not and cannot answer this.
-/// It parks dux's own refits so the grid is measured once at the geometry the
-/// gesture settles on, and it does that correctly: the canvas's CSS box is
-/// constant for the whole flight. The churn is the addon's own reaction to
-/// MOVING, which no amount of holding the grid prevents.
+/// The layout gesture (`lib/layoutGesture.ts`) cannot answer this: it parks
+/// dux's own refits, and the churn is the addon reacting to the canvas moving.
 ///
-/// Promoting the terminal's own box to a compositing layer does prevent it: the
-/// snapping is then done against the layer rather than against a screen
-/// position that is mid-animation, and the reported box holds still. Measured
-/// in the same journey, both directions fell to zero mid-flight buffer writes,
-/// leaving only the single settle refit the gesture already pays for.
-///
-/// It is applied for as long as the webgl renderer is attached rather than for
-/// the length of a gesture, deliberately. Applying it at the start of a gesture
-/// re-snaps the box once, which costs the very blank frame the pin exists to
-/// remove, and the theater flight is not the only thing that moves a terminal:
-/// a divider drag, a sidebar collapse and a rotation slide it too. The DOM
-/// renderer never gets it, so a browser on that rung keeps subpixel-antialiased
-/// text and pays for no layer it has no canvas to put in.
+/// Applied for as long as the renderer is attached rather than per gesture:
+/// applying it at a gesture's start re-snaps the box once, costing the very
+/// blank frame it exists to remove, and a divider drag, a sidebar collapse and a
+/// rotation move a terminal too. The DOM renderer never gets it, so a browser on
+/// that rung keeps subpixel-antialiased text.
 export function pinDevicePixelBox(element: HTMLElement): void {
   element.style.willChange = "transform"
 }
 
-/// Hands the layer back. Called when the renderer goes, whether that is the
-/// pane tearing down or a lost context dropping to the DOM renderer, so a
-/// terminal that is no longer painting with GL is not left holding a layer for
-/// a canvas that no longer exists.
+/// Hands the layer back when the renderer goes, so a terminal no longer painting
+/// with GL is not left holding a layer for a canvas that no longer exists.
 export function releaseDevicePixelBox(element: HTMLElement): void {
   element.style.removeProperty("will-change")
 }
 
-/// Loads the webgl renderer over an already-OPEN terminal, or does nothing and
-/// returns null when the ladder above says to stay on the DOM renderer. The
-/// returned handle is disposed by the pane's teardown; disposing it twice is
-/// harmless, and disposing the Terminal without it would also release the addon
-/// (xterm disposes what `loadAddon` registered), so this is belt and braces on
-/// a GPU resource rather than the only release path.
+/// Loads the webgl renderer over an already-open terminal, or returns null when
+/// the ladder above says to stay on the DOM renderer. The returned handle is
+/// disposed by the pane's teardown; disposing it twice is harmless, and
+/// disposing the Terminal releases the addon anyway, so this is belt and braces.
 ///
-/// The addon is imported STATICALLY, so a browser with no WebGL2 still pays for
-/// its bytes inside the already-lazy terminal chunk (see `LazyTerminalPane`).
-/// That is the deliberate trade: a dynamic import would make this function
-/// async, and an async attach has to be raced against a pane that unmounted
-/// while the chunk was in flight. A few tens of kilobytes inside a chunk the
-/// user is already downloading a terminal from is cheaper than that race.
+/// The addon is imported statically, inside the already-lazy terminal chunk (see
+/// `LazyTerminalPane`): a dynamic import would make this function async, and an
+/// async attach has to be raced against a pane that unmounted mid-flight.
 export function attachWebglRenderer(
   term: Terminal,
   container: HTMLElement,

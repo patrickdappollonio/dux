@@ -11,28 +11,19 @@ import {
 import { inputMenuHasItems, type InputMenuGates } from "@/lib/inputMenu"
 import { cn } from "@/lib/utils"
 
-// THE INPUT `⋯`: the menu that belongs to the virtual input, and lives and dies
-// with it. It is input-LOCAL, and that is the whole of it: the way out of the
-// virtual input, and the terminal-keys toggle.
-//
-// IT IS NOT A PERMANENT SURFACE, deliberately. It used to render in every bar
-// state, minimal row of its own included, so that it could be the one menu
-// always within reach; asking to type directly in the terminal now takes the
-// whole bottom bar, and a row kept alive purely to hold an `⋯` is exactly the
-// chrome that choice is asking to be rid of. What must always be reachable
-// (attaching a file, the way out of theater, the way back to the virtual input)
-// moved up into the top menu every surface already has, through
-// `PaneInputGroup`, and this menu has no gates for any of them any more.
+// The menu that belongs to the virtual input and lives and dies with it. It is
+// input-local, and that is the whole of it: the way out of the virtual input,
+// and the terminal-keys toggle. It is deliberately not a permanent surface, so
+// what must always be reachable lives in the top menu instead, through
+// `PaneInputGroup`.
 //
 // It renders at the leading edge of the bottom-most input row that exists: the
 // compose row's leading slot when the message box is up, the accessory bar's
-// row-one trailing slot when only the keys are up. Exactly one instance ever
-// renders; the anchors are mutually exclusive by construction and a test pins
-// the state that could produce two.
+// row-one trailing slot when only the keys are. The anchors are mutually
+// exclusive by construction, so exactly one instance ever renders.
 //
-// It NEVER renders empty: an `⋯` that opens nothing is worse than no `⋯`, and
-// the empty state is reachable, so every anchor asks `inputMenuHasItems` first
-// and this component asks again for the callers that do not.
+// It never renders empty, the empty state being reachable, so every anchor asks
+// `inputMenuHasItems` first and this component asks again for those that do not.
 export function InputMenu({
   gates,
   composeSurface,

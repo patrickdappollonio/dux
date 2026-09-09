@@ -95,23 +95,19 @@ import {
 // One height for every control in the bulk bar; they differ in width only.
 const BULK_CONTROL = "h-9 max-md:h-11"
 
-// The row's ONE leading slot. It holds the status marker and the selection
-// checkbox stacked in the same box, so which of the two is showing can never
-// shift the path sideways. Fixed on both axes for that reason.
+// The row's one leading slot: the status marker and the selection checkbox
+// stacked in the same box, fixed on both axes so which one shows can never shift
+// the path sideways.
 //
-// Mouse: a 20px box. The 14px glyph and the 16px checkbox both centre in it,
-// and the checkbox's own click halo is suppressed (`after:hidden` below) so a
-// near-miss lands on the row's open-diff click rather than on a target the
-// user cannot see. A touchscreen that reports a FINE pointer (a pen tablet, a
-// hybrid laptop) lands here too: a fingertip inside the 16px box ticks the row
-// instead of opening the diff, which is the one direction that trade can go
-// wrong, and the neighbour it can be missed onto is the row's own read-only
-// diff click.
+// Mouse: a 20px box, centring the 14px glyph and the 16px checkbox, with the
+// checkbox's own click halo suppressed (`after:hidden` below) so a near-miss
+// lands on the row's open-diff click rather than an invisible target. A
+// touchscreen reporting a fine pointer lands here too, where a fingertip inside
+// the 16px box ticks the row instead of opening the diff.
 const STATUS_SLOT = "size-5 pointer-coarse:size-11"
-// Touch: the slot IS the selection control, since a finger cannot hover, so it
-// carries the 44px floor on BOTH axes. Its only neighbours are the row's path
-// and the row itself, whose click opens a read-only diff: a stray tap there
-// costs nothing and is undone by closing the diff.
+// Touch: the slot is the selection control, since a finger cannot hover, so it
+// carries the 44px floor on both axes. Its only neighbours are the row's path
+// and the row itself, where a stray tap costs a read-only diff.
 
 interface StatusSlotProps {
   status: string
@@ -120,41 +116,33 @@ interface StatusSlotProps {
   onToggleSelected: (path: string) => void
 }
 
-// The status marker, which becomes the selection checkbox on hover, on
-// keyboard focus of that checkbox, or while the row is checked.
+// The status marker, which becomes the selection checkbox on hover, on keyboard
+// focus of that checkbox, or while the row is checked.
 //
-// The checkbox is ALWAYS in the DOM and always focusable: the swap is opacity,
-// never `display`, so a keyboard user can reach it on a row nobody is hovering.
-// The marker keeps its `role="img"` label throughout for the same reason, so a
-// screen reader still hears the status of a row whose checkbox is showing.
-//
-// The status word stays reachable because the tooltip sits on the SLOT rather
-// than on the marker: hovering the slot reveals the checkbox and shows the
-// status at the same time.
+// The checkbox is always in the DOM and always focusable, since the swap is
+// opacity and never `display`, so a keyboard can reach it on an unhovered row;
+// the marker keeps its `role="img"` label throughout for the same reason. The
+// tooltip sits on the slot rather than the marker, so hovering reveals the
+// checkbox and shows the status word at once.
 function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProps) {
   const { label } = fileStatusMeta(status)
-  // Same duration and easing as the row's trailing ellipsis wrapper, so the two
-  // things a hover reveals on this row arrive together rather than at two
-  // visibly different speeds.
+  // Same duration and easing as the row's trailing ellipsis wrapper, so both
+  // things a hover reveals arrive together.
   const reveal = "transition-opacity duration-200 ease-out motion-reduce:transition-none"
-  // Keyboard focus of the CHECKBOX reveals it, never focus-within on the row.
-  // focus-within also fires when the row's ellipsis menu closes and hands focus
-  // back to its trigger, and when a mouse tick leaves the checkbox focused,
-  // either of which would strand that one row showing a checkbox and no marker
-  // until focus moved on. `:focus-visible` keeps it to the keyboard.
+  // Keyboard focus of the checkbox reveals it, never focus-within on the row:
+  // focus-within also fires when the ellipsis menu hands focus back to its
+  // trigger, stranding one row with a checkbox and no marker.
   const keyboard = "group-has-[[data-slot=checkbox]:focus-visible]:"
 
   return (
-    // The status tooltip belongs to the SLOT, not to the marker inside it: the
-    // marker is pointer-transparent and fades out on exactly the hover that
-    // would have opened its tooltip, so a tooltip on the marker itself is dead.
-    // Here it answers a hover or a keyboard focus of either state of the slot.
+    // The tooltip belongs to the slot, not the marker: the marker is
+    // pointer-transparent and fades out on the very hover that would open its
+    // tooltip, so one attached to it never fires.
     <SimpleTooltip content={label}>
       {/* The click stops here: base-ui re-dispatches the root's click onto its
-          hidden input and both bubble, so without this every tick would also
-          open the diff. There is deliberately no shift-click range: the rows
-          carry no keyboard model, and a range gesture needs one to be
-          reachable at all. */}
+        * hidden input and both bubble, so a tick would also open the diff.
+        * There is deliberately no shift-click range, because the rows carry no
+        * keyboard model for one to be reachable through. */}
       <div
         className={cn(
           "relative flex shrink-0 items-center justify-center",
@@ -182,11 +170,10 @@ function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProp
             "opacity-0 group-hover:opacity-100",
             `${keyboard}opacity-100`,
             selected && "opacity-100",
-            // On touch the halo is the tap target and is grown to fill the slot
-            // exactly. The pseudo-element is sized from the padding box, which
-            // is 14px inside the 16px bordered box, so 15px a side makes 44px
-            // (measured; 14px left a 1px inert ring). On a mouse it is
-            // suppressed so it cannot reach past the slot into the path.
+            // On touch the halo is the tap target, grown to fill the slot: the
+            // pseudo-element is sized from the 14px padding box, so 15px a side
+            // makes 44px. On a mouse it is suppressed so it cannot reach past
+            // the slot into the path.
             "after:hidden pointer-coarse:after:block pointer-coarse:after:-inset-[15px]",
           )}
         />
@@ -232,9 +219,8 @@ function FileRow({
     }
   }
 
-  // Discard is only offered on unstaged files (the "stage" action rows), mirroring
-  // the TUI which blocks discarding staged files. An untracked file ("?") will be
-  // deleted; a tracked one is restored — the dialog distinguishes them.
+  // Discard is offered on unstaged files only, mirroring the TUI. An untracked
+  // file is deleted and a tracked one restored; the dialog distinguishes them.
   function runDiscard() {
     openDiscard({
       sessionId,
@@ -250,8 +236,7 @@ function FileRow({
       onClick={() => onOpenDiff(file.path)}
     >
       {/* Leading slot: the status marker, which becomes the selection checkbox
-          on hover, on keyboard focus of the checkbox, or while the row is
-          checked. */}
+        * on hover, on focus of the checkbox, or while the row is checked. */}
       <StatusSlot
         status={file.status}
         path={file.path}
@@ -259,24 +244,19 @@ function FileRow({
         onToggleSelected={onToggleSelected}
       />
 
-      {/* Path and counts share ONE baseline container. Their line boxes differ
-          (text-sm against text-xs), so under the row's items-center the digits
-          would centre inside the taller box and read as superscript. */}
+      {/* Path and counts share one baseline container: their line boxes differ,
+        * so under the row's items-center the digits read as superscript. */}
       <div className="flex min-w-0 flex-1 items-baseline gap-2">
-        {/* File path — monospace (it's a path/code identifier). Long paths
-            ellipsize at the START (direction:rtl) so the filename at the end
-            stays visible; text-left keeps short paths normally left-aligned.
-            The path itself is wrapped in a <bdi> LTR isolate so a leading
-            bidi-neutral character in a dotfile path (e.g. ".github/...") isn't
-            reordered by the rtl container to the visual end — without it the
-            leading "." renders stuck onto the end of the filename. */}
+        {/* Long paths ellipsize at the start (direction:rtl) so the filename
+          * stays visible, with text-left keeping short paths left-aligned. The
+          * path is a <bdi> LTR isolate, or the rtl container reorders a dotfile
+          * path's leading "." onto the end of the filename. */}
         <span className="min-w-0 flex-1 truncate text-left font-mono text-sm text-foreground [direction:rtl]">
           <bdi dir="ltr">{file.path}</bdi>
         </span>
 
-        {/* Additions / deletions (text-only, skip for binary). Added lines
-            green, removed lines red, matching the diff viewer's gutter
-            coloring. */}
+        {/* Additions and deletions, coloured to match the diff viewer's gutter.
+          * Binary files report none. */}
         {!file.binary && (file.additions > 0 || file.deletions > 0) && (
           <span className="shrink-0 font-mono text-xs">
             {file.additions > 0 && (
@@ -290,15 +270,12 @@ function FileRow({
         )}
       </div>
 
-      {/* Row actions consolidated into a single ⋯ menu (like the sidebar's
-          project/session rows). The wrapper consumes NO width until the row is
-          hovered, the menu is open (trigger data-popup-open), or an action is in
-          flight (trigger aria-busy — so the spinner stays visible after the menu
-          closes) — its max-width animates open, so the path/counts use the full
-          row otherwise. Always visible on touch at a ≥44px target. The
-          stopPropagation keeps clicks on the trigger AND on the (portaled) menu
-          items from bubbling to the row's open-diff onClick — React routes portal
-          events through this React-tree ancestor. */}
+      {/* The wrapper consumes no width until the row is hovered, the menu is
+        * open, or an action is in flight (aria-busy, so the spinner outlives the
+        * menu), so the path and counts otherwise use the full row. Always
+        * visible on touch at a 44px target. The stopPropagation keeps clicks on
+        * the trigger and on the portaled menu items off the row's open-diff
+        * handler, which React routes through this ancestor. */}
       <div
         className={cn(
           "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-10 md:group-hover:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 md:has-[[aria-busy=true]]:max-w-10 md:has-[[aria-busy=true]]:opacity-100",
@@ -337,10 +314,9 @@ function FileRow({
               {action === "stage" ? <Plus /> : <Minus />}
               {action === "stage" ? "Stage" : "Unstage"}
             </DropdownMenuItem>
-            {/* Discard — unstaged rows only (the TUI blocks discarding staged
-                files). Destructive: a trailing "…" + a confirm dialog signal the
-                danger; the item is left neutral (no red), the … + confirmation
-                are the cue. */}
+            {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
+              * and the confirm dialog carry the danger and the item itself
+              * stays neutral. */}
             {action === "stage" && (
               <>
                 <DropdownMenuSeparator />
@@ -363,9 +339,8 @@ interface FileGroupProps {
   // The unfiltered group size, so the badge can show "N of M" while a search is
   // active. Equal to `files.length` when nothing is filtered out.
   total: number
-  // The aggregate for the rows this group actually shows: summed over `files`,
-  // the filtered set, because the recap describes exactly the rows visible
-  // beneath it.
+  // Summed over `files`, the filtered set, so the recap describes exactly the
+  // rows visible beneath it.
   recap: ChangedFilesRecap
   filtering: boolean
   action: "stage" | "unstage"
@@ -375,12 +350,9 @@ interface FileGroupProps {
   onOpenDiff: (path: string) => void
 }
 
-// What a recap says out loud. The glyphs are a dense column of figures, fine to
-// look at and useless to hear, so the spoken form spells the numbers out.
-//
-// The label keeps the FULL number where the glyphs abbreviate: precision belongs
-// here, where there is room for it and no count beside it to crowd. It carries
-// no thousands separators, matching the figures the pane prints everywhere else.
+// What a recap says out loud: the glyphs are a dense column of figures, so the
+// spoken form spells the numbers out. It keeps the full number where the glyphs
+// abbreviate, with no thousands separators, matching the figures elsewhere.
 function recapLabel(scope: string, recap: ChangedFilesRecap): string {
   const lines = (n: number, verb: string) =>
     `${n} line${n === 1 ? "" : "s"} ${verb}`
@@ -396,18 +368,15 @@ function recapLabel(scope: string, recap: ChangedFilesRecap): string {
 }
 
 // The aggregate for a set of rows, rendered above them. It reuses the row's own
-// +/− classes so the header and its rows read as one column of figures, and it
-// carries no thousands separators, because the rows carry none either.
+// +/- classes so the header and its rows read as one column of figures, with no
+// thousands separators, because the rows carry none.
 //
-// A sum of a thousand lines or more is abbreviated ("+12.3k"), which is the one
-// way the recap's figures differ from the rows': a row's number is data beside a
-// path, while this one sits on a heading beside a file count and is there to
-// give a sense of scale. Only LINE counts abbreviate; the file count in the
-// badge and the "N bin" marker stay raw. The aria-label keeps the full numbers.
+// Line sums of a thousand or more abbreviate, because this figure sits on a
+// heading and is there to give a sense of scale; the file count and the binary
+// marker stay raw, and the aria-label keeps the full numbers.
 //
-// Binary files contribute no lines (git reports none for them), so they are
-// counted apart in a quiet "· N bin" marker rather than silently pulling the
-// sums toward zero.
+// Binary files contribute no lines, so they are counted apart in a quiet marker
+// rather than pulling the sums toward zero.
 function ChangesRecap({
   scope,
   recap,
@@ -459,9 +428,8 @@ function FileGroup({
 }: FileGroupProps) {
   const [open, setOpen] = useState(true)
 
-  // Hide a group that's empty in the source. While filtering, a group that has
-  // source files but no matches stays hidden too (the overall empty state below
-  // covers the "no matches anywhere" case).
+  // A group empty in the source is hidden, and so is one whose files all fail
+  // the filter; the empty state below covers no matches anywhere.
   if (files.length === 0) return null
 
   return (
@@ -494,22 +462,17 @@ function FileGroup({
   )
 }
 
-// THE DIRECT ROUTE TO THE EDITOR for the agent whose changes are on screen.
+// The direct route to the editor for the agent whose changes are on screen. One
+// button, one act: the in-page overlay on a computer, the same act as the menus'
+// "Open editor here", so there is no second way to keep in step. The new-tab
+// variant stays a menu item.
 //
-// One button, one act: the in-page overlay on a computer, exactly what the
-// menus' "Open editor here" does, so there is no second way to open an editor
-// to keep in step. The new-tab variant stays a menu item rather than riding a
-// modifier on this button.
+// On a phone the overlay does not exist, so this is a real `<a>` to the
+// standalone editor's address, which also keeps long-press and middle-click
+// doing what the browser makes them do.
 //
-// On a phone the overlay does not exist (EditorOverlay renders null there), so
-// this is the same anchor the phone's menu entries are: a real `<a>` to the
-// standalone editor's address, which is the phone's editor surface. Keeping it
-// an anchor rather than a handler also keeps long-press and middle-click doing
-// what the browser makes them do.
-//
-// Weight: it matches the `⋯` on geometry and is quieter than it. This control
-// navigates to another surface rather than acting on the changes, and the
-// header's one outline control stays the menu of acts.
+// It matches the `⋯` on geometry and is quieter than it: this control navigates
+// rather than acting, and the header's one outline control is the menu of acts.
 function OpenEditorButton({
   sessionId,
   isMobile,
@@ -581,22 +544,19 @@ function ChangesHeader({
     <CardHeader className="flex items-center justify-between gap-2 border-b">
       <div className="flex min-w-0 items-baseline gap-2">
         <CardTitle className="shrink-0">Changes</CardTitle>
-        {/* The pane's own recap is the one figure with a control beside it: the
-            header is a two-cell grid and the ⋯ trigger owns the second cell, so
-            a recap that refused to shrink painted over the trigger at the
-            widths where the two meet. It gives way instead, ellipsizing down to
-            nothing while the title stays whole, and the aria-label keeps saying
-            the whole thing. The group headings need none of this: their badge
-            is inside the same shrinking row. */}
+        {/* The pane's recap is the one figure with a control beside it: the
+          * header is a two-cell grid whose second cell is the ⋯ trigger, so the
+          * recap gives way, ellipsizing to nothing while the title stays whole
+          * and the aria-label keeps saying it. The group headings need none of
+          * this, their badge being inside the same shrinking row. */}
         <ChangesRecap
           scope="Changes"
           recap={recap}
           className="min-w-0 shrink truncate"
         />
       </div>
-      {/* Two controls now, so the cell is a row of its own: `gap-2` is the
-          misclick spacing between the editor button and the `⋯`, which are
-          otherwise adjacent icon squares of the same size. */}
+      {/* The cell is a row of its own: `gap-2` is the misclick spacing between
+        * the editor button and the `⋯`, adjacent icon squares of one size. */}
       <CardAction className="flex shrink-0 items-center gap-2 self-center">
         <OpenEditorButton sessionId={sessionId} isMobile={isMobile} />
         <DropdownMenu>

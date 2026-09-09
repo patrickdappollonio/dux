@@ -17,23 +17,18 @@ import { useDux } from "@/lib/store"
 
 /**
  * The body of the launcher's ⋯ menu: every way to create something that is not
- * the corner's own filled verb, under three headings. One component, every
- * surface that carries the ⋯ (the sidebar footer's corner, the mobile hub's,
- * and the collapsed icon rail's), so those menus cannot drift; the caller
- * supplies its own <DropdownMenuContent> wrapper, exactly as ProjectMenuItems
- * and InputMenuItems do.
+ * the corner's own filled verb, under three headings. One component for every
+ * surface carrying the ⋯, so those menus cannot drift; the caller supplies its
+ * own content wrapper, as `ProjectMenuItems` and `InputMenuItems` do.
  *
  * The rows are the shared lists from creationMenus.ts verbatim, minus the plain
- * agent (the verb beside the ⋯ already is that click; see NEW_AGENT_PLAIN_ID).
- * The GROUPING is presentation added here and nowhere else: the cog app menu
- * renders the same lists unlabeled, because its submenu titles already name the
- * group.
+ * agent, which is the verb beside the ⋯. The grouping is presentation added
+ * here alone: the cog app menu renders the same lists unlabeled, its submenu
+ * titles already naming the group.
  *
- * Each heading is a DropdownMenuLabel INSIDE a DropdownMenuGroup: base-ui's
- * GroupLabel throws outside a Menu.Group, so the parent is load-bearing, not
- * decoration. Label rows are non-interactive, so the touch floor does not apply
- * to them; on a phone the whole menu renders as a bottom sheet and the headings
- * come along.
+ * Each heading is a `DropdownMenuLabel` inside a `DropdownMenuGroup`, because
+ * base-ui's GroupLabel throws outside a Menu.Group. Label rows are
+ * non-interactive, so the touch floor does not apply to them.
  */
 export function CreationOverflowMenuItems() {
   const { bootstrap } = useDux()
@@ -58,10 +53,9 @@ export function CreationOverflowMenuItems() {
       ),
     },
   ]
-  // A heading with nothing under it is a dangling word, and a rule with nothing
-  // on one side is a dangling line: drop empty groups first, then draw the rule
-  // BETWEEN what survives. That is what keeps the separators off both edges no
-  // matter which gate hid what.
+  // A heading with nothing under it is a dangling word and a rule with nothing on
+  // one side is a dangling line, so empty groups are dropped first and the rules
+  // drawn between what survives.
   const drawn = groups.filter((group) => group.items.length > 0)
   return (
     <>

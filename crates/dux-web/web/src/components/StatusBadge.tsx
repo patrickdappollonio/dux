@@ -10,12 +10,10 @@ import {
 import type { SessionStatus } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-// Meaningful status color + icon, mirroring the dux TUI (active=green/●,
-// detached=amber/◐, exited=muted/○). The color lives on the icon and label
-// only — no pill background — so the indicator stays minimal. `bg-transparent`
-// is explicit because the base Badge defaults to `variant="default"`, whose
-// `bg-primary` would otherwise show through. This is the single source of truth
-// for session-status badges.
+// The one session-status badge, colour and icon mirroring the TUI. The colour
+// lives on the icon and label only, with no pill background. `bg-transparent` is
+// explicit because the base Badge's default variant would otherwise show its
+// `bg-primary` through.
 const STATUS: Record<
   SessionStatus,
   { className: string; Icon: typeof Circle; fill: boolean; label: string }
@@ -49,20 +47,18 @@ export function StatusBadge({
   // Compact mode for tight rows (the sidebar): show just the colored icon and
   // reveal the label in a tooltip on hover, so long agent names keep their room.
   iconOnly?: boolean
-  // When the agent is actively streaming output, an active badge's label becomes
-  // "active — working". The MOTION cues for "working" live on the agent row (the
-  // Bot icon bobs and the name shimmers in the sidebar/mobile rows), so the badge
-  // itself stays calm. Honored only for active; otherwise ignored.
+  // Extends an active badge's label while the agent streams output. The motion
+  // cues for working live on the agent row, so the badge stays calm. Honored for
+  // the active status only.
   working?: boolean
 }) {
   const s = STATUS[status]
   const streaming = status === "active" && working
   const label = streaming ? `${s.label} — working` : s.label
 
-  // Status icons rest slightly transparent (quiet metadata). Only the active dot
-  // "streams", so while the agent works it pulses its opacity (breathing between
-  // faint and opaque) and settles back to the resting opacity when work stops
-  // (see .agent-status-dot in index.css).
+  // Status icons rest slightly transparent, being quiet metadata. Only the active
+  // dot pulses its opacity while the agent works, settling back to the resting
+  // value when work stops (see .agent-status-dot in index.css).
   const dotClass = cn(
     "size-2.5 agent-status-dot",
     s.fill && "fill-current",
@@ -77,10 +73,8 @@ export function StatusBadge({
         <Tooltip>
           <TooltipTrigger
             render={
-              // role="img" so the aria-label (e.g. "active — working") is
-              // actually announced — a bare span's aria-label is otherwise
-              // ignored by most screen readers, and the dot/bounce are visual
-              // (and motion-safe) only.
+              // `role="img"` so the aria-label is announced: a bare span's is
+              // ignored by most screen readers, and the dot is visual only.
               <Badge
                 role="img"
                 className={`${s.className} px-1.5`}

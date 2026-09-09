@@ -36,11 +36,10 @@ function ResizableHandle({
 }: ResizablePrimitive.SeparatorProps & {
   withHandle?: boolean
 }) {
-  // The held paint is dux's, not the library's. Its own `data-separator`
-  // attribute never comes back off after a cancelled touch (4.11.2 has no
-  // `pointercancel` listener), so the line stayed lit with no finger on the
-  // glass; this hook publishes `data-dux-held` on the same presses and drops it
-  // when the gesture ends however it ends. See lib/paneDivider.ts.
+  // The held paint is dux's, not the library's, whose `data-separator` never
+  // comes back off after a cancelled touch, leaving the line lit with no finger
+  // on the glass. This publishes `data-dux-held` on the same presses and drops it
+  // however the gesture ends. See lib/paneDivider.ts.
   const heldRef = useDividerHeld()
   return (
     <ResizablePrimitive.Separator
@@ -48,12 +47,11 @@ function ResizableHandle({
       data-slot="resizable-handle"
       className={cn(
         "relative flex w-px items-center justify-center bg-border ring-offset-background",
-        // The grab band, the resize cursor and the touch-action suppression
-        // come from the shared divider chrome; the sidebar's edge wears the
-        // same string. The band matches the hit region the library already
-        // claims in the capture phase, so nothing new is taken from the
-        // neighbouring panes; what it adds is `touch-action: none` across the
-        // whole of that region instead of only over the painted line.
+        // The grab band, the resize cursor and the touch-action suppression come
+        // from the shared divider chrome, which the sidebar's edge wears too. The
+        // band matches the hit region the library already claims, so it takes
+        // nothing new from the neighbouring panes; what it adds is
+        // `touch-action: none` across that region rather than the painted line.
         DIVIDER_CHROME,
         "aria-[orientation=horizontal]:h-px aria-[orientation=horizontal]:w-full aria-[orientation=horizontal]:cursor-row-resize aria-[orientation=horizontal]:after:left-0 aria-[orientation=horizontal]:after:h-1 aria-[orientation=horizontal]:after:w-full aria-[orientation=horizontal]:after:translate-x-0 aria-[orientation=horizontal]:after:-translate-y-1/2 [&[aria-orientation=horizontal]>div]:rotate-90",
         className

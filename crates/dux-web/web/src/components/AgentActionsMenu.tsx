@@ -67,15 +67,11 @@ import {
 } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 
-// The AGENT'S OWN ACTIONS, every per-agent entry from the parity inventory, in
-// one place so no surface can drift from another.
+// Every per-agent action, in one place so no surface can drift from another.
 //
-// It is never rendered on its own: `PaneMenuBody` is the menu, and this is
-// the group inside it that is about the agent. That is why the pane's INPUT
-// group is not here — it is the wrapper's, once per menu, above these rows —
-// and why there is no context parameter left to pass: the sidebar row, the
-// desktop pane header, the phone's flap and the floating pill all open the one
-// merged body.
+// It is never rendered on its own: `PaneMenuBody` is the menu and this is the
+// group inside it about the agent, which is why the pane's input group is the
+// wrapper's rather than this one's, and why there is no context to pass.
 export function AgentActionsMenu({ session }: { session: SessionView }) {
   const duxState = useDux()
   const { bootstrap, spine, createTabInFlight } = duxState
@@ -84,12 +80,10 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   const addingTab = createTabInFlight.includes(session.id)
   const providers = bootstrap?.available_providers ?? []
   const defaultProvider = defaultProviderForSession(spine, session)
-  // The Project submenu names the PROJECT, because its actions affect the whole
-  // project, not just this agent. The tab submenu names nothing: the agent's own
-  // name sits beside the menu in every placement (the row, the mobile terminal
-  // header), so repeating it in the label is noise.
-  // `null` for a standalone agent, which belongs to no project. Read once so
-  // the submenu's presence and its contents cannot disagree.
+  // The Project submenu names the project, whose actions affect more than this
+  // agent; the tab submenu names nothing, the agent's own name being beside the
+  // menu in every placement. `null` for a standalone agent, which belongs to no
+  // project, read once so the submenu's presence and contents cannot disagree.
   const projectId = workspaceProjectId(session.workspace)
   const projectName = spine?.projects.find((p) => p.id === projectId)?.name
   const ghAvailable = bootstrap?.gh_available ?? false
@@ -106,18 +100,13 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   // suppression is dux's own state, so it must be removable even if gh went
   // away after the detach.
   const prSuppressed = session.pr_autodetect_suppressed ?? false
-  // While another connection input-owns one of this agent's PTYs, the entries
-  // that MUTATE the agent disable: deleting, renaming or relaunching an agent
-  // someone else is actively driving is a surprise for them. Two sources feed
-  // the answer (see `sessionActiveElsewhere`): a mounted TerminalPane's live
-  // verdict, and the server-published `input_owner` field on the spine's
-  // tabs — the latter is what lets a hub or sidebar row gate an agent NO pane
-  // on this device is attached to. Read-only entries (info, the
-  // project submenu, editor/terminal/copy entries) and this device's own view
-  // preferences (the bar toggles) stay usable. The reason renders as an
-  // inline label rather than a tooltip: disabled menu items are
-  // pointer-events-none, so a hover tooltip could never fire, and touch has
-  // no hover at all.
+  // While another connection input-owns one of this agent's PTYs, the mutating
+  // entries disable: deleting, renaming or relaunching an agent someone else is
+  // driving surprises them. `sessionActiveElsewhere` answers from a mounted
+  // pane's live verdict and from the spine's `input_owner`, which is what lets a
+  // row gate an agent no pane here is attached to. Read-only entries and this
+  // device's own view preferences stay usable. The reason is an inline label,
+  // because a disabled item is pointer-events-none and touch has no hover.
   const activeElsewhere = sessionActiveElsewhere(duxState, session)
 
   return (
@@ -131,11 +120,9 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           <DropdownMenuSeparator />
         </>
       ) : null}
-      {/* The changed-file row and the shared input-menu items used to be here.
-          They live in `PaneMenu` now, the ONE menu every surface opens (the
-          phone's docked flap, the floating pill, the desktop pane header's `⋯`
-          and this row's), and which renders this body as its agent group with
-          the pane's INPUT group above it. */}
+      {/* The changed-file row and the shared input-menu items belong to
+        * `PaneMenu`, the one menu every surface opens, which renders this body
+        * as its agent group with the pane's input group above it. */}
       <AgentTabSubmenu
         sessionId={session.id}
         providers={providers}
@@ -180,11 +167,9 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         activeElsewhere={activeElsewhere}
       />
       <DropdownMenuSeparator />
-      {/* Two editor entries, named to distinguish their surfaces. The in-app
-          overlay cannot open on a phone (EditorOverlay is desktop-only), so
-          its item is CSS-hidden there rather than left as a dead no-op; the
-          new-tab item, which opens the standalone surface, is the only
-          editor entry on phones. Final copy was left to PR review. */}
+      {/* Two editor entries, named for their surfaces. The in-app overlay
+        * cannot open on a phone, so its item is CSS-hidden there rather than
+        * left a dead no-op, and the new-tab item is the only one on phones. */}
       <DropdownMenuItem
         className="max-md:hidden"
         onClick={() => openEditor(agentRoot(session.id))}
@@ -207,10 +192,9 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         <ExternalLink />
         Open editor in new tab
       </DropdownMenuItem>
-      {/* The label names where the shell opens, because "New terminal" alone
-          leaves the reader guessing at the current working directory. It is
-          workspace-derived rather than fixed: this same menu serves a
-          standalone agent, which has a folder and no worktree. */}
+      {/* The label names where the shell opens, and is workspace-derived rather
+        * than fixed: this menu also serves a standalone agent, which has a
+        * folder and no worktree. */}
       <DropdownMenuItem onClick={() => createTerminal(session.id)}>
         <SquareTerminal />
         {newTerminalLabel(session.workspace)}

@@ -15,11 +15,9 @@ import {
 } from "@/lib/store"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
-// Confirmation before force-recreating an agent ("Force recreate agent…" in the
-// agent ⋯ menus). A forced reconnect relaunches the provider WITHOUT resume
-// args, so the current conversation is abandoned for a fresh session. That is
-// worth a deliberate confirm rather than a single misclickable menu item.
-// Cancel is the default focus, matching the other confirm dialogs.
+// Confirmation before force-recreating an agent. A forced reconnect relaunches
+// the provider without resume args, abandoning the current conversation for a
+// fresh session. Cancel takes focus, as in the other confirm dialogs.
 export function ConfirmForceReconnectDialog() {
   const { forceReconnectTarget, spine } = useDux()
 

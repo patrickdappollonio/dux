@@ -26,15 +26,11 @@ interface SaveConflictDialogProps {
   onClose: () => void
 }
 
-// What a 409 from the save route looks like to the user.
-//
-// The server refused because the file is not what this buffer was read from,
-// which means somebody else's work is on disk. There are exactly three honest
-// answers and this offers all three: keep the user's version (overwrite, which
-// destroys the other edit), take the disk version (reload, which destroys the
-// user's text and therefore goes through its own destructive confirm), or do
-// nothing. Cancel takes focus, because doing nothing is the only choice that
-// loses no work: the draft survives a cancelled save untouched.
+// What a refused save looks like to the user: the file is not what this buffer
+// was read from, so somebody else's work is on disk. Three honest answers, all
+// offered: keep this version and overwrite theirs, take the disk version through
+// its own destructive confirm, or do nothing. Cancel takes focus, doing nothing
+// being the only choice that loses no work.
 //
 // Deliberately not a toast: a toast retires itself, and every option here
 // destroys something.

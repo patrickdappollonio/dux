@@ -4,29 +4,24 @@ import { startDormantTab } from "@/lib/store"
 import { endingSentence, genericEndingSentence } from "@/lib/tabVerdict"
 import type { TabRunVerdict } from "@/lib/types"
 
-// The center-pane surface for a dormant tab that is waiting to be asked: an
-// extra tab with no process, or any tab whose last run ended badly. It renders
-// WITHOUT opening the PTY socket (`dormantTabNeedsCard` gates this) because
-// subscribing would force-launch the provider; only the "Start session" button
-// launches it, via `startDormantTab`. An agent's own first tab does not come
-// here after a plain restart or stop: selecting the agent starts it.
+// The center-pane surface for a dormant tab waiting to be asked: an extra tab
+// with no process, or any tab whose last run ended badly. It renders without
+// opening the PTY socket, which `dormantTabNeedsCard` gates, because subscribing
+// would force-launch the provider; only the start button launches it. An agent's
+// own first tab does not come here after a plain restart or stop.
 //
-// Two dormant tabs look identical without a word about WHY a press is needed,
-// so a tab whose last run ended badly gets one extra sentence, and, when the run
-// left anything on screen, its last lines under it: the case this exists for is
-// a provider that printed the answer on its way out. The words come from
-// `lib/tabVerdict.ts`, a port of `dux_core::tab_verdict`, so the terminal UI's
-// card says the same thing, and it is deliberately neutral about blame: a
-// non-zero exit is often the user quitting the CLI in a way it reports as an
-// error, so the sentence says what dux observed and what dux therefore did not
-// do, and never that anything crashed. Everything else on the card is the same
-// for both, because the way forward is the same.
+// A tab whose last run ended badly gets one extra sentence, and its last lines
+// under it when the run left any: the case this exists for is a provider that
+// printed the answer on its way out. The words come from `lib/tabVerdict.ts`, a
+// port of `dux_core::tab_verdict`, so the terminal UI's card says the same, and
+// they are neutral about blame, because a non-zero exit is often the user
+// quitting the CLI. Everything else is the same for both, the way forward being
+// the same.
 //
-// The message is deliberately PROVIDER-AGNOSTIC and states the actual rule:
-// launching resumes the provider's most-recent conversation in this worktree when
-// this is the sole live-or-launching tab of that provider, and starts fresh
-// otherwise. Older conversations are reachable through the provider's own history
-// command, and different CLIs name that command differently, so we don't name one.
+// The message is provider-agnostic and states the rule: launching resumes the
+// provider's most-recent conversation in this worktree when this is the sole
+// live-or-launching tab of that provider, and starts fresh otherwise. CLIs name
+// their history commands differently, so none is named here.
 export function DormantTabCard({
   sessionId,
   tabId,
@@ -85,10 +80,9 @@ export function DormantTabCard({
           </a>
         </p>
       </div>
-      {/* The touch floor, the take-over card's own height idiom: that card is
-          the nearest analogue on this surface (a full-pane card with one
-          primary act), and matching it keeps the two the same size under a
-          finger. No per-axis exemption: nothing here is a cramped row. */}
+      {/* The touch floor, at the take-over card's height idiom: that card is the
+        * nearest analogue here, a full-pane card with one primary act, so
+        * matching it keeps the two the same size under a finger. */}
       <Button
         onClick={() => startDormantTab(sessionId, tabId)}
         className="max-md:min-h-11"

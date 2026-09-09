@@ -25,11 +25,9 @@ interface NewEntryDialogProps {
   onSubmit: (name: string) => Promise<void>
 }
 
-// Unified New File / New Folder dialog. Driven by `target`; title and
-// placeholder switch on `target.kind`.
-// The body is mounted only while `target` is non-null, so its local `name`
-// state resets on every open with no set-state-in-effect (matches
-// AddProjectDialog's pattern).
+// The one New File and New Folder dialog, driven by `target`, whose `kind`
+// switches the title and placeholder. The body is mounted only while `target` is
+// non-null, so its local `name` state resets on every open.
 export function NewEntryDialog({
   target,
   onClose,

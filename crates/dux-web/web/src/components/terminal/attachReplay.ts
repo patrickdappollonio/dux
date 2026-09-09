@@ -31,18 +31,14 @@ export type AttachReplay = {
   replayInFlight: () => boolean
   /// Retire the dedupe's high-water mark. The generation counter is
   /// process-global on the server, so a restarted run starts low and its first
-  /// replay would be dropped as "already applied", clearing the cover over the
-  /// PREVIOUS run's screen. The lifecycle calls this when the run-identity probe
-  /// can no longer vouch for the run (see `lib/serverRun.ts`); forgetting the
-  /// mark costs nothing in normal operation, where every new open is strictly
-  /// newer and the dedupe is inert anyway.
+  /// replay would be dropped as already applied, clearing the cover over the
+  /// previous run's screen. Called when the run-identity probe can no longer
+  /// vouch for the run (see `lib/serverRun.ts`), and free otherwise.
   forgetAppliedGeneration: () => void
-  /// Register the "this open's screen is now on screen" listener. Fires exactly
-  /// once per open, carrying the epoch it belongs to, when the replay write's
-  /// COMPLETION callback has run: xterm has parsed the bytes and the picture
-  /// exists. A replay dropped by the generation dedupe counts as applied for the
-  /// same reason it is dropped (the picture is already there, unchanged), or the
-  /// cover would hang forever on a duplicate. Last registration wins.
+  /// Fires once per open, carrying its epoch, when the replay write's completion
+  /// callback has run and the picture exists. A replay dropped by the generation
+  /// dedupe counts as applied for the same reason it is dropped, or the cover
+  /// hangs forever on a duplicate. Last registration wins.
   onReplayApplied: (cb: (epoch: number) => void) => void
 }
 
@@ -50,26 +46,20 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
   const { term, replayGeneration, needsFirstFrameResize, firstFrameLanded } =
     deps
 
-  // THE ATTACH EPOCH. A monotonically increasing pane-local integer, minted by
-  // every `noteOpen()`. Everything below that is per-OPEN state is keyed to it,
-  // and every write-completion callback captures the epoch it was created under
-  // and returns immediately when that is no longer the live one.
-  //
-  // Before the epoch existed, all of this was one shared set of closure
-  // variables, and a close and reopen landing mid-drain let the PREVIOUS open's
-  // `term.write("", cb)` callback run against the NEW open's state: it reset the
-  // terminal, flushed the old open's held chunks over the fresh replay, and
-  // cleared `draining` under the new open's feet.
+  // The attach epoch: a pane-local integer minted by every `noteOpen()`. All
+  // per-open state below is keyed to it, and every write-completion callback
+  // captures the epoch it was created under and returns when that is no longer
+  // live, so a close and reopen landing mid-drain cannot let the previous open's
+  // callback reset the terminal the new open is painting.
   let epoch = 0
   // The per-open state, valid only for `epoch`. Rebuilt by `noteOpen`, so a
   // superseded open's leftovers cannot be read by anybody: they went out of
   // scope with the epoch they belonged to.
   let awaitingRepaint = false
   let repaintNeedsReset = false
-  // Set only while draining the previous connection's write queue; incoming
-  // bytes are buffered here (repaint first, then any live bytes) and flushed in
-  // order once the drain completes so nothing is written ahead of the
-  // reset+replay.
+  // Set only while draining the previous connection's write queue. Incoming bytes
+  // buffer here and flush in order once it completes, so nothing is written ahead
+  // of the reset and replay.
   let draining = false
   let heldChunks: Uint8Array[] = []
 
@@ -104,22 +94,19 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
     }
   }
 
-  // The replay chunk specifically: the same write, wrapped in the focus-report
-  // suppression window, and carrying the applied signal. The window opens before
-  // the bytes go in and closes in the write's own completion callback, so it
-  // covers exactly the parse of this chunk, mode-restore tail included, and not
-  // a millisecond of real user focus activity either side of it.
+  // The replay chunk: the same write, wrapped in the focus-report suppression
+  // window and carrying the applied signal. The window opens before the bytes go
+  // in and closes in the write's completion callback, so it covers exactly this
+  // chunk's parse, mode-restore tail included, and no real focus activity.
   //
-  // A zero-length frame is a real case (the server repaints even a quiet pty)
-  // and needs no special handling: xterm runs the callback for an empty write,
-  // measured in `lib/termwrite.xterm.test.ts`.
+  // A zero-length frame is a real case, since the server repaints even a quiet
+  // pty, and needs nothing special: xterm runs the callback for an empty write.
   const writeReplayChunk = (bytes: Uint8Array, forEpoch: number) => {
     replayWritesInFlight++
     const done = () => {
-      // A superseded open's callback closes nothing: the counter it incremented
-      // is the same one the LIVE open is using, so decrementing here would
-      // reopen the live replay's focus-report window early. The counter is
-      // repaired by the epoch swap in `noteOpen` instead.
+      // A superseded open's callback closes nothing: its counter is the live
+      // open's too, so decrementing reopens that replay's focus-report window
+      // early. The epoch swap in `noteOpen` repairs the counter instead.
       if (forEpoch !== epoch) return
       replayWritesInFlight = Math.max(0, replayWritesInFlight - 1)
       signalApplied(forEpoch)
@@ -146,11 +133,10 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
     noteOpen() {
       const wasFirst = firstOpen
       epoch++
-      // Everything the previous open was in the middle of belongs to a byte
-      // stream the server has already replaced. Its held chunks are DISCARDED
-      // rather than flushed, and its in-flight write count is dropped with them:
-      // the callbacks that would have decremented it are about to see a stale
-      // epoch and return.
+      // Everything the previous open was mid-way through belongs to a byte
+      // stream the server has replaced, so its held chunks are discarded rather
+      // than flushed and its in-flight write count goes with them: the callbacks
+      // that would decrement it are about to see a stale epoch and return.
       awaitingRepaint = true
       draining = false
       heldChunks = []
@@ -179,11 +165,9 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
         awaitingRepaint = false
         const gen = replayGeneration()
         if (!shouldApplyReplay(gen, lastAppliedGen)) {
-          // A replay already applied (duplicate, or a stale/late blob): drop it
-          // entirely (no reset, no write) so it can never stack a second copy.
-          // It still counts as APPLIED: the picture it would have drawn is
-          // already on screen, and nothing else will ever clear this open's
-          // cover.
+          // A replay already applied is dropped whole, with no reset and no
+          // write, so it can never stack a second copy. It still counts as
+          // applied: its picture is on screen, and nothing else clears the cover.
           signalApplied(forEpoch)
           return
         }
@@ -194,10 +178,9 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
           draining = true
           heldChunks = [bytes]
           term.write("", () => {
-            // THE CALLBACK THE EPOCH EXISTS FOR. A close and reopen landing in
-            // this window leaves this closure holding the previous open's plan:
-            // running it would reset the terminal the new open is painting and
-            // flush a byte stream the server has already replaced.
+            // The callback the epoch exists for: a close and reopen inside this
+            // window leaves the closure holding the previous open's plan, which
+            // would reset the terminal the new open is painting.
             if (forEpoch !== epoch) return
             term.reset()
             const chunks = heldChunks

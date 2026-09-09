@@ -15,31 +15,24 @@ import {
 /// different things, and so a test can pin it.
 export const PANE_INPUT_GROUP_LABEL = "Input"
 
-// THE INPUT GROUP, AT THE TOP OF WHATEVER MENU THE SURFACE ALREADY HAS.
+// The input group, at the top of whatever menu the surface already has: the
+// flap's `⋯` on a phone, the pane header's on a computer, the floating pill's in
+// theater, the sidebar row's as a fourth anchor on the same body.
 //
-// "Type directly in the terminal" removes the whole bottom bar, compose row,
-// key row and the input `⋯` with them, so the way back cannot live down there:
-// a control that only exists while you do not need it is not a way back at all.
-// It lives here instead, in the menu the surface always has for the pane in
-// front of it (the flap's `⋯` on a phone, the pane header's on a computer, the
-// floating pill's in theater), and "Attach a file…" joins it because an upload
-// is an input act and had no other permanent home either.
+// "Type directly in the terminal" removes the whole bottom bar and the input `⋯`
+// with it, so the way back cannot live down there; "Attach a file…" joins it
+// because an upload is an input act with no other permanent home. A computer
+// puts this on the pane header rather than the cog beside it, because the cog's
+// menu is the app's and none of these rows is about the app.
 //
-// A COMPUTER PUTS IT ON THE PANE HEADER rather than in the cog beside it, which
-// is deliberate: the cog's menu is the app's, and none of these rows is about
-// the app. The sidebar row's `⋯` is a fourth anchor on the same body and shows
-// the same rows.
+// The group label stays even with one item in it: these rows are about the
+// pane's typing surface, and unlabelled at the top of an agent's actions they
+// read as two more agent actions.
 //
-// The GROUP LABEL stays even with one item in it. It is the only labelled group
-// in these menus, and that is the point: these rows are about the pane's typing
-// surface rather than about the agent, and an unlabelled pair of them at the
-// top of an agent's actions reads as two more agent actions.
-//
-// WHAT IS IN IT IS THE PANE'S ANSWER, not this component's: the pane knows
-// whether it owns the input and which surfaces are up, and publishes through
-// `paneInputGroup`. The attach act is borrowed from the same pane's own
-// capability, so the file travels through its already-gated socket and lands in
-// its own sink; both halves have to be there.
+// What is in it is the pane's answer, published through `paneInputGroup`: only
+// the pane knows whether it owns the input and which surfaces are up. The attach
+// act is borrowed from that same pane's capability, so the file travels through
+// its already-gated socket; both halves have to be there.
 export function PaneInputGroup({
   ptyIds,
   /// A separator AFTER the group, for a menu that continues below it. Every

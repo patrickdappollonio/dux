@@ -17,18 +17,15 @@ interface FileDiskBannerProps {
   onCloseTab: () => void
 }
 
-// The in-pane notice that the file on disk is no longer what this buffer
-// holds. Deliberately NOT a toast and NOT a modal.
+// The in-pane notice that the file on disk is no longer what this buffer holds.
 //
-// Not a toast, because this is positional truth about one tab rather than an
-// event: it must still be there when the user comes back to the tab in a
-// minute, and it must be gone when they switch to another one. Not a modal,
-// because the honest answer to "the file changed" is often "let me look at
-// what I typed first", and a modal forbids exactly that.
+// Not a toast, because it is positional truth about one tab rather than an event:
+// it must still be there on returning to the tab and gone on switching away. Not
+// a modal, because the answer to a changed file is often to look at what you
+// typed first, which a modal forbids.
 //
-// It only appears when the editor could NOT resolve the situation on its own.
-// A clean buffer reloads in place with no banner at all, which is what the
-// user asked for by having no edits to lose.
+// It appears only where the editor could not resolve the situation itself: a
+// clean buffer reloads in place with no banner.
 export function FileDiskBanner({
   state,
   path,

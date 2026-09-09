@@ -85,10 +85,9 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
   // (the dialog's established confirm style) rather than a nested modal.
   const [deleteIndex, setDeleteIndex] = useState<number | null>(null)
 
-  // Reorder by drag, the agents-pane idiom: mouse drags on a 6px pull (a plain
-  // click on the row's buttons stays a click); touch drags on a HOLD, so the
-  // gesture coexists with the list's own scroll. Values and reasoning live in
-  // lib/dragActivation.ts.
+  // Reorder by drag, the agents-pane idiom: a mouse drags on a short pull so a
+  // click on the row's buttons stays a click, and a touch drags on a hold so the
+  // gesture coexists with the list's scroll. Values live in lib/dragActivation.ts.
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: MOUSE_DRAG_ACTIVATION }),
     useSensor(TouchSensor, { activationConstraint: TOUCH_DRAG_ACTIVATION }),
@@ -103,10 +102,9 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
     // Rows are about to shift index; a pending delete-confirm would point at
     // the wrong row afterwards, so retire it with the drop.
     setDeleteIndex(null)
-    // Optimistic apply, then persist through the same wholesale save as the
-    // Save button. When the draft can't be saved yet (validation error, or the
-    // bootstrap window where a wholesale PUT would wipe the server's macros),
-    // the order stays in the draft and the eventual Save carries it.
+    // Optimistic apply, then persist through the same wholesale save the Save
+    // button uses. When the draft cannot be saved yet, the order stays in the
+    // draft and the eventual Save carries it.
     setMacros(next)
     if (bootstrap === null || validateMacros(next) !== null) return
     void persistMacroOrder(next).then((ok) => {
@@ -214,12 +212,10 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
   )
 }
 
-// One draggable macro row. Whole-row drag, exactly like the agents-pane rows:
-// `useSortable` supplies the drag props (spread on the row itself, no separate
-// handle), the sensors' activation gates are what let the row's Edit/Delete
-// buttons keep working (a plain click never moves 6px; a touch tap never holds
-// 300ms), and the wrapper carries the Y-locked transform so the row can't
-// slide out of the dialog column sideways.
+// One draggable macro row, whole-row like the agents-pane rows: `useSortable`
+// supplies the drag props with no separate handle, the sensors' activation gates
+// are what keep the row's own buttons working, and the wrapper carries the
+// Y-locked transform so the row cannot slide out of the dialog column.
 function SortableMacroRow({
   macro,
   index,
@@ -249,14 +245,12 @@ function SortableMacroRow({
   }
 
   return (
-    // While dragging, the row visibly LIFTS (shadow + stacking) so a touch
-    // hold that armed the drag reads as "grabbed" before the finger moves.
-    // The wrapper (the `li`) carries ref/transform/lift and keeps its list
-    // semantics; the drag props go on the row BODY (dnd-kit's attributes set
-    // `role="button"`/`tabIndex`, which belong on the activator, not the
-    // listitem) — the same wrapper/activator split as the sidebar rows. The
-    // delete-confirm strip stays OUTSIDE the activator so its buttons are
-    // never contended by a drag.
+    // The row lifts while dragging, so a touch hold that armed the drag reads as
+    // grabbed before the finger moves. The `li` carries the ref, transform and
+    // lift and keeps its list semantics, while the drag props go on the row body,
+    // because dnd-kit's attributes set a button role that belongs on the
+    // activator. The delete-confirm strip stays outside the activator so its
+    // buttons are never contended by a drag.
     <li
       ref={setNodeRef}
       style={style}

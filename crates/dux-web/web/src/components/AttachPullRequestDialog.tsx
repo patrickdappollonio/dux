@@ -16,12 +16,10 @@ import {
   useDux,
 } from "@/lib/store"
 
-// Manually attach (pin) a GitHub pull request to an agent. One text field for
-// the raw reference; the lookup runs server-side and its outcome rides the
-// status toast stream, so submitting closes the dialog immediately (modeled on
-// the rename dialog's shape, but deferred like the other 202-style actions).
-// When the agent already shows a PR the body names it, so replacing it is an
-// explicit, informed act rather than a surprise.
+// Pin a pull request to an agent. One text field for the raw reference; the
+// lookup runs server-side and its outcome rides the status toast stream, so
+// submitting closes the dialog at once. When the agent already shows a PR the
+// body names it, so replacing it is an informed act.
 export function AttachPullRequestDialog() {
   const { attachPullRequestTarget, attachPullRequestDraft, spine } = useDux()
   const session = spine?.sessions.find((s) => s.id === attachPullRequestTarget)

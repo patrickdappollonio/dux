@@ -1,30 +1,22 @@
-// THE TOUCH-GESTURE MACHINE: the SOLE owner of touch disambiguation.
+// The sole owner of touch disambiguation. Every finger on the terminal is one of
+// three things, and this decides which, once, for everybody:
 //
-// Every finger on the terminal is one of exactly three things, and this decides
-// which, once, for everybody:
-//
-//   a one-finger DRAG scrolls (the scrollback locally, or the app's own history
-//   as forwarded wheel notches),
-//   a stationary LONG PRESS selects the word under the finger, and the drag
+//   a one-finger drag scrolls, locally or as forwarded wheel notches,
+//   a stationary long press selects the word under the finger, and the drag
 //   after it extends the selection,
-//   a quick TAP is neither, and falls through to its client (which focuses the
-//   compose box, probes for a hyperlink, or lets xterm have it).
+//   a quick tap is neither and falls through to its client.
 //
-// THE DISAMBIGUATION. A long-press timer marks the gesture as a SELECTION the
-// moment the finger has been held still past the delay; from then on it never
-// scrolls, and every move re-selects instead. If the finger instead MOVES past
-// a small threshold before that fires, it is a scroll, so the timer is
-// cancelled and the scroll takes over. A short, still tap trips neither.
+// A long-press timer marks the gesture as a selection once the finger has been
+// held still past the delay, and from then on every move re-selects rather than
+// scrolling; a move past a small threshold before that cancels the timer and
+// scrolls instead. A short, still tap trips neither.
 //
-// ANY SECOND FINGER CANCELS THE WHOLE GESTURE, not just the pending timer:
-// leaving the selecting flag set meant lifting one finger out of a PINCH took
-// the selecting branch and copied. The painted selection is left alone, since
-// the user can still see it and may be pinching in order to read it.
+// Any second finger cancels the whole gesture, not just the pending timer, or
+// lifting one finger out of a pinch takes the selecting branch and copies. The
+// painted selection is left alone: the user may be pinching in order to read it.
 //
-// It EMITS EVENTS and does no work of its own. The selection drag, the resize
-// hold, the wheel forwarding and the tap redirect are all clients, which is
-// what keeps "is this a scroll or a selection" answered in exactly one place
-// instead of being re-derived from flags at each site.
+// It emits events and does no work of its own, so that scroll-or-selection is
+// answered in one place rather than re-derived from flags at each site.
 export type TouchGestureOutcome = {
   /// Neither a scroll nor a long press: the gesture the tap redirect acts on.
   wasTap: boolean
@@ -65,11 +57,10 @@ export const LONG_PRESS_MS = 400
 export const SCROLL_THRESHOLD_PX = 8
 
 export type TouchGesture = {
-  /// Register on the container. Touch-only listeners, so this also lights up a
-  /// touchscreen laptop, not just the mobile layout. `touchend` is registered
-  /// NON-PASSIVE unconditionally (even where the tap redirect never fires): a
-  /// deliberate, harmless choice, since touchend passivity does not gate the
-  /// browser's scroll optimizations the way touchmove's does.
+  /// Register on the container. Touch-only listeners, so a touchscreen laptop
+  /// lights up too, not just the mobile layout. `touchend` is always non-passive,
+  /// which is harmless: its passivity does not gate the browser's scroll
+  /// optimizations the way touchmove's does.
   attach: (container: Element) => void
   dispose: () => void
 }
@@ -179,12 +170,9 @@ export function createTouchGesture(client: TouchGestureClient): TouchGesture {
       })
     },
     dispose() {
-      // Finish any in-flight gesture first: reset() releases the resize hold
-      // and tells the selection client the gesture is over, which is what
-      // stops the 50ms edge auto-scroll interval. Without it, an unmount
-      // mid-selection left that interval firing against a disposed terminal
-      // (harmless only by accident: the first post-dispose tick read a null
-      // screen rect and stopped itself).
+      // Finish any in-flight gesture first: `reset()` releases the resize hold
+      // and ends the selection, which is what stops the edge auto-scroll
+      // interval firing against a disposed terminal.
       reset()
       clearTimeout(longPressTimer)
       attached?.removeEventListener("touchstart", onTouchStart as EventListener)

@@ -5,12 +5,10 @@ import { buildAgentVitals } from "@/lib/agentVitals"
 import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-// The "full vitals" tooltip content shared by the collapsed icon rail and the
-// expanded sidebar agent rows, so the two surfaces can never drift. Pure
-// presentational: all data comes in as props (the row model is built by the
-// framework-free `buildAgentVitals`, kept separately so it stays unit-testable
-// without mounting a tooltip). Renders on the popover surface (see
-// components/ui/tooltip.tsx) inherited from the wrapping SimpleTooltip/Tooltip.
+// The full-vitals tooltip content, shared by the collapsed icon rail and the
+// expanded sidebar rows so the two cannot drift. Purely presentational: the row
+// model is built by the framework-free `buildAgentVitals`, and the popover
+// surface is inherited from the wrapping tooltip.
 export function AgentVitalsTooltip({
   session,
   projectName,

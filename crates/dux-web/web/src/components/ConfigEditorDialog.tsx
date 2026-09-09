@@ -19,17 +19,15 @@ import {
   useDux,
 } from "@/lib/store"
 
-// Monaco is multiple MB; this dialog mounts (closed) in GlobalOverlays, so a
-// static CodeEditor import would drag the whole Monaco chunk into the eager
-// index bundle. Lazy-load it exactly like EditorBody does — the two share the
-// self-host bootstrap (lib/monacoSetup), so the heavy chunk loads once for both.
+// This dialog mounts closed in `GlobalOverlays`, so a static `CodeEditor` import
+// would drag the whole Monaco chunk into the eager index bundle. Lazy-loaded as
+// `EditorBody` is, sharing the self-host bootstrap so the chunk loads once.
 const CodeEditor = lazy(() => import("@/components/CodeEditor"))
 
-// The form body is mounted only once the raw config has loaded, so its lazy
-// `useState` initializer seeds the editor from a settled value (no
-// set-state-in-effect). The user's in-progress edits live in `text` and survive
-// a failed save (the server's parse error is shown inline and the modal stays
-// open). Ctrl/Cmd+s inside Monaco saves the current draft too.
+// Mounted only once the raw config has loaded, so the lazy `useState`
+// initializer seeds the editor from a settled value. In-progress edits live in
+// `text` and survive a failed save, whose parse error is shown inline with the
+// modal left open. The save chord inside Monaco saves the current draft too.
 function ConfigEditorForm({
   initial,
   error,
@@ -86,10 +84,9 @@ function ConfigEditorForm({
   )
 }
 
-// The Monaco config.toml editor (the app menu's "Edit config file…"). The server validates the
-// TOML before writing; saving PERSISTS the file but does not apply it (the
-// running config is unchanged until the user runs "Reload config"). A callout in
-// the form states this.
+// The Monaco config.toml editor. The server validates the TOML before writing,
+// and saving persists the file without applying it: the running config is
+// unchanged until a reload. A callout in the form says so.
 export function ConfigEditorDialog() {
   const {
     configEditorOpen,

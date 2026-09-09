@@ -1,21 +1,11 @@
-// THE INPUT SURFACE.
-//
 // Everything that puts a byte into the PTY on the user's behalf, and everything
-// that decides where the caret goes afterwards: the compose bar's Send, the
-// accessory bar's key rows, the sticky modifier latches, the draft splice, and
-// the one focus-routing rule.
+// that decides where the caret goes afterwards. Pane-adjacent rather than part
+// of the lifecycle: none of it is tied to the terminal's lifetime.
 //
-// It is a pane-adjacent unit rather than part of the lifecycle because none of
-// it is tied to the terminal's lifetime: these are handlers the render hands to
-// two child components, and they read the live terminal and socket through the
-// refs the lifecycle fills in.
-//
-// THE ONE ROUTING RULE lives here as a pair of standalone functions rather than
-// as methods, because the pane needs it before this hook has run (the ownership
-// machine's take-over refocuses, and the lifecycle focuses on mount). Every
-// refocus in the pane goes through `focusTypingSurfaceIn`, and every
-// keyboard-state question through `typingSurfaceHasFocusIn`; there is no second
-// implementation of either.
+// The routing rule is a pair of standalone functions rather than methods,
+// because the pane needs it before this hook has run. Every refocus goes through
+// `focusTypingSurfaceIn` and every keyboard-state question through
+// `typingSurfaceHasFocusIn`; there is no second implementation of either.
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { Terminal } from "@xterm/xterm"
 
@@ -53,12 +43,8 @@ export type TypingSurfaceRefs = {
   termRef: { current: Terminal | null }
 }
 
-// Where typing focus belongs right now: the compose textarea while the
-// mobile compose bar is up (so the soft keyboard keeps typing into the
-// buffer), xterm's hidden textarea otherwise. Every handler that used to
-// refocus the terminal after acting routes through this, keeping the
-// accessory-bar contract (a bar key never steals focus from the active
-// typing surface) intact for both surfaces.
+// Where typing focus belongs right now: the compose textarea while the compose
+// bar is up, xterm's hidden textarea otherwise.
 export function focusTypingSurfaceIn(refs: TypingSurfaceRefs): void {
   if (refs.live.current.composeActive && refs.composeInputRef.current) {
     refs.composeInputRef.current.focus()
@@ -67,16 +53,9 @@ export function focusTypingSurfaceIn(refs: TypingSurfaceRefs): void {
   }
 }
 
-// Whether the active typing surface (the compose textarea while the bar is
-// up, xterm's hidden textarea otherwise) holds focus RIGHT NOW. The
-// accessory-key handlers read this at tap time to preserve the soft-keyboard
-// state: a key tap must never CHANGE that state, so they refocus only when
-// the surface had focus when the tap landed (the bar's buttons preventDefault
-// their pointerdown, so the tap itself never moves focus; the conditional
-// refocus is insurance for browsers where that suppression is incomplete).
-// An unconditional focusTypingSurface() here was the soft-keyboard-pop bug:
-// a user paging through output with the keyboard closed had it summoned by
-// every key tap.
+// Whether the active typing surface holds focus right now. Accessory-key
+// handlers read it at tap time and refocus only when it was already focused: a
+// key tap must never change the soft keyboard's state.
 export function typingSurfaceHasFocusIn(refs: TypingSurfaceRefs): boolean {
   const active = document.activeElement
   if (active === null) return false
@@ -86,23 +65,17 @@ export function typingSurfaceHasFocusIn(refs: TypingSurfaceRefs): boolean {
   return active === (refs.termRef.current?.textarea ?? null)
 }
 
-/// MAY AN AUTOMATIC FOCUS MOVE HAPPEN RIGHT NOW? Pure, because the answer is a
-/// rule rather than a state, and because raising a soft keyboard at the wrong
-/// moment is exactly the kind of thing that is easier to argue about than to
-/// observe.
+/// May an automatic focus move happen right now? Focusing summons the soft
+/// keyboard, so every condition waits for the pane to have reconciled:
 ///
-/// Focusing summons the keyboard on a phone, so it waits for the pane to have
-/// RECONCILED rather than for it to merely believe something:
+///   - `ownershipConfirmed` is the server's answer; `isOwner` alone is the
+///     foreground guess taken before the handshake.
+///   - the replay for the current attach epoch must be on screen, or the
+///     keyboard covers a placeholder.
+///   - an IME composition in flight is never interrupted, or the half-typed
+///     text and its candidate popup are destroyed.
 ///
-///   - `isOwner` alone is not enough, because before the handshake it is only
-///     the foreground guess. `ownershipConfirmed` is the server's answer.
-///   - the replay for the CURRENT attach epoch must be on screen. A keyboard over
-///     a pane that is still reconciling covers a placeholder.
-///   - an IME composition in flight is never interrupted: moving focus mid
-///     composition destroys the half-typed text and its candidate popup.
-///
-/// It governs AUTOMATIC moves only. A user tapping the box focuses it themselves,
-/// and nothing here second-guesses that.
+/// Automatic moves only: a user tapping the box focuses it themselves.
 export function typingFocusAllowed(ctx: {
   isOwner: boolean
   ownershipConfirmed: boolean
@@ -115,28 +88,16 @@ export function typingFocusAllowed(ctx: {
   return !ctx.composing
 }
 
-/// ONCE PER ATTACH, not once per epoch. Given what the pane has already moved
-/// the keyboard for, decide whether it owes another move and what it should
-/// remember afterwards.
+/// Once per attach, not once per epoch: `typingFocusAllowed` is a permission,
+/// not an occasion, and its `replayApplied` input flips on every socket reopen.
+/// `attach` names what a move is owed for (the target, plus which typing surface
+/// is up), so a reconnect onto the same one is silent.
 ///
-/// `typingFocusAllowed` alone is a permission, not an occasion. Its inputs
-/// include `replayApplied`, which goes false and back to true on EVERY socket
-/// reopen, so acting on the permission each time it turns true meant a
-/// background reconnect pulled focus out of whatever a desktop user was typing
-/// in and raised the soft keyboard on a phone. `attach` names the thing a move
-/// is owed for (the target, plus which typing surface is up), so a reconnect
-/// onto the same one is silent while a target switch, a regained ownership or
-/// the compose bar appearing each move the keyboard exactly once.
+/// Two rules on top of that:
 ///
-/// Two more rules, both from real failures:
-///
-///   - LOSING OWNERSHIP FORGETS. The next time this pane owns the pty is a fresh
-///     attach as far as the keyboard is concerned, so a take-over after a
-///     demotion still focuses.
-///   - A REFUSAL IS NOT A CONSUMPTION. A move blocked by an in-flight IME
-///     composition leaves the memory alone, so the same attach is still owed one
-///     when the composition ends; recording it there would cancel that pane's
-///     one focus move permanently.
+///   - Losing ownership forgets, so a take-over after a demotion still focuses.
+///   - A refusal is not a consumption: a move blocked by an in-flight IME
+///     composition leaves the memory alone, or the attach loses its one move.
 export function nextTypingFocus(ctx: {
   /// `typingFocusAllowed` for this same commit.
   allowed: boolean
@@ -155,12 +116,6 @@ export function nextTypingFocus(ctx: {
   return { focus: true, focusedFor: ctx.attach }
 }
 
-// Accessory-bar key sends. Esc/Tab/arrows are full sequences, not single
-// chars, so they bypass `applyModifiers` (which only transforms single-char
-// input). We still honor a latched Alt by prefixing ESC, and we clear any
-// latch one-shot afterward. Ctrl on a non-char key has no meaning here, so
-// it's simply consumed. Sends go through the same socket path as typed input.
-
 export type InputSurfaceDeps = TypingSurfaceRefs & {
   ptyRef: { current: PtySocket | null }
   ownership: OwnershipVerdict
@@ -175,13 +130,9 @@ export type InputSurface = {
   alt: boolean
   /// The latch channel, whose only writer is this unit.
   mods: ModifierLatch
-  /// The compose draft. It lives in the STORE, keyed by target id, and this hook
-  /// reads and writes it there. That is a stronger guarantee than the hook state
-  /// it replaces, which survived the bar unmounting (a preference flip, a
-  /// rotation past the mobile breakpoint) but not the pane REMOUNTING, and the
-  /// pane is remounted by `reconnect()` bumping `terminalEpoch`, which is the
-  /// Retry button a user presses after a bad network. The draft now also survives
-  /// that, and a `pagehide`/`pageshow` round trip with it.
+  /// The compose draft. It lives in the store, keyed by target id, so it
+  /// survives the bar unmounting, the pane remounting on a reconnect, and a
+  /// `pagehide`/`pageshow` round trip.
   composeText: string
   setComposeText: (value: string) => void
   focusTypingSurface: () => void
@@ -203,11 +154,9 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
   const focusTypingSurface = () => focusTypingSurfaceIn(refs)
   const typingSurfaceHasFocus = () => typingSurfaceHasFocusIn(refs)
 
-  // Sticky (one-shot latched) soft-keyboard modifiers for the accessory bar.
-  // The state drives the latch's visual highlight; the ref mirrors it so the
-  // value is readable inside the lifecycle's stable `onData` closure, which
-  // would otherwise capture a stale `ctrl`/`alt`. The CHANNEL writes both
-  // together, so they can never diverge, and it is the only writer.
+  // Sticky (one-shot latched) soft-keyboard modifiers. The state drives the
+  // highlight; the ref mirrors it for the lifecycle's stable `onData` closure,
+  // which would capture a stale value. The channel is the only writer of both.
   const [ctrl, setCtrl] = useState(false)
   const [alt, setAlt] = useState(false)
   const modsRef = useRef({ ctrl: false, alt: false })
@@ -225,12 +174,9 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
 
   const composeText = composeDraft(useDux(), targetId)
   const setComposeText = (value: string) => setComposeDraft(targetId, value)
-  // Where the caret should land after a programmatic draft splice (a picked
-  // macro inserting into the draft). A controlled textarea re-renders on the
-  // value change and the browser parks the caret at the end of the new value,
-  // so the splice records its intended caret here and this effect applies it in
-  // the same commit the new draft text reaches the DOM. Null means "no pending
-  // placement": ordinary typing never goes through this.
+  // Where the caret should land after a programmatic draft splice: a controlled
+  // textarea re-renders and the browser parks the caret at the end of the new
+  // value. Null means no pending placement; ordinary typing never sets it.
   const pendingComposeCaretRef = useRef<number | null>(null)
   useEffect(() => {
     const caret = pendingComposeCaretRef.current
@@ -239,17 +185,12 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
     composeInputRef.current?.setSelectionRange(caret, caret)
   }, [composeText, composeInputRef])
 
-  // Right-click pastes the browser clipboard (classic terminal: selecting
-  // copies via copy-on-select, right-click pastes). Gated on ownership (a
-  // read-only viewer cannot drive input). Needs a secure context for
-  // `readText`; the shared reader toasts a "use Ctrl+v" hint when the clipboard
-  // cannot be read (plain HTTP).
+  // Right-click pastes the browser clipboard, gated on ownership. `readText`
+  // needs a secure context; the shared reader toasts a hint when it is refused.
   //
-  // THE DESTINATION IS THE TYPING SURFACE, not always the terminal. While the
-  // message box is up it is where typing goes, so a right-click joins the DRAFT
-  // through the same splice the box's own paste listener delivers into. Sending
-  // it to the PTY instead put the clipboard on the wire behind an unsent draft,
-  // in the one state the pane exists to keep keystrokes out of the child.
+  // The destination is the typing surface, not always the terminal: while the
+  // message box is up a right-click joins the draft, or the clipboard goes on
+  // the wire behind an unsent draft.
   function onRightClickPaste() {
     if (!ownership.read()) return
     if (live.current.composeActive && composeInputRef.current !== null) {
@@ -260,16 +201,12 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
     if (term) void pasteIntoTerm(term, focusTypingSurface)
   }
 
-  // Splice text into the mobile compose bar's DRAFT at the caret. Shared by
-  // the two things that put text there without typing it: a picked macro (via
-  // the module-scope `composeInsert` sink) and the path of an image pasted
-  // while the bar is the typing surface. One implementation, so the caret
-  // handling and the refocus cannot drift between them.
+  // Splice text into the compose draft at the caret. Shared by everything that
+  // puts text there without typing it (the `composeInsert` sink, a pasted
+  // image's path), so the caret handling and the refocus cannot drift.
   function insertComposeText(text: string) {
-    // The textarea's selection is read up front, once: the functional updater
-    // below may run more than once (StrictMode), and it must splice the same
-    // way each time. A missing element or selection falls back to appending
-    // (insertIntoComposeDraft treats null as "append").
+    // Read up front, once: the splice below may run more than once and must
+    // splice the same way each time. `insertIntoComposeDraft` appends on null.
     const el = composeInputRef.current
     const selectionStart = el === null ? null : el.selectionStart
     const selectionEnd = el === null ? null : el.selectionEnd
@@ -281,63 +218,33 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
       selectionEnd,
       text,
     )
-    // The caret-placement effect applies this once the new draft value reaches
-    // the DOM. The store write is idempotent, so a StrictMode double invoke
-    // splices the same way twice rather than twice over.
+    // Applied by the caret-placement effect once the new value reaches the DOM.
+    // The store write is idempotent, so a double invoke splices once.
     pendingComposeCaretRef.current = caret
     setComposeText(next)
-    // The draft the text just joined is where editing continues; the active
-    // typing surface here IS the compose textarea.
+    // The draft the text just joined is where editing continues.
     focusTypingSurface()
   }
 
   const encoder = new TextEncoder()
 
-  // The compose bar's Send: deliver the buffered message, then submit it.
-  // The write plan lives in the pure `composeSendWrites`: the MACRO keystroke
-  // convention (newlines are Alt+Enter, ESC CR, exactly like
-  // `macroPayloadBytes`) as the body write, and the submitting bare CR as a
-  // SEPARATE write the timeout below delivers COMPOSE_SUBMIT_DELAY_MS later.
-  // Deliberately NOT bracketed paste, and no read of `bracketedPasteMode`;
-  // and the Enter travels alone because Claude Code merges stdin chunks into
-  // one paste through a measured 50ms debounce that would swallow a
-  // same-window CR into the paste as a newline (see COMPOSE_SUBMIT_DELAY_MS).
-  // An empty buffer is a single immediate bare CR, a lone Enter keystroke.
-  // The shared landing-effects writer replays the scroll-to-live-edge and
-  // selection-drop a typed key would get, ONCE, with the first write. Focus
-  // stays in the compose textarea (the Send button preventDefaults its
-  // pointerdown, so it never left).
+  // The compose bar's Send. `composeSendWrites` holds the plan: the macro
+  // keystroke convention as the body write, and the submitting bare CR as a
+  // separate write delivered `COMPOSE_SUBMIT_DELAY_MS` later, deliberately not
+  // bracketed paste, because a receiving CLI's stdin debounce would swallow a
+  // same-window CR into the paste as a newline. An empty buffer sends one bare CR.
   //
-  // Returns whether the send happened; the bar clears its buffer only on
-  // true. A composed message can be minutes of typing, so unlike a keystroke
-  // (cheap to re-type, silently droppable) every refused send KEEPS the buffer
-  // and toasts the reason: not the input owner (like every write path; take
-  // over to reclaim), socket not open (the sendInput readyState guard would
-  // silently drop the bytes), or payload over the client-side cap (an
-  // oversized frame would make the server abort the whole socket, see
-  // MAX_COMPOSE_SEND_BYTES).
+  // Returns whether the send happened; the bar clears its buffer only on true.
+  // A composed message can be minutes of typing, so every refusal keeps the
+  // buffer and toasts the reason: not the owner, socket not open, or over
+  // `MAX_COMPOSE_SEND_BYTES` (an oversized frame aborts the whole socket).
   //
-  // Deliberately does NOT consume the one-shot Ctrl/Alt accessory latches: a
-  // latch arms the next direct KEY, and a composed message is not a key; a
-  // user who tapped Ctrl intending Ctrl-c should not lose the latch to an
-  // unrelated Send.
+  // It does not consume the one-shot Ctrl/Alt latches: a latch arms the next
+  // direct key, and a composed message is not a key.
   //
-  // All three refusals KEEP the fixed `compose-send` id, unlike the terminal
-  // copy and paste notifications, which carry no id (see
-  // `lib/termClipboard.ts`). Send is one deliberate
-  // press producing one of three fixed sentences, and a user who presses it
-  // three times against a dead socket wants one "not connected", not three
-  // identical copies of it stacked up. The id is doing real work here: it also
-  // means the reason REPLACES itself when it changes, so a viewer who takes
-  // over and then hits the size cap sees the new reason rather than two
-  // contradictory ones.
-  //
-  // The hazard is real and is accepted: repeating a failing Send restarts the
-  // 24s error countdown each time, so the toast lingers for a full window after
-  // the LAST attempt rather than the first. That is the correct end of the
-  // trade for a message that is still true while the user keeps trying, and it
-  // is bounded, unlike the copy-on-select case where an incidental gesture the
-  // user never thought of as raising a toast could pin one open indefinitely.
+  // The refusals share the fixed `compose-send` id, so one press repeated
+  // against a dead socket raises one toast and a changed reason replaces the
+  // old one. The cost, accepted: each attempt restarts the error's countdown.
   function sendCompose(text: string): boolean {
     if (!ownership.read()) {
       notifyError("Another device is driving this terminal. Take over to send.", {
@@ -360,13 +267,10 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
       return false
     }
     writeInputWithLandingEffects(termRef.current, ptyRef.current, writes[0])
-    // A two-write plan: the submitting CR follows after the measured-safe gap
-    // (see composeSendWrites). The send is committed at this point, hence
-    // `true` below; the delayed CR is a bare PTY write with no further side
-    // effects. Guards: the pane may unmount (its cleanup nulls `ptyRef`, so
-    // the identity check fails) or the socket may drop (`isOpen`) before the
-    // timer fires; in either case the orphaned CR is skipped rather than
-    // delivered to a socket this pane no longer drives.
+    // The send is committed once the body is written, so the delayed CR is a
+    // bare PTY write with no further effects. It is skipped when the pane has
+    // unmounted (its cleanup nulls `ptyRef`) or the socket has dropped, rather
+    // than delivered to a socket this pane no longer drives.
     if (writes.length > 1) {
       const pty = ptyRef.current
       const rest = writes.slice(1)
@@ -379,12 +283,12 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
   }
 
   function sendSeq(seq: string) {
-    // Read-only when not the owner: the accessory-bar keys (Esc/Tab/arrows) are
-    // input too, so a secondary viewer's taps are dropped just like typed input.
+    // Full sequences rather than single chars, so they bypass `applyModifiers`;
+    // a latched Alt still prefixes ESC, and Ctrl on a non-char key is consumed.
+    // Owner-gated: a bar key is input like any other.
     if (!ownership.read()) return
-    // Captured BEFORE acting: a key tap preserves the keyboard state, so the
-    // refocus below runs only when the typing surface had focus at tap time
-    // (see typingSurfaceHasFocus).
+    // Captured before acting: the refocus below must run only when the typing
+    // surface had focus at tap time.
     const keepFocus = typingSurfaceHasFocus()
     const latch = mods.read()
     const out = latch.alt ? ESC + seq : seq
@@ -400,12 +304,10 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
     sendSeq(arrowSeq(dir, app))
   }
 
-  // The accessory bar's ⇧↵ key, the touch equivalent of Shift-Enter, since a
-  // soft keyboard can't produce that chord. Owner-gated like every accessory
-  // send; consumes any armed Ctrl/Alt latch (a raw newline doesn't combine with
-  // them, so unlike `sendSeq` it never routes through `applyModifiers`) and keeps
-  // focus so the user keeps typing. Shares `writeSoftNewline` with the physical
-  // Shift-Enter handler so both land input identically.
+  // The accessory bar's soft-newline key, since a soft keyboard cannot produce
+  // Shift-Enter. Owner-gated, and it consumes any armed latch because a raw
+  // newline does not combine with one. Shares `writeSoftNewline` with the
+  // physical Shift-Enter handler so both land input identically.
   function sendNewline() {
     if (!ownership.read()) return
     const keepFocus = typingSurfaceHasFocus()
@@ -428,34 +330,22 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
     if (keepFocus) focusTypingSurface()
   }
 
-  // Scroll the xterm viewport from the accessory bar's second row. On the normal
-  // buffer these drive xterm's own scrollback (the history that accumulates as
-  // the agent streams output), giving a reliable touch target the slim scrollbar
-  // can't.
+  // Scroll the xterm viewport from the accessory bar. On the normal buffer these
+  // drive xterm's own scrollback; on the alt-screen there is none, so PgUp/PgDn
+  // forward a page to the app itself (wheel events while it tracks the mouse,
+  // the keys otherwise) and jump-to-top/bottom, which has no wheel equivalent,
+  // stays scrollback-only.
   //
-  // On the ALT-SCREEN (a full-screen TUI) xterm has no scrollback, so PgUp/PgDn
-  // forward a page to the app itself, mirroring the TUI's forward-scroll: a
-  // mouse-tracking app (Claude, Codex, ...) gets a screenful of wheel events; a
-  // keyboard-only app gets the PgUp/PgDn keys. Jump-to-top/bottom has no clean
-  // wheel equivalent, so those two stay scrollback-only and are a no-op on the
-  // alt-screen; the cursor-arrow row drives fine-grained movement there.
-  //
-  // Scrolling is a READ gesture, so it drops the hidden textarea's focus: that
-  // slides the soft keyboard away to free the whole screen for reading back and,
-  // crucially, stops a scroll-button tap from re-summoning it. On iOS the
-  // textarea stays the focused element after the user swipes the keyboard down,
-  // so any later tap on a focus-retaining (preventDefault) button pops it right
-  // back up; blurring here is what keeps it down. Tapping the terminal refocuses
-  // to resume typing. (The input keys, Esc/Tab/Ctrl/Alt/newline and the cursor
-  // arrows, instead KEEP focus; only PgUp/PgDn blur. It's an input vs
-  // page-scroll split, not a row split.)
+  // Scrolling is a read gesture, so it drops focus and lets the soft keyboard
+  // go: on iOS the textarea stays focused after a keyboard swipe-down, so a
+  // later tap on a focus-retaining button pops it back up. The input keys keep
+  // focus instead; the split is input versus page-scroll, not row versus row.
   function onScroll(dir: ScrollDir) {
     const term = termRef.current
     if (!term) return
     const altScreen = term.buffer.active.type !== "normal"
-    // On the alt-screen, a Page button forwards to the full-screen app (input,
-    // so only when we own the PTY); top/bottom have no wheel equivalent and fall
-    // through to the local scroll, which is a no-op there.
+    // Forwarding is input, so it is owner-gated; top and bottom fall through to
+    // the local scroll, which is a no-op on the alt-screen.
     if (
       altScreen &&
       ownership.read() &&
@@ -463,12 +353,9 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
     ) {
       const up = dir === "pageUp"
       if (term.modes.mouseTrackingMode !== "none") {
-        // A screenful of wheel notches toward older (up) or newer (down) output.
-        // The exact distance depends on the app's per-notch step; one row-height
-        // shy of a full screen is a reasonable page. Replayed as real wheel
-        // events at the middle of the terminal so xterm encodes them the way the
-        // app asked (see `lib/termmouse.ts`); there is no finger to take a point
-        // from here, so the centre stands in for one.
+        // Replayed as real wheel events so xterm encodes them the way the app
+        // asked (see `lib/termmouse.ts`); with no finger to take a point from,
+        // the terminal's centre stands in for one.
         const lines = Math.max(1, term.rows - 1)
         const element = term.element
         if (element) {
@@ -488,8 +375,7 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
       }
       if (navigator.maxTouchPoints > 0) {
         term.textarea?.blur()
-        // The compose textarea holds the keyboard when the compose bar is up;
-        // a page-scroll is a reading gesture on either surface, so let it go.
+        // A page-scroll is a reading gesture on either typing surface.
         composeInputRef.current?.blur()
       }
       return
@@ -502,10 +388,8 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
         term.scrollPages(1)
         break
     }
-    // Only a touch device has a soft keyboard to dismiss. Gating on touch
-    // capability stops a narrow-window mouse user (who also gets this mobile bar)
-    // from silently losing terminal focus when paging through output. The
-    // compose textarea can be the keyboard's holder too, so both surfaces let go.
+    // Only a touch device has a soft keyboard to dismiss; without the gate a
+    // narrow-window mouse user silently loses terminal focus when paging.
     if (navigator.maxTouchPoints > 0) {
       term.textarea?.blur()
       composeInputRef.current?.blur()

@@ -6,34 +6,25 @@ import type { editor } from "monaco-editor"
 import { monaco } from "@/lib/monacoSetup"
 import { autoRevertLanguageId } from "@/lib/editorLanguage"
 
-// The `monaco` instance's type, re-exported so a consumer (EditorOverlay's
-// `EditorBody`, which owns tab lifecycle and disposes closed tabs' models) can
-// type a ref to it WITHOUT importing `@/lib/monacoSetup` itself: that import
-// runs the multi-MB self-host bootstrap eagerly, defeating the whole point of
-// lazy-loading `CodeEditor`. A `MonacoInstance` type-only import is erased at
-// build time, so it costs nothing.
+// The `monaco` instance's type, re-exported so a consumer can type a ref to it
+// without importing `@/lib/monacoSetup`, whose self-host bootstrap runs eagerly
+// and would defeat lazy-loading `CodeEditor`. A type-only import is erased.
 export type MonacoInstance = typeof monaco
 
 interface CodeEditorProps {
   // The worktree-relative path — Monaco infers the language from its extension.
   path: string
-  // The user's per-file language override, from the header's language picker.
-  // `undefined` means no override, which is the default: the `language` prop
-  // is then absent and Monaco's own URI inference decides, exactly as before.
-  // Changing it re-languages the live model, so a pick applies without a
-  // remount and without touching the buffer. Setting a language is the
-  // wrapper's own effect; CLEARING one is not (it skips an undefined value),
-  // so the effect below owns that half.
+  // The user's per-file language override. `undefined` means none, and Monaco's
+  // own URI inference decides. Changing it re-languages the live model, so a pick
+  // applies without a remount; the wrapper's effect sets a language but skips an
+  // undefined value, so the effect below owns clearing one.
   language?: string
   value: string
   onChange: (value: string) => void
   onSave: () => void
-  // Fired once on mount with the `monaco` instance captured at `onMount`, so
-  // the PARENT (EditorBody, which owns the tab lifecycle) can dispose a
-  // closed tab's model by URI: `monaco.editor.getModel(monaco.Uri.parse(path))
-  // ?.dispose()`. CodeEditor stays a pure active-tab renderer and never
-  // disposes models itself, see EditorOverlay.tsx's "Monaco model lifecycle"
-  // comment for the full contract.
+  // Fired once on mount with the `monaco` instance, so the parent, which owns
+  // the tab lifecycle, can dispose a closed tab's model by URI. `CodeEditor`
+  // stays a pure active-tab renderer and never disposes a model itself.
   onReady?: (mon: MonacoInstance) => void
 }
 
@@ -55,12 +46,10 @@ export default function CodeEditor({
     language,
     path,
   })
-  // Picking "Auto" clears the `language` prop, and @monaco-editor/react ignores
-  // that: its effect is `model && language && setModelLanguage(...)`, so an
-  // undefined value sets nothing and the model keeps the language the user is
-  // clearing. Do it ourselves, for that one transition only; see
-  // `autoRevertLanguageId` for why a path change is left alone and for the
-  // shebang nuance this accepts.
+  // Picking "Auto" clears the `language` prop, which @monaco-editor/react
+  // ignores: an undefined value sets nothing and the model keeps the language
+  // being cleared. Done here for that one transition; `autoRevertLanguageId` has
+  // why a path change is left alone and the shebang nuance this accepts.
   useEffect(() => {
     const prev = lastLanguageRef.current
     const next = { language, path }
@@ -76,10 +65,9 @@ export default function CodeEditor({
     if (revertTo !== null) mon.editor.setModelLanguage(model, revertTo)
   }, [language, path])
 
-  // Ctrl/Cmd+s is bound once on mount, but `onSave` is a fresh closure each
-  // render (it reads the latest draft). Route the keybinding through a ref so it
-  // always calls the current handler, never a stale one that saves old content.
-  // The ref is updated in an effect (not during render) so re-renders stay pure.
+  // The save chord is bound once on mount while `onSave` is a fresh closure each
+  // render, so the binding goes through a ref or it saves old content. The ref
+  // is updated in an effect, not during render, so re-renders stay pure.
   const saveRef = useRef(onSave)
   useEffect(() => {
     saveRef.current = onSave

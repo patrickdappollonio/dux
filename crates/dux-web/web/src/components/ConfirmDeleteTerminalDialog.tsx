@@ -15,19 +15,15 @@ import {
 import { terminalForeground } from "@/lib/terminals"
 import type { TerminalView } from "@/lib/types"
 
-// Confirmation before closing a companion terminal. The TUI ALWAYS confirms
-// terminal deletion (its running process is killed), with Cancel as the default
-// focus — the web mirrors that exactly. The ✕ on the sidebar/mobile rows opens
-// this dialog instead of deleting on a single click.
+// Confirmation before closing a companion terminal, whose running process is
+// killed. Cancel takes focus, as in the TUI, and the row's ✕ opens this rather
+// than deleting on a single click.
 export function ConfirmDeleteTerminalDialog() {
   const { deleteTerminalTarget, spine } = useDux()
 
-  // Derive the terminal from the ViewModel so a process that exits while the
-  // dialog is open (the terminal vanishes from the model) closes it gracefully
-  // via the effect below, mirroring the TUI's exit handling. One flat
-  // collection, so this is a lookup by id and cannot miss an owner kind (a
-  // session-only scan once resolved a project terminal to `undefined`, so its
-  // dialog auto-closed the instant it opened).
+  // Derived from the ViewModel so a process that exits while the dialog is open
+  // closes it through the effect below. One flat collection, so this is a lookup
+  // by id and cannot miss an owner kind.
   const terminal: TerminalView | undefined =
     deleteTerminalTarget && spine
       ? spine.terminals.find((t) => t.id === deleteTerminalTarget)

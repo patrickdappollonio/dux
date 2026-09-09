@@ -21,16 +21,13 @@ import {
 /**
  * Pick a folder you already have and run an agent in it.
  *
- * The browsing is the add-project picker's, through the shared
- * `FolderBrowseList` and the store's one browse slice. What is deliberately
- * ABSENT is that picker's inspection ladder: a project must be a repository, so
- * adding one classifies the folder first and offers to `git init` a plain one.
- * A standalone agent accepts whatever is there, initializes nothing, and never
- * modifies the folder, so there is nothing to check and nothing to warn about.
+ * The browsing is the add-project picker's, through the shared `FolderBrowseList`
+ * and the store's one browse slice. That picker's inspection ladder is
+ * deliberately absent: a standalone agent accepts whatever is there, initializes
+ * nothing and never modifies the folder, so there is nothing to check.
  *
- * Every refusal (a relative path, a folder that already hosts a standalone
- * agent) is the SERVER's and arrives as a toast, shared with the terminal UI so
- * the two surfaces cannot answer the same question differently.
+ * Every refusal is the server's and arrives as a toast, shared with the terminal
+ * UI so the two surfaces cannot answer the same question differently.
  */
 function StandaloneAgentBrowser() {
   const { browsePath, browseEntries, browseLoading } = useDux()
@@ -49,10 +46,8 @@ function StandaloneAgentBrowser() {
     <DialogContent className="sm:max-w-xl" showCloseButton={false}>
       <DialogHeader>
         <DialogTitle>New standalone agent</DialogTitle>
-        {/* The words "standalone agent" appear here on purpose: it is the name
-            every other surface uses for this kind of agent (the menu entry, the
-            info panel, every refusal), so the dialog that creates one has to
-            teach it. */}
+        {/* The words "standalone agent" appear here on purpose: every other
+          * surface uses that name, so the dialog that creates one teaches it. */}
         <span className="text-xs text-muted-foreground">
           Pick any folder and a standalone agent runs there directly: no branch,
           no worktree, and dux never creates, moves or removes the folder.
@@ -80,11 +75,9 @@ function StandaloneAgentBrowser() {
             value={name}
             onChange={(e) => setName(e.target.value)}
             // Empty is the ordinary case: the server names the agent after the
-            // folder. A typed name is used as typed, since no branch is created
-            // and no ref-name rule applies.
-            // The promised default is derived through the twin of the server's
-            // own sanitizer, so the placeholder cannot name something other
-            // than what gets stored.
+            // folder. A typed name is used verbatim, no branch being created and
+            // no ref-name rule applying. The placeholder is derived through the
+            // twin of the server's sanitizer, so it cannot promise another name.
             placeholder={`Agent name (optional, defaults to "${standaloneAgentDefaultName(selected)}")`}
           />
           <span className="font-mono text-xs break-all text-muted-foreground">

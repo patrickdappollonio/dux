@@ -19,19 +19,16 @@ import {
 import type { Bootstrap, WelcomeScreenView } from "@/lib/bootstrapApi"
 import { hasRenderableBody, NO_NOTES_EXPLANATION } from "@/lib/releaseNotes"
 
-// THE first-load dialog: the first-run welcome AND the post-upgrade what's-new
-// screen. ONE renderer, deliberately — the two screens share a frame and differ
-// only in text and buttons, which is exactly how the approved design defines
-// them, and one renderer is also what keeps desktop and mobile in step (the
-// shared `GlobalOverlays` in App.tsx mounts this once for both shells).
+// The first-run welcome and the post-upgrade what's-new screen, from one
+// renderer: they share a frame and differ only in text and buttons, and one
+// renderer keeps desktop and mobile in step (`GlobalOverlays` mounts it once for
+// both shells).
 //
 // The content is server-projected plain prose (`dux_core::welcome_screen` and
 // `dux_core::release_notes`), never Markdown, so there is no renderer here and
-// no copy of the copy: the TUI says the same words from the same source.
+// no second copy of the copy: the TUI says the same words from the same source.
 //
-// Every colour is a token (`--muted-foreground`, `--primary`, `--border`, …).
-// The dux web palette is near-neutral greyscale with colour reserved for
-// meaning, so this screen introduces no accent hue of its own.
+// Every colour is a token, and this screen introduces no accent hue of its own.
 
 /** The duck's column width and the art inside it, from the approved mock. */
 const ART_COLUMN = "md:w-[152px]"
@@ -40,11 +37,10 @@ const DUCK_SIZE = "md:w-[118px]"
 export function FirstLoadDialog() {
   const { firstLoad, bootstrap, standaloneEditor } = useDux()
 
-  // The onboarding belongs to the MAIN shell. The standalone editor tab is a
-  // second SPA instance sharing the same store boot, so without this gate the
-  // welcome/what's-new screen would open over a tab that is nothing but the
-  // editor; it stands down there and shows in the workspace tab instead
-  // (dismissal is version-recorded server-side, so the two never both show).
+  // The onboarding belongs to the main shell. The standalone editor tab is a
+  // second SPA instance on the same store boot, so without this gate the screen
+  // opens over a tab that is nothing but the editor; dismissal is recorded
+  // server-side, so it still shows once, in the workspace tab.
   if (standaloneEditor) return null
 
   function handleOpenChange(open: boolean) {
@@ -55,17 +51,13 @@ export function FirstLoadDialog() {
 
   return (
     <Dialog open={firstLoad !== null} onOpenChange={handleOpenChange}>
-      {/* 700px: comfortably wider than a routine dialog, because this one
-          carries the duck column plus prose. On phones it becomes a bottom
-          sheet, docked to the bottom edge, full width, square bottom corners,
-          while staying the same component. The base primitive caps the height
-          to the visible viewport and would scroll the WHOLE popup, which takes
-          the title and the buttons away with the prose; on phones we therefore
-          neutralize its `grid`/`overflow-y-auto` (a later variant wins over the
-          unvariant utility, the same trick the docking classes already use) and
-          make the popup a non-scrolling flex column whose middle region is the
-          only scroller. This is the EditorOverlay pattern. Desktop is untouched:
-          every override here is `max-md:`. */}
+      {/* Wider than a routine dialog, because this one carries the duck column
+        * beside prose, and a bottom sheet on phones from the same component.
+        * The base primitive caps the height to the viewport and would scroll the
+        * whole popup, taking the title and buttons away with the prose, so on
+        * phones its `grid`/`overflow-y-auto` are neutralized and the popup is a
+        * flex column whose middle region is the only scroller. Every override
+        * here is `max-md:`, so desktop is untouched. */}
       <DialogContent
         className="sm:max-w-[700px] max-md:top-auto max-md:bottom-0 max-md:left-0 max-md:flex max-md:max-w-none max-md:translate-x-0 max-md:translate-y-0 max-md:flex-col max-md:overflow-hidden max-md:rounded-b-none"
       >
@@ -87,24 +79,20 @@ function Body({
   const isWelcome = state.screen === "welcome"
   const website = bootstrap?.website_url ?? ""
   const notesUrl = state.notes?.html_url ?? ""
-  // The footer names where the primary/link button will take you, so the
-  // destination is visible before it is clicked (the same affordance the TUI
-  // gallery puts in its footer).
+  // The footer names where the link button leads, so the destination is visible
+  // before it is clicked, as the TUI gallery's footer does.
   const destination = isWelcome ? website : notesUrl
-  // Width picks the layout. The phone masthead and the desktop header are the
-  // same three pieces in different places, and only one of them may exist: two
-  // DialogTitles in one dialog is two accessible names, and the version chip
-  // rendered twice is the same text queried twice. So this is a real DOM branch,
-  // not a `hidden`/`md:block` pair. The dropdown-menu primitive splits the same
-  // way, off the same hook.
+  // Width picks the layout, as a real DOM branch rather than a `hidden`/
+  // `md:block` pair: the phone masthead and the desktop header are the same
+  // pieces in different places, and only one may exist, or the dialog has two
+  // accessible names and the version chip answers a query twice.
   const isMobile = useIsMobile()
 
   return (
     <>
       {isMobile ? (
-        // Pinned: the mark, the title and (on what's-new) the version chip stay
-        // put while the prose scrolls beneath them. `pr-8` clears the popup's
-        // own absolutely positioned close button in the top-right corner.
+        // Pinned, so the mark, the title and the version chip stay put while the
+        // prose scrolls. `pr-8` clears the popup's own close button.
         <div
           data-slot="first-load-masthead"
           className="flex shrink-0 items-center gap-3 border-b border-border pr-8 pb-3"
@@ -147,9 +135,8 @@ function Body({
             <WhatsNewHeader state={state} />
           )}
 
-          {/* The ONLY scrolling region on phones. Inert on desktop, where the
-              popup itself still scrolls and this is a plain wrapper carrying
-              the same `gap-3` its children used to get from the column. */}
+          {/* The only scrolling region on phones. Inert on desktop, where the
+            * popup itself scrolls and this is a plain wrapper. */}
           <div
             data-slot="first-load-body"
             className="flex flex-col gap-3 max-md:min-h-0 max-md:flex-1 max-md:overflow-y-auto"
@@ -207,8 +194,7 @@ function Tagline({ welcome }: { welcome: WelcomeScreenView }) {
 }
 
 // `withTagline`: on phones the title lives in the pinned masthead and the
-// tagline scrolls with the prose it introduces, so it is rendered here instead
-// of in the header.
+// tagline scrolls with the prose it introduces, so it is rendered here.
 function WelcomeContent({
   bootstrap,
   withTagline,
@@ -229,10 +215,9 @@ function WelcomeContent({
             </p>
           ))}
 
-          {/* The numbered steps DELIBERATELY repeat the prose above, so a reader
-              who skips the paragraphs can still act. Numbered because it is a
-              real sequence: no agent without a project, no launch without an
-              agent. */}
+          {/* The steps deliberately repeat the prose above, so a reader who
+            * skips the paragraphs can still act, and are numbered because the
+            * sequence is real: no agent without a project. */}
           <ol className="mt-1 flex flex-col gap-3">
             {welcome.steps.map((step) => (
               <li key={step.number} className="flex gap-3">
@@ -268,20 +253,15 @@ function WelcomeContent({
 /**
  * A link-shaped button that is genuinely inert when it has no destination.
  *
- * MEASURED, not assumed: `<Button disabled render={<a href=… />} />` renders an
- * anchor that still carries its `href` and gains `disabled=""`/`data-disabled`.
- * Neither does anything to an anchor — the CSS `:disabled` pseudo-class (and so
- * the variant's `disabled:pointer-events-none`) does not match `<a>` — so it
- * stays clickable and navigates. When there is no URL we therefore render a real
- * disabled `<button>`, which is inert for real.
+ * A disabled `Button` rendered as an anchor keeps its `href` and gains only
+ * `disabled` attributes, which do nothing to an `<a>`: the CSS `:disabled`
+ * pseudo-class does not match one, so the variant's `pointer-events-none` never
+ * applies and it still navigates. With no URL this renders a real `<button>`.
  *
- * Using the link DISMISSES the screen, matching the TUI, which closes the screen
- * and then opens the URL so the version is always recorded. Without this, a user
- * who clicks "Open full notes" or "Visit the website" and then closes the tab
- * records nothing and sees the same screen next launch. Base UI's render prop
- * merges this `onClick` onto the custom `<a>` (which carries none of its own), so
- * the handler runs before the browser's native new-tab navigation and the link
- * still opens. The sibling "Add a project" button does the same thing.
+ * Following the link dismisses the screen, matching the TUI, so the version is
+ * recorded even if the user then closes the tab. The render prop merges this
+ * `onClick` onto the `<a>`, which carries none of its own, so the handler runs
+ * before the browser's navigation and the link still opens.
  */
 function LinkButton({
   href,
@@ -377,13 +357,11 @@ function WhatsNewContent({ state }: { state: FirstLoadDialogState }) {
         // A real error in the body, not just a toast that may have auto-cleared.
         <p className="text-sm text-destructive">{state.error}</p>
       ) : notes && !hasRenderableBody(notes) ? (
-        // The release exists but its body had nothing the server-side parser could
-        // read as prose or feature titles. The headline above is still the title,
-        // so without this the dialog is a title, two buttons, and a blank middle.
-        // Reachable without anyone doing anything unusual: GitHub prepends
-        // `## What's Changed` and the release workflow appends `## Installation`,
-        // so a one-line human headline is all the parser is left with. The
-        // required format is written down in CONTRIBUTING.md.
+        // The release exists but its body held nothing the server-side parser
+        // could read as prose or feature titles, which leaves the dialog a title,
+        // two buttons and a blank middle. Routinely reachable, because the
+        // generated release-body sections are not prose; CONTRIBUTING.md has the
+        // format the parser needs.
         <p className="text-sm text-muted-foreground">{NO_NOTES_EXPLANATION}</p>
       ) : notes ? (
         <>

@@ -12,22 +12,18 @@ import {
   useDux,
 } from "@/lib/store"
 
-// What an editor says when the thing it was rooted at goes away while a
-// buffer is dirty.
+// What an editor says when the thing it was rooted at goes away while a buffer
+// is dirty.
 //
-// It is a sibling of `ConfirmCloseEditorTabDialog`, not a variant of the reload
-// confirm: that one is about disk truth (the file moved, reload or keep), and
-// this one is about the ROOT, which has no disk truth left to compare against.
-// The root that could have saved this text is exactly what vanished, so there
-// is no Save to offer and no reload to run. The honest choice is between
-// leaving and staying to copy the words out, so "Keep it open" is the safe
-// default and the destructive half is the one that discards.
+// A sibling of `ConfirmCloseEditorTabDialog` rather than a variant of the reload
+// confirm, which is about disk truth: the root that could have saved this text is
+// what vanished, so there is no Save to offer and no reload to run. The choice is
+// between leaving and staying to copy the words out, so keeping it open is the
+// safe default and the destructive half discards.
 //
-// Both surfaces raise it: the standalone tab and the in-app overlay share one
-// vanish handler (`endOpenEditorIfRootGone` in the store), because the
-// workspace still being visible around the overlay changes nothing about the
-// unsaved text. On either surface, only this confirm may discard it; a clean
-// buffer closes with a warning toast instead.
+// Both surfaces raise it, through the store's one `endOpenEditorIfRootGone`
+// handler, and on either only this confirm may discard the text; a clean buffer
+// closes with a warning toast instead.
 export function ConfirmVanishedEditorDialog() {
   const { editorTargetGone } = useDux()
   const isTerminal = editorTargetGone?.kind === "terminal"

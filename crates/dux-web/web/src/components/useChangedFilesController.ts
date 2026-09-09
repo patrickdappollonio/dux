@@ -66,10 +66,9 @@ function changedFilesModel(
     staged: filterChangedFiles(changed.staged, query),
     unstaged: filterChangedFiles(changed.unstaged, query),
   }
-  // The recap describes exactly the rows visible beneath it, so it is summed
-  // over the FILTERED lists, matching the first number in the group badge's
-  // "3 of 17". The header's figure is the two visible sets added together, not
-  // an unfiltered total.
+  // The recap describes exactly the rows visible beneath it, so it is summed over
+  // the filtered lists and the header's figure is the visible sets added
+  // together, never an unfiltered total.
   const stagedRecap = summarizeChangedFiles(filtered.staged)
   const unstagedRecap = summarizeChangedFiles(filtered.unstaged)
   const selected = reconcileSelection(
@@ -108,10 +107,9 @@ function bulkResultToast(
   result: { done: string[]; refused: string[] },
 ): void {
   const past = verb === "stage" ? "staged" : "unstaged"
-  // A clean stage or unstage says nothing: the rows move between the two
-  // sections of the pane the click happened in, which is the whole feedback.
-  // A REFUSAL still speaks, because the rows that did not move are exactly the
-  // ones that are no longer on screen to be looked at.
+  // A clean stage or unstage says nothing: the rows moving between the pane's
+  // sections is the whole feedback. A refusal still speaks, because rows that
+  // did not move are the ones there is nothing on screen to explain.
   if (result.refused.length === 0) return
   notifyWarning(
     `${fileCount(result.done.length)} ${past}. ${fileCount(
