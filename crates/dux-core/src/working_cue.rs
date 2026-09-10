@@ -140,7 +140,10 @@ mod tests {
         let mut previous = pulse_level(0);
         for elapsed in (10..=WORKING_CUE_PERIOD_MS / 2).step_by(10) {
             let level = pulse_level(elapsed);
-            assert!(level <= previous, "rose at {elapsed}: {previous} -> {level}");
+            assert!(
+                level <= previous,
+                "rose at {elapsed}: {previous} -> {level}"
+            );
             previous = level;
         }
     }

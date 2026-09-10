@@ -18,15 +18,16 @@ pub(crate) const REDRAW_BACKSTOP: Duration = Duration::from_secs(1);
 /// The phase of every wall-clock animation the renderer reads, each quantized
 /// to ITS OWN frame interval and present only while it is actually painted. The
 /// gate compares phases rather than elapsed time, so every animation redraws at
-/// its own cadence: a shimmering row at the shimmer's, a row that only spins at
-/// the spinner's, and a screen with neither at nothing but the backstop.
+/// its own cadence: a working row at the spinner's, its slower cue riding along,
+/// and a screen with no animation at nothing but the backstop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AnimationPhase {
     /// Index into [`crate::theme::SPINNER_FRAMES`].
     spinner: Option<usize>,
-    /// The shimmer sweep sampled at [`crate::theme::SHIMMER_FRAME_MS`]; it has
-    /// no glyph of its own, so the interval is the sampling rate.
-    shimmer: Option<usize>,
+    /// The working cue's step, counted at
+    /// [`dux_core::working_cue::ELLIPSIS_STEP_MS`]: the state word's shade and
+    /// its ellipsis both change on it, and neither has a glyph of its own.
+    cue: Option<usize>,
     attention_on: Option<bool>,
     /// The modal refusal cue's own phase, false whenever the cue is not running.
     refusal_on: bool,
@@ -159,8 +160,8 @@ impl App {
         changed
     }
 
-    /// Whether a row is working: the one flag the spinner glyph and the name
-    /// shimmer both fire on.
+    /// Whether a row is working: the one flag the spinner glyph and the pulsing
+    /// state word both fire on.
     fn any_row_working(&self) -> bool {
         self.engine.sessions.iter().any(|session| {
             matches!(session.status, crate::model::SessionStatus::Active)
@@ -209,16 +210,16 @@ impl App {
                 ((elapsed / crate::theme::SPINNER_FRAME_MS) as usize)
                     % crate::theme::SPINNER_FRAMES.len()
             }),
-            shimmer: self
+            cue: self
                 .any_row_working()
-                .then_some((elapsed / crate::theme::SHIMMER_FRAME_MS) as usize),
+                .then_some((elapsed / dux_core::working_cue::ELLIPSIS_STEP_MS as u128) as usize),
             attention_on: self
                 .attention_cue_visible()
                 .then(|| attention_blink_phase(elapsed)),
             refusal_on: self.refusal_blink_highlight(),
         };
         let resting = phase.spinner.is_none()
-            && phase.shimmer.is_none()
+            && phase.cue.is_none()
             && phase.attention_on.is_none()
             && !phase.refusal_on;
         (!resting).then_some(phase)
@@ -375,7 +376,7 @@ mod tests {
     #[test]
     fn a_spinning_row_draws_at_the_spinner_cadence_not_the_poll_cadence() {
         let (mut app, mut terminal, _start) = app_at_rest();
-        // A spinner with no shimmer beside it: the project browser's listing.
+        // A spinner with no working cue beside it: the project browser's listing.
         app.prompt = PromptState::BrowseProjects {
             purpose: crate::app::BrowsePurpose::AddProject,
             current_dir: std::path::PathBuf::from("/tmp"),
@@ -398,25 +399,63 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_shimmering_row_keeps_the_shimmers_own_cadence() {
-        let (mut app, mut terminal, _start) = app_at_rest();
-        // A streaming agent: the spinner AND the name shimmer are on screen, and
-        // the shimmer is the faster of the two.
+    /// Put the fixture's only session into the working state: Active, with
+    /// streaming keyed by TAB id (the session's slot tab is the only tab it has).
+    fn make_the_row_work(app: &mut App) {
         app.engine.sessions[0].status = crate::model::SessionStatus::Active;
-        // Streaming is keyed by TAB id, and the fixture session's slot tab is
-        // the only tab it has.
         app.engine
             .pty_activity
             .insert("session-1-slot".to_string(), Instant::now());
         assert!(app.any_row_animating(), "the row must be animating");
+    }
+
+    #[test]
+    fn a_working_row_draws_at_the_spinner_cadence() {
+        let (mut app, mut terminal, _start) = app_at_rest();
+        // A streaming agent carries the spinner AND the working cue, and the
+        // spinner is the faster of the two, so it sets the pace.
+        make_the_row_work(&mut app);
 
         let drawn = frames_per_simulated_second(&mut app, &mut terminal);
-        let shimmer_rate = 1_000 / crate::theme::SHIMMER_FRAME_MS as u64;
+        let spinner_rate = 1_000 / crate::theme::SPINNER_FRAME_MS as u64;
         assert!(
-            drawn.abs_diff(shimmer_rate) <= 2,
-            "the shimmer must keep its own cadence of about {shimmer_rate} frames a \
-             second, not fall back to the spinner's; drew {drawn}"
+            drawn.abs_diff(spinner_rate) <= 2,
+            "a working row must draw at the spinner's cadence of about \
+             {spinner_rate} frames a second; drew {drawn}"
+        );
+    }
+
+    #[test]
+    fn the_working_cue_advances_two_and_a_half_times_a_second() {
+        let (mut app, _terminal, start) = app_at_rest();
+        make_the_row_work(&mut app);
+        // The cue is the pulsing state word and its ellipsis: no glyph of its
+        // own, so its step IS its frame interval. Sampled across one simulated
+        // second at the poll cadence, it must advance at 2.5 frames a second.
+        let steps: Vec<Option<usize>> = (0..30u64)
+            .map(|step| {
+                app.animation_phase_at(start + Duration::from_millis(step * 33))
+                    .expect("a working row animates")
+                    .cue
+            })
+            .collect();
+        assert!(steps.iter().all(Option::is_some), "the cue must be present");
+        let advances = steps.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        assert_eq!(
+            advances,
+            2,
+            "the cue must advance every {}ms, not every frame; saw {advances} \
+             advances in a second",
+            dux_core::working_cue::ELLIPSIS_STEP_MS
+        );
+    }
+
+    #[test]
+    fn a_resting_row_carries_no_working_cue() {
+        let (app, _terminal, start) = app_at_rest();
+        assert!(
+            app.animation_phase_at(start).is_none(),
+            "nothing on screen animates, so there is no phase at all"
         );
     }
 

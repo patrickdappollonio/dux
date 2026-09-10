@@ -21494,7 +21494,7 @@ not_a_real_action = ["x"]
         // Idle: nothing is animating, so the loop can stay on the lazy cadence.
         assert!(!app.any_row_animating());
         // Fresh PTY activity on the session-slot tab marks it streaming (working),
-        // which drives the spinner + shimmer, so the loop must animate.
+        // which drives the spinner and the working cue, so the loop must animate.
         app.engine
             .pty_activity
             .insert("s1-slot".to_string(), std::time::Instant::now());
@@ -21507,7 +21507,7 @@ not_a_real_action = ["x"]
         app.engine.sessions.clear();
         assert!(!app.any_row_animating());
         // A terminal whose foreground is owned by an app is Running (its spinner
-        // and label shimmer animate) even with no output streaming, so the loop
+        // and state word animate) even with no output streaming, so the loop
         // must animate for it too, not only for PTY-streaming rows.
         let args: Vec<String> = vec![];
         app.engine.companion_terminals.insert(

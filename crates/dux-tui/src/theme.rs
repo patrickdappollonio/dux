@@ -17,10 +17,28 @@ pub const SPINNER_FRAMES: &[char] = &['◜', '◠', '◝', '◞', '◡', '◟'];
 /// polls every 33ms while anything animates, which keeps this cadence honest.
 pub const SPINNER_FRAME_MS: u128 = 75;
 
-/// Wall-clock milliseconds per sampled frame of the working-name shimmer. The
-/// band sweeps once every `shimmer::PERIOD_MS` and its brightness is
-/// continuous, so this is the interval at which a redraw is worth paying for.
-pub const SHIMMER_FRAME_MS: u128 = 33;
+/// How far toward the muted tone the working word travels at the bottom of its
+/// pulse. A cell has no opacity, so the dip is a color blend; two thirds keeps a
+/// visible third of the working green, which still reads as green beside the
+/// grey it sits in.
+const WORKING_WORD_MAX_MUTE: f32 = 2.0 / 3.0;
+
+/// The working state word's shade at `step`, the quantized pulse cell from
+/// `dux_core::working_cue::pulse_step`. Full `working` at the top of the pulse,
+/// blended toward `muted` as the level falls, so the word breathes on the same
+/// clock as its ellipsis. Written against the two tokens rather than a literal,
+/// so every theme pulses in its own palette; a non-RGB token cannot be blended,
+/// so it rests at `working` rather than being guessed at.
+pub fn working_word_color(working: Color, muted: Color, step: usize) -> Color {
+    let (Color::Rgb(wr, wg, wb), Color::Rgb(mr, mg, mb)) = (working, muted) else {
+        return working;
+    };
+    let level = dux_core::working_cue::step_level(step);
+    let floor = dux_core::working_cue::PULSE_FLOOR;
+    let t = WORKING_WORD_MAX_MUTE * (1.0 - level) / (1.0 - floor);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color::Rgb(mix(wr, mr), mix(wg, mg), mix(wb, mb))
+}
 
 /// The one solid round dot dux paints, reused by name so the glyph cannot
 /// drift between call sites.
@@ -749,6 +767,49 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_working_word_rests_at_the_working_token_and_dips_toward_muted() {
+        let working = Color::Rgb(0x22, 0xc5, 0x5e);
+        let muted = Color::Rgb(0x64, 0x64, 0x64);
+        // Step 0 is the top of the pulse: the untouched working token.
+        assert_eq!(working_word_color(working, muted, 0), working);
+        // The two mid cells are the same shade, and the floor is the dimmest.
+        assert_eq!(
+            working_word_color(working, muted, 1),
+            working_word_color(working, muted, 3)
+        );
+        let (Color::Rgb(_, mid_g, _), Color::Rgb(_, floor_g, _)) = (
+            working_word_color(working, muted, 1),
+            working_word_color(working, muted, 2),
+        ) else {
+            panic!("expected RGB shades");
+        };
+        assert!(floor_g < mid_g && mid_g < 0xc5);
+    }
+
+    #[test]
+    fn the_working_word_stays_visibly_green_at_the_floor() {
+        // The bottom of the pulse is a dip, not a fade-out: the floor shade must
+        // still read as the working color rather than as the grey beside it.
+        let working = Color::Rgb(0x22, 0xc5, 0x5e);
+        let muted = Color::Rgb(0x64, 0x64, 0x64);
+        let Color::Rgb(r, g, b) = working_word_color(working, muted, 2) else {
+            panic!("expected an RGB shade");
+        };
+        assert!(
+            g > r + 30 && g > b + 30,
+            "the floor shade ({r},{g},{b}) has lost its green"
+        );
+    }
+
+    #[test]
+    fn a_non_rgb_token_rests_rather_than_being_guessed_at() {
+        assert_eq!(
+            working_word_color(Color::Green, Color::Rgb(1, 2, 3), 2),
+            Color::Green
+        );
+    }
 
     /// The standalone star must occupy exactly one terminal cell, measured
     /// through the same `CellWidth` trait the row layout advances columns

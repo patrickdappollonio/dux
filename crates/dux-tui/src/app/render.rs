@@ -283,6 +283,13 @@ pub(crate) fn agent_row_branch_segment(session: &AgentSession) -> Option<String>
 /// Priority for an Active session: `needs_attention`, else `typing`, else
 /// `working`, else "Idle". Typing and working never apply to a non-Active
 /// session, so Detached and Exited win outright.
+/// The busy word on an agent row. Named so the working cue can recognise the
+/// word it pulses without a second copy of the literal beside it.
+pub(crate) const AGENT_WORKING_WORD: &str = "Working";
+/// The busy word on a terminal row: a terminal runs a process, it does not work
+/// at one.
+pub(crate) const TERMINAL_WORKING_WORD: &str = "Running";
+
 pub(crate) fn agent_state_word(
     status: crate::model::SessionStatus,
     working: bool,
@@ -296,7 +303,7 @@ pub(crate) fn agent_state_word(
     match dux_core::row_state::agent_row_state(status, working, typing, needs_attention) {
         RowState::NeedsAttention => "Needs you",
         RowState::Typing => "Typing",
-        RowState::Busy => "Working",
+        RowState::Busy => AGENT_WORKING_WORD,
         RowState::Idle => "Idle",
         RowState::Detached => "Detached",
         RowState::Exited => "Exited",
@@ -1665,15 +1672,13 @@ impl App {
         // (theme `search_match_fg` + BOLD; the same range logic the web uses).
         // Only the name field is checked, so a row that matched on its project,
         // branch, or provider highlights nothing, exactly what the filter
-        // matched on this visible text. While a hit is highlighted the working
-        // shimmer stands down for that row: the search is transient and seeing
-        // WHAT matched is its whole point.
+        // matched on this visible text.
         let search_range = self
             .agent_filter
             .as_ref()
             .and_then(|input| dux_core::agent_search::match_char_range(&label, &input.text));
-        // Otherwise the name shimmers while the agent is operating, or renders as
-        // one plain span.
+        // The name never animates: the working cue is the pulsing state word and
+        // its ellipsis on line two, so line one is one plain span.
         let name_spans: Vec<Span<'static>> = if let Some(range) = search_range {
             search_highlight_spans(
                 &label,
@@ -1686,14 +1691,7 @@ impl App {
                 range,
             )
         } else {
-            match (working && !deleting, base_color) {
-                (true, Color::Rgb(r, g, b)) => crate::shimmer::shimmer_spans(
-                    &label,
-                    (r, g, b),
-                    self.start_time.elapsed().as_millis(),
-                ),
-                _ => vec![Span::styled(label.clone(), name_style)],
-            }
+            vec![Span::styled(label.clone(), name_style)]
         };
 
         // Line one: glyph + name packed left, and (if present) the PR badge
@@ -1732,7 +1730,26 @@ impl App {
         // same star at the same indent; owned terminal rows keep their arrow.
         let (marker, name_span) = self.agent_row_owner_spans(session, found, muted);
         let word = agent_state_word(session.status, working, typing, needs_attention);
-        let word_color = self.agent_row_state_color(word, deleting, steady_color);
+        // The one working cue: the word pulses between the working token and the
+        // muted tone beside it, and a cycling ellipsis runs after it in a slot
+        // three cells wide, so the tab count behind it never moves as the dots
+        // come and go.
+        let (word_text, word_color) = if working && !deleting && word == AGENT_WORKING_WORD {
+            let elapsed = self.start_time.elapsed().as_millis() as u64;
+            (
+                format!("{word}{}", dux_core::working_cue::ellipsis_slot(elapsed)),
+                crate::theme::working_word_color(
+                    self.theme.session_working,
+                    muted,
+                    dux_core::working_cue::pulse_step(elapsed),
+                ),
+            )
+        } else {
+            (
+                word.to_string(),
+                self.agent_row_state_color(word, deleting, steady_color),
+            )
+        };
         // Show the branch only when it differs from the displayed name (i.e. a
         // title is set), so it is not repeated as the name on line one, and
         // never at all for an agent that has no branch.
@@ -1783,7 +1800,7 @@ impl App {
             text_width,
             marker,
             name_span,
-            Span::styled(word.to_string(), Style::default().fg(word_color)),
+            Span::styled(word_text, Style::default().fg(word_color)),
             branch_span,
             [tabs_span, remote_span].into_iter().flatten().collect(),
             MetaLineStyle {
@@ -11820,17 +11837,12 @@ fn terminal_row_lines(
         Some(title) if !title.is_empty() => title,
         _ => "Terminal",
     };
-    // The label shimmers while the terminal is Running; otherwise it is a single
-    // plain span.
-    let name_spans: Vec<Span<'static>> = match (working, base_color) {
-        (true, Color::Rgb(r, g, b)) => {
-            crate::shimmer::shimmer_spans(primary, (r, g, b), elapsed_ms)
-        }
-        _ => vec![Span::styled(
-            primary.to_string(),
-            Style::default().fg(base_color),
-        )],
-    };
+    // The label never animates: the working cue is the pulsing state word and
+    // its ellipsis on line two.
+    let name_spans: Vec<Span<'static>> = vec![Span::styled(
+        primary.to_string(),
+        Style::default().fg(base_color),
+    )];
     let mut spans = vec![Span::styled(
         format!("{glyph} "),
         Style::default().fg(base_color),
@@ -11845,15 +11857,25 @@ fn terminal_row_lines(
     // agents keep "Working".
     let word = match dux_core::row_state::terminal_row_state(working, typing) {
         dux_core::row_state::RowState::Typing => "Typing",
-        dux_core::row_state::RowState::Busy => "Running",
+        dux_core::row_state::RowState::Busy => TERMINAL_WORKING_WORD,
         _ => "Idle",
     };
-    let word_color = if typing {
-        theme.session_typing
-    } else if working {
-        theme.session_working
+    // The same working cue the agent row wears: the word pulses toward the muted
+    // tone and a cycling ellipsis follows it in a fixed three-cell slot.
+    let (word_text, word_color) = if word == TERMINAL_WORKING_WORD {
+        let elapsed = elapsed_ms as u64;
+        (
+            format!("{word}{}", dux_core::working_cue::ellipsis_slot(elapsed)),
+            crate::theme::working_word_color(
+                theme.session_working,
+                muted,
+                dux_core::working_cue::pulse_step(elapsed),
+            ),
+        )
+    } else if typing {
+        (word.to_string(), theme.session_typing)
     } else {
-        muted
+        (word.to_string(), muted)
     };
     // A two-space indent aligns the owner marker under the label column,
     // echoing the agent row's "  ※ " project marker. An owned terminal wears
@@ -11875,7 +11897,7 @@ fn terminal_row_lines(
             owner_name.to_string(),
             Style::default().fg(marker_fg),
         )),
-        Span::styled(word.to_string(), Style::default().fg(word_color)),
+        Span::styled(word_text, Style::default().fg(word_color)),
         None,
         Vec::new(),
         MetaLineStyle {
@@ -13646,6 +13668,66 @@ mod tests {
     }
 
     #[test]
+    fn a_running_terminal_row_keeps_one_width_across_the_four_dot_states() {
+        let theme = crate::theme::Theme::default_dark();
+        let width = 40;
+        let rendered: Vec<(String, Color)> = (0..4u128)
+            .map(|step| {
+                let elapsed = step * dux_core::working_cue::ELLIPSIS_STEP_MS as u128
+                    + dux_core::working_cue::ELLIPSIS_STEP_MS as u128 / 2;
+                let (_, line2) = terminal_row_lines(
+                    &theme,
+                    false,
+                    true,
+                    '◠',
+                    Some("cargo test"),
+                    "proj",
+                    false,
+                    width,
+                    elapsed,
+                    None,
+                );
+                let text: String = line2
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                let word = line2
+                    .spans
+                    .iter()
+                    .find(|span| span.content.starts_with(TERMINAL_WORKING_WORD))
+                    .expect("the running word");
+                (text, word.style.fg.expect("a word color"))
+            })
+            .collect();
+
+        // The dots cycle...
+        let dots: Vec<String> = rendered
+            .iter()
+            .map(|(text, _)| {
+                let at = text.find(TERMINAL_WORKING_WORD).expect("the running word");
+                let start = at + TERMINAL_WORKING_WORD.len();
+                text[start..start + dux_core::working_cue::ELLIPSIS_SLOT_WIDTH].to_string()
+            })
+            .collect();
+        assert_eq!(dots, vec!["   ", ".  ", ".. ", "..."]);
+        // ...the rendered width never does...
+        let widths: Vec<usize> = rendered
+            .iter()
+            .map(|(text, _)| text.chars().count())
+            .collect();
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "the row width moved with the dots: {widths:?}"
+        );
+        // ...and the word pulses through three shades, brightest first.
+        let shades: Vec<Color> = rendered.iter().map(|(_, fg)| *fg).collect();
+        assert_eq!(shades[0], theme.session_working);
+        assert_eq!(shades[1], shades[3]);
+        assert_ne!(shades[1], shades[2]);
+    }
+
+    #[test]
     fn terminal_row_lines_render_two_content_lines_and_a_spacer() {
         let theme = crate::theme::Theme::default_dark();
         let width = 40;
@@ -13697,8 +13779,8 @@ mod tests {
         );
 
         // Busy terminal: the foreground command replaces the label, the spinner
-        // glyph shows in the NEUTRAL color, the label shimmers (split per char),
-        // and only the word is "Running" in the busy color.
+        // glyph shows in the NEUTRAL color, the label is one plain span (it does
+        // not animate), and the "Running" word carries the working cue.
         let (working0, working1) = terminal_row_lines(
             &theme,
             false,
@@ -13715,12 +13797,23 @@ mod tests {
         assert!(!line_text(&working0).contains("zsh"));
         assert!(line_text(&working0).contains('◠'));
         assert_eq!(working0.spans[0].style.fg, Some(theme.session_active));
-        // The shimmer splits the label into per-character spans (glyph + chars).
-        assert!(
-            working0.spans.len() > 3,
-            "expected a shimmered (per-char) label"
+        // The label is the glyph span plus one plain name span, never a band of
+        // per-character spans: the name does not animate any more.
+        assert_eq!(
+            working0.spans.len(),
+            2,
+            "the name must be one plain span, not a per-character band"
         );
-        assert_eq!(word_span(&working1, "Running"), Some(theme.session_working));
+        // The working word wears the pulse shade at this step, and the ellipsis
+        // slot rides in the same span.
+        assert_eq!(
+            word_span(&working1, "Running   "),
+            Some(crate::theme::working_word_color(
+                theme.session_working,
+                theme.provider_label_fg,
+                0
+            ))
+        );
 
         // Typing wins over working: the typing glyph shows, but line one stays
         // neutral; only the "Typing" word carries the session_typing color.
@@ -16340,6 +16433,95 @@ mod tests {
             .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The four ellipsis states of a working agent row's line two, as plain text.
+    fn working_agent_line_twos(width: u16) -> Vec<String> {
+        (0..4u64)
+            .map(|step| {
+                let mut app = test_app(default_bindings());
+                app.engine.sessions[0].status = crate::model::SessionStatus::Active;
+                let slot = app.engine.sessions[0].slot_tab_id().to_string();
+                app.engine.pty_activity.insert(slot, Instant::now());
+                // Land mid-cell so the sample cannot sit on a boundary.
+                app.start_time = Instant::now()
+                    - Duration::from_millis(
+                        step * dux_core::working_cue::ELLIPSIS_STEP_MS
+                            + dux_core::working_cue::ELLIPSIS_STEP_MS / 2,
+                    );
+                agent_row_text(&app, width)
+                    .lines()
+                    .nth(1)
+                    .expect("line two")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_working_word_cycles_its_dots_in_a_fixed_slot() {
+        let lines = working_agent_line_twos(60);
+        let dots: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                let at = line.find(AGENT_WORKING_WORD).expect("the working word");
+                let start = at + AGENT_WORKING_WORD.len();
+                line[start..start + dux_core::working_cue::ELLIPSIS_SLOT_WIDTH].to_string()
+            })
+            .collect();
+        assert_eq!(dots, vec!["   ", ".  ", ".. ", "..."]);
+    }
+
+    #[test]
+    fn nothing_behind_the_working_word_moves_as_the_dots_cycle() {
+        // The slot is reserved at three cells, so the rest of line two is
+        // byte-for-byte the same whichever ellipsis is showing.
+        let lines = working_agent_line_twos(60);
+        let tails: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                let at = line.find(AGENT_WORKING_WORD).expect("the working word");
+                let end =
+                    at + AGENT_WORKING_WORD.len() + dux_core::working_cue::ELLIPSIS_SLOT_WIDTH;
+                format!("{}|{}", &line[..at], &line[end..])
+            })
+            .collect();
+        assert!(
+            tails.windows(2).all(|pair| pair[0] == pair[1]),
+            "line two shifted as the dots cycled: {tails:?}"
+        );
+    }
+
+    #[test]
+    fn a_working_agent_name_carries_no_animated_band() {
+        // Line one is the glyph and the name and nothing else: the cue lives
+        // entirely on line two now.
+        let mut app = test_app(default_bindings());
+        app.engine.sessions[0].status = crate::model::SessionStatus::Active;
+        let slot = app.engine.sessions[0].slot_tab_id().to_string();
+        app.engine.pty_activity.insert(slot, Instant::now());
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::List;
+
+        let session = app.engine.sessions[0].clone();
+        let width = 60;
+        let item = app.render_agent_row(&session, width);
+        let mut terminal = Terminal::new(TestBackend::new(width, 3)).expect("terminal");
+        terminal
+            .draw(|frame| frame.render_widget(List::new(vec![item]), frame.area()))
+            .expect("render row");
+        let buf = terminal.backend().buffer();
+        // The name starts after the glyph and its space. Every one of its cells
+        // must carry the same foreground: a sweeping band would tint them apart.
+        let label = session.display_label();
+        let shades: Vec<Color> = (0..label.chars().count() as u16)
+            .map(|offset| buf[(2 + offset, 0)].fg)
+            .collect();
+        assert!(
+            shades.windows(2).all(|pair| pair[0] == pair[1]),
+            "the name is tinted per character, so something still animates it: {shades:?}"
+        );
     }
 
     #[test]

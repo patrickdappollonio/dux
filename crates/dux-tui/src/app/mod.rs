@@ -4401,7 +4401,7 @@ impl App {
     }
 
     /// Whether anything on screen currently has a live animation: a working
-    /// agent or terminal (spinner + name shimmer), an attention blink, or the
+    /// agent or terminal (the spinner and the pulsing state word), an attention blink, or the
     /// one-shot modal refusal cue. The run loop polls faster while this is true
     /// so those animations render smoothly, and falls back to the lazy cadence
     /// when everything is quiet.
@@ -4419,7 +4419,7 @@ impl App {
                     || (attention_on && self.engine.session_needs_attention(&s.id)))
         });
         // `terminal_is_working`, not `is_agent_streaming`: a terminal running a
-        // quiet foreground app is "Running" (its spinner and label shimmer
+        // quiet foreground app is "Running" (its spinner and state word
         // animate) even with no output streaming.
         let terminals = self
             .engine
