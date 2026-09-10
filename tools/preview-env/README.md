@@ -183,7 +183,10 @@ docker compose down -v         # stop + wipe all preview state
 ```
 
 These need no environment set: every variable in `compose.yml` defaults to what
-the scripts pass, so plain compose commands work from this directory.
+the scripts pass, so plain compose commands work from this directory. The one
+exception is a moved port: the `DUX_PORT + 208` derivation lives in `up.sh`, so
+a compose command you run yourself with `DUX_PORT` set needs `DUX_TUI_PORT` set
+too, or the second published port stays on its 8998 default.
 
 ## Login-walled providers
 

@@ -8,11 +8,9 @@
 #   ./up.sh --restart       # rebuild binary + restart container (no image rebuild)
 #   DUX_PORT=9000 ./up.sh   # move both published ports (web 9000, TUI 9208)
 #
-# Two loopback ports are published: the web preview on DUX_PORT (default 8790)
-# and the concurrent-TUI journey's background server on DUX_TUI_PORT, which
-# defaults to DUX_PORT + 208 so moving one moves both and a second stack does
-# not collide on the second port. shot.sh reads DUX_PORT too, so export it (or
-# pass it to both) when you move the web port.
+# Two loopback ports are published; see the DUX_TUI_PORT block below and the
+# README for how they move together. shot.sh reads DUX_PORT independently, so
+# export it (or pass it to both) when you move the web port.
 #
 # Docker only, on purpose. Never run `dux server` directly on a development
 # host to inspect the UI: it would share the developer's real ~/.config/dux
@@ -24,6 +22,28 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${DUX_SRC:-$(cd "$HERE/../.." && pwd)}"
 DUX_PORT="${DUX_PORT:-8790}"
+
+# Refuse a port that is not a plain decimal number, BEFORE the release build:
+# the arithmetic below is the only thing that would notice, an arithmetic error
+# is not fatal under `set -e` inside a `${x:-...}` default, and the stack would
+# then come up on the pinned fallback port after several minutes of cargo. A
+# leading zero is rejected for the same reason: the shell reads 09000 as octal
+# and refuses the digit 9.
+require_port() {
+  case "$2" in
+    '' | *[!0-9]*) ;;
+    0*) ;;
+    *) return 0 ;;
+  esac
+  echo "error: $1 must be a plain decimal port number with no leading zero," >&2
+  echo "       got '$2'" >&2
+  exit 1
+}
+require_port DUX_PORT "$DUX_PORT"
+if [ -n "${DUX_TUI_PORT:-}" ]; then
+  require_port DUX_TUI_PORT "$DUX_TUI_PORT"
+fi
+
 # The concurrent-TUI journey's port rides along with the web port: both are
 # published, so leaving this one pinned would collide the moment a second stack
 # moved DUX_PORT to get out of the first one's way. The offset keeps the pair
