@@ -65,6 +65,7 @@ pub mod welcome;
 pub mod welcome_screen;
 pub mod wire;
 pub mod worker;
+pub mod working_cue;
 pub mod worktree_file;
 pub mod worktree_manager;
 
