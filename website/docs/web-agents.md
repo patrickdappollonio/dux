@@ -123,9 +123,12 @@ drive the same rules.
 
 An agent's `⋯` menu is where the rest lives: rename it (a display title, the branch keeps
 its own name), change its provider, view its info, inspect its project's environment and
-[startup command](/docs/startup-commands), and read startup-command logs.
+[startup command](/docs/startup-commands), and read startup-command logs. It opens with the
+**Input** group (**Attach a file…**, and the way back to the typing bar when you have turned
+it off), which is the same group the pane's own `⋯` carries, then the agent's actions below
+it.
 
-![An agent's menu open beside its sidebar row, listing rename, fork, change provider, editor and delete actions.](/screens/agent-session-menu.png)
+![An agent's menu open beside its sidebar row: an Input group with Attach a file and Use virtual input at the top, then rename, fork, change provider, editor and delete actions.](/screens/agent-session-menu.png)
 
 **Change provider** and **Force recreate** are the two knobs around resume:
 
