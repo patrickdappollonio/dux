@@ -635,6 +635,63 @@ mod tests {
         );
     }
 
+    /// Body of the identity-free add, run by the parent test below in a CHILD
+    /// process because only the process environment reaches the git commands
+    /// the worker spawns.
+    #[tokio::test]
+    #[ignore = "helper process for add_with_init_repo_succeeds_with_no_git_identity"]
+    async fn add_init_repo_identity_free_child() {
+        let Ok(folder) = std::env::var("DUX_TEST_INIT_REPO_FOLDER") else {
+            return;
+        };
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(post_add_flags(&folder, r#","init_repo":true"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        assert!(dux_core::git::repo_has_commits(Path::new(&folder)));
+    }
+
+    #[tokio::test]
+    async fn add_with_init_repo_succeeds_with_no_git_identity() {
+        // The exact condition a clean CI runner boots in: no configured
+        // identity and no synthesizable one. Adopting a plain folder must still
+        // answer 201, because the commit it needs is dux's own.
+        let folder = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "project_actions::tests::add_init_repo_identity_free_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("DUX_TEST_INIT_REPO_FOLDER", folder.path())
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .env_remove("EMAIL")
+            .env_remove("EMAIL_ADDRESS")
+            .output()
+            .expect("re-run the test binary");
+        assert!(
+            out.status.success(),
+            "the identity-free add must answer 201:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn create_initial_commit_outranks_checkout_default() {
         // An unborn repo has no default branch to check out, so the birth flag

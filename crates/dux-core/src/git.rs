@@ -537,12 +537,44 @@ pub fn repo_has_commits(path: &Path) -> bool {
 ///   concurrent real commit makes this fail rather than land a second one, and
 ///   no step needs a work tree, so a **bare** repo works too.
 ///
+/// The commit signs itself as `dux <dux@localhost>` when, and only when, git
+/// can resolve no identity of its own in the repo (no `user.name`/`user.email`
+/// anywhere and no synthesizable one, which is the state of a clean CI runner).
+/// A real identity always wins, and commits of the USER's work are untouched by
+/// this: those still fail loudly, because signing somebody's work for them is
+/// not dux's to do.
+///
 /// Idempotent: a repo that already has a commit, at entry or because the CAS
 /// lost a race, returns `Ok(branch)`. It errors when the index has staged
 /// changes (a courtesy stop, so dux does not add a project over work the user
 /// may want in the first commit), when git's state cannot be determined, on a
 /// detached HEAD, and on a genuine git failure, surfaced verbatim. The CAS is
 /// the cross-process backstop behind the engine's own in-flight gate.
+/// The identity dux signs its own bootstrap commit with when git can resolve no
+/// other one. `localhost` is reserved and can never be a real mail domain, so
+/// the commit reads as the machine-made artifact it is rather than as a claim
+/// about a person.
+const BOOTSTRAP_IDENTITY_NAME: &str = "user.name=dux";
+const BOOTSTRAP_IDENTITY_EMAIL: &str = "user.email=dux@localhost";
+
+/// Whether git can resolve a committer identity in `repo`. Measured on git
+/// 2.55: `git var GIT_COMMITTER_IDENT` fails with exit 128 in exactly the cases
+/// `commit-tree` does, so it answers the question without writing anything.
+///
+/// A probe that cannot run at all is reported as "resolvable", because the
+/// fallback is only ever worth applying on a definite no; an indeterminate
+/// answer leaves the commit exactly as it behaved before.
+fn has_resolvable_identity(repo: &Path) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .stdin(Stdio::null())
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(true)
+}
+
 pub fn create_initial_commit(path: &Path) -> Result<String> {
     let repo = path.to_string_lossy();
     // Fail closed on commit state: only bootstrap a confirmed-unborn repo. A
@@ -601,22 +633,26 @@ pub fn create_initial_commit(path: &Path) -> Result<String> {
         &["hash-object", "-t", "tree", NULL_DEVICE],
         "compute the empty tree",
     )?;
-    let commit = run_git_capture(
-        path,
-        &[
-            // `commit.gpgsign=false` so a signing prompt can't block; hooksPath at
-            // /dev/null so no hook runs at any step of this bootstrap.
+    // `commit.gpgsign=false` so a signing prompt can't block; hooksPath at
+    // /dev/null so no hook runs at any step of this bootstrap.
+    let mut commit_args = vec![
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+    ];
+    if !has_resolvable_identity(path) {
+        // Last resort only, and only for THIS commit, which is dux's own empty
+        // one rather than any of the user's work.
+        commit_args.extend_from_slice(&[
             "-c",
-            "commit.gpgsign=false",
+            BOOTSTRAP_IDENTITY_NAME,
             "-c",
-            "core.hooksPath=/dev/null",
-            "commit-tree",
-            &empty_tree,
-            "-m",
-            "Initial commit",
-        ],
-        "create the initial commit object",
-    )?;
+            BOOTSTRAP_IDENTITY_EMAIL,
+        ]);
+    }
+    commit_args.extend_from_slice(&["commit-tree", &empty_tree, "-m", "Initial commit"]);
+    let commit = run_git_capture(path, &commit_args, "create the initial commit object")?;
     // Land it atomically: CAS with an empty old-value requires the branch to not
     // yet exist, closing the "a real commit landed concurrently" race. hooksPath
     // at /dev/null so the ref update runs no `reference-transaction` hook.
@@ -8548,6 +8584,111 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim(),
             "1",
             "the race must leave exactly one commit"
+        );
+    }
+
+    /// Body of the identity-free bootstrap, run by the parent test below in a
+    /// CHILD process because per-command isolation cannot reach the git
+    /// commands production spawns; only the process environment can.
+    #[test]
+    #[ignore = "helper process for create_initial_commit_succeeds_with_no_git_identity"]
+    fn create_initial_commit_identity_free_child() {
+        let Ok(path) = std::env::var("DUX_TEST_UNBORN_REPO") else {
+            return;
+        };
+        create_initial_commit(Path::new(&path))
+            .expect("the bootstrap commit must not need a configured git identity");
+    }
+
+    #[test]
+    fn create_initial_commit_succeeds_with_no_git_identity() {
+        // The CI runner has no `user.name`/`user.email` and an undotted
+        // hostname, so git cannot synthesize one either: dux's own empty commit
+        // has to sign itself rather than fail the whole project add.
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let init = test_support::git_command()
+            .args(["init", "-b", "main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "git init");
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "git::tests::create_initial_commit_identity_free_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("DUX_TEST_UNBORN_REPO", repo.path())
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .env_remove("EMAIL")
+            .env_remove("EMAIL_ADDRESS");
+        test_support::isolate_git_config(&mut child);
+        let out = child.output().expect("re-run the test binary");
+        assert!(
+            out.status.success(),
+            "the identity-free child must bootstrap the repo:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let author = test_support::git_command()
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "log",
+                "-1",
+                "--format=%an <%ae>",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&author.stdout).trim(),
+            "dux <dux@localhost>",
+            "the fallback identity is what signed the bootstrap commit"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_keeps_a_configured_identity() {
+        // The fallback is a last resort: wherever git can resolve a real
+        // identity, that identity is the one on dux's bootstrap commit.
+        let repo = init_test_repo_no_commit();
+        let run = |args: &[&str]| {
+            test_support::git_command()
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+        };
+        assert!(
+            run(&["config", "user.name", "Real Person"])
+                .status
+                .success(),
+            "set user.name"
+        );
+        assert!(
+            run(&["config", "user.email", "real@example.com"])
+                .status
+                .success(),
+            "set user.email"
+        );
+
+        create_initial_commit(repo.path()).expect("initial commit should succeed");
+
+        let author = run(&["log", "-1", "--format=%an <%ae>"]);
+        assert_eq!(
+            String::from_utf8_lossy(&author.stdout).trim(),
+            "Real Person <real@example.com>",
+            "a configured identity must win over the fallback"
         );
     }
 
