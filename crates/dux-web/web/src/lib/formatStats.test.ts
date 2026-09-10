@@ -29,7 +29,7 @@ describe("formatBytes", () => {
   })
 
   it("uses_binary_units_matching_the_tui", () => {
-    // 1_000_000 bytes is under one MiB, so it must still read as KiB — a
+    // 1_000_000 bytes is under one MiB, so it must still read as KiB, a
     // decimal-unit formatter would wrongly say "1.0 MB".
     expect(formatBytes(1_000_000)).toBe("977 KiB")
   })

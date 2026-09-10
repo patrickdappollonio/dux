@@ -150,7 +150,7 @@ describe("engine status → sonner toast routing", () => {
       duration: BUSY_TOAST_MAX_MS,
     })
 
-    // Success replaces it on the same id — should fire toast.success with 6s.
+    // Success replaces it on the same id, should fire toast.success with 6s.
     status(mod, "pull", "info", "Pulled.")
     expect(toast.success).toHaveBeenCalledWith("Pulled.", {
       id: "pull",
@@ -211,7 +211,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.dismiss).toHaveBeenCalledWith("dux-anon-status")
   })
 
-  it("empty message is dropped — no toast fired", async () => {
+  it("empty message is dropped, no toast fired", async () => {
     const mod = await loadStore()
     const { toast } = await import("sonner")
 
@@ -220,7 +220,7 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.loading).not.toHaveBeenCalled()
   })
 
-  it("status does NOT update a statusLine field — toasts are the sole web surface", async () => {
+  it("status does NOT update a statusLine field, toasts are the sole web surface", async () => {
     const mod = await loadStore()
 
     status(mod, "sl-key", "info", "Status bar message.")
@@ -420,7 +420,7 @@ describe("engine status → sonner toast routing", () => {
 
   it("uses the 6s default window for info toasts when status_clear_seconds is the default", async () => {
     // The `?? 6` fallback covers both the pre-load (null bootstrap) window and a
-    // config whose status_clear_seconds is the default 6 — either way, 6000ms.
+    // config whose status_clear_seconds is the default 6, either way, 6000ms.
     const mod = await loadStore()
     const { toast } = await import("sonner")
 
@@ -435,7 +435,7 @@ describe("engine status → sonner toast routing", () => {
     // The async worktree-removal delete emits a `delete:{id}` busy whose final
     // arrives later keyed identically. Both ride `status` events; the busy adopts
     // the key as its sonner id so the final replaces it in place (otherwise the
-    // spinner strands on the anonymous slot — the reported worktree-delete bug).
+    // spinner strands on the anonymous slot, the reported worktree-delete bug).
     const mod = await loadStore()
     const { toast } = await import("sonner")
 

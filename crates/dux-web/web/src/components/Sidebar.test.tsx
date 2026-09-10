@@ -1690,7 +1690,7 @@ describe("AppSidebar collapsed icon rail", () => {
     const rail = screen.getByTestId("collapsed-agent-rail")
     // One button per agent, in project order then agent order: s1 (Repo) then
     // s2 (Other). No project folder affordance ("Project actions" menu) inside
-    // the rail — only agent icons.
+    // the rail, only agent icons.
     expect(rail.querySelectorAll('[aria-label="Session actions"]').length).toBe(
       0,
     )

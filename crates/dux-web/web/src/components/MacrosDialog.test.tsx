@@ -10,9 +10,9 @@ import type { MacroView } from "@/lib/types"
 // run a real drag under jsdom (it measures rects), so DndContext is mocked to a
 // passthrough that CAPTURES `onDragEnd` and the tests call it with synthetic
 // DragEndEvents. useSortable is a static stub; what these tests pin is the
-// dialog's own wiring — rows carry the sortable attributes, a drop reorders the
+// dialog's own wiring: rows carry the sortable attributes, a drop reorders the
 // draft, a persisted reorder goes through `persistMacroOrder`, and a refused
-// save snaps the order back — not dnd-kit's internals.
+// save snaps the order back, not dnd-kit's internals.
 const dragEndHandlers: ((event: DragEndEvent) => void)[] = []
 vi.mock("@dnd-kit/core", () => ({
   DndContext: ({

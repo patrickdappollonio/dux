@@ -398,7 +398,7 @@ function WorktreesBody({ projectId }: { projectId: string }) {
             autoFocus
           />
           <span className="text-xs text-muted-foreground">
-            Display name only — the branch already exists. Letters, digits,
+            Display name only: the branch already exists. Letters, digits,
             dashes, underscores and slashes.
           </span>
         </div>

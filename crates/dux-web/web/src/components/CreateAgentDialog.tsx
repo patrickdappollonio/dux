@@ -75,8 +75,8 @@ export function CreateAgentDialog() {
           onSubmit={handleSubmit}
         />
         <p className="text-xs text-muted-foreground">
-          Letters, digits, dashes, underscores and slashes — becomes the branch
-          name.
+          Letters, digits, dashes, underscores and slashes. This becomes the
+          branch name.
         </p>
         <AgentOptions
           showCopyChanges={dialog.showCopyChanges}

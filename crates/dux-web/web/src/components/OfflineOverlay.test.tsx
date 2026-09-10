@@ -67,7 +67,7 @@ describe("OfflineOverlay", () => {
 
   it("stays up (still reconnecting copy) through a retry's 'connecting' blip", () => {
     // The sticky offline flag keeps the modal mounted even though conn momentarily
-    // reads "connecting" during an auto-retry — it must not flicker to a blank or
+    // reads "connecting" during an auto-retry; it must not flicker to a blank or
     // a different state.
     seed({ offline: true, conn: "connecting" })
     render(<OfflineOverlay />)

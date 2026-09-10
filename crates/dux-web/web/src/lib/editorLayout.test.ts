@@ -65,7 +65,7 @@ describe("isExplorerCollapsed", () => {
 // THE PROPERTY THIS FILE EXISTS FOR: the explorer is sized in PIXELS, so the
 // modal overlay (capped at min(80rem, 100%-2rem)) and the standalone tab
 // (uncapped) render the same tree. A percentage is two different widths there
-// — 22% was ~281px in the modal and ~563px on a 2560px tab — and no
+// (22% was ~281px in the modal and ~563px on a 2560px tab), and no
 // percentage value can fix that.
 describe("panel size props carry explicit units, and the explorer's are pixels", () => {
   it("the explorer's default and minimum are px, not %", () => {

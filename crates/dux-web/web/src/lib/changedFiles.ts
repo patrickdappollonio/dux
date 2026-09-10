@@ -45,7 +45,7 @@ export function fileStatusMeta(status: string): FileStatusMeta {
     case "T":
       return { kind: "type-changed", label: "Type changed" }
     default:
-      // Unknown code — show a neutral label rather than leaking the raw letter.
+      // Unknown code: show a neutral label rather than leaking the raw letter.
       return { kind: "other", label: "Changed" }
   }
 }

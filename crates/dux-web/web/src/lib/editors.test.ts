@@ -14,7 +14,7 @@ describe("OPEN_IN_EDITORS", () => {
 
   it("ships a bundled brand icon for every listed editor", () => {
     // A key with no bundled path silently renders the neutral fallback glyph, so
-    // pin every menu entry to a real simple-icons path — adding an editor without
+    // pin every menu entry to a real simple-icons path; adding an editor without
     // its icon fails here.
     for (const editor of OPEN_IN_EDITORS) {
       expect(

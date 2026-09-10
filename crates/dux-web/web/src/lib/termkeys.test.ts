@@ -497,7 +497,7 @@ describe("classifyClipboardKey", () => {
     )
   })
 
-  it("classifies by physical key, not ev.key — so non-Latin layouts still work", () => {
+  it("classifies by physical key, not ev.key, so non-Latin layouts still work", () => {
     // A Cyrillic layout types 'м' on the physical V key, but `code` is still
     // 'KeyV'. We must intercept it (xterm would otherwise emit \x16 by keyCode).
     expect(

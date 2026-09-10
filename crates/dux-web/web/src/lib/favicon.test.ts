@@ -15,7 +15,7 @@ import {
 
 // The curated set MUST equal the Rust `CURATED_FAVICON_COLORS` in
 // `crates/dux-core/src/wire.rs` (a cross-language pin keeps them in sync). NO
-// yellow — the default/unset favicon is the full-colour yellow duck.
+// yellow: the default/unset favicon is the full-colour yellow duck.
 const CURATED_NAMES = [
   "violet",
   "blue",

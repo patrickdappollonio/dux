@@ -54,10 +54,10 @@ describe("isAllDeleteDiff", () => {
 // The CSS half of the suppression is proven by the preview-env screenshots,
 // but ONE selector shape is pinned here because it regressed twice, once in
 // each direction: the line-number rule must scope to `.editor.modified`.
-// That scope picks WHICH numbers to hide — the deleted rows' numbers are
+// That scope picks WHICH numbers to hide: the deleted rows' numbers are
 // ordinary `.line-numbers` in the sibling `.editor.original`'s margin, so a
 // wider scope hides them too (measured on ab6564e7: the red rows lost their
-// 1-4) — and it doubles as the load-order guard: Monaco's own
+// 1-4), and it doubles as the load-order guard: Monaco's own
 // `.monaco-editor .margin-view-overlays .line-numbers` rule (no !important)
 // ships inside the LAZY DiffViewer chunk, so it loads after index.css and a
 // specificity TIE loses on source order (measured on 9c6fc2d1: the phantom

@@ -53,8 +53,8 @@ describe("isValidAgentName", () => {
   // Exact port of Rust's `is_valid_agent_name`, which forbids a LEADING `-` or
   // `/` but NOT a leading `_` (underscore is whitelisted everywhere). The TUI's
   // per-keystroke char map additionally rejects a leading `_`, and our
-  // `sanitizeAgentName` drops it too — so the input never produces a leading `_`
-  // — but `isValidAgentName` mirrors Rust and accepts one if handed it directly.
+  // `sanitizeAgentName` drops it too, so the input never produces a leading `_`,
+  // but `isValidAgentName` mirrors Rust and accepts one if handed it directly.
   const valid = [
     "feature-x",
     "AbC123",

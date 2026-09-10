@@ -70,21 +70,21 @@ describe("AgentEnvDialog", () => {
   it("renders the form when session and project resolve", () => {
     seed("s1", [session], [project])
     render(<AgentEnvDialog />)
-    expect(screen.getByText("Environment — quacky-mallard")).toBeTruthy()
+    expect(screen.getByText("Environment: quacky-mallard")).toBeTruthy()
     expect(closeAgentEnv).not.toHaveBeenCalled()
   })
 
   it("closes when the session is missing", () => {
     seed("s1", [], [project])
     render(<AgentEnvDialog />)
-    expect(screen.queryByText(/Environment —/)).toBeNull()
+    expect(screen.queryByText(/Environment:/)).toBeNull()
     expect(closeAgentEnv).toHaveBeenCalled()
   })
 
   it("closes when the session exists but its project is missing", () => {
     seed("s1", [session], [])
     render(<AgentEnvDialog />)
-    expect(screen.queryByText(/Environment —/)).toBeNull()
+    expect(screen.queryByText(/Environment:/)).toBeNull()
     expect(closeAgentEnv).toHaveBeenCalled()
   })
 })

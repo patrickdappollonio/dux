@@ -31,7 +31,7 @@ function makeBootstrap(overrides: Partial<Bootstrap> = {}): Bootstrap {
 
 let bootstrapBody: Bootstrap = makeBootstrap()
 let bootstrapFetches = 0
-// When true, the bootstrap GET rejects (simulated network failure) — used to
+// When true, the bootstrap GET rejects (simulated network failure), used to
 // exercise the failed-first-load → reconnect-retry recovery path.
 let bootstrapShouldFail = false
 

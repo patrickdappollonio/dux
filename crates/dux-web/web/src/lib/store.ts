@@ -167,7 +167,7 @@ export type SelectedTarget =
 
 // The mobile hub-&-spoke shell shows one screen at a time: the project/session
 // hub ("home"), the focused terminal, or the changed-files view. Desktop never
-// reads this — it renders all three panes at once.
+// reads this; it renders all three panes at once.
 export type MobileScreen = "home" | "terminal" | "changes"
 
 // A route the URL names but the workspace cannot resolve. Only agents get one:
@@ -197,7 +197,7 @@ export interface FirstLoadDialogState {
   screen: FirstLoadScreen
   /**
    * True when this is THIS LAUNCH's automatic screen (the server offered it in
-   * the bootstrap document). Closing an automatic screen DISMISSES it — the
+   * the bootstrap document). Closing an automatic screen DISMISSES it; the
    * server records the version as seen in SQLite, settling it for the TUI too.
    * An on-demand open from the app menu is `false` and dismisses nothing:
    * looking something up is not the same as acknowledging this launch's screen.
@@ -275,7 +275,7 @@ export interface ChangesSlice {
 // `EventsSocket` (`/ws/events`) feeds it: resource-change events plus the
 // connection id and status frames (surfaced as sonner toasts). Every action is a
 // REST `/api/v1/*` call. The PTY byte stream is NOT kept in React state nor on
-// this socket — each focused terminal attaches to its own dedicated `PtySocket`
+// this socket; each focused terminal attaches to its own dedicated `PtySocket`
 // (`lib/ptySocket.ts`).
 
 export interface DuxState {
@@ -363,7 +363,7 @@ export interface DuxState {
   projectSettingsTarget: string | null
   // The agent (session) whose startup-command / project-env editor is open, or
   // null. Both edit the agent's PROJECT (env and startup command are
-  // project-scoped in dux — there is no per-agent env), surfaced from the agent
+  // project-scoped in dux; there is no per-agent env), surfaced from the agent
   // menu for quick access (mirroring the TUI's per-agent palette commands). The
   // dialog resolves the owning project from the session id.
   agentStartupCommandTarget: string | null
@@ -382,7 +382,7 @@ export interface DuxState {
   startupLogsLoading: boolean
   startupLogsError: string | null
   // The project whose read-only info modal is open, or null (closed). Pure
-  // presentation of existing ViewModel data — no wire command, no git read.
+  // presentation of existing ViewModel data, no wire command, no git read.
   projectInfoTarget: string | null
   // The agent (session id) whose read-only info modal is open, or null (closed).
   // Like `projectInfoTarget`, pure presentation of existing ViewModel data.
@@ -482,7 +482,7 @@ export interface DuxState {
   // The session pending a provider swap, or null. The dialog pre-selects the
   // session's current provider; the swap takes effect on the next launch
   // (mirroring the TUI's `change-agent-provider`, which never kills a running
-  // agent — it changes the provider for the next reconnect).
+  // agent; it changes the provider for the next reconnect).
   changeProviderTarget: string | null
   // The session pending a manual pull-request attach (pin), or null. The
   // dialog holds one text field for the raw reference; the draft lives here
@@ -548,7 +548,7 @@ export interface DuxState {
   firstLoadDismissed: boolean
   // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
   // is the working copy of the whole macro list the user edits before saving
-  // (the save is wholesale — `update_macros` replaces the entire `[macros]`
+  // (the save is wholesale: `update_macros` replaces the entire `[macros]`
   // map, mirroring the TUI editor). Seeded from `bootstrap.macros` on open so
   // there is no set-state-in-effect. Empty draft when closed.
   macrosDialogOpen: boolean
@@ -721,7 +721,7 @@ export interface DuxState {
   // (see `endVanishedStandaloneEditor`).
   editorTargetGone: EditorRoot | null
   // Changed-files state for the selected session (see `ChangesSlice`). The single
-  // source for changed-files data — replaces the global `viewModel.changed_files`
+  // source for changed-files data: replaces the global `viewModel.changed_files`
   // broadcast, which a second client could clobber.
   changes: ChangesSlice
 }
@@ -1226,7 +1226,7 @@ async function reloadIfServerChanged(): Promise<void> {
 // After a (re)connect the socket has re-sent the whole interest set; re-fetch so
 // anything missed while disconnected is recovered (an event that arrived during
 // the outage is gone otherwise). The `config` coarse topic is always subscribed,
-// so refetch the bootstrap document too — a `config.changed` missed during the
+// so refetch the bootstrap document too; a `config.changed` missed during the
 // outage would otherwise leave stale providers/macros/UI flags until the next
 // config edit. The selected session's changes are also recovered when one is set.
 eventsSocket.onOpen = () => {
@@ -1310,7 +1310,7 @@ function applyChangesResponse(
   })
 }
 
-// Apply a failed fetch. A 404 means the session is gone — clear the slice (the
+// Apply a failed fetch. A 404 means the session is gone; clear the slice (the
 // next spine's `pruneSelectionIfGone` clears the selection). Anything else
 // (409 git lock, 5xx, network) lands in `error` so the pane shows a Refresh
 // affordance; the poller's eventual recovery event self-heals it. Same staleness
@@ -1444,7 +1444,7 @@ function applyBootstrap(b: Bootstrap): void {
   // without a reload.
   refreshAttentionChrome()
   // The server decided this launch's first-load screen once, at startup, and
-  // holds it in memory — so it arrives on the FIRST bootstrap of a client that
+  // holds it in memory, so it arrives on the FIRST bootstrap of a client that
   // connects at any point, and on the `config.changed`-driven refetch the server
   // emits the moment the decision resolves (which is how a browser already open
   // during a slow release-notes fetch still gets the screen). Guarded inside.
@@ -1761,7 +1761,7 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
     const session = spine.sessions.find((s) => s.id === target.sessionId)
     // The session must still exist; if an extra tab is focused, it must still be
     // in that session's tab list (an extra tab can be closed by ANOTHER client,
-    // whose local retarget-to-session-slot never ran here — this is the shared-workspace
+    // whose local retarget-to-session-slot never ran here; this is the shared-workspace
     // heal path). A gone extra tab falls back to the session-slot tab rather than
     // ejecting the user to the welcome screen.
     if (!session) {
@@ -1900,7 +1900,7 @@ function focusNewlyCreatedSession(spine: Spine): void {
   if (!created) return
   // Consume the token before selecting so a later spine can't re-fire.
   setState({ pendingCreateFocus: null })
-  // Force the owning project open so the new agent is actually visible — a
+  // Force the owning project open so the new agent is actually visible: a
   // project the user had collapsed would otherwise hide the row we just
   // selected.
   // A standalone agent has no project group to open; it is a top-level row.
@@ -1944,7 +1944,7 @@ eventsSocket.onConn = (conn) => {
   // REST action fired during the reconnect window must NOT stamp it as
   // `X-Connection-Id`, or the server would scope that action's status toasts to a
   // connection that no longer exists and the user would never see them. A null id
-  // falls back to scope `All` (broadcast) — visible to this client once it
+  // falls back to scope `All` (broadcast), visible to this client once it
   // reconnects, the safe default. The next `connected` frame re-issues a fresh id.
   if (conn === "closed" || conn === "failed") setConnectionId(null)
   // Every drop owes a fresh run-identity check before any PTY socket attaches
@@ -2038,8 +2038,8 @@ if (hasBrowser) {
   window.addEventListener("popstate", () => {
     applyUrlRoute()
   })
-  // Fragment navigation the page itself initiates — the standalone header's
-  // plain-anchor "Open in dux" link is the one shipping case — is delivered
+  // Fragment navigation the page itself initiates (the standalone header's
+  // plain-anchor "Open in dux" link is the one shipping case) is delivered
   // as `hashchange`, and whether a `popstate` accompanies it varies by
   // environment (jsdom fires only `hashchange`; browsers fire both). Listen
   // to both: `applyUrlRoute` is idempotent and by contract never writes the
@@ -2249,7 +2249,7 @@ function parseStandaloneEditorRoute(hash: string): Route | null {
     // STRICT, unlike the in-app suffix (which degrades a malformed path to
     // the bare agent): a standalone route with no editor half is a shell
     // with nothing to show, so a mangled tail is not a standalone route at
-    // all — it boots the NORMAL shell and takes the ordinary
+    // all; it boots the NORMAL shell and takes the ordinary
     // route-correction path there.
     if (editor === null) return null
     return { target, changes: false, editor, standalone: true, theater: false }
@@ -2526,7 +2526,7 @@ function applyUrlRoute(): void {
     return
   }
   if (!route.target) {
-    // Home names no editor, so a Back that lands here closes an open one —
+    // Home names no editor, so a Back that lands here closes an open one:
     // state only; the selection clear below is the URL's writer (and writes
     // nothing, since the browser is already parked on home).
     clearEditorStateSilently()
@@ -3122,7 +3122,7 @@ function restoreSessionScopedReconnect(
   armedSessionId: string,
 ): void {
   const sel = state.selectedSessionId
-  // The user actively moved to a DIFFERENT agent since we armed — respect it and
+  // The user actively moved to a DIFFERENT agent since we armed, respect it and
   // drop the intent so we never yank them back.
   if (sel !== null && sel !== armedSessionId) {
     reconnectDeepLink = null
@@ -3251,7 +3251,7 @@ function selectSessionRoute(
       ...(extra ?? {}),
     }),
   )
-  // Move the per-session changed-files subscription, THEN fetch — subscribing
+  // Move the per-session changed-files subscription, THEN fetch; subscribing
   // before the GET means an invalidation that races the fetch is never missed.
   switchChangesSubscription(prev, id)
   syncUrl(urlMode)
@@ -3423,8 +3423,8 @@ export function selectTerminal(
 }
 
 // Spawn a new companion terminal for a session via REST. The 201 reply
-// carries the new terminal id, so we focus it immediately — opening its PTY
-// socket (`TerminalPane`) — rather than waiting for a `terminal_created` frame.
+// carries the new terminal id, so we focus it immediately, opening its PTY
+// socket (`TerminalPane`), rather than waiting for a `terminal_created` frame.
 // The terminal also lands in the spine via the `sessions.changed` refetch, which
 // fills in its label/status; focusing first is safe because the PTY socket only
 // needs the ids the create returned. A failure surfaces as a toast.
@@ -3694,7 +3694,7 @@ export function handleTabGone(tabId: string): void {
 }
 
 // Open the discard-confirmation dialog for an unstaged file. The TUI confirms
-// every discard because it's destructive — an untracked file is deleted, a
+// every discard because it's destructive: an untracked file is deleted, a
 // tracked one loses its working-tree changes. The web mirrors that.
 export function openDiscard(target: DiscardTarget): void {
   setState({ discardTarget: target })
@@ -3814,7 +3814,7 @@ export function closeEditor(opts?: { urlMode?: "replace" }): void {
 // is what keeps the URL naming the file actually on screen. Same push key
 // before and after (the editor stays open), so `syncUrl` REPLACES: switching
 // files inside the editor never piles up history entries. A report for a
-// session whose editor is not open is dropped — a late effect from an
+// session whose editor is not open is dropped: a late effect from an
 // unmounting body must not resurrect a closed editor's suffix.
 export function editorSyncActiveTab(
   root: EditorRoot,
@@ -4229,7 +4229,7 @@ export function closeProjectSettings(): void {
 
 // Open the agent-scoped startup-command editor. The target is the SESSION id; the
 // dialog resolves and edits that agent's PROJECT startup command (startup command
-// is project-scoped — there is no per-agent startup command).
+// is project-scoped; there is no per-agent startup command).
 export function openAgentStartupCommand(sessionId: string): void {
   setState({ agentStartupCommandTarget: sessionId })
 }
@@ -4239,7 +4239,7 @@ export function closeAgentStartupCommand(): void {
 }
 
 // Open the agent-scoped environment editor. The target is the SESSION id; the
-// dialog resolves and edits that agent's PROJECT env (env is project-scoped — it
+// dialog resolves and edits that agent's PROJECT env (env is project-scoped; it
 // applies to every agent and terminal in the project).
 export function openAgentEnv(sessionId: string): void {
   setState({ agentEnvTarget: sessionId })
@@ -4354,7 +4354,7 @@ export function closeStartupLogs(): void {
 
 // Re-run the agent's project startup command in its worktree (the TUI's
 // `rerun-startup-command-on-agent`). The server runs it off-thread and reports
-// busy/success/failure on the status stream — nothing to do here but fire the
+// busy/success/failure on the status stream; nothing to do here but fire the
 // command and surface a transport/validation error if the request is rejected.
 export function rerunStartupCommand(sessionId: string): void {
   sessionsApi
@@ -4511,7 +4511,7 @@ export function browseDir(path: string | null): void {
 // `add_project`, which inspects the current branch before adding. The reply
 // fills `projectPathInspection` when it lands; the dialog shows
 // a warning step when it carries one. Runs in the click handler that selects the
-// repo — never an effect — like `openAttachWorktree` kicks off its listing.
+// repo, never an effect, like `openAttachWorktree` kicks off its listing.
 export function inspectProjectPath(path: string): void {
   setState({
     projectPathInspection: {
@@ -4579,7 +4579,7 @@ export function addProject(path: string, name: string): void {
     )
 }
 
-// Check out the repo's default branch first, then add it — the TUI's
+// Check out the repo's default branch first, then add it; the TUI's
 // "Check Out & Add" path. Only offered for the Known warning (the server
 // re-validates and rejects otherwise). The switch + add run server-side through
 // the worker chain; the status stream reports the outcome.
@@ -4592,7 +4592,7 @@ export function addProjectCheckoutDefault(path: string, name: string): void {
 }
 
 // Birth an unborn repo (fresh `git init`, no commits) with an empty initial
-// commit, then add it — the server creates the commit before registering so the
+// commit, then add it; the server creates the commit before registering so the
 // repo can back worktrees. Offered when inspect reports `hasCommits: false`.
 export function addProjectCreateInitialCommit(path: string, name: string): void {
   projectsApi
@@ -4658,7 +4658,7 @@ export async function updateProjectSettings(
   projectId: string,
   patch: PatchProjectBody,
 ): Promise<boolean> {
-  // Empty patch (nothing changed) is a successful no-op — let the dialog close.
+  // Empty patch (nothing changed) is a successful no-op, let the dialog close.
   if (Object.keys(patch).length === 0) return true
   // Validate a provider SET (a non-null provider) up front: the PATCH dispatches
   // its fields as independent wire sub-commands with no rollback, so a provider the
@@ -4686,7 +4686,7 @@ export async function updateProjectSettings(
 // Refresh a project's source checkout from remote (the TUI's
 // `refresh_selected_project`). The server resolves the project, runs the pull
 // against its source checkout, and reports busy/success/failure on the status
-// stream — nothing to do here but fire the command.
+// stream; nothing to do here but fire the command.
 export function pullProject(projectId: string): void {
   projectsApi
     .pull(projectId)
@@ -4719,7 +4719,7 @@ export function checkoutDefaultBranch(projectId: string): void {
 // Open the attach-worktree dialog for a project and immediately request its
 // managed-worktree listing (the server classifies in spawn_blocking). The
 // listing reply fills `attachWorktreeEntries` when it lands. Runs in
-// the click handler that opens the dialog — never an effect — mirroring how
+// the click handler that opens the dialog, never an effect, mirroring how
 // `openAddProject` kicks off its browse.
 export function openAttachWorktree(
   projectId: string,
@@ -4823,7 +4823,7 @@ export function closeAttachWorktree(): void {
 // Ask the server to adopt a managed worktree as a new agent. The server
 // re-validates the path against a fresh classification (never trusting this
 // list) and validates `name` as a display name, then dispatches the create
-// worker — the outcome (busy/success/failure) arrives on the status stream.
+// worker; the outcome (busy/success/failure) arrives on the status stream.
 export function attachWorktree(
   projectId: string,
   worktreePath: string,
@@ -4839,7 +4839,7 @@ export function attachWorktree(
 // `randomize_agent_names_by_default` is set (mirroring the TUI prompt, which
 // pre-checks when opened with no initial name); in that case we request a name
 // right away so the input previews it. This runs in the click handler that opens
-// the dialog — never an effect — so there is no set-state-in-effect.
+// the dialog, never an effect, so there is no set-state-in-effect.
 export function openCreateAgent(projectId: string): void {
   openNameDialog({ kind: "new", projectId })
 }
@@ -4951,7 +4951,7 @@ function retireInFlightPrResolve(): Partial<DuxState> {
   return { createAgentPrRequestId: null, createAgentPrResolving: false }
 }
 
-// Update the PR-reference field. Free text — unlike the agent name, this is NOT
+// Update the PR-reference field. Free text; unlike the agent name, this is NOT
 // sanitized (a PR URL contains slashes, colons, etc.); the server parses it.
 export function setCreateAgentPrInput(raw: string): void {
   // Editing the field retires its refusal: the user is answering it.
@@ -5340,7 +5340,7 @@ export function sortAgents(by: SortKey): void {
 
 // Where a picked macro landed: the compose draft, the PTY, or nowhere (unknown
 // macro, no focused target, no active socket). The macro popover reads this to
-// decide its close-focus target — a compose insert must land focus in the
+// decide its close-focus target: a compose insert must land focus in the
 // draft, while the PTY path keeps today's focus behavior.
 export type MacroDestination = "compose" | "pty" | "none"
 
@@ -5373,7 +5373,7 @@ export function runMacro(name: string): MacroDestination {
 
 // Open the macro-editor dialog, seeding the draft from the current bootstrap
 // macros (a fresh copy so edits don't mutate the shared model). Runs in the
-// click/palette handler that opens the dialog — never an effect.
+// click/palette handler that opens the dialog, never an effect.
 export function openMacrosDialog(): void {
   const macros = state.bootstrap?.macros ?? []
   setState({
@@ -5389,7 +5389,7 @@ export function closeMacrosDialog(): void {
 // Persist the draft wholesale via `update_macros`. The server validates
 // (empty/duplicate names, empty text, unknown surface) and reports the outcome
 // on the status lane; a config reload emits `config.changed`, refetching
-// `bootstrap.macros`. The dialog closes optimistically — a rejection surfaces as
+// `bootstrap.macros`. The dialog closes optimistically; a rejection surfaces as
 // an error toast, and reopening re-seeds from the (unchanged) bootstrap.
 export function saveMacros(macros: MacroView[]): void {
   // `update_macros` is a WHOLESALE replace of the entire `[macros]` map. Before
@@ -5866,7 +5866,7 @@ export function setAccessoryBarVisibility(next: boolean): Promise<boolean> {
     .then(() => true)
     .catch((e) => {
       // Roll the optimistic override back so the bar doesn't strand in the
-      // toggled state when the persist fails — but ONLY while the override
+      // toggled state when the persist fails, but ONLY while the override
       // still holds the value this call wrote. A newer tap may have landed
       // while this write was in flight, and rolling back over it would snap
       // the bar to a state the user already corrected.
@@ -5886,7 +5886,7 @@ export function setAccessoryBarVisibility(next: boolean): Promise<boolean> {
 // TerminalPane's reporter: record this pane's live ownership verdict for the
 // AGENT PTY it renders ("mine" while it holds input, "elsewhere" while another
 // connection does), or retire the verdict ("unknown", from the unmount
-// cleanup — with the pane gone this client has no live verdict and the
+// cleanup; with the pane gone this client has no live verdict and the
 // server-published spine field takes over). Idempotent so the per-render
 // effect churn never re-publishes an unchanged verdict.
 export function noteAgentPtyOwnership(
@@ -5993,12 +5993,12 @@ export function closeCustomizeWebapp(): void {
 
 // Open the automatic screen the server offered in the bootstrap document, if any.
 // Called from `applyBootstrap`, so it runs on first load AND on every
-// `config.changed` refetch — hence the three guards below, each of which is the
+// `config.changed` refetch; hence the three guards below, each of which is the
 // difference between "shown once" and "pops up while you work".
 function offerAutomaticFirstLoad(pending: PendingFirstLoad | null): void {
   if (pending === null) {
     // The server has no pending screen. If THIS tab is showing the AUTOMATIC one,
-    // it has been settled elsewhere — another browser tab dismissed it, and the
+    // it has been settled elsewhere: another browser tab dismissed it, and the
     // server emitted `config.changed` precisely so we find out. Close ours rather
     // than leaving a dialog up over a screen nobody owes an acknowledgement for.
     // Scoped to `automatic`: an on-demand dialog the user opened themselves is
@@ -6043,7 +6043,7 @@ export function openWelcomeScreen(): void {
 // The app menu's "What's new…". Opens immediately in a loading state and fetches
 // the notes, because the server may have to reach GitHub. Works even when
 // `ui.disable_release_notes` is set: that preference suppresses the AUTOMATIC
-// screen only. A failure lands in the dialog body AND a toast — never silent.
+// screen only. A failure lands in the dialog body AND a toast, never silent.
 export function openReleaseNotes(): void {
   setState({
     firstLoad: {
@@ -6090,7 +6090,7 @@ export function closeFirstLoad(): void {
   if (open === null) return
   if (!open.automatic) {
     setState({ firstLoad: null })
-    // Nothing to dismiss — but the offer may have been DROPPED while this dialog
+    // Nothing to dismiss, but the offer may have been DROPPED while this dialog
     // was up: `offerAutomaticFirstLoad` runs only from `applyBootstrap` and bails
     // when a dialog is already open, and nothing else retries it. Re-check the
     // last bootstrap now that the slot is free, or a real pending screen that
@@ -6207,7 +6207,7 @@ export function closeConfigEditor(): void {
 // Save the edited config.toml. The server validates the TOML before writing: a
 // rejection (invalid TOML) surfaces inline via `configEditorError` and keeps the
 // modal open so the user can fix it. On a successful write we adopt it with the
-// existing reload (best-effort — the file is already persisted), close, and toast.
+// existing reload (best-effort: the file is already persisted), close, and toast.
 export function saveConfigEditor(content: string): void {
   setState({ configEditorError: null })
   configApi

@@ -42,7 +42,7 @@ describe("configApi.setInstanceIdentity", () => {
 
     const [, opts] = fetchMock.mock.calls[0] as [string, RequestInit]
     // JSON.stringify drops `undefined`, so a favicon-only call sends no `title`
-    // key — matching the backend's `#[serde(default)]` "absent = leave unchanged".
+    // key, matching the backend's `#[serde(default)]` "absent = leave unchanged".
     expect(JSON.parse(opts.body as string)).toEqual({ favicon: "amber" })
   })
 

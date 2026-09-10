@@ -7,7 +7,7 @@ import type { Spine } from "./workspaceApi"
 // when the remembered tab is still a live extra tab, and `selectTab` persists
 // every explicit switch via `PUT .../focused-tab` (fire-and-forget, J3/J4).
 // An explicit boot deep-link (#/agent/<id>/tab/<other>) still wins over the
-// remembered tab — `restoreDeepLink` is untouched by this feature.
+// remembered tab; `restoreDeepLink` is untouched by this feature.
 
 function makeSpine(
   sessions: {

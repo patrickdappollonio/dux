@@ -293,7 +293,7 @@ describe("ReconnectingSocket", () => {
     sock.connect()
     const ws1 = last()
     ws1.open()
-    // A double connect() must NOT orphan ws1 — it is detached and closed before
+    // A double connect() must NOT orphan ws1; it is detached and closed before
     // ws2 is created, so ws1's later callbacks can't mutate shared state.
     sock.connect()
     const ws2 = last()

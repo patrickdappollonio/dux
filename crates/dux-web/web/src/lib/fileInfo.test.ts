@@ -16,7 +16,7 @@ describe("formatBytes", () => {
   })
 
   it("reports an absent size as a dash rather than zero", () => {
-    expect(formatBytes(null)).toBe("—")
+    expect(formatBytes(null)).toBe("-")
   })
 })
 

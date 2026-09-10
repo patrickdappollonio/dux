@@ -11,7 +11,7 @@ import { AccessoryBar } from "./AccessoryBar"
 
 // The accessory keys' activation contract, the same one the compose bar's Send
 // button carries: act on pointerdown WITH preventDefault (so a tap never moves
-// focus — the soft keyboard state is preserved, whichever it was), and accept
+// focus; the soft keyboard state is preserved, whichever it was), and accept
 // keyboard/AT activation through a `detail === 0` click. A click that follows
 // a real pointer tap carries `detail >= 1` and must be ignored, or every tap
 // would fire the key twice.

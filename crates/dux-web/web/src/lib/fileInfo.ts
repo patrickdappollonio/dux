@@ -53,7 +53,7 @@ const UNITS = ["KiB", "MiB", "GiB", "TiB"] as const
 // Sizes under 1 KiB read as a plain byte count; above that, a one-decimal binary
 // unit for scale plus the exact byte count for anyone checking a limit.
 export function formatBytes(bytes: number | null): string {
-  if (bytes === null) return "—"
+  if (bytes === null) return "-"
   if (bytes < KIB) return bytes === 1 ? "1 byte" : `${bytes} bytes`
   let value = bytes / KIB
   let unit: string = UNITS[0]

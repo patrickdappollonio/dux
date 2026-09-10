@@ -174,12 +174,12 @@ describe("store attention chrome (browser-tab count)", () => {
     spineBody = makeSpine({ sessions: [session("s1", true), session("s2", true)] })
     const mod = await loadStore()
     expect(mod.getSnapshot().standaloneEditor).toBe(true)
-    expect(document.title).toBe(`Editor — ${BASE_TITLE}`)
+    expect(document.title).toBe(`Editor: ${BASE_TITLE}`)
 
     await pushSpine(
       mod,
       makeSpine({ sessions: [session("s1", true), session("s2", true)] }),
     )
-    expect(document.title).toBe(`Editor — ${BASE_TITLE}`)
+    expect(document.title).toBe(`Editor: ${BASE_TITLE}`)
   })
 })

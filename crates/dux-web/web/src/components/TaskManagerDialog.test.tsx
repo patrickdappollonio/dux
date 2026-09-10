@@ -434,7 +434,7 @@ describe("TaskManagerDialog", () => {
     render(<TaskManagerDialog />)
 
     const row = await screen.findByTestId("task-row-tab:t2")
-    expect(row.textContent).toContain("—")
+    expect(row.textContent).toContain("-")
     // The extra tab's Stop label carries the owning agent and its position,
     // not just the bare provider: "Stop codex" alone would
     // collide with any other codex extra tab on any other agent.

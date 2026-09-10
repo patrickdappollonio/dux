@@ -54,7 +54,7 @@ export function StatusBadge({
 }) {
   const s = STATUS[status]
   const streaming = status === "active" && working
-  const label = streaming ? `${s.label} — working` : s.label
+  const label = streaming ? `${s.label}, working` : s.label
 
   // Status icons rest slightly transparent, being quiet metadata. Only the active
   // dot pulses its opacity while the agent works, settling back to the resting

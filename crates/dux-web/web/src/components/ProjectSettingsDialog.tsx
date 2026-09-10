@@ -84,7 +84,7 @@ function ProjectSettingsForm({
   return (
     <DialogContent showCloseButton={false} className="sm:max-w-lg">
       <DialogHeader>
-        <DialogTitle>Project settings — {project.name}</DialogTitle>
+        <DialogTitle>Project settings: {project.name}</DialogTitle>
         <DialogDescription>
           Per-project overrides. Leave a field on the inherited default to fall
           back to the global configuration.

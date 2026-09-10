@@ -19,7 +19,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
 })
 
 // CodeEditor is lazy-loaded (Monaco cannot mount under vitest, and the real
-// dialog must not drag Monaco into the eager bundle — see the component).
+// dialog must not drag Monaco into the eager bundle; see the component).
 // Mocking the module makes the lazy import() resolve to this stub, so the test
 // proves the Suspense boundary actually mounts the editor once the chunk lands.
 vi.mock("@/components/CodeEditor", () => ({

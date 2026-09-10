@@ -147,7 +147,7 @@ describe("manual reconnect() (the Retry button)", () => {
     // A fresh events socket was opened (connect() constructs a new WebSocket)...
     expect(FakeWebSocket.instances.length).toBe(socketsBefore + 1)
     // ...and the focused terminal pane is remounted so its PtySocket reconnects
-    // with a fresh budget — one Retry restores spine AND terminal.
+    // with a fresh budget; one Retry restores spine AND terminal.
     expect(mod.getSnapshot().terminalEpoch).toBe(epochBefore + 1)
 
     // The reopened events socket clears the sticky offline flag.

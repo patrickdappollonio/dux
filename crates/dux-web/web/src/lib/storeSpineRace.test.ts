@@ -111,7 +111,7 @@ describe("loadWorkspace in-flight guard", () => {
     spineResolvers[1](makeSpine({ sessions: [session("old", "p1")] }))
 
     // Give the older response a chance to (wrongly) apply, then assert the newer
-    // spine still stands — the stale older result was discarded by the guard.
+    // spine still stands; the stale older result was discarded by the guard.
     await Promise.resolve()
     await Promise.resolve()
     expect(mod.getSnapshot().spine?.sessions.map((s) => s.id)).toEqual(["new"])

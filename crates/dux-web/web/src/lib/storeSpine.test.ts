@@ -57,7 +57,7 @@ function projectTerm(id: string, projectId: string): Spine["terminals"][number] 
 
 let spineBody: Spine = makeSpine()
 let spineFetches = 0
-// When true, the spine GET rejects (simulated network failure) — used to
+// When true, the spine GET rejects (simulated network failure), used to
 // exercise the failed-first-load → reconnect-retry recovery path.
 let spineShouldFail = false
 
@@ -330,7 +330,7 @@ describe("spine slice", () => {
     await pushSpine(mod, makeSpine({ sessions: [session("s1", "p1")] }))
     mod.selectSession("s1")
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
-    // The session is gone in the next spine — the selection must clear.
+    // The session is gone in the next spine; the selection must clear.
     await pushSpine(mod, makeSpine({ sessions: [] }))
     expect(mod.getSnapshot().selectedSessionId).toBeNull()
     expect(mod.getSnapshot().selectedTarget).toBeNull()

@@ -170,7 +170,7 @@ describe("EditorTabsStrip", () => {
   it("phone pills match the mode toggle's height, a deliberate touch-floor deviation", () => {
     // The pill's visible phone height is pinned to the File/Diff mode
     // toggle's rendered height (h-7 button + p-0.5 + border = 34px =
-    // min-h-8.5), NOT the 40px touch floor — a settled product decision for
+    // min-h-8.5), NOT the 40px touch floor, a settled product decision for
     // this surface. The close button keeps a larger-than-visual hit area
     // (max-md:size-8 fits inside the 34px pill without adding height).
     seed("s1", [tab({ id: "t1" })], "t1")

@@ -312,7 +312,7 @@ describe("store agent-tab lifecycle", () => {
 
   it("addTab called twice synchronously (a double-click) fires only ONE POST", async () => {
     const mod = await loadStore()
-    // Both calls happen before either has a chance to await/resolve — the
+    // Both calls happen before either has a chance to await/resolve; the
     // in-flight guard (`createTabInFlight`) must block the second one
     // synchronously, not just race it.
     mod.addTab("s1")

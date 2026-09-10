@@ -28,7 +28,7 @@ export function projectBranchDisplay(
     branch,
     warn,
     tooltip: warn
-      ? `On ${branch} — this doesn't appear to be the project's leading branch.`
+      ? `On ${branch}: this doesn't appear to be the project's leading branch.`
       : null,
   }
 }

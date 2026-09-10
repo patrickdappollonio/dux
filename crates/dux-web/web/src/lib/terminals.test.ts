@@ -45,7 +45,7 @@ describe("terminalForeground", () => {
 
   it('keeps a bare "TERM" whose trailing space was trimmed away', () => {
     // The TUI trims before stripping, so "TERM " becomes "TERM" (no trailing
-    // space to match the "TERM " prefix) and is shown verbatim — not dropped.
+    // space to match the "TERM " prefix) and is shown verbatim, not dropped.
     expect(terminalForeground(term({ foreground_cmd: "TERM " }))).toBe("TERM")
   })
 

@@ -689,7 +689,7 @@ describe("the attachment length limit", () => {
     // The other direction of the same mistake. A terminal always uses the
     // shell-safe form, so keying by form made it inherit codex's composer limit,
     // and dux withheld a perfectly good path from a shell while telling the user
-    // it was too long for "this agent" — which is not what it was talking to.
+    // it was too long for "this agent", which is not what it was talking to.
     const plan = dragDropPasteFor(published({ codex: "single_quoted" }), {
       kind: "terminal",
     })

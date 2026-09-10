@@ -92,7 +92,7 @@ describe("FileInfoDialog", () => {
       />,
     )
     await waitFor(() => screen.getByText("Folder"))
-    expect(screen.getByText("—")).toBeTruthy()
+    expect(screen.getByText("-")).toBeTruthy()
     expect(screen.getByText(/git tracks files, not folders/i)).toBeTruthy()
   })
 

@@ -27,7 +27,7 @@ describe("projectBranchDisplay", () => {
     expect(d?.branch).toBe("feature/x")
     expect(d?.warn).toBe(true)
     expect(d?.tooltip).toBe(
-      "On feature/x — this doesn't appear to be the project's leading branch.",
+      "On feature/x: this doesn't appear to be the project's leading branch.",
     )
   })
 

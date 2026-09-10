@@ -28,8 +28,8 @@ import { GLYPH_SPINNER_CLASS, SPINNER_FRAMES } from "@/lib/spinnerFrames"
 import { usePaneInputGroup } from "@/lib/paneInputGroup"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
-// note in TerminalArea.test.tsx). So we mount the REAL TerminalPane — exercising
-// its actual JSX and the Reconnect button's real `onClick` — against a minimal
+// note in TerminalArea.test.tsx). So we mount the REAL TerminalPane, exercising
+// its actual JSX and the Reconnect button's real `onClick`, against a minimal
 // xterm stub and a fake PtySocket. The fake captures the pane's own `onConn`
 // handler (TerminalPane assigns `pty.onConn = …` in its wiring effect) so a test
 // can drive a `failed`/`open` transition, and exposes a `connect` spy so we can
@@ -631,7 +631,7 @@ describe.each([
     expect(screen.getByText("Connection lost.")).toBeTruthy()
     expect(screen.getByText("Reconnect")).toBeTruthy()
     // The connection-lost block replaces (does not stack with) the reconnecting
-    // spinner — no double overlay.
+    // spinner, no double overlay.
     expect(screen.queryByText("Reconnecting…")).toBeNull()
   })
 
@@ -641,7 +641,7 @@ describe.each([
     pty.emit("failed")
     // Ignore the connect() the wiring effect already fired on mount; the button
     // must fire a fresh one on THIS socket. For a companion terminal an
-    // epoch-only reconnect would never reach here — that is the regression.
+    // epoch-only reconnect would never reach here; that is the regression.
     pty.connect.mockClear()
     fireEvent.click(screen.getByText("Reconnect"))
     expect(pty.connect).toHaveBeenCalledTimes(1)
@@ -1879,7 +1879,7 @@ describe("TerminalPane mobile compose bar", () => {
 // open because a key handler unconditionally refocused the typing surface,
 // and a user mid-typing must not lose the keyboard to a key tap. The bar's
 // buttons already preventDefault their pointerdown (they never take focus);
-// what these tests pin is the HANDLER side — the refocus is conditional on
+// what these tests pin is the HANDLER side: the refocus is conditional on
 // the typing surface having had focus when the tap landed.
 describe("TerminalPane accessory keys preserve the keyboard state", () => {
   const desktopWidth = window.innerWidth

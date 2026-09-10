@@ -239,7 +239,7 @@ describe("CustomizeWebappDialog", () => {
   // The two first-load rows are the only INVERTED ones: the switch says "Show
   // the welcome screen" while the config field is
   // `disable_automated_welcome_screen`. If the flip in `buildWrites` were ever
-  // dropped, the dialog would save the exact opposite of what the user sees —
+  // dropped, the dialog would save the exact opposite of what the user sees:
   // silent, and invisible until someone restarted dux. Hence a test per
   // direction.
   it("saves an inverted first-load row as the negated config field", async () => {

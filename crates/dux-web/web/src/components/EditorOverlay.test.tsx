@@ -873,7 +873,7 @@ describe("preview in diff mode", () => {
 // A DELETED file clicked in the Changes pane opens the editor in diff mode.
 // The diff must render as a deletion (HEAD content vs an empty modified side),
 // and every way the load can fail must SETTLE into a visible state with a
-// Retry action — never a permanent spinner. File mode on the same path keeps
+// Retry action, never a permanent spinner. File mode on the same path keeps
 // the existing fileError + Retry arm.
 describe("a deleted file in the editor", () => {
   beforeEach(async () => {
@@ -1019,7 +1019,7 @@ describe("a deleted file in the editor", () => {
     // The Changes-pane flow that reuses a tab id: open file A in diff mode,
     // then the store preview-replaces the SAME tab onto path B (rule 2 in
     // lib/editorTabs.ts). The tab's cached buffer still carries A's path, and
-    // the diff fetch for B must not be dropped on that stale buffer — that
+    // the diff fetch for B must not be dropped on that stale buffer; that
     // drop is a permanent spinner (nothing re-triggers the load effect).
     diffMock.mockResolvedValue({
       path: "src/a.txt",

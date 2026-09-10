@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest"
 // Drift guard for the traced duck favicon path. The committed DUCK_PATH in
 // favicon.ts is produced by `scripts/gen-duck-favicon.mjs`. That is a MANUAL,
 // ad-hoc regeneration step (potrace output is nondeterministic, and jimp/potrace
-// are not devDependencies) — nothing in CI re-runs it, and the maintainer
+// are not devDependencies); nothing in CI re-runs it, and the maintainer
 // validates the duck visually before committing. This test only guards the
 // committed value's shape so it can never silently become empty/truncated/
 // malformed (e.g. a bad merge, a botched hand-edit, or a wrong-image trace).
@@ -38,7 +38,7 @@ describe("committed DUCK_PATH", () => {
   // Geometric CORRUPTION guard (NOT a staleness/exact-match guard): potrace output
   // is nondeterministic, so we never pin the exact path. Instead we assert the
   // committed duck still has its multiple cutout sub-shapes, is built from many
-  // bezier curves, and spans the full 512 viewBox — so a truncated, collapsed, or
+  // bezier curves, and spans the full 512 viewBox, so a truncated, collapsed, or
   // degenerate (straight-line / repeated-segment) path fails the build.
   it("keeps its multiple cutout sub-shapes", () => {
     const path = committedDuckPath()
@@ -62,7 +62,7 @@ describe("committed DUCK_PATH", () => {
   it("spans the full 512 viewBox on both axes", () => {
     const path = committedDuckPath()
     // Parse coordinate PAIRS (x y) and assert BOTH axes reach near both edges of
-    // the 0..512 canvas — a collapsed/clipped trace, or one that only varies on a
+    // the 0..512 canvas: a collapsed/clipped trace, or one that only varies on a
     // single axis, would sit in a narrow band.
     const nums = (path.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number)
     const xs: number[] = []

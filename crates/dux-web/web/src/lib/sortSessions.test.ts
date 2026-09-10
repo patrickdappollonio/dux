@@ -28,7 +28,7 @@ function session(
   } as unknown as SessionView
 }
 
-describe("sortedSessionIds — updated", () => {
+describe("sortedSessionIds: updated", () => {
   it("orders newest updated first (Reverse(updated_at))", () => {
     const sessions = [
       session({ id: "old", updated_at: "2026-01-01T00:00:00+00:00" }),
@@ -65,7 +65,7 @@ describe("sortedSessionIds — updated", () => {
   })
 })
 
-describe("sortedSessionIds — created", () => {
+describe("sortedSessionIds: created", () => {
   it("orders newest created first (Reverse(created_at))", () => {
     const sessions = [
       session({ id: "first", created_at: "2026-01-01T00:00:00+00:00" }),
@@ -89,7 +89,7 @@ describe("sortedSessionIds — created", () => {
   })
 })
 
-describe("sortedSessionIds — name", () => {
+describe("sortedSessionIds: name", () => {
   it("orders case-insensitively ascending on the title", () => {
     const sessions = [
       session({ id: "1", title: "Zephyr" }),
@@ -134,7 +134,7 @@ describe("sortedSessionIds — name", () => {
   })
 })
 
-describe("sortedSessionIds — name_desc", () => {
+describe("sortedSessionIds: name_desc", () => {
   it("orders case-insensitively descending (Z to A), the reverse of name", () => {
     const sessions = [
       session({ id: "1", title: "Charlie" }),
@@ -166,7 +166,7 @@ describe("sortedSessionIds — name_desc", () => {
   })
 })
 
-describe("sortedSessionIds — purity", () => {
+describe("sortedSessionIds: purity", () => {
   it("does not mutate the input array", () => {
     const sessions = [
       session({ id: "b", updated_at: "2026-02-01T00:00:00+00:00" }),

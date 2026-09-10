@@ -113,7 +113,7 @@ const file = (path: string): ChangedFileView => ({
   binary: false,
 })
 
-describe("changes slice — subscription wiring", () => {
+describe("changes slice: subscription wiring", () => {
   it("selectSession subscribes the session topic and fetches (subscribe before fetch)", async () => {
     const mod = await loadStore()
     const realSub = mod.eventsSocket.subscribe.bind(mod.eventsSocket)
@@ -160,7 +160,7 @@ describe("changes slice — subscription wiring", () => {
   })
 })
 
-describe("changes slice — request state machine", () => {
+describe("changes slice: request state machine", () => {
   it("loading -> loaded applies the response", async () => {
     const mod = await loadStore()
     mod.selectSession("s1")
@@ -216,7 +216,7 @@ describe("changes slice — request state machine", () => {
     expect(mod.getSnapshot().changes.rev).toBe(3)
     const before = pendingChanges.length
     // The server's Lagged catch-up for a cold session carries NO rev. It must
-    // still trigger a refetch — `undefined >= 3` would otherwise skip it.
+    // still trigger a refetch; `undefined >= 3` would otherwise skip it.
     mod.eventsSocket.onEvent({ event: "session.changes", id: "s1" })
     expect(pendingChanges.length).toBe(before + 1)
   })
@@ -308,7 +308,7 @@ describe("changes slice — request state machine", () => {
   })
 })
 
-describe("changes slice — reconnect", () => {
+describe("changes slice: reconnect", () => {
   it("re-fetches the selected session on socket reopen and keeps the topic set", async () => {
     const mod = await loadStore()
     mod.selectSession("s1")
@@ -329,7 +329,7 @@ describe("changes slice — reconnect", () => {
   })
 })
 
-describe("changes slice — subscribe catch-up", () => {
+describe("changes slice: subscribe catch-up", () => {
   // The server sends a `session.changes` frame immediately after a client
   // subscribes to a fine topic. When the server's cache is cold it omits `rev`.
   // The client must treat `rev === undefined` as a force-refetch so the changes

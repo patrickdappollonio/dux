@@ -44,7 +44,7 @@ function AgentStartupCommandForm({
   return (
     <DialogContent showCloseButton={false}>
       <DialogHeader>
-        <DialogTitle>Startup command — {agentName}</DialogTitle>
+        <DialogTitle>Startup command: {agentName}</DialogTitle>
         <DialogDescription>
           Runs after each agent or terminal launches in project{" "}
           <span className="font-medium">{project.name}</span>. This applies to

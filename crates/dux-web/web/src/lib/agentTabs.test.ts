@@ -476,7 +476,7 @@ describe("shouldRefireFocusPut", () => {
 
   it("refires when a stale response settles with a value different from the latest intent", () => {
     // A→B switch fired two PUTs; B's response settled first, A's settled
-    // after with a different tab id — re-issue B so the server's last write
+    // after with a different tab id; re-issue B so the server's last write
     // matches the user's last click regardless of response ordering.
     const latest = { generation: 2, tabId: "t2" }
     const settled = { generation: 1, tabId: "t1" }

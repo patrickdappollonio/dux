@@ -33,7 +33,7 @@ vi.mock("@/components/LazyTerminalPane", () => ({
 
 // A tracking WebSocket double: it proves a DORMANT tab never opens a PTY
 // socket (which would force-launch the provider) merely by being
-// focused/rendered — only the explicit "Start session" action may. Every
+// focused/rendered; only the explicit "Start session" action may. Every
 // PtySocket construction goes through `new WebSocket(...)`, so counting
 // constructions here is a proxy for "was a PTY socket opened."
 class TrackingWebSocket {

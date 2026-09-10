@@ -360,7 +360,7 @@ function DuxBadge() {
 function NoStop() {
   return (
     <span aria-hidden className="text-muted-foreground/50">
-      —
+      -
     </span>
   )
 }
@@ -405,9 +405,9 @@ function ExpandToggle({
 // `pid` is the CALLER's: TOTAL is blank rather than dashed, a different nothing.
 function statCells(stats: ResourceStatsView | null) {
   return {
-    cpu: stats ? formatCpu(stats.cpu_percent) : "—",
-    mem: stats ? formatBytes(stats.rss_bytes) : "—",
-    procs: stats ? String(stats.process_count) : "—",
+    cpu: stats ? formatCpu(stats.cpu_percent) : "-",
+    mem: stats ? formatBytes(stats.rss_bytes) : "-",
+    procs: stats ? String(stats.process_count) : "-",
   }
 }
 
@@ -426,7 +426,7 @@ function DesktopRow({
   const { cpu, mem, procs } = statCells(row.stats)
   // TOTAL has no pid at all (blank: it is a summary, not a process); every
   // other row shows the real pid, or a dash before the first sample lands.
-  const pid = isTotal ? "" : row.stats?.pid != null ? String(row.stats.pid) : "—"
+  const pid = isTotal ? "" : row.stats?.pid != null ? String(row.stats.pid) : "-"
   // The body is gated on the same rule as the toggle: the expansion set outlives
   // the tree's shape, so a row that loses its children must stop rendering them.
   const children = rowHasBreakdown(row) ? (row.stats?.children ?? []) : []

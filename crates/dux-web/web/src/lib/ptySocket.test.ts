@@ -508,8 +508,8 @@ describe("PtySocket", () => {
     const ws = last()
     ws.open()
     // The server replays scrollback as the first Binary frame, then live bytes.
-    ws.binary([0x68, 0x69]) // "hi" — the repaint
-    ws.binary([0x21]) // "!" — a live byte
+    ws.binary([0x68, 0x69]) // "hi", the repaint
+    ws.binary([0x21]) // "!", a live byte
     expect(chunks.map((c) => Array.from(c))).toEqual([[0x68, 0x69], [0x21]])
   })
 
@@ -596,7 +596,7 @@ describe("PtySocket", () => {
     expect(ws).not.toBe(FakeWS.instances[0])
     ws.open()
     expect(opens).toBe(2)
-    // The reconnect sends NOTHING on its own (no buffered subscribe) — the
+    // The reconnect sends NOTHING on its own (no buffered subscribe); the
     // server replays scrollback as the first Binary frame after the reopen.
     expect(ws.sent).toHaveLength(0)
     ws.binary([0x41]) // the post-reconnect repaint
@@ -672,7 +672,7 @@ describe("PtySocket", () => {
     // closes with PROVIDER_UNAVAILABLE_CLOSE, meaning "do not retry". Re-subscribing
     // would relaunch the doomed provider, so the socket must stop on the FIRST
     // such close (not loop) and surface the give-up state for the Reconnect
-    // affordance — no attempt cap needed.
+    // affordance, no attempt cap needed.
     vi.useFakeTimers()
     const sock = new PtySocket("ws://x/pty")
     const states: ConnState[] = []
@@ -688,8 +688,8 @@ describe("PtySocket", () => {
   })
 
   it("still retries after an ordinary transient close (not the provider-unavailable code)", () => {
-    // A plain transport drop (code 1006) is transient — the provider may still be
-    // alive server-side — so the socket reconnects to re-attach, exactly like the
+    // A plain transport drop (code 1006) is transient; the provider may still be
+    // alive server-side, so the socket reconnects to re-attach, exactly like the
     // events socket.
     vi.useFakeTimers()
     const sock = new PtySocket("ws://x/pty")
@@ -733,7 +733,7 @@ describe("PtySocket", () => {
     const before = FakeWS.instances.length
     last().triggerClose()
     // No reconnect scheduled (no new socket even after time passes) and no
-    // "Reconnecting…" signal — this is a hard stop, not a retry.
+    // "Reconnecting…" signal; this is a hard stop, not a retry.
     vi.advanceTimersByTime(10000)
     expect(FakeWS.instances.length).toBe(before)
     expect(reconnecting).toBe(0)

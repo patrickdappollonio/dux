@@ -41,7 +41,7 @@ describe("applyFavicon", () => {
 
     const links = iconLinks()
     expect(links).toHaveLength(1)
-    expect(links[0]).toBe(existing) // same node — not replaced
+    expect(links[0]).toBe(existing) // same node, not replaced
   })
 
   it("replaces an existing icon link rather than stacking them", () => {
@@ -98,7 +98,7 @@ describe("applyFavicon legacy migration notice", () => {
     expect(message).toContain("Preferences dialog")
     expect(message).toContain("cog menu")
     expect(message).not.toMatch(/command palette/i)
-    expect(message).not.toContain("—")
+    expect(message).not.toContain("\u2014")
   })
 
   it("re-notifies when a DIFFERENT legacy value appears after a curated one", () => {

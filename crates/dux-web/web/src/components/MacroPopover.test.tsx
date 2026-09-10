@@ -8,7 +8,7 @@ import type { SelectedTarget } from "@/lib/store"
 // Where focus lands after PICKING a macro is a contract, not a nicety. On the
 // direct-to-PTY path Base UI's default (or the caller's finalFocus) applies as
 // it always has; but when the pick landed in the mobile compose DRAFT, focus
-// must follow the macro into the compose textarea — Base UI owns focus during
+// must follow the macro into the compose textarea; Base UI owns focus during
 // a popover close, so without the resolveFinalFocus routing it would hand
 // focus back to the trigger and yank the keyboard away from the text the user
 // is about to edit. runMacro's returned destination is what steers this, so
@@ -175,7 +175,7 @@ describe("MacroPopover pick focus routing", () => {
 
   it("a direct-to-PTY pick keeps the caller's finalFocus target", async () => {
     // The desktop trigger points finalFocus at xterm's hidden textarea so the
-    // user can review the pasted macro and press Enter — unchanged.
+    // user can review the pasted macro and press Enter, unchanged.
     const xtermTextarea = document.createElement("textarea")
     document.body.appendChild(xtermTextarea)
     runMacro.mockReturnValue("pty")

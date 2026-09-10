@@ -206,7 +206,7 @@ describe("EventsSocket", () => {
     ws.open()
     const before = FakeWS.instances.length
     // A deliberate close fires onclose (like a real socket) but must NOT trigger
-    // the reconnect loop — closedByUser short-circuits it.
+    // the reconnect loop; closedByUser short-circuits it.
     sock.close()
     vi.advanceTimersByTime(10000)
     expect(FakeWS.instances.length).toBe(before)
@@ -300,7 +300,7 @@ describe("EventsSocket", () => {
     ws1.open()
     sock.subscribe(["a"])
     // A double connect() (double-click Reconnect, or a recheck firing connect()
-    // mid-reconnect) must NOT orphan ws1 — it is closed before ws2 is created.
+    // mid-reconnect) must NOT orphan ws1; it is closed before ws2 is created.
     sock.connect()
     const ws2 = last()
     expect(ws2).not.toBe(ws1)

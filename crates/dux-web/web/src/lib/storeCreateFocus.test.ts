@@ -148,7 +148,7 @@ describe("auto-focus the agent this client created", () => {
     expect(fakeLocation.hash).toBe("#/agent/s2")
     // Selecting also subscribes the new session's changed-files topic.
     expect(subSpy).toHaveBeenCalledWith(["session:s2:changes"])
-    // The coarse app-wide topics are NOT clobbered by the focus change — the
+    // The coarse app-wide topics are NOT clobbered by the focus change; the
     // interest set still carries them alongside the new fine topic.
     expect(new Set(mod.eventsSocket.topics)).toEqual(
       new Set(["sessions", "projects", "config", "session:s2:changes"]),
@@ -189,7 +189,7 @@ describe("auto-focus the agent this client created", () => {
     await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
     mod.openCreateAgent("p1")
     mod.submitNameDialog("my-agent")
-    // Another client's agent lands in p2 — it must not satisfy our p1 token.
+    // Another client's agent lands in p2; it must not satisfy our p1 token.
     await pushSpine(mod, [
       { id: "s1", project_id: "p1" },
       { id: "other", project_id: "p2" },
@@ -319,7 +319,7 @@ describe("auto-focus the agent this client created", () => {
     await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
     mod.openCreateAgent("p1")
     mod.submitNameDialog("my-agent")
-    // The async agent launch fails — surfaced as an error-toned status event.
+    // The async agent launch fails, surfaced as an error-toned status event.
     mod.eventsSocket.onEvent({
       event: "status",
       tone: "error",

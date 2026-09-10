@@ -55,7 +55,7 @@ describe("partitionProjects", () => {
     expect(withoutAgents).toEqual(["p2"])
     // …but the reorder payload the server validates contains ONLY real project
     // ids, in display order (agent-bearing first, then agent-less). A ghost id
-    // would be rejected — the server has no project record to reorder.
+    // would be rejected; the server has no project record to reorder.
     expect(realOrder).toEqual(["p1", "p2"])
   })
 })

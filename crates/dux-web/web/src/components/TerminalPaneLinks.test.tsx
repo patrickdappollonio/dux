@@ -204,7 +204,7 @@ function installStubs() {
 // jsdom reports every box as 0x0, which makes xterm's char measurement invalid
 // and its mouse-to-cell conversion bail out (so no link would ever resolve).
 // Force a plausible 8x17 glyph and an 800x408 viewport so a click at (5, 5)
-// lands on row 1, column 1 — the first cell of the link written below.
+// lands on row 1, column 1, the first cell of the link written below.
 function forceLayout() {
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
     configurable: true,
@@ -415,7 +415,7 @@ describe("TerminalPane OSC 8 hyperlinks", () => {
   })
 
   // xterm's Linkifier does not look at `button`, so a right-click over a link
-  // activated it as well — and in dux a right-click is the PASTE gesture, so the
+  // activated it as well, and in dux a right-click is the PASTE gesture, so the
   // user got a paste AND a new tab they never asked for.
   it("does not open on a right-click, which is the paste gesture", async () => {
     const el = await mountWithLink()

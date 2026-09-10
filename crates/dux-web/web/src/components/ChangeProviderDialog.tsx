@@ -52,7 +52,7 @@ function ChangeProviderForm({
   return (
     <DialogContent showCloseButton={false}>
       <DialogHeader>
-        <DialogTitle>Change provider — {label}</DialogTitle>
+        <DialogTitle>Change provider: {label}</DialogTitle>
         <DialogDescription>
           Pick the CLI this agent uses. The change takes effect the next time
           this agent launches; the running session keeps its current provider

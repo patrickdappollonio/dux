@@ -8,7 +8,7 @@ import {
 
 describe("pageTitle", () => {
   it("prefixes the standalone editor tab so it reads as its own surface", () => {
-    expect(pageTitle("dux @ devbox", true)).toBe("Editor — dux @ devbox")
+    expect(pageTitle("dux @ devbox", true)).toBe("Editor: dux @ devbox")
   })
 
   it("leaves the workspace tab's title as the instance title alone", () => {

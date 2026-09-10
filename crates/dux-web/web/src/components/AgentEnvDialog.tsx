@@ -40,7 +40,7 @@ function AgentEnvForm({
   return (
     <DialogContent showCloseButton={false}>
       <DialogHeader>
-        <DialogTitle>Environment — {agentName}</DialogTitle>
+        <DialogTitle>Environment: {agentName}</DialogTitle>
         <DialogDescription>
           KEY=VALUE per line, applied to every agent and terminal in project{" "}
           <span className="font-medium">{project.name}</span> (layered over the

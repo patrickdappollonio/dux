@@ -155,11 +155,11 @@ export function MacroPopover({
       >
         {allMacros.length === 0 ? (
           <div className="px-3 py-6 text-center text-sm text-muted-foreground">
-            No macros found — start by creating one!
+            No macros found. Start by creating one!
           </div>
         ) : macros.length === 0 ? (
           <div className="px-3 py-6 text-center text-sm text-muted-foreground">
-            No macros for this target kind — add one via Edit macros below.
+            No macros for this target kind. Add one via Edit macros below.
           </div>
         ) : (
           // min-h-0 lets the Command column shrink when the popup hits its

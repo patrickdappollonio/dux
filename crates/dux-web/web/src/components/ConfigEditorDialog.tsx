@@ -107,7 +107,7 @@ export function ConfigEditorDialog() {
           <DialogTitle>Edit config.toml</DialogTitle>
           <DialogDescription>
             Edit the dux configuration. It is validated before saving; invalid
-            TOML is rejected with the reason. Saving does not apply the change —
+            TOML is rejected with the reason. Saving does not apply the change;
             run “Reload config” afterwards.
           </DialogDescription>
         </DialogHeader>

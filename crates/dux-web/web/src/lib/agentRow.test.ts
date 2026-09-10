@@ -29,7 +29,7 @@ describe("agentRowVisual", () => {
       typing: false,
     })
     // Even if a non-active agent somehow reports working, it stays dimmed and
-    // unshimmered — shimmer is gated on the active status.
+    // unshimmered; shimmer is gated on the active status.
     expect(agentRowVisual("detached", true)).toEqual({
       shimmer: false,
       dimmed: true,

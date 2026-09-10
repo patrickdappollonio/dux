@@ -28,7 +28,7 @@ import type { PtySocket } from "./ptySocket"
 // `bootstrapMacros` variable the fetch double reads at call time.
 
 let bootstrapMacros: MacroView[] = []
-// When set, the bootstrap fetch fails so `state.bootstrap` stays null — the
+// When set, the bootstrap fetch fails so `state.bootstrap` stays null; the
 // window the saveMacros guard protects against.
 let failBootstrap = false
 // When set, the macros PUT returns a 400, exercising the reorder rollback path.
@@ -253,7 +253,7 @@ describe("store macros commands", () => {
   // The mobile compose-bar routing: while the compose bar is the rendered
   // typing surface (TerminalPane registers the sink for exactly that window),
   // a picked macro is a DRAFT INSERT, never a wire write. The RAW text goes to
-  // the sink verbatim (newlines included — the compose Send path owns the
+  // the sink verbatim (newlines included: the compose Send path owns the
   // newline→keystroke transform later), and the PTY receives NOTHING.
   async function fakeComposeSink(): Promise<{ inserted: string[] }> {
     const inserted: string[] = []
@@ -272,7 +272,7 @@ describe("store macros commands", () => {
     const compose = await fakeComposeSink()
     mod.selectSession("s1")
     expect(mod.runMacro("Greet")).toBe("compose")
-    // Verbatim text, newlines preserved — NOT the Alt+Enter wire transform.
+    // Verbatim text, newlines preserved, NOT the Alt+Enter wire transform.
     expect(compose.inserted).toEqual(["hello\nworld"])
     expect(pty.sent).toHaveLength(0)
   })

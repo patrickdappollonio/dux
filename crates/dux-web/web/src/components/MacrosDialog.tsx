@@ -369,7 +369,7 @@ function MacroForm({
             className="font-mono"
           />
           <p className="text-xs text-muted-foreground">
-            Newlines are sent as Alt+Enter — the whole macro is one prompt.
+            Newlines are sent as Alt+Enter, so the whole macro is one prompt.
           </p>
         </div>
 

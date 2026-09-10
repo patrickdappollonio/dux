@@ -323,7 +323,7 @@ describe("deep-link restore on load", () => {
   it("is a one-shot: a later spine refetch does not re-restore", async () => {
     const mod = await loadStore("#/agent/s1", [{ id: "s1", project_id: "p1" }])
     expect(mod.getSnapshot().selectedTarget).not.toBeNull()
-    // The user navigates away, then a spine refetch arrives — it must NOT yank
+    // The user navigates away, then a spine refetch arrives; it must NOT yank
     // the selection back to the boot deep-link.
     mod.selectSession(null)
     spineBody = makeSpine([{ id: "s1", project_id: "p1" }])

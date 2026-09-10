@@ -1058,7 +1058,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           </>
         )}
         {readOnly && activeTab?.mode === "file" && (
-          <SimpleTooltip content="This file is read-only — it is a symlink to an external file or a .git path">
+          <SimpleTooltip content="This file is read-only: it is a symlink to an external file or a .git path">
             <span className="shrink-0 text-xs text-muted-foreground">
               read-only
             </span>
@@ -1098,12 +1098,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           </div>
         )}
         {hasDiff && activeTab?.mode === "diff" && diffStale && (
-          <SimpleTooltip content="This file changed on disk — reload the diff">
+          <SimpleTooltip content="This file changed on disk: reload the diff">
             <Button
               size="sm"
               variant="ghost"
               className="text-amber-500 max-md:hidden"
-              aria-label="Reload diff — the file changed on disk"
+              aria-label="Reload diff, the file changed on disk"
               onClick={refreshDiff}
             >
               <CircleAlert />
@@ -1155,7 +1155,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         content={
           localAccess
             ? undefined
-            : "Only available when dux is opened locally — not over a remote URL."
+            : "Only available when dux is opened locally, not over a remote URL."
         }
       >
         <span className="inline-flex max-md:hidden">
@@ -1482,7 +1482,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                         ))}
                         {searchTruncated && (
                           <p className="px-1 py-2 text-xs text-muted-foreground">
-                            The search index was capped — results may be
+                            The search index was capped, so results may be
                             incomplete.
                           </p>
                         )}

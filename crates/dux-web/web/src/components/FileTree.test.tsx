@@ -154,7 +154,7 @@ describe("FileTree", () => {
       />,
     )
     const row = await screen.findByText("__error__")
-    expect(screen.queryByText("Failed to load — retry")).toBeNull()
+    expect(screen.queryByText("Failed to load, retry")).toBeNull()
     fireEvent.click(row)
     expect(onOpen).toHaveBeenCalledWith("__error__")
   })
@@ -323,7 +323,7 @@ describe("FileTree", () => {
         onOpen={() => {}}
       />,
     )
-    const retry = await screen.findByText("Failed to load — retry")
+    const retry = await screen.findByText("Failed to load, retry")
     expect(badCalls).toBe(1)
 
     // Give any (undesired) automatic retry loop a chance to fire.

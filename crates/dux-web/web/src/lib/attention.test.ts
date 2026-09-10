@@ -65,11 +65,11 @@ describe("attentionCountForSurface", () => {
 
 describe("formatTabTitle", () => {
   it("leaves the title bare at zero", () => {
-    expect(formatTabTitle("dux — laptop", 0)).toBe("dux — laptop")
+    expect(formatTabTitle("dux @ laptop", 0)).toBe("dux @ laptop")
   })
 
   it("prefixes the count when above zero", () => {
-    expect(formatTabTitle("dux — laptop", 2)).toBe("(2) dux — laptop")
+    expect(formatTabTitle("dux @ laptop", 2)).toBe("(2) dux @ laptop")
     expect(formatTabTitle("dux", 1)).toBe("(1) dux")
   })
 })

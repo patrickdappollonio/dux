@@ -301,7 +301,7 @@ describe("the automatic first-load offer", () => {
     expect(mod.getSnapshot().firstLoad?.automatic).toBe(false)
 
     // Closing the on-demand dialog dismisses nothing, and the dropped offer is
-    // retried — so this tab still gets its screen.
+    // retried, so this tab still gets its screen.
     mod.closeFirstLoad()
     await vi.waitFor(() =>
       expect(mod.getSnapshot().firstLoad?.screen).toBe("whats_new"),
