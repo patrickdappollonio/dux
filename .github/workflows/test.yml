@@ -52,6 +52,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
+      # dux's own bootstrap commit (adopting a plain folder with init_repo) runs
+      # under whatever identity git can see, exactly as it does for a user. A
+      # hosted runner has no identity to see, so the test that adopts a plain
+      # folder gets git's "unable to auto-detect email" and a deferred 202.
+      - name: Give git the identity a developer's machine has
+        run: |
+          git config --global user.name "dux ci"
+          git config --global user.email "ci@getdux.app"
       - name: Run tests
         run: cargo test
 
