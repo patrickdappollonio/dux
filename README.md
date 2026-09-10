@@ -26,7 +26,14 @@ They are not identical, on purpose. Each surface does what its medium is good at
 
 You won't find a per-feature comparison table here, because a table like that is stale the week after it's written. The app is the reference: in the terminal, the help overlay and the command palette; in the browser, the cog menu and the row `⋯` menus.
 
-One thing worth knowing before you point a browser at anything: **there is no login.** No password, no token, no user accounts. dux is single-tenant by design, so everyone who can reach the address shares one workspace and can drive any agent, browse the server's filesystem, and edit your files. Loopback (the default), your own tailnet, or a reverse proxy you authenticate yourself are the safe shapes. A public address is not one. [Server Mode](#server-mode) has the details.
+One thing worth knowing before you point a browser at anything: **there is no login.** [Server Mode](#server-mode) explains exactly what that means and which shapes are safe; read it before you bind anything but loopback.
+
+## Prerequisites
+
+- **`git`**: dux is built around git worktrees, so git is non-negotiable. If it's not on your PATH, dux won't get very far.
+- **`gh` CLI** *(optional)*: authenticate it with your GitHub account and dux can pull PR statuses, check details, and show them right in the interface. Not required, but you'll miss it once you've tried it.
+
+Building from source instead? `cargo build` is the whole story, though it also builds the React web UI (which is compiled into the binary), so you'll want Node 22+ on your PATH. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the details, including how to skip the web UI build if you only care about the Rust side.
 
 ## Install
 
@@ -98,12 +105,22 @@ sha256sum -c dux-checksums.txt
 
 Worth being straight about what that buys you: it catches a corrupt or truncated download, and it gives you a value you can compare out of band. It is not tamper protection. The checksums are unsigned and served from the same place as the archives, so anyone able to replace an archive could replace its checksum too. Signing would be the answer to that, and dux does not sign releases yet.
 
-## Prerequisites
+## First Run
 
-- **`git`**: dux is built around git worktrees, so git is non-negotiable. If it's not on your PATH, dux won't get very far.
-- **`gh` CLI** *(optional)*: authenticate it with your GitHub account and dux can pull PR statuses, check details, and show them right in the interface. Not required, but you'll miss it once you've tried it.
+Type `dux`. The first launch on a machine opens a one-time welcome screen instead of an empty sidebar, tells you where your config file lives on *this* machine, and offers to add your first project right there.
 
-Building from source instead? `cargo build` is the whole story, though it also builds the React web UI (which is compiled into the binary), so you'll want Node 22+ on your PATH. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the details, including how to skip the web UI build if you only care about the Rust side.
+## Documentation
+
+The full documentation lives at **[getdux.app/docs](https://getdux.app/docs)**. The README is the tour; the docs are the reference. A sample of what they cover and this page only skims or skips:
+
+- **Dropping and pasting files**, in the browser: drag, paste, or pick a file, and dux saves it on the server and pastes its path into the agent.
+- **Theater mode and the phone shell**: the hub-and-spoke layout on a small screen, and the mode that hands the whole page to one terminal.
+- **Attention indicators**: how dux notices an agent is waiting on you, and lights up the sidebar, the browser tab and the favicon.
+- **Agent tabs**: several provider sessions inside one agent, all sharing the one worktree.
+- **The in-browser editor's reach**: a real Monaco editor over any file in a worktree or a terminal's directory, with previews, path search, and diffs against `HEAD`.
+- **Pull request banner settings**: including which side of the terminal the banner sits on.
+- **Naming a web instance**: `[server] title` and `favicon`, so you can tell several dux tabs apart.
+- **Hosting dux behind a login**: a reverse proxy and oauth2-proxy in front, since dux has no login of its own.
 
 ## How It Works
 
