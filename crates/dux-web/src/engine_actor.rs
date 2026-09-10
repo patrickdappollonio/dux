@@ -3812,9 +3812,7 @@ fn create_agent_tab_inner(
     let provider = match provider {
         Some(p) => {
             if !engine.config.providers.commands.contains_key(&p) {
-                return Err(format!(
-                    "Provider \"{p}\" is not configured. Pick one of the configured providers."
-                ));
+                return Err(dux_core::provider::provider_not_configured(&p));
             }
             dux_core::model::ProviderKind::new(p)
         }

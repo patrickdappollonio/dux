@@ -1415,9 +1415,7 @@ fn validate_settings_patch(
     if let Some(provider) = &patch.default_provider
         && !config.providers.commands.contains_key(provider.as_str())
     {
-        anyhow::bail!(
-            "Provider \"{provider}\" is not configured. Pick one of the configured providers."
-        );
+        anyhow::bail!("{}", crate::provider::provider_not_configured(provider));
     }
     Ok(patch)
 }
@@ -2315,9 +2313,7 @@ impl Engine {
         // ViewModel's `available_providers` is built from), so a forged or
         // stale provider name from the client is rejected with actionable copy.
         if !self.config.providers.commands.contains_key(provider) {
-            anyhow::bail!(
-                "Provider \"{provider}\" is not configured. Pick one of the configured providers."
-            );
+            anyhow::bail!("{}", crate::provider::provider_not_configured(provider));
         }
         let provider = ProviderKind::new(provider);
 
@@ -2416,9 +2412,7 @@ impl Engine {
             return self.change_agent_provider_wire(session_id, provider);
         }
         if !self.config.providers.commands.contains_key(provider) {
-            anyhow::bail!(
-                "Provider \"{provider}\" is not configured. Pick one of the configured providers."
-            );
+            anyhow::bail!("{}", crate::provider::provider_not_configured(provider));
         }
         let provider = ProviderKind::new(provider);
         let outcome = self.change_tab_provider(session_id, tab_id, provider.clone())?;

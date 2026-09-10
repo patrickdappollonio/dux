@@ -3636,7 +3636,7 @@ export async function retargetTab(
   provider: string,
 ): Promise<boolean> {
   if (!providerIsConfigured(provider)) {
-    notifyError(`Provider "${provider}" is not configured.`)
+    notifyError(providerNotConfigured(provider))
     return false
   }
   try {
@@ -4125,6 +4125,12 @@ function providerIsConfigured(provider: string): boolean {
   return (state.bootstrap?.available_providers ?? []).includes(provider)
 }
 
+// The same refusal the server gives, so a pre-flight toast and a refused
+// request read alike.
+function providerNotConfigured(provider: string): string {
+  return `Provider "${provider}" is not configured. Pick one of the configured providers.`
+}
+
 // Ask the server to swap which provider a session uses. The provider is validated
 // against the configured list up front (the server re-validates), persisted for
 // the next launch, with the outcome (swapped / already-uses-it / still-running)
@@ -4135,7 +4141,7 @@ export async function changeAgentProvider(
   provider: string,
 ): Promise<boolean> {
   if (!providerIsConfigured(provider)) {
-    notifyError(`Provider "${provider}" is not configured.`)
+    notifyError(providerNotConfigured(provider))
     return false
   }
   try {
@@ -4669,7 +4675,7 @@ export async function updateProjectSettings(
     patch.provider != null &&
     !providerIsConfigured(patch.provider)
   ) {
-    notifyError(`Provider "${patch.provider}" is not configured.`)
+    notifyError(providerNotConfigured(patch.provider))
     return false
   }
   try {

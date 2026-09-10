@@ -4056,10 +4056,7 @@ impl Engine {
         let provider = match provider.map(str::trim).filter(|value| !value.is_empty()) {
             Some(value) => {
                 if !self.config.providers.commands.contains_key(value) {
-                    anyhow::bail!(
-                        "Provider \"{value}\" is not configured. Pick one of the configured \
-                         providers, or add it to the [providers] section of your config."
-                    );
+                    anyhow::bail!("{}", crate::provider::provider_not_configured(value));
                 }
                 crate::model::ProviderKind::new(value)
             }
@@ -4658,7 +4655,10 @@ impl Engine {
             .commands
             .contains_key(provider.as_str())
         {
-            anyhow::bail!("provider \"{}\" is not configured", provider.as_str());
+            anyhow::bail!(
+                "{}",
+                crate::provider::provider_not_configured(provider.as_str())
+            );
         }
 
         // Per-agent cap. Every tab is a row, the slot tab included, so the
@@ -4976,7 +4976,10 @@ impl Engine {
             .commands
             .contains_key(provider.as_str())
         {
-            anyhow::bail!("provider \"{}\" is not configured", provider.as_str());
+            anyhow::bail!(
+                "{}",
+                crate::provider::provider_not_configured(provider.as_str())
+            );
         }
 
         let running = self.providers.contains_key(tab_id_ref);
@@ -9368,7 +9371,10 @@ mod tab_ops_tests {
                 (24, 80),
             )
             .unwrap_err();
-        assert!(err.to_string().contains("not configured"), "err: {err}");
+        assert_eq!(
+            err.to_string(),
+            "Provider \"definitely-not-a-provider\" is not configured. Pick one of the configured providers."
+        );
         assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 0);
     }
 

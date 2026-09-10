@@ -289,9 +289,7 @@ pub(crate) async fn require_configured_provider(
         Some(true) => Ok(()),
         Some(false) => Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "Provider \"{provider}\" is not configured. Pick one of the configured providers."
-            ),
+            dux_core::provider::provider_not_configured(provider),
         )
             .into_response()
             .into()),
