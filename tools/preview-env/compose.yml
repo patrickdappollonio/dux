@@ -1,5 +1,6 @@
 # Isolated dux preview stack. Brought up by ./up.sh, which builds the dux binary
-# on the host and exports DUX_BIN before invoking compose.
+# on the host and exports DUX_BIN, DUX_PORT, DUX_TUI_PORT and BASE_IMAGE before
+# invoking compose.
 #
 # Every variable here has a default, deliberately: compose interpolates the whole
 # file whatever service or profile you asked for, so a required-variable form on
@@ -29,7 +30,8 @@ services:
       # addresses, so they cannot share a port). Published now because a port
       # mapping needs a container restart and a journey script cannot add one;
       # nothing listens on it until a journey configures that port. Loopback
-      # only, exactly like its sibling.
+      # only, exactly like its sibling, and it moves with DUX_PORT (up.sh
+      # derives it as DUX_PORT + 208) so a second stack collides on neither.
       - "127.0.0.1:${DUX_TUI_PORT:-8998}:8998"
     environment:
       - DUX_PORT=8790

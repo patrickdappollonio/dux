@@ -13,8 +13,9 @@ const positional = argv.filter((a) => !a.startsWith("--"))
 const [url, out = "shot.png", w, h] = positional
 
 // Phone preset mirrors the mobile-shell breakpoint (<md); desktop is a roomy
-// sidebar+center layout. Both render at 2x, so a phone PNG is 780px wide.
-const width = +(w || (mobile ? 390 : 1280))
+// sidebar+center layout. Both render at 2x, so a phone PNG is 780px wide and a
+// desktop one 2880px, which is the size every committed desktop screenshot is.
+const width = +(w || (mobile ? 390 : 1440))
 const height = +(h || (mobile ? 844 : 900))
 
 // The scale is a browser flag, never puppeteer's `deviceScaleFactor` viewport

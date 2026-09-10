@@ -53,6 +53,19 @@ DUX_SRC=/path/to/worktree ./up.sh   # preview a different branch/worktree
 
 Then open `http://127.0.0.1:8790` (loopback only; `DUX_PORT` overrides).
 
+Two loopback ports are published: the web preview on `DUX_PORT` and the
+concurrent-TUI journey's background server on `DUX_TUI_PORT`, which defaults to
+`DUX_PORT + 208` (so 8790 pairs with 8998). Moving one moves both, which is what
+lets a second stack come up beside a running one:
+
+```bash
+DUX_PORT=9000 ./up.sh         # web 9000, TUI-journey 9208
+```
+
+`shot.sh` reads `DUX_PORT` independently, so export it (or pass it to every
+script in the session) when you move the web port, or the screenshots go to the
+other stack.
+
 ### Iterate on code
 
 ```bash
@@ -72,8 +85,22 @@ Playwright build, then common system binaries).
 ./shot.sh '/#/agent/<sid>' agent.png  # a deep-linked position
 ```
 
-Captures render at 2×: the desktop preset writes 2560×1800 and the phone preset
-780×1688.
+Captures render at 2×: the desktop preset is 1440×900 CSS and writes
+2880×1800, the phone preset 390×844 CSS and writes 780×1688.
+
+Those are the conventions of the committed set under `website/public/screens/`,
+and a reshoot that departs from them lands beside its neighbours looking wrong:
+
+| | value |
+| --- | --- |
+| Scale | 2×, always (`--force-device-scale-factor=2`) |
+| Desktop viewport | 1440×900 CSS (2880×1800 pixels) |
+| Phone viewport | 390×844 CSS (780×1688 pixels), `--mobile` |
+| TUI theme | `--theme dux_dark` (the script's own default is different) |
+
+Element crops are cut from a capture at those viewports rather than shot at a
+viewport of their own, so a crop's pixel size is whatever its element measures
+at 2×.
 
 The scale is asked of the browser (`--force-device-scale-factor=2`) rather than
 of the viewport, and SwiftShader is requested by name. Both matter for the
