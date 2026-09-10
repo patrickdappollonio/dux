@@ -315,7 +315,8 @@ fn diff_file(
 
     let verdict = diff_size_verdict(&old_bytes, &new_bytes);
     if verdict == DiffSizeVerdict::TooLarge {
-        return Ok(too_large_diff_output(
+        return Ok(head_diff_output(
+            worktree_path,
             rel_path,
             old_bytes.len(),
             new_bytes.len(),
@@ -419,7 +420,77 @@ fn diff_file(
     })
 }
 
-/// What the pane shows instead of a diff dux refused to compute.
+/// What the pane shows for a pair dux will not diff in process: the head of
+/// git's own patch, and the banner saying where it was cut.
+///
+/// Syntax highlighting is left off deliberately. The added and removed colors
+/// are what a reader of a diff this size is looking for, and syntect's per-line
+/// cost is the reason the in-process diff bowed out in the first place.
+fn head_diff_output(
+    worktree_path: &Path,
+    rel_path: &str,
+    old_size: usize,
+    new_size: usize,
+    theme: &AppTheme,
+) -> DiffOutput {
+    let head = match dux_core::diff::diff_head_via_git(worktree_path, rel_path) {
+        Ok(head) => head,
+        // The fallback is the only diff left for a file this size, so its
+        // failure is reported with the refusal it replaced, git's words and all.
+        Err(error) => {
+            let mut output = too_large_diff_output(rel_path, old_size, new_size, theme);
+            output.lines.push(Line::from(format!(
+                "git could not diff it either: {error:#}"
+            )));
+            return output;
+        }
+    };
+    if head.binary {
+        return binary_diff_output(rel_path, old_size, new_size, theme);
+    }
+
+    let mut lines: Vec<Line<'static>> = head.text.lines().map(|l| patch_line(l, theme)).collect();
+    let banner = dux_core::diff::diff_head_banner(&head);
+    if !banner.is_empty() {
+        lines.push(Line::from(Span::styled(
+            banner,
+            Style::default().fg(theme.hint_dim_desc_fg),
+        )));
+    }
+    DiffOutput {
+        lines,
+        gutter_width: 0,
+    }
+}
+
+/// Style one line of a unified patch by its leading marker. The file-header
+/// lines are matched before the `+`/`-` ones, which they otherwise look like.
+fn patch_line(line: &str, theme: &AppTheme) -> Line<'static> {
+    let style = if line.starts_with("diff --git ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+        || line.starts_with("index ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+    {
+        Style::default()
+            .fg(theme.diff_file_header)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("@@") {
+        Style::default().fg(theme.diff_hunk)
+    } else if line.starts_with('+') {
+        Style::default().fg(theme.diff_add).bg(theme.diff_add_bg)
+    } else if line.starts_with('-') {
+        Style::default()
+            .fg(theme.diff_remove)
+            .bg(theme.diff_remove_bg)
+    } else {
+        Style::default()
+    };
+    Line::from(Span::styled(line.to_string(), style))
+}
+
+/// What the pane shows when even the git fallback could not answer.
 ///
 /// Honest rather than empty: it names the sizes it judged and says what the
 /// user can still do, because the file itself is perfectly readable, just not
@@ -1303,7 +1374,74 @@ mod tests {
     /// Past the hard cap dux says so in the pane rather than holding a worker
     /// thread for minutes on a diff nobody can read anyway.
     #[test]
-    fn a_file_past_the_hard_cap_is_refused_in_words() {
+    fn a_file_past_the_hard_cap_shows_the_head_and_the_banner() {
+        // Both sides rewritten line for line, so the pair is past the hard cap
+        // AND git's own patch is far longer than the head cap.
+        let lines = DIFF_REFUSE_ABOVE_LINES / 2 + 1;
+        let base: String = (0..lines).map(|i| format!("old {i}\n")).collect();
+        // Every other line rewritten, so the patch interleaves its removals and
+        // its additions rather than emitting one whole side before the other.
+        let changed: String = (0..lines)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("old {i}\n")
+                } else {
+                    format!("new {i}\n")
+                }
+            })
+            .collect();
+        let dir = setup_text_repo("huge.txt", &base, &changed);
+        let cache = SyntaxCache::new();
+
+        let output = diff_file(
+            dir.path(),
+            "huge.txt",
+            &AppTheme::default_dark(),
+            &cache,
+            false,
+            4,
+        )
+        .unwrap();
+
+        let rendered: Vec<String> = output.lines.iter().map(|line| line.to_string()).collect();
+        assert!(
+            !rendered
+                .iter()
+                .any(|line| line.contains("File too large to diff.")),
+            "the pane shows the head instead of refusing, got {:?}",
+            &rendered[..rendered.len().min(6)]
+        );
+        assert!(
+            rendered.iter().any(|line| line.starts_with("-old ")),
+            "the removed lines are there, got {:?}",
+            &rendered[..rendered.len().min(12)]
+        );
+        assert!(
+            rendered.iter().any(|line| line.starts_with("+new ")),
+            "the added lines are there, got {:?}",
+            &rendered[..rendered.len().min(12)]
+        );
+        assert_eq!(
+            rendered.len(),
+            dux_core::diff::DIFF_HEAD_MAX_LINES + 1,
+            "the head plus its banner, and nothing else"
+        );
+        let banner = rendered.last().expect("a banner line");
+        assert!(
+            banner.starts_with("Diff cut here: showing the first 4000 of "),
+            "got {banner:?}"
+        );
+        assert!(
+            banner.ends_with("Open the file in your editor or run git diff to see the rest."),
+            "got {banner:?}"
+        );
+        assert_eq!(output.gutter_width, 0);
+    }
+
+    /// A pair past the cap whose patch still fits under the head cap shows the
+    /// whole patch and no banner: the cut sentence is only true when it is.
+    #[test]
+    fn a_file_past_the_hard_cap_with_a_short_patch_gets_no_banner() {
         let base: String = "x\n".repeat(DIFF_REFUSE_ABOVE_LINES + 1);
         let changed = format!("{base}y\n");
         let dir = setup_text_repo("huge.txt", &base, &changed);
@@ -1321,16 +1459,13 @@ mod tests {
 
         let rendered: Vec<String> = output.lines.iter().map(|line| line.to_string()).collect();
         assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains("File too large to diff.")),
+            rendered.iter().any(|line| line.starts_with("+y")),
             "got {rendered:?}"
         );
         assert!(
-            rendered.iter().any(|line| line.contains("Old size:")),
-            "the refusal names the sizes it judged, got {rendered:?}"
+            !rendered.iter().any(|line| line.contains("Diff cut here")),
+            "nothing was cut, so nothing says it was: {rendered:?}"
         );
-        assert_eq!(output.gutter_width, 0);
     }
 
     /// The worker path is the only way in from the app, so it has to produce
