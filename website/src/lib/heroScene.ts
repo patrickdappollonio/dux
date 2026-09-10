@@ -456,12 +456,8 @@ export function mountHeroScene(
   // palette falling back to the literal colour, then the 2 Hz block cursor
   // under them. Returns the y the cursor row sits on, for whatever the caller
   // draws beside it.
-  function drawFeed(
-    ctx: CanvasRenderingContext2D,
-    p: Pane,
-    t: number,
-    g: FeedGeometry,
-  ): number {
+  function drawFeed(p: Pane, t: number, g: FeedGeometry): number {
+    const ctx = p.ctx
     ctx.font = g.font;
     ctx.textBaseline = "top";
     const rows = p.lines.slice(-ROWS);
@@ -482,7 +478,7 @@ export function mountHeroScene(
     const ctx = p.ctx;
     const box = drawChrome(p, t);
 
-    const y = drawFeed(ctx, p, t, {
+    const y = drawFeed(p, t, {
       font: `500 13.5px ${MONO}`,
       cut: clip(66),
       x: PAD + 14,
@@ -550,7 +546,7 @@ export function mountHeroScene(
       }
     });
 
-    drawFeed(ctx, p, t, {
+    drawFeed(p, t, {
       font: `500 11.5px ${MONO}`,
       cut: fit(rightX - midX - 22, 6.9),
       x: midX + 12,

@@ -296,6 +296,15 @@ describe("how many PTY sockets one pane mount opens", () => {
     expect(getActivePtySocket()).toBe(FakePtySocket.instances[0])
   })
 
+  it("disposes that socket and clears the registration on unmount", () => {
+    const view = render(<TerminalPane {...paneProps} />)
+    view.unmount()
+
+    expect(FakePtySocket.instances).toHaveLength(1)
+    expect(FakePtySocket.instances[0].dispose).toHaveBeenCalledTimes(1)
+    expect(getActivePtySocket()).toBeNull()
+  })
+
   it("constructs two under StrictMode, one per effect invocation", () => {
     render(
       <React.StrictMode>
@@ -339,4 +348,22 @@ describe("how many PTY sockets one pane mount opens", () => {
     expect(getActivePtySocket()).toBe(FakePtySocket.instances.at(-1))
     expect(getActivePtySocket()).not.toBe(FakePtySocket.instances[0])
   })
+
+  it("disposes the StrictMode survivor too, and clears the registration", () => {
+    const view = render(
+      <React.StrictMode>
+        <TerminalPane {...paneProps} />
+      </React.StrictMode>,
+    )
+    view.unmount()
+
+    // Both sockets end disposed: the discarded one by the double-invoke's own
+    // cleanup, the survivor by the unmount. Nothing is left holding the PTY.
+    const disposals = FakePtySocket.instances.map(
+      (pty) => pty.dispose.mock.calls.length,
+    )
+    expect(disposals).toEqual([1, 1])
+    expect(getActivePtySocket()).toBeNull()
+  })
 })
+
