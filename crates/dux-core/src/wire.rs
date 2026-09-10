@@ -1968,10 +1968,11 @@ impl Engine {
     /// preference, lazy write.
     ///
     /// The shared value set is "active" (default), "updated", "created", "name"
-    /// (ascending), "name_desc" (descending) and "manual" (the web's drag-reorder
-    /// order). Each surface OFFERS its own subset in its picker but DISPLAYS any
-    /// value the other one sets. `pub` so the TUI's `sort-agents` palette command
-    /// can drive it too.
+    /// (ascending), "name_desc" (descending) and "manual" (the hand-placed order,
+    /// which a drag on the web or a `move-agent-*` / `move-terminal-*` command in
+    /// the TUI stamps). Each surface OFFERS its own subset in its picker but
+    /// DISPLAYS any value the other one sets. `pub` so the TUI's `sort-agents`
+    /// palette command can drive it too.
     pub fn set_agent_sort(&mut self, sort: &str) -> WireStatus {
         const VALID: [&str; 6] = [
             "active",

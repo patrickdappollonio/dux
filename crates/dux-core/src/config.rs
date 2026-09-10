@@ -1547,14 +1547,15 @@ pub struct UiConfig {
     /// The agent-list sort mode, persisted so a chosen order (and the manual
     /// drag order it enables) survives restarts and is shared across clients:
     /// "active" (working/attention float up, the default), "updated", "created",
-    /// "name", "name_desc", or "manual" (the raw persisted order, enabled by
-    /// drag-reorder).
+    /// "name", "name_desc", or "manual" (the raw persisted order, which
+    /// hand-placing a row stamps).
     ///
-    /// One setting for both surfaces. The TUI orders its sidebar by it and
-    /// writes it from the `sort-agents` palette command and from a drag, which
-    /// stamps "manual"; the web writes it from its sidebar sort control. Each
-    /// surface offers its own subset of the modes and displays whatever value
-    /// the other one set.
+    /// One setting for both surfaces. The TUI orders its sidebar by it and has
+    /// three writers: the `sort-agents` palette command, and the
+    /// `move-agent-*` and `move-terminal-*` commands, which hand-place a row and
+    /// stamp "manual". The web writes it from its sidebar sort control, where a
+    /// drag stamps "manual" the same way. Each surface offers its own subset of
+    /// the modes and displays whatever value the other one set.
     pub agent_sort: String,
     pub theme: String,
 }
