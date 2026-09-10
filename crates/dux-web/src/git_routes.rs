@@ -670,7 +670,7 @@ fn apply_wire_response(result: Result<dux_core::wire::WireCommandOutcome, String
 fn no_selected_files_left_message(refused: usize, section: Section, first: &str) -> String {
     let word = section.word();
     let subject = if refused == 1 {
-        "the 1 selected file is not".to_string()
+        "the selected file is not".to_string()
     } else {
         format!("none of the {refused} selected files are")
     };
@@ -1308,7 +1308,7 @@ mod tests {
     fn the_stale_selection_refusal_counts_the_files() {
         assert_eq!(
             no_selected_files_left_message(1, Section::Staged, "a.rs"),
-            "the 1 selected file is not in this worktree's staged changes any more (starting \
+            "the selected file is not in this worktree's staged changes any more (starting \
              with \"a.rs\"). Refresh the changes and try again."
         );
         assert_eq!(

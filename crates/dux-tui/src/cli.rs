@@ -626,7 +626,7 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
                             removed += 1;
                         }
                     }
-                    println!("removed {removed} session worktree(s)");
+                    println!("{}", removed_worktrees_line(removed));
                 }
                 Err(error) => {
                     eprintln!("warning: could not load sessions from database: {error}");
@@ -725,6 +725,11 @@ fn worktree_holds_occupied_folder(worktree: &Path, occupied: &[PathBuf]) -> bool
 /// folder a standalone agent occupies, and the `remove_dir_all` would take the
 /// user's folder with it, so the whole removal is skipped and the reason
 /// printed.
+/// The factory reset's stdout summary, counting the worktrees it removed.
+fn removed_worktrees_line(removed: usize) -> String {
+    format!("removed {}", count_of(removed, "session worktree"))
+}
+
 fn remove_session_worktree(
     paths: &DuxPaths,
     managed: &dux_core::model::ManagedWorkspace,
@@ -2099,5 +2104,12 @@ mod tests {
             !String::from_utf8_lossy(&worktrees.stdout).contains(removed_registration.as_ref()),
             "no stale worktree registration for the removed path may remain in the repo",
         );
+    }
+
+    #[test]
+    fn the_factory_reset_summary_counts_the_worktrees() {
+        assert_eq!(removed_worktrees_line(0), "removed 0 session worktrees");
+        assert_eq!(removed_worktrees_line(1), "removed 1 session worktree");
+        assert_eq!(removed_worktrees_line(3), "removed 3 session worktrees");
     }
 }

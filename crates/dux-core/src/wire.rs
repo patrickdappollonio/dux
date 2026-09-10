@@ -2206,10 +2206,9 @@ impl Engine {
         Ok(WireStatus::new(
             "info",
             format!(
-                "Detached agent \"{}\" and stopped {} tab{}. It stays in Projects. Reconnect it from the agent menu.",
+                "Detached agent \"{}\" and stopped {}. It stays in Projects. Reconnect it from the agent menu.",
                 session.display_label(),
-                stopped,
-                if stopped == 1 { "" } else { "s" },
+                crate::text::count_of(stopped, "tab"),
             ),
         ))
     }
@@ -6616,7 +6615,7 @@ mod tests {
             .expect("apply detach");
         let status = outcome.status.expect("a status");
         assert!(
-            status.message.contains("Detached agent") && status.message.contains("2 tab"),
+            status.message.contains("Detached agent") && status.message.contains("stopped 2 tabs."),
             "msg: {}",
             status.message
         );

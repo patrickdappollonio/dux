@@ -7,7 +7,11 @@
 /// `"0 commits"` / `"1 commit"` / `"3 commits"`: count a regular noun that
 /// pluralizes with a trailing `s`.
 pub fn count_of(n: usize, singular: &str) -> String {
-    count_of_with(n, singular, &format!("{singular}s"))
+    if n == 1 {
+        format!("{n} {singular}")
+    } else {
+        format!("{n} {singular}s")
+    }
 }
 
 /// `"1 process"` / `"2 processes"`: count a noun whose plural is spelled out
