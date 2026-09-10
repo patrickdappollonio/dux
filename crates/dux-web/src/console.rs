@@ -336,8 +336,11 @@ impl Console {
                 Tone::Warn,
                 &now_hms(),
                 &format!(
-                    "console output fell behind: {drop_streak} line(s) dropped \
-                     (slow stdout consumer)"
+                    "console output fell behind: {} dropped (slow stdout consumer)",
+                    dux_core::text::count_of(
+                        usize::try_from(drop_streak).unwrap_or(usize::MAX),
+                        "line"
+                    )
                 ),
             );
             // Only clear the streak if the warning itself made it through, so a
@@ -1217,12 +1220,12 @@ mod tests {
 
         let out = buf.contents();
         assert!(
-            out.contains("console output fell behind") && out.contains("line(s) dropped"),
+            out.contains("console output fell behind") && out.contains("lines dropped"),
             "a drop streak must surface a single warning: {out}"
         );
         // The warning names the EXACT number of lines that were dropped.
         assert!(
-            out.contains(&format!("{dropped_before} line(s) dropped")),
+            out.contains(&format!("{dropped_before} lines dropped")),
             "the warning must name the dropped count ({dropped_before}): {out}"
         );
         assert!(

@@ -1641,10 +1641,7 @@ pub(crate) fn auto_reopen_agents_on_startup(engine: &mut Engine) -> usize {
     if candidates.is_empty() {
         return 0;
     }
-    dux_core::logger::info(&format!(
-        "Auto-reopening {} agent(s) that were running when dux last exited...",
-        candidates.len()
-    ));
+    dux_core::logger::info(&auto_reopen_log_line(candidates.len()));
     let mut launched = 0;
     for session in candidates {
         let id = session.id.clone();
@@ -3927,6 +3924,16 @@ fn dispatch_launch(engine: &mut Engine, request: AgentLaunchRequest) -> Result<(
         return Err(message);
     }
     Ok(())
+}
+
+/// The startup log line announcing the auto-reopen sweep, counting the agents
+/// it is about to relaunch.
+fn auto_reopen_log_line(count: usize) -> String {
+    let verb = if count == 1 { "was" } else { "were" };
+    format!(
+        "Auto-reopening {} that {verb} running when dux last exited...",
+        dux_core::text::count_of(count, "agent")
+    )
 }
 
 #[cfg(test)]
@@ -6687,6 +6694,18 @@ mod tests {
             43,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
+        );
+    }
+
+    #[test]
+    fn the_auto_reopen_log_line_counts_the_agents() {
+        assert_eq!(
+            auto_reopen_log_line(1),
+            "Auto-reopening 1 agent that was running when dux last exited..."
+        );
+        assert_eq!(
+            auto_reopen_log_line(3),
+            "Auto-reopening 3 agents that were running when dux last exited..."
         );
     }
 }

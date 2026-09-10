@@ -480,11 +480,9 @@ async fn files_op(
     if done.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            format!(
-                "none of the {} selected files are in this worktree's {} changes any more \
-                 (starting with \"{}\"). Refresh the changes and try again.",
+            no_selected_files_left_message(
                 refused.len(),
-                section.word(),
+                section,
                 refused.first().map(String::as_str).unwrap_or_default(),
             ),
         )
@@ -664,6 +662,22 @@ fn apply_wire_response(result: Result<dux_core::wire::WireCommandOutcome, String
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
+}
+
+/// The refusal when every file the browser named has left the section it was
+/// staged or unstaged from, naming the first one so the user can see which
+/// list went stale.
+fn no_selected_files_left_message(refused: usize, section: Section, first: &str) -> String {
+    let word = section.word();
+    let subject = if refused == 1 {
+        "the 1 selected file is not".to_string()
+    } else {
+        format!("none of the {refused} selected files are")
+    };
+    format!(
+        "{subject} in this worktree's {word} changes any more (starting with \"{first}\"). \
+         Refresh the changes and try again."
+    )
 }
 
 #[cfg(test)]
@@ -1288,5 +1302,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn the_stale_selection_refusal_counts_the_files() {
+        assert_eq!(
+            no_selected_files_left_message(1, Section::Staged, "a.rs"),
+            "the 1 selected file is not in this worktree's staged changes any more (starting \
+             with \"a.rs\"). Refresh the changes and try again."
+        );
+        assert_eq!(
+            no_selected_files_left_message(3, Section::Unstaged, "a.rs"),
+            "none of the 3 selected files are in this worktree's unstaged changes any more \
+             (starting with \"a.rs\"). Refresh the changes and try again."
+        );
     }
 }
