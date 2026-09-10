@@ -135,11 +135,33 @@ pub struct StartupCommandTerminalConfig {
     pub args: Vec<String>,
 }
 
+/// Default size the log is allowed to reach before dux rotates it, 10 MiB.
+///
+/// Rotation is by size and dux does it itself, so a machine with no logrotate
+/// still has a bounded log. `0` means never rotate, matching how other
+/// zero-valued size settings in dux read as off.
+pub const DEFAULT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Default number of rotated log copies kept beside the live log.
+///
+/// With the default size that is at most 60 MiB of plain text, and much less
+/// once the older copies are compressed. `0` rotates and discards.
+pub const DEFAULT_LOG_KEEP: u32 = 5;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
     pub path: String,
+    /// Size in bytes the log may reach before dux rotates it. Checked before
+    /// each line is appended, so the file may exceed this by less than one
+    /// line. `0` never rotates.
+    pub max_bytes: u64,
+    /// How many rotated copies to keep, numbered `dux.log.1` upwards. The
+    /// oldest is deleted. `0` rotates and discards.
+    pub keep: u32,
+    /// Whether a rotated copy is gzipped to `dux.log.N.gz` in the background.
+    pub compress: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1933,6 +1955,9 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_string(),
             path: "dux.log".to_string(),
+            max_bytes: DEFAULT_LOG_MAX_BYTES,
+            keep: DEFAULT_LOG_KEEP,
+            compress: true,
         }
     }
 }
@@ -2541,10 +2566,7 @@ impl Default for Config {
             providers: ProvidersConfig::default(),
             terminal: TerminalConfig::default(),
             startup_command_terminal: StartupCommandTerminalConfig::default(),
-            logging: LoggingConfig {
-                level: "info".to_string(),
-                path: "dux.log".to_string(),
-            },
+            logging: LoggingConfig::default(),
             projects: Vec::new(),
             ui: UiConfig {
                 left_width_pct: 20,

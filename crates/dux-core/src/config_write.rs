@@ -252,6 +252,9 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     // --- [logging] ---
     patch_table_str(doc, "logging", "level", &config.logging.level);
     patch_table_str(doc, "logging", "path", &config.logging.path);
+    patch_table_u64(doc, "logging", "max_bytes", config.logging.max_bytes);
+    patch_table_u32(doc, "logging", "keep", config.logging.keep);
+    patch_table_bool(doc, "logging", "compress", config.logging.compress);
 
     // --- [ui] ---
     patch_table_u16(doc, "ui", "left_width_pct", config.ui.left_width_pct);
@@ -668,6 +671,10 @@ fn patch_root_u16(doc: &mut DocumentMut, key: &str, value: u16) {
     doc[key] = toml_edit::value(i64::from(value));
 }
 
+fn patch_table_u32(doc: &mut DocumentMut, section: &str, key: &str, value: u32) {
+    let table = ensure_table(doc, section);
+    table[key] = toml_edit::value(i64::from(value));
+}
 fn patch_table_usize(doc: &mut DocumentMut, section: &str, key: &str, value: usize) {
     let table = ensure_table(doc, section);
     table[key] = toml_edit::value(value as i64);

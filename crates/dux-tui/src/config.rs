@@ -243,6 +243,8 @@ enum FieldValue {
     Str(String),
     OptStr(Option<String>),
     U16(u16),
+    U32(u32),
+    U64(u64),
     Usize(usize),
     Bool(bool),
     StrList(Vec<String>),
@@ -407,6 +409,37 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # The log file is opened once, so changing this needs a restart.",
             )),
             value_fn: |c| FieldValue::Str(c.logging.path.clone()),
+        },
+        ConfigEntry::Field {
+            key: "max_bytes",
+            comment: Some(CommentSource::Static(
+                "# Size in bytes the log may reach before dux rotates it itself. Default\n\
+                 # 10485760 (10 MiB). Rotation is by SIZE only: there is no daily or weekly\n\
+                 # schedule, and nothing rotates while dux is not writing. The check runs\n\
+                 # before each line is appended, so the file can end up under this by one\n\
+                 # line rather than over it. Set to 0 to never rotate.",
+            )),
+            value_fn: |c| FieldValue::U64(c.logging.max_bytes),
+        },
+        ConfigEntry::Field {
+            key: "keep",
+            comment: Some(CommentSource::Static(
+                "# How many rotated copies to keep beside the live log. Default 5. On each\n\
+                 # rotation the live log becomes dux.log.1, the previous dux.log.1 becomes\n\
+                 # dux.log.2, and so on; anything past this count is deleted. Set to 0 to\n\
+                 # rotate and throw the old log away.",
+            )),
+            value_fn: |c| FieldValue::U32(c.logging.keep),
+        },
+        ConfigEntry::Field {
+            key: "compress",
+            comment: Some(CommentSource::Static(
+                "# Gzip rotated copies in the background, so they are named dux.log.1.gz,\n\
+                 # dux.log.2.gz and so on. Default true. Set to false to keep them as plain\n\
+                 # text you can read without decompressing.\n\
+                 # A config reload applies all three of these at the next line written.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.logging.compress),
         },
         ConfigEntry::Blank,
         ConfigEntry::Section("ui"),
@@ -1262,6 +1295,12 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                     FieldValue::U16(n) => {
                         let _ = writeln!(out, "{key} = {n}");
                     }
+                    FieldValue::U32(n) => {
+                        let _ = writeln!(out, "{key} = {n}");
+                    }
+                    FieldValue::U64(n) => {
+                        let _ = writeln!(out, "{key} = {n}");
+                    }
                     FieldValue::Usize(n) => {
                         let _ = writeln!(out, "{key} = {n}");
                     }
@@ -1918,6 +1957,53 @@ mod tests {
             !raw.contains('#'),
             "fixture must contain zero comments, or it is not a bare config"
         );
+    }
+
+    /// The config file is the documentation, so the three rotation settings must
+    /// arrive explained: what they do, their defaults, the numbered naming, and
+    /// that a reload picks them up.
+    #[test]
+    fn the_canonical_template_documents_log_rotation() {
+        let rendered = render_default_config();
+        assert!(rendered.contains("max_bytes = 10485760"));
+        assert!(rendered.contains("keep = 5"));
+        assert!(rendered.contains("compress = true"));
+        for phrase in [
+            "Rotation is by SIZE only",
+            "Set to 0 to never rotate",
+            "dux.log.1",
+            "dux.log.2",
+            "dux.log.1.gz",
+            "rotate and throw the old log away",
+            "applies all three of these at the next line written",
+        ] {
+            assert!(
+                rendered.contains(phrase),
+                "the rendered [logging] block never says {phrase:?}"
+            );
+        }
+    }
+
+    /// A config written before rotation existed must load unchanged rather than
+    /// failing on the missing keys.
+    #[test]
+    fn a_logging_block_without_the_rotation_keys_takes_the_defaults() {
+        let parsed: Config = toml::from_str(
+            r#"
+            [logging]
+            level = "debug"
+            path = "elsewhere.log"
+            "#,
+        )
+        .expect("an older [logging] block must still parse");
+        assert_eq!(parsed.logging.level, "debug");
+        assert_eq!(parsed.logging.path, "elsewhere.log");
+        assert_eq!(
+            parsed.logging.max_bytes,
+            dux_core::config::DEFAULT_LOG_MAX_BYTES
+        );
+        assert_eq!(parsed.logging.keep, dux_core::config::DEFAULT_LOG_KEEP);
+        assert!(parsed.logging.compress);
     }
 
     #[test]
