@@ -11,7 +11,7 @@ clipboard write, a clickable link) stops at dux. The `[capabilities]` section op
 directions.
 
 That same embedded terminal draws the diff view, which is why a very large file is diffed
-without syntax highlighting and an enormous one is not diffed at all; see
+without syntax highlighting and an enormous one shows only the start of git's own diff; see
 [very large diffs in the terminal UI](/docs/introduction#very-large-diffs-in-the-terminal-ui).
 
 ## Terminal identity

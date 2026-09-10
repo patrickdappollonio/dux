@@ -30,8 +30,13 @@ an empty file already looks.
 
 Click any row to open its diff in the [code editor](/docs/web-editor), read-only and
 syntax-highlighted, HEAD against the working copy. The browser has a ceiling of its own
-rather than the terminal UI's: a version over **5 MiB** on either side is refused, and the
-editor says so instead of showing a diff.
+rather than the terminal UI's: when a version is over **5 MiB** on either side, the editor
+shows the first **4,000 lines** of git's own diff instead, with a line at the end saying how
+many lines the whole diff has.
+
+> [!IMPORTANT]
+> Past that ceiling you are reading the start of the change, not all of it. Open the file in
+> your editor, or run git diff yourself, to see the rest.
 
 Status icons are the same ones the editor's file tree uses, each with a tooltip spelling it
 out: **M** modified, **A** added, **D** deleted, **R** renamed, **C** copied, **U**

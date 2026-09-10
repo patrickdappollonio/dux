@@ -106,13 +106,14 @@ one on disk.
 
 - Over **1 MiB, or 20,000 lines**, the diff is still drawn, without syntax highlighting.
   Added and removed lines keep their green and red; only the token colors inside them go.
-- Over **16 MiB, or 200,000 lines**, dux does not diff the file at all. The pane says
-  "File too large to diff.", prints the size of each version, and says what to do instead.
+- Over **16 MiB, or 200,000 lines**, dux does not diff the file itself. It asks git for the
+  diff instead and shows the first **4,000 lines** of it, with the added and removed colors
+  and no syntax highlighting. A line at the end says how many lines the whole diff has.
 
 > [!IMPORTANT]
-> Comparing versions that large would hold dux up for minutes, so it does not start.
-> Open the file in your editor, or diff it with git directly and narrow the comparison to
-> the part you care about.
+> Comparing versions that large in dux would take minutes, so it does not try. What you see
+> past that ceiling is the start of the change, not all of it. Open the file in your editor,
+> or run git diff yourself and narrow the comparison to the part you care about.
 
 The browser's diffs are the editor's, and they have a limit of their own; see
 [Git without leaving the browser](/docs/web-git).
