@@ -368,7 +368,7 @@ describe("DeleteSessionDialog", () => {
     fireEvent.click(screen.getByRole("checkbox"))
     expect(
       await screen.findByText(
-        /Nothing on it has been pushed anywhere: its only commit exists only on this machine\./,
+        /Nothing on it has been pushed anywhere: its one commit exists only on this machine\./,
       ),
     ).toBeTruthy()
   })

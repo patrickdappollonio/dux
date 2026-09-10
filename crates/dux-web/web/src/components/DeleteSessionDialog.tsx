@@ -62,7 +62,7 @@ function unpushedSentence(
   // admitting it was assembled rather than written.
   const existence =
     count === 1
-      ? `${possessive} only commit exists`
+      ? `${possessive} one commit exists`
       : `all ${count} of ${possessive} commits exist`
   return `Nothing on ${subject} has been pushed anywhere: ${existence} only on this machine.`
 }

@@ -908,7 +908,7 @@ fn unpushed_commits_sentence(
     // A single commit gets its own clause: "all 1 of its commits" is the
     // sentence admitting it was assembled rather than written.
     let existence = if count == 1 {
-        format!("{possessive} only commit exists")
+        format!("{possessive} one commit exists")
     } else {
         format!("all {count} of {possessive} commits exist")
     };
@@ -23048,7 +23048,7 @@ mod tests {
         };
         assert_eq!(
             super::unpushed_commits_sentence(never_pushed(1), false).unwrap(),
-            " Nothing on it has been pushed anywhere: its only commit exists only on this machine."
+            " Nothing on it has been pushed anywhere: its one commit exists only on this machine."
         );
         assert_eq!(
             super::unpushed_commits_sentence(never_pushed(4), true).unwrap(),
@@ -23157,7 +23157,7 @@ mod tests {
             .as_deref(),
             Some(
                 "This branch existed before the agent. Nothing on it has been pushed \
-                 anywhere: its only commit exists only on this machine."
+                 anywhere: its one commit exists only on this machine."
             )
         );
         assert_eq!(
@@ -23168,7 +23168,7 @@ mod tests {
             )
             .as_deref()
             .map(|text| text.contains(
-                "Nothing on them has been pushed anywhere: their only commit exists only \
+                "Nothing on them has been pushed anywhere: their one commit exists only \
                  on this machine."
             )),
             Some(true)
