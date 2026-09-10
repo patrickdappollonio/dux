@@ -9,6 +9,7 @@ use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, The
 use syntect::parsing::SyntaxSet;
 
 use crate::theme::Theme as AppTheme;
+use dux_core::text::count_of;
 
 /// Cached syntax highlighting resources to avoid reloading on every diff.
 pub struct SyntaxCache {
@@ -444,8 +445,8 @@ fn too_large_diff_output(
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from("File too large to diff."),
-            Line::from(format!("Old size: {old_size} bytes")),
-            Line::from(format!("New size: {new_size} bytes")),
+            Line::from(format!("Old size: {}", count_of(old_size, "byte"))),
+            Line::from(format!("New size: {}", count_of(new_size, "byte"))),
             Line::from(
                 "Comparing versions this large would hold dux up for minutes, so it does not \
                  start. Open the file in your editor, or diff it with git directly.",
@@ -476,8 +477,8 @@ fn binary_diff_output(
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from("Binary file changed."),
-            Line::from(format!("Old size: {old_size} bytes")),
-            Line::from(format!("New size: {new_size} bytes")),
+            Line::from(format!("Old size: {}", count_of(old_size, "byte"))),
+            Line::from(format!("New size: {}", count_of(new_size, "byte"))),
             Line::from("No text diff available for binary or non-UTF-8 content."),
         ],
         gutter_width: 0,
@@ -1365,5 +1366,25 @@ mod tests {
                 .iter()
                 .any(|line| line.to_string().contains("+bbb"))
         );
+    }
+
+    #[test]
+    fn size_lines_count_a_single_byte() {
+        let theme = AppTheme::default_dark();
+        let rendered: Vec<String> = binary_diff_output("image.bin", 1, 2, &theme)
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(rendered.iter().any(|line| line == "Old size: 1 byte"));
+        assert!(rendered.iter().any(|line| line == "New size: 2 bytes"));
+
+        let rendered: Vec<String> = too_large_diff_output("image.bin", 1, 2, &theme)
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(rendered.iter().any(|line| line == "Old size: 1 byte"));
+        assert!(rendered.iter().any(|line| line == "New size: 2 bytes"));
     }
 }

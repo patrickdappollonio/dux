@@ -7,6 +7,7 @@ use super::components::{
 use super::pty_ownership::PtyTakeoverCard;
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
+use dux_core::text::{count_of, count_of_with};
 use ratatui::buffer::{CellDiffOption, CellWidth};
 use std::path::Path;
 
@@ -1487,8 +1488,7 @@ impl App {
     fn running_terminals_chip(&self) -> Option<String> {
         match self.running_companion_terminal_count() {
             0 => None,
-            1 => Some("● 1 terminal".to_string()),
-            count => Some(format!("● {count} terminals")),
+            count => Some(format!("● {}", count_of(count, "terminal"))),
         }
     }
 
@@ -2626,7 +2626,10 @@ impl App {
             // reader is until the next key press.
             if drawn_scroll > 0 {
                 spans.push(Span::styled(
-                    format!("Scrolled back {drawn_scroll} lines. "),
+                    format!(
+                        "Scrolled back {}. ",
+                        count_of(usize::from(drawn_scroll), "line")
+                    ),
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
                 spans.extend(self.theme.dim_key_badge_default(&scroll_down));
@@ -4157,10 +4160,11 @@ impl App {
         let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
         let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let scrolled = count_of(scrollback_offset, "line");
         let prefix = if self.center_typeable() {
-            format!("Scrolled back {scrollback_offset} lines. Typing is paused. ")
+            format!("Scrolled back {scrolled}. Typing is paused. ")
         } else {
-            format!("Scrolled back {scrollback_offset} lines. ")
+            format!("Scrolled back {scrolled}. ")
         };
         let mut spans = vec![Span::styled(
             prefix,
@@ -5113,8 +5117,10 @@ impl App {
                     ),
                     GhStatus::Available => {
                         let count = self.engine.pr_statuses.len();
-                        let noun = if count == 1 { "session" } else { "sessions" };
-                        ("✓", format!("Active: tracking PRs for {count} {noun}"))
+                        (
+                            "✓",
+                            format!("Active: tracking PRs for {}", count_of(count, "session")),
+                        )
                     }
                 }
             };
@@ -5202,7 +5208,7 @@ impl App {
 
             if scroll > 0 {
                 spans.push(Span::styled(
-                    format!("Scrolled back {scroll} lines. "),
+                    format!("Scrolled back {}. ", count_of(usize::from(scroll), "line")),
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
             }
@@ -6949,8 +6955,7 @@ impl App {
             .clamp(8, 28);
         let count_label = |n: usize| match n {
             0 => "no agents".to_string(),
-            1 => "1 agent".to_string(),
-            n => format!("{n} agents"),
+            n => count_of(n, "agent"),
         };
         let count_col = visible
             .iter()
@@ -7041,16 +7046,10 @@ impl App {
         );
         let mut summary = Vec::new();
         if agent_count > 0 {
-            summary.push(format!(
-                "{agent_count} agent{}",
-                if agent_count == 1 { "" } else { "s" }
-            ));
+            summary.push(count_of(agent_count, "agent"));
         }
         if terminal_count > 0 {
-            summary.push(format!(
-                "{terminal_count} terminal{}",
-                if terminal_count == 1 { "" } else { "s" }
-            ));
+            summary.push(count_of(terminal_count, "terminal"));
         }
         let lines = vec![
             Line::from(""),
@@ -7060,10 +7059,7 @@ impl App {
                     confirm_prompt.action.button_label()
                 )),
                 Span::styled(
-                    format!(
-                        "{targets} running process{}",
-                        if targets == 1 { "" } else { "es" }
-                    ),
+                    count_of_with(targets, "running process", "running processes"),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("."),
@@ -11470,10 +11466,8 @@ impl App {
                 .unwrap_or_default();
             let base = format!("{base}{remote}");
             let count = self.session_terminal_count(&session.id);
-            if count == 1 {
-                return format!("{base} (+ 1 terminal)");
-            } else if count > 1 {
-                return format!("{base} (+ {count} terminals)");
+            if count > 0 {
+                return format!("{base} (+ {})", count_of(count, "terminal"));
             }
             return base;
         }
@@ -11706,15 +11700,13 @@ fn format_bytes(bytes: u64) -> String {
 
 fn quit_process_description(agents: usize, terminals: usize) -> String {
     match (agents, terminals) {
-        (0, 1) => "1 running terminal".to_string(),
-        (0, t) => format!("{t} running terminals"),
-        (1, 0) => "1 running agent".to_string(),
-        (a, 0) => format!("{a} running agents"),
-        (a, t) => {
-            let agent_word = if a == 1 { "agent" } else { "agents" };
-            let term_word = if t == 1 { "terminal" } else { "terminals" };
-            format!("{a} running {agent_word} and {t} {term_word}")
-        }
+        (0, t) => count_of(t, "running terminal"),
+        (a, 0) => count_of(a, "running agent"),
+        (a, t) => format!(
+            "{} and {}",
+            count_of(a, "running agent"),
+            count_of(t, "terminal")
+        ),
     }
 }
 
@@ -12241,8 +12233,7 @@ fn scrollback_indicator_label(scrolled: usize) -> Option<String> {
         return None;
     }
 
-    let noun = if scrolled == 1 { "line" } else { "lines" };
-    Some(format!(" {scrolled} {noun} below "))
+    Some(format!(" {} below ", count_of(scrolled, "line")))
 }
 
 fn path_completion_display_label(completion: &str) -> String {
@@ -20712,6 +20703,36 @@ mod tests {
                 rows.join("\n")
             );
         }
+    }
+
+    #[test]
+    fn the_diff_hint_bar_counts_a_single_scrolled_line() {
+        let (_, buf) = diff_frame((120, 40), 400, 0, 1);
+        let rows = buffer_rows(&buf);
+        let hint = rows
+            .iter()
+            .find(|row| row.contains("Scrolled back"))
+            .expect("expected a scroll hint");
+        assert!(
+            hint.contains("Scrolled back 1 line."),
+            "one line back is one line, not lines: {hint:?}"
+        );
+    }
+
+    #[test]
+    fn quit_process_description_counts_agents_and_terminals() {
+        assert_eq!(quit_process_description(1, 0), "1 running agent");
+        assert_eq!(quit_process_description(3, 0), "3 running agents");
+        assert_eq!(quit_process_description(0, 1), "1 running terminal");
+        assert_eq!(quit_process_description(0, 3), "3 running terminals");
+        assert_eq!(
+            quit_process_description(1, 1),
+            "1 running agent and 1 terminal"
+        );
+        assert_eq!(
+            quit_process_description(3, 2),
+            "3 running agents and 2 terminals"
+        );
     }
 
     /// Put the fullscreen startup-log viewer on screen with `rows` log lines and

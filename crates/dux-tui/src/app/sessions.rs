@@ -2870,17 +2870,9 @@ impl App {
             "Saving environment variables for project \"{project_name}\"..."
         ))
         .resolve_in_handler(move |o: &PersistFinalOutcome| match o {
-            PersistFinalOutcome::Saved => {
-                if env_count == 0 {
-                    dux_core::engine::Final::info(format!(
-                        "Environment variables cleared for project \"{success_name}\"."
-                    ))
-                } else {
-                    dux_core::engine::Final::info(format!(
-                        "Saved {env_count} environment variable(s) for project \"{success_name}\". New agents and terminals will receive them.",
-                    ))
-                }
-            }
+            PersistFinalOutcome::Saved => dux_core::engine::Final::info(
+                super::workers::project_env_saved_message(env_count, &success_name),
+            ),
             PersistFinalOutcome::DbFailed(error) => dux_core::engine::Final::error(format!(
                 "Could not save environment variables for project \"{db_fail_name}\": {error}"
             )),

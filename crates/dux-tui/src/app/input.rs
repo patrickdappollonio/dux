@@ -4,6 +4,7 @@ use super::*;
 use chrono::Local;
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
 use dux_core::statusline::StatusTone;
+use dux_core::text::count_of;
 use ratatui::buffer::CellWidth;
 /// Lines moved per mouse-wheel tick for local scrolling, shared by every wheel
 /// handler so wheel speed is uniform. Deliberately not applied where the wheel
@@ -7603,31 +7604,11 @@ impl App {
             return false;
         }
 
-        let mut pieces = Vec::new();
-        if agents > 0 {
-            pieces.push(format!(
-                "{agents} agent{}",
-                if agents == 1 { "" } else { "s" }
-            ));
-        }
-        if terminals > 0 {
-            pieces.push(format!(
-                "{terminals} terminal{}",
-                if terminals == 1 { "" } else { "s" }
-            ));
-        }
+        let message = killed_runtime_message(agents, terminals, already_gone);
         if already_gone > 0 {
-            self.set_warning(format!(
-                "Killed {}. {} selected runtime{} were already gone. In-progress CLI work was stopped, but the worktree files are still available for review or relaunch.",
-                pieces.join(" and "),
-                already_gone,
-                if already_gone == 1 { "" } else { "s" }
-            ));
+            self.set_warning(message);
         } else {
-            self.set_info(format!(
-                "Killed {}. In-progress CLI work was stopped, but the worktree files are still available for review or relaunch.",
-                pieces.join(" and ")
-            ));
+            self.set_info(message);
         }
         false
     }
@@ -10853,6 +10834,32 @@ fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: 
             *title = name;
         }
     }
+}
+
+/// The status line after a Kill Running confirmation: what was killed, and how
+/// much of the selection had already exited before the kill reached it.
+fn killed_runtime_message(agents: usize, terminals: usize, already_gone: usize) -> String {
+    let mut pieces = Vec::new();
+    if agents > 0 {
+        pieces.push(count_of(agents, "agent"));
+    }
+    if terminals > 0 {
+        pieces.push(count_of(terminals, "terminal"));
+    }
+    let killed = pieces.join(" and ");
+    let gone = if already_gone > 0 {
+        let verb = if already_gone == 1 { "was" } else { "were" };
+        format!(
+            " {} {verb} already gone.",
+            count_of(already_gone, "selected runtime")
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "Killed {killed}.{gone} In-progress CLI work was stopped, but the worktree files are \
+         still available for review or relaunch."
+    )
 }
 
 #[cfg(test)]
@@ -36236,6 +36243,26 @@ cyan = "#00ffff"
         assert!(
             message.contains("Opened agent"),
             "the outcome is on the line with no tick in between: {message}"
+        );
+    }
+
+    #[test]
+    fn killed_runtime_message_counts_and_agrees_with_its_verb() {
+        assert_eq!(
+            super::killed_runtime_message(1, 0, 1),
+            "Killed 1 agent. 1 selected runtime was already gone. In-progress CLI work was \
+             stopped, but the worktree files are still available for review or relaunch."
+        );
+        assert_eq!(
+            super::killed_runtime_message(3, 2, 3),
+            "Killed 3 agents and 2 terminals. 3 selected runtimes were already gone. \
+             In-progress CLI work was stopped, but the worktree files are still available for \
+             review or relaunch."
+        );
+        assert_eq!(
+            super::killed_runtime_message(0, 1, 0),
+            "Killed 1 terminal. In-progress CLI work was stopped, but the worktree files are \
+             still available for review or relaunch."
         );
     }
 }

@@ -10,6 +10,7 @@ use crate::keybindings::RuntimeBindings;
 use crate::logger;
 use crate::storage::SessionStore;
 use dux_core::project_browser::canonical_or_original;
+use dux_core::text::count_of;
 
 // ---------------------------------------------------------------------------
 // CLI dispatch
@@ -216,7 +217,7 @@ enum Policy {
 enum Summary {
     /// `env: changed`. The bare fact, with no shape to it at all.
     Changed,
-    /// `macros: 2 macro(s) configured`, for the given singular noun.
+    /// `macros: 2 macros configured`, for the given singular noun.
     Count(&'static str),
 }
 
@@ -274,7 +275,10 @@ fn diff_node(
             let line = match summary {
                 Summary::Changed => format!("{dotted}: changed"),
                 Summary::Count(noun) => {
-                    format!("{dotted}: {} {noun}(s) configured", collection_len(current))
+                    format!(
+                        "{dotted}: {} configured",
+                        count_of(collection_len(current), noun)
+                    )
                 }
             };
             found.push((dotted, line));
@@ -1395,10 +1399,7 @@ mod tests {
         });
 
         let changes = collect_config_changes(&config);
-        assert_eq!(
-            changes,
-            vec!["projects: 1 project(s) configured".to_string()]
-        );
+        assert_eq!(changes, vec!["projects: 1 project configured".to_string()]);
         assert!(
             !changes.join("\n").contains(SENTINEL),
             "a project env value must never reach the summary"
@@ -1417,7 +1418,7 @@ mod tests {
         );
 
         let changes = collect_config_changes(&config);
-        assert_eq!(changes, vec!["macros: 1 macro(s) configured".to_string()]);
+        assert_eq!(changes, vec!["macros: 1 macro configured".to_string()]);
         assert!(!changes.join("\n").contains(SENTINEL));
     }
 
