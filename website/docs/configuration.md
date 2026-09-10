@@ -87,14 +87,35 @@ It is careful with your data:
 
 ```toml
 [logging]
-level = "info"   # error, warn, info or debug
-path  = ""       # empty means dux.log in the config directory
+level      = "info"    # error, warn, info or debug
+path       = ""        # empty means dux.log in the config directory
+max_bytes  = 10485760  # rotate once the log reaches 10 MiB; 0 never rotates
+keep       = 5         # how many rotated copies to keep
+compress   = true      # gzip the rotated copies
 ```
+
+dux rotates its own log by size, so you do not need logrotate or a cron for it.
+When the log is about to pass `max_bytes`, dux renames it to `dux.log.1`, moves
+`dux.log.1` to `dux.log.2` and so on, deletes anything past `keep`, and starts a
+fresh `dux.log`. With `compress = true` the rotated copies are gzipped in the
+background and are named `dux.log.1.gz`, `dux.log.2.gz` and so on; read one with
+`zcat` or `gunzip -c`. Set `keep = 0` to rotate and throw the old log away, and
+`max_bytes = 0` to never rotate at all.
+
+Rotation happens by size and only when dux writes a line, so there is no daily or
+weekly schedule and a dux that is sitting idle never touches the files. If you are
+upgrading with a log that is already far bigger than `max_bytes`, it is rotated on
+the first line dux writes after the upgrade.
+
+> [!TIP]
+> `tail -F ~/.config/dux/dux.log` (note the capital F) follows the log across a
+> rotation. Plain `tail -f` keeps watching the rotated copy and goes quiet.
 
 | Key | When it takes effect |
 |---|---|
 | `level` | On a config reload. Turn `debug` on while something is misbehaving and back off again without restarting. |
 | `path` | At startup only. The log file is opened once, so a new path needs a restart. |
+| `max_bytes`, `keep`, `compress` | On a config reload, applied at the next line dux writes. |
 
 ## Environment variables and portable paths
 
