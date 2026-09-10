@@ -123,6 +123,9 @@ struct MkdirReply {
 /// be a single path component (no `/`, no NUL, not `.` or `..`), so the path is
 /// one `join` of an absolute parent with a vetted component and there is no
 /// arithmetic to defeat. `create_dir` never overwrites, follows, or removes.
+/// The joined target is bounded on the same character cap the parent carries,
+/// so a maximal parent and a maximal name cannot build a folder the inspect
+/// route then refuses to look at.
 async fn mkdir(State(_state): State<AppState>, Json(body): Json<MkdirBody>) -> Response {
     let parent = body.parent;
     // The parent is checked as a path string: present, absolute and bounded.
@@ -164,12 +167,21 @@ async fn mkdir(State(_state): State<AppState>, Json(body): Json<MkdirBody>) -> R
         )
             .into_response();
     }
+    // The parent and the name each fit; their join still has to. Measured in
+    // characters, the unit the parent check above uses.
+    let target = std::path::Path::new(&parent).join(&name);
+    if target.to_string_lossy().chars().count() > MAX_PATH_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            "the folder's full path is too long",
+        )
+            .into_response();
+    }
 
     // Filesystem write off the reactor (the browse precedent). `create_dir`,
     // not `create_dir_all`: the picker only navigates existing directories, so
     // a missing parent is an error, not a request.
     let result = tokio::task::spawn_blocking(move || {
-        let target = std::path::Path::new(&parent).join(&name);
         std::fs::create_dir(&target).map(|()| target.to_string_lossy().to_string())
     })
     .await;
@@ -413,6 +425,59 @@ mod tests {
             std::fs::read_dir(dir.path()).unwrap().next().is_none(),
             "no rejected request may have created anything"
         );
+    }
+
+    /// Create a real directory whose absolute path is exactly `target_len`
+    /// characters, nesting components that each stay well inside the 255-byte
+    /// name limit.
+    fn deep_dir(base: &std::path::Path, target_len: usize) -> std::path::PathBuf {
+        let mut remaining = target_len - base.to_string_lossy().chars().count();
+        // Every component costs one separator plus its own length, so pick a
+        // final component that leaves a whole number of 100-char ones.
+        let mut last = (remaining - 1) % 101;
+        if last == 0 {
+            last = 101;
+        }
+        let mut path = base.to_path_buf();
+        remaining -= 1 + last;
+        while remaining > 0 {
+            path.push("d".repeat(100));
+            remaining -= 101;
+        }
+        path.push("d".repeat(last));
+        assert_eq!(path.to_string_lossy().chars().count(), target_len);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn mkdir_rejects_a_join_that_overruns_the_path_cap() {
+        // Catches the gap between the two bounded strings: a parent inside the
+        // cap plus a name inside its own limit can still join into a path the
+        // inspect route would refuse to look at.
+        let dir = tempfile::tempdir().unwrap();
+        let deep = deep_dir(dir.path(), MAX_PATH_LEN - 6);
+        let parent = deep.to_string_lossy().to_string();
+
+        let long_name = "n".repeat(32);
+        let (_tmp, app) = router_no_auth();
+        let resp = post_mkdir(app, &parent, &long_name).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.to_vec()).unwrap(),
+            "the folder's full path is too long"
+        );
+        assert!(
+            !deep.join(&long_name).exists(),
+            "a refused join must create nothing"
+        );
+
+        // The same parent still works for a name the join can carry.
+        let (_tmp, app) = router_no_auth();
+        let resp = post_mkdir(app, &parent, "ok").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(deep.join("ok").is_dir());
     }
 
     #[tokio::test]
