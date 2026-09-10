@@ -1,0 +1,18 @@
+#!/bin/sh
+# Stand-in `gh` for the screenshot container, so the pull-request chip, the
+# banner and the from-PR dialog can be shot without a GitHub login. It answers
+# only the two calls dux makes, and fails loudly on anything else rather than
+# pretending: a screenshot of a lie is worse than a screenshot that did not
+# happen. Installed by entrypoint.sh only when DUX_SCREENS=1.
+case "$1 $2" in
+  "auth status")
+    printf '{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com"}]}}\n'
+    exit 0
+    ;;
+  "pr view")
+    printf '{"number":123,"title":"Fix the login redirect loop","state":"OPEN","headRefName":"fix-login-redirect"}\n'
+    exit 0
+    ;;
+esac
+echo "stand-in gh: unhandled $*" >&2
+exit 1

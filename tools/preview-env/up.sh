@@ -52,6 +52,12 @@ fi
 DUX_TUI_PORT="${DUX_TUI_PORT:-$((DUX_PORT + 208))}"
 BASE_IMAGE="${BASE_IMAGE:-archlinux:latest}"
 
+# The screenshot tool's two switches, resolved here so both docker paths below
+# carry them: the `sg` path builds its own environment and would otherwise drop
+# whatever the caller exported. Off unless reshoot.sh set them.
+DUX_SCREENS="${DUX_SCREENS:-0}"
+DUX_NO_TAILSCALE="${DUX_NO_TAILSCALE:-1}"
+
 # The mount-the-host-binary path only works when the host builds a Linux
 # binary of the container's arch. On macOS a Mach-O binary cannot run in the
 # Linux container; build in-container instead (see README). Fail loudly
@@ -77,7 +83,7 @@ if docker info > /dev/null 2>&1; then
   run_docker() {
     (
       cd "$HERE"
-      export DUX_BIN DUX_PORT DUX_TUI_PORT BASE_IMAGE
+      export DUX_BIN DUX_PORT DUX_TUI_PORT BASE_IMAGE DUX_SCREENS DUX_NO_TAILSCALE
       docker compose "$@"
     )
   }
@@ -85,7 +91,7 @@ else
   run_docker() {
     local quoted
     quoted=$(printf '%q ' "$@")
-    sg docker -c "cd $(printf '%q' "$HERE") && export DUX_BIN=$(printf '%q' "$DUX_BIN") DUX_PORT=$(printf '%q' "$DUX_PORT") DUX_TUI_PORT=$(printf '%q' "$DUX_TUI_PORT") BASE_IMAGE=$(printf '%q' "$BASE_IMAGE") && docker compose $quoted"
+    sg docker -c "cd $(printf '%q' "$HERE") && export DUX_BIN=$(printf '%q' "$DUX_BIN") DUX_PORT=$(printf '%q' "$DUX_PORT") DUX_TUI_PORT=$(printf '%q' "$DUX_TUI_PORT") BASE_IMAGE=$(printf '%q' "$BASE_IMAGE") DUX_SCREENS=$(printf '%q' "$DUX_SCREENS") DUX_NO_TAILSCALE=$(printf '%q' "$DUX_NO_TAILSCALE") && docker compose $quoted"
   }
 fi
 

@@ -8,3 +8,7 @@ shots/
 !tui-driver.js
 !tui-journey.example.js
 !tui-shot.js
+# The committed screenshot tool. Its scenes are the opposite of a throwaway:
+# one per PNG under website/public/screens, so a stale docs image has a journey
+# to re-run rather than a script to reinvent.
+!screens/**/*.js

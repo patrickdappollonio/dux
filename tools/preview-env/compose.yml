@@ -35,10 +35,19 @@ services:
       - "127.0.0.1:${DUX_TUI_PORT:-8998}:8998"
     environment:
       - DUX_PORT=8790
+      # The screenshot tool's two switches, both off for an ordinary preview.
+      # DUX_SCREENS installs the stand-in gh and the transcript provider;
+      # DUX_NO_TAILSCALE=0 drops the flag so the Preferences dialog carries the
+      # general Tailscale copy. reshoot.sh sets both.
+      - DUX_SCREENS=${DUX_SCREENS:-0}
+      - DUX_NO_TAILSCALE=${DUX_NO_TAILSCALE:-1}
     volumes:
       # Host-built binary, read-only. Rebuild on the host + `docker compose
       # restart dux` to pick up new code (a new inode needs a container restart).
       - ${DUX_BIN:-../../target/release/dux}:/usr/local/bin/dux:ro
+      # Read-only, and inert unless DUX_SCREENS asks the entrypoint to install
+      # them, so mounting them costs a plain preview nothing.
+      - ./screens/fixtures:/fixtures:ro
       - dux-data:/data
       - dux-repos:/repos
     # A PTY-heavy app; the defaults are enough (Docker provides /dev/ptmx), but

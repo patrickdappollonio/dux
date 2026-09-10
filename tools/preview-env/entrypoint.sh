@@ -44,5 +44,31 @@ for r in demo-api demo-web; do
   fi
 done
 
+# --- Screenshot fixtures (opt-in) ------------------------------------------
+# The committed screenshot tool needs two stand-ins an ordinary preview must not
+# have: a `gh` answering only dux's auth probe and its bounded `pr view`, so the
+# pull-request chip, banner and from-PR dialog can be shot without a GitHub
+# login, and a transcript provider standing in for `claude`, so the standalone
+# agent shows a scripted session rather than a streaming fixture. Both are
+# mounted read-only and installed only when this is asked for, and the marker
+# file is how the host tells a screens container from a plain one.
+if [ "${DUX_SCREENS:-0}" = "1" ] && [ -d /fixtures ]; then
+  echo "entrypoint: installing screenshot fixtures (stand-in gh, transcript provider)"
+  install -m 0755 /fixtures/gh /usr/local/bin/gh
+  install -m 0755 /fixtures/notes-agent /usr/local/bin/claude
+  : > /data/screens-mode
+else
+  rm -f /data/screens-mode
+fi
+
+# The Tailscale flag is a variable because the Preferences screenshot needs it
+# gone: `--no-tailscale` refuses a live mode change for the whole run, and the
+# dialog says so instead of carrying the general copy the docs describe.
+if [ "${DUX_NO_TAILSCALE:-1}" = "1" ]; then
+  set -- --no-tailscale
+else
+  set --
+fi
+
 echo "entrypoint: serving dux web UI on 0.0.0.0:$PORT (isolated, no login gate)"
-exec dux server --bind "0.0.0.0:$PORT" --no-tailscale
+exec dux server --bind "0.0.0.0:$PORT" "$@"

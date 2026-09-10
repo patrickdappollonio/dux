@@ -1,0 +1,36 @@
+#!/bin/sh
+# Transcript provider for the standalone-agent screenshot: a scripted session
+# rather than the fake provider's stream, because that shot is about what an
+# agent's pane looks like when there is a conversation in it. Installed as
+# `claude` by entrypoint.sh only when DUX_SCREENS=1, so the standalone agent can
+# ask for it by provider name.
+#
+# The trailing counter is what keeps the session reading as Working. It starts
+# from a fixed number so the line is the same every run bar the seconds the
+# capture waited; sidebar-standalone.js pins that wait.
+E=$(printf '\033')
+p() { printf '%b\n' "$1"; }
+p "${E}[36m*${E}[0m Welcome to the assistant. Working in /root/design-notes"
+p ""
+p "${E}[90m>${E}[0m Fix the redirect loop after login and add a regression test."
+p ""
+p "${E}[36m*${E}[0m Reading ${E}[1msrc/redirect.ts${E}[0m"
+p "${E}[36m*${E}[0m Reading ${E}[1msrc/cache.ts${E}[0m"
+p "${E}[36m*${E}[0m Searching for ${E}[1msessionLookup${E}[0m across 42 files"
+p ""
+p "  The redirect handler re-resolves the session on every hop, so a"
+p "  cold cache turns one login into three lookups and the third one"
+p "  races the cookie write."
+p ""
+p "${E}[33m~${E}[0m Editing ${E}[1msrc/cache.ts${E}[0m ${E}[32m+18${E}[0m ${E}[31m-4${E}[0m"
+p "${E}[33m~${E}[0m Editing ${E}[1msrc/redirect.ts${E}[0m ${E}[32m+7${E}[0m ${E}[31m-2${E}[0m"
+p "${E}[32m+${E}[0m Creating ${E}[1mNOTES.md${E}[0m"
+p "${E}[36m*${E}[0m Running ${E}[1mnpm test -- redirect${E}[0m"
+p "    ${E}[32mPASS${E}[0m  test/redirect.spec.ts (4 tests, 0 failures)"
+p ""
+i=128
+while :; do
+  printf '\rReviewing the diff for the cache TTL change... (%ds)' "$i"
+  i=$((i + 1))
+  sleep 1
+done
