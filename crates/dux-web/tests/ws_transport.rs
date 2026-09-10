@@ -597,15 +597,22 @@ async fn boot_with_gated_startup_command() -> (SocketAddr, std::path::PathBuf, t
     (addr, gate, tmp)
 }
 
-/// Release the gated startup command by opening its FIFO for writing. Opening a
-/// FIFO for write blocks until a reader is present, so this is only called once
-/// the busy status has proved the command is running.
+/// Release the gated startup command by opening its FIFO for writing.
+///
+/// Opening a FIFO for write blocks until a reader is present, so a reader that
+/// never arrives would park this forever and the test would look hung rather
+/// than failed. The bound turns that into a named failure.
 async fn release_gate(gate: std::path::PathBuf) {
-    tokio::task::spawn_blocking(move || {
+    let display = gate.display().to_string();
+    let writer = tokio::task::spawn_blocking(move || {
         let _ = std::fs::write(&gate, b"go\n");
-    })
-    .await
-    .expect("gate writer");
+    });
+    tokio::time::timeout(Duration::from_secs(20), writer)
+        .await
+        .unwrap_or_else(|_| {
+            panic!("nothing ever opened {display} for reading, so the gate could not be released")
+        })
+        .expect("gate writer");
 }
 
 /// The connect-time snapshot replay, in both directions, over a real socket.
@@ -1144,8 +1151,8 @@ async fn rest_create_session_422_when_the_create_fails() {
 
     assert_eq!(status, 422, "a failed create must not answer 202: {body}");
     assert!(
-        !body.trim().is_empty(),
-        "the 422 body must carry the failure's own message"
+        body.contains("blocked/child"),
+        "the 422 body must carry the failure's own message, got {body:?}"
     );
     assert!(
         elapsed < Duration::from_secs(5),
@@ -1185,8 +1192,8 @@ async fn rest_create_session_from_pr_422_when_the_lookup_fails() {
 
     assert_eq!(status, 422, "a failed lookup must not answer 202: {body}");
     assert!(
-        !body.trim().is_empty(),
-        "the 422 body must carry the lookup's own message"
+        body.contains("does not have a GitHub origin remote"),
+        "the 422 body must carry the lookup's own message, got {body:?}"
     );
     assert!(
         elapsed < Duration::from_secs(5),
@@ -1195,7 +1202,14 @@ async fn rest_create_session_from_pr_422_when_the_lookup_fails() {
 }
 
 /// A worker-backed add that FAILS answers `422` with the worker's message rather
-/// than a reasonless 202.
+/// than a reasonless 202, AND that same failure reaches the posting connection
+/// on the events socket.
+///
+/// Both halves matter together: the browser suppresses the 422 toast precisely
+/// because the socket is carrying the failure, so a test that checked only the
+/// reply would let that premise rot silently and leave the failure invisible.
+/// The message is what is matched rather than the operation id, since the
+/// message is the thing that would otherwise appear twice.
 ///
 /// The folder is read-only, which the path validator accepts (a plain existing
 /// directory outside any repository) and the worker's `git init` then fails on,
@@ -1209,10 +1223,14 @@ async fn rest_add_project_422_when_the_add_fails() {
         // would succeed and the add would resolve. There is nothing to assert.
         return;
     }
+    // Connect BEFORE the POST: the add's statuses are scoped to this connection
+    // and start flowing during the dispatch.
+    let (mut ws, conn_id) = connect_events(addr).await;
 
     let started = std::time::Instant::now();
-    let (status, body) = post_create(
+    let (status, body) = post_create_as(
         addr,
+        Some(&conn_id),
         "/api/v1/projects",
         serde_json::json!({
             "path": folder.path().to_string_lossy(),
@@ -1221,36 +1239,58 @@ async fn rest_add_project_422_when_the_add_fails() {
     )
     .await;
     let elapsed = started.elapsed();
+    let on_the_socket = saw_status_with(
+        &mut ws,
+        &["\"tone\":\"error\"", "init failed"],
+        Duration::from_secs(8),
+    )
+    .await;
     restore_writable(folder.path());
 
     assert_eq!(status, 422, "a failed add must not answer 202: {body}");
     assert!(
-        !body.trim().is_empty(),
-        "the 422 body must carry the add's own message"
+        body.contains("init failed"),
+        "the 422 body must carry the add's own message, got {body:?}"
     );
     assert!(
         elapsed < Duration::from_secs(5),
         "the failure must answer promptly, took {elapsed:?}"
+    );
+    assert!(
+        on_the_socket,
+        "the same failure must reach the posting connection, which is what lets the browser \
+         suppress the 422's toast"
     );
 }
 
 /// POST a create and hand back its status code and body text, so a test can
 /// assert the failure reply without assuming a shape it may not have.
 async fn post_create(addr: SocketAddr, path: &str, body: serde_json::Value) -> (u16, String) {
-    let resp = reqwest::Client::new()
+    post_create_as(addr, None, path, body).await
+}
+
+/// The same, attributed to a connection, so the statuses the operation raises
+/// are scoped to that socket and a test can watch them arrive there.
+async fn post_create_as(
+    addr: SocketAddr,
+    conn_id: Option<&str>,
+    path: &str,
+    body: serde_json::Value,
+) -> (u16, String) {
+    let mut request = reqwest::Client::new()
         .post(format!("http://{addr}{path}"))
-        .json(&body)
-        .send()
-        .await
-        .expect("POST create");
+        .json(&body);
+    if let Some(conn_id) = conn_id {
+        request = request.header("x-connection-id", conn_id);
+    }
+    let resp = request.send().await.expect("POST create");
     let status = resp.status().as_u16();
     (status, resp.text().await.unwrap_or_default())
 }
 
 /// POST a create that cannot finish inside the window, assert the deferred
-/// shape, and hand back the operation id it named. Shared by the 202 tests above
-/// so the contract is stated once: no `Location` (nothing is addressable yet)
-/// and an `op_id`.
+/// shape, and hand back the operation id it named: no `Location` (nothing is
+/// addressable yet) and an `op_id`.
 async fn deferred_create(
     addr: SocketAddr,
     conn_id: &str,

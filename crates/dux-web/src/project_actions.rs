@@ -106,11 +106,25 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
     }
 }
 
+/// Parse the add body ourselves, the way the session create does, so a
+/// malformed or unknown shape is a clean 400. Axum's typed `Json` rejection is a
+/// 422, which on this route now means "the add was dispatched and failed"; two
+/// unrelated conditions sharing a code would leave a client unable to tell a
+/// typo from a git failure, and the browser suppresses one of them.
+fn parse_add_project_body(raw: serde_json::Value) -> Result<AddProjectBody, String> {
+    serde_json::from_value(raw).map_err(|error| format!("invalid add-project body: {error}"))
+}
+
 async fn add_project(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<AddProjectBody>,
+    Json(raw): Json<serde_json::Value>,
 ) -> Response {
+    let body = match parse_add_project_body(raw) {
+        Ok(body) => body,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+
     // Idempotency replay: a key that already produced a still-present project
     // returns it without adding another.
     let key = idempotency_key(&headers);
@@ -612,6 +626,22 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_malformed_add_body_is_a_400_not_a_422() {
+        // 422 on this route means an add that was dispatched and failed, and the
+        // browser suppresses that toast. A body it could not read must not
+        // borrow the same code.
+        let (_tmp, app) = router_no_auth();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/projects")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"path":42}"#))
+            .unwrap();
+        let resp = app.oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -15,10 +15,9 @@
 //! bodyless: a client that stopped being waited on still gets the one thing it
 //! needs to correlate the outcome.
 //!
-//! Waiting out a twenty second window and then answering `202` with no reason
-//! for a create that failed in milliseconds is the silent waiting dux's design
-//! tenets refuse, so the await helpers watch the dispatched operation alongside
-//! the resource.
+//! The await helpers watch the dispatched operation alongside the resource, so a
+//! create that fails is answered when it fails rather than at the end of the
+//! window.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,8 +51,10 @@ pub const IDEMPOTENCY_TTL: Duration = Duration::from_secs(600);
 
 /// How long a create handler waits for the asynchronously-created resource to
 /// surface in the spine before giving up and replying `202 Accepted` with the
-/// operation id (the create was dispatched; its completion/failure still rides
-/// the status toast stream, under that same id).
+/// operation id. Only a create that is STILL RUNNING reaches the end of this
+/// window: one whose operation fails is answered `422` the moment its error
+/// final lands. What is left to correlate on the status stream is the eventual
+/// success, under that same id.
 /// Generous because a real create does `git worktree add` + a provider PTY spawn.
 pub const CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -63,9 +64,14 @@ pub const CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(20);
 /// one covers a slow network lookup plus the worktree and PTY work.
 pub const FROM_PR_CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The `202 Accepted` body of a deferred operation: the keyed status op id, the
-/// same key that rides the `status` and `status_cleared` frames on `/ws/events`,
-/// so a client correlates what happens next instead of polling for the record.
+/// The `202 Accepted` body of an operation still running when the handler stops
+/// waiting: the keyed status op id, the same key that rides the `status` and
+/// `status_cleared` frames on `/ws/events`, so a client correlates what happens
+/// next instead of polling for the record.
+///
+/// A 202 means STILL RUNNING and nothing else. An operation that has already
+/// failed is answered `422` with its own message, so this body never stands in
+/// for a reason the server already had.
 ///
 /// `op_id` is `null` whenever the dispatch's status carries no key, because there
 /// is then nothing to correlate on and the reply says so rather than inventing an
@@ -74,13 +80,13 @@ pub const FROM_PR_CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// WHAT THE ID NAMES DIFFERS BY PATH, and the from-PR create is the one where it
 /// does not name the create. A session create on the race-free path names its own
-/// create op, and the create's final arrives under it. A from-PR create names the
-/// PR-LOOKUP op, because the create's op is minted later, inside the lookup
-/// followup. A lookup that FAILS finals under the named id. A lookup that
-/// SUCCEEDS hands off, resolving the named id to a `status_cleared` and nothing
-/// more, and the create's own outcome then arrives under an id this reply never
-/// named. A from-PR client can therefore learn that the lookup failed, or that it
-/// has stopped being the operation to watch, but not the create's verdict; the
+/// create op, and the create's success final arrives under it. A from-PR create
+/// names the PR-LOOKUP op, because the create's op is minted later, inside the
+/// lookup followup; a lookup that fails never reaches this body at all, since it
+/// is answered `422`. A lookup that SUCCEEDS hands off, resolving the named id to
+/// a `status_cleared` and nothing more, and the create's own outcome then arrives
+/// under an id this reply never named. So a from-PR client can learn that it has
+/// stopped being the operation to watch, but not the create's verdict; the
 /// hand-off is the engine's design and this type only reports it honestly.
 #[derive(serde::Serialize)]
 pub struct Accepted {
@@ -333,7 +339,7 @@ pub fn id_within_bound(id: &str) -> bool {
 /// covers two different answers: an operation still running, which is the `202`
 /// the client correlates on, and one that already failed, which is a reason the
 /// client can be told now.
-pub enum AwaitedCreate {
+pub(crate) enum AwaitedCreate {
     /// The resource surfaced; its id.
     Resolved(String),
     /// The dispatched operation finaled with an error before the resource
@@ -345,10 +351,12 @@ pub enum AwaitedCreate {
 
 /// The error final `op_id` has already landed, if any.
 ///
-/// The status snapshot carries every open status, keyed ones included, and a
-/// final stays replayable there for longer than any create window, so one cheap
-/// synchronous read per poll answers "has this operation failed yet". A `busy`
-/// under the same key means it is still running, which is not an answer.
+/// The status snapshot carries every open status, keyed ones included, and the
+/// read is a synchronous `watch` borrow, so the hundred-millisecond poll sees a
+/// final within a tick of it landing. That is what makes the short retention the
+/// emitting controller gives a final irrelevant here: the wait never has to
+/// outlast it. A `busy` under the same key means the operation is still running,
+/// which is not an answer.
 fn failed_op_message(engine: &EngineHandle, op_id: Option<&str>) -> Option<String> {
     let op_id = op_id?;
     engine
@@ -373,7 +381,7 @@ pub(crate) fn create_failed(message: String) -> Response {
 /// `op_id -> session_id` when the worker-minted session lands, so the handler
 /// resolves ITS exact session, never a concurrent create's. The same id is what
 /// makes the failure observable, so this path watches its own op.
-pub async fn await_session_for_op(
+pub(crate) async fn await_session_for_op(
     engine: &EngineHandle,
     op_id: String,
     timeout: Duration,
@@ -412,7 +420,7 @@ pub async fn await_session_for_op(
 /// window. The from-PR path is the only remaining caller and is comparatively
 /// rare, so the residual race is accepted here; the op-id path above is race-free
 /// and is preferred wherever the op id is available synchronously.
-pub async fn await_new_session(
+pub(crate) async fn await_new_session(
     engine: &EngineHandle,
     pre: &std::collections::HashSet<String>,
     watch_op: Option<&str>,
@@ -439,7 +447,7 @@ pub async fn await_new_session(
 /// A direct add resolves synchronously so the first poll usually wins; the
 /// worker-backed adds (checkout-default, initial commit, init-repo) go through a
 /// worker, so the poll covers them and `watch_op` is their own add op.
-pub async fn await_new_project(
+pub(crate) async fn await_new_project(
     engine: &EngineHandle,
     pre: &std::collections::HashSet<String>,
     watch_op: Option<&str>,
@@ -505,31 +513,92 @@ mod tests {
         h
     }
 
-    /// The project add's deferred arm, at the helper rather than over a real
-    /// server: an add that is still running has neither a project nor an error
-    /// final, and the wait must end in `Pending` so the route answers 202.
+    /// Dispatch a project add whose worker refuses, and hand back the engine and
+    /// the key its error final landed under.
     ///
-    /// The real-server 202 fixture the session create uses (a startup command
-    /// parked on a FIFO) has no counterpart for a project add, whose worker the
-    /// engine actor has already drained by the handler's first poll even at a
-    /// one-millisecond window. This covers the arm the route reads.
-    #[tokio::test]
-    async fn await_new_project_is_pending_while_its_op_has_not_finaled() {
+    /// The refusal is `create_initial_commit`'s staged-changes stop, which needs
+    /// no permission games and so behaves the same under root. The wait for the
+    /// final to reach the snapshot is what makes the assertions below about a
+    /// PRESENT final rather than an absent one.
+    async fn engine_with_a_failed_add() -> (tempfile::TempDir, EngineHandle, String) {
         let tmp = tempfile::tempdir().unwrap();
         let engine = crate::test_support::test_engine_handle(tmp.path());
+
+        let repo = tmp.path().join("staged-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("staged.txt"), "x").unwrap();
+        run(&["add", "staged.txt"]);
+
+        let outcome = engine
+            .apply_wire_scoped(
+                dux_core::wire::WireCommand::AddProjectCreateInitialCommit {
+                    path: repo.to_string_lossy().into_owned(),
+                    name: String::new(),
+                },
+                StatusScope::All,
+            )
+            .await
+            .expect("the add dispatches; the worker is what refuses");
+        let key = outcome
+            .status
+            .and_then(|s| s.key)
+            .expect("a worker-backed add mints a keyed op");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while failed_op_message(&engine, Some(&key)).is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "the add's error final never landed"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        (tmp, engine, key)
+    }
+
+    #[tokio::test]
+    async fn await_new_project_fails_on_its_own_ops_error_final() {
+        let (_tmp, engine, key) = engine_with_a_failed_add().await;
+        let pre = std::collections::HashSet::new();
+
+        let waited = await_new_project(&engine, &pre, Some(&key), Duration::from_secs(5)).await;
+
+        match waited {
+            AwaitedCreate::Failed(message) => assert!(
+                message.contains("staged changes"),
+                "the failure must carry the worker's own words, got {message:?}"
+            ),
+            _ => panic!("an error final under the watched key must end the wait"),
+        }
+    }
+
+    /// The discriminating half: the same engine, the same error final in the
+    /// snapshot, watched under a key that is not it. Nothing about somebody
+    /// else's failure may end this wait, so the route answers 202.
+    #[tokio::test]
+    async fn await_new_project_ignores_an_error_final_under_another_key() {
+        let (_tmp, engine, key) = engine_with_a_failed_add().await;
         let pre = std::collections::HashSet::new();
 
         let waited = await_new_project(
             &engine,
             &pre,
-            Some("op-nothing-has-finaled-under"),
-            Duration::from_millis(50),
+            Some(&format!("{key}-not-this-one")),
+            Duration::from_millis(300),
         )
         .await;
 
         assert!(
             matches!(waited, AwaitedCreate::Pending),
-            "no project and no final is the deferred answer, not a failure"
+            "another operation's failure is not this create's answer"
         );
     }
 

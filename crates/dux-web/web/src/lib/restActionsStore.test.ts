@@ -381,6 +381,18 @@ describe("store write actions surface REST errors as a toast", () => {
     expect(toast.error).not.toHaveBeenCalled()
   })
 
+  it("createAgent does NOT toast a 422 (the failed create's own final rides /ws)", async () => {
+    const mod = await loadStore()
+    actionFails = true
+    actionStatus = 422
+    mod.createAgent("p1", "feat")
+    await vi.waitFor(() => expect(actionCalls.length).toBe(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // The 422 body IS the operation's error final, and that final also reaches
+    // this connection over /ws, so the REST .catch stays silent.
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
   it("createAgent still toasts a non-409 REST error", async () => {
     const mod = await loadStore()
     actionFails = true

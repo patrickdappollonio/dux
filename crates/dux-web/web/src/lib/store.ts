@@ -5009,27 +5009,33 @@ export function toggleCreateAgentRandomize(): void {
   }
 }
 
-// The two create refusals whose message this connection is ALSO told over the
-// `/ws/events` status stream, so toasting them here would say the same thing
-// twice: 409, the engine's in-flight guard, and 422, an operation that was
-// dispatched and failed (the reply body is that failure's own final). Every
-// other code, network failures included, is surfaced.
-function alreadyOnTheStatusStream(status: number): boolean {
-  return status === 409 || status === 422
-}
-
-// Surface a create-action REST error as a toast, unless the status stream is
-// already carrying it.
-function toastCreateError(e: unknown, fallback: string): void {
-  if (e instanceof SessionsApiError && alreadyOnTheStatusStream(e.status)) return
+// Toast a REST error unless the `/ws/events` status stream is already carrying
+// the same message to this connection, in which case toasting here would say it
+// twice. Each caller passes the codes ITS route actually answers that way, so a
+// route never suppresses a code it cannot produce.
+function toastUnlessOnTheStatusStream(
+  e: unknown,
+  status: number | undefined,
+  suppressed: readonly number[],
+  fallback: string,
+): void {
+  if (status !== undefined && suppressed.includes(status)) return
   notifyError(e instanceof Error ? e.message : fallback)
 }
 
-// The same rule for the project add, whose four entry points all refuse the
-// same way.
+// The session create suppresses two: 409, the engine's in-flight guard, and
+// 422, an operation that was dispatched and failed (the reply body is that
+// failure's own final).
+function toastCreateError(e: unknown, fallback: string): void {
+  const status = e instanceof SessionsApiError ? e.status : undefined
+  toastUnlessOnTheStatusStream(e, status, [409, 422], fallback)
+}
+
+// The project add's four entry points suppress 422 alone: the add route has no
+// 409 of its own, so listing one would be suppressing a code it never answers.
 function toastAddProjectError(e: unknown): void {
-  if (e instanceof ProjectsApiError && alreadyOnTheStatusStream(e.status)) return
-  notifyError(e instanceof Error ? e.message : "Could not add the project.")
+  const status = e instanceof ProjectsApiError ? e.status : undefined
+  toastUnlessOnTheStatusStream(e, status, [422], "Could not add the project.")
 }
 
 // Ask the server to create a new agent in a project. An empty name lets the

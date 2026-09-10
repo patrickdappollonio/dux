@@ -141,20 +141,21 @@ without a session (using the actual router, not only the probe-route seam).
   |---|---|---|
   | `GET` read | 200 | 404 |
   | `POST` create (session/project/terminal) | 201 + `Location`. A session or project create that has not surfaced by the end of its await window answers 202 + `{ "op_id": … }` instead; a terminal create always answers 201 | 400 / 409 / 422 |
-
-  The three refusal codes on a create divide by when the refusal happens. `400`
-  is a synchronous guard (an unknown project, an invalid name). `409` is the
-  in-flight guard, or an existing-branch attach the client has not confirmed.
-  `422` is work that was dispatched and could not be done: the handler watches
-  the operation it dispatched alongside the resource, and an error final on that
-  operation ends the wait at once with the failure's own message as the body,
-  rather than waiting out the window and answering 202 with no reason.
-
   | `PATCH` update | 200 (or 202, see deferred) | 404 |
   | `DELETE` | 204 | 404 |
   | `POST` action (git mutation, reconnect, pull, checkout) | 200 | 4xx client-actionable / 5xx unexpected |
   | `POST` async trigger (commit-message generation) | 202 (completion arrives as an event) | 4xx |
   | changed-files read during a git lock/rebase | 409 + `Retry-After` | (not 503: proxies may reroute 503) |
+
+  The three refusal codes on a create divide by when the refusal happens. `400`
+  is a synchronous guard (an unknown project, an invalid name, a malformed
+  body). `409` is the in-flight guard, or an existing-branch attach the client
+  has not confirmed. `422` is work that was dispatched and could not be done:
+  the handler watches the operation it dispatched alongside the resource, and an
+  error final on that operation ends the wait at once with the failure's own
+  message as the body, rather than waiting out the window and answering 202 with
+  no reason. A 202 therefore means the operation is still running, and nothing
+  else.
 
 - **Idempotency.** `POST /api/v1/sessions` (create) is not naturally idempotent;
   a retry after a lost 5xx would create a duplicate worktree. It accepts an
