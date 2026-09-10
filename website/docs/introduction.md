@@ -108,7 +108,9 @@ one on disk.
   Added and removed lines keep their green and red; only the token colors inside them go.
 - Over **16 MiB, or 200,000 lines**, dux does not diff the file itself. It asks git for the
   diff instead and shows the first **4,000 lines** of it, with the added and removed colors
-  and no syntax highlighting. A line at the end says how many lines the whole diff has.
+  and no syntax highlighting. When there is more than it shows, a line above it says how
+  many lines the whole diff has. A binary file is unaffected: past every ceiling it keeps
+  the same summary it always had, since there is no text diff to cut.
 
 > [!IMPORTANT]
 > Comparing versions that large in dux would take minutes, so it does not try. What you see

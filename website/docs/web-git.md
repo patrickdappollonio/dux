@@ -28,11 +28,13 @@ thousand untracked files in a worktree. Any beyond that are still listed, in ful
 their status; they simply carry no line counts and are left out of the sums, the same way
 an empty file already looks.
 
-Click any row to open its diff in the [code editor](/docs/web-editor), read-only and
-syntax-highlighted, HEAD against the working copy. The browser has a ceiling of its own
-rather than the terminal UI's: when a version is over **5 MiB** on either side, the editor
-shows the first **4,000 lines** of git's own diff instead, with a line at the end saying how
-many lines the whole diff has.
+Click any row to open its diff in the [code editor](/docs/web-editor), read-only, HEAD
+against the working copy, and syntax-highlighted below the ceiling described next. The
+browser has a ceiling of its own rather than the terminal UI's: when a version is over
+**5 MiB** on either side, the editor shows the first **4,000 lines** of git's own diff, coloured
+by added and removed lines. When there is more than it shows, a line above it says how many
+lines the whole diff has. A binary file keeps the same one-sentence summary it always had,
+since there is no text diff to cut.
 
 > [!IMPORTANT]
 > Past that ceiling you are reading the start of the change, not all of it. Open the file in
