@@ -24,6 +24,25 @@ pub const ELLIPSIS_STEP_MS: u64 = 400;
 /// blink.
 pub const PULSE_FLOOR: f32 = 0.4;
 
+/// How far toward the surrounding muted tone the word travels at the bottom of
+/// the pulse, on a surface that has no opacity to dip.
+///
+/// A pixel can simply become 40% as bright as it was, so [`PULSE_FLOOR`] is the
+/// whole answer there. A terminal cell cannot: it has one foreground color and
+/// no alpha, so the same dip has to be expressed as a blend between the working
+/// color and the quiet tone it sits beside, and how far along that line the
+/// floor lands is a separate judgement from how much light is left. Two thirds
+/// keeps a visible third of the working hue, which still reads as that hue next
+/// to the grey around it.
+pub const PULSE_MUTE_FRACTION: f32 = 2.0 / 3.0;
+
+/// How far toward the muted tone a [`pulse_step`] cell sits, in `[0.0, 1.0]`:
+/// `0.0` is the untouched working color and [`PULSE_MUTE_FRACTION`] is the
+/// floor. The quantized cells give `0`, `1/3`, `2/3`, `1/3`.
+pub fn mute_blend(step: usize) -> f32 {
+    PULSE_MUTE_FRACTION * (1.0 - step_level(step)) / (1.0 - PULSE_FLOOR)
+}
+
 /// How many distinct ellipsis states there are: none, one dot, two, three.
 pub const ELLIPSIS_STATES: u64 = WORKING_CUE_PERIOD_MS / ELLIPSIS_STEP_MS;
 
@@ -161,6 +180,27 @@ mod tests {
         // The two mid cells are the same shade, and they sit between the ends.
         assert!((step_level(1) - step_level(3)).abs() < 1e-6);
         assert!(step_level(1) < step_level(0) && step_level(1) > step_level(2));
+    }
+
+    #[test]
+    fn the_mute_blend_runs_none_third_two_thirds_third() {
+        let thirds = |value: f32| (value * 3.0).round() as i32;
+        assert!(mute_blend(0).abs() < 1e-6);
+        assert_eq!(thirds(mute_blend(1)), 1);
+        assert_eq!(thirds(mute_blend(2)), 2);
+        assert!((mute_blend(2) - PULSE_MUTE_FRACTION).abs() < 1e-6);
+        assert!((mute_blend(1) - mute_blend(3)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_mute_blend_never_leaves_the_unit_range() {
+        for step in 0..4 {
+            let blend = mute_blend(step);
+            assert!(
+                (0.0..=1.0).contains(&blend),
+                "blend {blend} out of range at step {step}"
+            );
+        }
     }
 
     #[test]

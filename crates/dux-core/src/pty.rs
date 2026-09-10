@@ -2164,7 +2164,7 @@ impl TerminalState {
     /// The two are the same thing only while the display offset is zero. Scroll
     /// back past one screen height and the viewport is nothing but immutable
     /// history: its fingerprint can never change, so the agent would read as
-    /// idle, the spinner and shimmer would stop, the poll rate would drop, and
+    /// idle, the spinner and the working cue would stop, the poll rate would drop, and
     /// every browser watching that agent would turn its working badge off, all
     /// while the child was still producing output.
     fn take_content_change(&mut self) -> bool {
