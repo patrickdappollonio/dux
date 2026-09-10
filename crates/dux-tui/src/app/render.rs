@@ -275,6 +275,14 @@ pub(crate) fn agent_row_branch_segment(session: &AgentSession) -> Option<String>
     (title != branch).then(|| branch.to_string())
 }
 
+/// The busy word on an agent row. Named so the working cue can recognise the
+/// word it pulses without a second copy of the literal beside it.
+pub(crate) const AGENT_WORKING_WORD: &str = "Working";
+
+/// The busy word on a terminal row: a terminal runs a process, it does not work
+/// at one.
+pub(crate) const TERMINAL_WORKING_WORD: &str = "Running";
+
 /// The colored state word on an agent row's second line, read off the same flags
 /// that drive the working spinner and the attention pulse so the word cannot
 /// disagree with the motion cue. Mirrors the web's `stateWord`
@@ -283,13 +291,6 @@ pub(crate) fn agent_row_branch_segment(session: &AgentSession) -> Option<String>
 /// Priority for an Active session: `needs_attention`, else `typing`, else
 /// `working`, else "Idle". Typing and working never apply to a non-Active
 /// session, so Detached and Exited win outright.
-/// The busy word on an agent row. Named so the working cue can recognise the
-/// word it pulses without a second copy of the literal beside it.
-pub(crate) const AGENT_WORKING_WORD: &str = "Working";
-/// The busy word on a terminal row: a terminal runs a process, it does not work
-/// at one.
-pub(crate) const TERMINAL_WORKING_WORD: &str = "Running";
-
 pub(crate) fn agent_state_word(
     status: crate::model::SessionStatus,
     working: bool,
@@ -1628,6 +1629,12 @@ impl App {
         }
     }
 
+    /// The state word's RESTING color. The busy word is deliberately not here:
+    /// it is the one word that animates, so its shade comes from
+    /// `theme::working_word_color` at the live pulse step and its only caller
+    /// takes that branch first. A working row that reached this would be a bug,
+    /// so it falls to the muted tone with the other quiet words rather than
+    /// carrying a second, un-pulsing definition of the working shade.
     fn agent_row_state_color(&self, word: &str, deleting: bool, steady_color: Color) -> Color {
         if deleting {
             return self.theme.session_deleting;
@@ -1635,7 +1642,6 @@ impl App {
         match word {
             "Needs you" => self.theme.session_attention,
             "Typing" => self.theme.session_typing,
-            "Working" => self.theme.session_working,
             "Detached" => steady_color,
             _ => self.theme.provider_label_fg,
         }

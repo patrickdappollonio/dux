@@ -17,26 +17,50 @@ pub const SPINNER_FRAMES: &[char] = &['◜', '◠', '◝', '◞', '◡', '◟'];
 /// polls every 33ms while anything animates, which keeps this cadence honest.
 pub const SPINNER_FRAME_MS: u128 = 75;
 
-/// How far toward the muted tone the working word travels at the bottom of its
-/// pulse. A cell has no opacity, so the dip is a color blend; two thirds keeps a
-/// visible third of the working green, which still reads as green beside the
-/// grey it sits in.
-const WORKING_WORD_MAX_MUTE: f32 = 2.0 / 3.0;
+/// The RGB `into_ratatui` folded a color down from, for the nine canonical
+/// values it remaps to named ANSI colors. Those names exist so the terminal's
+/// own 16-color profile decides what they look like, which is right for a color
+/// dux merely paints; a BLEND has no named form at all, so it has to start from
+/// the canonical channels the name stands for. Anything else (a 256-color index,
+/// `Reset`) has no defined RGB and answers `None`.
+fn blendable_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Black => Some((0, 0, 0)),
+        Color::White => Some((255, 255, 255)),
+        Color::Red => Some((255, 0, 0)),
+        Color::Green => Some((0, 255, 0)),
+        Color::Yellow => Some((255, 255, 0)),
+        Color::Blue => Some((0, 0, 255)),
+        Color::Magenta => Some((255, 0, 255)),
+        Color::Cyan => Some((0, 255, 255)),
+        Color::DarkGray => Some((128, 128, 128)),
+        _ => None,
+    }
+}
 
 /// The working state word's shade at `step`, the quantized pulse cell from
 /// `dux_core::working_cue::pulse_step`. Full `working` at the top of the pulse,
-/// blended toward `muted` as the level falls, so the word breathes on the same
-/// clock as its ellipsis. Written against the two tokens rather than a literal,
-/// so every theme pulses in its own palette; a non-RGB token cannot be blended,
-/// so it rests at `working` rather than being guessed at.
+/// blended toward `muted` by `working_cue::mute_blend` as the level falls, so
+/// the word breathes on the same clock as its ellipsis.
+///
+/// Written against the two tokens rather than a literal, so every theme pulses
+/// in its own palette. The resting cell is returned UNCHANGED rather than
+/// rebuilt from channels: a theme whose working token is a named ANSI color
+/// means it that way, and the terminal's profile should keep deciding the shade
+/// the word spends most of its cycle at. Only the dimmed cells become RGB,
+/// because a blend cannot be named. A color with no RGB behind it at all cannot
+/// be blended, so it rests rather than being guessed at.
 pub fn working_word_color(working: Color, muted: Color, step: usize) -> Color {
-    let (Color::Rgb(wr, wg, wb), Color::Rgb(mr, mg, mb)) = (working, muted) else {
+    let blend = dux_core::working_cue::mute_blend(step);
+    if blend <= f32::EPSILON {
+        return working;
+    }
+    let (Some((wr, wg, wb)), Some((mr, mg, mb))) = (blendable_rgb(working), blendable_rgb(muted))
+    else {
         return working;
     };
-    let level = dux_core::working_cue::step_level(step);
-    let floor = dux_core::working_cue::PULSE_FLOOR;
-    let t = WORKING_WORD_MAX_MUTE * (1.0 - level) / (1.0 - floor);
-    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * blend).round() as u8;
     Color::Rgb(mix(wr, mr), mix(wg, mg), mix(wb, mb))
 }
 
@@ -804,10 +828,27 @@ mod tests {
     }
 
     #[test]
-    fn a_non_rgb_token_rests_rather_than_being_guessed_at() {
+    fn a_named_token_still_pulses_and_still_rests_by_name() {
+        // A named ANSI working color used to stop the pulse dead. It blends
+        // through its canonical channels now, while the resting cell keeps the
+        // NAME so the terminal's own profile still picks that shade.
+        let muted = Color::Rgb(0x64, 0x64, 0x64);
+        assert_eq!(working_word_color(Color::Green, muted, 0), Color::Green);
+        assert_ne!(working_word_color(Color::Green, muted, 2), Color::Green);
         assert_eq!(
-            working_word_color(Color::Green, Color::Rgb(1, 2, 3), 2),
-            Color::Green
+            working_word_color(Color::Green, muted, 2),
+            working_word_color(Color::Rgb(0, 255, 0), muted, 2)
+        );
+    }
+
+    #[test]
+    fn a_token_with_no_rgb_behind_it_rests_rather_than_being_guessed_at() {
+        // A 256-color index resolves through the terminal's palette and has no
+        // channels dux can mix, so the word holds its shade rather than
+        // inventing one.
+        assert_eq!(
+            working_word_color(Color::Indexed(42), Color::Rgb(1, 2, 3), 2),
+            Color::Indexed(42)
         );
     }
 
@@ -1315,6 +1356,44 @@ variant = "dark"
                 Color::Rgb(128, 128, 128),
                 "theme {} left the standalone location tone at the FALLBACK gray",
                 listing.id
+            );
+        }
+    }
+
+    /// The working word has to actually pulse in every theme dux can load, not
+    /// just in the ones whose working color happens to be an off-palette RGB.
+    /// A theme whose token lands on one of the nine canonical values collapses
+    /// to a NAMED ANSI color on the way in, and a named color has no channels
+    /// to blend, so the word silently stood still there. This walks every
+    /// loadable theme and asserts the floor shade really differs from the full
+    /// one.
+    #[test]
+    fn the_working_word_pulses_in_every_loadable_theme() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root,
+        };
+        let listings = discover_available(&paths);
+        assert!(listings.len() > 1, "expected more than one loadable theme");
+        for listing in listings {
+            let theme = load(&listing.id, &paths)
+                .unwrap_or_else(|err| panic!("theme {} failed to load: {err}", listing.id));
+            let full = working_word_color(theme.session_working, theme.provider_label_fg, 0);
+            let floor = working_word_color(theme.session_working, theme.provider_label_fg, 2);
+            assert_eq!(
+                full, theme.session_working,
+                "theme {} moved the resting shade off its own working token",
+                listing.id
+            );
+            assert_ne!(
+                floor, full,
+                "theme {} renders a working word that never dims (working token {:?})",
+                listing.id, theme.session_working
             );
         }
     }
