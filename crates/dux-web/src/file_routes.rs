@@ -541,11 +541,18 @@ async fn diff_contents(
             // the change, and there is one to show. Every other refusal is still
             // a refusal.
             Err(e) if e.downcast_ref::<dux_core::diff::DiffTooLarge>().is_some() => {
-                let head = dux_core::diff::diff_head_via_git(&worktree, &path)?;
-                Ok(DiffAnswer::Head {
-                    path: path.clone(),
-                    head,
-                })
+                match dux_core::diff::diff_head_via_git(&worktree, &path) {
+                    Ok(head) => Ok(DiffAnswer::Head {
+                        path: path.clone(),
+                        head,
+                    }),
+                    // The fallback failing does not make the file smaller. The
+                    // refusal leads and git's words follow it, so the browser
+                    // still learns the first and more useful fact.
+                    Err(fallback) => Err(anyhow::anyhow!(
+                        "{e}; the git fallback could not answer either: {fallback:#}"
+                    )),
+                }
             }
             Err(e) => Err(e),
         }

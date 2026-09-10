@@ -289,6 +289,52 @@ async fn http_file_diff_answers_a_huge_file_with_the_diff_head() {
     );
 }
 
+/// The same answer for a file that is COMMITTED and then rewritten, which takes
+/// git's `HEAD --` branch rather than the untracked `--no-index` one. The two
+/// branches differ in their arguments and in which exit codes count as success,
+/// so covering only one of them covers half the feature.
+#[tokio::test]
+async fn http_file_diff_answers_a_huge_tracked_file_with_the_diff_head() {
+    let (addr, tmp) = boot_with_repo().await;
+    let root = tmp.path().to_path_buf();
+    let run = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    // Committed over the ceiling, then rewritten line for line so the patch is
+    // far longer than the head cap.
+    let committed: String = (0..600_000).map(|i| format!("old {i}\n")).collect();
+    assert!(committed.len() > 5 * 1024 * 1024);
+    std::fs::write(root.join("tracked-big.txt"), &committed).expect("write");
+    run(&["add", "--", "tracked-big.txt"]);
+    run(&["commit", "-q", "-m", "big"]);
+    let rewritten: String = (0..600_000).map(|i| format!("new {i}\n")).collect();
+    std::fs::write(root.join("tracked-big.txt"), &rewritten).expect("rewrite");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/files/diff"))
+        .json(&serde_json::json!({ "path": "tracked-big.txt" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "a huge tracked file is answered too");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let head = &body["head"];
+    assert_eq!(head["truncated"], true, "{body:#}");
+    assert_eq!(head["binary"], false, "{body:#}");
+    assert_eq!(head["shown_lines"], 4_000, "{body:#}");
+    assert!(
+        head["text"].as_str().unwrap().starts_with("diff --git "),
+        "the HEAD branch's patch starts with git's own header: {body:#}"
+    );
+}
+
 /// HTTP `GET /api/v1/sessions/:id/files/raw` (the markdown-preview image proxy)
 /// serves a worktree file's bytes with a guessed content type, and rejects a path
 /// that escapes the worktree.
