@@ -1230,12 +1230,7 @@ impl Engine {
         // Tabs, session-slot first, then extras in creation order.
         let mut tabs = vec![self.tab_view(s.slot_tab_id(), self.running_provider_for(s), 0)];
         let mut extras: Vec<_> = extra_tabs.to_vec();
-        extras.sort_by(|a, b| {
-            a.sort_order
-                .cmp(&b.sort_order)
-                .then_with(|| a.created_at.cmp(&b.created_at))
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        extras.sort_by(|a, b| crate::model::tab_display_order(a, b));
         for (i, t) in extras.into_iter().enumerate() {
             let effective = self
                 .running_provider_pins
@@ -2077,6 +2072,48 @@ mod tests {
         );
         assert_eq!(session.tabs[0].id, session.slot_tab_id);
         assert_ne!(session.tabs[1].id, session.slot_tab_id);
+    }
+
+    /// The web strip and the engine's id ordering are the same comparator, so a
+    /// tie on `sort_order` cannot put one pill first here and another there.
+    #[test]
+    fn the_published_tab_order_matches_the_engines_ordered_tab_ids() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+        let early = chrono::Utc::now();
+        let late = early + chrono::Duration::seconds(5);
+        for (id, sort_order, created_at) in [
+            ("tab-late", 1, late),
+            ("tab-early", 1, early),
+            ("tab-z", 2, early),
+            ("tab-a", 2, early),
+        ] {
+            engine.agent_tabs.insert(
+                TabId::new(id),
+                crate::model::AgentTab {
+                    id: id.to_string(),
+                    session_id: "s1".to_string(),
+                    provider: ProviderKind::new("codex"),
+                    sort_order,
+                    created_at,
+                },
+            );
+        }
+
+        let vm = engine.spine();
+        let published: Vec<String> = vm.sessions[0].tabs.iter().map(|t| t.id.clone()).collect();
+        let ordered: Vec<String> = engine
+            .ordered_tab_ids_for_session("s1")
+            .into_iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        assert_eq!(published, ordered);
+        // And that order is the comparator's, not insertion order.
+        assert_eq!(
+            published[1..],
+            ["tab-early", "tab-late", "tab-a", "tab-z"].map(String::from)
+        );
     }
 
     #[test]

@@ -764,6 +764,22 @@ pub struct AgentTab {
     pub created_at: DateTime<Utc>,
 }
 
+/// The one comparator that decides which extra tab comes before which, on every
+/// surface: `sort_order`, then `created_at`, then the id.
+///
+/// The id is the final tiebreak so the answer is deterministic even for two tabs
+/// written in the same instant, because the engine holds its tabs in a `HashMap`
+/// whose iteration order is not. Ties are unreachable today (`sort_order` is a
+/// per-agent append-only stamp), so this is parity across the orderings rather
+/// than a fix: the TUI strip, the web strip and the promotion successor must not
+/// be able to disagree about which pill comes first.
+pub(crate) fn tab_display_order(a: &AgentTab, b: &AgentTab) -> std::cmp::Ordering {
+    a.sort_order
+        .cmp(&b.sort_order)
+        .then_with(|| a.created_at.cmp(&b.created_at))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 #[derive(Clone, Debug)]
 pub struct ChangedFile {
     pub status: String,

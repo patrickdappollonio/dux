@@ -4496,27 +4496,18 @@ impl Engine {
     }
 
     /// Every tab id of a session in DISPLAY order: the session-slot tab first,
-    /// then the extras by `(sort_order, created_at, id)`, which is the order the
-    /// tab strip renders. Read this whenever POSITION matters (which pill comes
-    /// first, which tab succeeds the slot); [`Self::tab_ids_for_session`] is the
-    /// unordered form, for fan-out over the whole set where order cannot matter.
-    ///
-    /// The id is the final tiebreak so the answer is deterministic even for two
-    /// tabs written in the same instant: `agent_tabs` is a `HashMap`, whose
-    /// iteration order is not. Ties are unreachable today (`sort_order` is a
-    /// per-agent append-only stamp).
+    /// then the extras by [`crate::model::tab_display_order`], which is the one
+    /// comparator both surfaces' strips are ordered by. This method is the id
+    /// form of that order, for the callers that hold no tab rows;
+    /// [`Self::tab_ids_for_session`] is the unordered form, for fan-out over the
+    /// whole set where order cannot matter.
     pub fn ordered_tab_ids_for_session(&self, session_id: &str) -> Vec<TabId> {
         let mut extras: Vec<&AgentTab> = self
             .agent_tabs
             .values()
             .filter(|t| t.session_id == session_id)
             .collect();
-        extras.sort_by(|a, b| {
-            a.sort_order
-                .cmp(&b.sort_order)
-                .then_with(|| a.created_at.cmp(&b.created_at))
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        extras.sort_by(|a, b| crate::model::tab_display_order(a, b));
         std::iter::once(
             self.slot_tab_id_of(SessionIdRef::new(session_id))
                 .to_owned(),
