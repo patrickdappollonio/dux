@@ -301,6 +301,14 @@ async fn http_file_raw_serves_bytes_and_rejects_traversal() {
 /// `pull_before_creating_agent_by_default` is disabled because the test repo has
 /// no remote, so a pre-create pull would fail.
 async fn boot_for_create_agent() -> (SocketAddr, tempfile::TempDir) {
+    boot_for_create_agent_window(None).await
+}
+
+/// The same fixture with the create-await window overridden, so a test can reach
+/// a create's deferred `202` without sitting through the real window.
+async fn boot_for_create_agent_window(
+    create_await: Option<Duration>,
+) -> (SocketAddr, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
 
@@ -358,7 +366,14 @@ async fn boot_for_create_agent() -> (SocketAddr, tempfile::TempDir) {
     // The test repo has no remote, so a pre-create pull would fail; disable it.
     engine.config.defaults.pull_before_creating_agent_by_default = false;
     let (handle, _join) = spawn_engine_thread(engine);
-    let app = router(handle);
+    let app = match create_await {
+        Some(window) => dux_web::server::build_app(
+            handle,
+            axum::Router::new(),
+            dux_web::server::RouterParams::plain_http().with_create_await_timeout(window),
+        ),
+        None => router(handle),
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -1006,6 +1021,66 @@ async fn rest_create_session_returns_201_and_scopes_status() {
         )
         .await,
         "a different connection must not receive the scoped create status"
+    );
+}
+
+/// The deferred create, end to end through a real server: a create the handler
+/// stops waiting on answers `202` with an operation id, and the SAME id is the
+/// `key` on the `status` frame the events socket carries. That correlation is
+/// the whole reason the id is in the body.
+///
+/// The agent name nests under an existing branch, which git refuses as a ref it
+/// cannot lock, so the create never persists a session and the deferred branch
+/// is reached on timing nothing can change. Only the provider process is
+/// stood in for (`cat`); everything else is the real server.
+#[tokio::test]
+async fn rest_create_session_202_op_id_matches_the_status_frames_key() {
+    let (addr, tmp) = boot_for_create_agent_window(Some(Duration::from_millis(1))).await;
+    // A branch for the requested name to collide with, in the repo the fixture
+    // registered as project `p1`.
+    let ok = std::process::Command::new("git")
+        .args(["branch", "blocked"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("spawn git")
+        .success();
+    assert!(ok, "creating the colliding branch failed");
+
+    // Connect BEFORE the POST: the create's busy is emitted during the dispatch,
+    // so a socket opened afterwards could miss it.
+    let (mut ws, conn_id) = connect_events(addr).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions"))
+        .header("x-connection-id", &conn_id)
+        .json(&serde_json::json!({
+            "kind": "new",
+            "project_id": "p1",
+            "name": "blocked/child",
+        }))
+        .send()
+        .await
+        .expect("POST create");
+    assert_eq!(resp.status().as_u16(), 202, "the create must be deferred");
+    assert!(
+        resp.headers().get("location").is_none(),
+        "a deferred create names no resource yet"
+    );
+    let body: serde_json::Value = resp.json().await.expect("202 json body");
+    let op_id = body["op_id"]
+        .as_str()
+        .expect("op_id in the 202 body")
+        .to_string();
+
+    assert!(
+        saw_status(
+            &mut ws,
+            &format!("\"key\":\"{op_id}\""),
+            Duration::from_secs(8)
+        )
+        .await,
+        "a status frame must carry the operation id the 202 handed out"
     );
 }
 

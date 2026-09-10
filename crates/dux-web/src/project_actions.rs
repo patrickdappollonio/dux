@@ -6,6 +6,10 @@
 //! Removing a project does not touch its checkout unless `?delete_worktrees=true`
 //! asks for the agents' worktrees too. The add route honors `Idempotency-Key`, and
 //! the settings PATCH is tri-state per field.
+//!
+//! The add answers `201 Created` with the project when it surfaces inside the
+//! await window and `202 Accepted` with [`crate::rest_common::Accepted`] when it
+//! does not, the same deferred contract the session create follows.
 
 use std::collections::BTreeMap;
 
@@ -21,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use dux_core::wire::WireCommand;
 
 use crate::rest_common::{
-    CREATE_AWAIT_TIMEOUT, await_new_project, delete_wire_response, id_within_bound,
+    Accepted, CREATE_AWAIT_TIMEOUT, await_new_project, delete_wire_response, id_within_bound,
     idempotency_key, require_configured_provider, scope_from_headers,
 };
 use crate::server::AppState;
@@ -122,20 +126,32 @@ async fn add_project(
 
     let cmd = add_project_command(body);
 
-    match state
+    let outcome = match state
         .engine
         .apply_wire_scoped(cmd, scope_from_headers(&headers, &state.connections))
         .await
     {
-        Ok(_) => {}
+        Ok(outcome) => outcome,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-    }
+    };
 
     // A direct add resolves synchronously (first poll wins); the checkout-default
     // add goes through a worker, so the poll covers it.
-    match await_new_project(&state.engine, &pre, CREATE_AWAIT_TIMEOUT).await {
+    let window = state.create_await_timeout.unwrap_or(CREATE_AWAIT_TIMEOUT);
+    match await_new_project(&state.engine, &pre, window).await {
         Some(id) => created_project_response(&state, id, key).await,
-        None => StatusCode::ACCEPTED.into_response(),
+        // The deferred reply carries the worker-backed add's keyed op id, the same
+        // key its final arrives under on the events socket. The plain add resolves
+        // on the reactor and mints no keyed op, so it answers `op_id: null` rather
+        // than an id nothing would ever resolve; that path only reaches here if the
+        // project vanished between the add and the poll.
+        None => (
+            StatusCode::ACCEPTED,
+            Json(Accepted {
+                op_id: outcome.status.and_then(|s| s.key),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -493,6 +509,44 @@ mod tests {
             .body(Body::from(body))
             .unwrap()
     }
+
+    /// A worker-backed add that never surfaces a project answers `202` with the
+    /// add op's id, the same key its final rides on the events socket.
+    ///
+    /// The folder is read-only, which the path validator accepts (it is a plain
+    /// existing directory outside any repository) and the worker's `git init`
+    /// then fails on, so no project is ever registered and the deferred branch is
+    /// reached on timing nothing can change.
+    #[tokio::test]
+    async fn add_202_carries_the_add_op_id() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().to_string_lossy().to_string();
+        std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let (_tmp, app) = crate::test_support::router_no_auth_with_create_window(DEFERRED_WINDOW);
+        let resp = app.oneshot(post_add_init_repo(&path)).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            status,
+            axum::http::StatusCode::ACCEPTED,
+            "body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = json["op_id"].as_str().expect("op_id in the 202 body");
+        assert!(op_id.starts_with("op-"), "got {op_id:?}");
+    }
+
+    /// The create-await window the deferred-reply test runs in. Short only to
+    /// keep it quick: the add it drives can never register a project, so the
+    /// deferred branch is reached whatever the window is.
+    const DEFERRED_WINDOW: std::time::Duration = std::time::Duration::from_millis(1);
 
     fn add_body(
         checkout_default: bool,

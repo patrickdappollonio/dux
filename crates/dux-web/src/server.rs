@@ -145,6 +145,12 @@ pub struct AppState {
     /// bootstrap document so the Preferences row can say the flag outranks the
     /// saved value for as long as this run lasts.
     pub tailscale_forced_no: bool,
+    /// Overrides how long a create handler waits for its resource to surface
+    /// before answering `202 Accepted`. `None` in every real serve, which uses
+    /// [`crate::rest_common::CREATE_AWAIT_TIMEOUT`] and
+    /// [`crate::rest_common::FROM_PR_CREATE_AWAIT_TIMEOUT`]; a test sets a short
+    /// window so the deferred reply is exercised without waiting out the real one.
+    pub create_await_timeout: Option<std::time::Duration>,
 }
 
 impl AppState {
@@ -332,6 +338,10 @@ pub struct RouterParams {
     pub tailscale_mode_control: Option<crate::serve_legs::TailscaleModeControl>,
     /// Whether this run was started with `--no-tailscale`.
     pub tailscale_forced_no: bool,
+    /// How long a create handler waits for its resource before answering `202`.
+    /// `None` uses the real windows; overridden only by tests (see
+    /// [`RouterParams::with_create_await_timeout`]).
+    pub create_await_timeout: Option<std::time::Duration>,
     /// Base URL for release-notes fetches. Defaults to
     /// `dux_core::urls::GITHUB_API_BASE`; overridden only by tests (see
     /// [`RouterParams::with_release_notes_api_base`]).
@@ -385,6 +395,7 @@ impl RouterParams {
             live_tailscale_host_literals: None,
             tailscale_mode_control: None,
             tailscale_forced_no: false,
+            create_await_timeout: None,
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
             ownership_publisher: None,
             connections_gauge: None,
@@ -425,6 +436,15 @@ impl RouterParams {
     /// `dux_core::urls::GITHUB_API_BASE`.
     pub fn with_release_notes_api_base(mut self, base: impl Into<String>) -> Self {
         self.release_notes_api_base = base.into();
+        self
+    }
+
+    /// Shorten the window a create handler waits in before it answers `202`.
+    /// Exists for tests: the real windows are tens of seconds, and a test that
+    /// wants the deferred reply would otherwise have to sit through one.
+    /// Production never calls this and keeps the real windows.
+    pub fn with_create_await_timeout(mut self, window: std::time::Duration) -> Self {
+        self.create_await_timeout = Some(window);
         self
     }
 
@@ -734,6 +754,7 @@ pub fn build_app(
         changes,
         resources,
         idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
+        create_await_timeout: params.create_await_timeout,
         // Shared with the engine actor loop (see `build_actor_channels`), which
         // overlays the owner map onto the spine so every client learns which
         // connection is driving each agent PTY without attaching to it.

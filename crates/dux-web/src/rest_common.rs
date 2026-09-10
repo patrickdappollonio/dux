@@ -3,6 +3,13 @@
 //!
 //! These live in one place so the session/project action modules and the git
 //! mutation routes derive `StatusScope` and bound `:id` params identically.
+//!
+//! A create answers one of two shapes: `201 Created` with the record and a
+//! `Location` header when it surfaces inside the await window, otherwise
+//! `202 Accepted` carrying [`Accepted`], the operation id the eventual final
+//! arrives under on the events socket. The deferred reply is never bodyless: a
+//! client that stopped being waited on still gets the one thing it needs to
+//! correlate the outcome.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -35,16 +42,46 @@ pub const MAX_ID_LEN: usize = 128;
 pub const IDEMPOTENCY_TTL: Duration = Duration::from_secs(600);
 
 /// How long a create handler waits for the asynchronously-created resource to
-/// surface in the spine before giving up and replying `202 Accepted` (the create
-/// was dispatched; its completion/failure still rides the status toast stream).
+/// surface in the spine before giving up and replying `202 Accepted` with the
+/// operation id (the create was dispatched; its completion/failure still rides
+/// the status toast stream, under that same id).
 /// Generous because a real create does `git worktree add` + a provider PTY spawn.
 pub const CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Longer await window for the from-PR create, which does a `gh pr view` network
 /// round trip before the worktree and PTY worker even starts: the ordinary window
-/// expires on it and yields a bodyless `202` for a create that succeeds. This one
-/// covers a slow network lookup plus the worktree and PTY work.
+/// expires on it and yields the deferred `202` for a create that succeeds. This
+/// one covers a slow network lookup plus the worktree and PTY work.
 pub const FROM_PR_CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The `202 Accepted` body of a deferred operation: the keyed status op id, the
+/// same key that rides the `status` and `status_cleared` frames on `/ws/events`,
+/// so a client correlates the eventual final instead of polling for the record.
+///
+/// For a from-PR create the id is the PR-LOOKUP op, which spans resolving the
+/// reference AND the create it hands off to; the create's own op is minted later,
+/// inside the lookup followup, so the lookup key is the only one available when
+/// the handler answers.
+///
+/// `op_id` is `null` when the dispatch minted no keyed op at all, which the
+/// synchronous plain project add is: the reply says so rather than inventing an
+/// id a client would wait forever on.
+#[derive(serde::Serialize)]
+pub struct Accepted {
+    pub op_id: Option<String>,
+}
+
+impl Accepted {
+    /// The deferred reply for an operation that minted a keyed status op.
+    pub fn keyed(op_id: String) -> Self {
+        Self { op_id: Some(op_id) }
+    }
+
+    /// The deferred reply for an operation with no key to correlate on.
+    pub fn unkeyed() -> Self {
+        Self { op_id: None }
+    }
+}
 
 /// The class of a live WebSocket connection tracked in the [`ConnectionRegistry`].
 /// Used by the liveness reaper (every class is pingable) and by `scope_from_headers`
