@@ -700,14 +700,16 @@ fn find_soft_break(spans: &[Span<'static>], max_col: usize) -> Option<usize> {
 /// Wrap pre-rendered diff lines so that continuation lines are indented to
 /// align with the content column (past the gutter).
 ///
-/// When `gutter_width` is 0 this is a no-op, so the caller should fall back to
-/// `Paragraph::wrap()`.
+/// A zero gutter is an ordinary case, not a bail-out: it wraps at the full
+/// width with no indent. The diff pane draws only the rows in the viewport, so
+/// it needs the wrapped extent for every setting, and having one wrapper answer
+/// for both is what keeps the scroll extent and the drawn rows agreeing.
 pub fn wrap_diff_lines(
     lines: &[Line<'static>],
     total_width: usize,
     gutter_width: usize,
 ) -> Vec<Line<'static>> {
-    if gutter_width == 0 || total_width <= gutter_width {
+    if total_width == 0 || total_width <= gutter_width {
         return lines.to_vec();
     }
 
@@ -1234,11 +1236,21 @@ mod tests {
     }
 
     #[test]
-    fn wrap_diff_lines_zero_gutter_is_noop() {
-        let lines = vec![Line::from("a long line that should not be touched")];
+    fn wrap_diff_lines_with_zero_gutter_wraps_at_the_full_width() {
+        let lines = vec![Line::from("abcdefghijklmno")];
+        let wrapped = wrap_diff_lines(&lines, 5, 0);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[0].to_string(), "abcde");
+        assert_eq!(wrapped[1].to_string(), "fghij");
+        assert_eq!(wrapped[2].to_string(), "klmno");
+    }
+
+    #[test]
+    fn wrap_diff_lines_leaves_a_fitting_line_alone_with_zero_gutter() {
+        let lines = vec![Line::from("short")];
         let wrapped = wrap_diff_lines(&lines, 10, 0);
         assert_eq!(wrapped.len(), 1);
-        assert_eq!(wrapped[0].to_string(), lines[0].to_string());
+        assert_eq!(wrapped[0].to_string(), "short");
     }
 
     #[test]

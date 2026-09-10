@@ -4590,6 +4590,7 @@ mod tests {
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,
             last_diff_visual_lines: 0,
+            diff_rows: None,
             theme: Theme::default_dark(),
             tick_count: 0,
             start_time: std::time::Instant::now(),

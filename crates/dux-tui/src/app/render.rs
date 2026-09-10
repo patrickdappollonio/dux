@@ -2589,48 +2589,48 @@ impl App {
 
         let w = content_area.width.max(1) as usize;
 
-        // The offset actually DRAWN, which is the outer `scroll` clamped to the
-        // wrapped extent. Both wrapping paths below produce it, and the scroll
-        // marker is rendered once from it after the branch, so the two paths
-        // cannot drift into disagreeing about what the marker says.
-        let drawn_scroll;
-
-        if gutter_width > 0 {
-            // Gutter-aware wrapping: continuation lines are indented to align
-            // with the content column past the gutter.
-            let wrapped = crate::diff::wrap_diff_lines(&lines, w, gutter_width);
-            self.last_diff_visual_lines = wrapped.len() as u16;
-
-            let max_scroll = self
-                .last_diff_visual_lines
-                .saturating_sub(content_area.height);
-            let scroll = scroll.min(max_scroll);
-            drawn_scroll = scroll;
-
-            Paragraph::new(wrapped)
-                .scroll((scroll, 0))
-                .render(content_area, frame.buffer_mut());
-        } else {
-            // No gutter: fall back to ratatui's built-in wrapping.
-            self.last_diff_visual_lines = lines
-                .iter()
-                .map(|l| {
-                    let lw = l.width();
-                    if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
-                })
-                .sum();
-
-            let max_scroll = self
-                .last_diff_visual_lines
-                .saturating_sub(content_area.height);
-            let scroll = scroll.min(max_scroll);
-            drawn_scroll = scroll;
-
-            Paragraph::new((*lines).clone())
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0))
-                .render(content_area, frame.buffer_mut());
+        // Wrap once per diff, width and gutter setting rather than once per
+        // frame: the wrap walks every line of the file, and a frame draws forty
+        // rows of it. The cache is keyed on all three, so a re-computed diff, a
+        // resized pane or a toggled gutter re-wraps and nothing else does.
+        let stale = match &self.diff_rows {
+            Some(cache) => {
+                !Arc::ptr_eq(&cache.lines, &lines)
+                    || cache.width != w
+                    || cache.gutter_width != gutter_width
+            }
+            None => true,
+        };
+        if stale {
+            let rows = crate::diff::wrap_diff_lines(&lines, w, gutter_width);
+            self.diff_rows = Some(DiffRowCache {
+                lines: Arc::clone(&lines),
+                width: w,
+                gutter_width,
+                rows,
+            });
         }
+        let total_rows = self.diff_rows.as_ref().map_or(0, |cache| cache.rows.len());
+        self.last_diff_visual_lines = u16::try_from(total_rows).unwrap_or(u16::MAX);
+
+        // The offset actually DRAWN, which is the outer `scroll` clamped to the
+        // wrapped extent. The scroll marker and the hint bar are rendered from
+        // it, so neither can drift from what the pane put on screen.
+        let max_scroll = self
+            .last_diff_visual_lines
+            .saturating_sub(content_area.height);
+        let drawn_scroll = scroll.min(max_scroll);
+
+        let start = usize::from(drawn_scroll);
+        let end = start
+            .saturating_add(usize::from(content_area.height))
+            .min(total_rows);
+        let visible: Vec<Line<'static>> = self
+            .diff_rows
+            .as_ref()
+            .map(|cache| cache.rows[start.min(end)..end].to_vec())
+            .unwrap_or_default();
+        Paragraph::new(visible).render(content_area, frame.buffer_mut());
 
         // Scroll marker in the pane's right border column, on the content
         // pane's last row. Units are wrapped VISUAL lines (what the diff already
@@ -20705,6 +20705,45 @@ mod tests {
                         "row {y}'s last content column must still hold the message"
                     );
                 }
+            }
+        }
+    }
+
+    /// The text of the diff's content rows, top to bottom, trailing blanks
+    /// trimmed.
+    fn diff_content_rows(buf: &ratatui::buffer::Buffer, content: Rect) -> Vec<String> {
+        (content.y..content.y + content.height)
+            .map(|y| {
+                let row: String = (content.x..content.x + content.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect();
+                row.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_diff_draws_exactly_the_rows_at_the_scroll_offset() {
+        // A diff far longer than the viewport: whatever the pane does with the
+        // rows it is not drawing, the rows it IS drawing start at the scroll
+        // offset and run to the bottom of the content area.
+        for gutter_width in [0usize, 6] {
+            let scroll = 12_345u16;
+            let (app, buf) = diff_frame((120, 40), 20_000, gutter_width, scroll);
+            let (content, _) = diff_rects(&app);
+            let rows = diff_content_rows(&buf, content);
+            assert_eq!(rows.len(), content.height as usize);
+            for (offset, row) in rows.iter().enumerate() {
+                let index = usize::from(scroll) + offset;
+                let expected = if gutter_width > 0 {
+                    format!("{:>4}│ line {index}", index + 1)
+                } else {
+                    format!("line {index}")
+                };
+                assert_eq!(
+                    row, &expected,
+                    "row {offset} at scroll {scroll} (gutter {gutter_width})"
+                );
             }
         }
     }

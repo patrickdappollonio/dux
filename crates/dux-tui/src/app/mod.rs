@@ -428,6 +428,9 @@ pub struct App {
     pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
     pub(crate) last_diff_visual_lines: u16,
+    /// The diff's wrapped rows, kept so a frame draws its viewport instead of
+    /// re-wrapping the whole file. See [`DiffRowCache`].
+    pub(crate) diff_rows: Option<DiffRowCache>,
     pub(crate) theme: Theme,
     pub(crate) tick_count: u64,
     /// Wall-clock reference for time-based animations (spinners). Using
@@ -1168,6 +1171,21 @@ pub(crate) enum CenterMode {
         worktree_path: String,
         rel_path: String,
     },
+}
+
+/// One diff's lines wrapped for one pane width, kept between frames.
+///
+/// Wrapping is per line of the whole file, so doing it every frame made a large
+/// diff cost tens of milliseconds a frame to draw forty rows. The three things
+/// that can change the rows are the diff itself (compared by `Arc` identity, so
+/// a re-computed diff of the same file is a different one), the pane width, and
+/// whether the gutter is on.
+#[derive(Clone, Debug)]
+pub(crate) struct DiffRowCache {
+    pub(crate) lines: Arc<Vec<Line<'static>>>,
+    pub(crate) width: usize,
+    pub(crate) gutter_width: usize,
+    pub(crate) rows: Vec<Line<'static>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3750,6 +3768,7 @@ impl App {
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,
             last_diff_visual_lines: 0,
+            diff_rows: None,
             theme,
             tick_count: 0,
             start_time: Instant::now(),
