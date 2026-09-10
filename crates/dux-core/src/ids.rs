@@ -111,6 +111,14 @@ macro_rules! id_pair {
             pub fn as_ref_id(&self) -> &$borrowed {
                 $borrowed::new(&self.0)
             }
+
+            /// Unwrap into the owned string, for a boundary that wants `String`
+            /// and already owns this id. Costs no allocation, unlike
+            /// `as_str().to_string()`, which matters on the render paths that
+            /// convert a whole session's ids every frame.
+            pub fn into_string(self) -> String {
+                self.0
+            }
         }
 
         impl $borrowed {
@@ -234,6 +242,10 @@ mod tests {
         assert_eq!(tab.as_str(), "t1");
         assert_eq!(TabIdRef::new(tab.as_str()), tab.as_ref_id());
         assert_eq!(tab.as_ref_id().to_owned(), tab);
+        // The owning unwrap, for a boundary that wants the `String` back and is
+        // done with the id.
+        assert_eq!(TabId::new("t1").into_string(), "t1".to_string());
+        assert_eq!(SessionId::new("s1").into_string(), "s1".to_string());
     }
 
     #[test]

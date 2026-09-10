@@ -6627,9 +6627,9 @@ impl App {
     /// ordering; this only spells it as `String`.
     pub(crate) fn session_tab_ids(&self, session_id: &str) -> Vec<String> {
         self.engine
-            .ordered_tab_ids_for_session(session_id)
+            .ordered_tab_ids_for_session(SessionIdRef::new(session_id))
             .into_iter()
-            .map(|id| id.as_str().to_string())
+            .map(TabId::into_string)
             .collect()
     }
 

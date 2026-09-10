@@ -2104,7 +2104,7 @@ mod tests {
         let vm = engine.spine();
         let published: Vec<String> = vm.sessions[0].tabs.iter().map(|t| t.id.clone()).collect();
         let ordered: Vec<String> = engine
-            .ordered_tab_ids_for_session("s1")
+            .ordered_tab_ids_for_session(SessionIdRef::new("s1"))
             .into_iter()
             .map(|id| id.as_str().to_string())
             .collect();

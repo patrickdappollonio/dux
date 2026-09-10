@@ -4501,19 +4501,16 @@ impl Engine {
     /// form of that order, for the callers that hold no tab rows;
     /// [`Self::tab_ids_for_session`] is the unordered form, for fan-out over the
     /// whole set where order cannot matter.
-    pub fn ordered_tab_ids_for_session(&self, session_id: &str) -> Vec<TabId> {
+    pub fn ordered_tab_ids_for_session(&self, session_id: &SessionIdRef) -> Vec<TabId> {
         let mut extras: Vec<&AgentTab> = self
             .agent_tabs
             .values()
-            .filter(|t| t.session_id == session_id)
+            .filter(|t| t.session_id == session_id.as_str())
             .collect();
         extras.sort_by(|a, b| crate::model::tab_display_order(a, b));
-        std::iter::once(
-            self.slot_tab_id_of(SessionIdRef::new(session_id))
-                .to_owned(),
-        )
-        .chain(extras.into_iter().map(|t| TabId::new(t.id.clone())))
-        .collect()
+        std::iter::once(self.slot_tab_id_of(session_id).to_owned())
+            .chain(extras.into_iter().map(|t| TabId::new(t.id.clone())))
+            .collect()
     }
 
     /// Whether one tab is running or coming up: it holds a provider PTY, or an
@@ -4545,10 +4542,10 @@ impl Engine {
     /// activation. Kept in core (not the TUI) because liveness is one predicate,
     /// [`Self::tab_is_live`], and every tab question asks it there.
     pub fn first_live_tab(&self, session_id: &str) -> Option<String> {
-        self.ordered_tab_ids_for_session(session_id)
+        self.ordered_tab_ids_for_session(SessionIdRef::new(session_id))
             .into_iter()
             .find(|id| self.tab_is_live(id.as_ref_id()))
-            .map(|id| id.as_str().to_string())
+            .map(TabId::into_string)
     }
 
     /// Resolve a tab id back to the session that owns it. An extra tab resolves
@@ -4775,7 +4772,7 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id.as_str()) else {
             return Vec::new();
         };
-        let ids = self.ordered_tab_ids_for_session(session_id.as_str());
+        let ids = self.ordered_tab_ids_for_session(session_id);
         let providers: Vec<String> = ids
             .iter()
             .map(|id| {
@@ -4813,7 +4810,7 @@ impl Engine {
     pub fn successor_slot_tab(&self, session_id: &SessionIdRef) -> Option<&AgentTab> {
         // Position 0 is the slot tab itself, so the successor is position 1.
         let successor = self
-            .ordered_tab_ids_for_session(session_id.as_str())
+            .ordered_tab_ids_for_session(session_id)
             .into_iter()
             .nth(1)?;
         self.agent_tabs.get(successor.as_ref_id())
@@ -5267,7 +5264,7 @@ mod tests {
         add("tab-a", 2, early);
 
         assert_eq!(
-            engine.ordered_tab_ids_for_session("s1"),
+            engine.ordered_tab_ids_for_session(SessionIdRef::new("s1")),
             vec![
                 engine.slot_tab_id_of(SessionIdRef::new("s1")).to_owned(),
                 TabId::new("tab-early"),
