@@ -407,6 +407,6 @@ Logs go to `dux.log` in the config directory. Control the level in your config:
 level = "info"        # "error", "warn", "info", or "debug"
 path = "dux.log"      # relative to config dir, or use an absolute path
 max_bytes = 10485760  # rotate at 10 MiB; rotation is by size only, 0 never rotates
-keep = 5              # rotated copies kept as dux.log.1, dux.log.2 and so on
+keep = 5              # rotated copies kept as dux.log.1, dux.log.2 and so on (max 1000)
 compress = true       # gzip them, so they are named dux.log.1.gz and so on
 ```

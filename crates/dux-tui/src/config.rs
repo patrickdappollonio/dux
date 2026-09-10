@@ -406,7 +406,9 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "path",
             comment: Some(CommentSource::Static(
                 "# Relative paths are resolved from the dux config directory.\n\
-                 # The log file is opened once, so changing this needs a restart.",
+                 # The log file is opened once, so changing this needs a restart.\n\
+                 # A symlink here is followed once at startup: the log and its rotated\n\
+                 # copies live beside the file it points at, and the link is left alone.",
             )),
             value_fn: |c| FieldValue::Str(c.logging.path.clone()),
         },
@@ -415,9 +417,10 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Size in bytes the log may reach before dux rotates it itself. Default\n\
                  # 10485760 (10 MiB). Rotation is by SIZE only: there is no daily or weekly\n\
-                 # schedule, and nothing rotates while dux is not writing. The check runs\n\
-                 # before each line is appended, so the file can end up under this by one\n\
-                 # line rather than over it. Set to 0 to never rotate.",
+                 # schedule, and nothing rotates while dux is not writing. A line is always\n\
+                 # written whole, so the file stops just short of this rather than crossing\n\
+                 # it; a single line longer than the whole limit is still written and\n\
+                 # briefly goes over. Set to 0 to never rotate.",
             )),
             value_fn: |c| FieldValue::U64(c.logging.max_bytes),
         },
@@ -427,7 +430,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                 "# How many rotated copies to keep beside the live log. Default 5. On each\n\
                  # rotation the live log becomes dux.log.1, the previous dux.log.1 becomes\n\
                  # dux.log.2, and so on; anything past this count is deleted. Set to 0 to\n\
-                 # rotate and throw the old log away.",
+                 # rotate and throw the old log away. Values above 1000 are clamped.",
             )),
             value_fn: |c| FieldValue::U32(c.logging.keep),
         },
@@ -1976,6 +1979,9 @@ mod tests {
             "dux.log.1.gz",
             "rotate and throw the old log away",
             "applies all three of these at the next line written",
+            "A line is always\n# written whole",
+            "Values above 1000 are clamped",
+            "A symlink here is followed once at startup",
         ] {
             assert!(
                 rendered.contains(phrase),

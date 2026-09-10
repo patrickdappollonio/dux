@@ -8122,6 +8122,57 @@ mod tests {
         crate::logger::set_level("info");
     }
 
+    /// The rotation settings ride the same reload the level does, and reach the
+    /// cell the real logger reads on every line. Held under the level guard,
+    /// which is what serializes every test that moves process-global logger
+    /// state.
+    #[test]
+    fn a_config_reload_adopts_new_log_rotation_settings() {
+        let _guard = crate::logger::level_test_guard();
+        let (mut engine, _tmp) = test_engine();
+
+        let mut config = engine.config.clone();
+        config.logging.max_bytes = 4321;
+        config.logging.keep = 7;
+        config.logging.compress = false;
+        engine
+            .apply_reloaded_config(config)
+            .expect("reload applies");
+
+        assert_eq!(crate::logger::rotation_for_test(), (4321, 7, false));
+
+        let mut restored = engine.config.clone();
+        restored.logging = crate::config::LoggingConfig::default();
+        engine
+            .apply_reloaded_config(restored)
+            .expect("reload applies");
+    }
+
+    /// A `keep` past the ceiling is clamped on the way in, so an absurd config
+    /// value cannot make every line pay for a thousand renames.
+    #[test]
+    fn a_config_reload_clamps_an_absurd_keep() {
+        let _guard = crate::logger::level_test_guard();
+        let (mut engine, _tmp) = test_engine();
+
+        let mut config = engine.config.clone();
+        config.logging.keep = 100_000;
+        engine
+            .apply_reloaded_config(config)
+            .expect("reload applies");
+
+        assert_eq!(
+            crate::logger::rotation_for_test().1,
+            crate::config::MAX_LOG_KEEP
+        );
+
+        let mut restored = engine.config.clone();
+        restored.logging = crate::config::LoggingConfig::default();
+        engine
+            .apply_reloaded_config(restored)
+            .expect("reload applies");
+    }
+
     #[test]
     fn branch_sync_wait_treats_zero_as_an_idle_nap_rather_than_an_exit() {
         // `0` inside the loop must never end the thread: the guard means "a

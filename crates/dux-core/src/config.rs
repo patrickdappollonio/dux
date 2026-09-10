@@ -144,21 +144,43 @@ pub const DEFAULT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Default number of rotated log copies kept beside the live log.
 ///
-/// With the default size that is at most 60 MiB of plain text, and much less
-/// once the older copies are compressed. `0` rotates and discards.
+/// At the default size that is the live log plus five copies, so at most 60 MiB
+/// of plain text, and much less once the older copies are compressed. `0`
+/// rotates and discards.
 pub const DEFAULT_LOG_KEEP: u32 = 5;
+
+/// Hard ceiling on `logging.keep`, since every rotation shifts the whole set of
+/// copies and the user is unlikely to want a thousand of them.
+pub const MAX_LOG_KEEP: u32 = 1000;
+
+/// The effective number of rotated copies to keep: values above
+/// [`MAX_LOG_KEEP`] are clamped with a warning, as the other numeric settings
+/// are. `0` is a real answer here (rotate and discard) rather than "use the
+/// default", so it passes through.
+pub fn normalized_log_keep(configured: u32) -> u32 {
+    if configured > MAX_LOG_KEEP {
+        crate::logger::warn(&format!(
+            "[logging] keep = {configured} exceeds the maximum of {MAX_LOG_KEEP} \
+             and is being clamped",
+        ));
+        return MAX_LOG_KEEP;
+    }
+    configured
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
     pub path: String,
-    /// Size in bytes the log may reach before dux rotates it. Checked before
-    /// each line is appended, so the file may exceed this by less than one
-    /// line. `0` never rotates.
+    /// Size in bytes the log may reach before dux rotates it. A line is written
+    /// whole, so the file stops just short of this rather than crossing it; a
+    /// single line larger than the whole limit is still written and briefly
+    /// exceeds it. `0` never rotates.
     pub max_bytes: u64,
     /// How many rotated copies to keep, numbered `dux.log.1` upwards. The
-    /// oldest is deleted. `0` rotates and discards.
+    /// oldest is deleted. `0` rotates and discards. Read through
+    /// [`normalized_log_keep`].
     pub keep: u32,
     /// Whether a rotated copy is gzipped to `dux.log.N.gz` in the background.
     pub compress: bool,
@@ -4849,6 +4871,21 @@ mod agent_tabs_cap_tests {
     #[test]
     fn normalized_agent_tabs_max_substitutes_default_for_zero() {
         assert_eq!(normalized_agent_tabs_max(0), DEFAULT_AGENT_TABS_MAX);
+    }
+
+    /// `0` is a real answer for `keep` (rotate and discard) rather than "use the
+    /// default", which is what tells it apart from the settings above.
+    #[test]
+    fn normalized_log_keep_passes_zero_and_sane_values_through() {
+        assert_eq!(normalized_log_keep(0), 0);
+        assert_eq!(normalized_log_keep(5), 5);
+        assert_eq!(normalized_log_keep(MAX_LOG_KEEP), MAX_LOG_KEEP);
+    }
+
+    #[test]
+    fn normalized_log_keep_clamps_an_absurd_value() {
+        assert_eq!(normalized_log_keep(100_000), MAX_LOG_KEEP);
+        assert_eq!(normalized_log_keep(u32::MAX), MAX_LOG_KEEP);
     }
 
     #[test]

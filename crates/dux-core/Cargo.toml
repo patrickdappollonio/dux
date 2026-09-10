@@ -12,7 +12,7 @@ test-support = []
 [dependencies]
 notify.workspace = true
 # Gzips a rotated log copy in the background; dux-web already depends on it.
-flate2 = "1"
+flate2.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 compact_str = "0.9"

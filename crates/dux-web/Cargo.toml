@@ -37,7 +37,7 @@ brotli = "8"
 # is recompressed (and the not-built notice detection reads such a dist too).
 [build-dependencies]
 brotli = "8"
-flate2 = "1"
+flate2.workspace = true
 
 [dev-dependencies]
 # The stand-in `gh` builders live in dux-core behind `test-support`, so the

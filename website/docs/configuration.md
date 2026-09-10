@@ -103,9 +103,16 @@ background and are named `dux.log.1.gz`, `dux.log.2.gz` and so on; read one with
 `max_bytes = 0` to never rotate at all.
 
 Rotation happens by size and only when dux writes a line, so there is no daily or
-weekly schedule and a dux that is sitting idle never touches the files. If you are
-upgrading with a log that is already far bigger than `max_bytes`, it is rotated on
-the first line dux writes after the upgrade.
+weekly schedule and a dux that is sitting idle never touches the files. A line is
+always written whole, so the file stops just short of `max_bytes` rather than
+crossing it, and a single line longer than the whole limit is still written and
+briefly goes over. `keep` above 1000 is clamped, with a note in the log. If you
+are upgrading with a log that is already far bigger than `max_bytes`, it is
+rotated on the first line dux writes after the upgrade.
+
+If `path` points at a symlink, dux follows it once at startup: the live log and
+its rotated copies all live beside the file the link points at, and the link
+itself is left alone.
 
 > [!TIP]
 > `tail -F ~/.config/dux/dux.log` (note the capital F) follows the log across a
