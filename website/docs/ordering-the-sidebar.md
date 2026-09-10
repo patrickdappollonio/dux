@@ -22,7 +22,7 @@ and Terminals is its own pane below. Every row is two lines: the name, then who 
 belongs to and what it is doing. The terminal UI looks like this (the spinner glyph
 animates while an agent works):
 
-![The terminal UI sidebar: three active agents, one of them running three tabs, a collapsed Inactive tail, and a Terminals section below with one terminal.](/screens/tui-agent-list-two-line.png)
+![The terminal UI sidebar: three active agents, one of them running three tabs, and a collapsed Inactive tail.](/screens/tui-agent-list-two-line.png)
 
 A terminal's second line names its owner as `agent@project`, or just the project for a
 project terminal. A standalone terminal has no owner, so it names the directory it

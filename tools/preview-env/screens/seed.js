@@ -166,6 +166,13 @@ async function seedStandaloneAgent() {
 async function seedTabs() {
   const by = await agents()
   const session = by["refactor-cache"]
+  // Converges in both directions: an earlier run (or an experiment) that left a
+  // fourth tab has to lose it, or the strip shot grows a pill the docs do not
+  // describe. The first tab is never closable, and never in this range.
+  for (const extra of session.tabs.slice(TAB_PROVIDERS.length)) {
+    await api("DELETE", `/api/v1/sessions/${session.id}/tabs/${extra.id}`)
+    await sleep(800)
+  }
   for (let i = session.tabs.length; i < TAB_PROVIDERS.length; i++) {
     await api("POST", `/api/v1/sessions/${session.id}/tabs`, { provider: TAB_PROVIDERS[i] })
     await sleep(1800)

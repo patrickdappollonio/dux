@@ -7,6 +7,9 @@ on:
   pull_request:
     paths:
       - "website/**"
+      # The docs-screenshot loop test reads these, so deleting a scene has to run
+      # the site suite even when nothing under website/ changed.
+      - "tools/preview-env/screens/scenes/**"
       - "install.sh"
       - "assets/dux-logo.png"
       - "assets/dux-screenshot.svg"
@@ -16,6 +19,9 @@ on:
     branches: [main]
     paths:
       - "website/**"
+      # The docs-screenshot loop test reads these, so deleting a scene has to run
+      # the site suite even when nothing under website/ changed.
+      - "tools/preview-env/screens/scenes/**"
       - "install.sh"
       - "assets/dux-logo.png"
       - "assets/dux-screenshot.svg"

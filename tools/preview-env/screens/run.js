@@ -8,13 +8,17 @@
 // set relights the workspace once per staging rather than once per picture.
 const fs = require("fs")
 const path = require("path")
-const { stage } = require("./lib.js")
 const lib = require("./lib.js")
 
 const sceneDir = path.join(__dirname, "scenes")
 const outDir = process.env.SCREENS_DIR || path.resolve(__dirname, "../../../website/public/screens")
 
 const DEFAULT_STAGING = "all-working"
+
+// A scene that hangs (a selector that never appears, a socket that never opens)
+// would otherwise stall the whole run with no clue which one it was. Comfortably
+// past the slowest scene, which restarts an agent and waits out a fixture.
+const SCENE_TIMEOUT_MS = 120000
 
 function load(name) {
   const file = path.join(sceneDir, `${name}.js`)
@@ -52,27 +56,42 @@ function list() {
   }
 }
 
+// Reject if the scene has not produced a clip in time, naming the scene: a
+// bare hang says nothing about which of forty-one is stuck.
+function withTimeout(promise, name) {
+  let timer
+  const bell = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${name} did not finish within ${SCENE_TIMEOUT_MS / 1000}s`)),
+      SCENE_TIMEOUT_MS,
+    )
+  })
+  return Promise.race([promise, bell]).finally(() => clearTimeout(timer))
+}
+
 async function shootOne(scene) {
   const mobile = scene.mod.viewport === "phone"
   const { browser, page, reassert } = await lib.open({ mobile })
-  // A scene that opens a second browser must not close it before the capture:
-  // a second device leaving is a thing the page reacts to, and the take-over
-  // card re-titles the moment its driver disconnects. So teardown is registered
-  // here and run after the shot rather than in the scene's own `finally`.
+  // A scene that opens a second browser must not close it before the capture: a
+  // second device leaving is a thing the page reacts to, and the take-over card
+  // re-titles the moment its driver disconnects. So teardown is registered here
+  // and run after the shot rather than in the scene's own `finally`. It runs
+  // after this browser closes too, because a hook that puts back state a scene
+  // disturbed (an attention flag the pane cleared by being looked at) would be
+  // undone again by a page still watching that pane.
   const afterShot = []
   try {
-    const clip = await scene.mod.shoot(page, {
-      open: lib.open,
-      mobile,
-      after: (fn) => afterShot.push(fn),
-    })
+    const clip = await withTimeout(
+      scene.mod.shoot(page, { open: lib.open, mobile, after: (fn) => afterShot.push(fn) }),
+      scene.name,
+    )
     await reassert()
     const out = path.join(outDir, scene.mod.file)
     await page.screenshot({ path: out, clip })
     return out
   } finally {
-    for (const fn of afterShot) await fn()
     await browser.close()
+    for (const fn of afterShot) await fn()
   }
 }
 
@@ -97,26 +116,33 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true })
   let staged = DEFAULT_STAGING
   const failures = []
-  for (const scene of scenes) {
-    const want = scene.mod.staging || DEFAULT_STAGING
-    if (want !== staged) {
-      console.log(`staging ${want}`)
-      await stage(want)
-      staged = want
+  try {
+    for (const scene of scenes) {
+      const want = scene.mod.staging || DEFAULT_STAGING
+      try {
+        if (want !== staged) {
+          console.log(`staging ${want}`)
+          // Recorded BEFORE the attempt: a staging that fails half way through
+          // has already relit some agents, so the workspace is no longer the one
+          // it was, and the restage below has to run.
+          staged = want
+          await lib.stage(want)
+        }
+        const out = await shootOne(scene)
+        console.log("wrote", path.basename(out))
+      } catch (error) {
+        console.error(`FAILED ${scene.name}: ${String(error)}`)
+        failures.push(scene.name)
+      }
     }
-    try {
-      const out = await shootOne(scene)
-      console.log("wrote", path.basename(out))
-    } catch (error) {
-      console.error(`FAILED ${scene.name}: ${String(error)}`)
-      failures.push(scene.name)
+  } finally {
+    // Leave the workspace in the state the seed leaves it in, so a second run
+    // and the terminal UI journeys after this one both start from the same
+    // place. In a finally, because an abandoned run owes the next one the same.
+    if (staged !== DEFAULT_STAGING) {
+      console.log(`restaging ${DEFAULT_STAGING}`)
+      await lib.stage(DEFAULT_STAGING)
     }
-  }
-  // Leave the workspace in the state the seed leaves it in, so a second run and
-  // the terminal UI journeys after this one both start from the same place.
-  if (staged !== DEFAULT_STAGING) {
-    console.log(`restaging ${DEFAULT_STAGING}`)
-    await stage(DEFAULT_STAGING)
   }
   if (failures.length) {
     console.error(`\n${failures.length} scene(s) failed: ${failures.join(", ")}`)

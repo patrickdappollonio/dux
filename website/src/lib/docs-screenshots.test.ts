@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -23,12 +24,23 @@ const scenes = readdirSync(scenesDir)
   .filter((name) => name.endsWith(".js"))
   .sort();
 
+// Both Markdown flavours the docs directory carries: a page that illustrates
+// itself from an .mdx file counts as showing its screenshot.
 function docsText(): string {
   return readdirSync(docsDir)
-    .filter((name) => name.endsWith(".md"))
+    .filter((name) => name.endsWith(".md") || name.endsWith(".mdx"))
     .map((name) => readFileSync(resolve(docsDir, name), "utf8"))
     .join("\n");
 }
+
+// The scenes are CommonJS run by node, not modules this suite's bundler owns, so
+// they are loaded the way reshoot.sh loads them. Loading them for real is the
+// point: a scene whose `file` disagrees with its own name would quietly
+// overwrite a different picture, and reading the source for a substring would
+// not notice a name built at runtime.
+const requireScene = createRequire(import.meta.url);
+const sceneModule = (stem: string): unknown =>
+  requireScene(resolve(scenesDir, `${stem}.js`)) as unknown;
 
 describe("docs screenshots", () => {
   it("has screenshots to check", () => {
@@ -51,20 +63,38 @@ describe("docs screenshots", () => {
     expect(orphans).toEqual([]);
   });
 
-  // The file a scene names is what reshoot.sh writes, so a scene whose `file`
-  // disagrees with its own name would quietly overwrite a different picture.
   it("names its own file in every scene", () => {
-    const text = scenes.map((name) => ({
-      name,
-      source: readFileSync(resolve(scenesDir, name), "utf8"),
-    }));
-    const wrong = text
-      .filter(({ name, source }) => {
-        const stem = name.replace(/\.js$/, "");
-        return !source.includes(`"${stem}.png"`);
-      })
-      .map(({ name }) => name);
+    const wrong = scenes
+      .map((name) => name.replace(/\.js$/, ""))
+      .filter((stem) => {
+        const mod = sceneModule(stem) as { file?: unknown };
+        return mod.file !== `${stem}.png`;
+      });
     expect(wrong).toEqual([]);
+  });
+
+  // The two shapes reshoot.sh knows how to drive. A scene that is neither is one
+  // the tool will skip or misread, which is a picture nobody can regenerate.
+  it("exports one of the two documented scene shapes", () => {
+    const malformed: string[] = [];
+    for (const file of scenes) {
+      const stem = file.replace(/\.js$/, "");
+      const mod = sceneModule(stem) as Record<string, unknown>;
+      if (typeof mod === "function") {
+        // A terminal UI journey: the function tui-shot.sh runs, with the grid
+        // and theme it is captured at hung off it.
+        const journey = mod as unknown as Record<string, unknown>;
+        const ok =
+          typeof journey.cols === "number" &&
+          typeof journey.rows === "number" &&
+          typeof journey.theme === "string";
+        if (!ok) malformed.push(`${stem} (terminal UI scene missing cols/rows/theme)`);
+        continue;
+      }
+      const ok = typeof mod.viewport === "string" && typeof mod.shoot === "function";
+      if (!ok) malformed.push(`${stem} (browser scene missing viewport/shoot)`);
+    }
+    expect(malformed).toEqual([]);
   });
 
   it("shows every screenshot on a docs page", () => {

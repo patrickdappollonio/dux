@@ -47,23 +47,30 @@ if [ "${1:-}" = "--list" ]; then
   exit 0
 fi
 
-[ -d "$PREVIEW/node_modules/puppeteer-core" ] || (cd "$PREVIEW" && npm install --silent)
+# Resolved in the browser branch below rather than up front. The terminal UI
+# path needs a Chromium of its own (tui-shot.sh rasterizes the captured cells
+# with one) but it hunts for it itself and says its own thing when it cannot find
+# one, so gating every run here would just be this script refusing on another
+# script's behalf, before the table that says what was rewritten.
+prepare_browser() {
+  [ -d "$PREVIEW/node_modules/puppeteer-core" ] || (cd "$PREVIEW" && npm install --silent)
 
-# Chromium discovery, in shot.sh's preference order: an explicit CHROME=, a
-# cached Playwright build, then common system binaries.
-if [ -z "${CHROME:-}" ]; then
-  CHROME="$(find "$HOME/.cache/ms-playwright" -path '*/chrome-linux64/chrome' -type f 2>/dev/null | head -1 || true)"
-fi
-if [ -z "${CHROME:-}" ]; then
-  for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
-    if command -v "$candidate" > /dev/null 2>&1; then
-      CHROME="$(command -v "$candidate")"
-      break
-    fi
-  done
-fi
-[ -n "${CHROME:-}" ] && [ -x "$CHROME" ] || fail "no Chromium found; set CHROME=<path-to-chrome>"
-export CHROME
+  # Chromium discovery, in shot.sh's preference order: an explicit CHROME=, a
+  # cached Playwright build, then common system binaries.
+  if [ -z "${CHROME:-}" ]; then
+    CHROME="$(find "$HOME/.cache/ms-playwright" -path '*/chrome-linux64/chrome' -type f 2>/dev/null | head -1 || true)"
+  fi
+  if [ -z "${CHROME:-}" ]; then
+    for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
+      if command -v "$candidate" > /dev/null 2>&1; then
+        CHROME="$(command -v "$candidate")"
+        break
+      fi
+    done
+  fi
+  [ -n "${CHROME:-}" ] && [ -x "$CHROME" ] || fail "no Chromium found; set CHROME=<path-to-chrome>"
+  export CHROME
+}
 
 # Every scene, or the ones named. A name is the PNG's own stem.
 mapfile -t MANIFEST < <(cd "$HERE" && node run.js --list)
@@ -109,11 +116,18 @@ for name in "${WANTED[@]}"; do
   if [ "${fields[1]}" = "tui" ]; then TUI+=("$name"); else WEB+=("$name"); fi
 done
 
+# A scene that fails must not take the table with it: the table is how a person
+# sees which pictures were rewritten and which were not, and that is most worth
+# having on the run that went wrong. So failures are counted here and the script
+# exits on the count at the very end.
+FAILED=0
+
 # --- The browser scenes -----------------------------------------------------
 # Only these need the long-running preview. A terminal UI journey brings up a
 # disposable container of its own, so a reshoot of one of those touches neither
 # the preview nor its seeded workspace.
 if [ "${#WEB[@]}" -gt 0 ]; then
+  prepare_browser
   # It has to be a screens container: the plain preview has neither the stand-in
   # gh nor the transcript provider, and it binds with --no-tailscale. The marker
   # file the entrypoint writes is how the two are told apart.
@@ -136,7 +150,10 @@ if [ "${#WEB[@]}" -gt 0 ]; then
   (cd "$HERE" && node seed.js)
 
   echo ">> shooting ${#WEB[@]} browser scene(s)"
-  (cd "$HERE" && node run.js "${WEB[@]}")
+  if ! (cd "$HERE" && node run.js "${WEB[@]}"); then
+    echo ">> some browser scenes failed" >&2
+    FAILED=$((FAILED + 1))
+  fi
 fi
 
 for name in "${TUI[@]}"; do
@@ -151,7 +168,10 @@ for name in "${TUI[@]}"; do
   [ -n "$crop" ] && args+=(--crop "$crop")
   # stdin closed: the capture runs `docker compose run`, which would otherwise
   # read from this script's own input.
-  "$PREVIEW/tui-shot.sh" "${args[@]}" < /dev/null
+  if ! "$PREVIEW/tui-shot.sh" "${args[@]}" < /dev/null; then
+    echo ">> $name failed" >&2
+    FAILED=$((FAILED + 1))
+  fi
   # tui-shot.sh writes three companions beside the PNG; the docs want the image
   # only, so the working artifacts do not land in website/public.
   rm -f "$SCREENS/$name.ansi" "$SCREENS/$name.txt" "$SCREENS/$name.json"
@@ -178,3 +198,8 @@ for name in "${WANTED[@]}"; do
   fi
   printf '%-36s %10s %10s   %s\n' "$name.png" "$old" "$new" "$note"
 done
+
+if [ "$FAILED" -gt 0 ]; then
+  echo >&2
+  fail "$FAILED scene group(s) failed; the table above says which pictures were rewritten"
+fi
