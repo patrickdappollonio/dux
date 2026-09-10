@@ -2533,6 +2533,13 @@ impl App {
             self.render_pr_banner(frame, pr_area, pr);
         }
 
+        // The wrapped-row cache belongs to a diff that is on screen. Released
+        // here, one place the match makes exhaustive, rather than at each of the
+        // ten sites that leave diff mode: a new one of those cannot forget.
+        if !matches!(self.center_mode, CenterMode::Diff { .. }) {
+            self.diff_rows = None;
+        }
+
         match &self.center_mode {
             CenterMode::Diff { .. } => {
                 self.render_diff(frame, pane_area, focused);
@@ -2611,6 +2618,8 @@ impl App {
             });
         }
         let total_rows = self.diff_rows.as_ref().map_or(0, |cache| cache.rows.len());
+        // Rows past 65,535 are unreachable by scrolling: the offset is a u16
+        // and this is the extent it is clamped against.
         self.last_diff_visual_lines = u16::try_from(total_rows).unwrap_or(u16::MAX);
 
         // The offset actually DRAWN, which is the outer `scroll` clamped to the
@@ -20746,6 +20755,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn closing_the_diff_releases_its_wrapped_rows() {
+        // A wrapped 20,000-row diff is a second copy of the whole thing. It is
+        // held only while a diff is on screen; the frame that draws something
+        // else gives it back.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, _) = diff_frame((120, 40), 20_000, 6, 0);
+        assert!(
+            app.diff_rows.is_some(),
+            "the diff on screen holds its wrapped rows"
+        );
+
+        app.center_mode = CenterMode::Agent;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        assert!(
+            app.diff_rows.is_none(),
+            "no diff on screen, no rows held for one"
+        );
     }
 
     #[test]

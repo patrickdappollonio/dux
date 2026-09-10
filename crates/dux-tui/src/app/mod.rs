@@ -1180,6 +1180,11 @@ pub(crate) enum CenterMode {
 /// that can change the rows are the diff itself (compared by `Arc` identity, so
 /// a re-computed diff of the same file is a different one), the pane width, and
 /// whether the gutter is on.
+///
+/// The trade is memory for time, and it is a real one: a wrapped 200,000-line
+/// diff is a second copy of the whole thing, styled spans and all. It is held
+/// only while a diff is actually on screen, and the center pane's render
+/// releases it the first frame one is not.
 #[derive(Clone, Debug)]
 pub(crate) struct DiffRowCache {
     pub(crate) lines: Arc<Vec<Line<'static>>>,
@@ -3460,7 +3465,10 @@ pub(crate) fn build_left_items(
 
 mod background_server;
 pub(crate) use background_server::{BackgroundServerStart, CompanionRouting};
-mod components;
+// `pub(crate)` for its width helpers alone: the diff wrapper has to measure a
+// CJK glyph exactly as the pane's own wrapper does, and two functions that
+// disagree about that produce rows too wide for the box they were measured for.
+pub(crate) mod components;
 mod first_load;
 mod input;
 pub(crate) mod modal;

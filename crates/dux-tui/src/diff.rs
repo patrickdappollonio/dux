@@ -8,6 +8,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
+use crate::app::components::wrap_lines::{char_display_width, display_width};
 use crate::theme::Theme as AppTheme;
 use dux_core::text::count_of;
 
@@ -627,10 +628,16 @@ fn expand_tabs(line: &str, tab_width: u16) -> String {
 
 /// Split a list of spans at a display-column boundary.
 ///
-/// Returns `(left, right)` where `left` contains the first `col` display
-/// columns and `right` contains the remainder. Spans are split mid-span if
-/// the boundary falls inside one. Uses character iteration rather than byte
-/// slicing to handle multi-byte UTF-8 safely.
+/// Returns `(left, right)` where `left` is the first `col` DISPLAY COLUMNS and
+/// `right` the remainder. Columns, not characters: a CJK glyph or an emoji is
+/// two cells wide, and cutting by character count while measuring by width put
+/// twice the content on a row and lost whatever the renderer then truncated.
+/// A wide glyph straddling the boundary goes wholly to the right, so `left` can
+/// be one column short of `col` and is never one column over.
+///
+/// Characters are the unit of the cut, so a multi-byte scalar is never split.
+/// A grapheme CLUSTER still can be (a combining mark, an emoji sequence): dux
+/// has no segmenter, and the pane's own wrapper works the same way.
 fn split_spans_at(spans: &[Span<'static>], col: usize) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
     let mut left: Vec<Span<'static>> = Vec::new();
     let mut right: Vec<Span<'static>> = Vec::new();
@@ -643,7 +650,7 @@ fn split_spans_at(spans: &[Span<'static>], col: usize) -> (Vec<Span<'static>>, V
             continue;
         }
 
-        let span_width = span.content.chars().count();
+        let span_width = display_width(&span.content);
         if consumed + span_width <= col {
             // Entire span fits in the left side.
             left.push(span.clone());
@@ -651,23 +658,44 @@ fn split_spans_at(spans: &[Span<'static>], col: usize) -> (Vec<Span<'static>>, V
             if consumed == col {
                 past_split = true;
             }
-        } else {
-            // Split within this span.
-            let take = col - consumed;
-            let left_text: String = span.content.chars().take(take).collect();
-            let right_text: String = span.content.chars().skip(take).collect();
-            if !left_text.is_empty() {
-                left.push(Span::styled(left_text, span.style));
-            }
-            if !right_text.is_empty() {
-                right.push(Span::styled(right_text, span.style));
-            }
-            past_split = true;
-            consumed = col;
+            continue;
         }
+
+        // Split within this span, one character at a time so a double-width
+        // glyph is never cut in half.
+        let mut left_text = String::new();
+        let mut right_text = String::new();
+        for ch in span.content.chars() {
+            let width = char_display_width(ch);
+            if !past_split && consumed + width <= col {
+                left_text.push(ch);
+                consumed += width;
+            } else {
+                past_split = true;
+                right_text.push(ch);
+            }
+        }
+        if !left_text.is_empty() {
+            left.push(Span::styled(left_text, span.style));
+        }
+        if !right_text.is_empty() {
+            right.push(Span::styled(right_text, span.style));
+        }
+        past_split = true;
     }
 
     (left, right)
+}
+
+/// Display columns of the first character, or 0 when there is none. What the
+/// wrapper falls back to when a single glyph is wider than the whole content
+/// column: emit it on a row of its own rather than loop on a cut that cannot
+/// advance.
+fn first_char_width(spans: &[Span<'static>]) -> usize {
+    spans
+        .iter()
+        .find_map(|span| span.content.chars().next())
+        .map_or(0, char_display_width)
 }
 
 /// Build a continuation gutter from real gutter spans: replace every character
@@ -701,13 +729,14 @@ fn find_soft_break(spans: &[Span<'static>], max_col: usize) -> Option<usize> {
     let mut col: usize = 0;
     for span in spans {
         for ch in span.content.chars() {
-            if col >= max_col {
+            let width = char_display_width(ch);
+            if col + width > max_col {
                 return last_space_end;
             }
             if ch == ' ' {
-                last_space_end = Some(col + 1);
+                last_space_end = Some(col + width);
             }
-            col += 1;
+            col += width;
         }
     }
     last_space_end
@@ -750,7 +779,7 @@ pub fn wrap_diff_lines(
         let mut remaining = content_spans;
         let mut first = true;
         loop {
-            let remaining_width: usize = remaining.iter().map(|s| s.content.chars().count()).sum();
+            let remaining_width: usize = remaining.iter().map(|s| display_width(&s.content)).sum();
             if remaining_width == 0 {
                 break;
             }
@@ -762,6 +791,14 @@ pub fn wrap_diff_lines(
                 remaining_width
             };
             let (chunk, rest) = split_spans_at(&remaining, take);
+            // A single glyph wider than the content column takes nothing, and
+            // the next pass would be handed the same spans forever. Let it
+            // overflow by one cell on a row of its own instead.
+            let (chunk, rest) = if chunk.is_empty() {
+                split_spans_at(&remaining, first_char_width(&remaining))
+            } else {
+                (chunk, rest)
+            };
 
             let mut row_spans: Vec<Span<'static>> = if first {
                 gutter_spans.clone()
@@ -1251,6 +1288,51 @@ mod tests {
         assert_eq!(wrapped[2].to_string(), " ijkl");
     }
 
+    /// The wrapper measured a line in display columns and then cut it by
+    /// character count, so a CJK line came out at twice the width it was
+    /// measured for: the rows overflowed, the renderer truncated them, and a
+    /// third of the content was gone. Both paths, since they are one wrapper.
+    #[test]
+    fn wrap_diff_lines_cuts_wide_characters_by_display_columns() {
+        let text: String = "漢".repeat(30);
+        for (total_width, gutter_width) in [(20usize, 0usize), (26, 6)] {
+            let line = if gutter_width > 0 {
+                Line::from(vec![Span::raw("  1 │ "), Span::raw(text.clone())])
+            } else {
+                Line::from(text.clone())
+            };
+            let wrapped = wrap_diff_lines(&[line], total_width, gutter_width);
+
+            assert_eq!(
+                wrapped.len(),
+                3,
+                "sixty columns of content in twenty is three rows (gutter \
+                 {gutter_width}): {:?}",
+                wrapped.iter().map(|l| l.to_string()).collect::<Vec<_>>()
+            );
+            for row in &wrapped {
+                assert!(
+                    row.width() <= total_width,
+                    "a row measured {} columns in {total_width} (gutter \
+                     {gutter_width}): {:?}",
+                    row.width(),
+                    row.to_string()
+                );
+            }
+            let rejoined: String = wrapped
+                .iter()
+                .map(|row| row.to_string())
+                .collect::<Vec<_>>()
+                .join("")
+                .replace("  1 │ ", "")
+                .replace("    │ ", "");
+            assert_eq!(
+                rejoined, text,
+                "nothing may be lost (gutter {gutter_width})"
+            );
+        }
+    }
+
     #[test]
     fn wrap_diff_lines_with_zero_gutter_wraps_at_the_full_width() {
         let lines = vec![Line::from("abcdefghijklmno")];
@@ -1259,6 +1341,31 @@ mod tests {
         assert_eq!(wrapped[0].to_string(), "abcde");
         assert_eq!(wrapped[1].to_string(), "fghij");
         assert_eq!(wrapped[2].to_string(), "klmno");
+    }
+
+    /// The exact rows a long line produces with no gutter, recorded rather than
+    /// described. The diff pane used to hand this case to the paragraph's own
+    /// wrapping and measure it with a hard division, so the two disagreed; now
+    /// one wrapper answers, and this is the answer.
+    #[test]
+    fn wrap_diff_lines_with_zero_gutter_pins_a_long_line_with_spaces() {
+        let line = Line::from("    indented words here supercalifragilistic tail   ");
+        let wrapped: Vec<String> = wrap_diff_lines(&[line], 16, 0)
+            .iter()
+            .map(|row| row.to_string())
+            .collect();
+        assert_eq!(
+            wrapped,
+            vec![
+                // Leading indent kept, break after the last space that fits.
+                "    indented ",
+                "words here ",
+                // A word longer than the row has no space to break at, so it is
+                // cut at the width.
+                "supercalifragili",
+                "stic tail   ",
+            ]
+        );
     }
 
     #[test]
