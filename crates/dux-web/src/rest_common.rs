@@ -56,31 +56,26 @@ pub const FROM_PR_CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The `202 Accepted` body of a deferred operation: the keyed status op id, the
 /// same key that rides the `status` and `status_cleared` frames on `/ws/events`,
-/// so a client correlates the eventual final instead of polling for the record.
+/// so a client correlates what happens next instead of polling for the record.
 ///
-/// For a from-PR create the id is the PR-LOOKUP op, which spans resolving the
-/// reference AND the create it hands off to; the create's own op is minted later,
-/// inside the lookup followup, so the lookup key is the only one available when
-/// the handler answers.
+/// `op_id` is `null` whenever the dispatch's status carries no key, because there
+/// is then nothing to correlate on and the reply says so rather than inventing an
+/// id a client would wait forever on. The plain project add is the known case: it
+/// resolves on the reactor and mints no keyed op at all.
 ///
-/// `op_id` is `null` when the dispatch minted no keyed op at all, which the
-/// synchronous plain project add is: the reply says so rather than inventing an
-/// id a client would wait forever on.
+/// WHAT THE ID NAMES DIFFERS BY PATH, and the from-PR create is the one where it
+/// does not name the create. A session create on the race-free path names its own
+/// create op, and the create's final arrives under it. A from-PR create names the
+/// PR-LOOKUP op, because the create's op is minted later, inside the lookup
+/// followup. A lookup that FAILS finals under the named id. A lookup that
+/// SUCCEEDS hands off, resolving the named id to a `status_cleared` and nothing
+/// more, and the create's own outcome then arrives under an id this reply never
+/// named. A from-PR client can therefore learn that the lookup failed, or that it
+/// has stopped being the operation to watch, but not the create's verdict; the
+/// hand-off is the engine's design and this type only reports it honestly.
 #[derive(serde::Serialize)]
 pub struct Accepted {
     pub op_id: Option<String>,
-}
-
-impl Accepted {
-    /// The deferred reply for an operation that minted a keyed status op.
-    pub fn keyed(op_id: String) -> Self {
-        Self { op_id: Some(op_id) }
-    }
-
-    /// The deferred reply for an operation with no key to correlate on.
-    pub fn unkeyed() -> Self {
-        Self { op_id: None }
-    }
 }
 
 /// The class of a live WebSocket connection tracked in the [`ConnectionRegistry`].

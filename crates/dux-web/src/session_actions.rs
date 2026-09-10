@@ -21,10 +21,12 @@
 //! agreement holds on that branch and not unconditionally.
 //!
 //! A create that has not surfaced its session by the end of the await window
-//! answers `202 Accepted` with [`crate::rest_common::Accepted`] instead: the
-//! operation id the eventual final carries on the events socket, so the client
-//! correlates the outcome rather than being handed nothing. The create route and
-//! the pull-request attach share that shape.
+//! answers `202 Accepted` with [`crate::rest_common::Accepted`] instead: an
+//! operation id to correlate on over the events socket, rather than nothing at
+//! all. The create route and the pull-request attach share that shape. A 202
+//! records no `Idempotency-Key`, since there is no resource id to record yet, so
+//! a retry under the same key after a deferred reply dispatches a SECOND create
+//! instead of replaying the first.
 
 use axum::{
     Json, Router,
@@ -329,11 +331,16 @@ async fn create_session(
 /// window the `gh pr view` network call needs (see `await_new_session` for the
 /// residual concurrent-create race it carries).
 ///
-/// Either wait timing out is a 202 carrying the operation id: the create may
-/// still succeed or fail asynchronously, and that final rides the status stream
-/// under the same key, so the client correlates it rather than polling. On the
-/// race-free path the id is the create op itself; on the from-PR path it is the
-/// lookup op that spans resolving the reference and the create it hands off to.
+/// Either wait timing out is a 202 carrying an operation id, so the client has a
+/// key to correlate on rather than nothing at all. WHICH op it names differs by
+/// path. The race-free path names the create op itself, and the create's final
+/// arrives under it. The from-PR path names the PR-LOOKUP op, the only key that
+/// exists when the handler answers: a lookup that fails finals under it, while a
+/// lookup that succeeds resolves it to a `status_cleared` and the create it
+/// handed off to finals under an id this response never named. That hand-off is
+/// the engine's design (see `Accepted`); the reply reports it rather than
+/// papering over it.
+///
 /// A create that produced NEITHER an op NOR a status did no async work at all,
 /// so it fails rather than spinning out a misleading 202 that would arm a
 /// never-resolving client focus token; a from-PR dispatch always returns a busy
@@ -349,7 +356,7 @@ async fn resolve_created_session(
         let window = state.create_await_timeout.unwrap_or(CREATE_AWAIT_TIMEOUT);
         return match await_session_for_op(&state.engine, op_id.clone(), window).await {
             Some(id) => created_response(state, id, key).await,
-            None => accepted(Accepted::keyed(op_id)),
+            None => accepted(Accepted { op_id: Some(op_id) }),
         };
     }
 
@@ -773,7 +780,7 @@ async fn attach_pull_request(
         // correlate the eventual final on the toast stream. This is the
         // documented deferred direction (see `rest_common`): the handler must
         // NOT block on the `gh` lookup.
-        Ok(op_id) => accepted(Accepted::keyed(op_id)),
+        Ok(op_id) => accepted(Accepted { op_id: Some(op_id) }),
         // Defense in depth for a session deleted between the check above and
         // the dispatch: the engine's own unknown-session error stays a 404.
         Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
@@ -978,17 +985,6 @@ mod tests {
     /// that already has a branch named `existing_branch`. The project is declared
     /// in config.toml so the bootstrap reconciliation adopts it into the engine.
     fn router_with_project_and_branch(existing_branch: &str) -> (TempDir, axum::Router, String) {
-        router_with_project_and_branch_window(existing_branch, None, |_, _| {})
-    }
-
-    /// The same fixture with the create-await window overridden, so a test can
-    /// reach the deferred `202` without sitting through the real one, and one
-    /// last chance to touch the engine before the actor thread owns it.
-    fn router_with_project_and_branch_window(
-        existing_branch: &str,
-        window: Option<std::time::Duration>,
-        prepare: impl FnOnce(&mut dux_core::engine::Engine, &std::path::Path),
-    ) -> (TempDir, axum::Router, String) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1014,30 +1010,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let mut engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
-        prepare(&mut engine, tmp.path());
+        let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
-        (tmp, router_with_window(handle, window), "p1".to_string())
+        (tmp, crate::server::router(handle), "p1".to_string())
     }
-
-    /// A router whose create handlers wait `window` (when given) instead of the
-    /// real await windows. The only knob these fixtures need beyond the plain
-    /// defaults.
-    fn router_with_window(
-        handle: crate::engine_actor::EngineHandle,
-        window: Option<std::time::Duration>,
-    ) -> axum::Router {
-        let mut params = crate::server::RouterParams::plain_http();
-        if let Some(window) = window {
-            params = params.with_create_await_timeout(window);
-        }
-        crate::server::build_app(handle, axum::Router::new(), params)
-    }
-
-    /// The create-await window the deferred-reply tests run in. Short only to
-    /// keep them quick: each of them dispatches a create that can never persist
-    /// a session, so the deferred branch is reached whatever the window is.
-    const DEFERRED_WINDOW: std::time::Duration = std::time::Duration::from_millis(1);
 
     async fn post_create(app: &axum::Router, body: serde_json::Value) -> axum::response::Response {
         app.clone()
@@ -1127,83 +1103,6 @@ mod tests {
             StatusCode::CONFLICT,
             "a fresh name must not hit the existing-branch refusal"
         );
-    }
-
-    /// A create that never surfaces a session answers `202` with the CREATE
-    /// op's id, the same key its final rides on the events socket, so the client
-    /// has something to correlate instead of a bodyless reply.
-    ///
-    /// The agent name nests under an existing branch, which git refuses as a ref
-    /// that cannot be locked, so the worker fails and no session is ever
-    /// persisted: the deferred branch is reached on timing nothing can change.
-    #[tokio::test]
-    async fn create_202_carries_the_create_op_id() {
-        let (_tmp, app, project_id) =
-            router_with_project_and_branch_window("feature-x", Some(DEFERRED_WINDOW), |_, _| {});
-        let resp = post_create(
-            &app,
-            serde_json::json!({
-                "kind": "new",
-                "project_id": project_id,
-                "name": "feature-x/child",
-            }),
-        )
-        .await;
-        let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(
-            status,
-            StatusCode::ACCEPTED,
-            "body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let op_id = json["op_id"].as_str().expect("op_id in the 202 body");
-        assert!(op_id.starts_with("op-"), "got {op_id:?}");
-    }
-
-    /// The from-PR create has no synchronous create op: its own op is minted
-    /// later, inside the lookup followup. Its `202` therefore carries the LOOKUP
-    /// op's key, which spans resolving the reference and the create it hands off
-    /// to. The repository has no remote, so the lookup refuses and no session is
-    /// ever persisted.
-    #[tokio::test]
-    async fn create_from_pr_202_carries_the_lookup_op_id() {
-        let (_tmp, app, project_id) = router_with_project_and_branch_window(
-            "feature-x",
-            Some(DEFERRED_WINDOW),
-            |engine, dir| {
-                // The gate the dispatch checks, preset so the POST cannot race
-                // the boot probe; the probe itself is pointed at the stand-in gh
-                // so enabling the integration never runs a real gh.
-                engine.github_integration_enabled = true;
-                engine.gh_status = dux_core::model::GhStatus::Available;
-                engine.gh_probe.program =
-                    dux_core::gh::probe_test_support::stand_in_gh_serving(dir, &["github.com"])
-                        .into();
-            },
-        );
-        let resp = post_create(
-            &app,
-            serde_json::json!({
-                "kind": "from_pr",
-                "project_id": project_id,
-                "pr": "#42",
-                "name": "deferred-from-pr",
-            }),
-        )
-        .await;
-        let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(
-            status,
-            StatusCode::ACCEPTED,
-            "body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let op_id = json["op_id"].as_str().expect("op_id in the 202 body");
-        assert!(op_id.starts_with("op-"), "got {op_id:?}");
     }
 
     /// Boot a router whose engine has ONE session seeded straight into the

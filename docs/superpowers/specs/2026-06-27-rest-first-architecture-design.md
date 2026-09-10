@@ -140,7 +140,7 @@ without a session (using the actual router, not only the probe-route seam).
   | Case | Success | Errors |
   |---|---|---|
   | `GET` read | 200 | 404 |
-  | `POST` create (session/project/terminal) | 201 + `Location`, or 202 + `{ "op_id": … }` when the resource has not surfaced by the end of the await window | 400 / 409 |
+  | `POST` create (session/project/terminal) | 201 + `Location`. A session or project create that has not surfaced by the end of its await window answers 202 + `{ "op_id": … }` instead; a terminal create always answers 201 | 400 / 409 |
   | `PATCH` update | 200 (or 202, see deferred) | 404 |
   | `DELETE` | 204 | 404 |
   | `POST` action (git mutation, reconnect, pull, checkout) | 200 | 4xx client-actionable / 5xx unexpected |

@@ -301,13 +301,21 @@ async fn http_file_raw_serves_bytes_and_rejects_traversal() {
 /// `pull_before_creating_agent_by_default` is disabled because the test repo has
 /// no remote, so a pre-create pull would fail.
 async fn boot_for_create_agent() -> (SocketAddr, tempfile::TempDir) {
-    boot_for_create_agent_window(None).await
+    boot_for_create_agent_window(None, |_, _| {}).await
 }
 
+/// The create-await window the deferred-reply tests run in. Short only to keep
+/// them quick, never to make them pass: each of those tests drives a create that
+/// can never persist its resource, so the deferred branch is reached whatever the
+/// window is.
+const DEFERRED_WINDOW: Duration = Duration::from_millis(1);
+
 /// The same fixture with the create-await window overridden, so a test can reach
-/// a create's deferred `202` without sitting through the real window.
+/// a create's deferred `202` without sitting through the real window, plus one
+/// last chance to touch the engine before the actor thread owns it.
 async fn boot_for_create_agent_window(
     create_await: Option<Duration>,
+    prepare: impl FnOnce(&mut dux_core::engine::Engine, &std::path::Path),
 ) -> (SocketAddr, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -365,6 +373,7 @@ async fn boot_for_create_agent_window(
     );
     // The test repo has no remote, so a pre-create pull would fail; disable it.
     engine.config.defaults.pull_before_creating_agent_by_default = false;
+    prepare(&mut engine, tmp.path());
     let (handle, _join) = spawn_engine_thread(engine);
     let app = match create_await {
         Some(window) => dux_web::server::build_app(
@@ -473,6 +482,25 @@ async fn saw_status(ws: &mut ClientWs, needle: &str, timeout: Duration) -> bool 
             && let Ok(t) = m.into_text()
             && t.contains("\"event\":\"status\"")
             && t.contains(needle)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether one `status` frame carrying EVERY one of `needles` arrives within the
+/// window. Separate from [`saw_status`] because the deferred-create tests must
+/// pin the key and the tone to the SAME frame: a create emits a busy and a final
+/// under one key, and matching them across two frames would let a test pass on
+/// the busy alone.
+async fn saw_status_with(ws: &mut ClientWs, needles: &[&str], timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"event\":\"status\"")
+            && needles.iter().all(|needle| t.contains(needle))
         {
             return true;
         }
@@ -1025,17 +1053,18 @@ async fn rest_create_session_returns_201_and_scopes_status() {
 }
 
 /// The deferred create, end to end through a real server: a create the handler
-/// stops waiting on answers `202` with an operation id, and the SAME id is the
-/// `key` on the `status` frame the events socket carries. That correlation is
-/// the whole reason the id is in the body.
+/// stops waiting on answers `202` with an operation id, and the create's FINAL
+/// arrives on the events socket under that same `key`. The tone is pinned to
+/// `error` on the same frame so the busy emitted during dispatch cannot satisfy
+/// the assertion; correlating the final is the whole reason the id is in the body.
 ///
 /// The agent name nests under an existing branch, which git refuses as a ref it
-/// cannot lock, so the create never persists a session and the deferred branch
-/// is reached on timing nothing can change. Only the provider process is
-/// stood in for (`cat`); everything else is the real server.
+/// cannot lock, so the create never persists a session and the deferred branch is
+/// reached on timing nothing can change. Only the provider process is stood in
+/// for (`cat`); everything else is the real server.
 #[tokio::test]
-async fn rest_create_session_202_op_id_matches_the_status_frames_key() {
-    let (addr, tmp) = boot_for_create_agent_window(Some(Duration::from_millis(1))).await;
+async fn rest_create_session_202_op_id_carries_the_creates_final() {
+    let (addr, tmp) = boot_for_create_agent_window(Some(DEFERRED_WINDOW), |_, _| {}).await;
     // A branch for the requested name to collide with, in the repo the fixture
     // registered as project `p1`.
     let ok = std::process::Command::new("git")
@@ -1047,41 +1076,166 @@ async fn rest_create_session_202_op_id_matches_the_status_frames_key() {
     assert!(ok, "creating the colliding branch failed");
 
     // Connect BEFORE the POST: the create's busy is emitted during the dispatch,
-    // so a socket opened afterwards could miss it.
+    // so a socket opened afterwards could miss the operation entirely.
     let (mut ws, conn_id) = connect_events(addr).await;
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("http://{addr}/api/v1/sessions"))
-        .header("x-connection-id", &conn_id)
-        .json(&serde_json::json!({
+    let op_id = deferred_create(
+        addr,
+        &conn_id,
+        "/api/v1/sessions",
+        serde_json::json!({
             "kind": "new",
             "project_id": "p1",
             "name": "blocked/child",
-        }))
+        }),
+    )
+    .await;
+
+    assert!(
+        saw_status_with(
+            &mut ws,
+            &[&format!("\"key\":\"{op_id}\""), "\"tone\":\"error\""],
+            Duration::from_secs(8),
+        )
+        .await,
+        "the create's final must arrive under the id the 202 handed out"
+    );
+}
+
+/// The from-PR create is the path where the id does NOT name the create: its own
+/// op is minted later, inside the lookup followup, so the `202` names the
+/// PR-LOOKUP op. This pins that: the repository has no remote, so the lookup
+/// fails and ITS error final lands under the id the reply handed out.
+///
+/// A lookup that instead succeeds resolves this id to a `status_cleared` and the
+/// create finals under an id the reply never named. That is the engine's hand-off
+/// design, documented on `Accepted`, and deliberately not what this asserts.
+#[tokio::test]
+async fn rest_create_session_from_pr_202_op_id_is_the_lookup_ops_key() {
+    let (addr, _tmp) = boot_for_create_agent_window(Some(DEFERRED_WINDOW), |engine, dir| {
+        // The gate the dispatch checks, preset so the POST cannot race the boot
+        // probe; the probe itself is pointed at the stand-in gh, so enabling the
+        // integration never runs a real gh.
+        engine.github_integration_enabled = true;
+        engine.gh_status = dux_core::model::GhStatus::Available;
+        engine.gh_probe.program =
+            dux_core::gh::probe_test_support::stand_in_gh_serving(dir, &["github.com"]).into();
+    })
+    .await;
+    let (mut ws, conn_id) = connect_events(addr).await;
+
+    let op_id = deferred_create(
+        addr,
+        &conn_id,
+        "/api/v1/sessions",
+        serde_json::json!({
+            "kind": "from_pr",
+            "project_id": "p1",
+            "pr": "#42",
+            "name": "deferred-from-pr",
+        }),
+    )
+    .await;
+
+    assert!(
+        saw_status_with(
+            &mut ws,
+            &[&format!("\"key\":\"{op_id}\""), "\"tone\":\"error\""],
+            Duration::from_secs(8),
+        )
+        .await,
+        "the PR lookup's failure must arrive under the id the 202 handed out"
+    );
+}
+
+/// The same contract for the project add, whose worker-backed variants are the
+/// only ones that can outlast the window: the `202` names the add op and the
+/// add's own final arrives under it.
+///
+/// The folder is read-only, which the path validator accepts (a plain existing
+/// directory outside any repository) and the worker's `git init` then fails on,
+/// so no project is ever registered.
+#[tokio::test]
+async fn rest_add_project_202_op_id_carries_the_adds_final() {
+    let (addr, _tmp) = boot_for_create_agent_window(Some(DEFERRED_WINDOW), |_, _| {}).await;
+    let folder = tempfile::tempdir().unwrap();
+    if !make_unwritable(folder.path()) {
+        // Running as root: CAP_DAC_OVERRIDE ignores the mode bits, `git init`
+        // would succeed and the add would resolve. There is nothing to assert.
+        return;
+    }
+    let (mut ws, conn_id) = connect_events(addr).await;
+
+    let op_id = deferred_create(
+        addr,
+        &conn_id,
+        "/api/v1/projects",
+        serde_json::json!({
+            "path": folder.path().to_string_lossy(),
+            "init_repo": true,
+        }),
+    )
+    .await;
+
+    let seen = saw_status_with(
+        &mut ws,
+        &[&format!("\"key\":\"{op_id}\""), "\"tone\":\"error\""],
+        Duration::from_secs(8),
+    )
+    .await;
+    restore_writable(folder.path());
+    assert!(
+        seen,
+        "the add's final must arrive under the id the 202 handed out"
+    );
+}
+
+/// POST a create that cannot finish, assert the deferred shape, and hand back the
+/// operation id it named. Shared by the three tests above so the 202 contract is
+/// stated once: no `Location` (nothing is addressable yet) and an `op_id`.
+async fn deferred_create(
+    addr: SocketAddr,
+    conn_id: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> String {
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}{path}"))
+        .header("x-connection-id", conn_id)
+        .json(&body)
         .send()
         .await
         .expect("POST create");
-    assert_eq!(resp.status().as_u16(), 202, "the create must be deferred");
-    assert!(
-        resp.headers().get("location").is_none(),
-        "a deferred create names no resource yet"
-    );
-    let body: serde_json::Value = resp.json().await.expect("202 json body");
-    let op_id = body["op_id"]
+    let status = resp.status().as_u16();
+    let parsed: serde_json::Value = resp.json().await.expect("202 json body");
+    assert_eq!(status, 202, "the create must be deferred, got {parsed}");
+    parsed["op_id"]
         .as_str()
         .expect("op_id in the 202 body")
-        .to_string();
+        .to_string()
+}
 
-    assert!(
-        saw_status(
-            &mut ws,
-            &format!("\"key\":\"{op_id}\""),
-            Duration::from_secs(8)
-        )
-        .await,
-        "a status frame must carry the operation id the 202 handed out"
-    );
+/// Take every write bit off `dir`, and report whether that actually made it
+/// unwritable. It does not under root, whose `CAP_DAC_OVERRIDE` ignores the mode
+/// bits entirely, so the probe writes a file rather than trusting the chmod.
+fn make_unwritable(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    let probe = dir.join(".write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            restore_writable(dir);
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+/// Put the write bits back so the `TempDir` can clean itself up.
+fn restore_writable(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
 }
 
 /// A retried `POST /api/v1/sessions` carrying the same `Idempotency-Key` returns

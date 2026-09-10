@@ -374,9 +374,17 @@ export interface EventsClientMessage {
 }
 
 // The `202 Accepted` body of a create the server stopped waiting on: the id of
-// the operation whose outcome arrives as a `status` event under the same `key`,
-// so a caller correlates the final instead of polling for the record. `null`
-// when the dispatch minted no keyed operation at all.
+// an operation to correlate on, matched against the `key` of `status` and
+// `status_cleared` events. `null` whenever the dispatch's status carried no key
+// and there is therefore nothing to correlate on; the plain project add is the
+// known case.
+//
+// What the id names differs by path. An ordinary session create names its own
+// create operation, and the create's outcome arrives under it. A from-PR create
+// names the PR-LOOKUP operation instead, because the create's own operation is
+// minted later: a failed lookup finals under this id, a successful one clears it
+// and hands off, and the create's verdict then arrives under an id this body
+// never named.
 export interface AcceptedOperation {
   op_id: string | null
 }

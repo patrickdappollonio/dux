@@ -37,18 +37,6 @@ pub(crate) fn router_no_auth() -> (TempDir, Router) {
     (tmp, router)
 }
 
-/// The same router with the create-await window shortened to `window`, so a test
-/// reaches a create's deferred `202` without sitting through the real window.
-pub(crate) fn router_no_auth_with_create_window(window: std::time::Duration) -> (TempDir, Router) {
-    let tmp = tempfile::tempdir().unwrap();
-    let router = server::build_app(
-        test_engine_handle(tmp.path()),
-        Router::new(),
-        server::RouterParams::plain_http().with_create_await_timeout(window),
-    );
-    (tmp, router)
-}
-
 /// Bind a real loopback server on an ephemeral port and serve the plain router on
 /// a background task. Returns the bound `SocketAddr` so an integration test can
 /// issue real HTTP/WebSocket requests against it. The `TempDir` is kept alive by
