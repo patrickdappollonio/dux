@@ -599,7 +599,7 @@ impl Engine {
                     format!("Deleted untracked file \"{path}\".")
                 } else {
                     format!(
-                        "Discarded unstaged changes to \"{path}\" — staged changes, if any, are kept."
+                        "Discarded unstaged changes to \"{path}\". Staged changes, if any, are kept."
                     )
                 };
                 Ok(EventReaction::Status(StatusUpdate::info(message)))
@@ -905,7 +905,7 @@ impl Engine {
     ) -> anyhow::Result<EventReaction> {
         if self.project_has_pending_deletion(project_id) {
             return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                "An agent in \"{project_name}\" is still being removed — try again in a moment."
+                "An agent in \"{project_name}\" is still being removed. Try again in a moment."
             ))));
         }
         let was_real = self.projects.iter().any(|project| project.id == project_id);
@@ -918,7 +918,7 @@ impl Engine {
         if was_real && let Err(error) = self.persist_projects_to_config() {
             return Ok(EventReaction::Status(StatusUpdate::error(format!(
                 "Removed \"{project_name}\"{detail} from dux, but updating config.toml failed: \
-                 {error}. The project may reappear on restart — check the file is writable."
+                 {error}. The project may reappear on restart. Check the file is writable."
             ))));
         }
         Ok(EventReaction::Status(StatusUpdate::info(format!(
@@ -2233,7 +2233,7 @@ mod tests {
                         .message
                         .contains("Discarded unstaged changes to \"a.txt\"")
                 );
-                assert!(update.message.contains("staged changes, if any, are kept"));
+                assert!(update.message.contains("Staged changes, if any, are kept"));
             }
             _ => panic!("expected Info status reaction"),
         }

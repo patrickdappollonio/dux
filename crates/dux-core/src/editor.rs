@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(
             rust_keys, ts_keys,
             "the web editor menu (OPEN_IN_EDITORS in editors.ts) and dux-core \
-             EDITOR_SPECS config keys have drifted — every menu entry must use a real \
+             EDITOR_SPECS config keys have drifted. Every menu entry must use a real \
              config key and every supported editor should appear in the menu."
         );
     }

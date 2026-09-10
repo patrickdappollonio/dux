@@ -2161,7 +2161,7 @@ impl Engine {
             WireStatus::new(
                 "info",
                 format!(
-                    "Closed the last tab for agent \"{}\". It is now detached — reconnect it from the agent menu.",
+                    "Closed the last tab for agent \"{}\". It is now detached. Reconnect it from the agent menu.",
                     session.display_label()
                 ),
             ),
@@ -2205,7 +2205,7 @@ impl Engine {
         Ok(WireStatus::new(
             "info",
             format!(
-                "Detached agent \"{}\" and stopped {} tab{}. It stays in Projects — reconnect it from the agent menu.",
+                "Detached agent \"{}\" and stopped {} tab{}. It stays in Projects. Reconnect it from the agent menu.",
                 session.display_label(),
                 stopped,
                 if stopped == 1 { "" } else { "s" },
@@ -2668,7 +2668,7 @@ impl Engine {
                         target_branch,
                         repo_path,
                     } => Final::error(format!(
-                        "Couldn't check out \"{target_branch}\" in {repo_path} — resolve in your terminal and retry."
+                        "Couldn't check out \"{target_branch}\" in {repo_path}. Resolve in your terminal and retry."
                     ))
                     .sticky(),
                     WebCheckoutOutcome::AlreadyLeading { current_branch } => Final::info(format!(
@@ -2799,7 +2799,7 @@ impl Engine {
                         target_branch,
                         repo_path,
                     } => Final::error(format!(
-                        "Couldn't check out \"{target_branch}\" in {repo_path} — resolve in your terminal and retry."
+                        "Couldn't check out \"{target_branch}\" in {repo_path}. Resolve in your terminal and retry."
                     ))
                     .sticky(),
                     WebAddProjectOutcome::AddFailed { message } => Final::error(message.clone()),
@@ -6799,7 +6799,7 @@ mod tests {
             status.message.contains("Couldn't check out \"ghost\" in")
                 && status
                     .message
-                    .contains("resolve in your terminal and retry"),
+                    .contains("Resolve in your terminal and retry"),
             "unexpected message: {}",
             status.message
         );
@@ -7981,7 +7981,7 @@ mod tests {
         );
         assert!(
             engine.projects.is_empty(),
-            "deferred — the project isn't registered yet"
+            "a deferred add must not register the project yet"
         );
     }
 

@@ -1038,7 +1038,7 @@ mod tests {
                 resolve_worktree_path_for_read(&worktree, "outlink.png").unwrap();
             assert!(
                 is_outside,
-                "outlink.png resolves outside the worktree — is_outside must be true"
+                "outlink.png resolves outside the worktree: is_outside must be true"
             );
         }
 
@@ -1102,7 +1102,7 @@ mod tests {
                 resolve_worktree_path_for_read(&worktree, "inlink.png").unwrap();
             assert!(
                 !is_outside,
-                "inlink.png resolves inside the worktree — is_outside must be false"
+                "inlink.png resolves inside the worktree: is_outside must be false"
             );
 
             // Stage 2: canonicalize and re-verify containment.

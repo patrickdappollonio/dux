@@ -93,8 +93,8 @@ fn run_tui_with_flip() -> Result<()> {
                         Ok(screen) => Some(screen),
                         Err(err) => {
                             eprintln!(
-                                "dux server running at {} (status screen unavailable: {err}) \
-                                 — press Ctrl-C to stop",
+                                "dux server running at {} (status screen unavailable: {err}). \
+                                 Press Ctrl-C to stop",
                                 urls.join(", ")
                             );
                             None

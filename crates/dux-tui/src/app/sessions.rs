@@ -5524,14 +5524,9 @@ mod tests {
 
         assert!(!app.pending_checkout_inspect_ops.contains_key(&id));
         assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Error);
-        let message = app.status.message();
-        assert!(
-            message.starts_with("Couldn't check out \"main\" in /tmp/switch-fail-test"),
-            "unexpected checkout failure message: {message}"
-        );
-        assert!(
-            message.ends_with("resolve in your terminal and retry."),
-            "the checkout failure message must keep its actionable tail: {message}"
+        assert_eq!(
+            app.status.message(),
+            "Couldn't check out \"main\" in /tmp/switch-fail-test. Resolve in your terminal and retry."
         );
     }
 

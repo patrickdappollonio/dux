@@ -58,7 +58,7 @@ pub(crate) fn branch_drift_log_line(
 ) -> String {
     format!(
         "[{session_id}] agent \"{label}\" branch changed externally to {new} from {previous} \
-         (original was {original}) — if unexpected, check for git activity in the worktree outside dux"
+         (original was {original}). If unexpected, check for git activity in the worktree outside dux"
     )
 }
 
@@ -3046,7 +3046,7 @@ impl Engine {
                     }
                 }
                 EventReaction::Status(StatusUpdate::error(format!(
-                    "Couldn't check out \"{target_branch}\" in {path} — resolve in your terminal and retry."
+                    "Couldn't check out \"{target_branch}\" in {path}. Resolve in your terminal and retry."
                 )))
             }
         }
@@ -4641,7 +4641,7 @@ mod tests {
         assert_eq!(
             msg,
             "[sess-1] agent \"My Agent\" branch changed externally to agent-tabs from server-mode \
-             (original was server-mode) — if unexpected, check for git activity in the worktree outside dux"
+             (original was server-mode). If unexpected, check for git activity in the worktree outside dux"
         );
         assert!(msg.contains("sess-1"));
         // The actionable clause must be present so a reader knows what to check.

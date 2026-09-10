@@ -674,7 +674,7 @@ impl SessionStore {
             .execute("delete from agent_tabs where id = ?1", params![tab_id])?;
         if affected == 0 {
             crate::logger::warn(&format!(
-                "delete_agent_tab affected no rows for {tab_id} — the in-memory tab map and \
+                "delete_agent_tab affected no rows for {tab_id}: the in-memory tab map and \
                  SQLite may have diverged",
             ));
         }
@@ -833,7 +833,7 @@ impl SessionStore {
         if removed == 0 {
             crate::logger::warn(&format!(
                 "promote_tab_to_slot found no row for the outgoing slot tab {old_slot_tab_id} of \
-                 agent {session_id} — the in-memory tab map and SQLite may have diverged",
+                 agent {session_id}: the in-memory tab map and SQLite may have diverged",
             ));
         }
         tx.commit()
@@ -849,7 +849,7 @@ impl SessionStore {
         )?;
         if affected == 0 {
             crate::logger::warn(&format!(
-                "update_agent_tab_provider affected no rows for {tab_id} — the in-memory tab map \
+                "update_agent_tab_provider affected no rows for {tab_id}: the in-memory tab map \
                  and SQLite may have diverged",
             ));
         }

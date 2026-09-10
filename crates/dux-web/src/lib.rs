@@ -132,11 +132,11 @@ fn build_console(config: &dux_core::config::Config) -> (Console, bool) {
     let setting = &config.server.color;
     if !crate::console::is_known_color_setting(setting) {
         dux_core::logger::warn(&format!(
-            "[server] color = \"{setting}\" is not one of auto/always/never — treating it as \
-             \"auto\". Fix [server] color in config.toml to silence this."
+            "[server] color = \"{setting}\" is not one of auto/always/never, so dux is treating \
+             it as \"auto\". Fix [server] color in config.toml to silence this."
         ));
         eprintln!(
-            "WARNING: [server] color = \"{setting}\" is not auto/always/never — using \"auto\"."
+            "WARNING: [server] color = \"{setting}\" is not auto/always/never. Using \"auto\"."
         );
     }
     let color = crate::console::detect(setting);
@@ -149,9 +149,9 @@ fn build_console(config: &dux_core::config::Config) -> (Console, bool) {
 /// `dux.log` WARN line. Pure so it is unit-testable.
 fn tailscale_bind_warning(addr: SocketAddr, err: &std::io::Error) -> String {
     format!(
-        "could not bind the Tailscale address {addr}: {err} — something else is already \
-         listening there; serving on the remaining address(es) only. Stop that process or \
-         change [server].port to also serve on Tailscale."
+        "could not bind the Tailscale address {addr}: {err}. Something else is already \
+         listening there, so dux is serving on the remaining address(es) only. Stop that \
+         process or change [server].port to also serve on Tailscale."
     )
 }
 
@@ -197,7 +197,7 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
                 // The operator named this address; refuse to serve silently
                 // without it. Log with address context, then propagate the error.
                 dux_core::logger::error(&format!(
-                    "[server] could not bind the listen address {addr}: {err} — something else \
+                    "[server] could not bind the listen address {addr}: {err}. Something else \
                      is already listening there. Stop that process or change the configured \
                      address/port."
                 ));
@@ -1890,7 +1890,7 @@ async fn shutdown_signal() {
     // the conventional interrupted-exit code.
     tokio::spawn(async move {
         next_terminate_signal(&mut interrupt, &mut terminate).await;
-        let msg = "[server] second interrupt received during shutdown — forcing immediate exit.";
+        let msg = "[server] second interrupt received during shutdown. Forcing immediate exit.";
         dux_core::logger::error(msg);
         eprintln!("{msg}");
         std::process::exit(130);
@@ -1911,7 +1911,7 @@ fn install_signal(
             // the error. The other signal still gives a graceful stop; if BOTH
             // fail, `shutdown_signal` parks rather than firing spuriously.
             let msg = format!(
-                "[server] failed to install the {label} handler: {e} — {label} will not stop the \
+                "[server] failed to install the {label} handler: {e}. {label} will not stop the \
                  server; rely on the other signal (Ctrl-C for SIGINT, systemctl/docker stop for \
                  SIGTERM)."
             );
@@ -2379,7 +2379,7 @@ mod tests {
     #[test]
     fn plain_http_banner_carries_degradation_warnings() {
         let legs = vec![(addr("127.0.0.1:8080"), true)];
-        let warnings = vec!["Tailscale: 100.64.0.1:8080 busy -- serving without it".to_string()];
+        let warnings = vec!["Tailscale: 100.64.0.1:8080 busy, serving without it".to_string()];
         let banner = plain_http_banner("0.1.0", &legs, &warnings, None, None);
         assert_eq!(banner.warnings, warnings);
     }

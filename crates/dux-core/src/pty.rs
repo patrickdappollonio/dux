@@ -4933,7 +4933,7 @@ mod tests {
         let replay = src.reconnect_repaint();
         assert!(
             !replay.contains(&b'\t'),
-            "replay must not emit a raw tab — the client would re-interpret it and drift columns"
+            "replay must not emit a raw tab: the client would re-interpret it and drift columns"
         );
 
         let mut dst = TerminalState::with_scrollback(4, 40, 100);

@@ -336,7 +336,7 @@ impl Console {
                 Tone::Warn,
                 &now_hms(),
                 &format!(
-                    "console output fell behind — {drop_streak} line(s) dropped \
+                    "console output fell behind: {drop_streak} line(s) dropped \
                      (slow stdout consumer)"
                 ),
             );
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn banner_degraded_rows_render_as_warnings() {
         let mut b = sample_banner();
-        b.warnings = vec!["Tailscale: 100.64.0.1:8080 busy — serving without it".to_string()];
+        b.warnings = vec!["Tailscale: 100.64.0.1:8080 busy, serving without it".to_string()];
         let plain = render_banner(false, &b).join("\n");
         assert!(plain.contains("warn Tailscale: 100.64.0.1:8080 busy"));
         let color = render_banner(true, &b).join("\n");
