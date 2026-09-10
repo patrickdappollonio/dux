@@ -15,8 +15,11 @@ FROM ${BASE_IMAGE}
 
 # Refresh to current packages (brings glibc to the rolling version) and install
 # the runtime toolchain. git supports worktree ops; node/npm run the agent CLIs;
-# tmux provides a fixed terminal grid for TUI captures. Clean the package cache.
-RUN pacman -Syu --noconfirm git nodejs npm ca-certificates tmux \
+# tmux provides a fixed terminal grid for TUI captures. `which` is required, not
+# incidental: dux probes for the gh CLI by running `which gh`, and the base image
+# does not ship it, so without this every GitHub feature reports gh as missing
+# however it was installed. Clean the package cache.
+RUN pacman -Syu --noconfirm git nodejs npm ca-certificates tmux which \
     && pacman -Scc --noconfirm
 
 # The two default resume-capable providers, installed exactly as a user would
