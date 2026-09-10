@@ -175,9 +175,9 @@ async fn delete_tab(
     {
         // `Engine::close_tab` detaches the agent the same way `KillSessionPty`
         // does when this was the session's LAST live tab, and returns that
-        // in-flight-aware outcome on the wire result. Consume it directly (the
-        // session-slot branch above does the same), instead of re-deriving from
-        // `has_live_process`.
+        // in-flight-aware outcome on the wire result. Consume it directly rather
+        // than re-deriving from `has_live_process`, which cannot see a launch
+        // still in flight for a sibling tab.
         Ok(outcome) => {
             let detached = outcome.detached.unwrap_or(true);
             (

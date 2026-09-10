@@ -1544,11 +1544,17 @@ pub struct UiConfig {
     /// not what that screen is allowed to contain.
     pub disable_release_notes: bool,
     pub pr_banner_position: String,
-    /// The web agent-list sort mode, persisted so a chosen order (and the manual
+    /// The agent-list sort mode, persisted so a chosen order (and the manual
     /// drag order it enables) survives restarts and is shared across clients:
     /// "active" (working/attention float up, the default), "updated", "created",
-    /// "name", or "manual" (the raw persisted order, enabled by drag-reorder).
-    /// Web-only today; the TUI keeps its one-shot sort palette commands.
+    /// "name", "name_desc", or "manual" (the raw persisted order, enabled by
+    /// drag-reorder).
+    ///
+    /// One setting for both surfaces. The TUI orders its sidebar by it and
+    /// writes it from the `sort-agents` palette command and from a drag, which
+    /// stamps "manual"; the web writes it from its sidebar sort control. Each
+    /// surface offers its own subset of the modes and displays whatever value
+    /// the other one set.
     pub agent_sort: String,
     pub theme: String,
 }

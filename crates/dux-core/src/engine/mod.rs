@@ -1,6 +1,8 @@
-//! The headless `Engine`: the single owner of dux's domain state. Surfaces (the
-//! TUI `App` today, the web server later) embed/drive it. In E2 it is a passive
-//! state container; domain operations and workers move into `Engine` methods in E3.
+//! The headless `Engine`: the single owner of dux's domain state AND of the
+//! domain operations and background workers that move it. Both surfaces drive
+//! the same engine, so neither owns a rule the other has to re-derive: the TUI
+//! embeds it and calls it directly, and the web server reaches it through its
+//! engine actor.
 
 pub mod command;
 mod companion;
