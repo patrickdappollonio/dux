@@ -246,6 +246,49 @@ async fn http_file_diff_returns_sides_and_rejects_traversal() {
     assert_eq!(resp.status(), 400, "path traversal must be rejected");
 }
 
+/// A version past the editor's size ceiling answers 200 with the head of git's
+/// own patch rather than the 400 it used to, so the browser has something to
+/// show for a file it cannot hold.
+#[tokio::test]
+async fn http_file_diff_answers_a_huge_file_with_the_diff_head() {
+    let (addr, tmp) = boot_with_repo().await;
+    // Comfortably past the 5 MiB working-copy ceiling, in lines short enough
+    // that the patch is far longer than the head cap.
+    let huge: String = (0..600_000).map(|i| format!("line {i}\n")).collect();
+    assert!(
+        huge.len() > 5 * 1024 * 1024,
+        "the fixture must be past the ceiling"
+    );
+    std::fs::write(tmp.path().join("big.txt"), &huge).expect("write big file");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/files/diff"))
+        .json(&serde_json::json!({ "path": "big.txt" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "a huge file is answered, not refused");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["path"], "big.txt", "{body:#}");
+    assert!(
+        body.get("original").is_none() && body.get("modified").is_none(),
+        "the head answer carries no sides: {body:#}"
+    );
+    let head = &body["head"];
+    assert_eq!(head["truncated"], true, "{body:#}");
+    assert_eq!(head["binary"], false, "{body:#}");
+    assert_eq!(head["shown_lines"], 4_000, "{body:#}");
+    assert!(
+        head["total_lines"].as_u64().unwrap() > 4_000,
+        "the total must count past what was kept: {body:#}"
+    );
+    assert!(
+        head["text"].as_str().unwrap().contains("+line 0"),
+        "the head holds the start of the patch: {body:#}"
+    );
+}
+
 /// HTTP `GET /api/v1/sessions/:id/files/raw` (the markdown-preview image proxy)
 /// serves a worktree file's bytes with a guessed content type, and rejects a path
 /// that escapes the worktree.

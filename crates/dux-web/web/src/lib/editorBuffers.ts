@@ -1,4 +1,4 @@
-import type { FileDiffContents, WorktreeFile } from "./fileApi"
+import type { FileDiffContents, FileDiffHead, WorktreeFile } from "./fileApi"
 
 // The server's freshness token for a file's bytes: RFC 3339 mtime plus byte
 // size. Both halves travel together and are compared together; see `stampsDiffer`.
@@ -54,6 +54,9 @@ export interface TabBuffer {
   binary: boolean
   readOnly: boolean
   diff: FileDiffContents | null
+  // The head of git's patch, set instead of `diff` when the file is past the
+  // size ceiling. Never both: the endpoint answers one shape or the other.
+  diffHead: FileDiffHead | null
   diffLoadedPath: string | null
   diffLoadedSignal: string
   fileError: string | null
@@ -99,6 +102,7 @@ export function emptyBuffer(path: string): TabBuffer {
     binary: false,
     readOnly: false,
     diff: null,
+    diffHead: null,
     diffLoadedPath: null,
     diffLoadedSignal: "",
     fileError: null,

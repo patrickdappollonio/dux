@@ -76,6 +76,30 @@ if (!monaco.languages.getLanguages().some((l) => l.id === "json")) {
   monaco.languages.setMonarchTokensProvider("json", json)
 }
 
+// Monaco ships no diff grammar either, and the head of git's own patch is the
+// one place the web renders raw diff text (see DiffHeadViewer). Without this it
+// would be plaintext, losing the added/removed colours, which are the whole
+// reason anyone reads a diff.
+if (!monaco.languages.getLanguages().some((l) => l.id === "diff")) {
+  monaco.languages.register({ id: "diff", extensions: [".diff", ".patch"], aliases: ["Diff"] })
+  const diff: monaco.languages.IMonarchLanguage = {
+    tokenizer: {
+      root: [
+        // File headers first: they lead with the same characters as the
+        // added/removed lines below and would otherwise be coloured as content.
+        [/^diff .*$/, "keyword"],
+        [/^(?:index|new file mode|deleted file mode|similarity index|rename from|rename to|old mode|new mode) .*$/, "keyword"],
+        [/^(?:---|\+\+\+) .*$/, "keyword"],
+        [/^@@.*$/, "type"],
+        [/^\+.*$/, "string"],
+        [/^-.*$/, "comment"],
+        [/^\\.*$/, "type"],
+      ],
+    },
+  }
+  monaco.languages.setMonarchTokensProvider("diff", diff)
+}
+
 export { monaco }
 
 // The Monaco language id for a file path, from the grammars registered above.

@@ -236,6 +236,21 @@ function diffViewerStub() {
 vi.mock("@/components/DiffViewer", diffViewerStub)
 vi.mock("./DiffViewer", diffViewerStub)
 
+// DiffHeadViewer mounts a plain Monaco editor, so it needs the same treatment.
+// The stub keeps the real component's banner element (that IS what the
+// past-the-ceiling test asserts) and exposes the patch text as an attribute.
+function diffHeadViewerStub() {
+  return {
+    default: ({ text, banner }: { text: string; banner: string }) => (
+      <div data-testid="diff-head-viewer" data-text={text}>
+        {banner !== "" && <p data-testid="diff-head-banner">{banner}</p>}
+      </div>
+    ),
+  }
+}
+vi.mock("@/components/DiffHeadViewer", diffHeadViewerStub)
+vi.mock("./DiffHeadViewer", diffHeadViewerStub)
+
 // Panel props recorded at render time, so the panel-unit tests can assert the
 // sizes the editor hands react-resizable-panels: pixels for the explorer (so
 // the modal and the standalone tab render the same tree) and a percentage for
@@ -905,6 +920,31 @@ describe("a deleted file in the editor", () => {
     // CSS marker class and the viewer gets the option-level flag.
     expect(viewer.closest(".dux-diff-all-delete")).not.toBeNull()
     expect(viewer.getAttribute("data-all-delete")).toBe("true")
+  })
+
+  it("a file past the size ceiling renders the diff head and its banner", async () => {
+    diffMock.mockResolvedValue({
+      path: "src/huge.txt",
+      head: {
+        text: "diff --git a/src/huge.txt b/src/huge.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        shown_lines: 4000,
+        total_lines: 90210,
+        truncated: true,
+        total_is_at_least: false,
+        binary: false,
+      },
+    } as unknown as MockDiff)
+    await mountWithTab("src/huge.txt", "diff")
+
+    const viewer = await screen.findByTestId("diff-head-viewer")
+    expect(viewer.getAttribute("data-text")).toContain("+new")
+    expect(screen.getByTestId("diff-head-banner").textContent).toBe(
+      "Diff cut here: showing the first 4000 of 90210 lines. Open the file in " +
+        "your editor or run git diff to see the rest.",
+    )
+    // The head is an ANSWER, not a failure: no error pane and nothing to retry.
+    expect(screen.queryByTestId("diff-viewer")).toBeNull()
+    expect(screen.queryByRole("button", { name: /retry/i })).toBeNull()
   })
 
   it("a normal modified file's diff arms no all-delete suppression", async () => {

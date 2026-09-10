@@ -48,6 +48,32 @@ export interface FileDiffContents {
   binary: boolean
 }
 
+// The head of git's own patch, answered for a version past the size ceiling the
+// editor can hold. Mirrors the Rust `DiffHead`.
+export interface FileDiffHead {
+  text: string
+  shown_lines: number
+  total_lines: number
+  truncated: boolean
+  total_is_at_least: boolean
+  binary: boolean
+}
+
+export interface FileDiffHeadAnswer {
+  path: string
+  head: FileDiffHead
+}
+
+// What the diff endpoint answers with. The two shapes are told apart by which
+// key is there, matching the server's untagged encoding.
+export type FileDiffAnswer = FileDiffContents | FileDiffHeadAnswer
+
+export function isDiffHeadAnswer(
+  answer: FileDiffAnswer,
+): answer is FileDiffHeadAnswer {
+  return "head" in answer
+}
+
 // A failed file request, carrying the HTTP status: the info panel treats a 404
 // (the entry is gone) as a reason to dismiss itself and a 400 (the path is
 // refused) as a reason to stay put and show why. Still an Error, so a caller
@@ -176,9 +202,10 @@ export const fileApi = {
   rawUrl: (root: EditorRoot, path: string) =>
     `${fileUrl(root, "raw")}?path=${encodeURIComponent(path)}`,
   // The two raw sides (HEAD vs working copy) of a changed file for the Monaco
-  // diff view. The server resolves both sides and the binary flag.
+  // diff view. The server resolves both sides and the binary flag, and answers
+  // with the head of git's own patch for a version it will not send whole.
   diff: (root: EditorRoot, path: string) =>
-    postFile<FileDiffContents>(fileUrl(root, "diff"), { path }),
+    postFile<FileDiffAnswer>(fileUrl(root, "diff"), { path }),
   // Save a file's working copy. With `expected`, the freshness token the read
   // handed out, a file that moved on disk answers 409 and this rejects with a
   // `FileConflictError` carrying the current stamp; without it the write is

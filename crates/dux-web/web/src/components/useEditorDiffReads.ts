@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react"
 import type { Dispatch, RefObject, SetStateAction } from "react"
 import { fileApi } from "@/lib/fileApi"
-import type { FileDiffContents } from "@/lib/fileApi"
+import { isDiffHeadAnswer } from "@/lib/fileApi"
+import type { FileDiffAnswer } from "@/lib/fileApi"
 import { emptyBuffer, isBufferStale, pruneByIds } from "@/lib/editorBuffers"
 import type { TabBuffer } from "@/lib/editorBuffers"
 import type { EditorRoot } from "@/lib/editorRoot"
@@ -38,15 +39,19 @@ function withDiffResult(
   previous: Map<string, TabBuffer>,
   tabs: readonly EditorTab[],
   request: DiffRequest,
-  diff: FileDiffContents,
+  answer: FileDiffAnswer,
   loadedSignal: string,
 ): Map<string, TabBuffer> {
   const base = diffResultBase(previous, tabs, request)
   if (base === null) return previous
   const next = new Map(previous)
+  // One shape or the other, never both: a head answer leaves no sides behind
+  // for the diff editor to render from a previous read of the same tab.
+  const head = isDiffHeadAnswer(answer)
   next.set(request.tabId, {
     ...base,
-    diff,
+    diff: head ? null : answer,
+    diffHead: head ? answer.head : null,
     diffLoadedPath: request.path,
     diffLoadedSignal: loadedSignal,
     diffError: null,

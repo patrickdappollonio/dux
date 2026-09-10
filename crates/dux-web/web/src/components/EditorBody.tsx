@@ -41,6 +41,7 @@ import {
 } from "@/lib/editorBuffers"
 import type { ChangesSliceView, TabBuffer } from "@/lib/editorBuffers"
 import { isAllDeleteDiff } from "@/lib/diffPresentation"
+import { diffHeadBanner } from "@/lib/diffHeadBanner"
 import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
 import {
   rootHasDiff,
@@ -158,6 +159,7 @@ import {
 // (lib/monacoSetup), so the heavy monaco chunk is loaded once for both.
 const CodeEditor = lazy(() => import("./CodeEditor"))
 const DiffViewer = lazy(() => import("./DiffViewer"))
+const DiffHeadViewer = lazy(() => import("./DiffHeadViewer"))
 // react-markdown is only needed when previewing a markdown file, so lazy-load it
 // into its own chunk so it never weighs on the main bundle or the editor open.
 const MarkdownPreview = lazy(() => import("./MarkdownPreview"))
@@ -1792,7 +1794,9 @@ function previewableDiffIsReady(
   ready: boolean,
   buffer: TabBuffer | undefined,
 ): boolean {
-  return ready && !(buffer?.diff?.binary ?? false)
+  // A head answer has no working-copy side to preview from, so a markdown file
+  // past the ceiling gets the patch rather than a preview of nothing.
+  return ready && !(buffer?.diff?.binary ?? false) && !buffer?.diffHead
 }
 
 function previewIsAvailable(
@@ -1889,6 +1893,28 @@ function DiffContentPane({
     )
   }
   if (!diffReady) return <LoadingPane />
+  // Past the size ceiling the server answers with the head of git's own patch
+  // instead of two sides, so there is nothing here for the diff editor to do.
+  const diffHead = buffer?.diffHead
+  if (diffHead) {
+    if (diffHead.binary) {
+      return (
+        <CenteredPane>
+          This file is binary and can&rsquo;t be diffed here.
+        </CenteredPane>
+      )
+    }
+    return (
+      <ChunkBoundary>
+        <Suspense fallback={<LoadingPane />}>
+          <DiffHeadViewer
+            text={diffHead.text}
+            banner={diffHeadBanner(diffHead)}
+          />
+        </Suspense>
+      </ChunkBoundary>
+    )
+  }
   if (buffer?.diff?.binary) {
     return (
       <CenteredPane>

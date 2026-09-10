@@ -496,9 +496,25 @@ async fn read_file<R: EditorRoot>(root: R, Json(op): Json<ReadOp>) -> Response {
     }
 }
 
+/// What the diff endpoint answers with: the two sides for a file the editor can
+/// hold, or the head of git's own patch for one past the size ceiling.
+///
+/// Untagged, so the ordinary answer is the same object it has always been and a
+/// client tells the two apart by which key is there.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum DiffAnswer {
+    Contents(dux_core::diff::DiffContents),
+    Head {
+        path: String,
+        head: dux_core::diff::DiffHead,
+    },
+}
+
 /// Return the two raw sides (HEAD vs working copy) of a changed file so the web
 /// editor can render a Monaco diff. Same worktree-relative path security as
 /// `read`; binary content is reported via the `binary` flag with empty sides.
+/// A version past the size ceiling answers with the diff head instead.
 async fn diff_contents(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
@@ -517,12 +533,28 @@ async fn diff_contents(
         Err(r) => return r.into_response(),
     };
     let path = op.path;
-    match tokio::task::spawn_blocking(move || dux_core::diff::file_diff_contents(&worktree, &path))
-        .await
+    match tokio::task::spawn_blocking(move || {
+        match dux_core::diff::file_diff_contents(&worktree, &path) {
+            Ok(contents) => Ok(DiffAnswer::Contents(contents)),
+            // A version past the editor's size ceiling is answered with the head
+            // of git's own patch rather than an error: the reader wanted to see
+            // the change, and there is one to show. Every other refusal is still
+            // a refusal.
+            Err(e) if e.downcast_ref::<dux_core::diff::DiffTooLarge>().is_some() => {
+                let head = dux_core::diff::diff_head_via_git(&worktree, &path)?;
+                Ok(DiffAnswer::Head {
+                    path: path.clone(),
+                    head,
+                })
+            }
+            Err(e) => Err(e),
+        }
+    })
+    .await
     {
-        Ok(Ok(contents)) => Json(contents).into_response(),
+        Ok(Ok(answer)) => Json(answer).into_response(),
         // file_diff_contents errors are mostly client conditions (path/containment,
-        // too-large, symlink); a git/IO failure also lands here as 400, matching
+        // symlink); a git/IO failure also lands here as 400, matching
         // read_file (both wrap dux_core errors without classifying them).
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Err(e) => (

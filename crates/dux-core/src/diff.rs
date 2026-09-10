@@ -203,6 +203,25 @@ pub struct DiffContents {
     pub binary: bool,
 }
 
+/// The one refusal a caller answers with the diff head rather than an error.
+///
+/// Carried as a type rather than recognised by its wording: every other reason
+/// [`file_diff_contents`] can refuse (containment, a symlink, a path that is
+/// not there) is still an error, and telling them apart by string match is how
+/// a reworded message quietly changes an HTTP status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffTooLarge {
+    pub message: String,
+}
+
+impl std::fmt::Display for DiffTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DiffTooLarge {}
+
 /// Whether a byte slice is renderable UTF-8 text (empty counts as text).
 /// `content_inspector` catches UTF-8 byte streams that nonetheless contain
 /// NUL/control bytes, which `String::from_utf8` alone would accept and render
@@ -235,7 +254,11 @@ pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<Dif
     if let Some(size) = head_size
         && size > MAX_EDITABLE_BYTES
     {
-        anyhow::bail!("file too large to diff: {size} bytes at HEAD (limit {MAX_EDITABLE_BYTES})");
+        return Err(anyhow::Error::new(DiffTooLarge {
+            message: format!(
+                "file too large to diff: {size} bytes at HEAD (limit {MAX_EDITABLE_BYTES})"
+            ),
+        }));
     }
 
     // Working side via a no-follow stat: refuse symlinks (consistent with
@@ -249,10 +272,12 @@ pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<Dif
                 anyhow::bail!("refusing to diff through a symlink: {rel_path}");
             }
             if meta.len() > MAX_EDITABLE_BYTES {
-                anyhow::bail!(
-                    "file too large to diff: {} bytes (limit {MAX_EDITABLE_BYTES})",
-                    meta.len()
-                );
+                return Err(anyhow::Error::new(DiffTooLarge {
+                    message: format!(
+                        "file too large to diff: {} bytes (limit {MAX_EDITABLE_BYTES})",
+                        meta.len()
+                    ),
+                }));
             }
             Some(meta)
         }
@@ -497,10 +522,15 @@ mod tests {
         let repo = init_repo();
         let big = vec![b'a'; (MAX_EDITABLE_BYTES + 1) as usize];
         std::fs::write(repo.path().join("big.txt"), &big).expect("write big");
-        let err = file_diff_contents(repo.path(), "big.txt")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("too large"), "unexpected error: {err}");
+        let err = file_diff_contents(repo.path(), "big.txt").unwrap_err();
+        assert!(
+            err.downcast_ref::<DiffTooLarge>().is_some(),
+            "the size refusal is typed so a caller can answer it with the head: {err}"
+        );
+        assert!(
+            err.to_string().contains("too large"),
+            "unexpected error: {err}"
+        );
     }
 
     /// Binary content at HEAD (not just in the working copy) flags the diff binary.
