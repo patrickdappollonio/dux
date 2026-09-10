@@ -1,4 +1,5 @@
 use super::components::pane_card::CardPlan;
+use super::components::wrap_lines::{char_display_width, display_width};
 use super::components::{
     Button, ButtonKind, ButtonPressedTarget, CardBlockPlan, CardContent, Checkbox, CheckboxState,
     Hint, Modal, PaneCardBlock, button_state_for, button_width_for, modal_hint_line,
@@ -23,10 +24,7 @@ use std::path::Path;
 /// width that counted characters would hand the planner a number the painter
 /// cannot honour for a label holding a wide glyph.
 fn pane_card_button_width(label: &str) -> u16 {
-    let columns: usize = label
-        .chars()
-        .map(super::components::wrap_lines::char_display_width)
-        .sum();
+    let columns: usize = label.chars().map(char_display_width).sum();
     u16::try_from(columns).unwrap_or(u16::MAX).saturating_add(6)
 }
 
@@ -917,6 +915,23 @@ fn unpushed_commits_sentence(
     ))
 }
 
+/// The status line confirming a project's environment save, counting the
+/// variables it wrote.
+///
+/// One function because the same sentence is produced by two paths, the
+/// eager save in `sessions.rs` and this worker's completion, and two copies
+/// would let them drift.
+pub(super) fn project_env_saved_message(env_count: usize, project_name: &str) -> String {
+    if env_count == 0 {
+        return format!("Environment variables cleared for project \"{project_name}\".");
+    }
+    let them = if env_count == 1 { "it" } else { "them" };
+    format!(
+        "Saved {} for project \"{project_name}\". New agents and terminals will receive {them}.",
+        count_of(env_count, "environment variable")
+    )
+}
+
 /// The worktree-manager checkbox label, naming the branch it would delete.
 ///
 /// ONE function for the same reason [`delete_agent_checkbox_label`] is one: the
@@ -968,6 +983,23 @@ pub(super) fn delete_worktree_branch_line(branch: &str, delete_branch: bool) -> 
     }
 }
 
+/// The longest prefix of `word` that fits `width` display columns, for the hard
+/// break a word too wide for a whole row needs. At least one character, so a
+/// glyph wider than the row still makes progress instead of looping.
+fn head_within_width(word: &str, width: usize) -> String {
+    let mut head = String::new();
+    let mut used = 0usize;
+    for ch in word.chars() {
+        let cw = char_display_width(ch);
+        if used + cw > width && !head.is_empty() {
+            break;
+        }
+        head.push(ch);
+        used += cw;
+    }
+    head
+}
+
 /// A paragraph of dialog body text as one string per rendered row, each
 /// carrying the body's one-space indent.
 ///
@@ -976,11 +1008,16 @@ pub(super) fn delete_worktree_branch_line(branch: &str, delete_branch: bool) -> 
 /// wrapped here instead of by the `Paragraph`, which would indent the first row
 /// and leave every continuation flush against the frame.
 ///
-/// Widths are counted in characters, never bytes, and a word too long for the
-/// line is hard-broken rather than pushed past the frame.
+/// A line that already fits comes back verbatim, because re-flowing it would
+/// collapse the runs of spaces that align an info panel's columns and a
+/// compiler's gutter and caret. Only an overflowing line is re-flowed, and a
+/// word too long for the line is hard-broken rather than pushed past the frame.
+///
+/// Widths are display columns, the measure the widgets render by, so a line of
+/// CJK is not handed to the paragraph under-measured and re-wrapped there.
 pub(super) fn indented_body_lines(text: &str, inner_width: u16) -> Vec<String> {
     let width = usize::from(inner_width).saturating_sub(1);
-    if width == 0 {
+    if width == 0 || display_width(text) <= width {
         return vec![format!(" {text}")];
     }
     let mut lines: Vec<String> = Vec::new();
@@ -989,7 +1026,7 @@ pub(super) fn indented_body_lines(text: &str, inner_width: u16) -> Vec<String> {
     for word in text.split_whitespace() {
         let mut word = word;
         loop {
-            let word_width = word.chars().count();
+            let word_width = display_width(word);
             let separator = usize::from(current_width > 0);
             if current_width + separator + word_width <= width {
                 if separator == 1 {
@@ -1004,7 +1041,7 @@ pub(super) fn indented_body_lines(text: &str, inner_width: u16) -> Vec<String> {
                 current_width = 0;
                 continue;
             }
-            let head: String = word.chars().take(width).collect();
+            let head = head_within_width(word, width);
             word = &word[head.len()..];
             lines.push(head);
         }
@@ -2604,9 +2641,9 @@ impl App {
             frame,
             area,
             content_area,
-            drawn_scroll as usize,
-            content_area.height as usize,
-            self.last_diff_visual_lines as usize,
+            usize::from(drawn_scroll),
+            usize::from(content_area.height),
+            usize::from(self.last_diff_visual_lines),
             self.theme.hint_key_fg,
         );
 
@@ -5190,9 +5227,9 @@ impl App {
             frame,
             area,
             content_area,
-            scroll as usize,
-            content_area.height as usize,
-            total_lines as usize,
+            usize::from(scroll),
+            usize::from(content_area.height),
+            usize::from(total_lines),
             self.theme.hint_key_fg,
         );
 
@@ -23236,6 +23273,19 @@ mod tests {
                                   juliett kilo lima mike november oscar papa quebec romeo \
                                   sierra tango uniform victor whiskey xray yankee zulu";
 
+    /// A body line whose internal padding is load-bearing: an info panel's
+    /// columns line up on it, and so does a compiler's caret under its gutter.
+    /// Short enough that every dialog holds it on one row.
+    const PADDED_BODY_LINE: &str = "Name:         feature";
+
+    /// Assert the padded line reached the screen with its run of spaces intact.
+    fn assert_padding_survived(screen: &str) {
+        assert!(
+            screen.contains(PADDED_BODY_LINE),
+            "a line that fits must not be re-flowed:\n{screen}"
+        );
+    }
+
     /// Assert every rendered row from the one holding `head` to the one holding
     /// `tail` starts exactly one column in from the dialog frame.
     ///
@@ -23271,25 +23321,27 @@ mod tests {
     fn the_config_reload_failure_body_hangs_its_indent() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigReloadFailed {
-            error: LONG_BODY_LINE.to_string(),
+            error: format!("{LONG_BODY_LINE}\n{PADDED_BODY_LINE}"),
             recover_old_config: false,
             focus: ConfigReloadFailedFocus::Close,
             scroll: 0,
         };
         let screen = rendered_screen(&mut app);
         assert_body_rows_hang_indented(&screen, "alpha bravo", "zulu");
+        assert_padding_survived(&screen);
     }
 
     #[test]
     fn the_add_project_failure_body_hangs_its_indent() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::AddProjectFailed {
-            message: LONG_BODY_LINE.to_string(),
+            message: format!("{LONG_BODY_LINE}\n{PADDED_BODY_LINE}"),
             return_prompt: Box::new(PromptState::None),
             scroll: 0,
         };
         let screen = rendered_screen(&mut app);
         assert_body_rows_hang_indented(&screen, "alpha bravo", "zulu");
+        assert_padding_survived(&screen);
     }
 
     #[test]
@@ -23297,10 +23349,14 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::AgentInfo(AgentInfoPrompt {
             session_label: "feature".to_string(),
-            lines: vec![(LONG_BODY_LINE.to_string(), AgentInfoTone::Neutral)],
+            lines: vec![
+                (LONG_BODY_LINE.to_string(), AgentInfoTone::Neutral),
+                (PADDED_BODY_LINE.to_string(), AgentInfoTone::Neutral),
+            ],
         });
         let screen = rendered_screen(&mut app);
         assert_body_rows_hang_indented(&screen, "alpha bravo", "zulu");
+        assert_padding_survived(&screen);
         // The dialog sizes itself from the WRAPPED rows, so its one button is
         // still on screen under a body that grew.
         assert!(
@@ -23312,6 +23368,40 @@ mod tests {
     /// The wrapper is the reason the rows above line up, so its own contract is
     /// pinned here: every line indented once, nothing wider than the frame, and
     /// a word too long to fit broken rather than pushed through the border.
+    #[test]
+    fn indented_body_lines_leaves_a_fitting_line_exactly_as_it_was() {
+        // A line that fits is emitted verbatim, so a body built out of aligned
+        // columns or a compiler's gutter and caret survives the indent.
+        assert_eq!(
+            super::indented_body_lines("Name:         feature", 40),
+            vec![" Name:         feature"]
+        );
+        assert_eq!(
+            super::indented_body_lines("  |     ^^^^^^ unknown field", 40),
+            vec!["   |     ^^^^^^ unknown field"]
+        );
+    }
+
+    #[test]
+    fn indented_body_lines_measures_in_display_columns() {
+        // Eight CJK glyphs are eight characters and sixteen columns. Measured by
+        // character the line would be handed to the widget whole and re-wrapped
+        // there, losing the indent on the row the widget split off.
+        let wide = "\u{4e00}\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{516d}\u{4e03}\u{516b}";
+        let wrapped = super::indented_body_lines(wide, 12);
+        assert!(wrapped.len() > 1, "{wrapped:?}");
+        assert!(
+            wrapped
+                .iter()
+                .all(|line| line.starts_with(' ') && !line.starts_with("  ")),
+            "{wrapped:?}"
+        );
+        assert!(
+            wrapped.iter().all(|line| Span::raw(line).width() <= 12),
+            "{wrapped:?}"
+        );
+    }
+
     #[test]
     fn indented_body_lines_indents_every_row_within_the_frame() {
         let wrapped = super::indented_body_lines("one two three four five six", 12);
@@ -23849,6 +23939,24 @@ mod tests {
         assert!(
             screen.contains("Changes (2) +12 -3 · 1 bin"),
             "the group title carries its recap:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn project_env_saved_message_counts_the_variables() {
+        assert_eq!(
+            super::project_env_saved_message(0, "dux"),
+            "Environment variables cleared for project \"dux\"."
+        );
+        assert_eq!(
+            super::project_env_saved_message(1, "dux"),
+            "Saved 1 environment variable for project \"dux\". New agents and terminals will \
+             receive it."
+        );
+        assert_eq!(
+            super::project_env_saved_message(3, "dux"),
+            "Saved 3 environment variables for project \"dux\". New agents and terminals will \
+             receive them."
         );
     }
 }

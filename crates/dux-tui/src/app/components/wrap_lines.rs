@@ -25,7 +25,10 @@ use ratatui::text::{Line, Span};
 /// Display width of `s`, via ratatui's own unicode-width measurement, so the
 /// wrapper agrees with the renderer about how wide a CJK glyph or an emoji is.
 /// `Span::raw` borrows, so there is no allocation.
-fn display_width(s: &str) -> usize {
+///
+/// Shared with the dialog bodies' own indenter, which must decide "does this
+/// line fit" by the measure the widget will render it at.
+pub(crate) fn display_width(s: &str) -> usize {
     Span::raw(s).width()
 }
 

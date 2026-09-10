@@ -2871,7 +2871,7 @@ impl App {
         ))
         .resolve_in_handler(move |o: &PersistFinalOutcome| match o {
             PersistFinalOutcome::Saved => dux_core::engine::Final::info(
-                super::workers::project_env_saved_message(env_count, &success_name),
+                super::render::project_env_saved_message(env_count, &success_name),
             ),
             PersistFinalOutcome::DbFailed(error) => dux_core::engine::Final::error(format!(
                 "Could not save environment variables for project \"{db_fail_name}\": {error}"

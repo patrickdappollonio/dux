@@ -7,8 +7,6 @@ use dux_core::engine::{
     ProjectPersistenceView, PrunedPty, PrunedPtyKind, StatusUpdate, WorktreeRemoval,
 };
 
-use dux_core::text::count_of;
-
 use super::*;
 
 impl PruneViewContext {
@@ -1245,7 +1243,7 @@ impl App {
         env_count: usize,
         status_op_id: &Option<String>,
     ) {
-        let success_message = project_env_saved_message(env_count, &project_name);
+        let success_message = super::render::project_env_saved_message(env_count, &project_name);
         self.save_runtime_projects_and_finish_status(
             status_op_id,
             &format!(
@@ -1782,23 +1780,6 @@ pub(crate) fn run_create_agent_branch_inspection_job(
         result,
         status_op_id,
     });
-}
-
-/// The status line confirming a project's environment save, counting the
-/// variables it wrote.
-///
-/// One function because the same sentence is produced by two paths, the
-/// eager save in `sessions.rs` and this worker's completion, and two copies
-/// would let them drift.
-pub(super) fn project_env_saved_message(env_count: usize, project_name: &str) -> String {
-    if env_count == 0 {
-        return format!("Environment variables cleared for project \"{project_name}\".");
-    }
-    let them = if env_count == 1 { "it" } else { "them" };
-    format!(
-        "Saved {} for project \"{project_name}\". New agents and terminals will receive {them}.",
-        count_of(env_count, "environment variable")
-    )
 }
 
 #[cfg(test)]
@@ -2949,24 +2930,6 @@ mod tests {
             app.status.most_recent_tui().is_none(),
             "the spinner must be gone, not waiting on the busy timeout: {:?}",
             app.status.most_recent_tui()
-        );
-    }
-
-    #[test]
-    fn project_env_saved_message_counts_the_variables() {
-        assert_eq!(
-            super::project_env_saved_message(0, "dux"),
-            "Environment variables cleared for project \"dux\"."
-        );
-        assert_eq!(
-            super::project_env_saved_message(1, "dux"),
-            "Saved 1 environment variable for project \"dux\". New agents and terminals will \
-             receive it."
-        );
-        assert_eq!(
-            super::project_env_saved_message(3, "dux"),
-            "Saved 3 environment variables for project \"dux\". New agents and terminals will \
-             receive them."
         );
     }
 }
