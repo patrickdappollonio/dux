@@ -1103,7 +1103,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               size="sm"
               variant="ghost"
               className="text-amber-500 max-md:hidden"
-              aria-label="Reload diff, the file changed on disk"
+              aria-label="Reload the diff. The file changed on disk"
               onClick={refreshDiff}
             >
               <CircleAlert />

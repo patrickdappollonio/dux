@@ -525,7 +525,7 @@ export function FileTree({
                   }}
                 >
                   <RotateCw className="size-3.5 shrink-0" />
-                  <span className="text-sm">Failed to load, retry</span>
+                  <span className="text-sm">Failed to load. Retry</span>
                 </button>
               </li>
             ) : (
