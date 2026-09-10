@@ -23,13 +23,17 @@ module.exports = {
     })
     if (!opened) throw new Error("no sidebar row menu for fix-login-redirect")
     await sleep(900)
+    // Framed on the menu itself rather than to the bottom of the window: the row
+    // it belongs to can be anywhere in the sidebar, and a menu near the bottom
+    // opens upwards, so the menu's own extent is the only stable frame. The
+    // sidebar comes along because the crop starts at the window's left edge.
     const menu = await boxOf(page, ['[role="menu"]'])
     const y = Math.max(0, Math.round(menu.y - 12))
     return {
       x: 0,
       y,
       width: Math.min(1440, Math.round(menu.x + menu.width + 12)),
-      height: 900 - y,
+      height: Math.min(900 - y, Math.round(menu.y + menu.height + 12 - y)),
     }
   },
 }

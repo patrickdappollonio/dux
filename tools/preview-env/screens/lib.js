@@ -269,7 +269,11 @@ const SIDEBAR_ORDER = [
 // runs; the provider defaults to `fake`, whose fixtures are what make working
 // and idle states shootable at all.
 const BUSY = {
-  "design-notes": { fixture: "working" },
+  // The folder agent is seeded on the transcript provider for its own
+  // screenshot, where a ticking counter always reads Working. Staged among the
+  // others it runs the fake provider, so its state follows the fixture like
+  // every other agent's; every other agent keeps the providers the seed gave it.
+  "design-notes": { fixture: "working", provider: "fake" },
   "review-billing": { fixture: "attention" },
   "polish-onboarding": { fixture: "working" },
   "refactor-cache": { fixture: "working" },
@@ -281,7 +285,7 @@ const STAGINGS = {
   "all-working": BUSY,
   twin: {
     ...BUSY,
-    "design-notes": { fixture: "steady" },
+    "design-notes": { fixture: "steady", provider: "fake" },
     "review-billing": { fixture: "steady" },
     "polish-onboarding": { fixture: "steady" },
   },
@@ -299,8 +303,12 @@ async function stage(name) {
   for (const title of SIDEBAR_ORDER) {
     const session = by[title]
     if (!session) throw new Error(`the seed has not created ${title}`)
-    const provider = want[title].provider || "fake"
-    if (session.tabs[0].provider !== provider) {
+    // Only an agent whose staging names a provider has its first tab
+    // retargeted. Everything else keeps the providers the seed gave it, which is
+    // what leaves refactor-cache carrying one tab per provider for the tab-strip
+    // shots.
+    const provider = want[title].provider
+    if (provider && session.tabs[0].provider !== provider) {
       await api("PATCH", `/api/v1/sessions/${session.id}/tabs/${session.tabs[0].id}`, { provider })
     }
     await setFixture(want[title].fixture)
@@ -315,7 +323,7 @@ async function stage(name) {
         await sleep(1200)
       }
     }
-    console.log(`  ${title.padEnd(20)} -> ${want[title].fixture} on ${provider}`)
+    console.log(`  ${title.padEnd(20)} -> ${want[title].fixture}`)
   }
   await setFixture("working")
 

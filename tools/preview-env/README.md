@@ -212,6 +212,7 @@ have, and they are installed only under `DUX_SCREENS=1`:
 | --- | --- |
 | `screens/fixtures/gh` | A stand-in `gh` answering only dux's auth probe and its bounded `pr view`, so the pull-request chip, banner and from-PR dialog are shootable without a GitHub login. |
 | `screens/fixtures/notes-agent` | A transcript provider installed as `claude`, so the folder agent's pane shows a scripted session rather than a streaming fixture. |
+| An `opencode` alias | dux refuses a tab for a CLI that is not on PATH, and the tab strip shows one tab per provider, so `opencode` points at the fake provider for the length of the run. |
 | `DUX_NO_TAILSCALE=0` | Drops `--no-tailscale`, which otherwise refuses a live mode change for the whole run and changes what the Preferences dialog says. |
 
 A website test asserts the loop stays closed: every PNG has a scene, every scene

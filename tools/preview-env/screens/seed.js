@@ -44,11 +44,11 @@ const MACROS = [
 
 // The changed files the panes show. Written straight into each worktree, so the
 // counts in the Changes pane are git's own answer rather than a fixture.
+// Four added lines, which is what the Changes pane counts beside README.md.
 const README_ADDENDUM = `
-## Preview notes
-
 Seeded by the dux screenshot tool; this worktree is disposable.
 Reshooting the docs rewrites it from scratch.
+Everything above this line is the repository's own README.
 `
 
 const RATE_LIMIT_MAIN = `import time
@@ -73,6 +73,20 @@ function shellQuote(text) {
 // A heredoc whose body is never expanded, so the file lands byte for byte.
 function writeFile(path, body) {
   return `cat > ${shellQuote(path)} <<'DUXSEEDEOF'\n${body}DUXSEEDEOF\n`
+}
+
+// Agent creation is a worker chain (a branch check, a worktree, a provider
+// spawn) and the engine refuses a second one while it runs, so each creation is
+// waited out rather than slept over.
+async function waitForAgent(name, timeoutMs = 90000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const list = await get("/api/v1/sessions")
+    const found = list.find((s) => s.title === name)
+    if (found && found.tabs.length) return found
+    await sleep(1000)
+  }
+  throw new Error(`the agent ${name} never appeared`)
 }
 
 async function seedProject() {
@@ -120,8 +134,9 @@ async function seedManagedAgents(projectId) {
       name,
       copy_uncommitted_changes: false,
     })
+    await waitForAgent(name)
     console.log("created agent", name)
-    await sleep(2500)
+    await sleep(1500)
   }
 }
 
@@ -141,8 +156,9 @@ async function seedStandaloneAgent() {
     name: "design-notes",
     provider: "claude",
   })
+  await waitForAgent("design-notes")
   console.log("created standalone agent design-notes")
-  await sleep(3000)
+  await sleep(2000)
 }
 
 // refactor-cache carries one tab per provider, which is what the tab strip and
@@ -193,31 +209,49 @@ async function seedPullRequest() {
 
 // Changed files, written into two worktrees: the login fix's four-file set that
 // the Changes pane and its bulk bar are shot against, and the rate-limit rewrite
-// the editor's diff view shows.
+// the editor's diff view shows. The worktree is reset to HEAD first and every
+// file is then written whole, so a second seed run leaves the same counts and
+// anything an earlier experiment left behind cannot join the picture. The
+// gitignored upload directory survives `git clean` and is meant to.
 function seedChangedFiles() {
   const worktree = (branch) => `/data/dux/worktrees/demo-api/${branch}`
+  // Reset to HEAD, then write: the order is what makes the counts the same on a
+  // second run and keeps a file some earlier experiment left behind out of the
+  // Changes pane.
+  const reset = "git checkout -- .\n     git clean -qfd"
+  const readme = `git show HEAD:README.md > README.md
+     printf '%s' ${shellQuote(README_ADDENDUM)} >> README.md`
   containerSh(
     `cd ${worktree("fix-login-redirect")}
+     ${reset}
+     ${readme}
      ${writeFile("NOTES.md", "The redirect handler re-resolves the session on every hop.\n")}
      ${writeFile("src/cache.ts", "export const sessionTtlSeconds = 900\n")}
-     ${writeFile("src/redirect.ts", "export const maxRedirectHops = 3\n")}
-     printf '%s' ${shellQuote(README_ADDENDUM)} >> README.md`,
+     ${writeFile("src/redirect.ts", "export const maxRedirectHops = 3\n")}`,
   )
   containerSh(
     `cd ${worktree("add-rate-limits")}
+     ${reset}
+     ${readme}
      ${writeFile("src/main.py", RATE_LIMIT_MAIN)}
-     ${writeFile("src/retry.rs", "pub fn retry_limit() -> usize {\n    3\n}\n")}
-     printf '%s' ${shellQuote(README_ADDENDUM)} >> README.md`,
+     ${writeFile("src/retry.rs", "pub fn retry_limit() -> usize {\n    3\n}\n")}`,
   )
   console.log("changed files written into both worktrees")
 }
 
 async function main() {
+  // A fresh workspace opens on the welcome screen, which would otherwise sit
+  // over the first scene that happened to be shot before anything dismissed it.
+  await api("POST", "/api/v1/first-load/dismiss")
   const demoApi = await seedProject()
-  seedRemote()
   seedStandaloneFolder()
   await seedManagedAgents(demoApi.id)
   await seedStandaloneAgent()
+  // Deliberately after the agents: dux pulls the project before creating one,
+  // and the fixture remote is a URL nothing answers. Adding it now keeps the
+  // pull local while the worktrees are made and still gives the pull-request
+  // fixture the GitHub-looking remote it resolves against.
+  seedRemote()
   await seedTabs()
   await seedTerminals(demoApi.id)
   await api("PUT", "/api/v1/macros", { entries: MACROS })

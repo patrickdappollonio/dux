@@ -8,7 +8,9 @@ const { agents, clearToasts, freshen, goto, sleep, takeOver } = require("../lib.
 // and given exactly this long, which pins the number to the second it is
 // counting in; it is the one value in the committed set that a reshoot can move
 // by one.
-const TRANSCRIPT_SECONDS = 19
+// The rest of this scene (the navigation, the take-over, the typing) adds about
+// fifteen seconds of its own, which is why this number is small.
+const TRANSCRIPT_SECONDS = 4
 
 module.exports = {
   file: "sidebar-standalone.png",

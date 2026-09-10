@@ -55,13 +55,23 @@ function list() {
 async function shootOne(scene) {
   const mobile = scene.mod.viewport === "phone"
   const { browser, page, reassert } = await lib.open({ mobile })
+  // A scene that opens a second browser must not close it before the capture:
+  // a second device leaving is a thing the page reacts to, and the take-over
+  // card re-titles the moment its driver disconnects. So teardown is registered
+  // here and run after the shot rather than in the scene's own `finally`.
+  const afterShot = []
   try {
-    const clip = await scene.mod.shoot(page, { open: lib.open, mobile })
+    const clip = await scene.mod.shoot(page, {
+      open: lib.open,
+      mobile,
+      after: (fn) => afterShot.push(fn),
+    })
     await reassert()
     const out = path.join(outDir, scene.mod.file)
     await page.screenshot({ path: out, clip })
     return out
   } finally {
+    for (const fn of afterShot) await fn()
     await browser.close()
   }
 }

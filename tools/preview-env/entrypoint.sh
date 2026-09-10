@@ -27,6 +27,12 @@ git config --global init.defaultBranch main
 git config --global user.email "dux@example.com"
 git config --global user.name "dux preview"
 git config --global --add safe.directory '*'
+# Nothing in here can answer a credential prompt, and the container has a tty, so
+# a git operation against an unreachable remote would sit on "Username for ..."
+# forever and wedge whatever dux was doing. Fail fast instead.
+git config --global credential.helper ""
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/true
 
 for r in demo-api demo-web; do
   d="/repos/$r"
@@ -56,6 +62,10 @@ if [ "${DUX_SCREENS:-0}" = "1" ] && [ -d /fixtures ]; then
   echo "entrypoint: installing screenshot fixtures (stand-in gh, transcript provider)"
   install -m 0755 /fixtures/gh /usr/local/bin/gh
   install -m 0755 /fixtures/notes-agent /usr/local/bin/claude
+  # The tab strip shows one tab per provider, and dux refuses to open a tab for a
+  # CLI that is not on PATH. opencode is not installed here, so it points at the
+  # fake provider: that shot is about the strip, not about opencode.
+  ln -sf /usr/local/bin/fake-agent /usr/local/bin/opencode
   : > /data/screens-mode
 else
   rm -f /data/screens-mode
