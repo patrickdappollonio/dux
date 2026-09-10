@@ -4,13 +4,13 @@
 module.exports = async ({
   createAgent,
   createStandaloneAgent,
-  sendKeys,
+  selectAgent,
   setFixture,
   sleep,
 }) => {
-  // Idle first, working second: the sidebar floats the working agents to the top
-  // and orders each group by reverse creation, which is how the browser shot
-  // reads too.
+  // Idle first, working second: the sidebar floats the working agents to the
+  // top, which is what makes the three that are working the three at the top,
+  // as the browser shot reads too.
   await createAgent(0, "review-billing")
   await createAgent(0, "polish-onboarding")
   await createStandaloneAgent("/root/design-notes", "design-notes")
@@ -20,8 +20,9 @@ module.exports = async ({
   await createAgent(0, "add-rate-limits")
   await createAgent(0, "fix-login-redirect")
 
-  // The shot is of the second row, whose pane is the one streaming.
-  sendKeys("Down")
+  // The shot is of the agent whose pane is streaming, picked by name: which row
+  // it lands on is the sidebar's sort talking.
+  await selectAgent("add-rate-limits")
   // The pane is a live stream, so this is how many test batches end up on it.
   await sleep(6000)
 }

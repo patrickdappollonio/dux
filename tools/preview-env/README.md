@@ -204,9 +204,12 @@ their states, the tabs, the terminals, the folder agent, the changed files, the
 remote and the pull request. The seed is idempotent, so running it against an
 already-seeded container converges to the same scene.
 
-`reshoot.sh` brings the container up itself if it is not already serving with the
-screenshot fixtures. Those fixtures are the pieces an ordinary preview must not
-have, and they are installed only under `DUX_SCREENS=1`:
+`reshoot.sh` brings the preview up itself if it is not already serving with the
+screenshot fixtures, and seeds it. Both are for the browser scenes only: a
+terminal UI journey runs in a disposable container of its own, so reshooting one
+of those touches neither the preview nor its workspace. Those fixtures are the
+pieces an ordinary preview must not have, and they are installed only under
+`DUX_SCREENS=1`:
 
 | Fixture | Why |
 | --- | --- |

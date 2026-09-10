@@ -21,6 +21,7 @@ SRC="${DUX_SRC:-$(cd "$PREVIEW/../.." && pwd)}"
 SCREENS="$SRC/website/public/screens"
 PORT="${DUX_PORT:-8790}"
 
+export DUX_PORT="$PORT"
 export DUX_SCREENS=1
 export DUX_NO_TAILSCALE=0
 
@@ -90,25 +91,6 @@ for name in "${WANTED[@]}"; do
   manifest_line "$name" > /dev/null || fail "no scene named $name (try --list)"
 done
 
-# --- The container ----------------------------------------------------------
-# It has to be a screens container: the plain preview has neither the stand-in
-# gh nor the transcript provider, and it binds with --no-tailscale. The marker
-# file the entrypoint writes is how the two are told apart.
-answering() { curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/v1/workspace" > /dev/null 2>&1; }
-screens_mode() { compose exec -T dux test -f /data/screens-mode > /dev/null 2>&1; }
-
-if answering && screens_mode; then
-  echo ">> preview already serving on $PORT with the screenshot fixtures"
-else
-  echo ">> bringing the preview up with the screenshot fixtures"
-  (cd "$PREVIEW" && ./up.sh)
-  for _ in $(seq 1 60); do
-    answering && break
-    sleep 2
-  done
-  answering || fail "the preview never answered on port $PORT"
-fi
-
 # --- Sizes before -----------------------------------------------------------
 declare -A OLD_SIZE
 for name in "${WANTED[@]}"; do
@@ -120,11 +102,6 @@ for name in "${WANTED[@]}"; do
   fi
 done
 
-# --- Seed -------------------------------------------------------------------
-echo ">> seeding the scene"
-(cd "$HERE" && node seed.js)
-
-# --- Shoot ------------------------------------------------------------------
 WEB=()
 TUI=()
 for name in "${WANTED[@]}"; do
@@ -132,7 +109,32 @@ for name in "${WANTED[@]}"; do
   if [ "${fields[1]}" = "tui" ]; then TUI+=("$name"); else WEB+=("$name"); fi
 done
 
+# --- The browser scenes -----------------------------------------------------
+# Only these need the long-running preview. A terminal UI journey brings up a
+# disposable container of its own, so a reshoot of one of those touches neither
+# the preview nor its seeded workspace.
 if [ "${#WEB[@]}" -gt 0 ]; then
+  # It has to be a screens container: the plain preview has neither the stand-in
+  # gh nor the transcript provider, and it binds with --no-tailscale. The marker
+  # file the entrypoint writes is how the two are told apart.
+  answering() { curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/v1/workspace" > /dev/null 2>&1; }
+  screens_mode() { compose exec -T dux test -f /data/screens-mode > /dev/null 2>&1; }
+
+  if answering && screens_mode; then
+    echo ">> preview already serving on $PORT with the screenshot fixtures"
+  else
+    echo ">> bringing the preview up with the screenshot fixtures"
+    (cd "$PREVIEW" && ./up.sh)
+    for _ in $(seq 1 60); do
+      answering && break
+      sleep 2
+    done
+    answering || fail "the preview never answered on port $PORT"
+  fi
+
+  echo ">> seeding the scene"
+  (cd "$HERE" && node seed.js)
+
   echo ">> shooting ${#WEB[@]} browser scene(s)"
   (cd "$HERE" && node run.js "${WEB[@]}")
 fi
@@ -147,7 +149,9 @@ for name in "${TUI[@]}"; do
   echo ">> shooting terminal UI scene $name (${cols}x${rows}, $theme)"
   args=("$HERE/scenes/$name.js" "$SCREENS/$pngfile" --cols "$cols" --rows "$rows" --theme "$theme")
   [ -n "$crop" ] && args+=(--crop "$crop")
-  "$PREVIEW/tui-shot.sh" "${args[@]}"
+  # stdin closed: the capture runs `docker compose run`, which would otherwise
+  # read from this script's own input.
+  "$PREVIEW/tui-shot.sh" "${args[@]}" < /dev/null
   # tui-shot.sh writes three companions beside the PNG; the docs want the image
   # only, so the working artifacts do not land in website/public.
   rm -f "$SCREENS/$name.ansi" "$SCREENS/$name.txt" "$SCREENS/$name.json"

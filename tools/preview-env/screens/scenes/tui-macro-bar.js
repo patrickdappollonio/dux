@@ -1,8 +1,10 @@
 // The macro bar over an agent pane, listing the macros that pane can take.
-module.exports = async ({ createAgent, sendKeys, sleep, waitFor }) => {
+module.exports = async ({ createAgent, focusPane, sendKeys, sleep, waitFor }) => {
   await createAgent(0, "retry-budget")
   await waitFor("Waiting for the next instruction", 20000)
-  // The macro bar has a chord of its own rather than a palette command.
+  // The macro bar belongs to the pane, so the pane has to hold the focus; the
+  // chord is its own rather than a palette command.
+  await focusPane()
   sendKeys("C-\\")
   await waitFor("Macros", 10000)
   await sleep(800)

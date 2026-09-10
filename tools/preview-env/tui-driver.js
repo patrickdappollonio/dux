@@ -138,6 +138,18 @@ async function waitFor(needle, timeoutMs = 10000) {
   throw new Error(`timed out waiting for ${JSON.stringify(needle)}\n\n${captureText()}`)
 }
 
+/// Wait until any one of several strings is on screen, and say which.
+async function waitForAny(needles, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const text = captureText()
+    const hit = needles.find((needle) => text.includes(needle))
+    if (hit) return hit
+    await sleep(100)
+  }
+  throw new Error(`timed out waiting for any of ${JSON.stringify(needles)}\n\n${captureText()}`)
+}
+
 function sendKeys(...keys) {
   tmux("send-keys", "-t", `${session}:0.0`, ...keys)
 }
@@ -147,6 +159,7 @@ function sendText(text) {
 }
 
 async function addProject(absolutePath, label) {
+  await focusSidebar()
   sendKeys("a")
   await waitFor("Add Project: /")
   await browseTo(absolutePath)
@@ -160,9 +173,55 @@ async function palette(command) {
   sendKeys("C-p")
   await waitFor("Command Palette")
   sendText(command)
+  // The typed text lands in the input a frame before the list is filtered, so
+  // waiting for the command's own name can match the input line and run
+  // whatever was still highlighted underneath. Settle first, then confirm the
+  // match is on the list, then run it.
+  await sleep(800)
   await waitFor(command)
   sendKeys("Enter")
-  await sleep(600)
+  await sleep(800)
+}
+
+/// Put the focus on the agent pane without engaging it, which is where the
+/// pane's own chords (the macro bar) are answered and Enter still means "start
+/// typing". Only the center pane's footer offers Reconnect.
+async function focusPane() {
+  for (let i = 0; i < 4; i++) {
+    if (captureText().includes("Reconnect")) return
+    sendKeys("Tab")
+    await sleep(500)
+  }
+  throw new Error(`the agent pane never took focus\n\n${captureText()}`)
+}
+
+/// Add one provider tab to the selected agent and wait for it to be there.
+///
+/// Two confirmations, each waited for by name rather than slept over: the
+/// palette command opens the provider chooser, and the chooser's own Enter is
+/// what creates the tab. The pane is then focused AND interactive, so the focus
+/// is aimed back at dux before the caller's next chord.
+async function addTab(expectedCount) {
+  await palette("new-agent-tab")
+  await waitFor("New Tab Provider", 15000)
+  sendKeys("Enter")
+  await waitFor(`${expectedCount} tabs`, 30000)
+  await focusSidebar()
+}
+
+/// Put the focus back on the sidebar. Some actions (adding a tab) leave the
+/// agent pane focused AND interactive, where every key is forwarded to the child
+/// and a journey's next chord would be typed at the agent instead of acted on.
+/// Tab cycles the panes, and only the sidebar's footer offers Add project (the
+/// changes pane's footer opens with the same Move that a looser test would have
+/// matched).
+async function focusSidebar() {
+  for (let i = 0; i < 4; i++) {
+    if (captureText().includes("Add project")) return
+    sendKeys("Tab")
+    await sleep(500)
+  }
+  throw new Error(`the sidebar never took focus\n\n${captureText()}`)
 }
 
 /// Type an absolute path into whichever folder browser is open. The browser's
@@ -180,15 +239,20 @@ async function browseTo(absolutePath) {
 /// own name, which is what the screenshots show.
 async function createStandaloneAgent(absolutePath, label) {
   fs.mkdirSync(absolutePath, { recursive: true })
+  await focusSidebar()
   sendKeys("s")
   await waitFor("Standalone Agent In")
   await browseTo(absolutePath)
   await waitFor("Name standalone agent", 20000)
   sendKeys("Enter")
-  await waitFor(label, 30000)
+  await waitFor(`agent "${label}" running`, 60000)
+  await sleep(600)
 }
 
 async function createAgent(projectIndex, name) {
+  // Creating an agent leaves the center pane focused, so a second creation's
+  // key would land on a pane that has no binding for it.
+  await focusSidebar()
   sendKeys("n")
   await waitFor("New agent in project")
   if (projectIndex > 0) sendKeys(...Array(projectIndex).fill("Down"))
@@ -196,7 +260,35 @@ async function createAgent(projectIndex, name) {
   await waitFor("Name New Agent", 20000)
   sendText(name)
   sendKeys("Enter")
-  await waitFor(name, 30000)
+  // Wait for the creation to REPORT, not merely for the row to appear. The row
+  // shows up while the worktree is still being made, and dux focuses the new
+  // agent's pane when it finishes: a journey that carried on at the row would
+  // have its next keystrokes stolen by that focus change.
+  //
+  // Either report ends the wait. An agent born on a fixture that exits at once
+  // (which is how a journey stages the Inactive tail) never shows the created
+  // line at all: the error pre-empts it and drops the infos queued behind it.
+  await waitForAny([`"${name}" in project`, 'Press "r" to relaunch'], 60000)
+  await sleep(600)
+  // dux focuses the new agent's pane, and it is interactive there: leave every
+  // journey on the sidebar so the next key is a dux key, whatever it is.
+  await focusSidebar()
+}
+
+/// Select an agent by name rather than by counting rows. Which row an agent
+/// lands on is the sidebar's sort talking (working agents float, and the order
+/// within a group is not something a journey should be predicting), so the
+/// header's own crumb is what this walks the list against.
+async function selectAgent(name, maxRows = 24) {
+  await focusSidebar()
+  sendKeys(...Array(maxRows).fill("Up"))
+  await sleep(600)
+  for (let i = 0; i < maxRows; i++) {
+    if (captureText().includes(`agent: ${name}`)) return
+    sendKeys("Down")
+    await sleep(300)
+  }
+  throw new Error(`never reached the agent ${name}\n\n${captureText()}`)
 }
 
 async function main() {
@@ -209,13 +301,17 @@ async function main() {
   await addProject("/capture/repos/demo-api", "demo-api")
   await addProject("/capture/repos/demo-web", "demo-web")
   await journey({
+    addTab,
     captureText,
     createAgent,
     createStandaloneAgent,
     duxHome,
+    focusPane,
+    focusSidebar,
     palette,
     repos,
     seedLooseWorktree,
+    selectAgent,
     sendKeys,
     sendText,
     setFixture,

@@ -5,6 +5,9 @@ module.exports = async ({ createAgent, palette, seedLooseWorktree, sendKeys, sle
   await createAgent(0, "cache-warmup")
   seedLooseWorktree("demo-api", "docs-pass")
   await palette("manage-worktrees")
+  // The command asks which project first; demo-api is the row it opens on.
+  await waitFor("Manage worktrees in project", 15000)
+  sendKeys("Enter")
   await waitFor("Manage Worktrees", 15000)
   await sleep(800)
   // The removable worktree is the first row and starts selected, so Enter is the

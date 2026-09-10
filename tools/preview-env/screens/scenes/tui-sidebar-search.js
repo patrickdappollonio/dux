@@ -4,26 +4,37 @@
 // The workspace is built inline rather than shared with
 // tui-agent-list-two-line.js: the capture container mounts one journey file and
 // nothing beside it, so a scene cannot require a helper.
-module.exports = async ({ createAgent, palette, sendKeys, sendText, sleep, waitFor }) => {
+module.exports = async ({
+  addTab,
+  createAgent,
+  focusSidebar,
+  sendKeys,
+  sendText,
+  setFixture,
+  sleep,
+  waitFor,
+}) => {
+  // Born on the fixture that exits at once, so these two land in the Inactive
+  // tail and the filter has something to hide as well as something to keep.
+  await setFixture("failure")
   for (const name of ["docs-pass", "release-notes"]) {
     await createAgent(0, name)
-    await palette("kill-running")
     await sleep(1500)
   }
+  await setFixture("steady")
 
   await createAgent(0, "retry-budget")
-  for (let i = 0; i < 2; i++) {
-    await palette("new-agent-tab")
-    await sleep(800)
-    sendKeys("Enter")
-    await sleep(2500)
-  }
-  await waitFor("3 tabs", 15000)
+  await addTab(2)
+  await addTab(3)
   await createAgent(0, "retry-tests")
   await createAgent(0, "cache-warmup")
 
+  // The filter is a sidebar key, and creation left the center pane focused.
+  await focusSidebar()
   sendKeys("/")
-  await sleep(500)
+  // The pane title counts the filter's matches the moment it opens, which is how
+  // this knows the field is there to type into.
+  await waitFor("/5)", 10000)
   sendText("retry")
   await sleep(800)
   // The filter leaves the selection where it was; the shot is of the second
