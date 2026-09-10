@@ -372,3 +372,11 @@ export interface EventsClientMessage {
   subscribe?: string[]
   unsubscribe?: string[]
 }
+
+// The `202 Accepted` body of a create the server stopped waiting on: the id of
+// the operation whose outcome arrives as a `status` event under the same `key`,
+// so a caller correlates the final instead of polling for the record. `null`
+// when the dispatch minted no keyed operation at all.
+export interface AcceptedOperation {
+  op_id: string | null
+}

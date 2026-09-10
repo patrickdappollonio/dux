@@ -4,6 +4,7 @@
 import { createJsonRequest } from "./jsonRequest"
 import type { DeleteWorktreeReply } from "./worktreeDelete"
 import type {
+  AcceptedOperation,
   BranchWarningView,
   InspectKind,
   ProjectView,
@@ -38,6 +39,8 @@ const request = createJsonRequest(
 )
 
 export const projectsApi = {
+  // 201 with the created project once it surfaces, otherwise 202 with the
+  // operation id to correlate the outcome on the events socket.
   create: (body: {
     path: string
     name?: string
@@ -48,7 +51,7 @@ export const projectsApi = {
     // Adopt a plain folder: `git init`, seed a starter .gitignore, empty initial
     // commit, then register. Outranks `create_initial_commit` server-side.
     init_repo?: boolean
-  }) => request<ProjectView>("POST", "/api/v1/projects", body),
+  }) => request<ProjectView | AcceptedOperation>("POST", "/api/v1/projects", body),
   remove: (id: string) =>
     request<void>("DELETE", `/api/v1/projects/${encodeURIComponent(id)}`),
   // The destructive cascade: removes the project, its agents and their worktrees

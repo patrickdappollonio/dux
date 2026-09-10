@@ -4,6 +4,7 @@
 
 import { createJsonRequest } from "./jsonRequest"
 import type {
+  AcceptedOperation,
   SessionView,
   StartupLogContent,
   StartupLogsList,
@@ -135,8 +136,12 @@ export type BranchUnpushed = {
 }
 
 export const sessionsApi = {
+  // 201 with the created session once it surfaces, otherwise 202 with the
+  // operation id to correlate the outcome on the events socket. Nothing reads
+  // the deferred half today; the type says it exists so a reader cannot assume
+  // a `SessionView` is always what came back.
   create: (body: CreateSessionBody) =>
-    request<SessionView>("POST", "/api/v1/sessions", body),
+    request<SessionView | AcceptedOperation>("POST", "/api/v1/sessions", body),
   // Ask which project a typed pull-request reference belongs to. A read: it
   // starts nothing, so a refusal (unreadable text, a bare number, a host dux
   // may not ask about) comes back as a 400 with the reason rather than a toast.
