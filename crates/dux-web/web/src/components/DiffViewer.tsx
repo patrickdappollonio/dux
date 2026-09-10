@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { DiffEditor, type DiffOnMount } from "@monaco-editor/react"
-import type { editor as MonacoEditor } from "monaco-editor"
+import type { editor as MonacoEditor, IDisposable } from "monaco-editor"
 // Importing the shared bootstrap wires Monaco's self-host (workers + bundled
 // instance) before DiffEditor mounts, and gives us the path→language helper.
 import { monacoLanguageForPath } from "@/lib/monacoSetup"
 import { allDeleteDiffOptions } from "@/lib/diffPresentation"
+import { diffQuitEarly } from "@/lib/diffComputation"
 
 interface DiffViewerProps {
   // Worktree-relative path, used only to pick the syntax language for both sides.
@@ -53,9 +54,16 @@ export default function DiffViewer({
   // setValue, since no model paths are passed.
   const modelsRef = useRef<MonacoEditor.IDiffEditorModel | null>(null)
   const editorRef = useRef<MonacoEditor.IStandaloneDiffEditor | null>(null)
+  const diffListenerRef = useRef<IDisposable | null>(null)
+  // Whether Monaco gave up on the diff before it finished. A viewer told
+  // nothing reads a coarse diff as the truth about the file.
+  const [quitEarly, setQuitEarly] = useState(false)
   const handleMount: DiffOnMount = (editorInstance) => {
     editorRef.current = editorInstance
     modelsRef.current = editorInstance.getModel()
+    diffListenerRef.current = editorInstance.onDidUpdateDiff(() => {
+      setQuitEarly(diffQuitEarly(editorInstance))
+    })
   }
   useEffect(() => {
     return () => {
@@ -63,6 +71,8 @@ export default function DiffViewer({
       const models = modelsRef.current
       editorRef.current = null
       modelsRef.current = null
+      diffListenerRef.current?.dispose()
+      diffListenerRef.current = null
       if (!models) return
       // React runs a deleted subtree's cleanups parent-first, so this runs
       // while the library's DiffEditor child is still live and its widget still
@@ -81,43 +91,60 @@ export default function DiffViewer({
   }, [])
 
   return (
-    <DiffEditor
-      // The web UI is dark-only (main.tsx force-adds `.dark`), matching vs-dark.
-      theme="vs-dark"
-      original={original}
-      modified={modified}
-      language={language}
-      onMount={handleMount}
-      // Leave the models to us on unmount (see modelsRef cleanup above): the
-      // library otherwise disposes them before the widget, tripping Monaco's
-      // "TextModel got disposed before DiffEditorWidget model got reset".
-      keepCurrentOriginalModel
-      keepCurrentModifiedModel
-      options={{
-        readOnly: true,
-        // The original side is always read-only; be explicit so a future Monaco
-        // default change can't make it editable.
-        originalEditable: false,
-        // Interleaved (unified) rather than two side-by-side panes: keeps the
-        // file tree's space and matches the old diff's single-column layout.
-        renderSideBySide: false,
-        fontSize: 14,
-        lineHeight: 1.6,
-        // Breathing room between the line-number gutter and the code so the text
-        // isn't flush against the numbers. The +/- line background still fills the
-        // row; this only insets the text (Monaco default is a cramped ~10px).
-        lineDecorationsWidth: 16,
-        wordWrap: "on",
-        minimap: { enabled: false },
-        scrollBeyondLastLine: false,
-        automaticLayout: true,
-        // Hide the inline change-accept arrows: this is a viewer, not a merge UI.
-        renderMarginRevertIcon: false,
-        // All-delete diffs drop the overview ruler (a canvas, so CSS can't blank
-        // its phantom green speck) and the current-line highlight (it borders
-        // the phantom empty row). See allDeleteDiffOptions for the reasoning.
-        ...allDeleteDiffOptions(allDelete),
-      }}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      {quitEarly && (
+        <p
+          className="border-b border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          data-testid="diff-quit-early-notice"
+        >
+          This diff was cut short because it took too long to compute; the
+          highlights may be coarse.
+        </p>
+      )}
+      <div className="min-h-0 flex-1">
+        <DiffEditor
+          // The web UI is dark-only (main.tsx force-adds `.dark`), matching vs-dark.
+          theme="vs-dark"
+          original={original}
+          modified={modified}
+          language={language}
+          onMount={handleMount}
+          // Leave the models to us on unmount (see modelsRef cleanup above): the
+          // library otherwise disposes them before the widget, tripping Monaco's
+          // "TextModel got disposed before DiffEditorWidget model got reset".
+          keepCurrentOriginalModel
+          keepCurrentModifiedModel
+          options={{
+            readOnly: true,
+            // The original side is always read-only; be explicit so a future Monaco
+            // default change can't make it editable.
+            originalEditable: false,
+            // Interleaved (unified) rather than two side-by-side panes: keeps the
+            // file tree's space and matches the old diff's single-column layout.
+            renderSideBySide: false,
+            fontSize: 14,
+            lineHeight: 1.6,
+            // Breathing room between the line-number gutter and the code so the text
+            // isn't flush against the numbers. The +/- line background still fills the
+            // row; this only insets the text (Monaco default is a cramped ~10px).
+            lineDecorationsWidth: 16,
+            wordWrap: "on",
+            minimap: { enabled: false },
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            // Hide the inline change-accept arrows: this is a viewer, not a merge UI.
+            renderMarginRevertIcon: false,
+            // Monaco's default is 5 seconds, which a large but perfectly
+            // readable file reaches; six times that is still bounded, and the
+            // notice above says so when even that was not enough.
+            maxComputationTime: 30000,
+            // All-delete diffs drop the overview ruler (a canvas, so CSS can't blank
+            // its phantom green speck) and the current-line highlight (it borders
+            // the phantom empty row). See allDeleteDiffOptions for the reasoning.
+            ...allDeleteDiffOptions(allDelete),
+          }}
+        />
+      </div>
+    </div>
   )
 }
