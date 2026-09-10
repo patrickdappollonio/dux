@@ -11,6 +11,7 @@ use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::model::{AgentSession, SessionStatus, TerminalOwner};
 use crate::pty::PtyClient;
 use crate::tab_verdict::TabRunEnding;
+use crate::text::count_of;
 
 use super::Engine;
 
@@ -356,11 +357,6 @@ fn force_survivors_and_count_exited<'a>(clients: impl Iterator<Item = &'a mut Pt
     exited
 }
 
-/// `"1 agent"` / `"2 agents"`: pluralize `word` for `n`.
-fn pluralize(n: usize, word: &str) -> String {
-    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
-}
-
 /// The line logged (and echoed by surfaces) when graceful shutdown begins.
 pub fn format_shutdown_start(
     agents: usize,
@@ -369,8 +365,8 @@ pub fn format_shutdown_start(
 ) -> String {
     format!(
         "Requesting {} and {} to gracefully shut down, timeout {}s.",
-        pluralize(agents, "agent"),
-        pluralize(terminals, "terminal"),
+        count_of(agents, "agent"),
+        count_of(terminals, "terminal"),
         grace.as_secs()
     )
 }
@@ -389,16 +385,16 @@ pub fn format_shutdown_result(report: &ShutdownReport) -> String {
             .saturating_sub(report.terminals_exited);
         format!(
             "{} and {} exited successfully. Force-closing {} and {}, then exiting...",
-            pluralize(report.agents_exited, "agent"),
-            pluralize(report.terminals_exited, "terminal"),
-            pluralize(remaining_agents, "agent"),
-            pluralize(remaining_terminals, "terminal"),
+            count_of(report.agents_exited, "agent"),
+            count_of(report.terminals_exited, "terminal"),
+            count_of(remaining_agents, "agent"),
+            count_of(remaining_terminals, "terminal"),
         )
     } else {
         format!(
             "All {} and {} exited gracefully in {:.1}s.",
-            pluralize(report.agents_total, "agent"),
-            pluralize(report.terminals_total, "terminal"),
+            count_of(report.agents_total, "agent"),
+            count_of(report.terminals_total, "terminal"),
             report.elapsed.as_secs_f64()
         )
     }

@@ -12,6 +12,7 @@ use crate::engine::events::{
 use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
 use crate::ids::TabIdRef;
 use crate::model::Project;
+use crate::text::count_of;
 use crate::worker::{
     AgentLaunchFailedData, AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction,
     PullOutcome, PullTarget, WorkerEvent,
@@ -704,10 +705,7 @@ impl Engine {
                 let msg = if self.config.env.is_empty() {
                     "Global environment variables cleared.".to_string()
                 } else {
-                    format!(
-                        "Saved {} global environment variable(s). New agents and terminals will receive them unless a project overrides the same key.",
-                        self.config.env.len()
-                    )
+                    saved_global_env_message(self.config.env.len())
                 };
                 Ok(EventReaction::Status(StatusUpdate::info(msg)))
             }
@@ -813,7 +811,7 @@ impl Engine {
                 let msg = if count == 0 {
                     "All macros removed. The macro list is now empty.".to_string()
                 } else {
-                    format!("Saved {count} macro(s).")
+                    saved_macros_message(count)
                 };
                 Ok(EventReaction::Status(StatusUpdate::info(msg)))
             }
@@ -1247,6 +1245,22 @@ fn project_added_reaction(
         },
         status_op_id: None,
     }))
+}
+
+/// The status line confirming a global environment save, counting the
+/// variables and matching the pronoun that refers back to them.
+fn saved_global_env_message(count: usize) -> String {
+    let them = if count == 1 { "it" } else { "them" };
+    format!(
+        "Saved {}. New agents and terminals will receive {them} unless a project overrides \
+         the same key.",
+        count_of(count, "global environment variable")
+    )
+}
+
+/// The status line confirming a macro save, counting the macros written.
+fn saved_macros_message(count: usize) -> String {
+    format!("Saved {}.", count_of(count, "macro"))
 }
 
 fn removed_agents_detail(removed: usize) -> String {
@@ -2961,5 +2975,25 @@ mod tests {
             }
             other => panic!("expected a message final, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn saved_env_vars_message_counts_the_variables() {
+        assert_eq!(
+            saved_global_env_message(1),
+            "Saved 1 global environment variable. New agents and terminals will receive it \
+             unless a project overrides the same key."
+        );
+        assert_eq!(
+            saved_global_env_message(3),
+            "Saved 3 global environment variables. New agents and terminals will receive them \
+             unless a project overrides the same key."
+        );
+    }
+
+    #[test]
+    fn saved_macros_message_counts_the_macros() {
+        assert_eq!(saved_macros_message(1), "Saved 1 macro.");
+        assert_eq!(saved_macros_message(3), "Saved 3 macros.");
     }
 }

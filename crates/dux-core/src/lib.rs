@@ -57,6 +57,7 @@ pub mod tab_verdict;
 pub mod tailscale;
 pub mod term_identity;
 pub mod terminal_title;
+pub mod text;
 pub mod theme;
 pub mod urls;
 pub mod viewmodel;

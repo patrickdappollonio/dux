@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::config::ProjectConfig;
 use crate::model::{AgentSession, AgentTab, ProviderKind, SessionStatus};
+use crate::text::count_of;
 
 /// A stored PR association loaded from the database.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,7 +255,8 @@ impl SessionStore {
         };
         if let Some(frozen) = frozen_titles {
             crate::logger::info(&format!(
-                "one-time migration: froze title for {frozen} legacy session(s)"
+                "one-time migration: froze the title of {}",
+                count_of(frozen, "legacy session")
             ));
         }
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
@@ -520,7 +522,8 @@ impl SessionStore {
         tx.commit()
             .context("failed to commit the slot tab migration")?;
         crate::logger::info(&format!(
-            "one-time migration: gave {count} session(s) a stored first tab"
+            "one-time migration: gave {} a stored first tab",
+            count_of(count, "session")
         ));
         Ok(())
     }
