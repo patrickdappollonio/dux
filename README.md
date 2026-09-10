@@ -30,6 +30,8 @@ One thing worth knowing before you point a browser at anything: **there is no lo
 
 ## Install
 
+dux targets macOS and Linux only. There is no native Windows build; Windows users run dux through WSL2, which is Linux.
+
 **Homebrew (macOS and Linux):**
 
 On macOS, Homebrew is the preferred route. This command taps the source and installs dux in one shot, because life's too short for a two-command install:
@@ -53,7 +55,7 @@ For a one-off run without keeping it around:
 npx -y @patrickdappollonio/dux
 ```
 
-**Shell (all platforms):**
+**Shell (Linux and macOS):**
 
 The install script sniffs out your operating system and architecture, then grabs the matching release archive. No guessing which tarball has your name on it:
 
@@ -98,8 +100,8 @@ Worth being straight about what that buys you: it catches a corrupt or truncated
 
 ## Prerequisites
 
-- **`git`** — dux is built around git worktrees, so git is non-negotiable. If it's not on your PATH, dux won't get very far.
-- **`gh` CLI** *(optional)* — authenticate it with your GitHub account and dux can pull PR statuses, check details, and show them right in the interface. Not required, but you'll miss it once you've tried it.
+- **`git`**: dux is built around git worktrees, so git is non-negotiable. If it's not on your PATH, dux won't get very far.
+- **`gh` CLI** *(optional)*: authenticate it with your GitHub account and dux can pull PR statuses, check details, and show them right in the interface. Not required, but you'll miss it once you've tried it.
 
 Building from source instead? `cargo build` is the whole story, though it also builds the React web UI (which is compiled into the binary), so you'll want Node 22+ on your PATH. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the details, including how to skip the web UI build if you only care about the Rust side.
 
@@ -107,17 +109,17 @@ Building from source instead? `cargo build` is the whole story, though it also b
 
 dux organizes work around **projects** (git repos) and **agents** (worktree sessions). When you create an agent, dux branches off a new git worktree so the agent has its own isolated copy of the code. No conflicts with your main checkout, no stepping on other agents' changes.
 
-You can also point an agent at a folder you already have, with no project, no branch and no worktree of dux's: a **standalone agent**. In the terminal UI it has a key of its own in the agents pane and inside the project chooser (the `?` help overlay names both, and they are rebindable), plus the `new-standalone-agent` palette command; in the browser it lives in the launcher's `⋯` menu. Both surfaces ask you to name it once you have picked the folder, and the name is optional: a blank name means the folder's name, and a typed one is used as you typed it, interior spaces and punctuation included, with surrounding whitespace trimmed. dux runs the provider there and never creates, moves or removes that folder. The branch-identity features (push, pull, fork, pull requests) do not exist for one, and the changes panel follows the folder: you get a real one when the folder is itself a git repository.
+You can also point an agent at a folder you already have, with no project, no branch and no worktree of dux's: a **standalone agent**. In the terminal UI it has a key of its own in the agents pane and inside the project chooser (the `?` help overlay names both, and they are rebindable), plus the `new-standalone-agent` palette command; in the browser it lives in the launcher's `⋯` menu. Both surfaces ask you to name it once you have picked the folder, and the name is optional: a blank name means the folder's name, and a typed one is used as you typed it, interior spaces and punctuation included, with surrounding whitespace trimmed. dux runs the provider there and never creates, moves or removes that folder. The branch-identity features (push, pull, fork, pull requests) do not exist for one, and the changes panel follows the folder: you get a real one when the folder is itself a git repository. Having no project, it gets the global `[env]` table with no project overlay on top, and no startup command runs, because a startup command is a provisioning step for a worktree dux just made. One more thing to know: the hidden upload directory dux keeps inside the folder for files you drop on the agent outlives the agent, since deleting a standalone agent removes dux's own record and nothing of yours.
 
-Already have a Git worktree you want dux to use? The `new-agent-from-worktree` command in the palette lets you pick a project from the chooser and then choose from its existing worktrees. If the worktree is already managed by dux, dux reuses it and reconnects like a continuable session; if it's outside dux's managed worktree directory, dux copies it into a fresh managed worktree first so the original checkout is left alone.
+Already have a Git worktree you want dux to use? The `new-agent-from-worktree` command in the palette lets you pick a project from the chooser and then choose from its existing worktrees. If the worktree is already managed by dux, dux reuses it and reconnects like a continuable session; if it's outside dux's managed worktree directory (terminal UI only), dux forks it: a new managed worktree branched from that worktree's current `HEAD`, with dirty and untracked files copied across, so the original checkout is left alone. Gitignored files do not travel.
 
 In the terminal UI, the interface has three panes:
 
-- **Left:** a flat list of your agents, most-active first, with search and a project chooser
+- **Left:** a flat list of your agents, most-active first by default, with search and a project chooser. The sort order is a setting (activity, recency, name, or your own hand-placed order) and it is shared by both surfaces
 - **Center:** the agent's live terminal (or a file diff). Focus it and type: your keystrokes go straight to the agent, right there in the window, while dux's own shortcuts keep working around it
 - **Right:** changed files, staging, and diffs
 
-Tab between panes. Resize them with keyboard or mouse. Collapse the sidebar or git pane when you want more room. Toggle the agent fullscreen when you want every key and every cell to belong to it. It's your layout.
+Move focus between the panes with the keyboard, and resize them with keyboard or mouse. Collapse the sidebar or git pane when you want more room. Toggle the agent fullscreen when you want every key and every cell to belong to it. It's your layout.
 
 ### Bring Any CLI
 
@@ -130,7 +132,9 @@ args = ["--some-flag"]
 resume_args = ["--continue"]
 ```
 
-Set `resume_args` and dux can reconnect to detached or crashed sessions. Omit it if your CLI doesn't support resuming; dux will just relaunch it.
+`resume_args` is your CLI's own resume flag: when dux relaunches the provider in a worktree it has already run in, it passes those args so the CLI picks its own conversation for that directory back up. dux is not reattaching to a live process, it is starting a new one that continues where the old one left off. Omit `resume_args` if your CLI doesn't support resuming; dux will just relaunch it fresh.
+
+Provider blocks carry a few more keys than these: `install_hint` (what to suggest when the command isn't on your PATH), `resume_wait_timeout_ms`, `forward_scroll`, and `web_dragdrop_paste` (how a dropped file's path is quoted for this CLI). The [docs site](https://getdux.app/docs) covers each of them, and so do the comments in your config file.
 
 When a provider supports resume args, dux can auto-reopen agents that were still running when the app exited. A normal agent exit with status code 0 is treated as intentional and will not be reopened. The feature is off by default; enable it globally with `[ui].auto_reopen_agents = true`, opt out a project with `auto_reopen_agents = false` in its `[[projects]]` entry, or use the `toggle-project-auto-reopen-agents` and `toggle-agent-auto-reopen` palette commands for project and per-agent opt-outs.
 
@@ -259,21 +263,21 @@ That serves the same workspace, not a copy of it and not a dashboard bolted on t
 
 You get the workspace, not a read-only view of it: attach to any agent's terminal and its provider tabs, spawn companion and project terminals, create, fork and adopt agents, stage and commit and push, review diffs, edit any file in a worktree with a real editor right in the page (your `config.toml` included), add a project by browsing the server's filesystem, and get desktop notifications when an agent wants you.
 
-Already in the TUI with agents running? You don't need a second dux, and you couldn't have one anyway: only one dux can use your dux directory at a time, so a second one refuses to start and says another dux is already running there. The one you have can serve the browser two ways instead. Run the `start-web-server` palette command and your running TUI starts serving in place: your agents keep running, no relaunch and no lost conversations; your terminal becomes a status screen, and leaving that screen drops you back into the TUI with everything still running. Or set `serve_while_tui = true` under `[server]` (the `start-background-server` palette command does it live) and dux serves the browser *behind* the TUI, so the same workspace is on your terminal and your phone at once. The TUI then joins the same one-driver-at-a-time model the browsers use: one device drives a terminal, everyone else watches the live output, nothing passive ever takes it away or hands it back, and a card covers any terminal that is not yours to type into, naming the device that is driving it or saying Running in the background when nobody is. Its Take over button is the one way to claim it. The terminal and the browser show the same card. The top bar says `● serving :3890` for as long as the listener is up, growing a `· 2 connected` when browsers are on it, which, since there is no login, is worth knowing.
+Already in the TUI with agents running? You don't need a second dux, and you couldn't have one anyway: only one dux can use your dux directory at a time, so a second one refuses to start and says another dux is already running there. The one you have can serve the browser two ways instead. Run the `start-web-server` palette command and your running TUI starts serving in place: your agents keep running, no relaunch and no lost conversations; your terminal becomes a status screen, and leaving that screen drops you back into the TUI with everything still running. Or set `serve_while_tui = true` under `[server]` (the `start-background-server` palette command does it live, and `stop-background-server` stops it again with your agents still running) and dux serves the browser *behind* the TUI, so the same workspace is on your terminal and your phone at once. The TUI then joins the same one-driver-at-a-time model the browsers use: one device drives a terminal, everyone else watches the live output, nothing passive ever takes it away or hands it back, and a card covers any terminal that is not yours to type into, naming the device that is driving it or saying Running in the background when nobody is. Its Take over button is the one way to claim it. The terminal and the browser show the same card. The top bar says `● serving :3890` for as long as the listener is up, growing a `· 2 connected` when browsers are on it, which, since there is no login, is worth knowing.
 
-**How it binds.** By default `dux server` binds `127.0.0.1:3890`, loopback only, so nothing leaves the machine. If the `tailscale` CLI is around it also binds this machine's Tailscale address on the same port, so your own tailnet devices reach dux over WireGuard. On the default `tailscale = "auto"` that leg follows the interface: dux binds it whenever your tailnet address is there, drops that one listener when it goes away, and binds it again when it comes back, all while serving. Set `tailscale = "yes"` under `[server]` to look once and keep what it finds, `"no"` (or `--no-tailscale` for a single run) to skip it, and when Tailscale isn't there dux warns and serves the configured host only. You can change the mode while dux is serving, from the TUI palette's `set-tailscale-mode` or the browser's Preferences dialog: it moves the listener there and then and saves your choice. `--bind <ADDR:PORT>` sets an exact address and port, `--port <PORT>` overrides just the port. A required address that can't bind is fatal and says so; the Tailscale leg failing to bind is only a warning. Both of the in-app ways, `start-web-server` and `serve_while_tui`, always serve loopback plus Tailscale and never a custom host, so reach for `dux server` when you need a specific interface.
+**How it binds.** By default `dux server` binds `127.0.0.1:3890`, loopback only, so nothing leaves the machine. If the `tailscale` CLI is around it also binds this machine's Tailscale address on the same port, so your own tailnet devices reach dux over WireGuard. On the default `tailscale = "auto"` that leg follows the interface: dux binds it whenever your tailnet address is there, drops that one listener when it goes away, and binds it again when it comes back, all while serving. Set `tailscale = "yes"` under `[server]` to look once and keep what it finds, `"no"` (or `--no-tailscale` for a single run) to skip it, and when Tailscale isn't there dux warns and serves the configured host only. You can change the mode while dux is serving, from the TUI palette's `set-tailscale-mode` or the browser's Preferences dialog: it moves the listener there and then and saves your choice. `--bind <ADDR:PORT>` sets an exact address and port, and it wants an IP literal and a port (`0.0.0.0:3890`, `127.0.0.1:9000`): hostnames are not resolved, and the flag may be given only once. `--port <PORT>` overrides just the port. A required address that can't bind is fatal and says so; the Tailscale leg failing to bind is only a warning. Both of the in-app ways, `start-web-server` and `serve_while_tui`, always serve loopback plus Tailscale and never a custom host, so reach for `dux server` when you need a specific interface.
 
 **And there is no login.** None: no password, no token, no user accounts. dux is a single-tenant, trusted-access tool, and server mode is honest about that instead of pretending otherwise. Everyone who can reach the address shares one workspace: they can drive any agent or terminal, browse the server's filesystem, edit files in your worktrees, and see every session. That's deliberate, and it means access control is entirely a question of where you bind.
 
 The safe shapes are loopback (the default), your own tailnet, or a reverse proxy you put in front and authenticate yourself, which is also where TLS would live, since dux itself serves plain HTTP. The shape that isn't safe is a LAN or public address, `--bind 0.0.0.0:3890` and friends: that puts your agents and your worktrees in reach of anyone who can hit it. dux prints a loud warning before it does that, but the warning is the only thing standing there. Don't serve it to anyone you wouldn't hand a shell on that machine.
 
-Two defenses do always run, and they're about hostile web pages rather than about users: a Host-header allowlist, so a malicious site can't DNS-rebind your browser into the server, and a same-origin check on every live terminal connection and every request that changes something, so another site can't ride along. Both are automatic. If you reach dux by a name rather than an IP literal, a tailnet MagicDNS name or a proxy hostname, add it to `allowed_hosts` under `[server]` or the host guard answers `403`.
+Two defenses do always run, and they're about hostile web pages rather than about users: a Host-header allowlist, so a malicious site can't DNS-rebind your browser into the server, and a same-origin check on every live terminal connection and every request that changes something, so another site can't ride along. Both are automatic. If you reach dux by a name rather than an IP literal, a tailnet MagicDNS name or a proxy hostname, add it to `allowed_hosts` under `[server]` or the host guard answers `403`. That one is read when serving starts, so it takes a server restart rather than a config reload; dux says so when you reload a config that changed it.
 
 The rest of `[server]` tunes presentation and limits: console color, the per-request access log, the shutdown grace period, and how many live connections of each kind dux accepts at once. As ever, each key explains itself inline in your config file.
 
 ### Configuration
 
-The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline, so you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, default provider, and startup agent reopening behavior is configurable.
+The config file at `~/.config/dux/config.toml` (Linux, or `$XDG_CONFIG_HOME/dux/config.toml` when you have set that variable to an absolute path) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline, so you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, default provider, and startup agent reopening behavior is configurable.
 
 ```bash
 dux config path          # Print the config file path
@@ -383,6 +387,6 @@ Logs go to `dux.log` in the config directory. Control the level in your config:
 
 ```toml
 [logging]
-level = "info"   # "error", "info", or "debug"
+level = "info"   # "error", "warn", "info", or "debug"
 path = "dux.log" # relative to config dir, or use an absolute path
 ```
