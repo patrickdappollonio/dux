@@ -19,6 +19,10 @@ if (!fs.existsSync(journeyPath)) fail("the journey script is not mounted at /jou
 const journey = require(journeyPath)
 if (typeof journey !== "function") fail("journey.js must export an async function", 64)
 const fixture = journey.fixture || "steady"
+// An optional last word on the seeded config, so a journey that needs a setting
+// (a serving port, a set of macros, a theme) does not have to type it into a
+// dialog first. Takes the rendered config text and returns the text to write.
+const patchConfig = journey.config || ((text) => text)
 
 function readInteger(name, fallback, minimum) {
   const value = Number(process.env[name] || fallback)
@@ -88,7 +92,29 @@ function seedState() {
 command = "/usr/local/bin/fake-agent"
 args = []
 `
-  fs.writeFileSync(configPath, config)
+  fs.writeFileSync(configPath, patchConfig(config))
+}
+
+/// The fixture the fake provider reads is an environment variable, and the
+/// global `[env]` table is what dux hands a provider it spawns. Rewriting that
+/// table and reloading the config therefore changes what the NEXT agent comes up
+/// as, which is how one journey stages agents in different states.
+async function setFixture(name) {
+  const configPath = path.join(duxHome, "config.toml")
+  const text = fs.readFileSync(configPath, "utf8").replace(/\n\[env\][\s\S]*?(?=\n\[|$)/, "")
+  fs.writeFileSync(configPath, `${text}\n[env]\nDUX_FAKE_FIXTURE = "${name}"\n`)
+  await palette("reload-config")
+  await waitFor("Configuration reloaded", 15000)
+}
+
+/// Seed a worktree no agent holds, with something uncommitted in it, so the
+/// worktree manager has a removable row to show.
+function seedLooseWorktree(project, branch) {
+  const repo = path.join(repos, project)
+  const at = path.join(duxHome, "worktrees", project, branch)
+  fs.mkdirSync(path.dirname(at), { recursive: true })
+  git(repo, "worktree", "add", "-q", "-b", branch, at, "HEAD")
+  fs.appendFileSync(path.join(at, "README.md"), "\nA note left in this worktree.\n")
 }
 
 function tmux(...args) {
@@ -123,12 +149,43 @@ function sendText(text) {
 async function addProject(absolutePath, label) {
   sendKeys("a")
   await waitFor("Add Project: /")
+  await browseTo(absolutePath)
+  await waitFor(`Added project "${label}" to workspace`, 20000)
+}
+
+/// Open the command palette, type one command's exact name, and run it. Every
+/// journey that reaches a screen with no key of its own goes through here, which
+/// is also what the docs tell a user to do.
+async function palette(command) {
+  sendKeys("C-p")
+  await waitFor("Command Palette")
+  sendText(command)
+  await waitFor(command)
+  sendKeys("Enter")
+  await sleep(600)
+}
+
+/// Type an absolute path into whichever folder browser is open. The browser's
+/// "go" field starts on the last directory it was in, so the existing text is
+/// cleared before the path is typed.
+async function browseTo(absolutePath) {
   sendKeys("g")
   await waitFor("go: ")
   sendKeys("Home", ...Array(128).fill("DC"))
   sendText(absolutePath)
   sendKeys("Enter")
-  await waitFor(`Added project "${label}" to workspace`, 20000)
+}
+
+/// Create a standalone agent in a plain folder. An empty name means the folder's
+/// own name, which is what the screenshots show.
+async function createStandaloneAgent(absolutePath, label) {
+  fs.mkdirSync(absolutePath, { recursive: true })
+  sendKeys("s")
+  await waitFor("Standalone Agent In")
+  await browseTo(absolutePath)
+  await waitFor("Name standalone agent", 20000)
+  sendKeys("Enter")
+  await waitFor(label, 30000)
 }
 
 async function createAgent(projectIndex, name) {
@@ -151,7 +208,20 @@ async function main() {
   await waitFor("Press a to add a project")
   await addProject("/capture/repos/demo-api", "demo-api")
   await addProject("/capture/repos/demo-web", "demo-web")
-  await journey({ captureText, createAgent, sendKeys, sendText, sleep, waitFor })
+  await journey({
+    captureText,
+    createAgent,
+    createStandaloneAgent,
+    duxHome,
+    palette,
+    repos,
+    seedLooseWorktree,
+    sendKeys,
+    sendText,
+    setFixture,
+    sleep,
+    waitFor,
+  })
   await sleep(Number(process.env.DUX_TUI_SETTLE_MS || 400))
 
   const ansi = tmux("capture-pane", "-p", "-e", "-N", "-t", `${session}:0.0`)
