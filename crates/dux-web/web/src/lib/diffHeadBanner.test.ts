@@ -17,7 +17,7 @@ function head(overrides: Partial<FileDiffHead> = {}): FileDiffHead {
 describe("diffHeadBanner", () => {
   it("names the shown and total line counts", () => {
     expect(diffHeadBanner(head())).toBe(
-      "Diff cut here: showing the first 4000 of 12345 lines. Open the file in " +
+      "Diff cut here: showing the first 4,000 of 12,345 lines. Open the file in " +
         "your editor or run git diff to see the rest.",
     )
   })
@@ -28,7 +28,7 @@ describe("diffHeadBanner", () => {
 
   it("says more than when the count stopped short", () => {
     expect(diffHeadBanner(head({ total_is_at_least: true }))).toContain(
-      "of more than 12345 lines.",
+      "of more than 12,345 lines.",
     )
   })
 

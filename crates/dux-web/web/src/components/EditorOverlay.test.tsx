@@ -939,7 +939,7 @@ describe("a deleted file in the editor", () => {
     const viewer = await screen.findByTestId("diff-head-viewer")
     expect(viewer.getAttribute("data-text")).toContain("+new")
     expect(screen.getByTestId("diff-head-banner").textContent).toBe(
-      "Diff cut here: showing the first 4000 of 90210 lines. Open the file in " +
+      "Diff cut here: showing the first 4,000 of 90,210 lines. Open the file in " +
         "your editor or run git diff to see the rest.",
     )
     // The head is an ANSWER, not a failure: no error pane and nothing to retry.

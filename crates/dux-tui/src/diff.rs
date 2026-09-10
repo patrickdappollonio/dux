@@ -449,7 +449,9 @@ fn head_diff_output(
         return binary_diff_output(rel_path, old_size, new_size, theme);
     }
 
-    let mut lines: Vec<Line<'static>> = head.text.lines().map(|l| patch_line(l, theme)).collect();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // The banner leads. A reader who has to scroll four thousand rows to learn
+    // the diff was cut has already been misled by everything above it.
     let banner = dux_core::diff::diff_head_banner(&head);
     if !banner.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -457,33 +459,47 @@ fn head_diff_output(
             Style::default().fg(theme.hint_dim_desc_fg),
         )));
     }
+    // Header-ness is decided by POSITION: before the first `@@` of a file the
+    // lines are git's own chrome, after it they are content.
+    let mut in_header = true;
+    for line in head.text.lines() {
+        lines.push(patch_line(line, theme, &mut in_header));
+    }
     DiffOutput {
         lines,
         gutter_width: 0,
     }
 }
 
-/// Style one line of a unified patch by its leading marker. The file-header
-/// lines are matched before the `+`/`-` ones, which they otherwise look like.
-fn patch_line(line: &str, theme: &AppTheme) -> Line<'static> {
-    let style = if line.starts_with("diff --git ")
-        || line.starts_with("--- ")
-        || line.starts_with("+++ ")
-        || line.starts_with("index ")
-        || line.starts_with("new file mode ")
-        || line.starts_with("deleted file mode ")
-    {
-        Style::default()
-            .fg(theme.diff_file_header)
-            .add_modifier(Modifier::BOLD)
-    } else if line.starts_with("@@") {
+/// Style one line of a unified patch, tracking whether the walk is still in a
+/// file's header.
+///
+/// The leading characters alone cannot answer: a REMOVED line whose content is
+/// the SQL comment `-- foo` is printed `--- foo`, exactly like the old-side
+/// header, and an added `++ bar` is printed `+++ bar`. Only before the first
+/// `@@` do those spellings mean a header.
+fn patch_line(line: &str, theme: &AppTheme, in_header: &mut bool) -> Line<'static> {
+    let header_style = Style::default()
+        .fg(theme.diff_file_header)
+        .add_modifier(Modifier::BOLD);
+    let style = if line.starts_with("@@") {
+        *in_header = false;
         Style::default().fg(theme.diff_hunk)
+    } else if line.starts_with("diff --git ") {
+        // The next file in a multi-file patch: back into its header.
+        *in_header = true;
+        header_style
+    } else if *in_header {
+        header_style
     } else if line.starts_with('+') {
         Style::default().fg(theme.diff_add).bg(theme.diff_add_bg)
     } else if line.starts_with('-') {
         Style::default()
             .fg(theme.diff_remove)
             .bg(theme.diff_remove_bg)
+    } else if line.starts_with('\\') {
+        // git's "\ No newline at end of file": about the patch, not content.
+        Style::default().fg(theme.diff_hunk)
     } else {
         Style::default()
     };
@@ -1438,9 +1454,11 @@ mod tests {
             dux_core::diff::DIFF_HEAD_MAX_LINES + 1,
             "the head plus its banner, and nothing else"
         );
-        let banner = rendered.last().expect("a banner line");
+        // The banner LEADS: nobody scrolls four thousand rows to find out the
+        // diff was cut.
+        let banner = rendered.first().expect("a banner line");
         assert!(
-            banner.starts_with("Diff cut here: showing the first 4000 of "),
+            banner.starts_with("Diff cut here: showing the first 4,000 of "),
             "got {banner:?}"
         );
         assert!(
@@ -1448,6 +1466,44 @@ mod tests {
             "got {banner:?}"
         );
         assert_eq!(output.gutter_width, 0);
+    }
+
+    /// A removed SQL comment is printed `--- foo`, which is exactly what the
+    /// old-side file header looks like. Past the first `@@` it is content, and
+    /// painting it as chrome loses the removal colour the reader is there for.
+    #[test]
+    fn a_removed_sql_comment_past_the_first_hunk_is_content_not_a_header() {
+        let theme = AppTheme::default_dark();
+        let mut in_header = true;
+        let styles: Vec<Style> = [
+            "diff --git a/q.sql b/q.sql",
+            "--- a/q.sql",
+            "+++ b/q.sql",
+            "@@ -1,2 +1,2 @@",
+            "--- the old comment",
+            "+++ the new one",
+        ]
+        .iter()
+        .map(|line| patch_line(line, &theme, &mut in_header).spans[0].style)
+        .collect();
+
+        let header = Style::default()
+            .fg(theme.diff_file_header)
+            .add_modifier(Modifier::BOLD);
+        assert_eq!(styles[1], header, "the real old-side header");
+        assert_eq!(styles[2], header, "the real new-side header");
+        assert_eq!(
+            styles[4],
+            Style::default()
+                .fg(theme.diff_remove)
+                .bg(theme.diff_remove_bg),
+            "a removed line, not a header"
+        );
+        assert_eq!(
+            styles[5],
+            Style::default().fg(theme.diff_add).bg(theme.diff_add_bg),
+            "an added line, not a header"
+        );
     }
 
     /// A pair past the cap whose patch still fits under the head cap shows the

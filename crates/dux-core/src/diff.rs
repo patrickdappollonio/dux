@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use anyhow::Context;
 use serde::Serialize;
 
-use crate::text::count_of;
+use crate::text::group_digits;
 use crate::worktree_file::MAX_EDITABLE_BYTES;
 
 /// How many lines of a past-the-ceiling diff both surfaces show. Enough to read
@@ -171,21 +171,30 @@ fn read_prefix(path: &Path, limit: usize) -> anyhow::Result<Option<Vec<u8>>> {
     Ok(Some(buffer))
 }
 
-/// The one sentence both surfaces put above a cut-short diff. Empty when
-/// nothing was cut.
+/// The one sentence both surfaces put ABOVE a cut-short diff, word for word.
+/// Empty when nothing was cut.
+///
+/// Above rather than below: a reader who has to scroll four thousand rows to
+/// learn the diff was cut has already been misled by everything before it.
 pub fn diff_head_banner(head: &DiffHead) -> String {
     if !head.truncated {
         return String::new();
     }
-    let total = if head.total_is_at_least {
-        format!("more than {}", count_of(head.total_lines, "line"))
+    let noun = if head.total_lines == 1 {
+        "line"
     } else {
-        count_of(head.total_lines, "line")
+        "lines"
+    };
+    let lines = format!("{} {noun}", group_digits(head.total_lines));
+    let total = if head.total_is_at_least {
+        format!("more than {lines}")
+    } else {
+        lines
     };
     format!(
         "Diff cut here: showing the first {} of {total}. Open the file in your editor or run \
          git diff to see the rest.",
-        head.shown_lines
+        group_digits(head.shown_lines)
     )
 }
 
@@ -676,8 +685,8 @@ mod tests {
         };
         assert_eq!(
             diff_head_banner(&head),
-            "Diff cut here: showing the first 4000 of 12345 lines. Open the file in your editor \
-             or run git diff to see the rest."
+            "Diff cut here: showing the first 4,000 of 12,345 lines. Open the file in your \
+             editor or run git diff to see the rest."
         );
     }
 
@@ -694,7 +703,7 @@ mod tests {
             binary: false,
         };
         assert!(
-            diff_head_banner(&head).contains("of more than 2000000 lines."),
+            diff_head_banner(&head).contains("of more than 2,000,000 lines."),
             "unexpected banner: {}",
             diff_head_banner(&head)
         );
