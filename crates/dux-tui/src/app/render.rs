@@ -7170,7 +7170,9 @@ impl App {
         // problem, so the dialog scrolls (marker below) instead of
         // dropping lines with nothing to say it did.
         for line in error.lines() {
-            body_lines.push(Line::from(format!(" {line}")));
+            for row in indented_body_lines(line, inner_width) {
+                body_lines.push(Line::from(row));
+            }
         }
         let dialog = self.render_error_dialog_body(
             frame,
@@ -7271,8 +7273,11 @@ impl App {
         // git error explaining it runs past six lines, and the tail is
         // the part that says why. The body scrolls instead (marker in the
         // border column).
+        let inner_width = dialog_width.saturating_sub(2);
         for line in message.lines() {
-            body_lines.push(Line::from(format!(" {line}")));
+            for row in indented_body_lines(line, inner_width) {
+                body_lines.push(Line::from(row));
+            }
         }
         let dialog = self.render_error_dialog_body(
             frame,
@@ -7352,7 +7357,9 @@ impl App {
                 AgentInfoTone::Warning => Style::default().fg(self.theme.warning_fg),
                 AgentInfoTone::Neutral => Style::default().fg(self.theme.text_fg),
             };
-            body_lines.push(Line::from(Span::styled(format!(" {line}"), style)));
+            for row in indented_body_lines(line, inner_width) {
+                body_lines.push(Line::from(Span::styled(row, style)));
+            }
         }
         let body_height = wrapped_line_count(&body_lines, inner_width, false);
         let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
@@ -23221,6 +23228,85 @@ mod tests {
                 "every warning row starts one column in from the frame, {row:?} does not:\n{screen}"
             );
         }
+    }
+
+    /// A body sentence long enough that no dialog can hold it on one row, made
+    /// of distinct words so the first and the last are findable on screen.
+    const LONG_BODY_LINE: &str = "alpha bravo charlie delta echo foxtrot golf hotel india \
+                                  juliett kilo lima mike november oscar papa quebec romeo \
+                                  sierra tango uniform victor whiskey xray yankee zulu";
+
+    /// Assert every rendered row from the one holding `head` to the one holding
+    /// `tail` starts exactly one column in from the dialog frame.
+    ///
+    /// The continuation rows are the point: a `Paragraph` wrapping a line that
+    /// was indented by hand leaves them flush against the border.
+    fn assert_body_rows_hang_indented(screen: &str, head: &str, tail: &str) {
+        let rows: Vec<&str> = screen.lines().collect();
+        let first = rows
+            .iter()
+            .position(|row| row.contains(head))
+            .unwrap_or_else(|| panic!("the body must be on screen:\n{screen}"));
+        let last = rows
+            .iter()
+            .rposition(|row| row.contains(tail))
+            .unwrap_or_else(|| panic!("the body must end on screen:\n{screen}"));
+        assert!(
+            last > first,
+            "the body must actually wrap for this test to mean anything:\n{screen}"
+        );
+        let byte = rows[first].find(head).expect("the row");
+        let column = rows[first][..byte].chars().count();
+        for row in &rows[first..=last] {
+            let cells: Vec<char> = row.chars().collect();
+            assert_eq!(
+                (cells[column - 2], cells[column - 1], cells[column] == ' '),
+                ('│', ' ', false),
+                "every body row starts one column in from the frame, {row:?} does not:\n{screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_config_reload_failure_body_hangs_its_indent() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfigReloadFailed {
+            error: LONG_BODY_LINE.to_string(),
+            recover_old_config: false,
+            focus: ConfigReloadFailedFocus::Close,
+            scroll: 0,
+        };
+        let screen = rendered_screen(&mut app);
+        assert_body_rows_hang_indented(&screen, "alpha bravo", "zulu");
+    }
+
+    #[test]
+    fn the_add_project_failure_body_hangs_its_indent() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::AddProjectFailed {
+            message: LONG_BODY_LINE.to_string(),
+            return_prompt: Box::new(PromptState::None),
+            scroll: 0,
+        };
+        let screen = rendered_screen(&mut app);
+        assert_body_rows_hang_indented(&screen, "alpha bravo", "zulu");
+    }
+
+    #[test]
+    fn the_agent_info_body_hangs_its_indent() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::AgentInfo(AgentInfoPrompt {
+            session_label: "feature".to_string(),
+            lines: vec![(LONG_BODY_LINE.to_string(), AgentInfoTone::Neutral)],
+        });
+        let screen = rendered_screen(&mut app);
+        assert_body_rows_hang_indented(&screen, "alpha bravo", "zulu");
+        // The dialog sizes itself from the WRAPPED rows, so its one button is
+        // still on screen under a body that grew.
+        assert!(
+            screen.contains("Close"),
+            "the wrapped body must not push the button off the dialog:\n{screen}"
+        );
     }
 
     /// The wrapper is the reason the rows above line up, so its own contract is
