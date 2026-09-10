@@ -12,6 +12,7 @@
 //     its extra tabs nested by `order`, then that agent's terminals, then TOTAL.
 //     Sorting by CPU would reorder rows under the cursor on every poll.
 
+import { formatCount } from "./formatRegularCount"
 import { formatBytes, formatCpu } from "./formatStats"
 import type { ResourceStatsView } from "./resourcesApi"
 import { matchWireOwner, ownerKey } from "./terminalOwner"
@@ -264,7 +265,7 @@ export function taskManagerSummary(rows: readonly TaskRow[]): string | null {
 
   const total = rows.find((r) => r.kind === "total")?.stats ?? null
   if (total) {
-    parts.push(`${total.process_count} process${total.process_count === 1 ? "" : "es"}`)
+    parts.push(formatCount(total.process_count, "process", "processes"))
     parts.push(`${formatCpu(total.cpu_percent)} CPU`)
     parts.push(formatBytes(total.rss_bytes))
   }

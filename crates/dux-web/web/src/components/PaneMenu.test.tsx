@@ -144,7 +144,7 @@ describe("the phone's one pane menu", () => {
     expect(items.some((t) => t?.startsWith("Changes"))).toBe(false)
     expect(
       screen.getByTestId("pane-changes-count").getAttribute("aria-label"),
-    ).toBe("1 changed files")
+    ).toBe("1 changed file")
     // The way to the app's own actions, named for the control it stands in for.
     expect(items.some((t) => t?.includes("Settings"))).toBe(true)
   })

@@ -1,3 +1,5 @@
+import { formatRegularCount } from "./formatRegularCount"
+
 // The header metadata strip is one row of chips, each a glyph followed by its
 // value. Which chips exist and what each says is decided here rather than in the
 // components, so the agent and terminal variants cannot drift apart and the rule
@@ -59,7 +61,7 @@ export function headerChipTooltip(chip: HeaderChip, truncated: boolean): string 
 // pass the count unconditionally.
 export function terminalCountCaption(count: number): string | null {
   if (count <= 0) return null
-  return count === 1 ? "1 terminal" : `${count} terminals`
+  return formatRegularCount(count, "terminal")
 }
 
 export interface AgentChipsInput {

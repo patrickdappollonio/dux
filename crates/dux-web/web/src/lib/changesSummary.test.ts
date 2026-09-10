@@ -41,6 +41,13 @@ describe("changesSummary", () => {
     })
   })
 
+  it("counts a single changed file in the singular", () => {
+    // The label reaches a tooltip and an aria-label, so a screen reader must
+    // not hear "1 changed files".
+    const s = slice({ staged: [file("a.rs", "M")], unstaged: [] })
+    expect(changesSummary(s, "s1")?.countLabel).toBe("1 changed file")
+  })
+
   it("counts a deletion and a rename like any other changed file", () => {
     // The summary is a FILE COUNT, not a line-delta and not a per-status
     // breakdown, so no status code is weighted or dropped.

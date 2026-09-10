@@ -28,6 +28,7 @@ import {
 import { cn } from "@/lib/utils"
 import type { ProjectView } from "@/lib/types"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 
 // The New-agent picker: the home for agent creation and every project action,
 // since the flat list has no project headers. A searchable list of all
@@ -196,8 +197,8 @@ function PickerBody() {
                       ? null
                       : (worktreeCount ?? 0) === 0
                         ? "none"
-                        : `${worktreeCount} ${worktreeCount === 1 ? "worktree" : "worktrees"}`
-                    : `${count} ${count === 1 ? "agent" : "agents"}`
+                        : formatRegularCount(worktreeCount ?? 0, "worktree")
+                    : formatRegularCount(count, "agent")
                 return (
                   <div
                     key={project.id}

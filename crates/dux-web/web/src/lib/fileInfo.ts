@@ -2,6 +2,7 @@
 // shapes mirror `dux_core::worktree_file::WorktreeEntryInfo`.
 
 import { fileStatusMeta } from "@/lib/changedFiles"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 
 // What git has to say about the entry, kept apart on the wire (see the Rust
 // `GitStatusView`) because collapsing any two answers into a null makes the
@@ -54,7 +55,7 @@ const UNITS = ["KiB", "MiB", "GiB", "TiB"] as const
 // unit for scale plus the exact byte count for anyone checking a limit.
 export function formatBytes(bytes: number | null): string {
   if (bytes === null) return "-"
-  if (bytes < KIB) return bytes === 1 ? "1 byte" : `${bytes} bytes`
+  if (bytes < KIB) return formatRegularCount(bytes, "byte")
   let value = bytes / KIB
   let unit: string = UNITS[0]
   for (let i = 1; i < UNITS.length && value >= KIB; i += 1) {

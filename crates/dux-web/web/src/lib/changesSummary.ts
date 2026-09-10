@@ -3,6 +3,7 @@
 // different numbers. It rides the `session.changes` broadcast, so both update with no polling.
 
 import { changesCountFor } from "@/lib/agentVitals"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import type { ChangesSlice } from "@/lib/store"
 
 export interface ChangesSummary {
@@ -36,6 +37,6 @@ export function changesSummary(
   return {
     count,
     label: `±${count}`,
-    countLabel: `${count} changed files`,
+    countLabel: formatRegularCount(count, "changed file"),
   }
 }
