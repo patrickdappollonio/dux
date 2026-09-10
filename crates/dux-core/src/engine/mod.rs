@@ -4410,8 +4410,7 @@ impl Engine {
         }
         let others_same_provider = self.tab_ids_for_session(&session.id).into_iter().any(|id| {
             id != tab_id
-                && (self.providers.contains_key(&id)
-                    || self.is_in_flight(&InFlightKey::AgentLaunch(id.clone())))
+                && self.tab_is_live(id.as_ref_id())
                 && self.tab_running_provider(session, &id) == *provider
         });
         !others_same_provider
@@ -4494,16 +4493,24 @@ impl Engine {
         ids
     }
 
+    /// Whether one tab is running or coming up: it holds a provider PTY, or an
+    /// `AgentLaunch` for it is in flight. The one liveness predicate every
+    /// tab-level question reads, so no two of them can disagree about whether a
+    /// launching tab counts.
+    pub fn tab_is_live(&self, tab_id: &TabIdRef) -> bool {
+        self.providers.contains_key(tab_id)
+            || self.is_in_flight(&InFlightKey::AgentLaunch(tab_id.to_owned()))
+    }
+
     /// True if ANY tab of the session currently has a live provider PTY or an
     /// in-flight launch. Since no tab is privileged, this is what "the agent is
     /// still running" means: the session-slot row stays Active until its LAST
     /// tab is gone, and it drives resume liveness (whoever comes up alone
     /// resumes; everyone launched alongside a live/launching sibling is fresh).
     pub fn any_tab_active(&self, session_id: &str) -> bool {
-        self.tab_ids_for_session(session_id).into_iter().any(|id| {
-            self.providers.contains_key(&id)
-                || self.is_in_flight(&InFlightKey::AgentLaunch(id.clone()))
-        })
+        self.tab_ids_for_session(session_id)
+            .into_iter()
+            .any(|id| self.tab_is_live(id.as_ref_id()))
     }
 
     /// The first LIVE tab of a session, in display order: the session-slot tab
@@ -4512,8 +4519,8 @@ impl Engine {
     /// provider PTY or an in-flight `AgentLaunch`. Returns `None` when every
     /// tab is dormant, so callers know to fall back to the session-slot tab
     /// rather than land on a dormant tab that would relaunch on the next
-    /// activation. Kept in core (not the TUI) because the liveness predicate
-    /// must stay identical to `any_tab_active`'s.
+    /// activation. Kept in core (not the TUI) because liveness is one predicate,
+    /// [`Self::tab_is_live`], and every tab question asks it there.
     pub fn first_live_tab(&self, session_id: &str) -> Option<String> {
         let mut extras: Vec<&AgentTab> = self
             .agent_tabs
@@ -4536,10 +4543,7 @@ impl Engine {
                 .to_owned(),
         )
         .chain(extras.into_iter().map(|t| TabId::new(t.id.clone())))
-        .find(|id| {
-            self.providers.contains_key(id.as_ref_id())
-                || self.is_in_flight(&InFlightKey::AgentLaunch(id.clone()))
-        })
+        .find(|id| self.tab_is_live(id.as_ref_id()))
         .map(|id| id.as_str().to_string())
     }
 
