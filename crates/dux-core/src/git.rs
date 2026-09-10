@@ -2909,6 +2909,45 @@ pub fn blob_size_at_head(worktree_path: &Path, path: &str) -> Result<Option<u64>
     Ok(Some(size))
 }
 
+/// Return at most `limit` bytes of a file's blob at HEAD, or `None` when the
+/// path is absent at HEAD. Streams `cat-file -p` and stops reading at the
+/// limit, so a hundred-megabyte blob costs a few kilobytes of memory: the
+/// caller only wants enough of the head to classify the content.
+pub fn file_prefix_at_head(
+    worktree_path: &Path,
+    path: &str,
+    limit: usize,
+) -> Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+
+    // Presence is answered by the object header, not by the streaming read's
+    // exit status: closing the pipe early kills git with SIGPIPE, which would
+    // otherwise read as "absent at HEAD".
+    if blob_size_at_head(worktree_path, path)?.is_none() {
+        return Ok(None);
+    }
+    let mut child = Command::new("git")
+        .args([
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "cat-file",
+            "-p",
+            &format!("HEAD:{path}"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut prefix = Vec::new();
+    if let Some(stdout) = child.stdout.as_mut() {
+        stdout.take(limit as u64).read_to_end(&mut prefix)?;
+    }
+    // Drop the pipe so a blob larger than the limit gets EPIPE and exits
+    // instead of blocking forever on a reader that stopped.
+    drop(child.stdout.take());
+    let _ = child.wait();
+    Ok(Some(prefix))
+}
+
 pub fn is_under(base: &Path, candidate: &Path) -> bool {
     match (base.canonicalize(), candidate.canonicalize()) {
         (Ok(b), Ok(c)) => c.starts_with(b),

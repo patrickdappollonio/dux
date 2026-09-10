@@ -6,12 +6,188 @@
 //! terminal/ratatui types: the TUI keeps its own syntect+ratatui diff renderer
 //! in `dux-tui/src/diff.rs`.
 
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use anyhow::Context;
 use serde::Serialize;
 
+use crate::text::count_of;
 use crate::worktree_file::MAX_EDITABLE_BYTES;
+
+/// How many lines of a past-the-ceiling diff both surfaces show. Enough to read
+/// the shape of the change; small enough that the browser and the terminal pane
+/// stay responsive holding it.
+pub const DIFF_HEAD_MAX_LINES: usize = 4_000;
+
+/// How far the line count is allowed to run before it stops counting. A diff
+/// this long is already unreadable, and walking a multi-gigabyte patch to reach
+/// an exact figure buys nothing; past it the total is reported as a floor.
+pub const DIFF_HEAD_MAX_COUNTED_LINES: usize = 2_000_000;
+
+/// How many bytes of each side are sampled to decide text versus binary.
+const BINARY_SAMPLE_BYTES: usize = 8 * 1024;
+
+/// The first [`DIFF_HEAD_MAX_LINES`] lines of git's own unified patch for one
+/// file, with an honest account of how much was left behind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiffHead {
+    /// The kept lines, newline-joined. Always ends at a line boundary.
+    pub text: String,
+    pub shown_lines: usize,
+    /// The patch's whole line count, or the point counting stopped when
+    /// `total_is_at_least` is set.
+    pub total_lines: usize,
+    /// True when lines were dropped: `shown_lines < total_lines`.
+    pub truncated: bool,
+    /// True when counting stopped at [`DIFF_HEAD_MAX_COUNTED_LINES`], so
+    /// `total_lines` is a floor rather than the figure.
+    pub total_is_at_least: bool,
+    /// True when either side is non-UTF-8/binary. `text` is then empty and the
+    /// caller should say so rather than render a patch.
+    pub binary: bool,
+}
+
+/// Read the head of git's own diff for one file, for the case where dux's
+/// in-process diff refuses the pair as too large.
+///
+/// The deliberate exception to computing diffs in process: a file past the
+/// ceiling would hold a dux worker for minutes, while git answers in well under
+/// a second and this only ever reads the first few thousand lines of what it
+/// says.
+pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<DiffHead> {
+    let working_path = crate::git::resolve_worktree_path(worktree, rel_path)?;
+
+    let head_prefix = crate::git::file_prefix_at_head(worktree, rel_path, BINARY_SAMPLE_BYTES)?;
+    let working_prefix = read_prefix(&working_path, BINARY_SAMPLE_BYTES)?;
+    if head_prefix.is_none() && working_prefix.is_none() {
+        anyhow::bail!("file not found in the worktree or at HEAD: {rel_path}");
+    }
+    let sample_is_text =
+        |sample: &Option<Vec<u8>>| sample.as_deref().is_none_or(is_renderable_text);
+    if !sample_is_text(&head_prefix) || !sample_is_text(&working_prefix) {
+        return Ok(DiffHead {
+            text: String::new(),
+            shown_lines: 0,
+            total_lines: 0,
+            truncated: false,
+            total_is_at_least: false,
+            binary: true,
+        });
+    }
+
+    let mut command = Command::new("git");
+    command.args(["-C", worktree.to_string_lossy().as_ref()]);
+    // Pin the settings that change the patch's shape, then bound the pathspec
+    // with `--` so a dash-leading name cannot be read as an option.
+    command.args([
+        "-c",
+        "core.quotePath=false",
+        "-c",
+        "diff.noprefix=false",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+    ]);
+    if head_prefix.is_some() {
+        command.args(["HEAD", "--", rel_path]);
+    } else {
+        // Absent at HEAD: git's index-based diff has nothing to compare, so the
+        // untracked file is diffed against the empty file directly.
+        command.args(["--no-index", "--", "/dev/null", rel_path]);
+    }
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("could not run git diff for {rel_path}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("git diff produced no output stream")?;
+
+    let mut text = String::new();
+    let mut shown_lines = 0usize;
+    let mut total_lines = 0usize;
+    let mut total_is_at_least = false;
+    for line in BufReader::new(stdout).split(b'\n') {
+        let line = line.with_context(|| format!("could not read git diff for {rel_path}"))?;
+        total_lines += 1;
+        if shown_lines < DIFF_HEAD_MAX_LINES {
+            text.push_str(&String::from_utf8_lossy(&line));
+            text.push('\n');
+            shown_lines += 1;
+        }
+        if total_lines >= DIFF_HEAD_MAX_COUNTED_LINES {
+            total_is_at_least = true;
+            break;
+        }
+    }
+
+    if total_is_at_least {
+        let _ = child.kill();
+    }
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    let status = child.wait()?;
+    // `--no-index` reports "the two files differ" as exit code 1, which is the
+    // normal answer here, not a failure. Anything else is one.
+    let acceptable = matches!(status.code(), Some(0) | Some(1));
+    if !acceptable && !total_is_at_least {
+        anyhow::bail!("git diff failed for {rel_path}: {}", stderr.trim());
+    }
+
+    Ok(DiffHead {
+        truncated: shown_lines < total_lines,
+        text,
+        shown_lines,
+        total_lines,
+        total_is_at_least,
+        binary: false,
+    })
+}
+
+/// Read at most `limit` bytes of a working copy, or `None` when it is absent.
+/// A symlink is refused, matching [`file_diff_contents`].
+fn read_prefix(path: &Path, limit: usize) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            anyhow::bail!("refusing to diff through a symlink: {}", path.display())
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("could not stat {}", path.display())),
+    }
+    let file =
+        std::fs::File::open(path).with_context(|| format!("could not read {}", path.display()))?;
+    let mut buffer = Vec::new();
+    file.take(limit as u64)
+        .read_to_end(&mut buffer)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    Ok(Some(buffer))
+}
+
+/// The one sentence both surfaces put above a cut-short diff. Empty when
+/// nothing was cut.
+pub fn diff_head_banner(head: &DiffHead) -> String {
+    if !head.truncated {
+        return String::new();
+    }
+    let total = if head.total_is_at_least {
+        format!("more than {}", count_of(head.total_lines, "line"))
+    } else {
+        count_of(head.total_lines, "line")
+    };
+    format!(
+        "Diff cut here: showing the first {} of {total}. Open the file in your editor or run \
+         git diff to see the rest.",
+        head.shown_lines
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiffContents {
@@ -343,6 +519,157 @@ mod tests {
 
     /// A path absent both at HEAD and on disk is a stale/typo path: it errors
     /// rather than returning a confusing all-blank diff.
+    /// Commit a file whose diff is far longer than the head cap, so the
+    /// fallback has something real to cut.
+    fn commit_and_rewrite_long_file(repo: &Path, rel: &str, lines: usize) {
+        let original: String = (0..lines).map(|i| format!("old line {i}\n")).collect();
+        commit_file(repo, rel, &original);
+        let rewritten: String = (0..lines).map(|i| format!("new line {i}\n")).collect();
+        std::fs::write(repo.join(rel), rewritten).expect("rewrite");
+    }
+
+    #[test]
+    fn a_long_diff_is_cut_at_the_head_cap_on_a_line_boundary() {
+        let repo = init_repo();
+        commit_and_rewrite_long_file(repo.path(), "long.txt", 5_000);
+
+        let head = diff_head_via_git(repo.path(), "long.txt").expect("head");
+        assert!(!head.binary);
+        assert!(head.truncated, "a 10,000-line patch must be cut");
+        assert!(
+            !head.total_is_at_least,
+            "the count fits well under the bound"
+        );
+        assert_eq!(head.shown_lines, DIFF_HEAD_MAX_LINES);
+        assert!(head.total_lines > DIFF_HEAD_MAX_LINES);
+        assert_eq!(
+            head.text.lines().count(),
+            DIFF_HEAD_MAX_LINES,
+            "the kept text holds exactly the shown lines"
+        );
+        assert!(
+            head.text.ends_with('\n'),
+            "the cut lands on a line boundary, never mid-line"
+        );
+        assert!(
+            head.text.starts_with("diff --git "),
+            "the head starts at the patch's own first line: {:?}",
+            head.text.chars().take(40).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn a_short_diff_is_not_truncated_and_gets_no_banner() {
+        let repo = init_repo();
+        commit_file(repo.path(), "f.txt", "one\ntwo\n");
+        std::fs::write(repo.path().join("f.txt"), "one\nTWO\n").expect("overwrite");
+
+        let head = diff_head_via_git(repo.path(), "f.txt").expect("head");
+        assert!(!head.truncated);
+        assert_eq!(head.shown_lines, head.total_lines);
+        assert!(head.text.contains("+TWO"));
+        assert_eq!(diff_head_banner(&head), "");
+    }
+
+    #[test]
+    fn an_untracked_file_diffs_against_the_empty_file() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("brand-new.txt"), "alpha\nbeta\n").expect("write");
+
+        let head = diff_head_via_git(repo.path(), "brand-new.txt").expect("head");
+        assert!(!head.binary);
+        assert!(!head.truncated);
+        assert!(
+            head.text.contains("+alpha") && head.text.contains("+beta"),
+            "an untracked file reads as all-insert: {}",
+            head.text
+        );
+    }
+
+    #[test]
+    fn a_file_deleted_from_the_worktree_diffs_as_all_delete() {
+        let repo = init_repo();
+        commit_file(repo.path(), "gone.txt", "first\nsecond\n");
+        std::fs::remove_file(repo.path().join("gone.txt")).expect("remove");
+
+        let head = diff_head_via_git(repo.path(), "gone.txt").expect("head");
+        assert!(!head.binary);
+        assert!(
+            head.text.contains("-first") && head.text.contains("-second"),
+            "a deleted file reads as all-delete: {}",
+            head.text
+        );
+    }
+
+    #[test]
+    fn a_binary_file_returns_the_binary_verdict_rather_than_a_patch() {
+        let repo = init_repo();
+        commit_file(repo.path(), "f.bin", "text\n");
+        std::fs::write(repo.path().join("f.bin"), [0u8, 159, 146, 150]).expect("overwrite");
+
+        let head = diff_head_via_git(repo.path(), "f.bin").expect("head");
+        assert!(
+            head.binary,
+            "binary content must not be rendered as a patch"
+        );
+        assert_eq!(head.text, "");
+        assert_eq!(head.total_lines, 0);
+    }
+
+    #[test]
+    fn a_path_with_a_space_and_a_non_ascii_name_is_not_quoted_away() {
+        let repo = init_repo();
+        let rel = "sp ace/caf\u{e9}-\u{1f600}.txt";
+        std::fs::create_dir(repo.path().join("sp ace")).expect("mkdir");
+        commit_file(repo.path(), rel, "before\n");
+        std::fs::write(repo.path().join(rel), "after\n").expect("overwrite");
+
+        let head = diff_head_via_git(repo.path(), rel).expect("head");
+        assert!(!head.binary);
+        assert!(
+            head.text.contains(rel),
+            "core.quotePath=false keeps the real name in the patch: {}",
+            head.text
+        );
+        assert!(head.text.contains("+after"));
+    }
+
+    #[test]
+    fn the_banner_names_the_shown_and_total_line_counts() {
+        let head = DiffHead {
+            text: String::new(),
+            shown_lines: 4_000,
+            total_lines: 12_345,
+            truncated: true,
+            total_is_at_least: false,
+            binary: false,
+        };
+        assert_eq!(
+            diff_head_banner(&head),
+            "Diff cut here: showing the first 4000 of 12345 lines. Open the file in your editor \
+             or run git diff to see the rest."
+        );
+    }
+
+    /// When counting stopped at the bound the banner says so rather than
+    /// passing a floor off as the figure.
+    #[test]
+    fn the_banner_says_more_than_when_counting_stopped() {
+        let head = DiffHead {
+            text: String::new(),
+            shown_lines: 4_000,
+            total_lines: DIFF_HEAD_MAX_COUNTED_LINES,
+            truncated: true,
+            total_is_at_least: true,
+            binary: false,
+        };
+        assert!(
+            diff_head_banner(&head).contains("of more than 2000000 lines."),
+            "unexpected banner: {}",
+            diff_head_banner(&head)
+        );
+    }
+
     #[test]
     fn absent_on_both_sides_errors() {
         let repo = init_repo();
