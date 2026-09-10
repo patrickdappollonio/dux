@@ -247,12 +247,13 @@ async fn existing_branch_conflict(state: &AppState, body: &CreateSessionBody) ->
 /// worktree) is an `Err` → 400; the in-flight guard returns an `Ok` error-toned
 /// status → 409 (an agent is already being created). 409 rather than 503 with a
 /// `Retry-After`: the frontend suppresses this toast and the `/ws` status stream
-/// carries the message.
+/// carries the message. The refusal is the status and the sentence, not a built
+/// response, which keeps the error small enough for clippy's large-error lint.
 async fn dispatch_create(
     state: &AppState,
     body: CreateSessionBody,
     headers: &HeaderMap,
-) -> Result<dux_core::wire::WireCommandOutcome, Response> {
+) -> Result<dux_core::wire::WireCommandOutcome, (StatusCode, String)> {
     let outcome = state
         .engine
         .apply_wire_scoped(
@@ -260,13 +261,13 @@ async fn dispatch_create(
             scope_from_headers(headers, &state.connections),
         )
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e).into_response())?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if outcome_is_error(&outcome) {
         let msg = outcome
             .status
             .map(|s| s.message)
             .unwrap_or_else(|| "create rejected".to_string());
-        return Err((StatusCode::CONFLICT, msg).into_response());
+        return Err((StatusCode::CONFLICT, msg));
     }
     Ok(outcome)
 }
@@ -315,7 +316,7 @@ async fn create_session(
 
     let outcome = match dispatch_create(&state, body, &headers).await {
         Ok(outcome) => outcome,
-        Err(refusal) => return refusal,
+        Err(refusal) => return refusal.into_response(),
     };
 
     resolve_created_session(&state, outcome, is_from_pr, &pre, key).await
