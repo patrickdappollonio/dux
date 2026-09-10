@@ -117,8 +117,12 @@ come back with the full-pane take-over card over the terminal instead of the
 terminal itself. When that happens, press **Take over** in a journey script
 before capturing.
 
-For interactions (clicking through a flow before screenshotting), write a
-throwaway `puppeteer-core` script for the journey at hand and delete it after:
+**To regenerate a screenshot the docs already use, do not write a throwaway:
+see [Regenerating the docs screenshots](#regenerating-the-docs-screenshots).**
+
+For an ad-hoc journey of your own (clicking through a flow before screenshotting
+something the docs do not carry), write a throwaway `puppeteer-core` script for
+the journey at hand and delete it after:
 `shot.js` shows the connection boilerplate (launch args, viewport, the
 forwarded port), and `puppeteer-core` is already in this directory's
 `package.json`. Use journey-specific selectors instead of a generic action DSL;
@@ -171,8 +175,52 @@ neighbours.
 
 `tui-journey.example.js` shows the journey contract. For a special capture,
 copy it to a throwaway `*.tmp.js` file and use the supplied `createAgent`,
-`sendKeys`, `sendText`, `captureText`, `sleep`, and `waitFor` helpers. Throwaway
-scripts are ignored by Git, matching the web screenshot workflow.
+`createStandaloneAgent`, `palette`, `seedLooseWorktree`, `sendKeys`, `sendText`,
+`setFixture`, `captureText`, `sleep`, and `waitFor` helpers, plus the optional
+`config` export for a setting no dialog can reach. Throwaway scripts are ignored
+by Git, matching the web screenshot workflow; the journeys behind the docs
+screenshots are not throwaways and live under `screens/scenes`.
+
+## Regenerating the docs screenshots
+
+Every image under `website/public/screens/` has a committed journey beside it,
+so a screenshot a UI change made stale is re-run rather than reinvented:
+
+```bash
+cd tools/preview-env/screens
+./reshoot.sh                        # every screenshot
+./reshoot.sh phone-hub pr-banner    # just these
+./reshoot.sh --list                 # the scenes there are
+```
+
+The scenes live in `screens/scenes/`, **one file per PNG, named after the PNG it
+produces**, so `grep -rn phone-hub screens/scenes` finds the journey behind any
+image in the docs. A browser scene exports `{ file, viewport, shoot }` and is
+driven through `puppeteer-core`; a terminal UI scene exports the journey function
+`tui-shot.sh` runs, with its grid, theme and crop hung off it. `screens/lib.js`
+holds the shared browser and REST plumbing, and `screens/seed.js` builds the one
+workspace every browser scene is shot against: the project, the six agents and
+their states, the tabs, the terminals, the folder agent, the changed files, the
+remote and the pull request. The seed is idempotent, so running it against an
+already-seeded container converges to the same scene.
+
+`reshoot.sh` brings the container up itself if it is not already serving with the
+screenshot fixtures. Those fixtures are the pieces an ordinary preview must not
+have, and they are installed only under `DUX_SCREENS=1`:
+
+| Fixture | Why |
+| --- | --- |
+| `screens/fixtures/gh` | A stand-in `gh` answering only dux's auth probe and its bounded `pr view`, so the pull-request chip, banner and from-PR dialog are shootable without a GitHub login. |
+| `screens/fixtures/notes-agent` | A transcript provider installed as `claude`, so the folder agent's pane shows a scripted session rather than a streaming fixture. |
+| `DUX_NO_TAILSCALE=0` | Drops `--no-tailscale`, which otherwise refuses a live mode change for the whole run and changes what the Preferences dialog says. |
+
+A website test asserts the loop stays closed: every PNG has a scene, every scene
+has a PNG, and every PNG is shown by a docs page.
+
+A few things in these captures are the clock's or a random generator's and move
+on every reshoot: the pet name in `tui-name-new-agent.png`, the run timestamp in
+`tui-startup-command-log.png`, and how far a streaming fixture has counted in any
+shot of a working agent. Everything else should come back the same.
 
 ## Logs / teardown
 
@@ -225,3 +273,7 @@ host (`BASE_IMAGE=<image> ./up.sh`) or use the in-container build.
 | `tui-shot.sh` / `tui-shot.js` | Host: run a deterministic TUI scene and render its captured cells as a PNG (`--crop sidebar` frames the left pane). |
 | `tui-driver.js` | Container: seed disposable state, run one journey, and export capture artifacts. |
 | `tui-journey.example.js` | Minimal example that agents copy into ignored, task-specific journeys. |
+| `screens/reshoot.sh` | Host: regenerate the docs screenshots under `website/public/screens`. |
+| `screens/seed.js` | The one idempotent workspace every browser scene is shot against. |
+| `screens/scenes/` | One committed journey per docs screenshot, named after the PNG. |
+| `screens/fixtures/` | The stand-in `gh` and transcript provider a screenshot run installs. |

@@ -255,6 +255,10 @@ when you (or an agent working for you) already have a real dux instance
 running: a second directly-run instance contends for the same config
 directory, and killing the wrong dux process can take down a live session.
 
+When a change makes a docs screenshot stale, regenerate it with
+`tools/preview-env/screens/reshoot.sh` (no arguments for the whole set, or the
+screenshot's own name for just that one) rather than reshooting it by hand.
+
 ## A few house rules worth knowing up front
 
 - **Commit messages are plain sentences.** No `feat:`/`fix:`/`chore:` prefixes and
