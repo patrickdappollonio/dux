@@ -556,17 +556,10 @@ describe("FlatAgentList agent row branch", () => {
 // The search-match highlight: the matched part of a row's NAME (the field the
 // filter searched and the row displays) wraps in a token-styled emphasis span.
 describe("FlatAgentList search-match highlight", () => {
-  // A name wrapper also holds the inert shimmer clone, which repeats the name;
-  // what the row SHOWS is every child except that one.
+  // What the row SHOWS: the name wrapper's own text, emphasis span included.
   function shown(el: HTMLElement | null | undefined): string {
     if (!el) return ""
-    return [...el.childNodes]
-      .filter(
-        (node) =>
-          !(node instanceof HTMLElement && node.classList.contains("agent-name-shimmer")),
-      )
-      .map((node) => node.textContent ?? "")
-      .join("")
+    return [...el.childNodes].map((node) => node.textContent ?? "").join("")
   }
 
   const withQuery = (query: string): DuxState => {
@@ -1406,11 +1399,18 @@ describe("FlatAgentList line two alignment", () => {
     render(<FlatAgentList handlers={handlers} />)
 
     for (const el of [screen.getByText("Working"), screen.getByText("Idle")]) {
-      expect(el.className).toContain("motion-safe:animate-state-word")
       expect(el.className).toContain("shrink-0")
       // Nothing may nudge the word off the line the rest of line two sits on.
       expect(el.className).not.toMatch(/translate|self-|align-|mt-|pt-/)
     }
+    // A resting word carries the one-shot swap fade; a working one carries the
+    // pulse in its place, since only one `animation` shorthand can win.
+    expect(screen.getByText("Idle").className).toContain(
+      "motion-safe:animate-state-word",
+    )
+    expect(screen.getByText("Working").className).toContain(
+      "motion-safe:animate-working-pulse",
+    )
     expect(lineTwo("Working").className).toContain("items-baseline")
     expect(lineTwo("Idle").className).toContain("items-baseline")
   })
@@ -1493,25 +1493,9 @@ describe("FlatAgentList row actions on a coarse pointer", () => {
   })
 })
 
-describe("FlatAgentList working-name sweep", () => {
-  // The clone is what the band is painted through, so it has to say exactly
-  // what the name says; a stale copy would sweep the wrong glyphs.
-  function clones(container: HTMLElement): HTMLElement[] {
-    return [...container.querySelectorAll<HTMLElement>(".agent-name-shimmer")]
-  }
+describe("FlatAgentList working cue", () => {
+  const PULSE = "motion-safe:animate-working-pulse"
 
-  // The body of one declaration block, read from the authored stylesheet. The
-  // selector is matched inside the @supports gate, so a rule outside it (the
-  // display:none fallback, the reduced-motion override) cannot answer instead.
-  function block(css: string, selector: string): string {
-    const gate = css.indexOf("@supports (-webkit-mask-clip: text)")
-    expect(gate).toBeGreaterThan(-1)
-    const start = css.indexOf(`${selector} {`, gate)
-    expect(start).toBeGreaterThan(-1)
-    const end = css.indexOf("\n    }", start)
-    expect(end).toBeGreaterThan(start)
-    return css.slice(start, end)
-  }
   // What a screen reader would read off the row: its subtree's text, minus the
   // parts marked aria-hidden.
   function computeName(el: Element): string {
@@ -1524,8 +1508,6 @@ describe("FlatAgentList working-name sweep", () => {
       })
       .join("")
   }
-  const cloneRule = (css: string) => block(css, ".agent-name-shimmer")
-  const litRule = (css: string) => block(css, ".agent-name-shimmer--on")
 
   function workingAlpha(): DuxState {
     const base = makeState("name")
@@ -1539,21 +1521,52 @@ describe("FlatAgentList working-name sweep", () => {
     } as DuxState
   }
 
-  it("stacks an inert clone of the name on a working agent row", () => {
+  // The masked clone the old sweep painted through is gone outright. It is
+  // asserted absent rather than merely unlit, because its whole cost was a
+  // second copy of every name in the accessibility tree and in find-in-page.
+  it("stacks no clone of the name on a working agent row", () => {
     mockState = workingAlpha()
     const { container } = render(<FlatAgentList handlers={handlers} />)
 
-    const [clone, ...rest] = clones(container)
-    expect(rest).toHaveLength(0)
-    expect(clone.textContent).toBe("Alpha")
-    expect(clone.getAttribute("aria-hidden")).toBe("true")
-    expect(clone.hasAttribute("inert")).toBe(true)
-    expect(clone.className).toContain("agent-name-shimmer--on")
-    // The real name is still its own node, so the accessible row reads once.
-    expect(clone.parentElement!.textContent).toBe("AlphaAlpha")
+    expect(container.querySelectorAll(".agent-name-shimmer")).toHaveLength(0)
+    expect(screen.getAllByText("Alpha")).toHaveLength(1)
+    const row = screen.getAllByRole("button").find((el) => /Alpha/.test(computeName(el)))
+    expect(row).toBeTruthy()
+    expect(computeName(row!).match(/Alpha/g)).toHaveLength(1)
   })
 
-  it("leaves the clone unlit on a row that is not working", () => {
+  // The glyph and the word fire on the ONE flag, so they cannot fall out of
+  // step, and the name is not part of the cue at all.
+  it("pulses the glyph and the state word together on a working agent row", () => {
+    mockState = workingAlpha()
+    const { container } = render(<FlatAgentList handlers={handlers} />)
+
+    const glyph = container.querySelector("svg.lucide-bot")
+    expect(glyph?.getAttribute("class")).toContain(PULSE)
+    // Paired with the opacity transition so a stop eases back to rest rather
+    // than freezing mid-dip.
+    expect(glyph?.getAttribute("class")).toContain("motion-safe:transition-opacity")
+
+    const word = screen.getByText("Working")
+    expect(word.className).toContain(PULSE)
+    // The name itself never animates.
+    expect(screen.getByText("Alpha").className).not.toContain(PULSE)
+  })
+
+  // The dots ride in a reserved slot, and the slot is what keeps the count and
+  // the trailing text behind the word from moving as they cycle.
+  it("gives the working word a fixed ellipsis slot", () => {
+    mockState = workingAlpha()
+    const { container } = render(<FlatAgentList handlers={handlers} />)
+
+    const slots = container.querySelectorAll(".working-dots")
+    expect(slots).toHaveLength(1)
+    expect(slots[0].getAttribute("aria-hidden")).toBe("true")
+    // It lives INSIDE the word, so it pulses with it rather than beside it.
+    expect(slots[0].parentElement).toBe(screen.getByText("Working"))
+  })
+
+  it("leaves a row that is not working steady, with no slot at all", () => {
     const base = makeState("name")
     mockState = {
       ...base,
@@ -1565,57 +1578,109 @@ describe("FlatAgentList working-name sweep", () => {
     } as DuxState
     const { container } = render(<FlatAgentList handlers={handlers} />)
 
-    const [clone] = clones(container)
-    expect(clone.className).not.toContain("agent-name-shimmer--on")
+    expect(container.querySelectorAll(".working-dots")).toHaveLength(0)
+    expect(
+      container.querySelector("svg.lucide-bot")?.getAttribute("class"),
+    ).not.toContain(PULSE)
+    expect(screen.getByText("Idle").className).not.toContain(PULSE)
   })
 
-  it("sweeps a terminal row through the same clone", () => {
+  // A terminal row is an agent row: the same cue, on its own glyph and its own
+  // busy word.
+  it("pulses a running terminal row the same way", () => {
     const base = makeState("name")
     mockState = {
       ...base,
       spine: {
         ...base.spine,
         sessions: [],
-        terminals: [makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim", working: true })],
+        terminals: [
+          makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim", working: true }),
+        ],
       },
     } as DuxState
     const { container } = render(<FlatAgentList handlers={handlers} />)
 
-    const [clone] = clones(container)
-    expect(clone.textContent).toBe("vim")
-    expect(clone.className).toContain("agent-name-shimmer--on")
+    expect(
+      container.querySelector("svg.lucide-square-terminal")?.getAttribute("class"),
+    ).toContain(PULSE)
+    const word = screen.getByText("Running")
+    expect(word.className).toContain(PULSE)
+    expect(word.querySelectorAll(".working-dots")).toHaveLength(1)
+    expect(screen.getByText("vim").className).not.toContain(PULSE)
   })
 
-  // The clone is in the row's own subtree, so an accessible name computed over
-  // that subtree is where doubling it would show up first.
-  it("names a working row once", () => {
-    mockState = workingAlpha()
-    render(<FlatAgentList handlers={handlers} />)
-
-    const row = screen.getAllByRole("button").find((el) => /Alpha/.test(computeName(el)))
-    expect(row).toBeTruthy()
-    expect(computeName(row!).match(/Alpha/g)).toHaveLength(1)
-  })
-
-  // The whole point of the technique: the band moves by a compositor property
-  // and the clone never widens the row it is stacked on.
-  it("moves the band with a transform, out of flow", async () => {
+  // The two surfaces paint one cue, so the browser's timing is the terminal
+  // UI's timing. Both halves are read off the authored sources rather than
+  // restated here, which is what makes a change to either one fail this.
+  it("keeps the browser's timing equal to the shared working-cue constants", async () => {
     const { readFileSync } = await import("node:fs")
     const css = readFileSync(`${process.cwd()}/src/index.css`, "utf8")
-    const frames = /@keyframes agent-name-shimmer\s*\{([\s\S]*?)\n\}/.exec(css)
-    expect(frames).toBeTruthy()
-    expect(frames![1]).toContain("transform: translateX(")
-    expect(frames![1]).not.toContain("background-position")
+    const rust = readFileSync(
+      `${process.cwd()}/../../dux-core/src/working_cue.rs`,
+      "utf8",
+    )
 
-    const rule = cloneRule(css)
-    expect(rule).toContain("mask-clip: text;")
-    expect(rule).toContain("position: absolute;")
-    expect(rule).toContain("inset: 0;")
-    // The clone truncates the way the real name does, by the same declarations.
-    expect(rule).toContain("overflow: hidden;")
-    expect(rule).toContain("text-overflow: ellipsis;")
-    // Idle it is hidden outright, so find-in-page and hit testing skip it.
-    expect(rule).toContain("visibility: hidden;")
-    expect(litRule(css)).toContain("visibility: visible;")
+    const periodMs = Number(/WORKING_CUE_PERIOD_MS: u64 = (\d+)/.exec(rust)![1])
+    const stepMs = Number(/ELLIPSIS_STEP_MS: u64 = (\d+)/.exec(rust)![1])
+    const floor = Number(/PULSE_FLOOR: f32 = ([\d.]+)/.exec(rust)![1])
+    const period = `${periodMs / 1000}s`
+    expect(period).toBe("1.6s")
+
+    // Both animations run for exactly one period.
+    expect(css).toContain(
+      `--animate-working-pulse: working-pulse ${period} ease-in-out infinite;`,
+    )
+    expect(css).toContain(
+      `--animate-working-dots: working-dots ${period} steps(1, end) infinite;`,
+    )
+
+    // The pulse dips to the shared floor at the halfway point, and nowhere else.
+    const pulse = /@keyframes working-pulse\s*\{([\s\S]*?)\n\}/.exec(css)
+    expect(pulse).toBeTruthy()
+    expect(pulse![1]).toContain("0%, 100% { opacity: 1; }")
+    expect(pulse![1]).toContain(`50% { opacity: ${floor}; }`)
+    // Opacity only: a transform would nudge the word off line two's baseline.
+    expect(pulse![1]).not.toMatch(/transform|translate|top:|margin/)
+
+    // Four ellipsis states, one per step, evenly spread over the period.
+    const dots = /@keyframes working-dots\s*\{([\s\S]*?)\n\}/.exec(css)
+    expect(dots).toBeTruthy()
+    const states = periodMs / stepMs
+    expect(states).toBe(4)
+    const contents = ['""', '"."', '".."', '"..."']
+    for (const [index, content] of contents.entries()) {
+      expect(dots![1]).toContain(`${(index * 100) / states}% { content: ${content}; }`)
+    }
+
+    // The slot is as wide as the widest state and never narrower, so nothing
+    // behind it moves.
+    const slot = /\.working-dots \{([\s\S]*?)\n\}/.exec(css)
+    expect(slot).toBeTruthy()
+    expect(slot![1]).toContain(`width: ${states - 1}ch;`)
+    expect(slot![1]).toContain("display: inline-block;")
+  })
+
+  // Reduced motion shows the glyph and the word steady and no dots at all: the
+  // word alone still says the agent is working.
+  it("stands the whole cue down under reduced motion", async () => {
+    const { readFileSync } = await import("node:fs")
+    const css = readFileSync(`${process.cwd()}/src/index.css`, "utf8")
+
+    // The dots are gated by the query itself...
+    const gate = css.indexOf("@media (prefers-reduced-motion: no-preference)")
+    expect(gate).toBeGreaterThan(-1)
+    const animation = css.indexOf("animation: var(--animate-working-dots);")
+    expect(animation).toBeGreaterThan(gate)
+
+    // ...and the pulse by the `motion-safe:` variant everywhere it is applied.
+    mockState = workingAlpha()
+    const { container } = render(<FlatAgentList handlers={handlers} />)
+    const classes = [...container.querySelectorAll("*")]
+      .map((el) => el.getAttribute("class") ?? "")
+      .join(" ")
+    expect(classes).toContain(PULSE)
+    expect(classes).not.toMatch(/(?<!motion-safe:)animate-working-pulse/)
   })
 })
+

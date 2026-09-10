@@ -155,13 +155,18 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --radius-2xl: calc(var(--radius) * 1.8);
     --radius-3xl: calc(var(--radius) * 2.2);
     --radius-4xl: calc(var(--radius) * 2.6);
-    /* A gentle bob for the agent icon while it streams output ("working").
-       Symmetric around the rest position (up AND down by the same amount) so it
-       doesn't open a one-sided gap below the icon; ease-in-out so a busy sidebar
-       isn't jarring. The row pairs it with `motion-safe:transition-transform` so
-       that when work stops the icon glides back to rest (translateY(0)) instead
-       of freezing at the top or bottom of the bob. */
-    --animate-agent-working: agent-working 0.5s ease-in-out infinite;
+    /* The one working cue: the glyph and the state word breathe together while
+       the agent or terminal is busy. The period and the floor are
+       `dux_core::working_cue`'s WORKING_CUE_PERIOD_MS and PULSE_FLOOR, so the
+       browser and the terminal UI pulse on one clock; a test pins them equal.
+       Opacity only, so it rides the compositor, and the surfaces that carry it
+       pair it with `motion-safe:transition-opacity` so a stop eases back to full
+       rather than freezing mid-dip. */
+    --animate-working-pulse: working-pulse 1.6s ease-in-out infinite;
+    /* The ellipsis that runs after the state word: four states over the SAME
+       period, one every ELLIPSIS_STEP_MS, held rather than tweened. It rides in
+       a slot the width of three dots, so the row behind it never shifts. */
+    --animate-working-dots: working-dots 1.6s steps(1, end) infinite;
     /* The "needs attention" dot rhythm: two quick pulses, then a steady hold,
        then repeat. Faster and more insistent than Tailwind's stock 2s
        `animate-pulse` (which this replaced), because the whole point of the dot
@@ -192,10 +197,40 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     50.01%, 100% { opacity: 0.25; }
 }
 
-@keyframes agent-working {
-    0%, 100% { transform: translateY(0); }
-    25% { transform: translateY(-10%); }
-    75% { transform: translateY(10%); }
+@keyframes working-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* Discrete by design: the dots appear and disappear, they never fade. */
+@keyframes working-dots {
+    0% { content: ""; }
+    25% { content: "."; }
+    50% { content: ".."; }
+    75% { content: "..."; }
+    100% { content: ""; }
+}
+
+/* The reserved ellipsis slot after a working state word. Fixed at the width of
+   three dots and left-aligned, so the count and the trailing text behind it stay
+   exactly where they are through all four states. `pre` keeps the dots from
+   being collapsed. Under reduced motion the slot stays and the dots do not
+   come: the word alone says the agent is working. */
+.working-dots {
+    display: inline-block;
+    width: 3ch;
+    text-align: left;
+    white-space: pre;
+}
+
+.working-dots::after {
+    content: "";
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .working-dots::after {
+        animation: var(--animate-working-dots);
+    }
 }
 
 /* Two quick dips (~0.35s each), then the dot holds at full opacity for the rest
@@ -206,82 +241,6 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     0%, 36%, 100% { opacity: 1; }
     9%, 27% { opacity: 0.25; }
     18% { opacity: 1; }
-}
-
-.agent-name-shimmer {
-    display: none;
-}
-
-/* Firefox has no mask-clip: text; it gets a solid name until it does. */
-@supports (-webkit-mask-clip: text) {
-    /* A clone masks itself; masking the real name thins its edges. */
-    .agent-name-shimmer {
-        display: block;
-        position: absolute;
-        inset: 0;
-        overflow: hidden;
-        white-space: nowrap;
-        text-overflow: ellipsis;
-        color: transparent;
-        contain: strict;
-        pointer-events: none;
-        opacity: 0;
-        /* Hidden once the fade is over: find-in-page, hit testing and the
-           compositor all skip a hidden clone, a transparent one none of them. */
-        visibility: hidden;
-        transition:
-            opacity 500ms ease-out,
-            visibility 0s linear 500ms;
-        /* Half the band's width, in name glyphs; a chosen constant. */
-        --shimmer-spread: 9ch;
-        -webkit-mask-image: linear-gradient(white, white);
-        mask-image: linear-gradient(white, white);
-        -webkit-mask-clip: text;
-        mask-clip: text;
-    }
-
-    .agent-name-shimmer--on {
-        opacity: 1;
-        visibility: visible;
-        transition:
-            opacity 500ms ease-out,
-            visibility 0s;
-    }
-
-    /* Only transform and opacity animate on the compositor; a moving
-       background-position repaints the page's root layer every frame. */
-    .agent-name-shimmer::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(
-            90deg,
-            transparent calc(50% - var(--shimmer-spread)),
-            var(--dux-shimmer-accent) calc(50% - var(--shimmer-spread) / 2),
-            var(--dux-shimmer-bright) 50%,
-            var(--dux-shimmer-accent) calc(50% + var(--shimmer-spread) / 2),
-            transparent calc(50% + var(--shimmer-spread))
-        );
-        animation: agent-name-shimmer 2s linear infinite paused;
-    }
-
-    .agent-name-shimmer--on::after {
-        will-change: transform;
-        animation-play-state: running;
-    }
-}
-
-@keyframes agent-name-shimmer {
-    from { transform: translateX(-100%); }
-    to   { transform: translateX(100%); }
-}
-
-/* Dropping the sweep costs nothing here: the state word says "Working" and the
-   icon bob is gated on the same query. */
-@media (prefers-reduced-motion: reduce) {
-    .agent-name-shimmer {
-        display: none;
-    }
 }
 
 /* The text spinner's slot (components/GlyphSpinner.tsx), which cycles six arc
@@ -376,13 +335,6 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
-    /* Greyscale shimmer band for the working-agent name: `bright` (a muted grey)
-       at its centre, `accent` the fade out to the solid white name around it, so
-       a soft grey band travels across bright white text. Neutral to match the
-       app's greyscale palette. Constant across light/dark since the app is
-       dark-only. */
-    --dux-shimmer-accent: oklch(0.8 0 0);
-    --dux-shimmer-bright: oklch(0.62 0 0);
     /* Typing state color, matching the dux TUI bundled dark theme's soft violet
        (`#c586e0`). Constant across light/dark since the web app is dark-only. */
     --dux-typing: #c586e0;
@@ -430,9 +382,6 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
-    /* Greyscale shimmer band for the working-agent name (see :root above). */
-    --dux-shimmer-accent: oklch(0.8 0 0);
-    --dux-shimmer-bright: oklch(0.62 0 0);
     /* Typing state color (see :root above). */
     --dux-typing: #c586e0;
     /* Standalone-location identity color (see :root above). */

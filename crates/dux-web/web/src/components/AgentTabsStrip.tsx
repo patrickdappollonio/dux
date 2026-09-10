@@ -184,8 +184,8 @@ function TabPill({
     >
       <Bot
         className={cn(
-          "size-3.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
-          tab.working && "motion-safe:animate-agent-working",
+          "size-3.5 shrink-0 motion-safe:transition-opacity motion-safe:duration-300",
+          tab.working && "motion-safe:animate-working-pulse",
         )}
       />
       {/* Cyan attention dot on the flagged tab's pill (a permission prompt or a

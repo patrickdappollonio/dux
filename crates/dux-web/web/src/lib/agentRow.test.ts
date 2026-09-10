@@ -3,35 +3,35 @@ import { describe, expect, it } from "vitest"
 import { agentRowVisual, statusDotColorClass } from "./agentRow"
 
 describe("agentRowVisual", () => {
-  it("shimmers an active agent that is streaming output", () => {
+  it("marks an active agent that is streaming output as working", () => {
     expect(agentRowVisual("active", true)).toEqual({
-      shimmer: true,
+      working: true,
       dimmed: false,
       attention: false,
       typing: false,
     })
   })
 
-  it("does not shimmer (or dim) an idle active agent", () => {
+  it("neither works nor dims an idle active agent", () => {
     expect(agentRowVisual("active", false)).toEqual({
-      shimmer: false,
+      working: false,
       dimmed: false,
       attention: false,
       typing: false,
     })
   })
 
-  it("dims a detached agent and never shimmers it", () => {
+  it("dims a detached agent and never marks it working", () => {
     expect(agentRowVisual("detached", false)).toEqual({
-      shimmer: false,
+      working: false,
       dimmed: true,
       attention: false,
       typing: false,
     })
     // Even if a non-active agent somehow reports working, it stays dimmed and
-    // unshimmered; shimmer is gated on the active status.
+    // not working; the working cue is gated on the active status.
     expect(agentRowVisual("detached", true)).toEqual({
-      shimmer: false,
+      working: false,
       dimmed: true,
       attention: false,
       typing: false,
@@ -40,24 +40,24 @@ describe("agentRowVisual", () => {
 
   it("dims an exited agent", () => {
     expect(agentRowVisual("exited", false)).toEqual({
-      shimmer: false,
+      working: false,
       dimmed: true,
       attention: false,
       typing: false,
     })
   })
 
-  it("flags attention independently of shimmer and dimmed", () => {
+  it("flags attention independently of working and dimmed", () => {
     // A flagged agent may still be streaming its permission prompt.
     expect(agentRowVisual("active", true, true)).toEqual({
-      shimmer: true,
+      working: true,
       dimmed: false,
       attention: true,
       typing: false,
     })
     // Attention without streaming.
     expect(agentRowVisual("active", false, true)).toEqual({
-      shimmer: false,
+      working: false,
       dimmed: false,
       attention: true,
       typing: false,
@@ -65,9 +65,9 @@ describe("agentRowVisual", () => {
   })
 
   it("exposes typing for an active typing agent and keeps the working cue OFF", () => {
-    // Typing alone: caret cue (typing=true), no bob/shimmer (shimmer=false).
+    // Typing alone: caret cue (typing=true), no pulse (working=false).
     expect(agentRowVisual("active", false, false, true)).toEqual({
-      shimmer: false,
+      working: false,
       dimmed: false,
       attention: false,
       typing: true,
@@ -75,9 +75,9 @@ describe("agentRowVisual", () => {
   })
 
   it("suppresses the working cue while typing so the two states stay distinct", () => {
-    // Both flags set: typing wins the visual, shimmer is suppressed.
+    // Both flags set: typing wins the visual, the working cue is suppressed.
     expect(agentRowVisual("active", true, false, true)).toEqual({
-      shimmer: false,
+      working: false,
       dimmed: false,
       attention: false,
       typing: true,
@@ -86,7 +86,7 @@ describe("agentRowVisual", () => {
 
   it("keeps the working cue ON when working but not typing", () => {
     expect(agentRowVisual("active", true, false, false)).toEqual({
-      shimmer: true,
+      working: true,
       dimmed: false,
       attention: false,
       typing: false,

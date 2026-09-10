@@ -1,7 +1,5 @@
-import { configure } from "@testing-library/dom"
-
-// Every sidebar row stacks an inert, aria-hidden clone of its name over the real
-// one, so a text query would find each name twice; what it means is the real one.
-if (typeof document !== "undefined") {
-  configure({ defaultIgnore: "script, style, .agent-name-shimmer" })
-}
+// The one setup file every suite runs. It is deliberately empty: the row name's
+// inert clone is gone, so a text query finds each name exactly once and the
+// default ignore list is the right one again. Kept as the place the next
+// suite-wide setting goes, rather than removed and re-added.
+export {}

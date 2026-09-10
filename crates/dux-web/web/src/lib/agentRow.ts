@@ -3,27 +3,28 @@ import type { SessionStatus } from "@/lib/types"
 /** Visual treatment for an agent row, shared by the desktop sidebar and the
  *  mobile shell so the two surfaces never drift.
  *
- *  - `shimmer`: working. Drives the name shimmer and the Bot icon's bob
- *    together, so the two motion cues stay in lockstep. Requires `active`.
+ *  - `working`: busy. Drives the glyph pulse and the state word's own pulse
+ *    together, so the two halves of the one cue stay in lockstep. Requires
+ *    `active`.
  *  - `dimmed`: not running, so the whole row recedes and running agents stand
- *    out. Mutually exclusive with `shimmer` by construction.
+ *    out. Mutually exclusive with `working` by construction.
  *  - `attention`: a tab wants the user (a permission prompt, a finished turn),
  *    shown as a cyan dot. Orthogonal to the other flags.
  *  - `typing`: streaming keystroke-level input, shown as the caret and the
- *    violet "Typing" word. Requires `active`, and suppresses `shimmer` so a row
- *    shows the caret or the bob, never both. */
+ *    violet "Typing" word. Requires `active`, and suppresses `working` so a row
+ *    shows the caret or the pulse, never both. */
 export function agentRowVisual(
   status: SessionStatus,
   working: boolean,
   needsAttention = false,
   typing = false,
-): { shimmer: boolean; dimmed: boolean; attention: boolean; typing: boolean } {
+): { working: boolean; dimmed: boolean; attention: boolean; typing: boolean } {
   const active = status === "active"
   const isTyping = active && typing
   return {
     // Working cue is suppressed during typing so the two states never fire at
-    // once; the caret carries "typing", the bob/shimmer carry "working".
-    shimmer: active && working && !isTyping,
+    // once; the caret carries "typing", the pulse carries "working".
+    working: active && working && !isTyping,
     dimmed: !active,
     attention: needsAttention,
     typing: isTyping,

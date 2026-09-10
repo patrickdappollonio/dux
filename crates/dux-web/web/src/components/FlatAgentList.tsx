@@ -167,15 +167,25 @@ function RowLineTwo({ children }: { children: ReactNode }) {
 
 // The row's state word, shared by both row kinds and keyed on the label so a
 // change replays the swap. A fade only: motion drops it off line two's baseline.
-function RowStateWord({ word }: { word: StateWord }) {
+//
+// While the row is working the word IS the cue: it pulses on the same clock as
+// the glyph and carries the cycling ellipsis in a fixed slot behind it. The
+// pulse takes the place of the one-shot swap fade rather than joining it, since
+// both are the `animation` shorthand and only one of them can win; the word is
+// already at full opacity when the pulse starts, so nothing snaps.
+function RowStateWord({ word, working }: { word: StateWord; working: boolean }) {
   return (
     <span
       className={cn(
-        "shrink-0 font-medium motion-safe:animate-state-word",
+        "shrink-0 font-medium",
+        working
+          ? "motion-safe:animate-working-pulse"
+          : "motion-safe:animate-state-word",
         word.className,
       )}
     >
       {word.label}
+      {working ? <span aria-hidden className="working-dots" /> : null}
     </span>
   )
 }
@@ -208,30 +218,20 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
   )
 }
 
-// One home for the name and its shimmer clone, so the copy the band is masked
-// by can never carry different text from the name it covers.
+// One home for the row's name. It never animates: the working cue is the glyph
+// and the state word, so the name stays a single legible run of text.
 function RowName({
   text,
   query,
-  shimmer,
   className,
   ...rest
 }: {
   text: string
   query: string
-  shimmer: boolean
 } & ComponentProps<"span">) {
   return (
-    <span {...rest} className={cn("relative min-w-0 flex-1 truncate text-sm", className)}>
+    <span {...rest} className={cn("min-w-0 flex-1 truncate text-sm", className)}>
       <HighlightedText text={text} query={query} />
-      {/* A second copy of the name must be neither read out nor reachable. */}
-      <span
-        aria-hidden
-        inert
-        className={cn("agent-name-shimmer", shimmer && "agent-name-shimmer--on")}
-      >
-        {text}
-      </span>
     </span>
   )
 }
@@ -257,7 +257,7 @@ function AgentFlatRow({
   const label = sessionLabel(session)
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
-  const { shimmer, dimmed, attention, typing } = agentRowVisual(
+  const { working, dimmed, attention, typing } = agentRowVisual(
     session.status,
     session.working,
     session.needs_attention,
@@ -333,15 +333,15 @@ function AgentFlatRow({
             >
               <Bot
                 className={cn(
-                  "size-4.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
-                  shimmer && "motion-safe:animate-agent-working",
+                  "size-4.5 shrink-0 motion-safe:transition-opacity motion-safe:duration-300",
+                  working && "motion-safe:animate-working-pulse",
                 )}
               />
             </span>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               {/* Line one: name + PR + time. */}
               <span className="flex items-center gap-2">
-                <RowName text={label} query={query} shimmer={shimmer} />
+                <RowName text={label} query={query} />
                 {session.pr ? (
                   <SimpleTooltip
                     content={`#${session.pr.number} · ${session.pr.title} (${prStateLabel(session.pr.state)})`}
@@ -375,7 +375,7 @@ function AgentFlatRow({
                 ) : null}
                 {/* Typing cue: the violet caret, kept as the RIGHTMOST indicator so
                     its position is stable whether or not a PR badge is shown (the PR
-                    sits to its left). Working's bob + shimmer are suppressed while
+                    sits to its left). The working pulse is suppressed while
                     typing, so this is the sole cue. */}
                 {typing ? <TypingCaret /> : null}
               </span>
@@ -391,7 +391,7 @@ function AgentFlatRow({
                 {/* Keyed on the label so a state change (Working ⇄ Idle ⇄ Detached
                     …) remounts the span and replays the one-shot fade instead of
                     snapping the text. */}
-                <RowStateWord key={word.label} word={word} />
+                <RowStateWord key={word.label} word={word} working={working} />
                 {/* No branch here, by decision: a drifted agent would put a
                     long mono branch inline on every row, noise, and worst on a
                     tablet. The branch's one home is the top bar's
@@ -479,9 +479,9 @@ function TerminalFlatRow({
       ? "Terminal"
       : terminalTitle(terminal, siblings)
   const word = terminalStateWord(terminal)
-  // Same working cue as the agent row: the name shimmers while streaming, and only
-  // while streaming and NOT typing (typing owns the caret) so the two read apart.
-  const shimmer = terminal.working && !terminal.typing
+  // The same working cue as the agent row, and only while streaming and NOT
+  // typing (typing owns the caret) so the two read apart.
+  const working = terminal.working && !terminal.typing
 
   // Whether this row wears the standalone star instead of the owned-by arrow,
   // decided by the exhaustive owner matcher so a new owner kind must answer.
@@ -523,14 +523,19 @@ function TerminalFlatRow({
         onClick={() => onSelect(terminal.id, owner)}
         className="flex min-w-0 flex-1 touch-manipulation items-start gap-2.5 py-2 pl-2 text-left max-md:min-h-10"
       >
-        <SquareTerminal className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <SquareTerminal
+          className={cn(
+            "mt-0.5 size-4 shrink-0 text-muted-foreground motion-safe:transition-opacity motion-safe:duration-300",
+            working && "motion-safe:animate-working-pulse",
+          )}
+        />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex items-center gap-2">
             <SimpleTooltip
               content={title !== terminal.label ? terminal.label : null}
               side="right"
             >
-              <RowName text={title} query={query} shimmer={shimmer} />
+              <RowName text={title} query={query} />
             </SimpleTooltip>
             {terminal.typing ? <TypingCaret /> : null}
           </span>
@@ -552,7 +557,7 @@ function TerminalFlatRow({
               </span>
             )}
             <Dot className="text-muted-foreground" />
-            <RowStateWord key={word.label} word={word} />
+            <RowStateWord key={word.label} word={word} working={working} />
           </RowLineTwo>
         </span>
       </button>

@@ -75,7 +75,7 @@ function CollapsedAgentIcon({
   selected: boolean
 }) {
   const label = sessionLabel(session)
-  const { shimmer, dimmed, attention, typing } = agentRowVisual(
+  const { working, dimmed, attention, typing } = agentRowVisual(
     session.status,
     session.working,
     session.needs_attention,
@@ -107,7 +107,7 @@ function CollapsedAgentIcon({
               "inline-flex shrink-0",
               attention
                 ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
-                : // Typing tints the rail icon violet (no bob) so the icon-only
+                : // Typing tints the rail icon violet (no pulse) so the icon-only
                   // rail still distinguishes typing from working.
                   typing
                   ? "text-dux-typing"
@@ -116,8 +116,8 @@ function CollapsedAgentIcon({
           >
             <Bot
               className={cn(
-                "size-4.5! shrink-0 motion-safe:transition-transform motion-safe:duration-300",
-                shimmer && "motion-safe:animate-agent-working",
+                "size-4.5! shrink-0 motion-safe:transition-opacity motion-safe:duration-300",
+                working && "motion-safe:animate-working-pulse",
               )}
             />
           </span>

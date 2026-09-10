@@ -1820,7 +1820,7 @@ describe("AppSidebar collapsed icon rail", () => {
     expect(tooltips[1].textContent?.toLowerCase()).toContain("detached")
   })
 
-  it("carries the working bob and attention blink classes on the rail icon", () => {
+  it("carries the working pulse and attention blink classes on the rail icon", () => {
     const spine = makeTwoProjectSpine() as unknown as {
       sessions: { working: boolean; needs_attention: boolean }[]
     }
@@ -1843,10 +1843,10 @@ describe("AppSidebar collapsed icon rail", () => {
 
     const rail = screen.getByTestId("collapsed-agent-rail")
     const buttons = rail.querySelectorAll("button")
-    // s1 is active + working: its Bot icon bobs.
+    // s1 is active + working: its Bot icon pulses, the same cue the row wears.
     expect(
       buttons[0].querySelector("svg")?.getAttribute("class"),
-    ).toContain("animate-agent-working")
+    ).toContain("motion-safe:animate-working-pulse")
     // s2 needs attention: its icon wrapper carries the cyan blink.
     expect(
       buttons[1].querySelector("[aria-label='Needs attention']"),
