@@ -1229,8 +1229,8 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
         // truncated version would routinely drop the sentence that explains it.
         // So: verbatim, and a reason rather than a redaction.
         logger::debug(&format!(
-            "[gh-integration] gh api graphql failed for host {host} ({} session(s), rate_limited={rate_limited}): {stderr}{}",
-            chunk.len(),
+            "[gh-integration] gh api graphql failed for host {host} ({}, rate_limited={rate_limited}): {stderr}{}",
+            crate::text::count_of(chunk.len(), "session"),
             if errors.is_empty() {
                 String::new()
             } else {

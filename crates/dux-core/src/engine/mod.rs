@@ -2211,8 +2211,8 @@ impl Engine {
                     *map = paths;
                 }
                 crate::logger::info(&format!(
-                    "[gh-integration] refs watcher: initialized, watching {} session(s)",
-                    self.refs_watch_paths.len(),
+                    "[gh-integration] refs watcher: initialized, watching {}",
+                    crate::text::count_of(self.refs_watch_paths.len(), "session"),
                 ));
             }
             Err(e) => {
