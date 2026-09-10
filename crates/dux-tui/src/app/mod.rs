@@ -41,8 +41,8 @@ use crate::keybindings::{
 use crate::lockfile::SingleInstanceLock;
 use crate::logger;
 use crate::model::{
-    AgentSession, AgentTab, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus,
-    ProviderKind, SessionSurface,
+    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
+    SessionSurface,
 };
 // `Utc` and `SessionStatus` are now referenced only by the `#[cfg(test)]`
 // submodules (via their `use super::*`): the non-test call sites that used them
@@ -6622,29 +6622,15 @@ impl App {
             .tab_running_provider(session, TabIdRef::new(&tab))
     }
 
-    /// Ordered tab ids for a session: the slot tab first, then the extra tabs
-    /// by (sort_order, created_at, id).
+    /// Ordered tab ids for a session as owned strings, for the render and input
+    /// paths that index the strip. The order is the engine's one display
+    /// ordering; this only spells it as `String`.
     pub(crate) fn session_tab_ids(&self, session_id: &str) -> Vec<String> {
-        let mut support: Vec<&AgentTab> = self
-            .engine
-            .agent_tabs
-            .values()
-            .filter(|t| t.session_id == session_id)
-            .collect();
-        support.sort_by(|a, b| {
-            a.sort_order
-                .cmp(&b.sort_order)
-                .then_with(|| a.created_at.cmp(&b.created_at))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        let mut ids = Vec::with_capacity(support.len() + 1);
-        ids.push(
-            self.engine
-                .slot_tab_id_of(SessionIdRef::new(session_id))
-                .to_string(),
-        );
-        ids.extend(support.into_iter().map(|t| t.id.clone()));
-        ids
+        self.engine
+            .ordered_tab_ids_for_session(session_id)
+            .into_iter()
+            .map(|id| id.as_str().to_string())
+            .collect()
     }
 
     /// Set the focused tab for a session (Main clears the entry). Switching

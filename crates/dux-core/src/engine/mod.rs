@@ -4493,6 +4493,36 @@ impl Engine {
         ids
     }
 
+    /// Every tab id of a session in DISPLAY order: the session-slot tab first,
+    /// then the extras by `(sort_order, created_at, id)`, which is the order the
+    /// tab strip renders. Read this whenever POSITION matters (which pill comes
+    /// first, which tab succeeds the slot); [`Self::tab_ids_for_session`] is the
+    /// unordered form, for fan-out over the whole set where order cannot matter.
+    ///
+    /// The id is the final tiebreak so the answer is deterministic even for two
+    /// tabs written in the same instant: `agent_tabs` is a `HashMap`, whose
+    /// iteration order is not. Ties are unreachable today (`sort_order` is a
+    /// per-agent append-only stamp).
+    pub fn ordered_tab_ids_for_session(&self, session_id: &str) -> Vec<TabId> {
+        let mut extras: Vec<&AgentTab> = self
+            .agent_tabs
+            .values()
+            .filter(|t| t.session_id == session_id)
+            .collect();
+        extras.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        std::iter::once(
+            self.slot_tab_id_of(SessionIdRef::new(session_id))
+                .to_owned(),
+        )
+        .chain(extras.into_iter().map(|t| TabId::new(t.id.clone())))
+        .collect()
+    }
+
     /// Whether one tab is running or coming up: it holds a provider PTY, or an
     /// `AgentLaunch` for it is in flight. The one liveness predicate every
     /// tab-level question reads, so no two of them can disagree about whether a
@@ -4522,29 +4552,10 @@ impl Engine {
     /// activation. Kept in core (not the TUI) because liveness is one predicate,
     /// [`Self::tab_is_live`], and every tab question asks it there.
     pub fn first_live_tab(&self, session_id: &str) -> Option<String> {
-        let mut extras: Vec<&AgentTab> = self
-            .agent_tabs
-            .values()
-            .filter(|t| t.session_id == session_id)
-            .collect();
-        // The id is the final tiebreak, matching `successor_slot_tab` and the two
-        // render orderings. Ties are unreachable today (`sort_order` is a
-        // per-agent append-only stamp), so this is parity across the four
-        // orderings rather than a fix: they must not be able to disagree about
-        // which pill comes first.
-        extras.sort_by(|a, b| {
-            a.sort_order
-                .cmp(&b.sort_order)
-                .then_with(|| a.created_at.cmp(&b.created_at))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        std::iter::once(
-            self.slot_tab_id_of(SessionIdRef::new(session_id))
-                .to_owned(),
-        )
-        .chain(extras.into_iter().map(|t| TabId::new(t.id.clone())))
-        .find(|id| self.tab_is_live(id.as_ref_id()))
-        .map(|id| id.as_str().to_string())
+        self.ordered_tab_ids_for_session(session_id)
+            .into_iter()
+            .find(|id| self.tab_is_live(id.as_ref_id()))
+            .map(|id| id.as_str().to_string())
     }
 
     /// Resolve a tab id back to the session that owns it. An extra tab resolves
@@ -4771,23 +4782,7 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id.as_str()) else {
             return Vec::new();
         };
-        let mut extras: Vec<&AgentTab> = self
-            .agent_tabs
-            .values()
-            .filter(|t| t.session_id == session_id.as_str())
-            .collect();
-        // The same `(sort_order, created_at, id)` order `successor_slot_tab`
-        // and `first_live_tab` use: the four orderings must not be able to
-        // disagree about which pill comes first.
-        extras.sort_by(|a, b| {
-            a.sort_order
-                .cmp(&b.sort_order)
-                .then_with(|| a.created_at.cmp(&b.created_at))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        let ids: Vec<TabId> = std::iter::once(self.slot_tab_id_of(session_id).to_owned())
-            .chain(extras.into_iter().map(|t| TabId::new(t.id.clone())))
-            .collect();
+        let ids = self.ordered_tab_ids_for_session(session_id.as_str());
         let providers: Vec<String> = ids
             .iter()
             .map(|id| {
@@ -4817,27 +4812,18 @@ impl Engine {
     }
 
     /// The tab that takes the slot when the tab currently in it is closed: the
-    /// FIRST extra tab in strip order (`sort_order`, then `created_at`, then
-    /// `id`, the same ordering the strip and [`Self::first_live_tab`] render),
-    /// so the successor is the pill next to the one going away. Live or dormant
-    /// makes no difference; a tab is a tab.
+    /// FIRST extra tab in strip order, so the successor is the pill next to the
+    /// one going away. Live or dormant makes no difference; a tab is a tab.
     ///
     /// `None` when the agent has no other tab, which is the case that stays
     /// "closing the last tab detaches the agent".
-    ///
-    /// The id is the final tiebreak so the answer is deterministic even for two
-    /// tabs written in the same instant: `agent_tabs` is a `HashMap`, whose
-    /// iteration order is not.
     pub fn successor_slot_tab(&self, session_id: &SessionIdRef) -> Option<&AgentTab> {
-        self.agent_tabs
-            .values()
-            .filter(|t| t.session_id == session_id.as_str())
-            .min_by(|a, b| {
-                a.sort_order
-                    .cmp(&b.sort_order)
-                    .then_with(|| a.created_at.cmp(&b.created_at))
-                    .then_with(|| a.id.cmp(&b.id))
-            })
+        // Position 0 is the slot tab itself, so the successor is position 1.
+        let successor = self
+            .ordered_tab_ids_for_session(session_id.as_str())
+            .into_iter()
+            .nth(1)?;
+        self.agent_tabs.get(successor.as_ref_id())
     }
 
     /// Hand the session slot to `session_id`'s next tab in strip order and
@@ -5257,6 +5243,46 @@ mod tests {
             vec![
                 engine.slot_tab_id_of(SessionIdRef::new("s1")).to_owned(),
                 TabId::new("tab-b")
+            ]
+        );
+    }
+
+    /// The display ordering: slot tab first, then extras by `sort_order`, with
+    /// `created_at` and then the id breaking the ties.
+    #[test]
+    fn ordered_tab_ids_for_session_sorts_by_sort_order_then_created_at_then_id() {
+        let (mut engine, _tmp) = engine_with_an_extra_tab();
+        let early = Utc::now();
+        let late = early + chrono::Duration::seconds(5);
+        let mut add = |id: &str, sort_order: i64, created_at: chrono::DateTime<Utc>| {
+            engine.agent_tabs.insert(
+                TabId::new(id),
+                crate::model::AgentTab {
+                    id: id.to_string(),
+                    session_id: "s1".to_string(),
+                    provider: ProviderKind::new("codex"),
+                    sort_order,
+                    created_at,
+                },
+            );
+        };
+        // Two tabs tie on `sort_order`: the older one comes first.
+        add("tab-late", 0, late);
+        add("tab-early", 0, early);
+        // Two tabs tie on both, so only the id can separate them.
+        add("tab-z", 2, early);
+        add("tab-a", 2, early);
+
+        assert_eq!(
+            engine.ordered_tab_ids_for_session("s1"),
+            vec![
+                engine.slot_tab_id_of(SessionIdRef::new("s1")).to_owned(),
+                TabId::new("tab-early"),
+                TabId::new("tab-late"),
+                // `tab-b` from the fixture, at sort_order 1.
+                TabId::new("tab-b"),
+                TabId::new("tab-a"),
+                TabId::new("tab-z"),
             ]
         );
     }
