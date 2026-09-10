@@ -435,24 +435,62 @@ export function mountHeroScene(
     p.tex.needsUpdate = true;
   }
 
-  function drawFeedPane(p: Pane, t: number, front: boolean): void {
-    const ctx = p.ctx;
-    const box = drawChrome(p, t);
-    const cut = clip(66);
+  // How many characters of a column fit: its width in pixels over the advance
+  // width of the font that column is drawn in.
+  function fit(px: number, perChar: number): (s: string) => string {
+    return clip(Math.floor(px / perChar));
+  }
 
-    ctx.font = `500 13.5px ${MONO}`;
+  // Where one pane paints its feed: the text metrics, the origin, the row pitch
+  // and the cursor size, which is `null` for a pane that shows no cursor.
+  interface FeedGeometry {
+    font: string;
+    cut: (s: string) => string;
+    x: number;
+    y: number;
+    pitch: number;
+    cursor: readonly [number, number] | null;
+  }
+
+  // The scrolling feed both pane kinds paint: the last `ROWS` lines with the
+  // palette falling back to the literal colour, then the 2 Hz block cursor
+  // under them. Returns the y the cursor row sits on, for whatever the caller
+  // draws beside it.
+  function drawFeed(
+    ctx: CanvasRenderingContext2D,
+    p: Pane,
+    t: number,
+    g: FeedGeometry,
+  ): number {
+    ctx.font = g.font;
     ctx.textBaseline = "top";
     const rows = p.lines.slice(-ROWS);
     rows.forEach((row, i) => {
       ctx.fillStyle = p.pal[row[1]] || row[1];
-      ctx.fillText(cut(row[0]), PAD + 14, box.top + 12 + i * 23);
+      ctx.fillText(g.cut(row[0]), g.x, g.y + i * g.pitch);
     });
 
-    const y = box.top + 12 + rows.length * 23;
-    if (p.def.state === "run" && Math.floor(t * 2) % 2 === 0) {
+    const y = g.y + rows.length * g.pitch;
+    if (g.cursor && Math.floor(t * 2) % 2 === 0) {
       ctx.fillStyle = p.pal[ACCENT];
-      ctx.fillRect(PAD + 14, y + 2, 8, 14);
+      ctx.fillRect(g.x, y + 2, g.cursor[0], g.cursor[1]);
     }
+    return y;
+  }
+
+  function drawFeedPane(p: Pane, t: number, front: boolean): void {
+    const ctx = p.ctx;
+    const box = drawChrome(p, t);
+
+    const y = drawFeed(ctx, p, t, {
+      font: `500 13.5px ${MONO}`,
+      cut: clip(66),
+      x: PAD + 14,
+      y: box.top + 12,
+      pitch: 23,
+      cursor: p.def.state === "run" ? [8, 14] : null,
+    });
+
     if (p.def.state === "attention") {
       ctx.fillStyle = p.pal[ACCENT];
       ctx.fillText("waiting on you", PAD + 14, y);
@@ -486,7 +524,7 @@ export function mountHeroScene(
     ctx.fillStyle = p.pal[DIM];
     ctx.fillText("AGENTS", x0 + 12, y0 + 16);
     ctx.font = body;
-    const sideCut = clip(Math.floor((side - 34) / 7.2));
+    const sideCut = fit(side - 34, 7.2);
     AGENT_ROWS.forEach((row, i) => {
       const ry = y0 + 42 + i * 34;
       if (i === 0) {
@@ -512,24 +550,20 @@ export function mountHeroScene(
       }
     });
 
-    ctx.textBaseline = "top";
-    ctx.font = `500 11.5px ${MONO}`;
-    const midCut = clip(Math.floor((rightX - midX - 22) / 6.9));
-    const rows = p.lines.slice(-ROWS);
-    rows.forEach((row, i) => {
-      ctx.fillStyle = p.pal[row[1]] || row[1];
-      ctx.fillText(midCut(row[0]), midX + 12, y0 + 12 + i * 19);
+    drawFeed(ctx, p, t, {
+      font: `500 11.5px ${MONO}`,
+      cut: fit(rightX - midX - 22, 6.9),
+      x: midX + 12,
+      y: y0 + 12,
+      pitch: 19,
+      cursor: [7, 12],
     });
-    if (Math.floor(t * 2) % 2 === 0) {
-      ctx.fillStyle = p.pal[ACCENT];
-      ctx.fillRect(midX + 12, y0 + 14 + rows.length * 19, 7, 12);
-    }
 
     ctx.textBaseline = "middle";
     ctx.font = head;
     ctx.fillStyle = p.pal[DIM];
     ctx.fillText("CHANGES", rightX + 12, y0 + 16);
-    const fileCut = clip(Math.floor((right - 34) / 6.9));
+    const fileCut = fit(right - 34, 6.9);
     CHANGED_ROWS.forEach((row, i) => {
       const ry = y0 + 44 + i * 32;
       ctx.font = `600 11.5px ${MONO}`;
