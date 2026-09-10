@@ -8,8 +8,10 @@
 //! the settings PATCH is tri-state per field.
 //!
 //! The add answers `201 Created` with the project when it surfaces inside the
-//! await window and `202 Accepted` with [`crate::rest_common::Accepted`] when it
-//! does not, the same deferred contract the session create follows.
+//! await window, `422 Unprocessable Entity` with the worker's own message when
+//! the add op finals with an error first, and `202 Accepted` with
+//! [`crate::rest_common::Accepted`] when neither has happened by the end of the
+//! window, the same deferred contract the session create follows.
 
 use std::collections::BTreeMap;
 
@@ -25,8 +27,9 @@ use serde::{Deserialize, Serialize};
 use dux_core::wire::WireCommand;
 
 use crate::rest_common::{
-    Accepted, CREATE_AWAIT_TIMEOUT, await_new_project, delete_wire_response, id_within_bound,
-    idempotency_key, require_configured_provider, scope_from_headers,
+    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, await_new_project, create_failed,
+    delete_wire_response, id_within_bound, idempotency_key, require_configured_provider,
+    scope_from_headers,
 };
 use crate::server::AppState;
 
@@ -135,24 +138,22 @@ async fn add_project(
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
 
-    // A direct add resolves synchronously (first poll wins); the checkout-default
-    // add goes through a worker, so the poll covers it.
+    // A direct add resolves synchronously (first poll wins); the worker-backed
+    // adds are what the poll and the op-watch are for.
+    // The op the wait watches is the worker-backed add's own, the same key
+    // its final arrives under on the events socket. The plain add resolves on the
+    // reactor and mints no keyed op, so there is nothing to watch and nothing to
+    // name; unlike the from-PR create, nothing hands off here.
+    let op_id = outcome.status.and_then(|s| s.key);
     let window = state.create_await_timeout.unwrap_or(CREATE_AWAIT_TIMEOUT);
-    match await_new_project(&state.engine, &pre, window).await {
-        Some(id) => created_project_response(&state, id, key).await,
-        // The deferred reply carries the worker-backed add's keyed op id, the same
-        // key its final arrives under on the events socket. The plain add resolves
-        // on the reactor and mints no keyed op, so it answers `op_id: null` rather
-        // than an id nothing would ever resolve; that path only reaches here if the
-        // project vanished between the add and the poll. Unlike the from-PR create,
-        // nothing hands off here: the id names the operation whose final lands.
-        None => (
-            StatusCode::ACCEPTED,
-            Json(Accepted {
-                op_id: outcome.status.and_then(|s| s.key),
-            }),
-        )
-            .into_response(),
+    match await_new_project(&state.engine, &pre, op_id.as_deref(), window).await {
+        AwaitedCreate::Resolved(id) => created_project_response(&state, id, key).await,
+        AwaitedCreate::Failed(message) => create_failed(message),
+        // Still running at the end of the window: the deferred reply hands back
+        // the id to correlate on, or `op_id: null` for a keyless plain add rather
+        // than an id nothing would ever resolve (that path only reaches here if
+        // the project vanished between the add and the poll).
+        AwaitedCreate::Pending => (StatusCode::ACCEPTED, Json(Accepted { op_id })).into_response(),
     }
 }
 

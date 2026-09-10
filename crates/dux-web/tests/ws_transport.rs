@@ -1052,29 +1052,36 @@ async fn rest_create_session_returns_201_and_scopes_status() {
     );
 }
 
-/// The deferred create, end to end through a real server: a create the handler
-/// stops waiting on answers `202` with an operation id, and the create's FINAL
-/// arrives on the events socket under that same `key`. The tone is pinned to
-/// `error` on the same frame so the busy emitted during dispatch cannot satisfy
+/// The deferred create, end to end through a real server: a create still running
+/// when the handler stops waiting answers `202` with an operation id, and that
+/// create's FINAL arrives on the events socket under the same `key`. The tone is
+/// pinned on the same frame so the busy emitted during dispatch cannot satisfy
 /// the assertion; correlating the final is the whole reason the id is in the body.
 ///
-/// The agent name nests under an existing branch, which git refuses as a ref it
-/// cannot lock, so the create never persists a session and the deferred branch is
-/// reached on timing nothing can change. Only the provider process is stood in
-/// for (`cat`); everything else is the real server.
+/// The create is an ordinary, valid one parked on a FIFO its startup command
+/// reads, which runs before the session is announced: the wait can neither see a
+/// session nor a final for as long as the test holds the gate shut, so the
+/// deferred branch is reached on a real dependency rather than on timing.
 #[tokio::test]
 async fn rest_create_session_202_op_id_carries_the_creates_final() {
-    let (addr, tmp) = boot_for_create_agent_window(Some(DEFERRED_WINDOW), |_, _| {}).await;
-    // A branch for the requested name to collide with, in the repo the fixture
-    // registered as project `p1`.
-    let ok = std::process::Command::new("git")
-        .args(["branch", "blocked"])
-        .current_dir(tmp.path())
+    let gate = tempfile::tempdir().unwrap();
+    let gate_path = gate.path().join("startup-gate");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&gate_path)
         .status()
-        .expect("spawn git")
-        .success();
-    assert!(ok, "creating the colliding branch failed");
+        .expect("spawn mkfifo");
+    assert!(made.success(), "mkfifo {} failed", gate_path.display());
 
+    let (addr, _tmp) = boot_for_create_agent_window(Some(DEFERRED_WINDOW), |engine, _| {
+        // Pin the shell so the gate command is interpreted identically
+        // everywhere, rather than depending on the host's login shell.
+        engine.config.startup_command_terminal.command = "sh".to_string();
+        engine.config.startup_command_terminal.args = vec!["-c".to_string()];
+        for project in &mut engine.projects {
+            project.startup_command = Some(format!("cat {}", gate_path.display()));
+        }
+    })
+    .await;
     // Connect BEFORE the POST: the create's busy is emitted during the dispatch,
     // so a socket opened afterwards could miss the operation entirely.
     let (mut ws, conn_id) = connect_events(addr).await;
@@ -1086,15 +1093,16 @@ async fn rest_create_session_202_op_id_carries_the_creates_final() {
         serde_json::json!({
             "kind": "new",
             "project_id": "p1",
-            "name": "blocked/child",
+            "name": "deferred",
         }),
     )
     .await;
 
+    release_gate(gate_path).await;
     assert!(
         saw_status_with(
             &mut ws,
-            &[&format!("\"key\":\"{op_id}\""), "\"tone\":\"error\""],
+            &[&format!("\"key\":\"{op_id}\""), "\"tone\":\"info\""],
             Duration::from_secs(8),
         )
         .await,
@@ -1102,17 +1110,55 @@ async fn rest_create_session_202_op_id_carries_the_creates_final() {
     );
 }
 
-/// The from-PR create is the path where the id does NOT name the create: its own
-/// op is minted later, inside the lookup followup, so the `202` names the
-/// PR-LOOKUP op. This pins that: the repository has no remote, so the lookup
-/// fails and ITS error final lands under the id the reply handed out.
+/// A create whose operation FAILS answers the failure rather than waiting out the
+/// window and shrugging: `422` with git's own words in the body, promptly.
 ///
-/// A lookup that instead succeeds resolves this id to a `status_cleared` and the
-/// create finals under an id the reply never named. That is the engine's hand-off
-/// design, documented on `Accepted`, and deliberately not what this asserts.
+/// The agent name nests under an existing branch, which git refuses as a ref it
+/// cannot lock, so the create can never persist a session. The window is the real
+/// one, so the elapsed assertion measures the early answer rather than a fixture.
 #[tokio::test]
-async fn rest_create_session_from_pr_202_op_id_is_the_lookup_ops_key() {
-    let (addr, _tmp) = boot_for_create_agent_window(Some(DEFERRED_WINDOW), |engine, dir| {
+async fn rest_create_session_422_when_the_create_fails() {
+    let (addr, tmp) = boot_for_create_agent_window(None, |_, _| {}).await;
+    // A branch for the requested name to collide with, in the repo the fixture
+    // registered as project `p1`.
+    let ok = std::process::Command::new("git")
+        .args(["branch", "blocked"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("spawn git")
+        .success();
+    assert!(ok, "creating the colliding branch failed");
+
+    let started = std::time::Instant::now();
+    let (status, body) = post_create(
+        addr,
+        "/api/v1/sessions",
+        serde_json::json!({
+            "kind": "new",
+            "project_id": "p1",
+            "name": "blocked/child",
+        }),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(status, 422, "a failed create must not answer 202: {body}");
+    assert!(
+        !body.trim().is_empty(),
+        "the 422 body must carry the failure's own message"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the failure must answer promptly, took {elapsed:?}"
+    );
+}
+
+/// The from-PR create names the PR-LOOKUP operation, so a lookup that fails is
+/// the failure this route can answer with. The repository has no remote, so the
+/// lookup cannot resolve and its error final is what stops the wait.
+#[tokio::test]
+async fn rest_create_session_from_pr_422_when_the_lookup_fails() {
+    let (addr, _tmp) = boot_for_create_agent_window(None, |engine, dir| {
         // The gate the dispatch checks, preset so the POST cannot race the boot
         // probe; the probe itself is pointed at the stand-in gh, so enabling the
         // integration never runs a real gh.
@@ -1122,11 +1168,10 @@ async fn rest_create_session_from_pr_202_op_id_is_the_lookup_ops_key() {
             dux_core::gh::probe_test_support::stand_in_gh_serving(dir, &["github.com"]).into();
     })
     .await;
-    let (mut ws, conn_id) = connect_events(addr).await;
 
-    let op_id = deferred_create(
+    let started = std::time::Instant::now();
+    let (status, body) = post_create(
         addr,
-        &conn_id,
         "/api/v1/sessions",
         serde_json::json!({
             "kind": "from_pr",
@@ -1136,39 +1181,38 @@ async fn rest_create_session_from_pr_202_op_id_is_the_lookup_ops_key() {
         }),
     )
     .await;
+    let elapsed = started.elapsed();
 
+    assert_eq!(status, 422, "a failed lookup must not answer 202: {body}");
     assert!(
-        saw_status_with(
-            &mut ws,
-            &[&format!("\"key\":\"{op_id}\""), "\"tone\":\"error\""],
-            Duration::from_secs(8),
-        )
-        .await,
-        "the PR lookup's failure must arrive under the id the 202 handed out"
+        !body.trim().is_empty(),
+        "the 422 body must carry the lookup's own message"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the failure must answer promptly, took {elapsed:?}"
     );
 }
 
-/// The same contract for the project add, whose worker-backed variants are the
-/// only ones that can outlast the window: the `202` names the add op and the
-/// add's own final arrives under it.
+/// A worker-backed add that FAILS answers `422` with the worker's message rather
+/// than a reasonless 202.
 ///
 /// The folder is read-only, which the path validator accepts (a plain existing
 /// directory outside any repository) and the worker's `git init` then fails on,
 /// so no project is ever registered.
 #[tokio::test]
-async fn rest_add_project_202_op_id_carries_the_adds_final() {
-    let (addr, _tmp) = boot_for_create_agent_window(Some(DEFERRED_WINDOW), |_, _| {}).await;
+async fn rest_add_project_422_when_the_add_fails() {
+    let (addr, _tmp) = boot_for_create_agent_window(None, |_, _| {}).await;
     let folder = tempfile::tempdir().unwrap();
     if !make_unwritable(folder.path()) {
         // Running as root: CAP_DAC_OVERRIDE ignores the mode bits, `git init`
         // would succeed and the add would resolve. There is nothing to assert.
         return;
     }
-    let (mut ws, conn_id) = connect_events(addr).await;
 
-    let op_id = deferred_create(
+    let started = std::time::Instant::now();
+    let (status, body) = post_create(
         addr,
-        &conn_id,
         "/api/v1/projects",
         serde_json::json!({
             "path": folder.path().to_string_lossy(),
@@ -1176,23 +1220,37 @@ async fn rest_add_project_202_op_id_carries_the_adds_final() {
         }),
     )
     .await;
-
-    let seen = saw_status_with(
-        &mut ws,
-        &[&format!("\"key\":\"{op_id}\""), "\"tone\":\"error\""],
-        Duration::from_secs(8),
-    )
-    .await;
+    let elapsed = started.elapsed();
     restore_writable(folder.path());
+
+    assert_eq!(status, 422, "a failed add must not answer 202: {body}");
     assert!(
-        seen,
-        "the add's final must arrive under the id the 202 handed out"
+        !body.trim().is_empty(),
+        "the 422 body must carry the add's own message"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the failure must answer promptly, took {elapsed:?}"
     );
 }
 
-/// POST a create that cannot finish, assert the deferred shape, and hand back the
-/// operation id it named. Shared by the three tests above so the 202 contract is
-/// stated once: no `Location` (nothing is addressable yet) and an `op_id`.
+/// POST a create and hand back its status code and body text, so a test can
+/// assert the failure reply without assuming a shape it may not have.
+async fn post_create(addr: SocketAddr, path: &str, body: serde_json::Value) -> (u16, String) {
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}{path}"))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST create");
+    let status = resp.status().as_u16();
+    (status, resp.text().await.unwrap_or_default())
+}
+
+/// POST a create that cannot finish inside the window, assert the deferred
+/// shape, and hand back the operation id it named. Shared by the 202 tests above
+/// so the contract is stated once: no `Location` (nothing is addressable yet)
+/// and an `op_id`.
 async fn deferred_create(
     addr: SocketAddr,
     conn_id: &str,

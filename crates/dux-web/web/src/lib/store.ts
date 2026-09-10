@@ -1,7 +1,11 @@
 import { useSyncExternalStore } from "react"
 import { sanitizeAgentName } from "./agentName"
 import { git } from "./git"
-import { projectsApi, type PatchProjectBody } from "./projectsApi"
+import {
+  projectsApi,
+  ProjectsApiError,
+  type PatchProjectBody,
+} from "./projectsApi"
 import { existingBranchConflict, sessionsApi, SessionsApiError } from "./sessionsApi"
 
 import { ordersMatch, reorderById } from "./reorder"
@@ -4580,9 +4584,7 @@ export function inspectProjectPath(path: string): void {
 export function addProject(path: string, name: string): void {
   projectsApi
     .create({ path, name })
-    .catch((e) =>
-      notifyError(e instanceof Error ? e.message : "Could not add the project."),
-    )
+    .catch(toastAddProjectError)
 }
 
 // Check out the repo's default branch first, then add it; the TUI's
@@ -4592,9 +4594,7 @@ export function addProject(path: string, name: string): void {
 export function addProjectCheckoutDefault(path: string, name: string): void {
   projectsApi
     .create({ path, name, checkout_default: true })
-    .catch((e) =>
-      notifyError(e instanceof Error ? e.message : "Could not add the project."),
-    )
+    .catch(toastAddProjectError)
 }
 
 // Birth an unborn repo (fresh `git init`, no commits) with an empty initial
@@ -4603,9 +4603,7 @@ export function addProjectCheckoutDefault(path: string, name: string): void {
 export function addProjectCreateInitialCommit(path: string, name: string): void {
   projectsApi
     .create({ path, name, create_initial_commit: true })
-    .catch((e) =>
-      notifyError(e instanceof Error ? e.message : "Could not add the project."),
-    )
+    .catch(toastAddProjectError)
 }
 
 // Adopt a plain (non-repo) folder: the server runs `git init`, seeds a starter
@@ -4615,9 +4613,7 @@ export function addProjectCreateInitialCommit(path: string, name: string): void 
 export function initProject(path: string, name: string): void {
   projectsApi
     .create({ path, name, init_repo: true })
-    .catch((e) =>
-      notifyError(e instanceof Error ? e.message : "Could not add the project."),
-    )
+    .catch(toastAddProjectError)
 }
 
 export function openRemoveProject(projectId: string): void {
@@ -5013,14 +5009,27 @@ export function toggleCreateAgentRandomize(): void {
   }
 }
 
-// Surface a create-action REST error as a toast, except a 409 Conflict: that is
-// the engine's in-flight create guard, whose refusal already reaches this
-// connection over the `/ws/events` status stream, so toasting it here would
-// show the same refusal twice. Every other code, network failures included, is
-// surfaced.
+// The two create refusals whose message this connection is ALSO told over the
+// `/ws/events` status stream, so toasting them here would say the same thing
+// twice: 409, the engine's in-flight guard, and 422, an operation that was
+// dispatched and failed (the reply body is that failure's own final). Every
+// other code, network failures included, is surfaced.
+function alreadyOnTheStatusStream(status: number): boolean {
+  return status === 409 || status === 422
+}
+
+// Surface a create-action REST error as a toast, unless the status stream is
+// already carrying it.
 function toastCreateError(e: unknown, fallback: string): void {
-  if (e instanceof SessionsApiError && e.status === 409) return
+  if (e instanceof SessionsApiError && alreadyOnTheStatusStream(e.status)) return
   notifyError(e instanceof Error ? e.message : fallback)
+}
+
+// The same rule for the project add, whose four entry points all refuse the
+// same way.
+function toastAddProjectError(e: unknown): void {
+  if (e instanceof ProjectsApiError && alreadyOnTheStatusStream(e.status)) return
+  notifyError(e instanceof Error ? e.message : "Could not add the project.")
 }
 
 // Ask the server to create a new agent in a project. An empty name lets the

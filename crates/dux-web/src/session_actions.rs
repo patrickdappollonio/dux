@@ -20,6 +20,12 @@
 //! available and falls back to a minimal id-only body when it is not, so the
 //! agreement holds on that branch and not unconditionally.
 //!
+//! A create whose dispatched operation FAILS before the session appears answers
+//! `422 Unprocessable Entity` with that failure's own message, as soon as the
+//! final lands rather than at the end of the window. The three refusal codes
+//! divide by when the refusal happens: `400` is a synchronous guard, `409` the
+//! in-flight guard, and `422` work that was dispatched and could not be done.
+//!
 //! A create that has not surfaced its session by the end of the await window
 //! answers `202 Accepted` with [`crate::rest_common::Accepted`] instead: an
 //! operation id to correlate on over the events socket, rather than nothing at
@@ -41,9 +47,9 @@ use dux_core::wire::WireCommand;
 
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
-    Accepted, CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT, await_new_session,
-    await_session_for_op, delete_wire_response, id_within_bound, idempotency_key, outcome_is_error,
-    require_configured_provider, scope_from_headers, unknown_session,
+    Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT, await_new_session,
+    await_session_for_op, create_failed, delete_wire_response, id_within_bound, idempotency_key,
+    outcome_is_error, require_configured_provider, scope_from_headers, unknown_session,
 };
 use crate::server::AppState;
 
@@ -332,6 +338,11 @@ async fn create_session(
 /// window the `gh pr view` network call needs (see `await_new_session` for the
 /// residual concurrent-create race it carries).
 ///
+/// Either wait ALSO watches the op it dispatched, and an error final on that op
+/// before the session appears ends the wait with a 422 carrying the failure's own
+/// words: a create that failed in milliseconds must not cost the client the whole
+/// window and then answer with no reason.
+///
 /// Either wait timing out is a 202 carrying an operation id, so the client has a
 /// key to correlate on rather than nothing at all. WHICH op it names differs by
 /// path. The race-free path names the create op itself, and the create's final
@@ -356,8 +367,9 @@ async fn resolve_created_session(
     if let Some(op_id) = outcome.created_op_id {
         let window = state.create_await_timeout.unwrap_or(CREATE_AWAIT_TIMEOUT);
         return match await_session_for_op(&state.engine, op_id.clone(), window).await {
-            Some(id) => created_response(state, id, key).await,
-            None => accepted(Accepted { op_id: Some(op_id) }),
+            AwaitedCreate::Resolved(id) => created_response(state, id, key).await,
+            AwaitedCreate::Failed(message) => create_failed(message),
+            AwaitedCreate::Pending => accepted(Accepted { op_id: Some(op_id) }),
         };
     }
 
@@ -375,9 +387,10 @@ async fn resolve_created_session(
         CREATE_AWAIT_TIMEOUT
     };
     let window = state.create_await_timeout.unwrap_or(default_window);
-    match await_new_session(&state.engine, pre, window).await {
-        Some(id) => created_response(state, id, key).await,
-        None => accepted(Accepted { op_id: status.key }),
+    match await_new_session(&state.engine, pre, status.key.as_deref(), window).await {
+        AwaitedCreate::Resolved(id) => created_response(state, id, key).await,
+        AwaitedCreate::Failed(message) => create_failed(message),
+        AwaitedCreate::Pending => accepted(Accepted { op_id: status.key }),
     }
 }
 

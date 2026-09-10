@@ -3,8 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 // Exercises the store's add-project slice: the `runBrowse` staleness guard (a
 // late browse reply must not repopulate a closed picker), the `initProject`
 // wire contract (POST body carries `init_repo: true`), the `addProjectIntent`
-// set/clear lifecycle, and that inspections fire only on explicit selection
-// (never as a side effect of browsing).
+// set/clear lifecycle, that inspections fire only on explicit selection (never
+// as a side effect of browsing), and which refusals the add toasts.
+
+const { notifyErrorMock } = vi.hoisted(() => ({ notifyErrorMock: vi.fn() }))
+
+vi.mock("./notify", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./notify")>()),
+  notifyError: notifyErrorMock,
+}))
 
 interface Deferred {
   resolve: (value: unknown) => void
@@ -38,6 +45,17 @@ let pendingBrowse: Deferred[] = []
 let inspectedPaths: string[] = []
 // Bodies POSTed to /api/v1/projects.
 let createBodies: unknown[] = []
+// What the next POST /api/v1/projects answers, when it is not the 200 default.
+let createRefusal: { status: number; text: string } | null = null
+
+function refusalResponse(status: number, text: string) {
+  return {
+    ok: false,
+    status,
+    text: async () => text,
+    headers: { get: () => null },
+  }
+}
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
@@ -59,6 +77,12 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   }
   if (u.endsWith("/api/v1/projects") && init?.method === "POST") {
     createBodies.push(JSON.parse(String(init.body)))
+    if (createRefusal) {
+      return refusalResponse(
+        createRefusal.status,
+        createRefusal.text,
+      ) as unknown as Response
+    }
     return jsonResponse({ id: "p-new" }) as unknown as Response
   }
   throw new Error(`unexpected fetch: ${u}`)
@@ -79,6 +103,8 @@ beforeEach(() => {
   pendingBrowse = []
   inspectedPaths = []
   createBodies = []
+  createRefusal = null
+  notifyErrorMock.mockClear()
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -134,6 +160,29 @@ describe("add-project slice", () => {
     expect(createBodies).toEqual([
       { path: "/home/u/plain", name: "My Folder", init_repo: true },
     ])
+  })
+
+  it("does not toast a 422, whose message the status stream already carries", async () => {
+    createRefusal = {
+      status: 422,
+      text: "Initialized the repository, but couldn't create the initial commit.",
+    }
+    const mod = await loadStore()
+    mod.initProject("/home/u/plain", "My Folder")
+    await tick()
+    await tick()
+    expect(notifyErrorMock).not.toHaveBeenCalled()
+  })
+
+  it("toasts every other add refusal", async () => {
+    createRefusal = { status: 400, text: "that path is inside a repository" }
+    const mod = await loadStore()
+    mod.initProject("/home/u/plain", "My Folder")
+    await tick()
+    await tick()
+    expect(notifyErrorMock).toHaveBeenCalledWith(
+      "that path is inside a repository",
+    )
   })
 
   it("openAddProjectForInit sets the intent and close clears it", async () => {

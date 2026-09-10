@@ -379,6 +379,10 @@ export interface EventsClientMessage {
 // and there is therefore nothing to correlate on; the plain project add is the
 // known case.
 //
+// A 202 now means STILL RUNNING and nothing else. A create whose operation
+// failed answers `422` with that failure's own sentence instead of waiting out
+// the window, so this body never stands in for a reason the server already had.
+//
 // What the id names differs by path. An ordinary session create names its own
 // create operation, and the create's outcome arrives under it. A from-PR create
 // names the PR-LOOKUP operation instead, because the create's own operation is

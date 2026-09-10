@@ -4,12 +4,21 @@
 //! These live in one place so the session/project action modules and the git
 //! mutation routes derive `StatusScope` and bound `:id` params identically.
 //!
-//! A create answers one of two shapes: `201 Created` with the record and a
-//! `Location` header when it surfaces inside the await window, otherwise
-//! `202 Accepted` carrying [`Accepted`], the operation id the eventual final
-//! arrives under on the events socket. The deferred reply is never bodyless: a
-//! client that stopped being waited on still gets the one thing it needs to
-//! correlate the outcome.
+//! A create answers one of three shapes. `201 Created` with the record and a
+//! `Location` header when it surfaces inside the await window. `422
+//! Unprocessable Entity` with the failure's own words when the operation it
+//! dispatched finals with an error first: the request was well formed and
+//! dispatched, and the work it asked for could not be done, which is neither the
+//! `400` a synchronous guard answers nor the `409` an in-flight guard does.
+//! Otherwise `202 Accepted` carrying [`Accepted`], the operation id the eventual
+//! final arrives under on the events socket. The deferred reply is never
+//! bodyless: a client that stopped being waited on still gets the one thing it
+//! needs to correlate the outcome.
+//!
+//! Waiting out a twenty second window and then answering `202` with no reason
+//! for a create that failed in milliseconds is the silent waiting dux's design
+//! tenets refuse, so the await helpers watch the dispatched operation alongside
+//! the resource.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -318,36 +327,83 @@ pub fn id_within_bound(id: &str) -> bool {
     id.chars().count() <= MAX_ID_LEN
 }
 
-/// Poll the engine until create op `op_id` resolves to its session id, or the
-/// timeout elapses. This is the RACE-FREE create-correlation path: the op id comes
-/// back in `WireCommandOutcome.created_op_id` for a synchronous create
-/// (`new`/`fork`/`from_worktree`), and the engine records `op_id -> session_id`
-/// when the worker-minted session lands, so the handler resolves ITS exact
-/// session, never a concurrent create's. Returns `None` on timeout (the create
-/// was dispatched but has not completed yet; its completion/failure still rides
-/// the status stream).
+/// What a create's await settled on, in the order the handler checks them.
+///
+/// Three outcomes rather than an `Option`, because "the resource never appeared"
+/// covers two different answers: an operation still running, which is the `202`
+/// the client correlates on, and one that already failed, which is a reason the
+/// client can be told now.
+pub enum AwaitedCreate {
+    /// The resource surfaced; its id.
+    Resolved(String),
+    /// The dispatched operation finaled with an error before the resource
+    /// appeared, carrying the final's message.
+    Failed(String),
+    /// Neither happened inside the window.
+    Pending,
+}
+
+/// The error final `op_id` has already landed, if any.
+///
+/// The status snapshot carries every open status, keyed ones included, and a
+/// final stays replayable there for longer than any create window, so one cheap
+/// synchronous read per poll answers "has this operation failed yet". A `busy`
+/// under the same key means it is still running, which is not an answer.
+fn failed_op_message(engine: &EngineHandle, op_id: Option<&str>) -> Option<String> {
+    let op_id = op_id?;
+    engine
+        .status_snapshot()
+        .into_iter()
+        .find(|status| status.key.as_deref() == Some(op_id) && status.tone == "error")
+        .map(|status| status.message)
+}
+
+/// The `422 Unprocessable Entity` reply for a create whose operation failed: the
+/// request was well formed and dispatched, and the work it asked for could not be
+/// done. The body is the failure's own sentence, the same one the events socket
+/// carries, so a client showing either says the same thing.
+pub(crate) fn create_failed(message: String) -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, message).into_response()
+}
+
+/// Poll the engine until create op `op_id` resolves to its session id, that op
+/// fails, or the timeout elapses. This is the RACE-FREE create-correlation path:
+/// the op id comes back in `WireCommandOutcome.created_op_id` for a synchronous
+/// create (`new`/`fork`/`from_worktree`), and the engine records
+/// `op_id -> session_id` when the worker-minted session lands, so the handler
+/// resolves ITS exact session, never a concurrent create's. The same id is what
+/// makes the failure observable, so this path watches its own op.
 pub async fn await_session_for_op(
     engine: &EngineHandle,
     op_id: String,
     timeout: Duration,
-) -> Option<String> {
+) -> AwaitedCreate {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(id) = engine.created_session_for_op(op_id.clone()).await {
-            return Some(id);
+            return AwaitedCreate::Resolved(id);
+        }
+        if let Some(message) = failed_op_message(engine, Some(&op_id)) {
+            return AwaitedCreate::Failed(message);
         }
         if Instant::now() >= deadline {
-            return None;
+            return AwaitedCreate::Pending;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
 /// Poll the engine's session spine until a session id appears that was not in
-/// `pre`, or the timeout elapses. The FALLBACK create-correlation path, used only
-/// by the from-PR create (whose create op is minted later, inside the PR-lookup
-/// followup, so its id is not in the synchronous outcome). The synchronous
-/// `new`/`fork`/`from_worktree` creates instead use [`await_session_for_op`].
+/// `pre`, `watch_op` fails, or the timeout elapses. The FALLBACK
+/// create-correlation path, used only by the from-PR create (whose create op is
+/// minted later, inside the PR-lookup followup, so its id is not in the
+/// synchronous outcome). The synchronous `new`/`fork`/`from_worktree` creates
+/// instead use [`await_session_for_op`].
+///
+/// `watch_op` is therefore the PR-LOOKUP op here, and a lookup that fails is a
+/// create that will never happen, so its final is the failure to report. A lookup
+/// that succeeds hands off and clears that key instead, leaving this wait exactly
+/// as it was.
 ///
 /// RESIDUAL RACE: this returns the FIRST session not in `pre`, which under truly
 /// concurrent creates (another tab, or a TUI create in flip mode) could be a
@@ -359,17 +415,21 @@ pub async fn await_session_for_op(
 pub async fn await_new_session(
     engine: &EngineHandle,
     pre: &std::collections::HashSet<String>,
+    watch_op: Option<&str>,
     timeout: Duration,
-) -> Option<String> {
+) -> AwaitedCreate {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(spine) = engine.spine().await
             && let Some(found) = spine.sessions.iter().find(|s| !pre.contains(&s.id))
         {
-            return Some(found.id.clone());
+            return AwaitedCreate::Resolved(found.id.clone());
+        }
+        if let Some(message) = failed_op_message(engine, watch_op) {
+            return AwaitedCreate::Failed(message);
         }
         if Instant::now() >= deadline {
-            return None;
+            return AwaitedCreate::Pending;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -377,21 +437,26 @@ pub async fn await_new_session(
 
 /// Like [`await_new_session`] but for projects (the `POST /api/v1/projects` add).
 /// A direct add resolves synchronously so the first poll usually wins; the
-/// checkout-default add goes through a worker, so the poll covers it.
+/// worker-backed adds (checkout-default, initial commit, init-repo) go through a
+/// worker, so the poll covers them and `watch_op` is their own add op.
 pub async fn await_new_project(
     engine: &EngineHandle,
     pre: &std::collections::HashSet<String>,
+    watch_op: Option<&str>,
     timeout: Duration,
-) -> Option<String> {
+) -> AwaitedCreate {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(spine) = engine.spine().await
             && let Some(found) = spine.projects.iter().find(|p| !pre.contains(&p.id))
         {
-            return Some(found.id.clone());
+            return AwaitedCreate::Resolved(found.id.clone());
+        }
+        if let Some(message) = failed_op_message(engine, watch_op) {
+            return AwaitedCreate::Failed(message);
         }
         if Instant::now() >= deadline {
-            return None;
+            return AwaitedCreate::Pending;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -438,6 +503,34 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(name, value.parse().unwrap());
         h
+    }
+
+    /// The project add's deferred arm, at the helper rather than over a real
+    /// server: an add that is still running has neither a project nor an error
+    /// final, and the wait must end in `Pending` so the route answers 202.
+    ///
+    /// The real-server 202 fixture the session create uses (a startup command
+    /// parked on a FIFO) has no counterpart for a project add, whose worker the
+    /// engine actor has already drained by the handler's first poll even at a
+    /// one-millisecond window. This covers the arm the route reads.
+    #[tokio::test]
+    async fn await_new_project_is_pending_while_its_op_has_not_finaled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = crate::test_support::test_engine_handle(tmp.path());
+        let pre = std::collections::HashSet::new();
+
+        let waited = await_new_project(
+            &engine,
+            &pre,
+            Some("op-nothing-has-finaled-under"),
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert!(
+            matches!(waited, AwaitedCreate::Pending),
+            "no project and no final is the deferred answer, not a failure"
+        );
     }
 
     #[test]

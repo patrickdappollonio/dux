@@ -140,7 +140,16 @@ without a session (using the actual router, not only the probe-route seam).
   | Case | Success | Errors |
   |---|---|---|
   | `GET` read | 200 | 404 |
-  | `POST` create (session/project/terminal) | 201 + `Location`. A session or project create that has not surfaced by the end of its await window answers 202 + `{ "op_id": … }` instead; a terminal create always answers 201 | 400 / 409 |
+  | `POST` create (session/project/terminal) | 201 + `Location`. A session or project create that has not surfaced by the end of its await window answers 202 + `{ "op_id": … }` instead; a terminal create always answers 201 | 400 / 409 / 422 |
+
+  The three refusal codes on a create divide by when the refusal happens. `400`
+  is a synchronous guard (an unknown project, an invalid name). `409` is the
+  in-flight guard, or an existing-branch attach the client has not confirmed.
+  `422` is work that was dispatched and could not be done: the handler watches
+  the operation it dispatched alongside the resource, and an error final on that
+  operation ends the wait at once with the failure's own message as the body,
+  rather than waiting out the window and answering 202 with no reason.
+
   | `PATCH` update | 200 (or 202, see deferred) | 404 |
   | `DELETE` | 204 | 404 |
   | `POST` action (git mutation, reconnect, pull, checkout) | 200 | 4xx client-actionable / 5xx unexpected |
