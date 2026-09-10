@@ -7,7 +7,11 @@
 // captured black.
 const { spawnSync } = require("child_process")
 const path = require("path")
-const puppeteer = require("puppeteer-core")
+
+// Required inside `open` rather than here: loading a scene must cost nothing but
+// node, so the website suite's loop test can read every scene without this
+// directory's dependencies being installed.
+const puppeteer = () => require("puppeteer-core")
 
 const PORT = process.env.DUX_PORT || "8790"
 const BASE = `http://127.0.0.1:${PORT}`
@@ -116,7 +120,7 @@ async function open({ mobile = false, width, height } = {}) {
   const preset = mobile ? PHONE : DESKTOP
   const w = width || preset.width
   const h = height || preset.height
-  const browser = await puppeteer.launch({
+  const browser = await puppeteer().launch({
     executablePath: process.env.CHROME,
     headless: "new",
     defaultViewport: null,
@@ -292,6 +296,59 @@ const STAGINGS = {
   standalone: { ...BUSY, "design-notes": { fixture: "working", provider: "claude" } },
 }
 
+// The agent the busy stagings leave waiting on you, and the fixture that rings
+// the bell it waits with.
+const ATTENTION_AGENT = "review-billing"
+
+// Re-arm that agent's needs-you flag, on the same path `stage` relights an agent
+// on: the flag clears the moment someone looks at the pane, so any scene that
+// opens this agent leaves the workspace without one. A scene that is ABOUT the
+// flag calls this before it shoots rather than trusting whatever ran before it,
+// and a scene that clears it puts it back afterwards.
+async function armAttention(title = ATTENTION_AGENT, timeoutMs = 40000) {
+  const by = await agents()
+  const session = by[title]
+  if (!session) throw new Error(`the seed has not created ${title}`)
+  await setFixture("attention")
+  await api("POST", `/api/v1/sessions/${session.id}/kill`)
+  await sleep(1200)
+  await api("POST", `/api/v1/sessions/${session.id}/reconnect`)
+
+  // Wait for the flag itself, not for the restart: the fixture rings the bell
+  // once, shortly after it comes up, and resetting the global environment before
+  // the provider has been spawned would hand the next spawn the wrong fixture.
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const now = (await get("/api/v1/sessions")).find((s) => s.id === session.id)
+    if (now && now.needs_attention) {
+      await setFixture("working")
+      return
+    }
+    await sleep(500)
+  }
+  await setFixture("working")
+  throw new Error(`${title} never raised its needs-you flag`)
+}
+
+// Refuse to write a picture of the wrong thing: the sidebar row has to say the
+// words the caption promises. Same idea as the take-over card's guard.
+async function assertNeedsAttention(page, title = ATTENTION_AGENT) {
+  const reads = await page.evaluate((name) => {
+    // Bounded by length so this matches the row rather than an ancestor that
+    // happens to contain every row.
+    const row = [...document.querySelectorAll("a, li, div")].find((el) => {
+      const text = el.textContent || ""
+      return text.length < 200 && text.includes(name) && /Needs you/.test(text)
+    })
+    return Boolean(row)
+  }, title)
+  if (!reads) {
+    throw new Error(
+      `the ${title} row does not read "Needs you"; something cleared the flag before this scene`,
+    )
+  }
+}
+
 // Relight every agent on the fixture its staging asks for. The fixture is read
 // at spawn, so each agent is stopped and started again with the global
 // environment holding the value meant for it.
@@ -369,8 +426,11 @@ async function openMoreWays(page) {
 }
 
 module.exports = {
+  ATTENTION_AGENT,
   BASE,
   SIDEBAR_ORDER,
+  armAttention,
+  assertNeedsAttention,
   openMoreWays,
   openNewAgent,
   containerSh,
