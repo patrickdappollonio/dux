@@ -1853,6 +1853,40 @@ describe("AppSidebar collapsed icon rail", () => {
     ).toBeTruthy()
   })
 
+  // The rail has no state word to read, so it is the surface where a working
+  // flag that disagrees with the ladder shows up as a pulsing icon nested
+  // inside a blinking wrapper, the two opacities multiplying.
+  it("leaves the rail icon unpulsed when a working agent needs attention", () => {
+    const spine = makeTwoProjectSpine() as unknown as {
+      sessions: { working: boolean; needs_attention: boolean }[]
+    }
+    spine.sessions[0].working = true
+    spine.sessions[0].needs_attention = true
+    mockState = makeState({
+      spine: spine as unknown as DuxState["spine"],
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    const icon = rail.querySelectorAll("button")[0].querySelector("svg")
+    expect(icon?.getAttribute("class")).not.toContain(
+      "motion-safe:animate-working-pulse",
+    )
+    expect(icon?.parentElement?.getAttribute("class")).toContain(
+      "motion-safe:animate-attention-pulse",
+    )
+  })
+
   it("scrolls internally in icon mode instead of relying on SidebarContent's clipped overflow", () => {
     // jsdom does not lay out or clip content, so it can't observe the actual
     // clipping bug (icons past ~a screenful becoming unreachable below the

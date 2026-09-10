@@ -165,7 +165,14 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --animate-working-pulse: working-pulse 1.6s ease-in-out infinite;
     /* The ellipsis that runs after the state word: four states over the SAME
        period, one every ELLIPSIS_STEP_MS, held rather than tweened. It rides in
-       a slot the width of three dots, so the row behind it never shifts. */
+       a slot the width of three dots, so the row behind it never shifts.
+
+       It uncovers real dots with `clip-path` rather than animating `content`,
+       which WebKit does not animate at all: on the phone browser this UI is
+       most used from, the content technique left a permanently blank slot and
+       nothing said so. `clip-path` animates everywhere and degrades to the
+       fully-clipped first frame, which is the same empty-and-correctly-sized
+       slot reduced motion asks for. */
     --animate-working-dots: working-dots 1.6s steps(1, end) infinite;
     /* The "needs attention" dot rhythm: two quick pulses, then a steady hold,
        then repeat. Faster and more insistent than Tailwind's stock 2s
@@ -202,29 +209,43 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     50% { opacity: 0.4; }
 }
 
-/* Discrete by design: the dots appear and disappear, they never fade. */
+/* Discrete by design: the dots appear and disappear, they never fade. The
+   overlay holds all three and is clipped from the right in exact thirds, so the
+   four states are three dots, two, one, none. */
 @keyframes working-dots {
-    0% { content: ""; }
-    25% { content: "."; }
-    50% { content: ".."; }
-    75% { content: "..."; }
-    100% { content: ""; }
+    0% { clip-path: inset(0 100% 0 0); }
+    25% { clip-path: inset(0 66.667% 0 0); }
+    50% { clip-path: inset(0 33.333% 0 0); }
+    75% { clip-path: inset(0 0 0 0); }
+    100% { clip-path: inset(0 100% 0 0); }
 }
 
-/* The reserved ellipsis slot after a working state word. Fixed at the width of
-   three dots and left-aligned, so the count and the trailing text behind it stay
-   exactly where they are through all four states. `pre` keeps the dots from
-   being collapsed. Under reduced motion the slot stays and the dots do not
-   come: the word alone says the agent is working. */
+/* The reserved ellipsis slot after a working state word. Its width is MEASURED
+   rather than declared: a hidden but laid-out "..." sizes the box in the row's
+   own font, so the count and the trailing text behind it stay exactly where they
+   are through all four states and the slot is never wider than the dots it
+   holds. `pre` keeps the dots from being collapsed. */
 .working-dots {
+    position: relative;
     display: inline-block;
-    width: 3ch;
-    text-align: left;
     white-space: pre;
 }
 
+.working-dots::before {
+    content: "...";
+    visibility: hidden;
+}
+
+/* The dots the reader actually sees, stacked over that reserved box and fully
+   clipped at rest. With no animation (reduced motion, or an engine that cannot
+   animate clip-path) the slot keeps its width and shows nothing, which is the
+   state the cue is meant to degrade to: the word alone says the agent is
+   working. */
 .working-dots::after {
-    content: "";
+    content: "...";
+    position: absolute;
+    inset: 0;
+    clip-path: inset(0 100% 0 0);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -275,7 +296,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    heartbeat. When work stops the class is removed and the opacity reverts to the
    resting value; the `transition` on the base eases that change, so the dot
    settles back to rest instead of freezing at the faint part of the pulse (the
-   same "settle, don't snap" idea as the icon bob). */
+   same "settle, don't snap" idea as the row's working pulse). */
 .agent-status-dot {
     opacity: 0.6;
     transition: opacity 400ms ease-out;

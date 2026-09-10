@@ -164,8 +164,8 @@ export function displayedSessionOrder(
 }
 
 // The colored state word on a row's second line, read off the same flags that
-// drive the bob and the attention pulse so the word and the motion cue cannot
-// disagree. Colors are Tailwind palette utilities, as in agentRow.ts, never raw
+// drive the working pulse and the attention pulse so the word and the motion
+// cue cannot disagree. Colors are Tailwind palette utilities, as in agentRow.ts, never raw
 // hex or oklch.
 export interface StateWord {
   label: string

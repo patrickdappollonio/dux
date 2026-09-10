@@ -3,13 +3,16 @@ import type { SessionStatus } from "@/lib/types"
 /** Visual treatment for an agent row, shared by the desktop sidebar and the
  *  mobile shell so the two surfaces never drift.
  *
- *  - `working`: busy. Drives the glyph pulse and the state word's own pulse
- *    together, so the two halves of the one cue stay in lockstep. Requires
- *    `active`.
+ *  - `working`: busy, AND nothing outranks it. Drives the glyph pulse and the
+ *    state word's own pulse together, so the two halves of the one cue stay in
+ *    lockstep. It follows the same priority ladder the state word does, so it
+ *    is on exactly when the word reads "Working"; a test walks the whole input
+ *    space to keep the two from parting.
  *  - `dimmed`: not running, so the whole row recedes and running agents stand
  *    out. Mutually exclusive with `working` by construction.
  *  - `attention`: a tab wants the user (a permission prompt, a finished turn),
- *    shown as a cyan dot. Orthogonal to the other flags.
+ *    shown as a cyan dot. Orthogonal to the other flags, and it OUTRANKS
+ *    working.
  *  - `typing`: streaming keystroke-level input, shown as the caret and the
  *    violet "Typing" word. Requires `active`, and suppresses `working` so a row
  *    shows the caret or the pulse, never both. */
@@ -22,9 +25,13 @@ export function agentRowVisual(
   const active = status === "active"
   const isTyping = active && typing
   return {
-    // Working cue is suppressed during typing so the two states never fire at
-    // once; the caret carries "typing", the pulse carries "working".
-    working: active && working && !isTyping,
+    // The working cue stands down for both states above it, so the row shows
+    // one cue at a time: the caret carries "typing", the cyan blink carries
+    // "needs you", and the pulse carries "working". Attention matters twice
+    // over here, because its blink lives on the wrapper the pulsing glyph sits
+    // inside, and two opacity animations stacked that way MULTIPLY into a dip
+    // far deeper than either one asks for.
+    working: active && working && !isTyping && !needsAttention,
     dimmed: !active,
     attention: needsAttention,
     typing: isTyping,

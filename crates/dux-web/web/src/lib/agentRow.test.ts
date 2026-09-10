@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 
+import type { SessionStatus, SessionView } from "@/lib/types"
+
 import { agentRowVisual, statusDotColorClass } from "./agentRow"
+import { stateWord } from "./flatList"
 
 describe("agentRowVisual", () => {
   it("marks an active agent that is streaming output as working", () => {
@@ -47,10 +50,13 @@ describe("agentRowVisual", () => {
     })
   })
 
-  it("flags attention independently of working and dimmed", () => {
-    // A flagged agent may still be streaming its permission prompt.
+  it("turns the working cue OFF under attention, which outranks it", () => {
+    // A flagged agent is usually still streaming its permission prompt, and the
+    // word it shows is "Needs you". The cue must agree with that word: pulsing
+    // the glyph here would also nest an opacity animation inside the attention
+    // blink and multiply the two into a much deeper dip.
     expect(agentRowVisual("active", true, true)).toEqual({
-      working: true,
+      working: false,
       dimmed: false,
       attention: true,
       typing: false,
@@ -96,6 +102,30 @@ describe("agentRowVisual", () => {
   it("never reports typing for a non-active agent", () => {
     expect(agentRowVisual("detached", false, false, true).typing).toBe(false)
     expect(agentRowVisual("exited", false, false, true).typing).toBe(false)
+  })
+
+  // The cue and the word are two readings of the same row, and a row that
+  // pulses while saying something other than "Working" is the bug this pins.
+  // Walked over the whole input space rather than sampled, because the ladder
+  // has four inputs and the disagreement lived in one corner of it.
+  it("fires exactly when the row's state word is the busy one", () => {
+    const statuses: SessionStatus[] = ["active", "detached", "exited"]
+    for (const status of statuses) {
+      for (const working of [false, true]) {
+        for (const needsAttention of [false, true]) {
+          for (const typing of [false, true]) {
+            const visual = agentRowVisual(status, working, needsAttention, typing)
+            const word = stateWord({
+              status,
+              working,
+              needs_attention: needsAttention,
+              typing,
+            } as SessionView)
+            expect(visual.working).toBe(word.label === "Working")
+          }
+        }
+      }
+    }
   })
 })
 

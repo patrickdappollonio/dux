@@ -1587,6 +1587,41 @@ describe("FlatAgentList working cue", () => {
 
   // A terminal row is an agent row: the same cue, on its own glyph and its own
   // busy word.
+  // Attention outranks working, so a row streaming its permission prompt shows
+  // the cyan blink and NOTHING else: no pulsing glyph inside that blinking
+  // wrapper (two opacity animations there multiply into a dip neither asks
+  // for), and no dots growing after a word that does not read "Working".
+  it("stands the cue down on a row that is working AND needs attention", () => {
+    const base = makeState("name")
+    mockState = {
+      ...base,
+      spine: {
+        ...base.spine,
+        sessions: [
+          makeSession({
+            id: "alpha",
+            title: "Alpha",
+            working: true,
+            needs_attention: true,
+          }),
+        ],
+        terminals: [],
+      },
+    } as DuxState
+    const { container } = render(<FlatAgentList handlers={handlers} />)
+
+    const word = screen.getByText("Needs you")
+    expect(word.className).not.toContain(PULSE)
+    expect(container.querySelectorAll(".working-dots")).toHaveLength(0)
+
+    const glyph = container.querySelector("svg.lucide-bot")
+    expect(glyph?.getAttribute("class")).not.toContain(PULSE)
+    // The wrapper is the one thing animating, and it is the attention blink.
+    expect(glyph?.parentElement?.getAttribute("class")).toContain(
+      "motion-safe:animate-attention-pulse",
+    )
+  })
+
   it("pulses a running terminal row the same way", () => {
     const base = makeState("name")
     mockState = {
@@ -1611,8 +1646,9 @@ describe("FlatAgentList working cue", () => {
   })
 
   // The two surfaces paint one cue, so the browser's timing is the terminal
-  // UI's timing. Both halves are read off the authored sources rather than
-  // restated here, which is what makes a change to either one fail this.
+  // UI's timing. Every expected value is DERIVED from the shared constants
+  // rather than restated, so moving the period in Rust moves what this demands
+  // of the stylesheet instead of quietly passing.
   it("keeps the browser's timing equal to the shared working-cue constants", async () => {
     const { readFileSync } = await import("node:fs")
     const css = readFileSync(`${process.cwd()}/src/index.css`, "utf8")
@@ -1625,7 +1661,7 @@ describe("FlatAgentList working cue", () => {
     const stepMs = Number(/ELLIPSIS_STEP_MS: u64 = (\d+)/.exec(rust)![1])
     const floor = Number(/PULSE_FLOOR: f32 = ([\d.]+)/.exec(rust)![1])
     const period = `${periodMs / 1000}s`
-    expect(period).toBe("1.6s")
+    const states = periodMs / stepMs
 
     // Both animations run for exactly one period.
     expect(css).toContain(
@@ -1643,37 +1679,56 @@ describe("FlatAgentList working cue", () => {
     // Opacity only: a transform would nudge the word off line two's baseline.
     expect(pulse![1]).not.toMatch(/transform|translate|top:|margin/)
 
-    // Four ellipsis states, one per step, evenly spread over the period.
+    // The dots are uncovered by clipping real glyphs, never by animating
+    // `content`, which WebKit does not animate: the phone this UI is most used
+    // from would show a permanently blank slot.
     const dots = /@keyframes working-dots\s*\{([\s\S]*?)\n\}/.exec(css)
     expect(dots).toBeTruthy()
-    const states = periodMs / stepMs
+    expect(dots![1]).not.toContain("content:")
     expect(states).toBe(4)
-    const contents = ['""', '"."', '".."', '"..."']
-    for (const [index, content] of contents.entries()) {
-      expect(dots![1]).toContain(`${(index * 100) / states}% { content: ${content}; }`)
+    // One keyframe per state, evenly spread, each uncovering one more third.
+    for (let shown = 0; shown < states; shown += 1) {
+      const percent = (shown * 100) / states
+      const hidden = shown === states - 1
+        ? "0"
+        : `${Number((((states - 1 - shown) / (states - 1)) * 100).toFixed(3))}%`
+      expect(dots![1]).toContain(`${percent}% { clip-path: inset(0 ${hidden} 0 0); }`)
     }
+    // And it loops back to fully clipped.
+    expect(dots![1]).toContain("100% { clip-path: inset(0 100% 0 0); }")
 
-    // The slot is as wide as the widest state and never narrower, so nothing
-    // behind it moves.
+    // The slot's width is measured from real dots rather than declared in `ch`,
+    // so it is exactly as wide as what it holds in the row's own font.
     const slot = /\.working-dots \{([\s\S]*?)\n\}/.exec(css)
     expect(slot).toBeTruthy()
-    expect(slot![1]).toContain(`width: ${states - 1}ch;`)
     expect(slot![1]).toContain("display: inline-block;")
+    expect(slot![1]).not.toMatch(/width:/)
+    const reserve = /\.working-dots::before \{([\s\S]*?)\n\}/.exec(css)
+    expect(reserve![1]).toContain(`content: "${".".repeat(states - 1)}";`)
+    expect(reserve![1]).toContain("visibility: hidden;")
   })
-
-  // Reduced motion shows the glyph and the word steady and no dots at all: the
+  // Reduced motion shows the glyph and the word steady and no dots at all,
+  // while the slot keeps its width so nothing reflows against a moving row: the
   // word alone still says the agent is working.
   it("stands the whole cue down under reduced motion", async () => {
     const { readFileSync } = await import("node:fs")
     const css = readFileSync(`${process.cwd()}/src/index.css`, "utf8")
 
-    // The dots are gated by the query itself...
-    const gate = css.indexOf("@media (prefers-reduced-motion: no-preference)")
-    expect(gate).toBeGreaterThan(-1)
-    const animation = css.indexOf("animation: var(--animate-working-dots);")
-    expect(animation).toBeGreaterThan(gate)
+    // The dots' animation lives INSIDE the no-preference block, matched as a
+    // block rather than by source order: two rules can be in the right order
+    // and still not be nested, which is the mistake worth catching.
+    const gate = /@media \(prefers-reduced-motion: no-preference\) \{([\s\S]*?)\n\}\n/.exec(
+      css,
+    )
+    expect(gate).toBeTruthy()
+    expect(gate![1]).toContain("animation: var(--animate-working-dots);")
+    // With that block off, the dots rest fully clipped and the slot still holds
+    // its measured width.
+    const rest = /\.working-dots::after \{([\s\S]*?)\n\}/.exec(css)
+    expect(rest![1]).toContain("clip-path: inset(0 100% 0 0);")
+    expect(css).toContain('.working-dots::before {\n    content: "...";')
 
-    // ...and the pulse by the `motion-safe:` variant everywhere it is applied.
+    // ...and the pulse is gated by the `motion-safe:` variant everywhere it is applied.
     mockState = workingAlpha()
     const { container } = render(<FlatAgentList handlers={handlers} />)
     const classes = [...container.querySelectorAll("*")]
