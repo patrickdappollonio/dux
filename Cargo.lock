@@ -738,6 +738,7 @@ dependencies = [
  "chrono",
  "compact_str",
  "content_inspector",
+ "flate2",
  "home",
  "indexmap",
  "libc",

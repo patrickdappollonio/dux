@@ -2013,6 +2013,7 @@ impl Engine {
     /// the other's path.
     pub fn retune_after_config_swap(&mut self) {
         crate::logger::set_level(&self.config.logging.level);
+        crate::logger::set_rotation(&self.config.logging);
         self.pr_poll_interval_secs.store(
             u64::from(crate::config::normalized_pr_poll_interval(
                 self.config.ui.pr_poll_interval_seconds,
