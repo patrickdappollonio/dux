@@ -23,7 +23,9 @@ show a pre-flight step first:
 - If the repo is checked out to something other than its default branch, it offers to check
   that branch out before adding.
 - If the repo has no commits yet (a fresh `git init`), it offers to make the initial commit
-  for you.
+  for you. If git on the server cannot work out an identity for that commit, dux fills in
+  `dux@localhost` as the address so the add still succeeds; see
+  [the workspace page](/docs/web-workspace) for what it keeps and what it fills in.
 
 The confirm button's label adapts to whichever applies. A project's `⋯` menu carries
 project settings, project info, and remove project, alongside the agent-creation actions

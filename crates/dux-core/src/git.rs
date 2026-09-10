@@ -518,6 +518,80 @@ pub fn repo_has_commits(path: &Path) -> bool {
     matches!(repo_commit_state(path), CommitState::Born)
 }
 
+/// The address dux signs its own bootstrap commit with when git refuses the
+/// commit for want of one. `localhost` is reserved and can never be a real mail
+/// domain, so the commit reads as the machine-made artifact it is.
+const BOOTSTRAP_IDENTITY_EMAIL: &str = "dux@localhost";
+
+/// The name that goes with it, used only when the repo has no `user.name` to
+/// keep.
+const BOOTSTRAP_IDENTITY_NAME: &str = "dux";
+
+/// git's wording when it refuses a commit because it cannot work out who is
+/// making it. Measured on git 2.55 across the three ways it says so: a hostname
+/// it cannot build an address from, `user.useConfigOnly` with nothing
+/// configured, and a configured name that is empty.
+const IDENTITY_FAILURE_MARKERS: [&str; 4] = [
+    "identity unknown",
+    "unable to auto-detect",
+    "no email was given",
+    "empty ident name",
+];
+
+/// Whether `stderr` is git declining for want of an identity rather than for any
+/// other reason. Only this failure is worth a second attempt.
+fn is_identity_failure(stderr: &str) -> bool {
+    let lowered = stderr.to_ascii_lowercase();
+    IDENTITY_FAILURE_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+}
+
+/// Whether the repo can already tell git a `user.name`. An unreadable or empty
+/// value counts as none, so the retry supplies one.
+fn has_configured_user_name(repo: &Path) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["config", "--get", "user.name"])
+        .stdin(Stdio::null())
+        .output()
+        .is_ok_and(|out| {
+            out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+        })
+}
+
+/// Build the empty-tree commit object, with `overrides` prepended as `-c` pairs.
+/// `commit.gpgsign=false` so a signing prompt can't block; hooksPath at
+/// /dev/null so no hook runs at any step of this bootstrap. Returns the commit
+/// sha, or git's stderr.
+fn commit_tree(
+    path: &Path,
+    tree: &str,
+    overrides: &[String],
+) -> std::result::Result<String, String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(path);
+    command.args([
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+    ]);
+    for override_pair in overrides {
+        command.arg("-c").arg(override_pair);
+    }
+    command.args(["commit-tree", tree, "-m", "Initial commit"]);
+    let out = command
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| format!("failed to run git commit-tree: {err}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Creates an empty initial commit so an otherwise-unborn repo gains a root
 /// commit and can back worktrees.
 ///
@@ -537,12 +611,22 @@ pub fn repo_has_commits(path: &Path) -> bool {
 ///   concurrent real commit makes this fail rather than land a second one, and
 ///   no step needs a work tree, so a **bare** repo works too.
 ///
-/// The commit signs itself as `dux <dux@localhost>` when, and only when, git
-/// can resolve no identity of its own in the repo (no `user.name`/`user.email`
-/// anywhere and no synthesizable one, which is the state of a clean CI runner).
-/// A real identity always wins, and commits of the USER's work are untouched by
-/// this: those still fail loudly, because signing somebody's work for them is
-/// not dux's to do.
+/// The commit is attempted with whatever identity git already has. Only if git
+/// refuses it FOR WANT OF ONE is it retried once, adding
+/// `user.email=dux@localhost` and, only where the repo has no `user.name` to
+/// keep, `user.name=dux`. So a machine that can tell git who it is signs
+/// normally, a repo with a name but no address commits as
+/// `Real Person <dux@localhost>`, and a clean CI runner commits as
+/// `dux <dux@localhost>`. The discarded first attempt writes nothing but an
+/// unreferenced object.
+///
+/// Asking git to commit and reading its refusal is the whole probe, deliberately:
+/// `git var GIT_COMMITTER_IDENT` answers a DIFFERENT question, and was measured
+/// to succeed on a `GIT_COMMITTER_*` environment under which `commit-tree` still
+/// fails on the author.
+///
+/// Commits of the USER's work are untouched by this: those still fail loudly,
+/// because signing somebody's work for them is not dux's to do.
 ///
 /// Idempotent: a repo that already has a commit, at entry or because the CAS
 /// lost a race, returns `Ok(branch)`. It errors when the index has staged
@@ -550,31 +634,6 @@ pub fn repo_has_commits(path: &Path) -> bool {
 /// may want in the first commit), when git's state cannot be determined, on a
 /// detached HEAD, and on a genuine git failure, surfaced verbatim. The CAS is
 /// the cross-process backstop behind the engine's own in-flight gate.
-/// The identity dux signs its own bootstrap commit with when git can resolve no
-/// other one. `localhost` is reserved and can never be a real mail domain, so
-/// the commit reads as the machine-made artifact it is rather than as a claim
-/// about a person.
-const BOOTSTRAP_IDENTITY_NAME: &str = "user.name=dux";
-const BOOTSTRAP_IDENTITY_EMAIL: &str = "user.email=dux@localhost";
-
-/// Whether git can resolve a committer identity in `repo`. Measured on git
-/// 2.55: `git var GIT_COMMITTER_IDENT` fails with exit 128 in exactly the cases
-/// `commit-tree` does, so it answers the question without writing anything.
-///
-/// A probe that cannot run at all is reported as "resolvable", because the
-/// fallback is only ever worth applying on a definite no; an indeterminate
-/// answer leaves the commit exactly as it behaved before.
-fn has_resolvable_identity(repo: &Path) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["var", "GIT_COMMITTER_IDENT"])
-        .stdin(Stdio::null())
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(true)
-}
-
 pub fn create_initial_commit(path: &Path) -> Result<String> {
     let repo = path.to_string_lossy();
     // Fail closed on commit state: only bootstrap a confirmed-unborn repo. A
@@ -633,26 +692,29 @@ pub fn create_initial_commit(path: &Path) -> Result<String> {
         &["hash-object", "-t", "tree", NULL_DEVICE],
         "compute the empty tree",
     )?;
-    // `commit.gpgsign=false` so a signing prompt can't block; hooksPath at
-    // /dev/null so no hook runs at any step of this bootstrap.
-    let mut commit_args = vec![
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-    ];
-    if !has_resolvable_identity(path) {
-        // Last resort only, and only for THIS commit, which is dux's own empty
-        // one rather than any of the user's work.
-        commit_args.extend_from_slice(&[
-            "-c",
-            BOOTSTRAP_IDENTITY_NAME,
-            "-c",
-            BOOTSTRAP_IDENTITY_EMAIL,
-        ]);
-    }
-    commit_args.extend_from_slice(&["commit-tree", &empty_tree, "-m", "Initial commit"]);
-    let commit = run_git_capture(path, &commit_args, "create the initial commit object")?;
+    let commit = match commit_tree(path, &empty_tree, &[]) {
+        Ok(sha) => sha,
+        Err(refusal) if is_identity_failure(&refusal) => {
+            // Supply only what git is missing: the address always, the name only
+            // where the repo has none of its own to keep.
+            let mut overrides = vec![format!("user.email={BOOTSTRAP_IDENTITY_EMAIL}")];
+            if !has_configured_user_name(path) {
+                overrides.push(format!("user.name={BOOTSTRAP_IDENTITY_NAME}"));
+            }
+            commit_tree(path, &empty_tree, &overrides).map_err(|retry| {
+                anyhow!(
+                    "failed to create the initial commit object for {}: {retry}",
+                    path.display()
+                )
+            })?
+        }
+        Err(other) => {
+            return Err(anyhow!(
+                "failed to create the initial commit object for {}: {other}",
+                path.display()
+            ));
+        }
+    };
     // Land it atomically: CAS with an empty old-value requires the branch to not
     // yet exist, closing the "a real commit landed concurrently" race. hooksPath
     // at /dev/null so the ref update runs no `reference-transaction` hook.
@@ -8587,33 +8649,46 @@ mod tests {
         );
     }
 
-    /// Body of the identity-free bootstrap, run by the parent test below in a
+    /// Body of the identity-starved bootstrap, run by the parent tests below in a
     /// CHILD process because per-command isolation cannot reach the git
     /// commands production spawns; only the process environment can.
     #[test]
-    #[ignore = "helper process for create_initial_commit_succeeds_with_no_git_identity"]
+    #[ignore = "helper process for the create_initial_commit identity tests"]
     fn create_initial_commit_identity_free_child() {
         let Ok(path) = std::env::var("DUX_TEST_UNBORN_REPO") else {
             return;
         };
         create_initial_commit(Path::new(&path))
-            .expect("the bootstrap commit must not need a configured git identity");
+            .expect("the bootstrap commit must not need a resolvable git identity");
     }
 
-    #[test]
-    fn create_initial_commit_succeeds_with_no_git_identity() {
-        // The CI runner has no `user.name`/`user.email` and an undotted
-        // hostname, so git cannot synthesize one either: dux's own empty commit
-        // has to sign itself rather than fail the whole project add.
+    /// An unborn repo git cannot work out an identity for, on ANY host: the
+    /// environment carries none, the config files are unreachable, and
+    /// `user.useConfigOnly` stops git synthesizing one from the hostname (which a
+    /// dotted host with a GECOS name would otherwise let it do, leaving the test
+    /// asserting nothing).
+    fn identity_starved_repo(config: &[(&str, &str)]) -> tempfile::TempDir {
         let repo = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        let init = test_support::git_command()
-            .args(["init", "-b", "main"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(init.status.success(), "git init");
+        let run = |args: &[&str]| {
+            let out = test_support::git_command()
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.useConfigOnly", "true"]);
+        for (key, value) in config {
+            run(&["config", key, value]);
+        }
+        repo
+    }
 
+    /// Bootstrap `repo` in a child process whose environment can tell git
+    /// nothing, and hand back the author line the commit landed with.
+    fn bootstrap_without_identity(repo: &Path) -> String {
+        let home = tempfile::tempdir().unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap());
         child
             .args([
@@ -8622,7 +8697,7 @@ mod tests {
                 "--ignored",
                 "--nocapture",
             ])
-            .env("DUX_TEST_UNBORN_REPO", repo.path())
+            .env("DUX_TEST_UNBORN_REPO", repo)
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", home.path().join("config"))
             .env_remove("GIT_AUTHOR_NAME")
@@ -8635,7 +8710,7 @@ mod tests {
         let out = child.output().expect("re-run the test binary");
         assert!(
             out.status.success(),
-            "the identity-free child must bootstrap the repo:\n{}\n{}",
+            "the identity-starved child must bootstrap the repo:\n{}\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
@@ -8643,17 +8718,37 @@ mod tests {
         let author = test_support::git_command()
             .args([
                 "-C",
-                repo.path().to_string_lossy().as_ref(),
+                repo.to_string_lossy().as_ref(),
                 "log",
                 "-1",
                 "--format=%an <%ae>",
             ])
             .output()
             .unwrap();
+        String::from_utf8_lossy(&author.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn create_initial_commit_succeeds_with_no_git_identity() {
+        // A clean CI runner: nothing configured anywhere. dux's own empty commit
+        // signs itself rather than failing the whole project add.
+        let repo = identity_starved_repo(&[]);
         assert_eq!(
-            String::from_utf8_lossy(&author.stdout).trim(),
+            bootstrap_without_identity(repo.path()),
             "dux <dux@localhost>",
             "the fallback identity is what signed the bootstrap commit"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_keeps_a_configured_name_when_only_the_email_is_missing() {
+        // Only what git is missing is supplied: a repo that knows a name keeps
+        // it, and the fallback fills in the address alone.
+        let repo = identity_starved_repo(&[("user.name", "Real Person")]);
+        assert_eq!(
+            bootstrap_without_identity(repo.path()),
+            "Real Person <dux@localhost>",
+            "a configured name must survive the fallback"
         );
     }
 

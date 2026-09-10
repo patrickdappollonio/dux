@@ -107,9 +107,12 @@ browses the server's filesystem. Pick a git repository and it joins the workspac
   list) and dux offers to **initialize a repository**: it runs `git init`, seeds a
   commented starter `.gitignore` for dependency and build folders it actually finds
   (`node_modules`, `target`, and friends), makes an empty initial commit, and adds the
-  project. Your existing files are left untracked and untouched. When git has no
-  identity configured on that machine, dux signs its own first commit as
-  `dux <dux@localhost>`; your later commits still need your identity.
+  project. Your existing files are left untracked and untouched. If git on that
+  machine cannot work out an identity for that commit, dux fills in
+  `dux@localhost` as the address (keeping your `user.name` if git knows one, and
+  signing as `dux` if it does not) so adding the folder still succeeds. That
+  applies to dux's own empty first commit and nothing else: your later commits
+  still need an identity you have configured.
 - The picker's **New folder** button creates a directory from the browser.
 - Pick a folder *inside* an existing repository and dux refuses, pointing you at the
   repository root instead.

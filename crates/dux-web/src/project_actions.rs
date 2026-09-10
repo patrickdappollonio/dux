@@ -662,6 +662,13 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
 
+        // The env is hand-rolled rather than reusing dux-core's
+        // `test_support::isolate_git_config`, which is `pub(crate)` to that
+        // crate. `user.useConfigOnly` rides in through `GIT_CONFIG_COUNT`,
+        // git's own env transport for `-c`, because the folder git is about to
+        // initialize has no config file to write it into yet; without it a
+        // dotted hostname would let git synthesize an address and the fallback
+        // would rightly never fire.
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -675,7 +682,9 @@ mod tests {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env_remove("GIT_CONFIG_COUNT")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+            .env("GIT_CONFIG_VALUE_0", "true")
             .env_remove("GIT_CONFIG_PARAMETERS")
             .env_remove("GIT_AUTHOR_NAME")
             .env_remove("GIT_AUTHOR_EMAIL")
