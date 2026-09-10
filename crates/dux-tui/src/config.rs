@@ -913,13 +913,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "color",
             comment: Some(CommentSource::Static(
                 "# Colored, vite-style console output for `dux server`. One of:\n\
-                 #   \"auto\"   — color only when stdout is a real terminal, NO_COLOR is\n\
-                 #              unset/empty, and TERM is not \"dumb\" (piped output stays\n\
-                 #              plain ASCII, so logs and `| tee` capture cleanly).\n\
-                 #   \"always\" — force color even when piped.\n\
-                 #   \"never\"  — plain text always.\n\
+                 #   \"auto\":   color only when stdout is a real terminal, NO_COLOR is\n\
+                 #             unset/empty, and TERM is not \"dumb\" (piped output stays\n\
+                 #             plain ASCII, so logs and `| tee` capture cleanly).\n\
+                 #   \"always\": force color even when piped.\n\
+                 #   \"never\":  plain text always.\n\
                  # An unrecognized value falls back to \"auto\" with a warning. The in-app\n\
-                 # \"start web server\" flip keeps its themed status screen — this only\n\
+                 # \"start web server\" flip keeps its themed status screen. This only\n\
                  # affects the `dux server` CLI.\n\
                  # The console is built once, so changing this applies the next time\n\
                  # you start `dux server`.",
@@ -1033,7 +1033,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # HTTP 503 until one closes. A value of 0 PERMANENTLY blocks all tab\n\
                  # streams until the server restarts.\n\
                  # This is a CONCURRENT-VIEWERS cap, not a limit on how many tabs an\n\
-                 # agent may have — that is [ui] agent_tabs_max (default 20). The two\n\
+                 # agent may have; that is [ui] agent_tabs_max (default 20). The two\n\
                  # differ on purpose: creating a tab is cheap, streaming one is not.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.max_websocket_tabs_per_agent as usize),
@@ -1395,7 +1395,7 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
     if render_config_documented(&reparsed) != rendered_text {
         anyhow::bail!(
             "restoring the documentation would have changed a setting's value; refusing to write. \
-             This is a dux bug — please report it, and note that your config.toml has not been modified."
+             This is a dux bug. Please report it, and note that your config.toml has not been modified."
         );
     }
 
@@ -1538,9 +1538,9 @@ fn render_macros_config(
         out,
         "# Text macros: press {macro_key} to open the macro bar and select one to send.\n\
          # Each entry is a name mapped to its text and a surface restriction.\n\
-         # surface = \"agent\"    — only shown when the agent pane is focused.\n\
-         # surface = \"terminal\" — only shown when the terminal pane is focused.\n\
-         # surface = \"both\"     — shown on both surfaces.\n\
+         # surface = \"agent\":    only shown when the agent pane is focused.\n\
+         # surface = \"terminal\": only shown when the terminal pane is focused.\n\
+         # surface = \"both\":     shown on both surfaces.\n\
          # Newlines in text values are translated to Alt+Enter (ESC + CR) so\n\
          # multi-line macros are entered as a single prompt; press Enter yourself\n\
          # to submit afterwards.",

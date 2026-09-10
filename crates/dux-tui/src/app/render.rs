@@ -507,7 +507,7 @@ fn ellipsize_spans(spans: Vec<Span<'static>>, max_w: u16) -> Vec<Span<'static>> 
 /// Lay a line out with `left` packed to the left and `right` flush to the right
 /// edge of `total_w`, separated by at least `min_gap` blank cells. The left
 /// group is ellipsized to whatever space remains after the right group and the
-/// gap, so a long name yields `long-na…   PR#12` — the badge stays pinned to the
+/// gap, so a long name yields `long-na…   PR#12`: the badge stays pinned to the
 /// right and the name loses characters instead. Falls back to a single
 /// ellipsized run when there is not even room for the right group plus the gap.
 fn right_align_line(
@@ -2244,7 +2244,7 @@ impl App {
             });
         // No widget highlight: the selection is painted by hand below (an accent
         // bar plus a faint tint) so it keeps each row's text colors and leaves the
-        // Inactive separator row untouched — neither of which a whole-cell List
+        // Inactive separator row untouched, neither of which a whole-cell List
         // highlight can do. Rendered into the gutter-shifted body.
         StatefulWidget::render(
             List::new(items),
@@ -2501,7 +2501,7 @@ impl App {
                 self.render_diff(frame, pane_area, focused);
             }
             CenterMode::Agent if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) => {
-                // Skip agent rendering here — fullscreen overlay handles it.
+                // Skip agent rendering here: fullscreen overlay handles it.
                 // Rendering in both places causes the PTY to be resized twice
                 // per frame (once to the small pane, once to the overlay).
                 let title = self.center_pane_agent_title();
@@ -2574,7 +2574,7 @@ impl App {
                 .scroll((scroll, 0))
                 .render(content_area, frame.buffer_mut());
         } else {
-            // No gutter — fall back to ratatui's built-in wrapping.
+            // No gutter: fall back to ratatui's built-in wrapping.
             self.last_diff_visual_lines = lines
                 .iter()
                 .map(|l| {
@@ -3096,8 +3096,8 @@ impl App {
         let tab_ids = self.session_tab_ids(&session_id);
         let always_show = self.engine.config.ui.always_show_tab_strip;
         // The strip is a 3-row band of rounded boxes (top border, label,
-        // bottom border) — the same bordered-and-rounded idiom every other
-        // dux surface uses — so it needs a taller minimum than a flat row.
+        // bottom border), the same bordered-and-rounded idiom every other
+        // dux surface uses, so it needs a taller minimum than a flat row.
         if (tab_ids.len() < 2 && !always_show) || area.height < 6 || area.width < 12 {
             return area;
         }
@@ -3151,7 +3151,7 @@ impl App {
 
         // No "+" add button: new tabs are created via the `new-agent-tab`
         // palette command (or the NewTab keybinding), so the boxes get the
-        // full strip width — minus one column when a leading truncation mark is
+        // full strip width, minus one column when a leading truncation mark is
         // needed (decided below, once the segment widths are known).
         let strip_width = strip_area.width;
 
@@ -4351,7 +4351,7 @@ impl App {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Percentage(unstaged_pct), // Changes (unstaged) — always on top
+                    Constraint::Percentage(unstaged_pct), // Changes (unstaged), always on top
                     Constraint::Percentage(pct),          // Staged Changes (with commit input)
                 ])
                 .split(area);
@@ -4391,7 +4391,7 @@ impl App {
             ])
             .areas(area);
 
-        // Staged files — normal titled block.
+        // Staged files: normal titled block.
         let list_rect = self.render_file_list(
             frame,
             files_area,
@@ -4681,7 +4681,7 @@ impl App {
             .set_visible_lines(text_area.height as usize);
 
         if self.commit_input.is_empty() && !focused {
-            // Show placeholder when unfocused and empty — nothing to render
+            // Show placeholder when unfocused and empty: nothing to render
             // (the placeholder is shown only when focused, below).
         } else {
             // Render visible lines from TextInput (handles wrapping + scroll).
@@ -4923,7 +4923,7 @@ impl App {
         )));
         lines.push(Line::from(vec![
             Span::styled(
-                "Your config file is self-documented — open it and explore: ",
+                "Your config file is self-documented, so open it and explore: ",
                 body_style,
             ),
             Span::styled(
@@ -5024,17 +5024,13 @@ impl App {
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
         let session_states: &[(&str, Color, &str)] = &[
-            ("●", self.theme.session_active, "Active — agent is running"),
+            ("●", self.theme.session_active, "Active: agent is running"),
             (
                 "◎",
                 self.theme.session_detached,
-                "Detached — agent process disconnected",
+                "Detached: agent process disconnected",
             ),
-            (
-                "○",
-                self.theme.session_exited,
-                "Exited — agent has finished",
-            ),
+            ("○", self.theme.session_exited, "Exited: agent has finished"),
         ];
         for (dot, color, desc) in session_states {
             lines.push(Line::from(vec![
@@ -5071,13 +5067,13 @@ impl App {
                 Span::styled(
                     match status {
                         CompanionTerminalStatus::NotLaunched => {
-                            format!("{label} — shell has not been started")
+                            format!("{label}: shell has not been started")
                         }
                         CompanionTerminalStatus::Running => {
-                            format!("{label} — companion shell is alive")
+                            format!("{label}: companion shell is alive")
                         }
                         CompanionTerminalStatus::Exited => {
-                            format!("{label} — shell finished and awaits relaunch")
+                            format!("{label}: shell finished and awaits relaunch")
                         }
                     },
                     Style::default().fg(self.theme.hint_desc_fg),
@@ -5098,27 +5094,27 @@ impl App {
             let (icon, desc) = if !self.engine.github_integration_enabled {
                 (
                     "○",
-                    "Disabled — enable via command palette (toggle-github-integration)".to_string(),
+                    "Disabled: enable via command palette (toggle-github-integration)".to_string(),
                 )
             } else {
                 match self.engine.gh_status {
                     GhStatus::Unknown => ("◐", "Checking gh CLI availability…".to_string()),
                     GhStatus::NotInstalled => (
                         "⚠",
-                        "gh CLI not found — install from https://cli.github.com".to_string(),
+                        "gh CLI not found: install from https://cli.github.com".to_string(),
                     ),
                     GhStatus::NotAuthenticated => (
                         "⚠",
-                        "gh CLI not authenticated — run: gh auth login".to_string(),
+                        "gh CLI not authenticated, so run: gh auth login".to_string(),
                     ),
                     GhStatus::Unreachable => (
                         "⚠",
-                        "gh CLI could not be reached — dux is retrying periodically".to_string(),
+                        "gh CLI could not be reached, so dux is retrying periodically".to_string(),
                     ),
                     GhStatus::Available => {
                         let count = self.engine.pr_statuses.len();
                         let noun = if count == 1 { "session" } else { "sessions" };
-                        ("✓", format!("Active — tracking PRs for {count} {noun}"))
+                        ("✓", format!("Active: tracking PRs for {count} {noun}"))
                     }
                 }
             };
@@ -5182,7 +5178,7 @@ impl App {
             .render(content_area, frame.buffer_mut());
 
         // Scroll marker in the modal's right border column, on the content
-        // pane's last row — above the hint bar's own top border. Units are
+        // pane's last row, above the hint bar's own top border. Units are
         // wrapped rows, which is exactly what the clamp above uses.
         render_scroll_marker(
             frame,
@@ -8077,7 +8073,7 @@ impl App {
         let body_height = wrapped_line_count(&body_lines, inner_width, false);
 
         // Checkbox height is measured up-front so the outer rect can
-        // be sized exactly — mirrors the Delete Agent modal.
+        // be sized exactly, mirroring the Delete Agent modal.
         let checkbox_height = if has_checkbox {
             let BranchWarningKind::Known { default_branch } = kind else {
                 unreachable!("has_checkbox requires a known default branch");
@@ -8292,7 +8288,7 @@ impl App {
             ))
             .render(frame, cancel_area, &self.theme);
 
-        // "Use Existing" reuses a branch that already exists — not
+        // "Use Existing" reuses a branch that already exists and is not
         // destructive, so it shares the Confirm kind with Cancel.
         Button::new("Use Existing")
             .kind(ButtonKind::Confirm)
@@ -10363,7 +10359,7 @@ impl App {
                             Span::styled(" - ", Style::default().fg(self.theme.input_label_fg)),
                         ];
                         let text_preview = text.replace('\n', "↵");
-                        // " " + name + " (label)" + " — ", counted in CHARACTERS:
+                        // " " + name + " (label)" + " - ", counted in CHARACTERS:
                         // a macro name or surface label can hold multi-byte text
                         // just as the preview can.
                         let prefix_len =
@@ -11000,7 +10996,7 @@ impl App {
         // pane's last row. It has to be the border column: the log is painted
         // cell-by-cell with `set_string`, so a full-width line owns the pane's
         // last content column and a marker drawn there would eat a character.
-        // Units are wrapped visual ROWS — `startup_command_log_visual_lines`
+        // Units are wrapped visual ROWS: `startup_command_log_visual_lines`
         // pre-splits the content to the pane width, so one entry is one row,
         // which is the same measure `max_scroll` above clamps with.
         let drawn_scroll = viewer.scroll_offset;
@@ -11307,7 +11303,7 @@ impl App {
     /// modal's outer rect. For sub-strips that live inside another surface (the
     /// fullscreen log viewer's search bar, the agent pane's macro bar): they
     /// are not dismissible modals, and recording them would hand the dismissal
-    /// engine a rect that is smaller than — or unrelated to — the modal the
+    /// engine a rect that is smaller than, or unrelated to, the modal the
     /// user sees, turning clicks inside the real modal into dismissals.
     fn clear_overlay_bar_area(&self, frame: &mut Frame, area: Rect) {
         Clear.render(area, frame.buffer_mut());
@@ -11340,8 +11336,8 @@ impl App {
             })
             // Modals are presented after a `Clear.render(..)` which resets the
             // popup cells to `Color::Reset`. Filling the block with overlay_bg
-            // means the modal interior — borders, surrounding chrome, the gap
-            // around the inner widgets — tracks the active theme instead of
+            // means the modal interior (borders, surrounding chrome, the gap
+            // around the inner widgets) tracks the active theme instead of
             // reading terminal-default behind the border ring.
             .style(Style::default().bg(self.theme.overlay_bg))
     }
@@ -11366,7 +11362,7 @@ impl App {
         // Pre-wrap rather than letting the `Paragraph` do it: `wrapped.len()` is
         // then the RENDERED row count by construction, which is the unit the
         // scroll clamp and the marker are measured in. A wrapping paragraph draws
-        // more rows than it has lines and never reports how many — the trap the
+        // more rows than it has lines and never reports how many, the trap the
         // help page hit, where the bottom of the page was unreachable.
         let wrapped = wrap_styled_lines(&body_lines, inner_width as usize);
         let total_rows = u16::try_from(wrapped.len()).unwrap_or(u16::MAX);
@@ -11436,7 +11432,7 @@ impl App {
             .render(body, frame.buffer_mut());
 
         // Marker in the dialog's right BORDER column, on the message pane's last
-        // row — clear of the checkbox and buttons below. Units are wrapped rows,
+        // row, clear of the checkbox and buttons below. Units are wrapped rows,
         // exactly what the clamp above uses.
         render_scroll_marker(
             frame,
@@ -11954,7 +11950,7 @@ pub(crate) fn format_recap_count(n: usize) -> String {
 }
 
 /// The title of a changed-files group: its name, its file count, and an
-/// aggregate recap of what those files hold — the lines they add and remove
+/// aggregate recap of what those files hold: the lines they add and remove
 /// between them, and a quiet marker for the binaries among them.
 ///
 /// Binary files carry no line counts, so they are counted apart and a group of
@@ -12020,7 +12016,7 @@ pub(crate) fn changed_files_group_title(
     Line::from(spans)
 }
 
-/// Compact top-bar branch value for an agent (no label prefix — the caller owns
+/// Compact top-bar branch value for an agent (no label prefix, since the caller owns
 /// the themed "agent: " label). Returns just `<current>` normally; when the
 /// current branch has drifted from the branch the agent was created on, it
 /// appends `(orig: <initial>)` so the original is visible in the tight header.
@@ -12309,8 +12305,8 @@ impl App {
         let fill_style = Style::default().fg(fg).bg(bg);
 
         // Half-block caps (universally supported Unicode).
-        let left_cap = "\u{2590}"; // ▐ — right half block
-        let right_cap = "\u{258c}"; // ▌ — left half block
+        let left_cap = "\u{2590}"; // ▐ is the right half block
+        let right_cap = "\u{258c}"; // ▌ is the left half block
 
         // Build the pill content as a single string.
         // With title:    " ⎇ owner/repo#1234 ▸ PR title here… "
@@ -12346,7 +12342,7 @@ impl App {
         x += 1;
 
         if !has_title || inner_w <= prefix_w + 4 {
-            // No title or not enough room — render just the prefix, padded.
+            // No title or not enough room: render just the prefix, padded.
             // " ⎇ owner/repo#1234 "
             let content = format!("{prefix} ");
             for ch in content.chars() {
@@ -15781,7 +15777,7 @@ mod tests {
     }
 
     /// Every pill leads with its strip ordinal, the visible
-    /// address the tab switch keys count against — and the ordinal is a
+    /// address the tab switch keys count against, and the ordinal is a
     /// POSITION, never a stable id: closing a tab renumbers every pill after
     /// it. Position 4 renders like any other (its Ctrl-4 default is absent
     /// because legacy terminals send the same byte as the macro bar's Ctrl-\,
@@ -17010,7 +17006,7 @@ mod tests {
             .expect("agent terminal area should be recorded after render");
         // Confirm the renderer's input cursor really is the parked PTY cursor,
         // then derive the expected screen cell from the KNOWN (row 4, col 9)
-        // literals — not from snapshot_buf — so a transposed or mis-offset
+        // literals, not from snapshot_buf, so a transposed or mis-offset
         // production computation cannot make this assertion tautologically true.
         let cursor = app
             .snapshot_buf
@@ -17893,7 +17889,7 @@ mod tests {
     /// (`fg(input_cursor_fg).bg(prompt_cursor)`) *and* move the real hardware
     /// cursor onto the same cell. Alacritty draws its block cursor by INVERTING
     /// the cell's colors, so inverting a cell that was already styled to look
-    /// like a cursor cancelled it back to invisibility — the caret vanished
+    /// like a cursor cancelled it back to invisibility, so the caret vanished
     /// only under Alacritty. The fix stops pre-painting the cell and relies on
     /// the hardware cursor (set via `set_cursor_position`) for the visible
     /// block, leaving Alacritty a normal cell to invert.
@@ -18069,7 +18065,7 @@ mod tests {
 
     #[test]
     fn top_bar_branch_suffix_shows_original_only_on_drift() {
-        // No drift: just the bare current branch (no "branch: " label prefix —
+        // No drift: just the bare current branch (no "branch: " label prefix, because
         // the caller owns the label).
         assert_eq!(top_bar_branch_suffix("main", "main"), "main");
         // Drift: the original branch is appended.
@@ -19581,7 +19577,7 @@ mod tests {
             .draw(|frame| app.render(frame))
             .expect("render frame");
 
-        // Scroll as far as the input handler will allow — this is what the
+        // Scroll as far as the input handler will allow: this is what the
         // ScrollToBottom key does with the numbers the renderer recorded.
         let max = app
             .last_help_lines
@@ -21096,7 +21092,7 @@ mod tests {
     #[test]
     fn the_browse_projects_marker_tracks_the_item_offset() {
         // A directory listing is a LIST: item units, not rows of wrapped text.
-        // Both layout variants are covered — no filter (one full-height list) and
+        // Both layout variants are covered: no filter (one full-height list) and
         // a filter typed (an input strip plus a shorter list).
         for filter in ["", "dir-"] {
             let (app, buf) = browse_projects_frame((90, 30), 60, 0, filter);

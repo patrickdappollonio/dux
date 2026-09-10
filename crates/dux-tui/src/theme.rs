@@ -220,7 +220,7 @@ pub fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
     }
 
     Err(anyhow::anyhow!(
-        "unknown theme '{name}' — try '{DEFAULT_THEME_NAME}', a built-in name like \
+        "unknown theme '{name}': try '{DEFAULT_THEME_NAME}', a built-in name like \
          'catppuccin_mocha' / 'nord' / 'tokyo_night', or place a TOML file at \
          {}/themes/<name>.toml",
         paths.root.display()
@@ -319,7 +319,7 @@ pub fn load_or_fallback(name: &str, paths: &DuxPaths) -> (Theme, Option<String>)
             (
                 Theme::fallback(),
                 Some(format!(
-                    "Theme '{name}' could not be loaded — falling back to {DEFAULT_THEME_NAME}. \
+                    "Theme '{name}' could not be loaded, so dux fell back to {DEFAULT_THEME_NAME}. \
                      See dux.log for details."
                 )),
             )

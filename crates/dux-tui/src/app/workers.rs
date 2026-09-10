@@ -816,14 +816,14 @@ impl App {
             if let Some(op) = self.pending_server_flip_op.take() {
                 self.apply_reaction(
                     op.resolve(&TuiServerFlipOutcome::Warned(format!(
-                        "{warning} Starting the web server on {url_list} — your agents keep running."
+                        "{warning} Starting the web server on {url_list}. Your agents keep running."
                     )))
                     .into_reaction(),
                 );
             }
         } else if let Some(op) = &self.pending_server_flip_op {
             let progress = op.progress(format!(
-                "Starting the web server on {url_list} — your agents keep running."
+                "Starting the web server on {url_list}. Your agents keep running."
             ));
             self.apply_reaction(EventReaction::Status(progress));
         }

@@ -3450,7 +3450,7 @@ mod tests {
             }
             assert!(
                 def.help.is_some(),
-                "Action {:?} has keys but no help entry — add help: Some(HelpEntry {{ ... }})",
+                "Action {:?} has keys but no help entry. Add help: Some(HelpEntry {{ ... }})",
                 def.action,
             );
         }

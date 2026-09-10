@@ -385,7 +385,7 @@ mod tests {
                 Span::styled("/home/somebody/.config/dux/config.toml", key),
             ]),
             Line::from(Span::styled(
-                "  ○  Disabled — enable via command palette (toggle-github-integration)",
+                "  ○  Disabled: enable via command palette (toggle-github-integration)",
                 body,
             )),
         ];

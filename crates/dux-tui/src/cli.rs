@@ -62,7 +62,7 @@ fn reject_unknown_flags(args: &[String], known: &[&str]) -> Result<()> {
 fn print_config_help() {
     println!(
         "\
-dux config — manage the dux configuration file
+dux config: manage the dux configuration file
 
 Subcommands:
   dux config path          Print the config file path
@@ -144,7 +144,7 @@ fn run_diff_raw(_current_raw: &str, current: &Config) -> Result<()> {
     // Re-render current config to normalize it before diffing.
     let current_rendered = render_config_for_diff(current, &bindings);
     if current_rendered == default_rendered {
-        println!("config matches defaults — no differences");
+        println!("config matches defaults, so there are no differences");
         return Ok(());
     }
     print_unified_diff("default", "current", &default_rendered, &current_rendered);
@@ -154,7 +154,7 @@ fn run_diff_raw(_current_raw: &str, current: &Config) -> Result<()> {
 fn run_diff_summary(current: &Config) -> Result<()> {
     let changes = collect_config_changes(current);
     if changes.is_empty() {
-        println!("config matches defaults — no differences");
+        println!("config matches defaults, so there are no differences");
     } else {
         for line in &changes {
             println!("  {line}");
@@ -412,7 +412,7 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
             let current =
                 fs::read_to_string(&paths.config_path).with_context_path(&paths.config_path)?;
             if current == fresh {
-                println!("config already matches defaults — nothing to do");
+                println!("config already matches defaults, so there is nothing to do");
                 return Ok(());
             }
             print_unified_diff("current", "default", &current, &fresh);
@@ -466,7 +466,7 @@ fn run_restore_docs(paths: &DuxPaths, yes: bool) -> Result<()> {
     })?;
 
     if restored.is_noop(&raw) {
-        println!("config documentation is already up to date — nothing to do");
+        println!("config documentation is already up to date, so there is nothing to do");
         return Ok(());
     }
 

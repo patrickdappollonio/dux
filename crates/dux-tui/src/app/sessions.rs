@@ -1268,7 +1268,7 @@ impl App {
                 self.set_focused_tab(session_id, &tab_id);
                 self.rebuild_left_items();
                 self.set_info(
-                    "Added a tab. It starts fresh — a new tab does not resume a prior conversation."
+                    "Added a tab. It starts fresh: a new tab does not resume a prior conversation."
                         .to_string(),
                 );
             }
@@ -4334,7 +4334,7 @@ impl App {
         // until the flip; the warning/error arms resolve it. The resolver covers
         // only the two terminal-with-message outcomes (see `TuiServerFlipOutcome`).
         let op = dux_core::engine::status_op(
-            "Starting the web server — your agents keep running.".to_string(),
+            "Starting the web server. Your agents keep running.".to_string(),
         )
         .resolve_in_handler(|o: &TuiServerFlipOutcome| match o {
             TuiServerFlipOutcome::Warned(text) => dux_core::engine::Final::warning(text.clone()),
@@ -5021,7 +5021,7 @@ mod tests {
     /// `ServerFlipPreflightReady` handler under test has a stashed op to advance.
     fn stash_server_flip_op(app: &mut App) {
         let op = dux_core::engine::status_op(
-            "Starting the web server — your agents keep running.".to_string(),
+            "Starting the web server. Your agents keep running.".to_string(),
         )
         .resolve_in_handler(|o: &TuiServerFlipOutcome| match o {
             TuiServerFlipOutcome::Warned(text) => dux_core::engine::Final::warning(text.clone()),
@@ -5061,7 +5061,7 @@ mod tests {
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
         assert_eq!(
             app.status.message(),
-            format!("Starting the web server on {url} — your agents keep running.")
+            format!("Starting the web server on {url}. Your agents keep running.")
         );
         assert!(
             app.pending_server_flip_op.is_some(),
@@ -5077,14 +5077,14 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url.clone()])),
-            warning: Some("Tailscale not detected — serving on loopback only.".to_string()),
+            warning: Some("Tailscale not detected, serving on loopback only.".to_string()),
         });
         assert!(app.pending_server_flip.is_some());
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert_eq!(
             app.status.message(),
             format!(
-                "Tailscale not detected — serving on loopback only. Starting the web server on {url} — your agents keep running."
+                "Tailscale not detected, serving on loopback only. Starting the web server on {url}. Your agents keep running."
             )
         );
         assert!(
@@ -5524,9 +5524,14 @@ mod tests {
 
         assert!(!app.pending_checkout_inspect_ops.contains_key(&id));
         assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Error);
-        assert_eq!(
-            app.status.message(),
-            "Couldn't check out \"main\" in /tmp/switch-fail-test — resolve in your terminal and retry."
+        let message = app.status.message();
+        assert!(
+            message.starts_with("Couldn't check out \"main\" in /tmp/switch-fail-test"),
+            "unexpected checkout failure message: {message}"
+        );
+        assert!(
+            message.ends_with("resolve in your terminal and retry."),
+            "the checkout failure message must keep its actionable tail: {message}"
         );
     }
 
@@ -5650,7 +5655,7 @@ mod tests {
         // original config_path is never touched.
         assert!(
             !app.engine.paths.config_path.exists(),
-            "the Added arm wrote config off-queue (double write) — config_path \
+            "the Added arm wrote config off-queue (double write): config_path \
              should never be touched after the queue write"
         );
         // And the add still succeeded end to end. The path is stored in the
@@ -5672,7 +5677,7 @@ mod tests {
 
     #[test]
     fn combine_flip_warnings_passes_detection_warning_through() {
-        let detect = Some("Tailscale not detected — serving on loopback only.".to_string());
+        let detect = Some("Tailscale not detected, serving on loopback only.".to_string());
         let combined = combine_flip_warnings(detect, Vec::new()).expect("warning present");
         assert!(combined.contains("Tailscale not detected"));
     }

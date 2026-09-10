@@ -275,7 +275,7 @@ enum PromptMouseTarget {
 impl ButtonPressedTarget {
     /// Map a hit-tested prompt target to its button-press identifier.
     /// Returns `None` for non-button targets (text inputs, list rows,
-    /// checkboxes) so the press machinery cannot accidentally arm them —
+    /// checkboxes) so the press machinery cannot accidentally arm them:
     /// those targets keep their existing on-Down behavior.
     fn from_prompt_target(target: PromptMouseTarget) -> Option<Self> {
         match target {
@@ -546,7 +546,7 @@ fn should_forward_wheel(forward_scroll: Option<bool>, _alt_screen: bool, mouse_m
 }
 
 /// Decide whether a page-scroll key (PgUp/PgDn) should be forwarded to the
-/// embedded child process. Page keys don't need mouse mode — in the alt screen
+/// embedded child process. Page keys don't need mouse mode: in the alt screen
 /// there is no host scrollback, so forward them to the child.
 fn should_forward_page(forward_scroll: Option<bool>, alt_screen: bool) -> bool {
     match forward_scroll {
@@ -2956,7 +2956,7 @@ impl App {
             ) {
                 break;
             }
-            // Poll stdin with zero timeout — return immediately if no data.
+            // Poll stdin with zero timeout: return immediately if no data.
             let more = crate::io_retry::retry_on_interrupt_errno(|| {
                 let mut pollfd = [PollFd::new(&stdin_borrow, PollFlags::IN)];
                 poll(&mut pollfd, Some(&zero_timeout))
@@ -3471,7 +3471,7 @@ impl App {
                     }
                 }
                 RawSeqAction::Intercept(_, _, raw) | RawSeqAction::Forward(raw) => {
-                    // Unknown intercepted action or normal forward — batch
+                    // Unknown intercepted action or normal forward: batch
                     // for a single PTY write. In scroll mode, all non-scroll
                     // input is suppressed (the batch won't be flushed).
                     dispatch.queue(&raw);
@@ -5516,7 +5516,7 @@ impl App {
     ///
     /// Movement keys move focus and change nothing. Space acts on whatever has
     /// focus (types a space in a text field, advances the selector, activates a
-    /// button). Escape cancels — except inside the engaged body, where it exits
+    /// button). Escape cancels, except inside the engaged body, where it exits
     /// edit mode and leaves the modal open, the same contract
     /// `configure_startup_command_escape_exits_edit_mode_only` pins.
     fn handle_macro_editor_key(&mut self, key: KeyEvent, focus: MacroEditFocus) -> Result<bool> {
@@ -7694,7 +7694,7 @@ impl App {
         self.prompt = PromptState::None;
         if !confirm {
             self.set_info(
-                "Add cancelled. A project needs at least one commit — run \"git commit\" (or re-add and confirm) to create the initial commit.",
+                "Add cancelled. A project needs at least one commit, so run \"git commit\" (or re-add and confirm) to create the initial commit.",
             );
             return false;
         }
@@ -8754,7 +8754,7 @@ impl App {
 
     /// Fire the action for a button that was both pressed and released
     /// over its own bounds. Mirrors the previous on-Down dispatch
-    /// arms one-for-one — only the trigger event differs.
+    /// arms one-for-one; only the trigger event differs.
     fn activate_button(&mut self, button: ButtonPressedTarget) -> bool {
         match button {
             // The take-over card is not a modal and never rides
@@ -9025,7 +9025,7 @@ impl App {
             ));
             return Ok(());
         };
-        // Activating brings the agent to the foreground — refresh its PR status.
+        // Activating brings the agent to the foreground, so refresh its PR status.
         self.engine.spawn_foreground_pr_check(&session_id);
         // Resolve the FOCUSED tab so activation acts on the visible tab.
         let tab_id = self.focused_tab_id(&session_id);
@@ -9043,7 +9043,7 @@ impl App {
         {
             // Dormant extra tab: launch it (only when the caller allows it).
             // Resume eligibility is decided dynamically by
-            // `tab_resume_decision` inside the launch — this tab may resume
+            // `tab_resume_decision` inside the launch: this tab may resume
             // its provider's prior conversation if it is the sole
             // live/launching tab of that provider, not "never resume".
             if allow_launch {
@@ -17506,7 +17506,7 @@ not_a_real_action = ["x"]
 
     /// A plain left click inside the windowed pane of a `?1000h` child is
     /// focused AND forwarded as a translated SGR press, stamped as a pointer
-    /// report — and a rapid second click is just a second forwarded click,
+    /// report, and a rapid second click is just a second forwarded click,
     /// never a maximize.
     #[test]
     fn windowed_click_on_a_mouse_mode_child_forwards_the_translated_press() {
@@ -17587,7 +17587,7 @@ not_a_real_action = ["x"]
     /// The RELEASE must always be delivered, even when the pointer left the
     /// pane: its coordinates clamp to the pane edge. (Deleting the clamp
     /// makes the translation reject the out-of-pane coordinates and drop the
-    /// release, leaving the child with a stuck button — this test fails.)
+    /// release, leaving the child with a stuck button, so this test fails.)
     #[test]
     fn windowed_release_outside_the_pane_is_clamped_and_delivered() {
         let mut app = test_app(default_bindings());
@@ -20974,7 +20974,7 @@ not_a_real_action = ["x"]
     fn mouse_staged_divider_not_detected_without_staged_files() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        // With no staged files, staged_list is None — divider must not appear.
+        // With no staged files, staged_list is None, so the divider must not appear.
         app.mouse_layout.staged_list = None;
         app.mouse_layout.unstaged_list = Some(Rect::new(78, 1, 21, 18));
 
@@ -21020,7 +21020,7 @@ not_a_real_action = ["x"]
         install_mouse_layout(&mut app);
         // staged inner content: rows 9..12 (y=9, height=3)
         // border gap: row 12
-        // commit_area: rows 13..19 (y=13, height=6) — includes border
+        // commit_area: rows 13..19 (y=13, height=6), includes border
         app.mouse_layout.staged_list = Some(Rect::new(78, 9, 21, 3));
         app.mouse_layout.commit_area = Some(Rect::new(77, 13, 23, 6));
         app.engine.staged_files = vec![ChangedFile {
@@ -21091,7 +21091,7 @@ not_a_real_action = ["x"]
             selected: 0,
         };
 
-        // Press 'j' — should insert into text, not move selection down.
+        // Press 'j': should insert into text, not move selection down.
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .unwrap();
         match &app.prompt {
@@ -21104,7 +21104,7 @@ not_a_real_action = ["x"]
             other => panic!("expected command prompt, got {other:?}"),
         }
 
-        // Press 'k' — should also insert, not move selection up.
+        // Press 'k': should also insert, not move selection up.
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
             .unwrap();
         match &app.prompt {
@@ -23239,7 +23239,7 @@ cyan = "#00ffff"
     }
 
     // Mouse-down on a modal button arms the press but does not fire the
-    // action — the activation lives on mouse-up so that dragging off the
+    // action: the activation lives on mouse-up so that dragging off the
     // button cancels the click (universal GUI convention).
     #[test]
     fn prompt_mouse_down_on_button_arms_pressed_state_without_firing() {
@@ -23266,7 +23266,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
         install_confirm_kill_running_overlay(&mut app);
 
-        // Click Cancel — deterministically returns to the prior
+        // Click Cancel: deterministically returns to the prior
         // KillRunning prompt regardless of running-process state.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 11));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 11));
@@ -23282,7 +23282,7 @@ cyan = "#00ffff"
         install_confirm_kill_running_overlay(&mut app);
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 55, 11));
-        // Drag far outside the modal — coordinate (0, 0) is well outside
+        // Drag far outside the modal: coordinate (0, 0) is well outside
         // either button rect.
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0));
 
@@ -23316,7 +23316,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
         install_confirm_kill_running_overlay(&mut app);
 
-        // Press Cancel, drag out, drag back in, release — the press
+        // Press Cancel, drag out, drag back in, release: the press
         // re-arms when the cursor returns to the original button so the
         // action fires on Up.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 11));
@@ -23334,7 +23334,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
         install_confirm_kill_running_overlay(&mut app);
 
-        // Press Kill, release on Cancel — neither fires.
+        // Press Kill, release on Cancel: neither fires.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 55, 11));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 11));
 
@@ -23406,7 +23406,7 @@ cyan = "#00ffff"
         };
         install_confirm_delete_overlay(&mut app);
 
-        // Click the checkbox at (30, 7) — install_confirm_delete_overlay
+        // Click the checkbox at (30, 7): install_confirm_delete_overlay
         // places the checkbox at (24, 7, 44, 1).
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 7));
 
@@ -23712,7 +23712,7 @@ cyan = "#00ffff"
                     .expect("codex option present");
                 assert!(
                     codex_option.resume_available,
-                    "codex was started earlier — picker should advertise resume"
+                    "codex was started earlier, so the picker should advertise resume"
                 );
                 prompt.selected = prompt
                     .options
@@ -23745,7 +23745,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.engine.sessions[0].provider = ProviderKind::from_str("codex");
         app.engine.sessions[0].status = SessionStatus::Detached;
-        // Pretend copilot was launched earlier — it still shouldn't advertise
+        // Pretend copilot was launched earlier, but it still shouldn't advertise
         // resume because copilot's config has `resume_args: None`.
         app.engine.sessions[0].started_providers = vec!["copilot".to_string()];
 
@@ -24650,7 +24650,7 @@ cyan = "#00ffff"
         );
     }
 
-    /// A left-click outside the fullscreen surface dismisses it — matching the
+    /// A left-click outside the fullscreen surface dismisses it, matching the
     /// click-outside dismiss the interactive raw-input path already provides.
     #[test]
     fn click_outside_minimizes_dormant_agent_fullscreen() {
@@ -24702,7 +24702,7 @@ cyan = "#00ffff"
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
 
-        // Switch to project row (index 0) — simulates user clicking a different item.
+        // Switch to project row (index 0): simulates user clicking a different item.
         app.set_left_selection(0);
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -24790,7 +24790,7 @@ cyan = "#00ffff"
         assert_eq!(app.session_surface, SessionSurface::Terminal);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
         assert_eq!(app.input_target, InputTarget::Terminal);
-        // Spawned via fallback — returns to terminal list on close.
+        // Spawned via fallback: returns to terminal list on close.
         assert!(app.terminal_return_to_list);
     }
 
@@ -24808,7 +24808,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
 
-        // Now use the "open first" method — it should reuse, not spawn.
+        // Now use the "open first" method: it should reuse, not spawn.
         app.show_or_open_first_terminal()
             .expect("should reuse existing terminal");
 
@@ -24821,7 +24821,7 @@ cyan = "#00ffff"
         assert_eq!(app.session_surface, SessionSurface::Terminal);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
         assert_eq!(app.input_target, InputTarget::Terminal);
-        // Reused — should NOT return to terminal list on close.
+        // Reused: should NOT return to terminal list on close.
         assert!(!app.terminal_return_to_list);
     }
 
@@ -28183,7 +28183,7 @@ cyan = "#00ffff"
     #[test]
     fn scrolled_back_suppresses_regular_key_forwarding() {
         let mut app = app_with_scrolled_back_pty();
-        // Feed a regular ASCII character 'x' (0x78) — should be dropped.
+        // Feed a regular ASCII character 'x' (0x78): should be dropped.
         let result = app.process_raw_input_bytes(b"x").unwrap();
         assert!(!result, "should not request exit");
         // The key was consumed without error; the PTY didn't receive it.
@@ -28203,7 +28203,7 @@ cyan = "#00ffff"
         let mut app = app_with_scrolled_back_pty();
         assert_eq!(app.input_target, InputTarget::Agent);
 
-        // Feed Ctrl-g (0x07) — the fullscreen toggle should still work.
+        // Feed Ctrl-g (0x07): the fullscreen toggle should still work.
         let result = app.process_raw_input_bytes(&[0x07]).unwrap();
         assert!(!result);
         assert_eq!(
@@ -28793,7 +28793,7 @@ cyan = "#00ffff"
     fn arrow_key_passthrough_records_input_when_not_scrolled_back() {
         // Arrow keys are bound to line-scroll but pass through to the PTY when
         // not scrolled back. They echo back like typing, so they must also
-        // record input — the earlier Forward-only check missed this path.
+        // record input: the earlier Forward-only check missed this path.
         let (mut app, slot_tab) = app_with_live_agent_pty();
 
         app.process_raw_input_bytes(b"\x1b[A").unwrap();
@@ -28806,7 +28806,7 @@ cyan = "#00ffff"
     #[test]
     fn scrolled_back_input_does_not_record_pty_input() {
         // When scrolled back, keystrokes are suppressed and never reach the
-        // PTY, so there is no echo to discount — nothing should be recorded.
+        // PTY, so there is no echo to discount, so nothing should be recorded.
         let mut app = app_with_scrolled_back_pty();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
@@ -29963,7 +29963,7 @@ cyan = "#00ffff"
             0
         );
 
-        // Feed a regular character — should be forwarded without error.
+        // Feed a regular character: should be forwarded without error.
         let result = app.process_raw_input_bytes(b"x").unwrap();
         assert!(!result);
     }
@@ -29976,7 +29976,7 @@ cyan = "#00ffff"
             .unwrap()
             .scrollback_offset();
 
-        // Feed PgUp (CSI 5~) — should scroll further back.
+        // Feed PgUp (CSI 5~): should scroll further back.
         let result = app.process_raw_input_bytes(b"\x1b[5~").unwrap();
         assert!(!result);
         let after = app
@@ -29999,7 +29999,7 @@ cyan = "#00ffff"
                 > 0
         );
 
-        // Feed 'q' (0x71) — ScrollToBottom should reset scrollback.
+        // Feed 'q' (0x71): ScrollToBottom should reset scrollback.
         let result = app.process_raw_input_bytes(b"q").unwrap();
         assert!(!result);
         assert_eq!(
@@ -30031,7 +30031,7 @@ cyan = "#00ffff"
             .unwrap()
             .scrollback_offset();
 
-        // Feed Home key escape sequence — ScrollToTop should maximize scrollback.
+        // Feed Home key escape sequence: ScrollToTop should maximize scrollback.
         let result = app.process_raw_input_bytes(b"\x1b[H").unwrap();
         assert!(!result);
         let after = app
@@ -30054,7 +30054,7 @@ cyan = "#00ffff"
                 > 0
         );
 
-        // Feed End key escape sequence — ScrollToBottom should reset scrollback.
+        // Feed End key escape sequence: ScrollToBottom should reset scrollback.
         let result = app.process_raw_input_bytes(b"\x1b[F").unwrap();
         assert!(!result);
         assert_eq!(
@@ -30200,7 +30200,7 @@ cyan = "#00ffff"
             "test setup: should be scrolled back"
         );
 
-        // Click outside agent_term while scrolled back — overlay must close.
+        // Click outside agent_term while scrolled back: the overlay must close.
         let bytes = sgr_mouse_down(2, 2);
         let result = app.process_raw_input_bytes(&bytes).unwrap();
         assert!(!result);
@@ -30238,7 +30238,7 @@ cyan = "#00ffff"
 
     #[test]
     fn loading_phase_exit_interactive_multi_byte_binding() {
-        // Rebind ToggleFullscreen to Home (ESC [ H) — a multi-byte sequence.
+        // Rebind ToggleFullscreen to Home (ESC [ H), a multi-byte sequence.
         let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["home"])]);
         let mut app = test_app(bindings);
 
@@ -30266,14 +30266,14 @@ cyan = "#00ffff"
 
     #[test]
     fn loading_phase_exit_interactive_fragmented_across_reads() {
-        // Rebind ToggleFullscreen to Home (ESC [ H) — a multi-byte sequence.
+        // Rebind ToggleFullscreen to Home (ESC [ H), a multi-byte sequence.
         let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["home"])]);
         let mut app = test_app(bindings);
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
 
-        // First "read" delivers only the ESC byte — not a complete sequence.
+        // First "read" delivers only the ESC byte, not a complete sequence.
         app.loading_input_buf = vec![0x1b];
         assert!(
             !app.scan_loading_phase_exit(),
@@ -30339,7 +30339,7 @@ cyan = "#00ffff"
     fn append_capped_drops_oldest_bytes_on_incremental_overflow() {
         // Fill exactly to cap with distinct leading bytes.
         let mut buf: Vec<u8> = (0..super::LOADING_INPUT_BUF_MAX as u8).collect();
-        // Append 5 more bytes — should drop the first 5.
+        // Append 5 more bytes: should drop the first 5.
         super::append_capped(
             &mut buf,
             &[0xA, 0xB, 0xC, 0xD, 0xE],
@@ -30464,7 +30464,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
-        // No mouse layout installed — agent_term is None.
+        // No mouse layout installed, so agent_term is None.
         // Any left-click should be treated as outside.
         app.loading_input_buf = sgr_mouse_down(50, 10);
         assert!(
@@ -30579,7 +30579,7 @@ cyan = "#00ffff"
         let triggered = app.register_mouse_click(MouseClickTarget::LeftPane, Some(1));
         assert!(triggered);
 
-        // The state should be cleared — the next click starts a fresh sequence.
+        // The state should be cleared: the next click starts a fresh sequence.
         let after = app.register_mouse_click(MouseClickTarget::LeftPane, Some(1));
         assert!(
             !after,
@@ -30822,7 +30822,7 @@ cyan = "#00ffff"
         // Build input: ESC[200~ + Ctrl-g + ESC[201~
         let mut input = Vec::new();
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
-        input.push(0x07); // Ctrl-g — would be ToggleFullscreen outside paste
+        input.push(0x07); // Ctrl-g, which would be ToggleFullscreen outside paste
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
 
         let result = app.process_raw_input_bytes(&input).unwrap();
@@ -31216,7 +31216,7 @@ cyan = "#00ffff"
             .insert(TabId::new("session-1-slot"), client);
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Feed 100 'x' characters — they should all be forwarded.
+        // Feed 100 'x' characters: they should all be forwarded.
         let input = vec![b'x'; 100];
         let result = app.process_raw_input_bytes(&input).unwrap();
         assert!(!result);
@@ -32659,7 +32659,7 @@ cyan = "#00ffff"
             .expect("pinned project present");
         assert_eq!(pinned.default_provider.as_str(), "gemini");
 
-        // Existing sessions are untouched — provider is frozen at creation.
+        // Existing sessions are untouched: the provider is frozen at creation.
         assert_eq!(app.engine.sessions[0].provider, original_session_provider);
 
         assert!(matches!(app.prompt, PromptState::None));
@@ -33097,7 +33097,7 @@ cyan = "#00ffff"
         // running provider still surfaces in the center pane title, asserted
         // above; the swap is otherwise reflected in the agent tab strip.
 
-        // Tearing down the PTY clears the pin — the next launch will be opencode.
+        // Tearing down the PTY clears the pin: the next launch will be opencode.
         app.engine.providers.remove(TabIdRef::new(&slot_tab));
         app.engine
             .running_provider_pins
@@ -34160,7 +34160,7 @@ cyan = "#00ffff"
         };
 
         // The rect only exists once the modal has rendered, and the click
-        // coordinate is derived FROM that rect — never from a string index,
+        // coordinate is derived FROM that rect, never from a string index,
         // which would read the wrong cell once box drawing is in play.
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");

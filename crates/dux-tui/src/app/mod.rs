@@ -3863,7 +3863,7 @@ impl App {
         let status = boot_status(
             Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
             engine.live_status_keys.clone(),
-            "Web server stopped. Your agents kept running — reconnect to any session to pick up where it left off.",
+            "Web server stopped. Your agents kept running, so you can reconnect to any session to pick up where it left off.",
             tab_reaches_agent_trap_warning(&bindings, &engine.config),
             theme_warning,
         );
@@ -5030,9 +5030,9 @@ impl App {
                     .defaults
                     .enable_randomized_pet_name_by_default
                 {
-                    "enabled — new agent prompts start with a random pet name"
+                    "enabled: new agent prompts start with a random pet name"
                 } else {
-                    "disabled — new agent prompts start empty"
+                    "disabled: new agent prompts start empty"
                 };
                 let palette_key = self.bindings.label_for(Action::OpenPalette);
                 self.set_info(format!(
@@ -6910,7 +6910,7 @@ fn preflight_server_listeners(
             Err(err) => {
                 // Tailscale leg (best-effort): drop it, warn, serve loopback-only.
                 let warning = format!(
-                    "Could not bind the Tailscale address {addr}: {err} — something else is \
+                    "Could not bind the Tailscale address {addr}: {err}. Something else is \
                      already listening there; serving on loopback only. Stop that process or \
                      change [server] port to also serve on Tailscale."
                 );
@@ -8859,7 +8859,7 @@ leading_branch = "main"
         );
         assert!(
             elapsed < std::time::Duration::from_secs(10),
-            "a ~1s top-level grace was configured, but the wait took {elapsed:?} — \
+            "a ~1s top-level grace was configured, but the wait took {elapsed:?}; \
              the quit path likely read [server] (20s) or the 30s default instead"
         );
     }
