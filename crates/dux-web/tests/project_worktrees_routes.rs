@@ -1,10 +1,10 @@
 //! End-to-end tests for the project worktree-manager routes against a real
 //! router, a real git repository and real worktrees in a temp dir:
 //!
-//! - `GET    /api/v1/projects/:id/worktrees`      — the listing, now carrying the
+//! - `GET    /api/v1/projects/:id/worktrees`:      the listing, now carrying the
 //!   dirty flag and the holding agent's id.
-//! - `DELETE /api/v1/projects/:id/worktrees?path=` — remove one managed worktree.
-//! - `GET    /api/v1/projects/worktree-counts`     — per-project managed counts
+//! - `DELETE /api/v1/projects/:id/worktrees?path=`: remove one managed worktree.
+//! - `GET    /api/v1/projects/worktree-counts`:     per-project managed counts
 //!   for the project picker's row labels.
 //!
 //! The delete route's refusals are the point of most of this file: a worktree an

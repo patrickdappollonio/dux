@@ -11,7 +11,7 @@ export function avatarPath(login) {
 
 // GitHub's own username constraint: alphanumerics and single hyphens, 1–39
 // chars, no leading hyphen. Enforcing it locally means a login is always safe
-// to use as a filename and URL path segment — no path traversal can slip in.
+// to use as a filename and URL path segment: no path traversal can slip in.
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
 // True when `value` is an https URL on exactly `host`. Guards against a

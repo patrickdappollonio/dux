@@ -580,7 +580,7 @@ async fn patch_tab_rejects_an_unconfigured_provider() {
 // success path. `codex` is a default-configured provider. Retargeting a tab
 // while its process is still live only PINS the previous provider for display
 // (the pane title must not lie about what's on screen until relaunch), so the
-// tab is killed (dormant, no live process) first — only then does the tab
+// tab is killed (dormant, no live process) first: only then does the tab
 // view's `provider` field reflect the persisted retarget directly.
 #[tokio::test]
 async fn patch_tab_retargets_to_a_valid_provider() {
@@ -629,7 +629,7 @@ async fn patch_tab_retargets_to_a_valid_provider() {
 }
 
 // G21: an out-of-bound `:id` must be reported as an unknown SESSION, not an
-// unknown TAB — the two checks used to be collapsed into one tab-worded 404
+// unknown TAB: the two checks used to be collapsed into one tab-worded 404
 // regardless of which path segment was actually bad.
 #[tokio::test]
 async fn delete_tab_with_bad_session_id_is_unknown_session_not_unknown_tab() {

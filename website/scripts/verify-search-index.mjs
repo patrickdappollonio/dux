@@ -102,12 +102,12 @@ if (leaked.length > 0) {
   fail(
     `the homepage leaked into the search index (${JSON.stringify(
       leaked,
-    )}). Search scope must stay docs + blog — only docs and blog pages should carry \`data-pagefind-body\`.`,
+    )}). Search scope must stay docs + blog: only docs and blog pages should carry \`data-pagefind-body\`.`,
   );
 }
 
 const docsCount = urls.filter(isDocs).length;
 const blogCount = urls.filter(isBlog).length;
 console.log(
-  `verify-search-index: OK — ${docsCount} docs + ${blogCount} blog page(s) indexed, homepage excluded.`,
+  `verify-search-index: OK, ${docsCount} docs + ${blogCount} blog page(s) indexed, homepage excluded.`,
 );

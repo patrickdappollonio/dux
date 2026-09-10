@@ -146,7 +146,7 @@ async function pruneStaleAvatars(keepLogins) {
   try {
     entries = await readdir(contributorsDir);
   } catch {
-    return; // directory not created yet — nothing to prune
+    return; // directory not created yet, nothing to prune
   }
   for (const name of entries) {
     if (!name.endsWith(".png")) continue;
@@ -194,7 +194,7 @@ async function main() {
     avatars.push({ login: c.login, png });
   }
 
-  // All avatars are in hand — now commit the refresh.
+  // All avatars are in hand. Now commit the refresh.
   await mkdir(contributorsDir, { recursive: true });
   for (const { login, png } of avatars) {
     await writeFile(resolve(contributorsDir, `${login}.png`), png);

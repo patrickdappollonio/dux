@@ -313,7 +313,7 @@ main() {
 
     tar xzf "${DUX_TMPDIR}/${archive}" -C "$DUX_TMPDIR"
 
-    # Install the binary — use sudo only if the target directory is not writable.
+    # Install the binary: use sudo only if the target directory is not writable.
     if [ -w "$install_dir" ]; then
         install -m 755 "${DUX_TMPDIR}/${BINARY}" "${install_dir}/${BINARY}"
     else

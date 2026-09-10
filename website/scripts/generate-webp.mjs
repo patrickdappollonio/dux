@@ -3,7 +3,7 @@
 // under `public/`, so the <picture> sources emitted by rehype-prose-images can
 // always resolve. Run before `astro build` (which copies `public/` into the
 // final output). Converting the handful of chrome images (favicons, og.png)
-// alongside content images is harmless — those are referenced by extension in
+// alongside content images is harmless: those are referenced by extension in
 // <link>/<meta>, so their unused .webp siblings just sit unreferenced.
 //
 // Kept separate from copy-install.mjs so it can run after it: copy-install

@@ -225,7 +225,7 @@ pub fn router(engine: EngineHandle) -> Router {
 /// Pong at the protocol layer, so the ping both keeps an idle connection from being
 /// reaped by a NAT/proxy and surfaces a dead peer.
 ///
-/// LIVENESS APPROACH (deliberately the smallest correct one — see the task brief's
+/// LIVENESS APPROACH (deliberately the smallest correct one, see the task brief's
 /// YAGNI note): this is a SEND-FAILURE reap, not a pong-deadline reap. A ping that
 /// fails to send (the TCP send buffer has backed up against a dead/half-open peer,
 /// or the socket is already closed) breaks the socket's loop, which drops the
@@ -837,14 +837,14 @@ async fn access_log(State(state): State<AppState>, request: Request, next: Next)
     .await
 }
 
-/// The shared access-log core. CONSOLE-ONLY (never `dux.log` — piping
+/// The shared access-log core. CONSOLE-ONLY (never `dux.log`: piping
 /// `dux server`'s stdout IS the access log). Skips `/healthz` so a health checker
 /// does not flood the log, and is gated on `access_log && console.is_active()` so
 /// the flip/disabled paths emit nothing.
 ///
 /// The path is printed WITHOUT its query string. Query parameters can carry
-/// sensitive values — `GET /api/v1/sessions/<id>/files/raw?path=…` puts a
-/// worktree-relative filesystem path in the query — and this log is the
+/// sensitive values (`GET /api/v1/sessions/<id>/files/raw?path=…` puts a
+/// worktree-relative filesystem path in the query), and this log is the
 /// `dux server` stdout an operator may forward to a file or aggregator, so the
 /// query is dropped to avoid leaking secrets. The session id is an opaque `:id`
 /// path segment (not a query parameter) and so still appears in the logged path.
@@ -856,13 +856,13 @@ async fn log_request(
 ) -> Response {
     // Check the cheap gates BEFORE allocating anything: a disabled access log or a
     // no-op console pays nothing per request. /healthz is intentionally never
-    // logged (probe noise) — compared against the borrowed path, no allocation.
+    // logged (probe noise). Compared against the borrowed path, no allocation.
     let log = access_log && console.is_active() && request.uri().path() != "/healthz";
     if !log {
         return next.run(request).await;
     }
     let method = request.method().as_str().to_string();
-    // Log the PATH ONLY — never the query string. Query params can carry secrets
+    // Log the PATH ONLY, never the query string. Query params can carry secrets
     // (e.g. /api/v1/sessions/<id>/files/raw?path=…), and this log is stdout an
     // operator may persist, so dropping the query avoids leaking them. The session
     // id is an opaque path segment now, so it still appears in the logged path.
@@ -876,7 +876,7 @@ async fn log_request(
 
 /// Whether a WebSocket upgrade passes the same-host Origin check (cross-site
 /// WebSocket hijacking defense). `true` when the request carries no `Origin`
-/// (non-browser clients — CLIs, tests, native apps — don't send one, and the
+/// (non-browser clients such as CLIs, tests and native apps don't send one, and the
 /// tradeoff is documented) or when the `Origin`'s `host[:port]` matches the
 /// `Host` header. `false` for a present-but-mismatched `Origin`. Browsers always
 /// send `Origin` for WS, so this only ever rejects a genuine cross-site attempt.
@@ -969,14 +969,14 @@ const FORWARDER_POLL: std::time::Duration = std::time::Duration::from_millis(250
 /// drops `async_rx`, which closes the bounded `tx`. The blocking reader then ends either via a failed
 /// `blocking_send` on the next chunk OR, against a quiet PTY with no further output, via the
 /// `tx.is_closed()` check in its `recv_timeout` timeout arm within one `FORWARDER_POLL` window.
-/// Abort alone is NOT sufficient when the PTY is quiet — without the `is_closed` poll the blocking
+/// Abort alone is NOT sufficient when the PTY is quiet: without the `is_closed` poll the blocking
 /// task would loop forever. Once it ends it drops its std `Receiver`, so the owning `PtyClient`
 /// prunes that stale subscriber on its next read.
 ///
 /// The blocking reader parks on a bounded `recv_timeout` rather than `recv` so it can also exit on
 /// `shutdown`: the std-mpsc `Sender` lives in the `PtyClient` reader thread and, on a ReturnToTui
 /// flip, the engine (and thus that `Sender`) stays alive, so `recv` would never return Disconnected
-/// and would wedge the tokio blocking pool — hanging the runtime teardown. Polling `shutdown` every
+/// and would wedge the tokio blocking pool, hanging the runtime teardown. Polling `shutdown` every
 /// `FORWARDER_POLL` lets the task exit within one window of any teardown even with the engine alive.
 ///
 /// The same timeout arm also checks `tx.is_closed()`: when the downstream socket closes against a
@@ -987,7 +987,7 @@ const FORWARDER_POLL: std::time::Duration = std::time::Duration::from_millis(250
 /// which in turn drops the std `Receiver` so the owning `PtyClient` prunes the stale subscriber.
 /// WebSocket close code (application-private range 4000-4999, so it can never
 /// collide with a protocol close code) the server sends on a PTY socket when the
-/// provider is not available to attach to — it failed to launch (e.g. the CLI is
+/// provider is not available to attach to: it failed to launch (e.g. the CLI is
 /// not on PATH) or its process has exited/crashed. It tells the client NOT to
 /// auto-retry: a re-subscribe would just relaunch the doomed provider, so the
 /// client stops and surfaces a Reconnect affordance instead of looping. Must
@@ -1244,7 +1244,7 @@ fn upgrade_pty_socket(
         .into_response()
 }
 
-/// Upgrade handler for `GET /ws/sessions/:id/pty` — stream the agent session's main
+/// Upgrade handler for `GET /ws/sessions/:id/pty`: stream the agent session's main
 /// provider PTY. Replicates the `/ws` protections (origin check, connection-cap
 /// permit, frame-size limit) and path-validates `:id` against a known session
 /// (404 otherwise, before the upgrade).
@@ -1300,7 +1300,7 @@ async fn ws_session_pty_upgrade(
     )
 }
 
-/// Upgrade handler for `GET /ws/sessions/:id/terminals/:tid/pty` — stream a
+/// Upgrade handler for `GET /ws/sessions/:id/terminals/:tid/pty`: stream a
 /// companion terminal's PTY. Same protections as the agent socket, and
 /// path-validates BOTH that `:id` is a known session AND that `:tid` belongs to it
 /// (the legacy `SubscribeTerminal` looked terminals up by id alone; here the path
@@ -1469,7 +1469,7 @@ async fn ws_standalone_terminal_pty_upgrade(
 /// RAII guard for the per-agent live-tab-socket sub-quota
 /// (`[server] max_websocket_tabs_per_agent`). `acquire` increments the owning
 /// session's count when it is below the cap (returning `None` to refuse at/over
-/// the cap, and — because `0 >= 0` — when the cap is `0`, which blocks all tab
+/// the cap, and, because `0 >= 0`, when the cap is `0`, which blocks all tab
 /// sockets); `Drop` decrements it, so every early return and socket close releases
 /// the slot. The count map is shared via `AppState.tab_ws_counts`.
 struct TabWsGuard {
@@ -1512,13 +1512,13 @@ impl Drop for TabWsGuard {
     }
 }
 
-/// Upgrade handler for `GET /ws/sessions/:id/tabs/:tab/pty` — stream one tab's
+/// Upgrade handler for `GET /ws/sessions/:id/tabs/:tab/pty`: stream one tab's
 /// provider PTY. This is the stable address of EVERY tab of `:id`, the
 /// session-slot tab included; `/ws/sessions/:id/pty` is a convenience alias that
 /// resolves the slot tab id and reaches the identical PTY. Validates origin, id
 /// bounds, session existence, and (for an extra tab) ownership that `:tab`
 /// belongs to `:id`, then takes a permit from the DEDICATED tab-socket pool
-/// (`ws_tab_semaphore`, sized by `max_websocket_tab_connections`) — separate
+/// (`ws_tab_semaphore`, sized by `max_websocket_tab_connections`), separate
 /// from the agent-PTY pool, so tab sockets can never 503 the bare agent streams.
 /// Each failing branch is a 404/503 BEFORE the upgrade.
 ///
@@ -2169,7 +2169,7 @@ pub(crate) fn pty_owner_cleared_event(pty_id: &str, epoch: u64) -> Event {
 }
 
 /// The single `config.changed` signal emitted whenever the engine reloads config.
-/// No `id`/`rev` — it is a plain "refetch `/api/v1/bootstrap`" signal delivered on
+/// No `id`/`rev`: it is a plain "refetch `/api/v1/bootstrap`" signal delivered on
 /// the coarse `config` topic.
 pub(crate) fn config_changed_event() -> Event {
     Event::Resource {
@@ -2187,7 +2187,7 @@ pub(crate) fn config_changed_event() -> Event {
 /// re-emits a `config.changed` event so subscribed clients refetch bootstrap. A
 /// `Lagged` recovery still only needs to say "config changed" once (the signal is
 /// value-less and idempotent), so missed reloads coalesce into a single emit.
-/// Exits when the engine — and thus the reload broadcast — is gone. Returns the
+/// Exits when the engine (and thus the reload broadcast) is gone. Returns the
 /// task handle (used by tests; the production caller fire-and-forgets it).
 fn spawn_config_changed_forwarder(
     mut reload_rx: tokio::sync::broadcast::Receiver<()>,
@@ -2274,7 +2274,7 @@ fn holds_workspace_topic(subscribed: &std::collections::HashSet<String>) -> bool
 /// `/api/v1/workspace` (a page too old to read the pushed document). On `Lagged`
 /// it re-emits BOTH coarse signals once (the signals
 /// are value-less and idempotent, so a missed run coalesces into a single refetch
-/// of each side). Exits when the engine — and thus the broadcast — is gone. Returns
+/// of each side). Exits when the engine (and thus the broadcast) is gone. Returns
 /// the task handle (used by tests; the production caller fire-and-forgets it).
 fn spawn_spine_changed_forwarder(
     mut spine_rx: tokio::sync::broadcast::Receiver<SpineChange>,
@@ -2607,7 +2607,7 @@ async fn ws_events_upgrade(
 ///
 /// Besides resource-change events, this socket also delivers status toasts: the
 /// live status broadcast, the status-clear broadcast, and the on-connect status
-/// snapshot — all filtered by the per-connection scope rule ([`scope_delivers`])
+/// snapshot, all filtered by the per-connection scope rule ([`scope_delivers`])
 /// so one client's operation toasts never leak to another.
 #[allow(clippy::too_many_arguments)]
 async fn handle_events_socket(
@@ -2683,7 +2683,7 @@ async fn handle_events_socket(
     }
 
     // This connection's fine + coarse topic set (the sole owner), wrapped in a Drop
-    // guard so the held fine-topic interests are drained on EVERY exit — including
+    // guard so the held fine-topic interests are drained on EVERY exit, including
     // task cancellation (a runtime shutdown drops this future at an `.await`), not
     // just the normal loop break. Leaking interest would keep the poller computing
     // for a gone connection forever.
@@ -2949,7 +2949,7 @@ fn subscribed_resource_frame(
 }
 
 /// Drains a `/ws/events` connection's held fine-topic interests on Drop, so the
-/// global poll-interest refcount is balanced on EVERY exit path — the normal loop
+/// global poll-interest refcount is balanced on EVERY exit path: the normal loop
 /// break and task cancellation alike (a runtime shutdown drops the connection
 /// future at an `.await`, which would otherwise skip a hand-written cleanup at the
 /// end of the function). Holds an `Arc<EventBus>` clone so the bus outlives it.
@@ -3367,7 +3367,7 @@ where
 /// the send fails (a dead/half-open peer or an already-closed socket), so the
 /// caller breaks its loop and the socket tears down (freeing its permit + registry
 /// slot). The peer auto-responds with a Pong at the protocol layer; we do not read
-/// the Pong (send-failure reap — see [`WS_LIVENESS_PING_PERIOD`]).
+/// the Pong (send-failure reap, see [`WS_LIVENESS_PING_PERIOD`]).
 async fn send_ping(sink: &SharedSink) -> Result<(), ()> {
     let mut guard = sink.lock().await;
     guard
@@ -3377,7 +3377,7 @@ async fn send_ping(sink: &SharedSink) -> Result<(), ()> {
 }
 
 /// Removes a live connection's id from the [`ConnectionRegistry`] on Drop, so the
-/// id is deregistered on EVERY socket exit path — the normal loop break AND task
+/// id is deregistered on EVERY socket exit path: the normal loop break AND task
 /// cancellation (a runtime shutdown drops the socket future at an `.await`). Mirrors
 /// the `InterestGuard` pattern. Holds an `Arc` clone of the registry so it outlives
 /// the socket task.
@@ -3539,7 +3539,7 @@ mod tests {
     }
 
     /// A project PATCH that sets an UNCONFIGURED provider is rejected up front with
-    /// 400 — before any sub-command dispatches — so a bad provider cannot partially
+    /// 400, before any sub-command dispatches, so a bad provider cannot partially
     /// apply after the other fields. A CONFIGURED provider is accepted (200),
     /// proving the guard rejects only the invalid case.
     #[tokio::test]
@@ -3651,7 +3651,7 @@ mod tests {
     /// from `:id` and gets past routing: the path-validation step rejects it as a
     /// non-changed file (400), proving `:id` was extracted rather than 404-ing on
     /// an unknown session. (The seeded worktree is not a real git repo, so the
-    /// changed-file membership check fails — a non-routing outcome, which is the
+    /// changed-file membership check fails: a non-routing outcome, which is the
     /// point.)
     #[tokio::test]
     async fn nested_git_stage_resolves_known_session() {
@@ -3814,7 +3814,7 @@ mod tests {
 
     /// Boot a headless engine handle whose store holds one project (`p1`) and one
     /// session (`s1`), so the spine reads return non-empty bodies. The git/worktree
-    /// paths need not exist — the spine projection reads in-memory engine state, not
+    /// paths need not exist: the spine projection reads in-memory engine state, not
     /// the filesystem.
     fn seeded_engine_handle(tmp: &std::path::Path) -> crate::engine_actor::EngineHandle {
         use dux_core::config::{DuxPaths, ProjectConfig};
@@ -3968,7 +3968,7 @@ mod tests {
     /// The body-keyed project git endpoints (`/api/v1/git/pull-project` and
     /// `/api/v1/git/checkout-default`) were removed in favor of the path-keyed
     /// `/api/v1/projects/:id/{pull,checkout-default}` actions, so they must no
-    /// longer reach the git handler — like any unregistered `/api/v1/git/*` path,
+    /// longer reach the git handler. Like any unregistered `/api/v1/git/*` path,
     /// they now fall through to the SPA static fallback.
     #[tokio::test]
     async fn removed_project_git_routes_are_gone() {
@@ -3994,7 +3994,7 @@ mod tests {
         }
 
         // Contrast: a surviving git route still reaches its handler (an unknown
-        // session resolves there), so it does NOT match the fallback status —
+        // session resolves there), so it does NOT match the fallback status,
         // proving the equality above is route removal, not a blanket fallthrough
         // of everything under /api/v1/git. The git mutations now live under the
         // session-nested path.
@@ -4158,7 +4158,7 @@ mod tests {
     }
 
     /// The literal `/reorder` segment does not collide with `:id` (a reorder with a
-    /// full list against the seeded project is accepted — 200 — not routed into the
+    /// full list against the seeded project is accepted with 200, not routed into the
     /// `:id` handlers).
     #[tokio::test]
     async fn reorder_segment_does_not_collide_with_id() {
@@ -4273,7 +4273,7 @@ mod tests {
     /// `Some(epoch)`); a same-owner re-claim (an owner re-asserting its size) is not
     /// (returning `None`). The epoch increments on each ownership CHANGE and never
     /// on a same-owner re-claim, so the epoch handed to `pty.owner` is monotonic in
-    /// true claim order — the property the client's out-of-order dedup relies on.
+    /// true claim order, the property the client's out-of-order dedup relies on.
     #[test]
     fn pty_size_claim_reports_owner_change_with_monotonic_epoch() {
         let owners = PtySizeOwners::default();
@@ -4614,7 +4614,7 @@ mod tests {
 
         // A 404 on an unknown path is logged with its status. The SPA static
         // fallback serves index.html for unknown non-asset paths, so hit an
-        // /api/... path the router has no route for to get a clean 404 — actually
+        // /api/... path the router has no route for to get a clean 404. Actually
         // the fallback catches everything, so assert on whatever status the
         // fallback returns for a bogus asset path.
         let missing = app
@@ -4711,7 +4711,7 @@ mod tests {
     }
 
     /// A no-op console (the flip default) emits nothing even with `access_log`
-    /// nominally on — the middleware's `console.is_active()` gate short-circuits.
+    /// nominally on: the middleware's `console.is_active()` gate short-circuits.
     /// This is the flip zero-stdout regression guard at the middleware layer.
     #[tokio::test]
     async fn access_log_noop_console_emits_nothing() {
@@ -5973,7 +5973,7 @@ mod tests {
             "the newly-inserted fine topic must be returned"
         );
 
-        // Call the REAL production dispatch helper — not a hand-built WireEvent.
+        // Call the REAL production dispatch helper, not a hand-built WireEvent.
         let frames = catchup_frames(&new_fine, &changes);
         assert_eq!(
             frames.len(),

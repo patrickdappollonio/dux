@@ -165,7 +165,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     });
 
     // Connect a ws client to `/ws/events` and confirm the `connected` handshake
-    // frame arrives — proof the socket is live. All data (the session spine, its
+    // frame arrives, proof the socket is live. All data (the session spine, its
     // `s1` id) now rides the REST `/api/v1/workspace` read.
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
@@ -276,8 +276,8 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
 /// Regression for the flip hang: a subscribed PTY forwarder must not wedge the
 /// runtime teardown on ReturnToTui. A ws client subscribes to a live `cat`
 /// companion terminal and gets an echoed binary frame (so the forwarder is live
-/// and parked on its blocking `recv_timeout`, with the engine — and thus the
-/// PtyClient `Sender` — still alive). Then a `ReturnToTui` tick stops serving,
+/// and parked on its blocking `recv_timeout`, with the engine (and thus the
+/// PtyClient `Sender`) still alive). Then a `ReturnToTui` tick stops serving,
 /// and the serve thread must JOIN within a tight bound. Before the fix the
 /// forwarder parked on `recv()` forever (the Sender never dropped on
 /// ReturnToTui), so dropping the multi-thread runtime hung indefinitely.

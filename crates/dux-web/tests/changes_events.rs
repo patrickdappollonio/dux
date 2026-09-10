@@ -269,7 +269,7 @@ async fn connected_frame_is_first_and_carries_an_id() {
 
 /// A non-pull REST action (`POST /api/v1/projects/:id/checkout-default`, a deferred
 /// `HandlerStatusOp`) mints a busy scoped to the originating connection (via the
-/// `X-Connection-Id` header): A sees it, B does not — proving the HandlerStatusOp
+/// `X-Connection-Id` header): A sees it, B does not, proving the HandlerStatusOp
 /// scoping on `/ws/events`, not just the pull path.
 #[tokio::test]
 async fn non_pull_command_status_is_scoped_to_origin() {
@@ -314,7 +314,7 @@ async fn non_pull_command_status_is_scoped_to_origin() {
 }
 
 /// A client joining MID-OPERATION must NOT receive another connection's in-progress
-/// (or persisted error) status in its on-connect snapshot — the snapshot is scope
+/// (or persisted error) status in its on-connect snapshot: the snapshot is scope
 /// filtered exactly like the live status arm.
 #[tokio::test]
 async fn new_client_snapshot_excludes_other_connections_status() {

@@ -4,15 +4,15 @@
 //! Nothing is mocked. The store is a real SQLite file in a temp directory (dux
 //! has no external service, so a temp dir IS the real dependency), and the
 //! release-notes fetch points at a throwaway local HTTP server through the
-//! injectable API base — no test ever contacts api.github.com.
+//! injectable API base: no test ever contacts api.github.com.
 //!
 //! # What CANNOT be covered here, and why
 //!
 //! `dux_core::display_version()` is a COMPILE-TIME constant (`env!`), and a build
 //! without `DUX_RELEASE_BUILD=1` reports `"development"`. A development build
 //! deliberately never auto-shows the what's-new screen (`first_load::plan`), so
-//! the automatic upgrade journey — "a launch whose stored version differs from a
-//! real running version shows the notes" — is unreachable from a test binary. It
+//! the automatic upgrade journey ("a launch whose stored version differs from a
+//! real running version shows the notes") is unreachable from a test binary. It
 //! is covered by the exhaustive decision-table tests in
 //! `dux_core::first_load` and by `dux-core/tests/release_notes_fetch.rs`.
 //! What IS covered here is everything the web surface adds: the pending screen
@@ -221,7 +221,7 @@ async fn await_last_seen(server: &Server, expected: &str) {
 // ── journey: a fresh install ─────────────────────────────────────────────────
 
 /// A brand new install connects and is offered the welcome screen, with the copy
-/// and the numbered steps ready to render — and the stored version is still
+/// and the numbered steps ready to render, and the stored version is still
 /// EMPTY, because a shown screen stamps on dismissal, not when the plan is made.
 #[tokio::test]
 async fn a_fresh_install_is_offered_the_welcome_screen_and_nothing_is_stamped_yet() {
@@ -264,7 +264,7 @@ async fn a_fresh_install_is_offered_the_welcome_screen_and_nothing_is_stamped_ye
 }
 
 /// The user closes the welcome screen. That stamps the running version, and a
-/// second browser connecting afterwards is offered nothing — the dismissal is
+/// second browser connecting afterwards is offered nothing: the dismissal is
 /// shared through the one SQLite row, which is also the row the TUI reads.
 #[tokio::test]
 async fn dismissing_the_welcome_screen_stamps_the_version_and_the_next_client_sees_nothing() {
@@ -344,7 +344,7 @@ async fn a_launch_that_cannot_show_notes_leaves_the_stored_version_untouched() {
 }
 
 /// With the welcome suppressed by config there is no screen to dismiss, so the
-/// version is stamped IMMEDIATELY — the other half of the timing contract. The
+/// version is stamped IMMEDIATELY, the other half of the timing contract. The
 /// proof it matters: the user stays on a moving version rather than being pinned
 /// at "never seen anything".
 #[tokio::test]
@@ -370,7 +370,7 @@ async fn suppressing_the_welcome_stamps_the_version_immediately() {
 // ── journey: opening the notes on demand ─────────────────────────────────────
 
 /// The app menu's "What's new…" fetches the notes on demand and gets back plain
-/// prose and feature titles — parsed by core, so the client needs no Markdown
+/// prose and feature titles, parsed by core, so the client needs no Markdown
 /// renderer.
 #[tokio::test]
 async fn the_on_demand_read_returns_parsed_release_notes() {
@@ -397,7 +397,7 @@ async fn the_on_demand_read_returns_parsed_release_notes() {
 }
 
 /// The suppression flags disable the AUTOMATIC screens only. With both set, the
-/// on-demand read still works — otherwise a user who turned the startup screen
+/// on-demand read still works. Otherwise a user who turned the startup screen
 /// off could never look the notes up again.
 #[tokio::test]
 async fn the_on_demand_read_works_even_with_the_automatic_screens_disabled() {
@@ -484,7 +484,7 @@ async fn the_on_demand_read_at_capacity_one_waits_instead_of_rejecting() {
 
 /// A dismissal in ONE browser tab must settle the screen in every other open tab.
 /// `config.changed` is the only event that drives a client bootstrap refetch, so
-/// without it a second tab keeps its dialog up indefinitely — which would break
+/// without it a second tab keeps its dialog up indefinitely, which would break
 /// the promise that dismissal is shared. Proven with a receiver that is already
 /// subscribed to `/ws/events` BEFORE the dismissal is posted.
 #[tokio::test]
@@ -494,7 +494,7 @@ async fn dismissing_tells_every_other_open_client_through_config_changed() {
     let server = boot("", None, OFFLINE_BASE).await;
     await_pending_screen(&server).await;
 
-    // The other tab, already listening on the coarse `config` topic — the topic
+    // The other tab, already listening on the coarse `config` topic: the topic
     // `config.changed` is delivered on, and the one the real client holds.
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws/events", server.addr))
         .await

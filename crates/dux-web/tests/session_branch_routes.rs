@@ -1,9 +1,9 @@
 //! End-to-end tests for the delete dialog's two session routes against a real
 //! router, a real git repository and real worktrees in a temp dir:
 //!
-//! - `GET    /api/v1/sessions/:id/branch-unpushed` — the branches a delete would
+//! - `GET    /api/v1/sessions/:id/branch-unpushed`: the branches a delete would
 //!   remove and how much of their work exists only here.
-//! - `DELETE /api/v1/sessions/:id?delete_branch=`  — where an ABSENT answer and
+//! - `DELETE /api/v1/sessions/:id?delete_branch=`:  where an ABSENT answer and
 //!   an explicit `false` part company, which is the compatibility claim the
 //!   parameter rests on and the one a client actually enters through.
 //!

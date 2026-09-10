@@ -491,7 +491,7 @@ fn copy_tree(from: &Path, to: &Path) {
             // was gzipped IN PLACE by the ancient in-place version of this
             // script hands us compressed bytes already. The server no longer
             // speaks gzip, so those bytes are inflated FIRST and then Brotli'd
-            // like any other text asset — every staged file with a compressible
+            // like any other text asset: every staged file with a compressible
             // extension must be Brotli, because the extension is the only
             // signal the server has (Brotli has no magic bytes).
             let raw = if bytes.starts_with(&[0x1f, 0x8b]) {

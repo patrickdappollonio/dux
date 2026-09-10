@@ -110,7 +110,7 @@ async function main() {
 
   const match = svg.match(/ d="([^"]+)"/)
   if (!match) {
-    throw new Error("potrace produced no path — check the mask/threshold")
+    throw new Error("potrace produced no path: check the mask/threshold")
   }
   const duckPath = match[1].trim()
   if (!duckPath.startsWith("M")) {

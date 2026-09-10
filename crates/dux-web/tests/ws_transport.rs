@@ -200,7 +200,7 @@ async fn boot_with_repo() -> (SocketAddr, tempfile::TempDir) {
 }
 
 /// HTTP `POST /api/v1/sessions/:id/files/diff` returns both raw sides of a changed
-/// file and rejects a path that escapes the worktree — the HTTP-layer coverage that
+/// file and rejects a path that escapes the worktree, the HTTP-layer coverage that
 /// replaced the deleted WS `get_diff` test (route wiring, session resolution, the
 /// boundary, and JSON shape).
 #[tokio::test]
@@ -226,7 +226,7 @@ async fn http_file_diff_returns_sides_and_rejects_traversal() {
         body["modified"].as_str().unwrap().contains("CHANGED"),
         "modified (working) side missing the edit: {body}"
     );
-    // Pin which side each string lands on — catch an original/modified swap.
+    // Pin which side each string lands on: catch an original/modified swap.
     assert!(
         !body["original"].as_str().unwrap().contains("CHANGED"),
         "original (HEAD) side must not carry the working edit: {body}"
@@ -1046,7 +1046,7 @@ async fn rest_create_session_idempotency_replays_same_session() {
         "the replay must return the same session id"
     );
 
-    // Exactly one session exists under p1 — the replay created nothing new.
+    // Exactly one session exists under p1: the replay created nothing new.
     let sessions: serde_json::Value = client
         .get(format!("http://{addr}/api/v1/sessions"))
         .send()
@@ -2184,7 +2184,7 @@ async fn a_fragmented_message_past_the_message_cap_is_refused() {
 /// A Text frame `{"rows":R,"cols":C}` on a PTY socket is routed to resize, NOT
 /// written to the PTY as stdin: the `cat` provider echoes stdin, so if the resize
 /// JSON were mistakenly written it would echo back. We assert the resize JSON never
-/// appears in the stream while a subsequent Binary marker still echoes — proving the
+/// appears in the stream while a subsequent Binary marker still echoes, proving the
 /// text frame was consumed as a resize and streaming survived it.
 #[tokio::test]
 async fn nested_pty_socket_resize_text_frame_is_not_stdin() {
@@ -2223,7 +2223,7 @@ async fn nested_pty_socket_resize_text_frame_is_not_stdin() {
     );
     assert!(
         !text.contains("\"rows\":40"),
-        "the resize JSON was echoed as stdin — it was not routed to resize: {text}"
+        "the resize JSON was echoed as stdin. It was not routed to resize: {text}"
     );
 }
 
@@ -2270,7 +2270,7 @@ async fn nested_terminal_pty_socket_enforces_session_ownership() {
     );
 
     // The WRONG session path is rejected before upgrade (404 → connect error),
-    // even though s2 is a real session — the terminal belongs to s1.
+    // even though s2 is a real session: the terminal belongs to s1.
     let foreign = tokio_tungstenite::connect_async(format!(
         "ws://{addr}/ws/sessions/s2/terminals/{terminal_id}/pty"
     ))
