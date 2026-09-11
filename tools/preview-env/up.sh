@@ -109,9 +109,17 @@ else
 fi
 
 # What the container that is running right now was brought up with, or empty.
+#
+# `docker container inspect`, not `docker inspect`: the bare form falls back to
+# any other object with that name, and there is an IMAGE called dux-preview, so
+# it answered with the image's build-time environment rather than the running
+# container's. The `|| true` matters as much: with no container at all the
+# substitution's failure ends the script under `set -e`, silently, several
+# minutes of release build after anyone could have noticed.
 running_mode() {
-  docker_raw inspect -f '{{range .Config.Env}}{{println .}}{{end}}' dux-preview 2> /dev/null \
-    | sed -n "s/^$1=//p" | head -1
+  local env
+  env=$(docker_raw container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' dux-preview 2> /dev/null || true)
+  printf '%s\n' "$env" | sed -n "s/^$1=//p" | head -1
 }
 
 # Bringing the stack up recreates the container from THIS shell's environment,
