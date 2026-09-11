@@ -139,9 +139,19 @@ async function open({ mobile = false, width, height } = {}) {
     })
   }
   // A window opened at a size the platform will not give can write the window's
-  // pixels rather than the emulated viewport's, so the override is re-asserted
-  // (idempotently) immediately before every capture.
-  const reassert = () => cdp.send("Emulation.setDeviceMetricsOverride", metrics)
+  // pixels rather than the emulated viewport's, so the viewport is checked
+  // immediately before every capture and the override re-sent when it has
+  // drifted. Only when: re-sending it is a viewport change as far as the page is
+  // concerned, and a base-ui menu closes on one, which silently turned a picture
+  // of an open menu into a picture of the strip it hangs off.
+  const reassert = async () => {
+    const now = await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    }))
+    if (now.width === w && now.height === h) return
+    await cdp.send("Emulation.setDeviceMetricsOverride", metrics)
+  }
   return { browser, page, cdp, reassert, width: w, height: h }
 }
 
@@ -425,14 +435,65 @@ async function openMoreWays(page) {
 // not; run.js writes no PNG for a scene whose guard threw.
 
 // Set by run.js before each scene, so a refusal says which picture was refused
-// without every call site repeating its own name.
+// without every call site repeating its own name. It also clears the replay
+// below, which belongs to one scene at a time.
 let sceneUnderShot = "scene"
 const setSceneName = (name) => {
   sceneUnderShot = name
+  guardReplay = []
 }
 
 function refuse(what) {
-  throw new Error(`${sceneUnderShot}: ${what}`)
+  // Which pass refused matters: a scene whose promise held where it was written
+  // and broke by the time the shutter opened is a different bug from one that
+  // never got there, and they read identically without this.
+  const when = replaying ? " (asked again with the shutter open)" : ""
+  throw new Error(`${sceneUnderShot}: ${what}${when}`)
+}
+
+// A guard is a question asked of a live page, and a page settles: a replay
+// arrives, a menu finishes opening, a fixture prints its first line. So a guard
+// waits a bounded while for its promise to come true and refuses only when it
+// never does, saying what it saw last. Waiting is not weakening: the failures
+// this exists for (a pane that never attached, a menu that never opened) are
+// still there at the end of the window.
+const GUARD_SETTLE_MS = 12000
+const GUARD_POLL_MS = 500
+
+async function settle(probe) {
+  const deadline = Date.now() + GUARD_SETTLE_MS
+  let problem = await probe()
+  while (problem && Date.now() < deadline) {
+    await sleep(GUARD_POLL_MS)
+    problem = await probe()
+  }
+  if (problem) refuse(problem)
+}
+
+// Every guard a scene ran, so run.js can ask the same questions again with the
+// shutter open. The scene's own call is not the last word: the capture happens
+// after the scene returns, and the steps between (re-asserting the viewport,
+// parking the animations) are page events a menu closes on. That cost a picture
+// of an open tab menu, which came back as a bare strip and passed.
+let guardReplay = []
+let replaying = false
+
+// Wraps a guard so calling it also records the question. The recording is
+// suppressed while replaying, or a replay would grow the list it walks.
+function recorded(check) {
+  return async (...args) => {
+    await check(...args)
+    if (!replaying) guardReplay.push(() => check(...args))
+  }
+}
+
+async function recheckGuards() {
+  replaying = true
+  try {
+    for (const ask of guardReplay) await ask()
+  } finally {
+    replaying = false
+  }
 }
 
 // Whitespace is normalized on both sides: the DOM's own line breaks and the
@@ -467,51 +528,83 @@ async function findText(page, text, selector) {
 
 // A phrase the caption promises, visible somewhere on the page.
 async function expectVisibleText(page, text, { selector = "*", what } = {}) {
-  const found = await findText(page, text, selector)
-  if (!found) refuse(`${what || `the words "${flatten(text)}"`} are not on the page`)
+  await settle(async () => {
+    const found = await findText(page, text, selector)
+    return found ? null : `${what || `the text "${flatten(text)}"`} is not on the page`
+  })
 }
 
 // A visible element, named by what it is rather than by its selector: a scene
 // whose subject is a shape (a flap, a pill, an overlay) has no words of its own
 // to look for.
 async function expectVisible(page, selector, what) {
-  const there = await page.evaluate(
-    (sel) =>
-      [...document.querySelectorAll(sel)].some((el) => {
-        const r = el.getBoundingClientRect()
-        if (r.width < 1 || r.height < 1) return false
-        const style = getComputedStyle(el)
-        return style.visibility !== "hidden" && Number(style.opacity) >= 0.05
-      }),
-    selector,
-  )
-  if (!there) refuse(`${what} is not on screen (nothing visible matches ${selector})`)
+  await settle(async () => {
+    const there = await page.evaluate(
+      (sel) =>
+        [...document.querySelectorAll(sel)].some((el) => {
+          const r = el.getBoundingClientRect()
+          if (r.width < 1 || r.height < 1) return false
+          const style = getComputedStyle(el)
+          return style.visibility !== "hidden" && Number(style.opacity) >= 0.05
+        }),
+      selector,
+    )
+    return there ? null : `${what} is not on screen (nothing visible matches ${selector})`
+  })
 }
 
 // A wide strip of chrome rather than an incidental mention of the same words:
 // the sidebar row's pull-request chip carries the banner's own text at chip
 // width, and a picture of the chip is not a picture of the banner.
-async function expectBanner(page, text, { minWidth = 300, what } = {}) {
-  const found = await findText(page, text, "*")
-  if (!found) refuse(`${what || `the banner reading "${flatten(text)}"`} is not on the page`)
+//
+// The WIDEST element that is about this text, which is the strip itself rather
+// than the span inside it holding the title. "About" is what bounds the search:
+// every ancestor up to <body> contains the words too, so an element saying much
+// more than the phrase is a container rather than the banner.
+const BANNER_SLACK = 80
+
+async function expectBanner(page, text, { minWidth = 300, selector = "*", what } = {}) {
+  await settle(() => bannerProblem(page, text, minWidth, selector, what))
+}
+
+async function bannerProblem(page, text, minWidth, selector, what) {
+  const found = await page.evaluate(
+    (sel, needle, slack) => {
+      const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
+      const want = flat(needle)
+      let best = null
+      for (const el of document.querySelectorAll(sel)) {
+        const own = flat(el.textContent)
+        if (!own.includes(want) || own.length > want.length + slack) continue
+        const r = el.getBoundingClientRect()
+        if (r.width < 1 || r.height < 1) continue
+        const style = getComputedStyle(el)
+        if (style.visibility === "hidden" || Number(style.opacity) < 0.05) continue
+        if (!best || r.width > best.width) best = { width: r.width }
+      }
+      return best
+    },
+    selector,
+    text,
+    BANNER_SLACK,
+  )
+  if (!found) return `${what || `the banner reading "${flatten(text)}"`} is not on the page`
   if (found.width < minWidth) {
-    refuse(
-      `${what || `"${flatten(text)}"`} is only ${Math.round(found.width)}px wide, which is a chip rather than a banner`,
-    )
+    return `${what || `"${flatten(text)}"`} is only ${Math.round(found.width)}px wide, which is a chip rather than a banner`
   }
+  return null
 }
 
 // What a field holds, which is its value rather than anything in the DOM.
 async function expectFieldValue(page, selector, text) {
-  const values = await page.evaluate(
-    (sel) => [...document.querySelectorAll(sel)].map((el) => el.value || ""),
-    selector,
-  )
-  if (!values.some((value) => flatten(value).includes(flatten(text)))) {
-    refuse(
-      `no ${selector} holds "${flatten(text)}"; they hold ${JSON.stringify(values.map(flatten))}`,
+  await settle(async () => {
+    const values = await page.evaluate(
+      (sel) => [...document.querySelectorAll(sel)].map((el) => el.value || ""),
+      selector,
     )
-  }
+    if (values.some((value) => flatten(value).includes(flatten(text)))) return null
+    return `no ${selector} holds "${flatten(text)}"; they hold ${JSON.stringify(values.map(flatten))}`
+  })
 }
 
 // --- The pane --------------------------------------------------------------
@@ -531,6 +624,10 @@ const COVER_WORDINGS = [
 // card, which is the one picture where the card is the subject rather than the
 // failure; the spinner and the reconnect box are refused there too.
 async function expectNoCover(page, { card = false } = {}) {
+  await settle(() => coverProblem(page, card))
+}
+
+async function coverProblem(page, card) {
   const state = await page.evaluate((wordings) => {
     const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
     const shown = (el) => {
@@ -549,14 +646,15 @@ async function expectNoCover(page, { card = false } = {}) {
     const starting = /\bStarting [^…]{1,40}…/.test(body)
     return { hit, takeOver, starting }
   }, COVER_WORDINGS)
-  if (state.hit) refuse(`${state.hit[1]} ("${state.hit[0]}" is on the pane)`)
-  if (state.starting) refuse("the provider is still starting; nothing has painted the pane yet")
+  if (state.hit) return `${state.hit[1]} ("${state.hit[0]}" is on the pane)`
+  if (state.starting) return "the provider is still starting; nothing has painted the pane yet"
   if (state.takeOver && !card) {
-    refuse("the take-over card is covering the terminal; this scene never took the pty")
+    return "the take-over card is covering the terminal; this scene never took the pty"
   }
   if (!state.takeOver && card) {
-    refuse("this scene is about the take-over card and there is no card on the pane")
+    return "this scene is about the take-over card and there is no card on the pane"
   }
+  return null
 }
 
 // The terminal has something on it, measured off the picture rather than
@@ -569,6 +667,10 @@ async function expectNoCover(page, { card = false } = {}) {
 const PANE_INK_FLOOR = 0.004
 
 async function expectPanePainted(page, { floor = PANE_INK_FLOOR } = {}) {
+  await settle(() => paneProblem(page, floor))
+}
+
+async function paneProblem(page, floor) {
   const rect = await page.evaluate(() => {
     const el = document.querySelector('[data-testid="terminal-container"]')
     if (!el) return null
@@ -581,16 +683,13 @@ async function expectPanePainted(page, { floor = PANE_INK_FLOOR } = {}) {
       height: Math.round(r.height),
     }
   })
-  if (!rect) refuse("there is no terminal on this page for the pane guard to read")
+  if (!rect) return "there is no terminal on this page for the pane guard to read"
   // Wrapped rather than used as handed over: puppeteer answers with a plain
   // Uint8Array, which has none of Buffer's readers.
   const image = decodePng(Buffer.from(await page.screenshot({ clip: rect })))
   const { ratio, colors } = inkRatio(image)
-  if (ratio < floor) {
-    refuse(
-      `the terminal is blank: ${(ratio * 100).toFixed(3)}% of its pixels differ from the background (${colors} colours), under the ${(floor * 100).toFixed(3)}% floor`,
-    )
-  }
+  if (ratio >= floor) return null
+  return `the terminal is blank: ${(ratio * 100).toFixed(3)}% of its pixels differ from the background (${colors} colours), under the ${(floor * 100).toFixed(3)}% floor`
 }
 
 // --- The sidebar -----------------------------------------------------------
@@ -614,65 +713,61 @@ async function agentRowTexts(page) {
 
 // The agent rows the caption counts, and no others.
 async function expectRows(page, names) {
-  const rows = await agentRowTexts(page)
-  const missing = names.filter((name) => !rows.some((row) => row.includes(name)))
-  if (missing.length) {
-    refuse(
-      `the sidebar is missing ${missing.join(", ")}; it shows ${rows.length ? rows.map((row) => JSON.stringify(row)).join(" | ") : "no agent rows at all"}`,
-    )
-  }
-  if (rows.length !== names.length) {
-    refuse(
-      `the sidebar shows ${rows.length} agent rows and the picture is of ${names.length}: ${rows.map((row) => JSON.stringify(row)).join(" | ")}`,
-    )
-  }
+  await settle(async () => {
+    const rows = await agentRowTexts(page)
+    const missing = names.filter((name) => !rows.some((row) => row.includes(name)))
+    if (missing.length) {
+      return `the sidebar is missing ${missing.join(", ")}; it shows ${rows.length ? rows.map((row) => JSON.stringify(row)).join(" | ") : "no agent rows at all"}`
+    }
+    if (rows.length !== names.length) {
+      return `the sidebar shows ${rows.length} agent rows and the picture is of ${names.length}: ${rows.map((row) => JSON.stringify(row)).join(" | ")}`
+    }
+    return null
+  })
 }
 
 // The state word on one agent's row, which is what every scene about state is
 // actually about.
 async function expectStateWord(page, name, word) {
-  const rows = await agentRowTexts(page)
-  const row = rows.find((text) => text.includes(name))
-  if (!row) refuse(`there is no ${name} row on this page to read a state word off`)
-  if (!row.includes(word)) {
-    refuse(`the ${name} row does not read "${word}"; it reads ${JSON.stringify(row)}`)
-  }
+  await settle(async () => {
+    const rows = await agentRowTexts(page)
+    const row = rows.find((text) => text.includes(name))
+    if (!row) return `there is no ${name} row on this page to read a state word off`
+    if (row.includes(word)) return null
+    return `the ${name} row does not read "${word}"; it reads ${JSON.stringify(row)}`
+  })
 }
 
 // --- Menus and dialogs -----------------------------------------------------
 
 // A menu is open, and it is the right one, named by an item only that menu has.
 async function expectMenuOpen(page, itemText) {
-  const menus = await page.evaluate(() => {
-    const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
-    return [...document.querySelectorAll('[role="menu"]')]
-      .filter((el) => el.getBoundingClientRect().height > 1)
-      .map((el) => flat(el.textContent))
+  await settle(async () => {
+    const menus = await page.evaluate(() => {
+      const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
+      return [...document.querySelectorAll('[role="menu"]')]
+        .filter((el) => el.getBoundingClientRect().height > 1)
+        .map((el) => flat(el.textContent))
+    })
+    if (!menus.length) return `no menu is open; this scene is a picture of one offering "${itemText}"`
+    if (menus.some((text) => text.includes(flatten(itemText)))) return null
+    return `the open menu does not offer "${itemText}": ${menus.map((text) => JSON.stringify(text)).join(" | ")}`
   })
-  if (!menus.length) {
-    refuse(`no menu is open; this scene is a picture of one offering "${itemText}"`)
-  }
-  if (!menus.some((text) => text.includes(flatten(itemText)))) {
-    refuse(
-      `the open menu does not offer "${itemText}": ${menus.map((text) => JSON.stringify(text)).join(" | ")}`,
-    )
-  }
 }
 
 // A dialog is open, and it is the right one, named by its title.
 async function expectDialogOpen(page, title) {
-  const dialogs = await page.evaluate(() => {
-    const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
-    return [...document.querySelectorAll('[role="dialog"]')]
-      .filter((el) => el.getBoundingClientRect().height > 1)
-      .map((el) => flat(el.textContent).slice(0, 200))
+  await settle(async () => {
+    const dialogs = await page.evaluate(() => {
+      const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
+      return [...document.querySelectorAll('[role="dialog"]')]
+        .filter((el) => el.getBoundingClientRect().height > 1)
+        .map((el) => flat(el.textContent).slice(0, 200))
+    })
+    if (!dialogs.length) return `no dialog is open; this scene is a picture of "${title}"`
+    if (dialogs.some((text) => text.includes(flatten(title)))) return null
+    return `the open dialog is not "${title}": ${dialogs.map((text) => JSON.stringify(text)).join(" | ")}`
   })
-  if (!dialogs.length) refuse(`no dialog is open; this scene is a picture of "${title}"`)
-  if (!dialogs.some((text) => text.includes(flatten(title)))) {
-    refuse(
-      `the open dialog is not "${title}": ${dialogs.map((text) => JSON.stringify(text)).join(" | ")}`,
-    )
-  }
 }
 
 // --- Reading a capture -----------------------------------------------------
@@ -815,16 +910,19 @@ module.exports = {
   clearToasts,
   clickLabel,
   clickText,
-  expectBanner,
-  expectDialogOpen,
-  expectFieldValue,
-  expectMenuOpen,
-  expectNoCover,
-  expectPanePainted,
-  expectRows,
-  expectStateWord,
-  expectVisible,
-  expectVisibleText,
+  // Every guard goes out recorded, so a scene's questions are asked again with
+  // the shutter open rather than only where the scene wrote them.
+  expectBanner: recorded(expectBanner),
+  expectDialogOpen: recorded(expectDialogOpen),
+  expectFieldValue: recorded(expectFieldValue),
+  expectMenuOpen: recorded(expectMenuOpen),
+  expectNoCover: recorded(expectNoCover),
+  expectPanePainted: recorded(expectPanePainted),
+  expectRows: recorded(expectRows),
+  expectStateWord: recorded(expectStateWord),
+  expectVisible: recorded(expectVisible),
+  expectVisibleText: recorded(expectVisibleText),
+  recheckGuards,
   freshen,
   get,
   goto,

@@ -127,6 +127,11 @@ async function shootOne(scene) {
     )
     await reassert()
     await freezeWorkingCue(page)
+    // Asked again with the shutter open. The scene's own call is not the last
+    // word: these two steps are page events, and a base-ui menu closes on a
+    // viewport change, which is how a picture of an open tab menu came back as
+    // a bare strip and was written anyway.
+    await lib.recheckGuards()
     const out = path.join(outDir, scene.mod.file)
     await page.screenshot({ path: out, clip })
     return out
@@ -173,8 +178,10 @@ async function main() {
         console.log("wrote", path.basename(out))
       } catch (error) {
         // The sentence, not a stack: a refusal is a statement about what the
-        // page was showing, and it is the whole reason no PNG was written.
-        console.error(`refused ${scene.name}: ${error && error.message ? error.message : error}`)
+        // page was showing, and it is the whole reason no PNG was written. A
+        // guard has already named the scene; anything else thrown has not.
+        const said = error && error.message ? error.message : String(error)
+        console.error(said.startsWith(`${scene.name}:`) ? `refused ${said}` : `refused ${scene.name}: ${said}`)
         recordRefusal(scene.name)
         failures.push(scene.name)
       }
