@@ -13,7 +13,7 @@ const lib = require("./lib.js")
 const sceneDir = path.join(__dirname, "scenes")
 const outDir = process.env.SCREENS_DIR || path.resolve(__dirname, "../../../website/public/screens")
 
-const DEFAULT_STAGING = "all-working"
+const { DEFAULT_STAGING } = lib
 
 // A scene that hangs (a selector that never appears, a socket that never opens)
 // would otherwise stall the whole run with no clue which one it was. Comfortably
@@ -91,6 +91,21 @@ async function freezeWorkingCue(page) {
         clip-path: inset(0 0 0 0) !important;
       }
       [class*="animate-working-pulse"] {
+        animation: none !important;
+        opacity: 1 !important;
+      }
+      /* The needs-you word and its dot, on the same grounds and for the same
+         reason: this cue spends most of its two seconds dimmed, so a shutter
+         that does not park it lands on a washed-out "Needs you" more often than
+         not. The attention screenshot's own caption promises an agent "lit
+         cyan", and the committed picture showed it grey. */
+      [class*="animate-attention-pulse"] {
+        animation: none !important;
+        opacity: 1 !important;
+      }
+      /* The typing caret, which is a blink: half its frames are an absent
+         caret, and which half a capture lands on is pure luck. */
+      [class*="animate-typing-caret"] {
         animation: none !important;
         opacity: 1 !important;
       }

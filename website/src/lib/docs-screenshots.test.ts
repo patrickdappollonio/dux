@@ -233,6 +233,61 @@ describe("docs screenshots", () => {
     expect(unstated).toEqual([]);
   });
 
+  // The sidebar sorts "active first" by default, so the pinned manual order is
+  // the order on screen only while every agent in the staging is busy. A scene
+  // that guards on the pinned order under a mixed staging asks for rows the app
+  // never shows, and one did: web-two-front-ends refused its own correct
+  // picture, every run, for a sort working exactly as designed.
+  it("guards mixed stagings against the order the sort actually shows", () => {
+    const lib = requireScene(
+      resolve(repoRoot, "tools/preview-env/screens/lib.js"),
+    ) as {
+      SIDEBAR_ORDER: string[];
+      DEFAULT_STAGING: string;
+      displayOrder: (staging: string) => string[];
+    };
+    const pinned = lib.SIDEBAR_ORDER;
+    const wrong: string[] = [];
+    for (const file of scenes) {
+      const stem = file.replace(/\.js$/, "");
+      const mod = sceneModule(stem);
+      if (typeof mod === "function") continue;
+      const source = withoutComments(readFileSync(resolve(scenesDir, file), "utf8"));
+      if (!/expectRows\s*\([^)]*SIDEBAR_ORDER/.test(source)) continue;
+      const staging = (mod as { staging?: string }).staging || lib.DEFAULT_STAGING;
+      const shown = lib.displayOrder(staging);
+      if (shown.join() !== pinned.join()) {
+        wrong.push(`${stem} guards on the pinned order but ${staging} shows ${shown.join(", ")}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it("keeps every staging's displayed order a re-partition of the pinned one", () => {
+    const lib = requireScene(
+      resolve(repoRoot, "tools/preview-env/screens/lib.js"),
+    ) as { SIDEBAR_ORDER: string[]; displayOrder: (staging: string) => string[] };
+    const pinned = lib.SIDEBAR_ORDER;
+    for (const staging of ["all-working", "twin", "standalone"]) {
+      const shown = lib.displayOrder(staging);
+      expect([...shown].sort()).toEqual([...pinned].sort());
+      // Within a bucket the pinned order survives: the sort is stable.
+      const kept = shown.filter((name) => pinned.includes(name));
+      expect(kept.length).toBe(pinned.length);
+    }
+    // Every agent is busy under all-working, so nothing moves.
+    expect(lib.displayOrder("all-working")).toEqual(pinned);
+    // Half are idle under twin, so the three still working come first.
+    expect(lib.displayOrder("twin")).toEqual([
+      "refactor-cache",
+      "add-rate-limits",
+      "fix-login-redirect",
+      "design-notes",
+      "review-billing",
+      "polish-onboarding",
+    ]);
+  });
+
   it("shows every screenshot on a docs page", () => {
     const text = docsText();
     const unreferenced = screenshots.filter((png) => !text.includes(`/screens/${png}`));

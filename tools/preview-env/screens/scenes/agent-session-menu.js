@@ -9,6 +9,7 @@ const {
   expectPanePainted,
   goto,
   sleep,
+  steadyBox,
   takeOver,
 } = require("../lib.js")
 
@@ -43,7 +44,13 @@ module.exports = {
     // it belongs to can be anywhere in the sidebar, and a menu near the bottom
     // opens upwards, so the menu's own extent is the only stable frame. The
     // sidebar comes along because the crop starts at the window's left edge.
-    const menu = await boxOf(page, ['[role="menu"]'])
+    //
+    // Measured once it has stopped moving: this menu re-positions itself about a
+    // second after it opens, and a rect read before that framed it with forty
+    // pixels of dead black where the twelve asked for below were meant to go.
+    const menu = await steadyBox(() => boxOf(page, ['[role="menu"]']), {
+      what: "the row's actions menu",
+    })
     const y = Math.max(0, Math.round(menu.y - 12))
     return {
       x: 0,

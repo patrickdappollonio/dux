@@ -191,6 +191,40 @@ async function clearToasts(page) {
 
 // --- Geometry --------------------------------------------------------------
 
+// A crop rect read while its element is still moving frames the wrong thing,
+// and the picture that comes out looks perfectly valid. A sidebar row's actions
+// menu opens at one position and re-positions itself about a second later
+// (measured: x 299.8 at the click, 308 a tenth of a second in, 280 once it
+// settles), so a rect read too early framed the menu with forty pixels of dead
+// black where twelve were asked for. A scene that frames an element therefore
+// asks for its box only once the box has held still.
+//
+// `read` returns the box, or null while there is nothing to measure yet.
+async function steadyBox(read, { what = "the element", still = 600, gap = 150, timeout = 8000 } = {}) {
+  const same = (a, b) =>
+    a && b && ["x", "y", "width", "height"].every((k) => Math.abs(a[k] - b[k]) < 0.5)
+  const deadline = Date.now() + timeout
+  let last = null
+  let since = 0
+  while (Date.now() < deadline) {
+    const now = await read()
+    if (same(now, last)) {
+      since += gap
+      if (since >= still) return now
+    } else {
+      since = 0
+    }
+    last = now
+    await sleep(gap)
+  }
+  if (!last) throw new Error(`nothing to frame: ${what} never measured`)
+  // Deliberately not a throw: a box still moving after eight seconds is longer
+  // than any animation this app runs, and the picture plus a word on stderr is
+  // worth more than a refused scene with nothing to look at.
+  console.error(`  ${what} never settled; framing the last box it reported`)
+  return last
+}
+
 // Bounding box of every element matching any selector, unioned, in CSS pixels
 // and clamped to the viewport.
 async function boxOf(page, selectors, pad = 0, bounds = DESKTOP) {
@@ -264,6 +298,11 @@ async function clickText(page, source, sel = "button,[role=menuitem]") {
 // The sidebar order every scene is shot against. The active sort floats the
 // working and needs-you agents together in reverse creation order, which puts
 // the agent that needs you last; the screenshots pin an order instead.
+//
+// Pinned is the MANUAL order, which is the whole answer only while every agent
+// is busy: the sidebar's default sort is "active first", a stable partition that
+// keeps the busy agents ahead of the quiet ones. Ask `displayOrder` for the rows
+// a staging actually puts on screen rather than reading this list as the answer.
 const SIDEBAR_ORDER = [
   "design-notes",
   "review-billing",
@@ -272,6 +311,9 @@ const SIDEBAR_ORDER = [
   "add-rate-limits",
   "fix-login-redirect",
 ]
+
+// The staging a scene gets when it names none.
+const DEFAULT_STAGING = "all-working"
 
 // Three stagings, because three groups of screenshots are about different
 // things. "all-working" is the busy workspace: every agent works and one needs
@@ -305,6 +347,21 @@ const STAGINGS = {
     "polish-onboarding": { fixture: "steady" },
   },
   standalone: { ...BUSY, "design-notes": { fixture: "working", provider: "claude" } },
+}
+
+// The fixtures that leave an agent busy. "steady" is the quiet one; the rest
+// stream or ring, and the sidebar's active-first sort floats them.
+const BUSY_FIXTURES = new Set(["working", "attention", "attention-delayed"])
+
+// The rows a staging actually puts on screen, top to bottom: the pinned order
+// partitioned the way the default sort partitions it. Under "all-working" every
+// agent is busy and this is SIDEBAR_ORDER itself; under "twin" half the agents
+// are idle, so they follow the three that are still working.
+function displayOrder(name) {
+  const want = STAGINGS[name]
+  if (!want) throw new Error(`unknown staging ${name}; have ${Object.keys(STAGINGS).join(", ")}`)
+  const busy = (title) => BUSY_FIXTURES.has(want[title].fixture)
+  return [...SIDEBAR_ORDER.filter(busy), ...SIDEBAR_ORDER.filter((title) => !busy(title))]
 }
 
 // The agent the busy stagings leave waiting on you, and the fixture that rings
@@ -857,6 +914,8 @@ module.exports = {
   ATTENTION_WORD,
   BASE,
   SIDEBAR_ORDER,
+  DEFAULT_STAGING,
+  displayOrder,
   armAttention,
   openMoreWays,
   openNewAgent,
@@ -867,6 +926,7 @@ module.exports = {
   agents,
   api,
   boxOf,
+  steadyBox,
   clearToasts,
   clickLabel,
   clickText,
