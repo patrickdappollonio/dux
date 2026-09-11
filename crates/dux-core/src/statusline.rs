@@ -25,6 +25,60 @@ pub enum StatusScope {
     Connection(String),
 }
 
+/// Which surfaces withhold a status from the user.
+///
+/// A confirmation is owed wherever the screen cannot vouch for the outcome, and
+/// the two surfaces answer that separately: the web can quiet a message the
+/// terminal still needs, because a browser has affordances a status line has
+/// not. Every quieted status still rides back to its caller as the command's
+/// answer, so the sentence survives for an API client and for the log.
+///
+/// A quieted status that carries a KEY still retires the operation behind it on
+/// both surfaces: the spinner goes away, and only the final sentence is withheld.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QuietSurfaces {
+    /// Withheld from the web's toasts.
+    pub web: bool,
+    /// Withheld from the terminal UI's status line.
+    pub tui: bool,
+}
+
+impl QuietSurfaces {
+    /// Shown on both surfaces. The default, and what every status that does not
+    /// say otherwise is.
+    pub const LOUD: Self = Self {
+        web: false,
+        tui: false,
+    };
+    /// Withheld from the web only.
+    pub const WEB: Self = Self {
+        web: true,
+        tui: false,
+    };
+    /// Withheld from the terminal UI only.
+    pub const TUI: Self = Self {
+        web: false,
+        tui: true,
+    };
+    /// Withheld from both surfaces.
+    pub const BOTH: Self = Self {
+        web: true,
+        tui: true,
+    };
+
+    /// Whether this status is shown everywhere.
+    pub fn is_loud(&self) -> bool {
+        !self.web && !self.tui
+    }
+
+    /// Whether the web shows this status. The wire omits the `quiet` field
+    /// entirely when it does, so the shape a browser reads is what it was
+    /// before the flag grew a second half.
+    pub fn shows_on_web(&self) -> bool {
+        !self.web
+    }
+}
+
 /// Shared timeout for upgrading stale `Busy` entries to `Warning`. Used by
 /// both the TUI tick and the web engine actor so the behaviour is identical on
 /// both surfaces and the value only lives in one place.

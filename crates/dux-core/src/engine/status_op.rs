@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::StatusUpdate;
-use crate::statusline::{StatusScope, StatusTone};
+use crate::statusline::{QuietSurfaces, StatusScope, StatusTone};
 
 /// Process-global source of opaque status ids. Monotonic only so each op gets a
 /// distinct correlation handle; the value carries no meaning and consumers never
@@ -36,6 +36,9 @@ pub enum Final {
         tone: StatusTone,
         text: String,
         sticky: bool,
+        /// Which surfaces withhold this outcome. A quieted keyed final still
+        /// retires its spinner; only the sentence is withheld.
+        quiet_on: QuietSurfaces,
     },
     /// Deliberately dismiss the pending status with NO replacement message.
     /// Reads in review as "no final message needed here, empty is fine".
@@ -48,6 +51,7 @@ impl Final {
             tone: StatusTone::Info,
             text: text.into(),
             sticky: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
     pub fn warning(text: impl Into<String>) -> Self {
@@ -55,6 +59,7 @@ impl Final {
             tone: StatusTone::Warning,
             text: text.into(),
             sticky: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
     pub fn error(text: impl Into<String>) -> Self {
@@ -62,6 +67,7 @@ impl Final {
             tone: StatusTone::Error,
             text: text.into(),
             sticky: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
     pub fn clear() -> Self {
@@ -74,10 +80,32 @@ impl Final {
     /// may have been lost or left half-done.
     pub fn sticky(self) -> Self {
         match self {
-            Final::Message { tone, text, .. } => Final::Message {
+            Final::Message {
+                tone,
+                text,
+                quiet_on,
+                ..
+            } => Final::Message {
                 tone,
                 text,
                 sticky: true,
+                quiet_on,
+            },
+            Final::Clear => Final::Clear,
+        }
+    }
+
+    /// Withhold this outcome from the named surfaces (builder form). A
+    /// [`Final::Clear`] has no message to withhold and is returned unchanged.
+    pub fn quiet_on(self, quiet_on: QuietSurfaces) -> Self {
+        match self {
+            Final::Message {
+                tone, text, sticky, ..
+            } => Final::Message {
+                tone,
+                text,
+                sticky,
+                quiet_on,
             },
             Final::Clear => Final::Clear,
         }
@@ -129,12 +157,18 @@ impl ResolvedFinal {
     pub fn into_reaction(self) -> crate::engine::EventReaction {
         use crate::engine::EventReaction;
         match self.outcome {
-            Final::Message { tone, text, sticky } => EventReaction::Status(StatusUpdate {
+            Final::Message {
+                tone,
+                text,
+                sticky,
+                quiet_on,
+            } => EventReaction::Status(StatusUpdate {
                 tone,
                 message: text,
                 key: Some(self.key),
                 scope: self.scope,
                 sticky,
+                quiet_on,
             }),
             Final::Clear => EventReaction::ClearStatus(self.key),
         }
@@ -381,6 +415,7 @@ mod tests {
                 tone: StatusTone::Info,
                 text: "ok".into(),
                 sticky: false,
+                quiet_on: QuietSurfaces::LOUD,
             }
         );
         assert_eq!(
@@ -389,6 +424,7 @@ mod tests {
                 tone: StatusTone::Error,
                 text: "bad".into(),
                 sticky: false,
+                quiet_on: QuietSurfaces::LOUD,
             }
         );
         assert_eq!(
@@ -397,6 +433,7 @@ mod tests {
                 tone: StatusTone::Warning,
                 text: "hmm".into(),
                 sticky: false,
+                quiet_on: QuietSurfaces::LOUD,
             }
         );
         assert_eq!(Final::clear(), Final::Clear);

@@ -41,7 +41,7 @@ use crate::engine::{
 };
 use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
-use crate::statusline::StatusScope;
+use crate::statusline::{QuietSurfaces, StatusScope};
 use crate::worker::{
     CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction, PullTarget,
 };
@@ -898,34 +898,63 @@ pub struct WireStatus {
     /// [`dux_core::statusline::KeyedWireStatus::sticky`]: crate::statusline::KeyedWireStatus::sticky
     #[serde(default)]
     pub sticky: bool,
-    /// Presentation-only: the status is the command's ANSWER but not a
-    /// notification. It still rides back to the caller in
-    /// [`WireCommandOutcome::status`], so an API client keeps the sentence; the
-    /// web's status emitter drops it instead of broadcasting, so no toast is
-    /// raised. Marking rather than dropping is what keeps the wire answer intact.
+    /// Presentation-only: which surfaces withhold this status. It still rides
+    /// back to the caller in [`WireCommandOutcome::status`], so an API client
+    /// keeps the sentence; a surface that quiets it raises no notification for
+    /// it. Marking rather than dropping is what keeps the wire answer intact.
     ///
-    /// Reserve it for an unkeyed INFO whose outcome the user is already looking
-    /// straight at: a preference the dialog visibly flipped, a pane that just
-    /// appeared, a row that just left the screen. A sentence that names the way
-    /// BACK from something that has just vanished is not one of these, and
-    /// neither is a warning or an error, which stay loud whatever this says.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub quiet: bool,
+    /// The two surfaces decide separately, so this is a per-surface flag rather
+    /// than a boolean, and the web half is the only one that crosses the wire
+    /// (the browser is the only thing that reads a `WireStatus`, so it
+    /// serializes as the `quiet` boolean it has always been). A status minted
+    /// here is web-facing; the terminal half travels on
+    /// [`crate::engine::StatusUpdate`], which both surfaces read.
+    ///
+    /// Reserve it for an INFO whose outcome the user is already looking straight
+    /// at, and say at the site which tenet case the message fails: a pane that
+    /// relaunches and streams, a whole list reordering, a whole screen
+    /// recolouring, a full-screen view opening or closing. A destructive act, a
+    /// change landing on a small indicator, an action that did nothing because
+    /// the state already held, and an action whose effect can look like a no-op
+    /// are always confirmed. A warning or an error stays loud whatever this says.
+    #[serde(
+        default,
+        rename = "quiet",
+        with = "quiet_web_wire",
+        skip_serializing_if = "QuietSurfaces::shows_on_web"
+    )]
+    pub quiet_on: QuietSurfaces,
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
+/// The wire projection of [`QuietSurfaces`]: the web half alone, as the `quiet`
+/// boolean the browser has always read. The terminal half never crosses this
+/// wire, because the TUI renders engine statuses and never a `WireStatus`.
+mod quiet_web_wire {
+    use super::QuietSurfaces;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &QuietSurfaces, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bool(value.web)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<QuietSurfaces, D::Error> {
+        Ok(QuietSurfaces {
+            web: bool::deserialize(d)?,
+            tui: false,
+        })
+    }
 }
 
-/// Mark `status` quiet only on the arms where the outcome is already on screen.
+/// Mark `status` quiet on the WEB only on the arms where the outcome is already
+/// on screen there.
 ///
 /// A preference flip is usually two sentences that are not symmetric: the arm
 /// that puts something on screen needs no toast, while the arm that takes
 /// something away is often the only place the way back is named. Written as one
 /// helper so a flip's two arms are decided together at the site rather than by
-/// remembering to append `.quiet()` to one branch of an `if`.
-fn quiet_when(status: WireStatus, quiet: bool) -> WireStatus {
-    if quiet { status.quiet() } else { status }
+/// remembering to append `.quiet_web()` to one branch of an `if`.
+fn quiet_web_when(status: WireStatus, quiet: bool) -> WireStatus {
+    if quiet { status.quiet_web() } else { status }
 }
 
 impl WireStatus {
@@ -937,7 +966,7 @@ impl WireStatus {
             key: None,
             scope: StatusScope::All,
             sticky: false,
-            quiet: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
 
@@ -953,7 +982,7 @@ impl WireStatus {
             key: Some(key.into()),
             scope: StatusScope::All,
             sticky: false,
-            quiet: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
 
@@ -967,9 +996,10 @@ impl WireStatus {
     }
 
     /// Builder that keeps this status as the command's answer while raising no
-    /// notification for it. See [`WireStatus::quiet`] for when that is right.
-    pub fn quiet(mut self) -> Self {
-        self.quiet = true;
+    /// notification for it on the WEB. See [`WireStatus::quiet_on`] for when
+    /// that is right.
+    pub fn quiet_web(mut self) -> Self {
+        self.quiet_on.web = true;
         self
     }
 
@@ -992,10 +1022,9 @@ impl WireStatus {
             key: update.key.clone(),
             scope: update.scope.clone(),
             sticky: update.sticky,
-            // A `StatusUpdate` is the engine's own status-line traffic, which
-            // both surfaces render. Quieting is decided by the web-facing wire
-            // builders, never inherited from one of these.
-            quiet: false,
+            // Carried rather than reset: an engine status both surfaces render
+            // makes its own per-surface decision, and this is the web half of it.
+            quiet_on: update.quiet_on,
         }
     }
 }
@@ -1096,7 +1125,7 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
         EventReaction::DeleteTerminalView(view) => view
             .label
             .as_ref()
-            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")).quiet()),
+            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")).quiet_web()),
         _ => None,
     }
 }
@@ -1164,7 +1193,7 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         EventReaction::DeleteTerminalView(view) => view
             .label
             .as_ref()
-            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")).quiet())
+            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")).quiet_web())
             .into_iter()
             .collect(),
         EventReaction::OpenConfigReloadFailedModal(message) => {
@@ -1738,7 +1767,7 @@ impl Engine {
             // Quiet only when the pane is (or already was) SHOWN: the pane is
             // right there. Both hidden answers stay loud, because they name the
             // way back to something that has just left the screen.
-            return quiet_when(WireStatus::new("info", message.to_string()), visible);
+            return quiet_web_when(WireStatus::new("info", message.to_string()), visible);
         }
         self.config.ui.show_changes_pane = visible;
         self.config_writer.save_lazy(self.config.clone());
@@ -1747,7 +1776,7 @@ impl Engine {
         } else {
             "Changes pane hidden. Reopen it from the show button in the header, or set it permanently in Preferences."
         };
-        quiet_when(WireStatus::new("info", message.to_string()), visible)
+        quiet_web_when(WireStatus::new("info", message.to_string()), visible)
     }
 
     /// Persist this dux instance's identity, the browser tab title
@@ -1768,8 +1797,10 @@ impl Engine {
         favicon: Option<String>,
     ) -> anyhow::Result<WireStatus> {
         // Empty body: nothing to touch. Skip the disk write and the fan-out.
+        // Quiet on the web: an empty body is a client's own no-op rather than an
+        // act a person took, so no outcome is owed to anyone.
         if title.is_none() && favicon.is_none() {
-            return Ok(WireStatus::new("info", "Nothing to update.").quiet());
+            return Ok(WireStatus::new("info", "Nothing to update.").quiet_web());
         }
         let mut candidate = self.config.clone();
         if let Some(raw) = title {
@@ -1783,7 +1814,8 @@ impl Engine {
         if candidate.server.title == self.config.server.title
             && candidate.server.favicon == self.config.server.favicon
         {
-            return Ok(WireStatus::new("info", "Instance identity unchanged.").quiet());
+            // Quiet on the web: the dialog still shows the values it just sent.
+            return Ok(WireStatus::new("info", "Instance identity unchanged.").quiet_web());
         }
         // Persist eagerly so a disk failure is surfaced before the endpoint
         // replies; only commit to the running config once the write succeeds.
@@ -1793,7 +1825,7 @@ impl Engine {
         self.config.server.title = candidate.server.title;
         self.config.server.favicon = candidate.server.favicon;
         // The tab title and the favicon are what the user is looking at.
-        Ok(WireStatus::new("info", "Instance name and favicon updated.").quiet())
+        Ok(WireStatus::new("info", "Instance name and favicon updated.").quiet_web())
     }
 
     /// Persist an explicit set of `[ui]`/`[capabilities]` settings-modal fields
@@ -1921,7 +1953,7 @@ impl Engine {
                 "Settings updated. Every connected browser picks up the change now; a \
                  running dux TUI applies it after its next config reload or restart.",
             )
-            .quiet(),
+            .quiet_web(),
         ))
     }
 
@@ -1958,7 +1990,7 @@ impl Engine {
             "info",
             format!("PR banner moved to the {next} of the agent pane."),
         )
-        .quiet()
+        .quiet_web()
     }
 
     /// Set `ui.agent_sort` to an explicit, validated mode and persist it. Unknown
@@ -1990,12 +2022,16 @@ impl Engine {
             );
         }
         if self.config.ui.agent_sort == sort {
-            return WireStatus::new("info", format!("Agent sort is already \"{sort}\".")).quiet();
+            // Quiet on the web: the list is already in the order that was asked
+            // for, and the picker shows which one that is.
+            return WireStatus::new("info", format!("Agent sort is already \"{sort}\"."))
+                .quiet_web();
         }
         self.config.ui.agent_sort = sort.to_string();
         self.config_writer.save_lazy(self.config.clone());
-        // The list reorders under the cursor.
-        WireStatus::new("info", format!("Agent list now sorted by \"{sort}\".")).quiet()
+        // Quiet on the web: the whole left pane reorganises under the cursor,
+        // which is big and unmistakable, so no confirmation is owed.
+        WireStatus::new("info", format!("Agent list now sorted by \"{sort}\".")).quiet_web()
     }
 
     /// Save `[server] tailscale` as `mode`, refusing anything outside the
@@ -2033,7 +2069,7 @@ impl Engine {
         // Turning it OFF takes a behavior away with nothing on screen to show
         // for it, and the sentence is where the other three ways to copy are
         // named, so that arm stays loud.
-        quiet_when(WireStatus::new("info", message.to_string()), next)
+        quiet_web_when(WireStatus::new("info", message.to_string()), next)
     }
 
     /// Flip `ui.always_show_tab_strip` and persist it, mirroring the TUI's
@@ -2049,7 +2085,7 @@ impl Engine {
         };
         // Turning it on puts the strip on screen. Turning it off can make the
         // strip vanish, so that arm keeps the sentence that explains why.
-        quiet_when(WireStatus::new("info", message.to_string()), next)
+        quiet_web_when(WireStatus::new("info", message.to_string()), next)
     }
 
     /// Flip `ui.tab_reaches_agent` and persist it, mirroring the TUI's
@@ -2133,12 +2169,13 @@ impl Engine {
             // double-click or a kill racing a natural exit is not an error. The
             // agent is detached iff nothing of it is live now.
             let detached = !self.any_tab_active(&session.id);
+            // Quiet on the web: the row already reads as not running.
             return Ok((
                 WireStatus::new(
                     "info",
                     format!("Agent \"{}\" is not running.", session.display_label()),
                 )
-                .quiet(),
+                .quiet_web(),
                 detached,
             ));
         }
@@ -2193,11 +2230,12 @@ impl Engine {
             self.clear_tab_runtime(tab_id);
         }
         if stopped == 0 {
+            // Quiet on the web: the row already reads as not running.
             return Ok(WireStatus::new(
                 "info",
                 format!("Agent \"{}\" is not running.", session.display_label()),
             )
-            .quiet());
+            .quiet_web());
         }
         self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
         self.mark_session_desired_running(&session.id, false);
@@ -2281,7 +2319,7 @@ impl Engine {
         // A renamed agent's row shows its new name. Clearing the name falls
         // back to a branch or a folder the user did not choose, so those arms
         // stay loud and say which one it landed on.
-        Ok(quiet_when(
+        Ok(quiet_web_when(
             WireStatus::new("info", message),
             new_title.is_some(),
         ))
@@ -2320,6 +2358,7 @@ impl Engine {
         // No-op when the session already uses the chosen provider (mirrors the
         // TUI's `is_current` short-circuit, which knows the display label).
         if provider == current {
+            // Quiet on the web: the picker stays open on the provider it names.
             return Ok(WireStatus::new(
                 "info",
                 format!(
@@ -2328,7 +2367,7 @@ impl Engine {
                     provider.as_str(),
                 ),
             )
-            .quiet());
+            .quiet_web());
         }
 
         let outcome = self.change_agent_provider(session_id, provider.clone())?;
@@ -2394,7 +2433,7 @@ impl Engine {
         // Quiet: the closed pill leaves the strip and the promoted tab is
         // already the one the user lands on, both of which the browser drives
         // off `CloseTabOutcome`. The sentence stays as the command's answer.
-        Ok((WireStatus::new("info", message).quiet(), outcome))
+        Ok((WireStatus::new("info", message).quiet_web(), outcome))
     }
 
     /// Retarget one tab's provider, validating the choice server-side. The
@@ -3796,10 +3835,18 @@ impl Engine {
                 _ => WebFollowupStatuses::default(),
             },
             None => match crate::engine::launch_outcome_final(&outcome) {
-                crate::engine::Final::Message { tone, text, sticky } => WebFollowupStatuses {
+                crate::engine::Final::Message {
+                    tone,
+                    text,
+                    sticky,
+                    quiet_on,
+                } => WebFollowupStatuses {
                     statuses: vec![{
                         let s = WireStatus::new(tone.as_wire(), text);
-                        if sticky { s.sticky() } else { s }
+                        let s = if sticky { s.sticky() } else { s };
+                        // The outcome decided its own per-surface answer; this
+                        // path carries the web half rather than re-deciding it.
+                        WireStatus { quiet_on, ..s }
                     }],
                     clear_keys: Vec::new(),
                 },
@@ -5072,6 +5119,39 @@ mod tests {
         );
     }
 
+    /// The quiet flag is per surface, and the wire carries the WEB half alone
+    /// under the `quiet` name the browser has always read.
+    #[test]
+    fn the_quiet_flag_is_per_surface_and_the_wire_carries_the_web_half() {
+        let tui_only = WireStatus::from_update(
+            &StatusUpdate::info("terminal-quiet").quiet_on(QuietSurfaces::TUI),
+        );
+        assert!(
+            !tui_only.quiet_on.web,
+            "a status quiet on the terminal UI still reaches the web"
+        );
+        assert!(tui_only.quiet_on.tui);
+        let json = serde_json::to_value(&tui_only).expect("serialize");
+        assert_eq!(
+            json.get("quiet"),
+            None,
+            "a status the web shows carries no quiet field at all"
+        );
+
+        let web_only =
+            WireStatus::from_update(&StatusUpdate::info("web-quiet").quiet_on(QuietSurfaces::WEB));
+        assert!(web_only.quiet_on.web);
+        assert!(
+            !web_only.quiet_on.tui,
+            "a status quiet on the web still reaches the status line"
+        );
+        let json = serde_json::to_value(&web_only).expect("serialize");
+        assert_eq!(json.get("quiet").and_then(|v| v.as_bool()), Some(true));
+
+        let round_tripped: WireStatus = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(round_tripped, web_only);
+    }
+
     #[test]
     fn wire_delete_terminal_deserializes() {
         let json = r#"{"command":"delete_terminal","args":{"terminal_id":"term-1"}}"#;
@@ -5095,11 +5175,11 @@ mod tests {
         assert_eq!(s[0].tone, "info");
         assert!(s[0].message.contains("Closed terminal \"Terminal 1\""));
         assert!(
-            s[0].quiet,
+            s[0].quiet_on.web,
             "the row left the sidebar in the same breath, so the answer raises no toast"
         );
         let single = wire_status_from_reaction(&r).expect("the same answer, singly");
-        assert!(single.quiet);
+        assert!(single.quiet_on.web);
     }
 
     #[test]
@@ -5869,7 +5949,7 @@ mod tests {
                 .status
                 .expect("the answer is kept for the caller");
             assert_eq!(status.tone, "info");
-            (status.quiet, status.message)
+            (status.quiet_on.web, status.message)
         };
 
         // Sort: the list reorders under the cursor, and so does the no-op.
@@ -6325,7 +6405,7 @@ mod tests {
             "Closed the first tab, Claude. Codex took its place as the agent's first tab."
         );
         assert!(
-            status.quiet,
+            status.quiet_on.web,
             "the strip and the landed-on tab already say this, so no toast"
         );
     }
@@ -6359,7 +6439,10 @@ mod tests {
         assert!(outcome.promoted.is_none());
         let status = outcome.status.expect("a status");
         assert_eq!(status.message, "Closed the Codex tab.");
-        assert!(status.quiet, "the pill left the strip; nothing more to say");
+        assert!(
+            status.quiet_on.web,
+            "the pill left the strip; nothing more to say"
+        );
     }
 
     #[test]
@@ -6377,7 +6460,7 @@ mod tests {
             .expect("apply kill");
         let status = outcome.status.expect("a status");
         assert!(
-            status.quiet,
+            status.quiet_on.web,
             "the row already says the agent is not running: {}",
             status.message
         );
@@ -9601,7 +9684,7 @@ mod tests {
             status.message
         );
         assert!(
-            status.quiet,
+            status.quiet_on.web,
             "the row shows the name the user just typed, so no toast"
         );
 
@@ -9637,7 +9720,7 @@ mod tests {
             status.message
         );
         assert!(
-            !status.quiet,
+            !status.quiet_on.web,
             "the fallback name is one the user did not choose, so say which it is"
         );
 
@@ -9932,7 +10015,7 @@ mod tests {
         let status = outcome.status.expect("no-op still surfaces a status");
         assert_eq!(status.tone, "info");
         assert!(
-            status.quiet,
+            status.quiet_on.web,
             "the picker the click came from already shows the current provider: {}",
             status.message
         );
@@ -11217,7 +11300,7 @@ mod tests {
             .expect("dispatch ok");
         let status = outcome.status.expect("status kept for a mixed patch");
         assert!(
-            status.quiet,
+            status.quiet_on.web,
             "the Preferences dialog shows every value it just wrote: {}",
             status.message
         );

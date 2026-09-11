@@ -20,7 +20,7 @@ use crate::model::{
     AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
 };
 use crate::startup::StartupCommandLogListing;
-use crate::statusline::{StatusScope, StatusTone};
+use crate::statusline::{QuietSurfaces, StatusScope, StatusTone};
 use crate::storage::StoredPr;
 use crate::worker::{
     AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, BranchWarningKind, BrowserEntry,
@@ -84,6 +84,11 @@ pub struct StatusUpdate {
     /// [`crate::statusline::KeyedWireStatus::sticky`]; the TUI ignores it (a
     /// single status line already waits for the next message).
     pub sticky: bool,
+    /// Which surfaces withhold this message. Defaults to
+    /// [`QuietSurfaces::LOUD`]. See [`QuietSurfaces`] for the rule: a
+    /// confirmation is owed wherever the screen cannot vouch for the outcome,
+    /// and the two surfaces decide separately.
+    pub quiet_on: QuietSurfaces,
 }
 
 impl StatusUpdate {
@@ -94,6 +99,7 @@ impl StatusUpdate {
             key: None,
             scope: StatusScope::All,
             sticky: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
     /// SEALED: a `Busy` status may only be born from a [`StatusOp`] (its
@@ -109,6 +115,7 @@ impl StatusUpdate {
             key: None,
             scope: StatusScope::All,
             sticky: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
     pub fn warning(message: impl Into<String>) -> Self {
@@ -118,6 +125,7 @@ impl StatusUpdate {
             key: None,
             scope: StatusScope::All,
             sticky: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
     pub fn error(message: impl Into<String>) -> Self {
@@ -127,6 +135,7 @@ impl StatusUpdate {
             key: None,
             scope: StatusScope::All,
             sticky: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
 
@@ -141,6 +150,7 @@ impl StatusUpdate {
             key: Some(key.into()),
             scope: StatusScope::All,
             sticky: false,
+            quiet_on: QuietSurfaces::LOUD,
         }
     }
 
@@ -163,6 +173,14 @@ impl StatusUpdate {
     /// engine mint sites to stamp `current_origin` onto a freshly-minted status.
     pub fn with_scope(mut self, scope: StatusScope) -> Self {
         self.scope = scope;
+        self
+    }
+
+    /// Withhold this message from the named surfaces (builder form). The
+    /// surfaces decide separately, so the caller states both halves at once and
+    /// says which tenet case the quieted half fails.
+    pub fn quiet_on(mut self, quiet_on: QuietSurfaces) -> Self {
+        self.quiet_on = quiet_on;
         self
     }
 }

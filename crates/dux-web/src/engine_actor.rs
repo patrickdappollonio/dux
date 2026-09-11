@@ -18,7 +18,7 @@ use dux_core::ids::{TabId, TabIdRef};
 use dux_core::model::TerminalOwner;
 use dux_core::pty::{PtyClient, PtyViewerGuard};
 use dux_core::statusline::{
-    Generation, KeyedStatusController, KeyedWireStatus, StatusScope, StatusTone,
+    Generation, KeyedStatusController, KeyedWireStatus, QuietSurfaces, StatusScope, StatusTone,
 };
 use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::{AgentLaunchKind, AgentLaunchRequest};
@@ -2754,12 +2754,18 @@ impl StatusEmitter {
         &mut self,
         status: WireStatus,
     ) -> Result<usize, broadcast::error::SendError<WireStatus>> {
-        // A quiet status is the command's answer and not a notification: it
-        // already rode back to its caller in the outcome, so it must not enter
-        // the controller (which would replay it to every joining tab) and must
-        // not be broadcast. This is the ONE gate, so a site marking a status
-        // quiet cannot be undone by whichever path it happens to travel.
-        if status.quiet {
+        // A status quiet on the web is the command's answer and not a
+        // notification: it already rode back to its caller in the outcome, so it
+        // must not enter the controller (which would replay it to every joining
+        // tab) and must not be broadcast. This is the ONE gate, so a site
+        // marking a status quiet cannot be undone by whichever path it happens
+        // to travel.
+        if status.quiet_on.web {
+            // A keyed final still has a spinner to take down: withholding the
+            // sentence must not strand the busy it was the answer to.
+            if let Some(key) = status.key.clone() {
+                self.clear(key);
+            }
             return Ok(0);
         }
         let tone = StatusTone::from_wire(&status.tone);
@@ -2829,7 +2835,7 @@ impl StatusEmitter {
                 sticky: up.sticky,
                 // A quiet status never reaches the controller, so nothing it
                 // hands back here can be one.
-                quiet: false,
+                quiet_on: QuietSurfaces::LOUD,
             });
         }
     }
@@ -4532,12 +4538,12 @@ mod tests {
             .expect("a dormant pill is indistinguishable from a never-launched one");
         assert_eq!(dormant.tone, "info");
         assert!(dormant.message.contains("Tab (Claude) exited."));
-        assert!(!dormant.quiet, "there is nothing else to say it");
+        assert!(!dormant.quiet_on.web, "there is nothing else to say it");
 
         let detached = prune_wire_status(&pruned(PrunedPtyKind::Agent, true, false))
             .expect("losing the whole agent stays a warning");
         assert_eq!(detached.tone, "warning");
-        assert!(!detached.quiet);
+        assert!(!detached.quiet_on.web);
     }
 
     /// The quiet flag is honored at the one gate, so a status marked quiet
@@ -4550,7 +4556,8 @@ mod tests {
         let (snapshot_tx, snapshot_rx) = watch::channel(Vec::new());
         let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
 
-        let _ = status.send(WireStatus::new("info", "the pane you are looking at moved").quiet());
+        let _ =
+            status.send(WireStatus::new("info", "the pane you are looking at moved").quiet_web());
         assert!(
             status_rx.try_recv().is_err(),
             "a quiet status raises no toast"
@@ -4567,6 +4574,42 @@ mod tests {
                 .expect("an unmarked status still goes out")
                 .message,
             "loud"
+        );
+    }
+
+    /// The surfaces decide separately: a status the terminal UI withholds is
+    /// still a toast here, and a quieted keyed final still takes its spinner
+    /// down rather than stranding it.
+    #[test]
+    fn the_web_shows_a_status_the_terminal_ui_quiets_and_retires_a_quiet_final() {
+        let (status_tx, mut status_rx) = broadcast::channel(8);
+        let (clear_tx, mut clear_rx) = broadcast::channel(8);
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+
+        let mut tui_quiet = WireStatus::new("info", "the status line withholds this");
+        tui_quiet.quiet_on = QuietSurfaces::TUI;
+        let _ = status.send(tui_quiet);
+        assert_eq!(
+            status_rx
+                .try_recv()
+                .expect("quieting the terminal UI must not quiet the web")
+                .message,
+            "the status line withholds this"
+        );
+
+        let _ = status.send(WireStatus::keyed("launch:a", "busy", "Launching..."));
+        let _ = status_rx.try_recv();
+        let mut done = WireStatus::keyed("launch:a", "info", "launched");
+        done.quiet_on = QuietSurfaces::BOTH;
+        let _ = status.send(done);
+        assert!(
+            status_rx.try_recv().is_err(),
+            "the quieted final raises no toast"
+        );
+        assert_eq!(
+            clear_rx.try_recv().expect("the spinner is taken down"),
+            Some("launch:a".to_string())
         );
     }
 

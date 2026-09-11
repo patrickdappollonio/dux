@@ -450,8 +450,21 @@ impl App {
             // exists so a surface that DOES need to react cannot forget to.
             EventReaction::GhAvailabilityChanged { .. } => {}
             EventReaction::Status(StatusUpdate {
-                tone, message, key, ..
+                tone,
+                message,
+                key,
+                quiet_on,
+                ..
             }) => {
+                if quiet_on.tui {
+                    // Withheld from the line, but a keyed final still has a
+                    // spinner to take down: the sentence goes, the busy must not
+                    // be stranded behind it.
+                    if let Some(key) = key {
+                        self.status.clear(&key, None);
+                    }
+                    return;
+                }
                 // When a `StatusUpdate` carries a key (keyed operation), write it
                 // into the named slot so `most_recent_tui` can pick it up.
                 // Unkeyed updates (`key == None`) write the anonymous slot.
@@ -2107,6 +2120,62 @@ mod tests {
         let (tone, message) = app.status.most_recent_tui().expect("a status");
         assert_eq!(tone, StatusTone::Warning);
         assert_eq!(message, "last");
+    }
+
+    /// A status quiet on the terminal UI never reaches the line, while one
+    /// quiet on the web alone still does: the two surfaces decide separately.
+    #[test]
+    fn the_status_line_honours_the_terminal_half_of_the_quiet_flag() {
+        use dux_core::statusline::QuietSurfaces;
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+
+        app.apply_reaction(EventReaction::Status(
+            StatusUpdate::info("withheld here").quiet_on(QuietSurfaces::TUI),
+        ));
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "a status quiet on the terminal UI must not take the line"
+        );
+
+        app.apply_reaction(EventReaction::Status(
+            StatusUpdate::info("the web quiets this one").quiet_on(QuietSurfaces::WEB),
+        ));
+        let (_, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(
+            message, "the web quiets this one",
+            "quieting the web must not quiet the terminal UI"
+        );
+    }
+
+    /// Withholding the sentence must not strand the spinner it was the answer
+    /// to: a quieted KEYED final still retires its busy.
+    #[test]
+    fn a_quiet_keyed_final_still_retires_its_busy() {
+        use crate::statusline::StatusTone;
+        use dux_core::statusline::QuietSurfaces;
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.status.set(
+            std::time::Instant::now(),
+            Some("launch:/a".to_string()),
+            StatusTone::Busy,
+            "Launching...",
+        );
+
+        app.apply_reaction(EventReaction::Status(
+            StatusUpdate::keyed("launch:/a", StatusTone::Info, "launched")
+                .quiet_on(QuietSurfaces::BOTH),
+        ));
+
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .all(|s| s.key.as_deref() != Some("launch:/a")),
+            "a quiet keyed final must take its spinner down"
+        );
+        assert!(app.status.most_recent_tui().is_none());
     }
 
     #[test]
