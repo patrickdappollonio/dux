@@ -54,7 +54,14 @@ BASE_IMAGE="${BASE_IMAGE:-archlinux:latest}"
 
 # The screenshot tool's two switches, resolved here so both docker paths below
 # carry them: the `sg` path builds its own environment and would otherwise drop
-# whatever the caller exported. Off unless reshoot.sh set them.
+# whatever the caller exported. Off unless reshoot.sh set them, or unless a
+# container is already running with them on (see `carry_modes_forward`).
+#
+# Whether the CALLER asked is recorded before defaulting, because "unset" and
+# "set to the default" mean different things here: unset means "whatever this
+# stack already is", and 0 means "make it an ordinary preview".
+CALLER_SCREENS="${DUX_SCREENS:-}"
+CALLER_NO_TAILSCALE="${DUX_NO_TAILSCALE:-}"
 DUX_SCREENS="${DUX_SCREENS:-0}"
 DUX_NO_TAILSCALE="${DUX_NO_TAILSCALE:-1}"
 
@@ -87,13 +94,70 @@ if docker info > /dev/null 2>&1; then
       docker compose "$@"
     )
   }
+  docker_raw() { docker "$@"; }
 else
   run_docker() {
     local quoted
     quoted=$(printf '%q ' "$@")
     sg docker -c "cd $(printf '%q' "$HERE") && export DUX_BIN=$(printf '%q' "$DUX_BIN") DUX_PORT=$(printf '%q' "$DUX_PORT") DUX_TUI_PORT=$(printf '%q' "$DUX_TUI_PORT") BASE_IMAGE=$(printf '%q' "$BASE_IMAGE") DUX_SCREENS=$(printf '%q' "$DUX_SCREENS") DUX_NO_TAILSCALE=$(printf '%q' "$DUX_NO_TAILSCALE") && docker compose $quoted"
   }
+  docker_raw() {
+    local quoted
+    quoted=$(printf '%q ' "$@")
+    sg docker -c "docker $quoted"
+  }
 fi
+
+# What the container that is running right now was brought up with, or empty.
+running_mode() {
+  docker_raw inspect -f '{{range .Config.Env}}{{println .}}{{end}}' dux-preview 2> /dev/null \
+    | sed -n "s/^$1=//p" | head -1
+}
+
+# Bringing the stack up recreates the container from THIS shell's environment,
+# so without this a plain `./up.sh --restart` of a screenshot container silently
+# turns it into an ordinary preview: the stand-in gh, the transcript provider
+# and the opencode alias are gone and `--no-tailscale` is back. The scenes are
+# then shot against a workspace the seed never built (a provider tab that cannot
+# launch the real login-walled CLI, no pull request), which is a picture of the
+# wrong thing rather than a failure anybody sees. So what the stack already is
+# carries forward, and only an explicit value changes it.
+carry_modes_forward() {
+  local inherited
+  if [ -z "$CALLER_SCREENS" ]; then
+    inherited="$(running_mode DUX_SCREENS)"
+    if [ -n "$inherited" ] && [ "$inherited" != "$DUX_SCREENS" ]; then
+      DUX_SCREENS="$inherited"
+      echo ">> carrying DUX_SCREENS=$inherited forward from the running container"
+      echo "   (pass DUX_SCREENS=0 to make this an ordinary preview again)"
+    fi
+  fi
+  if [ -z "$CALLER_NO_TAILSCALE" ]; then
+    inherited="$(running_mode DUX_NO_TAILSCALE)"
+    if [ -n "$inherited" ] && [ "$inherited" != "$DUX_NO_TAILSCALE" ]; then
+      DUX_NO_TAILSCALE="$inherited"
+      echo ">> carrying DUX_NO_TAILSCALE=$inherited forward from the running container"
+    fi
+  fi
+}
+
+# Answering, not merely started: a container that is up is a dux still opening
+# its database and sweeping its agents, and a seed or a page load aimed at it in
+# that window is a race nobody can see afterwards.
+wait_until_answering() {
+  local seconds=0
+  while [ "$seconds" -lt 120 ]; do
+    if curl -fsS --max-time 3 "http://127.0.0.1:$DUX_PORT/api/v1/workspace" > /dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+    seconds=$((seconds + 2))
+  done
+  echo "error: dux never answered on port $DUX_PORT; try: docker compose logs dux" >&2
+  exit 1
+}
+
+carry_modes_forward
 
 if [ "${1:-}" = "--restart" ]; then
   # force-recreate re-resolves the bind-mount source, so the container picks
@@ -104,6 +168,8 @@ else
   echo ">> building image + starting container"
   run_docker up -d --build
 fi
+
+wait_until_answering
 
 echo ">> dux preview at http://127.0.0.1:$DUX_PORT (TUI-journey port $DUX_TUI_PORT)"
 echo ">> logs:  docker compose logs -f dux   (from $HERE)"

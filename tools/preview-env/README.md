@@ -73,6 +73,20 @@ other stack.
 ```
 
 A rebuilt binary is a new inode, so the container is recreated to pick it up.
+Bringing it up waits until dux actually answers, rather than until the container
+has started: a container that is up is a dux still opening its database and
+sweeping its agents, and a seed or a page load aimed at that window is a race
+nobody can see afterwards.
+
+Recreating it from a shell that says nothing about the screenshot switches would
+turn a screenshot container back into an ordinary preview (no stand-in `gh`, no
+transcript provider, no `opencode` alias, and `--no-tailscale` back on), so what
+the running container was brought up with carries forward and only an explicit
+`DUX_SCREENS=` or `DUX_NO_TAILSCALE=` changes it. What does NOT survive a
+restart is the agents: dux brings tabs back dormant by design, so the workspace
+the scenes are written against is gone until something relights it. `reshoot.sh`
+seeds before it shoots, which does exactly that; a scene driven by hand against
+a just-restarted stack is shot against dormant agents, and its guards say so.
 
 ## Screenshots (host side)
 
@@ -177,7 +191,10 @@ neighbours.
 copy it to a throwaway `*.tmp.js` file and use the supplied `createAgent`,
 `createStandaloneAgent`, `palette`, `seedLooseWorktree`, `sendKeys`, `sendText`,
 `setFixture`, `captureText`, `sleep`, and `waitFor` helpers, plus the optional
-`config` export for a setting no dialog can reach. Throwaway scripts are ignored
+`config` export for a setting no dialog can reach and the optional `expectText`
+export, which refuses the capture unless those strings are on the screen it
+captured (a throwaway may leave it off and is told on stderr that nothing
+checked what it captured). Throwaway scripts are ignored
 by Git, matching the web screenshot workflow; the journeys behind the docs
 screenshots are not throwaways and live under `screens/scenes`.
 
@@ -227,6 +244,31 @@ and wedge whatever dux was doing.
 
 A website test asserts the loop stays closed: every PNG has a scene, every scene
 has a PNG, and every PNG is shown by a docs page.
+
+### Every scene says what its picture must show
+
+A journey that drove itself into the wrong state still produces a perfectly
+valid PNG, and the tool used to report success for one: a pane stuck on
+"Attaching…", a sidebar that came back blank and a menu that had closed itself
+under a take-over card all shipped in one run. So a scene states its own
+caption's promise immediately before the shutter:
+
+- A browser scene calls the guards in `screens/lib.js` (`expectNoCover`,
+  `expectPanePainted`, `expectRows`, `expectStateWord`, `expectMenuOpen`,
+  `expectDialogOpen`, `expectBanner`, `expectVisible`, `expectVisibleText`,
+  `expectFieldValue`). Each returns nothing when the page holds up and throws
+  one sentence naming the scene and what was missing when it does not.
+  `expectPanePainted` is a measurement rather than a look at the socket: it
+  screenshots the terminal and reads what fraction of its pixels differ from its
+  own background.
+- A terminal UI scene declares `expectText`, the strings that must appear in the
+  captured cells. The driver refuses the capture when one is missing and prints
+  the grid it got instead.
+
+A refused scene writes no PNG, so the committed picture is left exactly as it
+was; `reshoot.sh` says "refused" against it in the table and exits non-zero. The
+website's loop test refuses a browser scene with no guard call and a terminal UI
+scene with no `expectText`, so a new scene cannot ship unguarded.
 
 A few things in these captures are the clock's or a random generator's and move
 on every reshoot: the pet name in `tui-name-new-agent.png`, the run timestamp in
