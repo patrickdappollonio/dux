@@ -5152,6 +5152,22 @@ mod tests {
 
         let round_tripped: WireStatus = serde_json::from_value(json).expect("deserialize");
         assert_eq!(round_tripped, web_only);
+
+        // Reading the wire back: the boolean is the web half alone, and an
+        // absent key is a status both surfaces show.
+        let parsed: WireStatus =
+            serde_json::from_str(r#"{"tone":"info","message":"hi","quiet":true}"#)
+                .expect("deserialize an explicit quiet");
+        assert_eq!(parsed.quiet_on, QuietSurfaces::WEB);
+
+        let parsed: WireStatus = serde_json::from_str(r#"{"tone":"info","message":"hi"}"#)
+            .expect("deserialize with no quiet key");
+        assert_eq!(parsed.quiet_on, QuietSurfaces::LOUD);
+
+        let parsed: WireStatus =
+            serde_json::from_str(r#"{"tone":"info","message":"hi","quiet":false}"#)
+                .expect("deserialize an explicit false");
+        assert_eq!(parsed.quiet_on, QuietSurfaces::LOUD);
     }
 
     #[test]
