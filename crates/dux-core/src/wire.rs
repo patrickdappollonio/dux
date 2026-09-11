@@ -1989,12 +1989,12 @@ impl Engine {
         };
         self.config.ui.pr_banner_position = next.to_string();
         self.config_writer.save_lazy(self.config.clone());
-        // The banner visibly moves.
+        // Loud: one band of chrome is a small indicator, and on an agent with
+        // no pull request attached nothing moves at all.
         WireStatus::new(
             "info",
             format!("PR banner moved to the {next} of the agent pane."),
         )
-        .quiet_web()
     }
 
     /// Set `ui.agent_sort` to an explicit, validated mode and persist it. Unknown
@@ -2319,13 +2319,10 @@ impl Engine {
                 }
             }
         };
-        // A renamed agent's row shows its new name. Clearing the name falls
-        // back to a branch or a folder the user did not choose, so those arms
-        // stay loud and say which one it landed on.
-        Ok(quiet_web_when(
-            WireStatus::new("info", message),
-            new_title.is_some(),
-        ))
+        // Loud on both arms: a rename lands on one row's label in a long list,
+        // which can sit outside the visible scroll area, and a clear lands on a
+        // fallback the user did not choose and that only this sentence names.
+        Ok(WireStatus::new("info", message))
     }
 
     /// Swap which provider a session uses, mirroring the TUI's
@@ -6115,6 +6112,29 @@ mod tests {
         );
     }
 
+    /// One band of chrome is a small indicator, and on an agent with no pull
+    /// request attached nothing moves at all, so the move is confirmed.
+    #[test]
+    fn moving_the_pr_banner_reaches_the_browser() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.ui.pr_banner_position = "top".to_string();
+
+        let status = engine
+            .apply_wire(WireCommand::TogglePrBannerPosition {})
+            .expect("apply toggle")
+            .status
+            .expect("a status");
+
+        assert_eq!(
+            status.message,
+            "PR banner moved to the bottom of the agent pane."
+        );
+        assert!(
+            !status.quiet_on.web,
+            "with no pull request attached, nothing moves and only this says so"
+        );
+    }
+
     #[test]
     fn apply_wire_toggle_pr_banner_position_swaps_top_and_bottom() {
         let (mut engine, _tmp) = test_engine();
@@ -9775,8 +9795,8 @@ mod tests {
             status.message
         );
         assert!(
-            status.quiet_on.web,
-            "the row shows the name the user just typed, so no toast"
+            !status.quiet_on.web,
+            "a rename lands on one row's label, which can be off screen entirely"
         );
 
         // Persisted: a fresh load from the same SQLite file sees the new title.
