@@ -3863,12 +3863,20 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
         // Use the SAME completion message the TUI shows on reconnect-ready rather
         // than a static "attaching…" placeholder (which left the status line stuck).
         let status_message = engine.agent_reconnect_status_message(&session, resume);
-        let request = engine.build_agent_launch_request(
-            session,
-            resume,
-            (24, 80),
-            AgentLaunchKind::Reconnect { status_message },
-        );
+        // A resumed pane clears, relaunches and streams the CLI's own banner, so
+        // nothing is owed. A fresh one comes up empty and the sentence says why.
+        let request = engine
+            .build_agent_launch_request(
+                session,
+                resume,
+                (24, 80),
+                AgentLaunchKind::Reconnect { status_message },
+            )
+            .quiet_status_on(if resume {
+                QuietSurfaces::BOTH
+            } else {
+                QuietSurfaces::LOUD
+            });
         return dispatch_launch(engine, request);
     }
     // Extra tab: resolve the owning session + the tab's own provider and launch.

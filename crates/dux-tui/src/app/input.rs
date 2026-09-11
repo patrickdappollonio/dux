@@ -9791,7 +9791,7 @@ impl App {
             return false;
         }
         if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse) {
-            self.close_help_overlay(false);
+            self.close_help_overlay();
             return true;
         }
 
@@ -14651,6 +14651,23 @@ not_a_real_action = ["x"]
         app.engine.config.ui.agent_sort = "manual".to_string();
         app.cycle_agent_sort();
         assert_eq!(app.engine.config.ui.agent_sort, "active");
+    }
+
+    /// The whole list reorders under the cursor, which is the big and
+    /// unmistakable change a confirmation is not owed for.
+    #[test]
+    fn cycling_the_agent_sort_announces_nothing() {
+        let mut app = test_app(default_bindings());
+        let before = app.status.most_recent_tui().map(|(_, text)| text);
+
+        app.cycle_agent_sort();
+
+        assert_eq!(app.engine.config.ui.agent_sort, "updated");
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            before,
+            "the sort change announced itself"
+        );
     }
 
     #[test]
@@ -26922,6 +26939,52 @@ cyan = "#00ffff"
         assert_eq!(
             app.selected_startup_command_log_path(),
             Some(PathBuf::from("/tmp/viewer.log"))
+        );
+    }
+
+    /// A full view opening and listing its own runs is the big and unmistakable
+    /// change, so the success says nothing and its spinner still goes.
+    #[test]
+    fn opening_the_startup_command_logs_announces_nothing() {
+        let mut app = test_app(default_bindings());
+        let _ = seed_two_startup_runs(&app);
+        app.open_startup_command_logs().expect("open logs");
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::StartupCommandLogs(_))
+        });
+
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "the open announced itself, or left its spinner up"
+        );
+    }
+
+    /// A full view leaving the screen is the big and unmistakable change, so
+    /// closing the viewer outright says nothing.
+    #[test]
+    fn closing_the_startup_command_log_viewer_announces_nothing() {
+        let mut app = test_app(default_bindings());
+        let before = app.status.most_recent_tui().map(|(_, text)| text);
+        app.startup_log_viewer = Some(StartupLogViewer {
+            scope_label: "project \"demo\"".to_string(),
+            path: Some(PathBuf::from("/tmp/viewer.log")),
+            display_name: "viewer.log".to_string(),
+            content: String::new(),
+            scroll_offset: 0,
+            wrap_width: 0,
+            search: TextInput::new(),
+            searching: false,
+            return_to: None,
+        });
+        app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+
+        assert!(app.close_top_overlay());
+
+        assert!(app.startup_log_viewer.is_none());
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            before,
+            "closing the viewer announced itself"
         );
     }
 

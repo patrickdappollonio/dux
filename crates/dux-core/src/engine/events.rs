@@ -413,6 +413,9 @@ pub struct AgentLaunchReadyOutcome {
     /// completion fullscreen when `true` and focused-but-minimized otherwise.
     /// The web never reads it.
     pub wants_fullscreen: bool,
+    /// Copied from `AgentLaunchRequest::status_quiet`: which surfaces withhold
+    /// this launch's completion message. Each surface honours its own half.
+    pub status_quiet: QuietSurfaces,
     pub view: AgentLaunchReadyView,
 }
 
@@ -995,6 +998,7 @@ impl Engine {
         // the resume-fallback candidate so an extra tab tracks under its own key.
         let tab_id = request.tab_id.clone();
         let wants_fullscreen = request.wants_fullscreen;
+        let status_quiet = request.status_quiet;
         self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.clone()));
 
         if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
@@ -1021,6 +1025,7 @@ impl Engine {
                         pty_size,
                         detached_session_id: None,
                         wants_fullscreen,
+                        status_quiet,
                         view: AgentLaunchReadyView::CreatePersistFailed {
                             error: err.to_string(),
                         },
@@ -1083,6 +1088,7 @@ impl Engine {
                 },
                 None => CreateLaunchOutcome::Committed {
                     status_message: status_message.clone(),
+                    quiet_on: status_quiet,
                 },
             };
             let create_final = self.resolve_create_op(&status_op_id, create_outcome);
@@ -1094,6 +1100,7 @@ impl Engine {
                     pty_size,
                     detached_session_id: detached.map(|d| d.id),
                     wants_fullscreen,
+                    status_quiet,
                     view: AgentLaunchReadyView::CreateCommitted {
                         status_message,
                         startup_result_error,
@@ -1116,6 +1123,7 @@ impl Engine {
                     pty_size,
                     detached_session_id: None,
                     wants_fullscreen,
+                    status_quiet,
                     view: AgentLaunchReadyView::SessionMissing,
                 },
                 None,
@@ -1143,6 +1151,7 @@ impl Engine {
                     pty_size,
                     detached_session_id: None,
                     wants_fullscreen,
+                    status_quiet,
                     view: AgentLaunchReadyView::SessionMissing,
                 },
                 None,
@@ -1222,6 +1231,7 @@ impl Engine {
                 pty_size,
                 detached_session_id: detached.map(|d| d.id),
                 wants_fullscreen,
+                status_quiet,
                 view,
             },
             None,
@@ -6219,6 +6229,7 @@ mod tests {
                 scrollback_lines: 1000,
                 kind,
                 wants_fullscreen: false,
+                status_quiet: QuietSurfaces::LOUD,
             },
             message: message.to_string(),
         }
@@ -6309,6 +6320,7 @@ mod tests {
                     status_message: String::new(),
                 },
                 wants_fullscreen: false,
+                status_quiet: QuietSurfaces::LOUD,
             },
             client: latecomer,
         };
@@ -6504,6 +6516,7 @@ mod tests {
                     status_message: String::new(),
                 },
                 wants_fullscreen: false,
+                status_quiet: QuietSurfaces::LOUD,
             },
             message: message.to_string(),
         }
@@ -7348,6 +7361,7 @@ mod tests {
                 status_message: String::new(),
             },
             wants_fullscreen: false,
+            status_quiet: QuietSurfaces::LOUD,
         };
         let reaction = engine
             .apply(crate::engine::Command::DispatchAgentLaunch {

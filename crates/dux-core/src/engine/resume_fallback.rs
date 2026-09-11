@@ -145,6 +145,9 @@ impl Engine {
             // Landing is minimized by default; a fullscreen-seeking gesture
             // flips this on the returned request.
             wants_fullscreen: false,
+            // Loud by default: a caller that quiets its completion says so on
+            // the returned request.
+            status_quiet: crate::statusline::QuietSurfaces::LOUD,
         }
     }
 
@@ -185,17 +188,26 @@ impl Engine {
                 provider.as_str()
             )
         };
-        Some(self.build_tab_launch_request(
-            tab_id.to_owned(),
-            Some(provider),
-            session,
-            resume,
-            pty_size,
-            AgentLaunchKind::Tab {
-                is_fresh: false,
-                status_message,
-            },
-        ))
+        // A resumed tab relaunches and paints the prior conversation, so nothing
+        // is owed. A fresh one comes up empty and the sentence says why.
+        Some(
+            self.build_tab_launch_request(
+                tab_id.to_owned(),
+                Some(provider),
+                session,
+                resume,
+                pty_size,
+                AgentLaunchKind::Tab {
+                    is_fresh: false,
+                    status_message,
+                },
+            )
+            .quiet_status_on(if resume {
+                crate::statusline::QuietSurfaces::BOTH
+            } else {
+                crate::statusline::QuietSurfaces::LOUD
+            }),
+        )
     }
 
     /// Attempt a resume-fallback retry for `session_id`. Synchronous: every
@@ -424,6 +436,51 @@ mod tests {
             }
             other => panic!("expected a Tab launch, got {other:?}"),
         }
+        // An empty transcript looks like a failure, so the fresh line is owed.
+        assert_eq!(request.status_quiet, crate::statusline::QuietSurfaces::LOUD);
+    }
+
+    /// A tab that resumes paints its prior conversation, which is the big and
+    /// unmistakable change, so "Resumed the ... conversation" goes unsaid.
+    #[test]
+    fn a_resuming_dormant_tab_relaunch_is_quiet_on_both_surfaces() {
+        use crate::engine::test_support::sample_tab;
+        use crate::worker::AgentLaunchKind;
+
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.started_providers = vec!["codex".into()];
+        engine.sessions.push(session);
+        engine
+            .agent_tabs
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
+        // Make codex resume-capable in this config; the default test provider
+        // has no resume flag, so the fresh half of the rule would answer instead.
+        engine
+            .config
+            .providers
+            .commands
+            .get_mut("codex")
+            .expect("a codex provider block")
+            .resume_args = Some(vec!["--continue".to_string()]);
+
+        let request = engine
+            .dormant_tab_launch_request("tab-2", (24, 80))
+            .expect("a dormant extra tab yields a launch request");
+        assert!(
+            request.resume,
+            "no live sibling owns the codex conversation"
+        );
+        match &request.kind {
+            AgentLaunchKind::Tab { status_message, .. } => {
+                assert_eq!(
+                    status_message,
+                    "Resumed the codex conversation in this tab."
+                );
+            }
+            other => panic!("expected a Tab launch, got {other:?}"),
+        }
+        assert_eq!(request.status_quiet, crate::statusline::QuietSurfaces::BOTH);
     }
 
     #[test]

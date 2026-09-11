@@ -3711,10 +3711,11 @@ impl Engine {
                         // the failure path) rather than an unkeyed one; otherwise an
                         // unrelated unkeyed toast could clobber this confirmation.
                         WebFollowupStatuses {
-                            statuses: vec![
-                                WireStatus::new("info", status_message.clone())
-                                    .with_key(format!("tab-launch-{}", outcome.tab_id)),
-                            ],
+                            statuses: vec![WireStatus {
+                                quiet_on: outcome.status_quiet,
+                                ..WireStatus::new("info", status_message.clone())
+                                    .with_key(format!("tab-launch-{}", outcome.tab_id))
+                            }],
                             clear_keys: Vec::new(),
                         }
                     } else {
@@ -3725,6 +3726,7 @@ impl Engine {
                             &outcome.session.id,
                             crate::engine::LaunchOutcome::Ready {
                                 status_message: status_message.clone(),
+                                quiet_on: outcome.status_quiet,
                             },
                         )
                     }
@@ -8473,6 +8475,7 @@ mod tests {
             pty_size: (24, 80),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::CreateCommitted {
                 status_message: "Launched agent \"feat\".".to_string(),
                 startup_result_error: None,
@@ -8489,6 +8492,7 @@ mod tests {
             pty_size: (24, 80),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::CreatePersistFailed {
                 error: "db error".to_string(),
             },
@@ -9286,6 +9290,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::Reconnect {
                 status_message: "Reconnected.".into(),
             },
@@ -9323,6 +9328,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::SessionMissing,
         }));
         let followup = engine.drive_web_launch_followup(&reaction);
@@ -12190,6 +12196,7 @@ mod tests {
                 pty_size: (24, 80),
                 detached_session_id: None,
                 wants_fullscreen: false,
+                status_quiet: QuietSurfaces::LOUD,
                 view,
             };
             assert!(

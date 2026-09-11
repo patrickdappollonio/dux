@@ -295,6 +295,20 @@ pub struct AgentLaunchRequest {
     /// TUI flips it before dispatch; the web has no fullscreen concept and never
     /// reads it.
     pub wants_fullscreen: bool,
+    /// Which surfaces withhold this launch's completion message. A launch that
+    /// relaunches a pane and streams into it confirms nothing; one that lands on
+    /// an empty transcript still has to say why it is empty.
+    pub status_quiet: crate::statusline::QuietSurfaces,
+}
+
+impl AgentLaunchRequest {
+    /// Withhold this launch's completion message from the named surfaces
+    /// (builder form). Every builder constructs a launch loud, so a site that
+    /// quiets one says which tenet case it fails.
+    pub fn quiet_status_on(mut self, quiet_on: crate::statusline::QuietSurfaces) -> Self {
+        self.status_quiet = quiet_on;
+        self
+    }
 }
 
 pub struct AgentLaunchReadyData {

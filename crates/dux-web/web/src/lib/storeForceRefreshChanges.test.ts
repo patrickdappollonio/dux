@@ -155,12 +155,9 @@ describe("forceRefreshChanges", () => {
     })
   })
 
-  // On the common case (nothing changed) the pane flickers and comes back
-  // identical, which is the wrong amount of evidence for an action whose entire
-  // purpose is proving dux looked again. Push and pull report themselves through
-  // the engine's status stream; this route emits no status, so the browser says
-  // it, with the same counts the terminal UI's command reports.
-  it("reports the counts it just read", async () => {
+  // The whole list re-renders with its own counts, which is the big and
+  // unmistakable change a confirmation is not owed for.
+  it("raises no toast: the list re-renders with its own counts", async () => {
     const mod = await loadStore()
     mod.selectSession("s1")
     await vi.waitFor(() => {
@@ -187,12 +184,9 @@ describe("forceRefreshChanges", () => {
 
     await mod.forceRefreshChanges()
 
-    await vi.waitFor(() => {
-      expect(toastSuccess).toHaveBeenCalledTimes(1)
-    })
-    expect(String(toastSuccess.mock.calls[0][0])).toContain(
-      "1 staged, 2 unstaged"
-    )
+    expect(toastSuccess).not.toHaveBeenCalled()
+    const slice = mod.getSnapshot().changes
+    expect(slice.phase).toBe("loaded")
   })
 
   it("says nothing when the forcing POST failed", async () => {

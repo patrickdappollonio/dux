@@ -3377,18 +3377,6 @@ impl AgentSortMode {
         }
     }
 
-    /// A human-readable label for status lines.
-    pub(crate) fn label(&self) -> &'static str {
-        match self {
-            AgentSortMode::Active => "Active first",
-            AgentSortMode::Updated => "Recently updated",
-            AgentSortMode::Created => "Recently created",
-            AgentSortMode::NameAsc => "Name (A to Z)",
-            AgentSortMode::NameDesc => "Name (Z to A)",
-            AgentSortMode::Manual => "Manual order",
-        }
-    }
-
     /// The next mode in the TUI cycle. If the current mode is not in the cycle
     /// (i.e. `Manual`, which the TUI never offers), start the cycle at `Active`.
     pub(crate) fn next_in_tui_cycle(&self) -> AgentSortMode {
@@ -4244,17 +4232,14 @@ impl App {
     /// Dropping `help_scroll` is what closes it, and that also discards the
     /// scroll offset: help always reopens at the top, by either route.
     ///
-    /// `announce` says how to reopen. A click passes `false`, matching the
-    /// engine's no-status rule for every other outside-click dismissal.
-    pub(crate) fn close_help_overlay(&mut self, announce: bool) -> bool {
+    /// It says nothing on the status line, by either route: a full-screen
+    /// overlay leaving is the big and unmistakable change a confirmation is not
+    /// owed for.
+    pub(crate) fn close_help_overlay(&mut self) -> bool {
         if self.help_scroll.is_none() {
             return false;
         }
         self.help_scroll = None;
-        if announce {
-            let key = self.bindings.label_for(Action::ToggleHelp);
-            self.set_info(format!("Closed help overlay. Press {key} to reopen."));
-        }
         true
     }
 
@@ -4309,9 +4294,10 @@ impl App {
             if let Some(prompt) = returned {
                 self.prompt = PromptState::StartupCommandLogs(*prompt);
                 self.set_info("Closed the startup command log. Back in the run list.");
-            } else {
-                self.set_info("Closed startup command log.");
             }
+            // The outright close says nothing: a full view leaving the screen is
+            // the big and unmistakable change. Returning to the run list still
+            // does, because that lands somewhere the viewer did not come from.
             return true;
         }
         // The NON-interactive agent fullscreen (e.g. the dormant-tab relaunch
@@ -4355,18 +4341,20 @@ impl App {
             return true;
         }
         if !matches!(self.prompt, PromptState::None) {
+            // No confirmation: a dialog leaving the screen is the big and
+            // unmistakable change the tenet exempts.
             self.prompt = PromptState::None;
-            self.set_info("Dismissed dialog. Resume your work in the current pane.");
             return true;
         }
-        if self.close_help_overlay(true) {
+        if self.close_help_overlay() {
             return true;
         }
         if matches!(self.center_mode, CenterMode::Diff { .. }) {
+            // No confirmation: the whole centre pane changes back to the
+            // agent's output.
             self.center_mode = CenterMode::Agent;
             self.focus = FocusPane::Files;
             self.abandon_pending_diff();
-            self.set_info("Closed diff view, returned to agent output.");
             return true;
         }
         false
@@ -5569,11 +5557,9 @@ impl App {
         let current = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         let next = current.next_in_tui_cycle();
         self.engine.set_agent_sort(next.as_config_str());
+        // No confirmation: the whole list reorders under the cursor, which is
+        // the big and unmistakable change the tenet exempts.
         self.rebuild_left_items();
-        self.set_info(format!(
-            "Sorting agents by {}.",
-            next.label().to_lowercase()
-        ));
     }
 
     /// Toggle the flat list's "Inactive" tail open/closed. Bound to the same key

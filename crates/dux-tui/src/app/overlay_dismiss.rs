@@ -1440,11 +1440,10 @@ mod tests {
         assert_eq!(by_key, by_click);
     }
 
+    /// A full-screen overlay leaving the screen is the big and unmistakable
+    /// change a confirmation is not owed for, so neither route narrates it.
     #[test]
-    fn closing_help_by_click_stays_silent_like_every_other_outside_click() {
-        // Deliberate divergence from the keyboard ladder, which narrates the
-        // dismissal: a click is self-evident, and the 26 modals that dismiss
-        // through this engine already announce nothing.
+    fn closing_help_announces_nothing_by_either_route() {
         let mut app = test_app(default_bindings());
         open_help(&mut app);
         render(&mut app);
@@ -1455,13 +1454,48 @@ mod tests {
         assert_eq!(app.help_scroll, None);
         assert_eq!(status_text(&app), before, "the dismissal announced itself");
 
-        // The keyboard route still says how to get back.
         let mut app = test_app(default_bindings());
+        let before = status_text(&app);
         open_help(&mut app);
         esc(&mut app);
-        assert!(
-            status_text(&app).is_some_and(|text| text.contains("help")),
-            "the keyboard ladder must keep its message"
+        assert_eq!(app.help_scroll, None);
+        assert_eq!(
+            status_text(&app),
+            before,
+            "the keyboard route announced the dismissal"
+        );
+    }
+
+    /// A dialog leaving the screen, and the diff view handing the centre pane
+    /// back to the agent, are both big and unmistakable.
+    #[test]
+    fn dismissing_a_dialog_and_leaving_the_diff_view_announce_nothing() {
+        let mut app = test_app(default_bindings());
+        let before = status_text(&app);
+        app.prompt = agent_info_prompt();
+        esc(&mut app);
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(
+            status_text(&app),
+            before,
+            "dismissing a dialog announced itself"
+        );
+
+        let mut app = test_app(default_bindings());
+        let before = status_text(&app);
+        app.center_mode = CenterMode::Diff {
+            lines: std::sync::Arc::new(Vec::new()),
+            scroll: 0,
+            gutter_width: 0,
+            worktree_path: String::new(),
+            rel_path: "a.rs".to_string(),
+        };
+        esc(&mut app);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert_eq!(
+            status_text(&app),
+            before,
+            "leaving the diff view announced itself"
         );
     }
 

@@ -3025,6 +3025,7 @@ mod tests {
             pty_size: (24, 80),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
             view,
         }
     }

@@ -72,6 +72,11 @@ struct ManagedCreatePlan {
     provider: crate::model::ProviderKind,
     source_branch: String,
     status_message: String,
+    /// Which surfaces withhold `status_message`. A create whose whole answer is
+    /// "a row appeared and its pane launched" confirms nothing; one whose
+    /// sentence carries a fact the screen never shows (what was copied, that a
+    /// branch was attached rather than minted) stays loud.
+    status_quiet: crate::statusline::QuietSurfaces,
     branch_name: String,
     worktree_path: PathBuf,
     owns_worktree: bool,
@@ -357,6 +362,14 @@ impl CreatePlanContext<'_> {
             },
             project,
             status_message,
+            // Attaching to a branch that already existed is nowhere on screen,
+            // so that arm stays loud. A plain create says only what the new row
+            // and its streaming pane already say.
+            status_quiet: if attach_existing {
+                crate::statusline::QuietSurfaces::LOUD
+            } else {
+                crate::statusline::QuietSurfaces::BOTH
+            },
             branch_name,
             worktree_path,
             owns_worktree: true,
@@ -487,6 +500,9 @@ impl CreatePlanContext<'_> {
                 provider: project.default_provider.clone(),
                 source_branch: project.current_branch.clone(),
                 status_message,
+                // Quiet on both: the new row carries the pull-request chip and
+                // its pane launches and streams.
+                status_quiet: crate::statusline::QuietSurfaces::BOTH,
                 branch_name,
                 worktree_path,
                 owns_worktree: true,
@@ -595,6 +611,9 @@ impl CreatePlanContext<'_> {
                 provider: source_session.provider,
                 source_branch: source_branch_name,
                 status_message,
+                // Loud: what a fork copied, and what it left behind, is nowhere
+                // on screen.
+                status_quiet: crate::statusline::QuietSurfaces::LOUD,
                 branch_name,
                 worktree_path,
                 owns_worktree: true,
@@ -637,6 +656,8 @@ impl CreatePlanContext<'_> {
                 provider: project.default_provider.clone(),
                 source_branch: branch_name.clone(),
                 status_message,
+                // Quiet on both: the new row appears and its pane launches.
+                status_quiet: crate::statusline::QuietSurfaces::BOTH,
                 branch_name,
                 worktree_path,
                 owns_worktree: false,
@@ -720,6 +741,8 @@ impl CreatePlanContext<'_> {
                 provider: project.default_provider.clone(),
                 source_branch,
                 status_message,
+                // Loud: the copy rule, and what it skipped, is invisible.
+                status_quiet: crate::statusline::QuietSurfaces::LOUD,
                 branch_name,
                 worktree_path,
                 owns_worktree: true,
@@ -993,6 +1016,9 @@ fn run_create_standalone_agent_job(
             status_op_id: create_key,
         },
         wants_fullscreen: false,
+        // Loud: dux's promise about never touching the user's folder is the
+        // whole point of the sentence and is nowhere on screen.
+        status_quiet: crate::statusline::QuietSurfaces::LOUD,
     };
     run_agent_launch_job(request, worker_tx);
 }
@@ -1013,6 +1039,7 @@ fn launch_managed_create(
         provider,
         source_branch,
         status_message,
+        status_quiet,
         branch_name,
         worktree_path,
         owns_worktree,
@@ -1098,11 +1125,15 @@ fn launch_managed_create(
         return;
     }
     // Notes ride the keyed create-op final so they surface as the visible
-    // status/toast, never log-only.
-    let status_message = if creation_notes.is_empty() {
-        status_message
+    // status/toast, never log-only. A note is a fact the screen does not show,
+    // so it makes even an otherwise quiet create speak.
+    let (status_message, status_quiet) = if creation_notes.is_empty() {
+        (status_message, status_quiet)
     } else {
-        format!("{status_message} {}", creation_notes.join(" "))
+        (
+            format!("{status_message} {}", creation_notes.join(" ")),
+            crate::statusline::QuietSurfaces::LOUD,
+        )
     };
     let env = match crate::config::resolve_agent_env(&config.env, &project.env) {
         Ok(env) => env,
@@ -1195,6 +1226,7 @@ fn launch_managed_create(
         // A freshly created agent lands focused-but-minimized;
         // only fullscreen-seeking gestures set this, and create is never one.
         wants_fullscreen: false,
+        status_quiet,
     };
     run_agent_launch_job(request, worker_tx);
 }
@@ -1385,6 +1417,7 @@ mod tests {
     struct JobRun {
         session: Option<AgentSession>,
         status_message: Option<String>,
+        status_quiet: crate::statusline::QuietSurfaces,
         failure: Option<String>,
         progress: Vec<String>,
         /// Keeps the temporary worktrees root alive so tests can inspect the
@@ -1431,6 +1464,7 @@ mod tests {
         let mut run = JobRun {
             session: None,
             status_message: None,
+            status_quiet: crate::statusline::QuietSurfaces::LOUD,
             failure: None,
             progress: Vec::new(),
             _paths_root: paths_root,
@@ -1441,6 +1475,7 @@ mod tests {
                     run.session = Some(data.request.session.clone());
                     if let AgentLaunchKind::Create { status_message, .. } = &data.request.kind {
                         run.status_message = Some(status_message.clone());
+                        run.status_quiet = data.request.status_quiet;
                     }
                 }
                 WorkerEvent::CreateAgentFailed { message, .. } => {
@@ -2238,6 +2273,63 @@ mod tests {
             pull_before_create,
             copy_uncommitted_changes,
         }
+    }
+
+    /// A plain create says only what the new row and its streaming pane already
+    /// say, so it is quiet on both surfaces. Attaching to a branch that already
+    /// existed is nowhere on screen, so that one speaks.
+    #[test]
+    fn a_plain_create_is_quiet_on_both_surfaces_and_an_attach_is_not() {
+        let repo = init_test_repo();
+        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, false));
+        assert!(run.failure.is_none(), "creation must succeed");
+        assert!(run.status_message.unwrap().starts_with("Created "));
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::BOTH);
+
+        let repo = init_test_repo();
+        create_branch(repo.path(), "already-here");
+        let attach = CreateAgentRequest::NewProject {
+            project: test_project(repo.path()),
+            custom_name: Some("already-here".to_string()),
+            use_existing_branch: true,
+            pull_before_create: false,
+            copy_uncommitted_changes: false,
+        };
+        let run = drive_create_job_run(repo.path(), attach);
+        assert!(run.failure.is_none(), "creation must succeed");
+        assert!(run.status_message.unwrap().starts_with("Attached to "));
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::LOUD);
+    }
+
+    /// A creation note is a fact the screen does not show, so it makes even an
+    /// otherwise quiet create speak.
+    #[test]
+    fn a_creation_note_makes_a_quiet_create_speak() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join("keep.txt"), "on main\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "base"]);
+        git_in(repo.path(), &["switch", "-c", "feature"]);
+        std::fs::write(repo.path().join("feature-only.txt"), "feature\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "feature commit"]);
+        std::fs::remove_file(repo.path().join("keep.txt")).unwrap();
+
+        let mut project = test_project(repo.path());
+        project.current_branch = "feature".to_string();
+        let run = drive_create_job_run(
+            repo.path(),
+            CreateAgentRequest::NewProject {
+                project,
+                custom_name: Some("note-carrier".to_string()),
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: true,
+            },
+        );
+        assert!(run.failure.is_none(), "creation must succeed");
+        assert!(run.status_message.unwrap().contains("were not copied"));
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::LOUD);
     }
 
     /// Happy path: the checkout's dirt travels; gitignored files do not.

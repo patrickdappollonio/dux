@@ -1551,11 +1551,9 @@ impl App {
                 return Ok(());
             }
         };
+        // No confirmation: the centre pane launches the shell and streams its
+        // prompt, which is the big and unmistakable change the tenet exempts.
         self.activate_new_terminal(terminal_id);
-        self.set_info(format!(
-            "Launched terminal for agent \"{}\".",
-            session.display_label()
-        ));
         Ok(())
     }
 
@@ -1643,14 +1641,14 @@ impl App {
                     .and_then(|n| n.parse::<u64>().ok())
                     .unwrap_or(u64::MAX)
             })
-            .map(|(id, t)| (id.clone(), t.label.clone()));
+            .map(|(id, _)| id.clone());
 
-        if let Some((terminal_id, label)) = first {
+        if let Some(terminal_id) = first {
             self.active_terminal_id = Some(terminal_id);
             self.terminal_return_to_list = false;
             self.show_companion_terminal_surface();
             self.input_target = InputTarget::Terminal;
-            self.set_info(format!("Opened terminal \"{label}\"."));
+            // No confirmation: the whole centre pane becomes that terminal.
             return Ok(());
         }
         self.show_companion_terminal()
@@ -1711,11 +1709,9 @@ impl App {
                 return Ok(());
             }
         };
+        // No confirmation, for the same reason as the first terminal: the pane
+        // launches and streams.
         self.activate_new_terminal(terminal_id);
-        self.set_info(format!(
-            "Launched new terminal for agent \"{}\".",
-            session.display_label()
-        ));
         Ok(())
     }
 
@@ -1741,7 +1737,6 @@ impl App {
         };
         let terminal_id = terminal_id.clone();
         let owner = terminal.owner.clone();
-        let label = terminal.label.clone();
         drop(items);
 
         // Select this terminal's owner (session or project) in the left pane.
@@ -1763,7 +1758,7 @@ impl App {
         self.terminal_return_to_list = false;
         self.show_companion_terminal_surface();
         self.input_target = InputTarget::Terminal;
-        self.set_info(format!("Opened terminal \"{label}\"."));
+        // No confirmation: the whole centre pane becomes that terminal.
         Ok(())
     }
 
@@ -3230,10 +3225,13 @@ impl App {
                     "No startup command logs recorded for {success_label} yet."
                 ))
             } else {
+                // Quiet on the terminal UI: a full view opens and lists the runs
+                // itself, which is the big and unmistakable change.
                 dux_core::engine::Final::info(format!(
                     "Opened {} startup command log run(s) for {success_label}.",
                     listing.entries.len()
                 ))
+                .quiet_on(dux_core::statusline::QuietSurfaces::TUI)
             }
         })
         .on_failure(move |err: &String| {
@@ -3392,11 +3390,9 @@ impl App {
             self.theme = theme;
             return Ok(());
         }
+        // No confirmation: every colour on screen changes, which is the biggest
+        // visible change dux makes.
         self.theme = theme;
-        self.set_info(format!(
-            "Theme changed to \"{}\". Future sessions will use it too.",
-            selected.display_name,
-        ));
         Ok(())
     }
 
@@ -7471,6 +7467,52 @@ mod tests {
             .into_iter()
             .map(|(id, _)| id.clone())
             .collect()
+    }
+
+    /// The whole centre pane becomes the terminal, which is the big and
+    /// unmistakable change a confirmation is not owed for.
+    #[test]
+    fn opening_an_existing_terminal_announces_nothing() {
+        let mut app = app_with_one_session();
+        insert_test_terminal(&mut app, "term-a", 0, Utc::now(), "Terminal 1", None);
+        let before = app.status.most_recent_tui().map(|(_, text)| text);
+
+        app.selected_terminal_index = 0;
+        app.open_terminal_from_terminal_list()
+            .expect("open the terminal");
+
+        assert_eq!(app.active_terminal_id.as_deref(), Some("term-a"));
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            before,
+            "opening a terminal announced itself"
+        );
+    }
+
+    /// Every colour on screen changes, which is the biggest visible change dux
+    /// makes, so the theme swap says nothing.
+    #[test]
+    fn changing_the_theme_announces_nothing() {
+        let mut app = app_with_one_session();
+        let options = crate::theme::discover_available(&app.engine.paths);
+        let current = app.engine.config.ui.theme.clone();
+        let Some(target) = options.iter().position(|t| t.id != current) else {
+            return;
+        };
+        let before = app.status.most_recent_tui().map(|(_, text)| text);
+
+        app.prompt = PromptState::ChangeTheme(ChangeThemePrompt {
+            options,
+            selected: target,
+            current,
+        });
+        app.apply_change_theme().expect("change the theme");
+
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            before,
+            "the theme change announced itself"
+        );
     }
 
     #[test]

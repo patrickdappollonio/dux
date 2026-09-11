@@ -1449,7 +1449,10 @@ impl App {
                     self.launch_completion_message(status_message, outcome.wants_fullscreen);
                 self.resolve_reconnect_op_or(
                     &outcome.tab_id,
-                    dux_core::engine::LaunchOutcome::Ready { status_message },
+                    dux_core::engine::LaunchOutcome::Ready {
+                        status_message,
+                        quiet_on: outcome.status_quiet,
+                    },
                 );
                 // The engine flipped the session Active while launching it, so the
                 // flat list must re-partition: a just-reconnected agent leaves the
@@ -1479,7 +1482,10 @@ impl App {
                 };
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    dux_core::engine::LaunchOutcome::Ready { status_message },
+                    dux_core::engine::LaunchOutcome::Ready {
+                        status_message,
+                        quiet_on: outcome.status_quiet,
+                    },
                 );
                 // Same re-partition as Reconnect: the resumed agent is Active now.
                 self.rebuild_left_items();
@@ -2258,6 +2264,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::CreateCommitted {
                 status_message: "Created agent.".to_string(),
                 startup_result_error: None,
@@ -2288,6 +2295,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::CreateCommitted {
                 status_message: "Created agent.".to_string(),
                 startup_result_error: None,
@@ -2331,6 +2339,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::Reconnect {
                 status_message: "Reconnected.".to_string(),
             },
@@ -2367,6 +2376,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: true,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::Reconnect {
                 status_message: "Reconnected.".to_string(),
             },
@@ -2390,6 +2400,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::CreateCommitted {
                 status_message: "Created agent.".to_string(),
                 startup_result_error: None,
@@ -2418,6 +2429,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::ResumeFallback {
                 session_id: session.id.clone(),
                 status_message: "Fresh restart.".to_string(),
@@ -2461,6 +2473,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::Reconnect {
                 status_message: "Reconnected.".to_string(),
             },
@@ -2502,6 +2515,7 @@ mod tests {
             pty_size: (80, 24),
             detached_session_id: None,
             wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
             view: AgentLaunchReadyView::Reconnect {
                 status_message: "Reconnected.".to_string(),
             },
@@ -2621,6 +2635,7 @@ mod tests {
                 status_message: "reconnect".to_string(),
             },
             wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
         };
 
         dux_core::agent_job::run_agent_launch_job(request, worker_tx);

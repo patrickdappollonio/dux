@@ -369,9 +369,10 @@ impl Engine {
                     .resolve_in_handler(|o: &crate::engine::CreateLaunchOutcome| {
                         use crate::engine::{CreateLaunchOutcome, Final};
                         match o {
-                            CreateLaunchOutcome::Committed { status_message } => {
-                                Final::info(status_message.clone())
-                            }
+                            CreateLaunchOutcome::Committed {
+                                status_message,
+                                quiet_on,
+                            } => Final::info(status_message.clone()).quiet_on(*quiet_on),
                             CreateLaunchOutcome::StartupFailed { branch_name, error } => {
                                 // Sticky: provisioning stopped part-way, so the
                                 // worktree is in an unknown state and the

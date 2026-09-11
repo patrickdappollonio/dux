@@ -1355,10 +1355,8 @@ export function refreshChanges(): void {
 // POST fails so the caller can report it, but the re-read runs either way: a
 // pane stuck in `loading` after a failed force is worse than a stale one.
 //
-// The success toast is raised here rather than by the engine's status stream,
-// which this route does not emit into because it mutates nothing, and it is
-// skipped when the re-read did not land: counts from a slice this refresh did
-// not fill would be made up.
+// No success toast: the whole list re-renders with its own counts, which is the
+// big and unmistakable change a confirmation is not owed for.
 export async function forceRefreshChanges(): Promise<void> {
   const id = state.selectedSessionId
   if (id === null) return
@@ -1368,12 +1366,6 @@ export async function forceRefreshChanges(): Promise<void> {
   } finally {
     await loadChanges(id)
   }
-  const slice = state.changes
-  if (slice.sessionId !== id || slice.phase !== "loaded") return
-  notifySuccess(
-    `Changed files refreshed: ${slice.staged.length} staged, ` +
-      `${slice.unstaged.length} unstaged.`
-  )
 }
 
 // Monotonic sequence for bootstrap loads, mirroring `loadWorkspaceSeq`. Rapid

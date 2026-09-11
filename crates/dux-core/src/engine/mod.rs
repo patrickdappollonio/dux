@@ -692,7 +692,13 @@ pub struct Engine {
 pub enum CreateLaunchOutcome {
     /// The session was committed and the agent surface is ready. `status_message`
     /// is the create-kind success line.
-    Committed { status_message: String },
+    Committed {
+        status_message: String,
+        /// Which surfaces withhold that line. A create whose pane launches and
+        /// streams confirms nothing; one whose sentence carries a fact the
+        /// screen does not show still does.
+        quiet_on: crate::statusline::QuietSurfaces,
+    },
     /// The session committed but its startup command failed; `branch_name` and
     /// `error` build the startup-failure line.
     StartupFailed { branch_name: String, error: String },
@@ -712,7 +718,13 @@ pub enum CreateLaunchOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchOutcome {
     /// Reconnect / force-reconnect succeeded; `status_message` is the success line.
-    Ready { status_message: String },
+    Ready {
+        status_message: String,
+        /// Which surfaces withhold that line. A resumed pane relaunches and
+        /// paints its prior conversation, so it confirms nothing; a pane that
+        /// comes up empty still has to say why.
+        quiet_on: crate::statusline::QuietSurfaces,
+    },
     /// Reconnect failed; `branch_name`/`message` build the reconnect-failure line.
     ReconnectFailed {
         branch_name: String,
@@ -732,7 +744,10 @@ pub enum LaunchOutcome {
 /// operations.
 pub fn launch_outcome_final(o: &LaunchOutcome) -> Final {
     match o {
-        LaunchOutcome::Ready { status_message } => Final::info(status_message.clone()),
+        LaunchOutcome::Ready {
+            status_message,
+            quiet_on,
+        } => Final::info(status_message.clone()).quiet_on(*quiet_on),
         LaunchOutcome::ReconnectFailed {
             branch_name,
             message,
@@ -4313,7 +4328,16 @@ impl Engine {
                 status_message: msg,
             }
         };
-        let request = self.build_agent_launch_request(session, resume, pty_size, kind);
+        // A resumed agent's pane clears, relaunches and streams the CLI's own
+        // banner, so nothing is owed. A fresh one comes up empty and the
+        // sentence is the only thing that says why.
+        let request = self
+            .build_agent_launch_request(session, resume, pty_size, kind)
+            .quiet_status_on(if resume {
+                crate::statusline::QuietSurfaces::BOTH
+            } else {
+                crate::statusline::QuietSurfaces::LOUD
+            });
         let busy_message = if force {
             format!("Starting fresh agent \"{branch_name}\"...")
         } else {
@@ -8430,6 +8454,7 @@ mod tests {
         assert_eq!(
             launch_outcome_final(&LaunchOutcome::Ready {
                 status_message: "Resumed claude agent \"x\".".to_string(),
+                quiet_on: crate::statusline::QuietSurfaces::LOUD,
             }),
             Final::info("Resumed claude agent \"x\".".to_string()),
         );
@@ -10233,6 +10258,41 @@ mod tab_ops_tests {
                 assert_eq!(request.provider.as_str(), "codex");
                 assert!(!request.resume, "a live codex sibling downgrades to fresh");
                 assert_eq!(resume, request.resume);
+            }
+            other => panic!("expected a Launch plan, got {other:?}"),
+        }
+    }
+
+    /// A resumed pane clears, relaunches and streams the CLI's own banner, so
+    /// the "Resumed ... agent" line is owed to nobody. A pane that comes up
+    /// fresh is empty, and only its sentence says why.
+    #[test]
+    fn a_resumed_reconnect_is_quiet_on_both_surfaces_and_a_fresh_one_is_not() {
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+
+        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+            ReconnectPlan::Launch { request, .. } => {
+                assert!(request.resume);
+                assert_eq!(
+                    request.status_quiet,
+                    crate::statusline::QuietSurfaces::BOTH,
+                    "a resumed pane relaunches and streams"
+                );
+            }
+            other => panic!("expected a Launch plan, got {other:?}"),
+        }
+
+        let (mut engine, tmp) = test_engine();
+        agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
+        match engine.reconnect_plan("s1", true, (24, 80)).expect("plan") {
+            ReconnectPlan::Launch { request, .. } => {
+                assert!(!request.resume, "a forced reconnect never resumes");
+                assert_eq!(
+                    request.status_quiet,
+                    crate::statusline::QuietSurfaces::LOUD,
+                    "an empty transcript looks like a failure until something says otherwise"
+                );
             }
             other => panic!("expected a Launch plan, got {other:?}"),
         }
