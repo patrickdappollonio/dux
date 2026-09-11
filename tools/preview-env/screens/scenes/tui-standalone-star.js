@@ -5,6 +5,10 @@ module.exports = async ({ createStandaloneAgent, sleep }) => {
   await sleep(1500)
 }
 
+// The agent and the star that says where it lives. The star is the whole point
+// of the picture, so it is named as the literal cell it is drawn in.
+module.exports.expectText = ["design-notes", "✷"]
+
 module.exports.file = "tui-standalone-star.png"
 module.exports.cols = 160
 module.exports.rows = 45

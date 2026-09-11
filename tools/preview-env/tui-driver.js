@@ -19,6 +19,12 @@ if (!fs.existsSync(journeyPath)) fail("the journey script is not mounted at /jou
 const journey = require(journeyPath)
 if (typeof journey !== "function") fail("journey.js must export an async function", 64)
 const fixture = journey.fixture || "steady"
+// What the picture must say. A journey that drove itself into the wrong screen
+// still captures a perfectly valid grid, and a grid of the wrong screen is
+// exactly what nobody notices until it is in the docs. Every committed scene
+// declares these (the website's loop test refuses one that does not); a
+// throwaway journey may leave them off and is told so.
+const expectText = journey.expectText || null
 // An optional last word on the seeded config, so a journey that needs a setting
 // (a serving port, a set of macros, a theme) does not have to type it into a
 // dialog first. Takes the rendered config text and returns the text to write.
@@ -324,6 +330,20 @@ async function main() {
   const text = captureText()
   const capturedRows = text.endsWith("\n") ? text.slice(0, -1).split("\n").length : text.split("\n").length
   if (capturedRows !== rows) throw new Error(`captured ${capturedRows} rows; expected ${rows}`)
+
+  // Refuse the capture rather than export it: nothing downstream reads the
+  // cells, so an artifact written here is a PNG of the wrong screen.
+  const journeyName = process.env.DUX_TUI_JOURNEY_NAME || path.basename(journeyPath)
+  if (expectText) {
+    const missing = expectText.filter((needle) => !text.includes(needle))
+    if (missing.length) {
+      throw new Error(
+        `${journeyName}: the captured screen does not show ${missing.map((needle) => JSON.stringify(needle)).join(", ")}`,
+      )
+    }
+  } else {
+    console.error(`${journeyName}: no expectText, so nothing checked what this captured`)
+  }
 
   fs.writeFileSync(path.join(output, `${outputStem}.ansi`), ansi)
   fs.writeFileSync(path.join(output, `${outputStem}.txt`), text)

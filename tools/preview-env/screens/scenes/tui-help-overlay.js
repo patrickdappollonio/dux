@@ -5,6 +5,10 @@ module.exports = async ({ createAgent, sendKeys, sleep }) => {
   await sleep(800)
 }
 
+// The overlay's own frame title, which is the only thing that tells this screen
+// apart from the workspace it is drawn over.
+module.exports.expectText = ["Help"]
+
 module.exports.file = "tui-help-overlay.png"
 module.exports.cols = 160
 module.exports.rows = 45

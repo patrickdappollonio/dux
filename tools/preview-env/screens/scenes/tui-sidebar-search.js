@@ -43,6 +43,10 @@ module.exports = async ({
   await sleep(1000)
 }
 
+// The count the filter leaves in the pane title, and the two rows that survived
+// it. A capture where the filter never took shows five rows and no count.
+module.exports.expectText = ["2/5", "retry-budget", "retry-tests"]
+
 module.exports.file = "tui-sidebar-search.png"
 module.exports.cols = 160
 module.exports.rows = 45

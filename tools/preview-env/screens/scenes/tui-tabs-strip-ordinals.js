@@ -9,6 +9,9 @@ module.exports = async ({ addTab, createAgent, sendKeys, sleep }) => {
   await sleep(1200)
 }
 
+// The agent the strip belongs to and the provider every pill carries.
+module.exports.expectText = ["retry-budget", "fake"]
+
 module.exports.file = "tui-tabs-strip-ordinals.png"
 module.exports.cols = 120
 module.exports.rows = 36

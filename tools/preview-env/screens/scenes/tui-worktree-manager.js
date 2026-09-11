@@ -15,6 +15,9 @@ module.exports = async ({ createAgent, palette, seedLooseWorktree, sendKeys, sle
   await sleep(1200)
 }
 
+// The manager, the worktree no agent holds, and the two that are held.
+module.exports.expectText = ["Manage Worktrees", "docs-pass", "retry-budget", "cache-warmup"]
+
 module.exports.file = "tui-worktree-manager.png"
 module.exports.cols = 140
 module.exports.rows = 40

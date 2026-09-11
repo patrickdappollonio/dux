@@ -5,6 +5,9 @@ module.exports = async ({ createAgent, palette, sleep }) => {
   await sleep(1000)
 }
 
+// The picker and the theme it opens on, which is the one in use.
+module.exports.expectText = ["Change Theme", "dux_dark"]
+
 module.exports.file = "tui-theme-picker.png"
 module.exports.cols = 140
 module.exports.rows = 40

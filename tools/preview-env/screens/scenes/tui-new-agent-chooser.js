@@ -7,6 +7,9 @@ module.exports = async ({ createAgent, palette, sleep, waitFor }) => {
   await sleep(800)
 }
 
+// The chooser and both projects it lists.
+module.exports.expectText = ["New agent in project", "demo-api", "demo-web"]
+
 module.exports.file = "tui-new-agent-chooser.png"
 module.exports.cols = 160
 module.exports.rows = 30

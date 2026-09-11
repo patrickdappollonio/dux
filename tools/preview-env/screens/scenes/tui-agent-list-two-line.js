@@ -29,6 +29,16 @@ module.exports = async ({ addTab, createAgent, selectAgent, setFixture, sleep })
   await sleep(1200)
 }
 
+// The three active rows, the tab count on one of them, and the collapsed tail:
+// the whole of what the caption counts.
+module.exports.expectText = [
+  "retry-budget",
+  "retry-tests",
+  "cache-warmup",
+  "3 tabs",
+  "Inactive (2)",
+]
+
 module.exports.file = "tui-agent-list-two-line.png"
 module.exports.cols = 160
 module.exports.rows = 45

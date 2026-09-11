@@ -15,6 +15,9 @@ module.exports = async ({ createAgent, selectAgent, setFixture, sleep }) => {
   await sleep(1200)
 }
 
+// The flag itself, and the two quiet rows it is shown against.
+module.exports.expectText = ["Needs you", "retry-budget", "cache-warmup"]
+
 module.exports.file = "tui-attention-sidebar.png"
 module.exports.cols = 160
 module.exports.rows = 45

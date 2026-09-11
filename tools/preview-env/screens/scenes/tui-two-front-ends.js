@@ -27,6 +27,17 @@ module.exports = async ({
   await sleep(6000)
 }
 
+// All six agents, because the caption counts them, and the one the pane is
+// showing.
+module.exports.expectText = [
+  "review-billing",
+  "polish-onboarding",
+  "design-notes",
+  "refactor-cache",
+  "add-rate-limits",
+  "fix-login-redirect",
+]
+
 module.exports.file = "tui-two-front-ends.png"
 module.exports.cols = 160
 module.exports.rows = 45

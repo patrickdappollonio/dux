@@ -31,6 +31,9 @@ text = "cargo clippy --all-targets"
 surface = "agent"
 `
 
+// The bar and the macros it lists, which are what the caption is about.
+module.exports.expectText = ["Macros", "Review", "Write tests", "Explain failure"]
+
 module.exports.file = "tui-macro-bar.png"
 module.exports.cols = 160
 module.exports.rows = 26

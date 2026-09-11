@@ -20,6 +20,10 @@ module.exports.config = (text) =>
     "enable_randomized_pet_name_by_default = true",
   )
 
+// The dialog's title only: the generated name in the field is random by design,
+// so it is the one thing this picture cannot be checked against.
+module.exports.expectText = ["Name New Agent"]
+
 module.exports.file = "tui-name-new-agent.png"
 module.exports.cols = 160
 module.exports.rows = 30

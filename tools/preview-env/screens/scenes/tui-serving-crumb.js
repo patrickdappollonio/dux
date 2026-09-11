@@ -13,6 +13,9 @@ module.exports = async ({ createAgent, palette, sleep, waitFor }) => {
 // rather than anything a journey can type at it.
 module.exports.config = (text) => text.replace(/^port = \d+$/m, "port = 3890")
 
+// The crumb, the port it names, and the workspace underneath it.
+module.exports.expectText = ["3890", "retry-budget"]
+
 module.exports.file = "tui-serving-crumb.png"
 module.exports.cols = 160
 module.exports.rows = 45

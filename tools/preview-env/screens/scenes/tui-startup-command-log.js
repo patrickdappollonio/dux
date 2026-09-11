@@ -45,6 +45,10 @@ module.exports = async ({ createAgent, duxHome, palette, sendKeys, sleep, waitFo
   await sleep(800)
 }
 
+// The viewer, the output section the caption is about, and a line the command
+// actually printed.
+module.exports.expectText = ["Startup Command Logs", "--- stdout ---", "Worktree ready at"]
+
 module.exports.file = "tui-startup-command-log.png"
 module.exports.cols = 160
 module.exports.rows = 30

@@ -19,6 +19,15 @@ module.exports = async ({ createAgent, palette, sendKeys, sendText, sleep, waitF
   await sleep(800)
 }
 
+// The dialog and every line typed into it: the picture is of the text, so a
+// capture that lost a line is a different picture.
+module.exports.expectText = [
+  "Configure Project Environment",
+  "API_URL=http://localhost:8080",
+  "LOG_LEVEL=debug",
+  "NODE_ENV=development",
+]
+
 module.exports.file = "tui-project-env-editor.png"
 module.exports.cols = 160
 module.exports.rows = 30

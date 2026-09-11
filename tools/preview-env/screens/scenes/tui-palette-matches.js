@@ -8,6 +8,9 @@ module.exports = async ({ createAgent, sendKeys, sendText, sleep, waitFor }) => 
   await sleep(800)
 }
 
+// The palette, the phrase typed into it, and the command that answers it.
+module.exports.expectText = ["Command Palette", "new tab", "new-agent-tab"]
+
 module.exports.file = "tui-palette-matches.png"
 module.exports.cols = 120
 module.exports.rows = 36
