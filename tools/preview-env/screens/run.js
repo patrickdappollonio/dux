@@ -133,6 +133,11 @@ async function shootOne(scene) {
     }
     await reassert()
     await freezeWorkingCue(page)
+    // Again here, whatever the scene did: a toast is never part of a picture,
+    // and the ones that matter arrive on their own schedule. A scene that swept
+    // them before it settled can still be handed one while it waits, and a
+    // GitHub retry notice landed in the middle of a file-drop picture that way.
+    await lib.clearToasts(page)
     // The frame is known now, so "on screen" means inside the crop from here on.
     lib.setCaptureClip(clip)
     // Asked again with the shutter open. The scene's own call is not the last
