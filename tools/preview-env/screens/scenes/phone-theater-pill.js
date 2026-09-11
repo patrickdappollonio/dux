@@ -1,6 +1,15 @@
 // Theater mode on a phone: the top chrome is gone and the floating pill is the
 // way back.
-const { agents, clearToasts, goto, sleep, takeOver } = require("../lib.js")
+const {
+  agents,
+  clearToasts,
+  expectNoCover,
+  expectPanePainted,
+  expectVisible,
+  goto,
+  sleep,
+  takeOver,
+} = require("../lib.js")
 
 module.exports = {
   file: "phone-theater-pill.png",
@@ -26,6 +35,11 @@ module.exports = {
     await page.evaluate(() => document.activeElement?.blur())
     await sleep(1200)
     await clearToasts(page)
+    // The pill is the mode's only way back, so it is the picture; a flight that
+    // never started leaves the ordinary pane screen, which crops the same.
+    await expectNoCover(page)
+    await expectPanePainted(page)
+    await expectVisible(page, '[data-testid="theater-pill"]', "the floating pill")
     return { x: 0, y: 0, width: 390, height: 844 }
   },
 }

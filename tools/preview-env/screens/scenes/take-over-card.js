@@ -2,7 +2,16 @@
 // This scene needs a SECOND device on the same pty, so it opens the driver
 // itself; the page it is handed is the watcher, which is why it must not have
 // been anywhere near the agent yet.
-const { agents, clearToasts, goto, open, sleep, takeOver } = require("../lib.js")
+const {
+  agents,
+  clearToasts,
+  expectNoCover,
+  expectVisibleText,
+  goto,
+  open,
+  sleep,
+  takeOver,
+} = require("../lib.js")
 
 // The card's own words, or empty when there is no card over the terminal.
 const cardText = (page) =>
@@ -43,6 +52,11 @@ module.exports = {
       await clearToasts(page)
       // The card has a word for a pty nobody drives too, and that is a different
       // picture from the one the docs caption. Refuse it rather than write it.
+      // The one scene where the card is the subject, so the cover guard is
+      // asked for it rather than against it; the spinner and the reconnect box
+      // are refused here like everywhere else.
+      await expectNoCover(page, { card: true })
+      await expectVisibleText(page, "Take over", { what: "the card's button" })
       const watcherCard = await cardText(page)
       if (!/Active on/i.test(watcherCard)) {
         throw new Error(`the watcher's card does not name a driving device: ${watcherCard}`)

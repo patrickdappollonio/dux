@@ -1,6 +1,16 @@
 // The sidebar row's own actions menu, which is where every per-agent action
 // lives.
-const { agents, boxOf, clearToasts, goto, sleep, takeOver } = require("../lib.js")
+const {
+  agents,
+  boxOf,
+  clearToasts,
+  expectMenuOpen,
+  expectNoCover,
+  expectPanePainted,
+  goto,
+  sleep,
+  takeOver,
+} = require("../lib.js")
 
 module.exports = {
   file: "agent-session-menu.png",
@@ -23,6 +33,12 @@ module.exports = {
     })
     if (!opened) throw new Error("no sidebar row menu for fix-login-redirect")
     await sleep(900)
+    // A click that lands wrong opens nothing, or opens the menu and lets it
+    // close again; either way the crop below still finds something to frame.
+    // This picture went out once with the menu shut and the take-over card up.
+    await expectNoCover(page)
+    await expectPanePainted(page)
+    await expectMenuOpen(page, "Attach a file")
     // Framed on the menu itself rather than to the bottom of the window: the row
     // it belongs to can be anywhere in the sidebar, and a menu near the bottom
     // opens upwards, so the menu's own extent is the only stable frame. The

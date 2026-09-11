@@ -5,6 +5,8 @@ const {
   boxOf,
   clearToasts,
   clickText,
+  expectDialogOpen,
+  expectFieldValue,
   goto,
   openMoreWays,
   sleep,
@@ -27,6 +29,10 @@ module.exports = {
     await page.keyboard.type("acme/demo-api#123", { delay: 25 })
     await sleep(700)
     await clearToasts(page)
+    // The dialog the menu item opens, with the reference typed into its first
+    // field, which is the whole of what the caption promises.
+    await expectDialogOpen(page, "New agent from PR")
+    await expectFieldValue(page, '[role="dialog"] input', "acme/demo-api#123")
     return await boxOf(page, ['[role="dialog"]'], 12)
   },
 }

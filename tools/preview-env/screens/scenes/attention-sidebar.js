@@ -1,9 +1,13 @@
 // The sidebar with one agent waiting on you among five that are working.
 const {
+  ATTENTION_AGENT,
+  ATTENTION_WORD,
+  SIDEBAR_ORDER,
   armAttention,
-  assertNeedsAttention,
   boxOf,
   clearToasts,
+  expectRows,
+  expectStateWord,
   goto,
   sleep,
 } = require("../lib.js")
@@ -21,7 +25,10 @@ module.exports = {
     await goto(page, "")
     await sleep(1500)
     await clearToasts(page)
-    await assertNeedsAttention(page)
+    // Every row the crop will contain, and the word the caption is entirely
+    // about. This picture came back blank once, with nothing to say so.
+    await expectRows(page, SIDEBAR_ORDER)
+    await expectStateWord(page, ATTENTION_AGENT, ATTENTION_WORD)
     const side = await boxOf(page, ["[data-slot=sidebar], aside, nav"])
     const rows = await boxOf(page, ['[aria-label="Session actions"]'])
     return {

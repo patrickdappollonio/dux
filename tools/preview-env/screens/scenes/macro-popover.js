@@ -5,6 +5,9 @@ const {
   boxOf,
   clearToasts,
   clickLabel,
+  expectNoCover,
+  expectPanePainted,
+  expectVisibleText,
   goto,
   takeOver,
 } = require("../lib.js")
@@ -22,6 +25,12 @@ module.exports = {
     await takeOver(page)
     await clearToasts(page)
     await clickLabel(page, "Run a macro")
+    // The picker, two of the macros it lists, and the way out to the editor the
+    // caption names, over a terminal that is on.
+    await expectNoCover(page)
+    await expectPanePainted(page)
+    await expectVisibleText(page, "Write tests", { what: "a macro in the picker" })
+    await expectVisibleText(page, "Edit macros", { what: "the picker's editor link" })
     // Framed on the pane rather than on the whole window: the crop starts at the
     // terminal pane's own left edge and ends below the popover.
     const pane = await boxOf(page, ['[data-testid="terminal-pane"]'])

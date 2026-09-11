@@ -1,5 +1,13 @@
 // The pull-request banner, the wide anchor that opens the PR from the pane.
-const { agents, clearToasts, goto, takeOver } = require("../lib.js")
+const {
+  agents,
+  clearToasts,
+  expectBanner,
+  expectNoCover,
+  expectPanePainted,
+  goto,
+  takeOver,
+} = require("../lib.js")
 
 module.exports = {
   file: "pr-banner.png",
@@ -9,6 +17,13 @@ module.exports = {
     await goto(page, `#/agent/${by["fix-login-redirect"].id}`)
     await takeOver(page)
     await clearToasts(page)
+    // The banner across the pane, not the sidebar row's chip, which carries the
+    // same words and the same href at a fraction of the width.
+    await expectNoCover(page)
+    await expectPanePainted(page)
+    await expectBanner(page, "Fix the login redirect loop", {
+      what: "the pull-request banner",
+    })
     // The sidebar row's chip carries the same href at chip width, so the banner
     // is picked out as the widest of the pull-request anchors.
     const r = await page.evaluate(() => {

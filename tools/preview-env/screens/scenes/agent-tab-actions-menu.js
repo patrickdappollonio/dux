@@ -1,5 +1,15 @@
 // One tab's own menu, open over the strip.
-const { agents, boxOf, clearToasts, clickLabel, goto, takeOver } = require("../lib.js")
+const {
+  agents,
+  boxOf,
+  clearToasts,
+  clickLabel,
+  expectMenuOpen,
+  expectNoCover,
+  expectPanePainted,
+  goto,
+  takeOver,
+} = require("../lib.js")
 
 module.exports = {
   file: "agent-tab-actions-menu.png",
@@ -10,6 +20,10 @@ module.exports = {
     await takeOver(page)
     await clearToasts(page)
     await clickLabel(page, "Tab actions", 2)
+    // The menu the caption names, over a terminal that is actually on.
+    await expectNoCover(page)
+    await expectPanePainted(page)
+    await expectMenuOpen(page, "Close tab")
     // The strip container runs the full pane width, so the right edge comes from
     // the controls rather than from it: whichever of the chevron and the open
     // menu ends furthest right.

@@ -1,6 +1,18 @@
 // The three-pane desktop workspace: the sidebar, a working agent's terminal,
 // and its changed files.
-const { agents, clearToasts, freshen, goto, sleep, takeOver } = require("../lib.js")
+const {
+  SIDEBAR_ORDER,
+  agents,
+  clearToasts,
+  expectNoCover,
+  expectPanePainted,
+  expectRows,
+  expectStateWord,
+  freshen,
+  goto,
+  sleep,
+  takeOver,
+} = require("../lib.js")
 
 module.exports = {
   file: "web-workspace-layout.png",
@@ -15,6 +27,14 @@ module.exports = {
     await setTerminalsExpanded(page, true)
     await sleep(2500)
     await clearToasts(page)
+    // All three panes the caption names: the six rows on the left, a terminal
+    // with a session on it in the middle, and the state word that says the
+    // agent is working. This picture went out once with the pane still reading
+    // "Attaching…".
+    await expectNoCover(page)
+    await expectPanePainted(page)
+    await expectRows(page, SIDEBAR_ORDER)
+    await expectStateWord(page, "fix-login-redirect", "Working")
     return { x: 0, y: 0, width: 1440, height: 900 }
   },
 }

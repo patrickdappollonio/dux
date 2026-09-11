@@ -1,6 +1,17 @@
 // A file held over an agent pane, with the drop overlay saying where it will
 // land.
-const { agents, boxOf, clearToasts, freshen, goto, sleep, takeOver } = require("../lib.js")
+const {
+  agents,
+  boxOf,
+  clearToasts,
+  expectNoCover,
+  expectPanePainted,
+  expectVisible,
+  freshen,
+  goto,
+  sleep,
+  takeOver,
+} = require("../lib.js")
 
 module.exports = {
   file: "file-drop-overlay.png",
@@ -13,6 +24,11 @@ module.exports = {
     await goto(page, `#/agent/${by["add-rate-limits"].id}`)
     await takeOver(page)
     await clearToasts(page)
+    // Read BEFORE the drag, deliberately: the overlay paints over the terminal
+    // at nine tenths opacity, so afterwards the pane's own pixels are the
+    // overlay's and say nothing about the session behind it.
+    await expectNoCover(page)
+    await expectPanePainted(page)
     // A real drag through CDP: the pane's gate reads dataTransfer.types, which a
     // hand-built DragEvent does not populate the same way.
     const cdp = await page.createCDPSession()
@@ -26,6 +42,9 @@ module.exports = {
     await cdp.send("Input.dispatchDragEvent", { type: "dragEnter", ...point, data })
     await cdp.send("Input.dispatchDragEvent", { type: "dragOver", ...point, data })
     await sleep(900)
+    // The overlay is the whole picture, and a drag the pane's gate refused
+    // leaves an ordinary terminal that crops just as well.
+    await expectVisible(page, '[data-testid="file-drop-overlay"]', "the file-drop overlay")
     // Cropped to the PANE, not to the overlay: the overlay is inset inside the
     // pane and its dashed border runs along that inset, so cropping to the
     // overlay puts the border on the crop edge and slices the terminal's first

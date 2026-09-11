@@ -1,5 +1,14 @@
 // The Changes pane with two rows ticked, so the bulk bar of plain verbs is up.
-const { agents, boxOf, clearToasts, goto, sleep, takeOver } = require("../lib.js")
+const {
+  agents,
+  boxOf,
+  clearToasts,
+  expectNoCover,
+  expectVisibleText,
+  goto,
+  sleep,
+  takeOver,
+} = require("../lib.js")
 
 module.exports = {
   file: "changes-bulk-bar.png",
@@ -18,6 +27,11 @@ module.exports = {
       boxes.slice(0, 2).forEach((c) => c.click())
     })
     await sleep(1200)
+    // The bar is the picture, and it exists only while rows are ticked: a click
+    // that missed leaves the pane looking ordinary and perfectly croppable.
+    await expectNoCover(page)
+    await expectVisibleText(page, "Stage 2", { what: "the bulk bar's Stage verb" })
+    await expectVisibleText(page, "Discard 2", { what: "the bulk bar's Discard verb" })
     const pane = await boxOf(page, ['[data-testid="changes-pane"]'])
     const filter = await boxOf(page, ['[data-testid="changes-pane"] input[type="search"]'])
     const rows = await boxOf(page, ['[data-testid="changes-pane"] [aria-label^="Actions for "]'])

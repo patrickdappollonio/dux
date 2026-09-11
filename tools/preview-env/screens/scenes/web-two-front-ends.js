@@ -1,6 +1,18 @@
 // The browser half of the introduction's pair: the same workspace the terminal
 // UI shot shows, three agents working and three idle.
-const { agents, clearToasts, freshen, goto, sleep, takeOver } = require("../lib.js")
+const {
+  SIDEBAR_ORDER,
+  agents,
+  clearToasts,
+  expectNoCover,
+  expectPanePainted,
+  expectRows,
+  expectStateWord,
+  freshen,
+  goto,
+  sleep,
+  takeOver,
+} = require("../lib.js")
 
 module.exports = {
   file: "web-two-front-ends.png",
@@ -21,6 +33,12 @@ module.exports = {
     })
     await sleep(2500)
     await clearToasts(page)
+    // The six rows the caption counts beside its terminal UI twin, and the one
+    // whose pane is on screen.
+    await expectNoCover(page)
+    await expectPanePainted(page)
+    await expectRows(page, SIDEBAR_ORDER)
+    await expectStateWord(page, "add-rate-limits", "Working")
     return { x: 0, y: 0, width: 1440, height: 900 }
   },
 }

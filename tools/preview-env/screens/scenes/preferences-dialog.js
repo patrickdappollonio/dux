@@ -1,6 +1,14 @@
 // The one place settings live, scrolled to the Tailscale row the server-mode
 // docs point at.
-const { boxOf, clearToasts, clickText, goto, sleep } = require("../lib.js")
+const {
+  boxOf,
+  clearToasts,
+  clickText,
+  expectDialogOpen,
+  expectVisibleText,
+  goto,
+  sleep,
+} = require("../lib.js")
 
 module.exports = {
   file: "preferences-dialog.png",
@@ -18,6 +26,12 @@ module.exports = {
     })
     await sleep(900)
     await clearToasts(page)
+    // The dialog, and the one row the server-mode docs point the reader at: a
+    // scroll that landed somewhere else is a picture of a different setting.
+    await expectDialogOpen(page, "Settings")
+    await expectVisibleText(page, "Bind your Tailscale address", {
+      what: "the Tailscale row the caption names",
+    })
     return await boxOf(page, ['[role="dialog"]'])
   },
 }

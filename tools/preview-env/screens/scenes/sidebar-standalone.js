@@ -1,7 +1,18 @@
 // A standalone agent selected: the row wears the star over its folder, the
 // crumb names the folder rather than a branch, and the changes panel says why it
 // has nothing to show.
-const { agents, clearToasts, freshen, goto, sleep, takeOver } = require("../lib.js")
+const {
+  agents,
+  clearToasts,
+  expectNoCover,
+  expectPanePainted,
+  expectRows,
+  expectVisibleText,
+  freshen,
+  goto,
+  sleep,
+  takeOver,
+} = require("../lib.js")
 
 // The transcript provider ticks a counter forever, so the elapsed figure in its
 // last line is whatever the session has been up for. The session is restarted
@@ -28,6 +39,15 @@ module.exports = {
     await page.type('input[placeholder*="Search agents"]', "design", { delay: 40 })
     await sleep(1200)
     await clearToasts(page)
+    // The filter leaving one row, the folder the row names instead of a
+    // project, and the sentence the changes panel answers a plain folder with.
+    await expectNoCover(page)
+    await expectPanePainted(page)
+    await expectRows(page, ["design-notes"])
+    await expectVisibleText(page, "design-notes", { what: "the folder the row names" })
+    await expectVisibleText(page, "git repository", {
+      what: "the changes panel's word about a plain folder",
+    })
     return { x: 0, y: 0, width: 1440, height: 900 }
   },
 }

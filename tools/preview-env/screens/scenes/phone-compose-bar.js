@@ -1,6 +1,16 @@
 // The virtual input: the terminal-key rows and the compose bar a finger types
 // into, with a draft in it.
-const { agents, clearToasts, goto, sleep, takeOver } = require("../lib.js")
+const {
+  agents,
+  clearToasts,
+  expectFieldValue,
+  expectNoCover,
+  expectPanePainted,
+  expectVisibleText,
+  goto,
+  sleep,
+  takeOver,
+} = require("../lib.js")
 
 module.exports = {
   file: "phone-compose-bar.png",
@@ -14,6 +24,12 @@ module.exports = {
     await page.keyboard.type("Add a test for the redirect loop", { delay: 20 })
     await sleep(800)
     await clearToasts(page)
+    // The two surfaces the caption names, the draft in the box, and a terminal
+    // above them with a session on it.
+    await expectNoCover(page)
+    await expectPanePainted(page)
+    await expectVisibleText(page, "Esc", { what: "the terminal-key row" })
+    await expectFieldValue(page, "textarea", "Add a test for the redirect loop")
     // The virtual input is the key rows plus the compose bar: from the top of
     // the first key row to the bottom of the viewport.
     const top = await page.evaluate(() => {

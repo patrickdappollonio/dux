@@ -1,5 +1,15 @@
 // The phone hub: the agents list, which is the screen a phone opens on.
-const { armAttention, assertNeedsAttention, clearToasts, goto, sleep } = require("../lib.js")
+const {
+  ATTENTION_AGENT,
+  ATTENTION_WORD,
+  SIDEBAR_ORDER,
+  armAttention,
+  clearToasts,
+  expectRows,
+  expectStateWord,
+  goto,
+  sleep,
+} = require("../lib.js")
 
 module.exports = {
   file: "phone-hub.png",
@@ -14,7 +24,9 @@ module.exports = {
     await goto(page, "")
     await sleep(1500)
     await clearToasts(page)
-    await assertNeedsAttention(page)
+    // The list the caption counts, and the one row it says is waiting on you.
+    await expectRows(page, SIDEBAR_ORDER)
+    await expectStateWord(page, ATTENTION_AGENT, ATTENTION_WORD)
     // Cut at the last agent row rather than at the viewport: below it is the
     // hub's bottom bar, which the hub's own caption is not about.
     return { x: 0, y: 0, width: 390, height: 529 }
