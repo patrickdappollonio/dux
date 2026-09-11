@@ -1797,10 +1797,10 @@ impl Engine {
         favicon: Option<String>,
     ) -> anyhow::Result<WireStatus> {
         // Empty body: nothing to touch. Skip the disk write and the fan-out.
-        // Quiet on the web: an empty body is a client's own no-op rather than an
-        // act a person took, so no outcome is owed to anyone.
+        // Loud: nothing happened because there was nothing to do, and silence
+        // there is indistinguishable from a silent error.
         if title.is_none() && favicon.is_none() {
-            return Ok(WireStatus::new("info", "Nothing to update.").quiet_web());
+            return Ok(WireStatus::new("info", "Nothing to update."));
         }
         let mut candidate = self.config.clone();
         if let Some(raw) = title {
@@ -1814,8 +1814,8 @@ impl Engine {
         if candidate.server.title == self.config.server.title
             && candidate.server.favicon == self.config.server.favicon
         {
-            // Quiet on the web: the dialog still shows the values it just sent.
-            return Ok(WireStatus::new("info", "Instance identity unchanged.").quiet_web());
+            // Loud: the write did nothing because the state already held.
+            return Ok(WireStatus::new("info", "Instance identity unchanged."));
         }
         // Persist eagerly so a disk failure is surfaced before the endpoint
         // replies; only commit to the running config once the write succeeds.
@@ -2026,10 +2026,9 @@ impl Engine {
             );
         }
         if self.config.ui.agent_sort == sort {
-            // Quiet on the web: the list is already in the order that was asked
-            // for, and the picker shows which one that is.
-            return WireStatus::new("info", format!("Agent sort is already \"{sort}\"."))
-                .quiet_web();
+            // Loud: nothing reorders, because the list is already in the order
+            // that was asked for, and only this says so.
+            return WireStatus::new("info", format!("Agent sort is already \"{sort}\"."));
         }
         self.config.ui.agent_sort = sort.to_string();
         self.config_writer.save_lazy(self.config.clone());
@@ -2173,13 +2172,13 @@ impl Engine {
             // double-click or a kill racing a natural exit is not an error. The
             // agent is detached iff nothing of it is live now.
             let detached = !self.any_tab_active(&session.id);
-            // Quiet on the web: the row already reads as not running.
+            // Loud: the kill did nothing because the state already held, and a
+            // row that looks the same cannot tell that from a silent failure.
             return Ok((
                 WireStatus::new(
                     "info",
                     format!("Agent \"{}\" is not running.", session.display_label()),
-                )
-                .quiet_web(),
+                ),
                 detached,
             ));
         }
@@ -2234,12 +2233,12 @@ impl Engine {
             self.clear_tab_runtime(tab_id);
         }
         if stopped == 0 {
-            // Quiet on the web: the row already reads as not running.
+            // Loud, for the same reason as the kill's own no-op arm: nothing
+            // happened because the state already held.
             return Ok(WireStatus::new(
                 "info",
                 format!("Agent \"{}\" is not running.", session.display_label()),
-            )
-            .quiet_web());
+            ));
         }
         self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
         self.mark_session_desired_running(&session.id, false);
@@ -5980,39 +5979,13 @@ mod tests {
             (status.quiet_on.web, status.message)
         };
 
-        // Sort: the list reorders under the cursor, and so does the no-op.
+        // Sort: the whole left pane reorganises under the cursor. Its no-op arm
+        // speaks instead, and has a test of its own below.
         assert!(
             quiet_of(
                 &mut engine,
                 WireCommand::SetAgentSort {
                     sort: "manual".to_string(),
-                },
-            )
-            .0
-        );
-        assert!(
-            quiet_of(
-                &mut engine,
-                WireCommand::SetAgentSort {
-                    sort: "manual".to_string(),
-                },
-            )
-            .0
-        );
-
-        // The PR banner visibly moves.
-        assert!(quiet_of(&mut engine, WireCommand::TogglePrBannerPosition {}).0);
-
-        // The instance identity's two no-ops: an empty body and an unchanged
-        // write both leave the dialog showing what it already sent. A real write
-        // lands on a tab title and a favicon, about as small as an indicator
-        // gets, so it speaks; see the test below.
-        assert!(
-            quiet_of(
-                &mut engine,
-                WireCommand::SetInstanceIdentity {
-                    title: None,
-                    favicon: None,
                 },
             )
             .0
@@ -6045,6 +6018,100 @@ mod tests {
         assert!(
             !quiet_of(&mut engine, WireCommand::ToggleAlwaysShowTabStrip {}).0,
             "turning it off can make the strip vanish"
+        );
+    }
+
+    /// An action that did nothing because the state already held is confirmed
+    /// on both surfaces: with no feedback there, a silent error and a clean
+    /// no-op look exactly alike. These are the four settings-shaped ones; the
+    /// two agent-shaped ones have tests of their own.
+    #[test]
+    fn a_settings_no_op_says_so_on_both_surfaces() {
+        let (mut engine, _tmp) = test_engine();
+
+        let answer_of = |engine: &mut Engine, cmd: WireCommand| -> (bool, String) {
+            let status = engine
+                .apply_wire(cmd)
+                .expect("apply")
+                .status
+                .expect("a no-op still answers");
+            assert_eq!(status.tone, "info");
+            (status.quiet_on.web, status.message)
+        };
+
+        // An empty instance-identity body: nothing to do at all.
+        let (quiet, message) = answer_of(
+            &mut engine,
+            WireCommand::SetInstanceIdentity {
+                title: None,
+                favicon: None,
+            },
+        );
+        assert!(!quiet, "nothing to update must say so");
+        assert_eq!(message, "Nothing to update.");
+
+        // The same identity written twice: the second write changes nothing.
+        let _ = answer_of(
+            &mut engine,
+            WireCommand::SetInstanceIdentity {
+                title: Some("Workshop".to_string()),
+                favicon: None,
+            },
+        );
+        let (quiet, message) = answer_of(
+            &mut engine,
+            WireCommand::SetInstanceIdentity {
+                title: Some("Workshop".to_string()),
+                favicon: None,
+            },
+        );
+        assert!(!quiet, "an unchanged identity write must say so");
+        assert_eq!(message, "Instance identity unchanged.");
+
+        // The sort the list already uses.
+        let _ = answer_of(
+            &mut engine,
+            WireCommand::SetAgentSort {
+                sort: "name".to_string(),
+            },
+        );
+        let (quiet, message) = answer_of(
+            &mut engine,
+            WireCommand::SetAgentSort {
+                sort: "name".to_string(),
+            },
+        );
+        assert!(!quiet, "a sort that is already active must say so");
+        assert_eq!(message, "Agent sort is already \"name\".");
+    }
+
+    /// Detaching an agent that is not running did nothing because the state
+    /// already held, so it says so rather than leaving an unchanged row to be
+    /// read as a silent failure.
+    #[test]
+    fn apply_wire_detach_session_not_running_says_so() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.sessions.push(session);
+
+        let status = engine
+            .apply_wire(WireCommand::DetachAgent {
+                session_id: "s1".to_string(),
+            })
+            .expect("apply detach")
+            .status
+            .expect("a status");
+
+        assert!(
+            status.message.contains("is not running"),
+            "msg: {}",
+            status.message
+        );
+        assert!(
+            !status.quiet_on.web,
+            "a detach that stopped nothing must say so: {}",
+            status.message
         );
     }
 
@@ -6480,8 +6547,8 @@ mod tests {
             .expect("apply kill");
         let status = outcome.status.expect("a status");
         assert!(
-            status.quiet_on.web,
-            "the row already says the agent is not running: {}",
+            !status.quiet_on.web,
+            "a kill that killed nothing must say so: {}",
             status.message
         );
         assert!(
