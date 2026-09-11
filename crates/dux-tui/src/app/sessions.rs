@@ -7489,6 +7489,30 @@ mod tests {
         );
     }
 
+    /// The other route onto an existing terminal, from the selected agent
+    /// rather than the terminals list, is quiet for the same reason.
+    #[test]
+    fn reopening_an_agents_first_terminal_announces_nothing() {
+        let mut app = app_with_one_session();
+        insert_test_terminal(&mut app, "term-a", 0, Utc::now(), "Terminal 1", None);
+        let before = app.status.most_recent_tui().map(|(_, text)| text);
+
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("the seeded agent's row");
+        app.show_or_open_first_terminal()
+            .expect("open the agent's first terminal");
+
+        assert_eq!(app.active_terminal_id.as_deref(), Some("term-a"));
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            before,
+            "reopening the agent's terminal announced itself"
+        );
+    }
+
     /// Every colour on screen changes, which is the biggest visible change dux
     /// makes, so the theme swap says nothing.
     #[test]

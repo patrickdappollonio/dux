@@ -23991,10 +23991,18 @@ cyan = "#00ffff"
     #[test]
     fn launch_companion_terminal_sets_runtime_state_and_overlay() {
         let mut app = test_app(default_bindings());
+        let before = app.status.most_recent_tui().map(|(_, text)| text);
 
         app.show_companion_terminal()
             .expect("launch companion terminal");
 
+        // The pane launches the shell and streams its prompt, which is the big
+        // and unmistakable change a confirmation is not owed for.
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            before,
+            "the launch announced itself"
+        );
         assert_eq!(
             app.selected_companion_terminal_status(),
             CompanionTerminalStatus::Running
@@ -24009,6 +24017,7 @@ cyan = "#00ffff"
     #[test]
     fn multiple_terminals_per_session() {
         let mut app = test_app(default_bindings());
+        let before = app.status.most_recent_tui().map(|(_, text)| text);
 
         app.show_companion_terminal().expect("first terminal");
         let first_id = app.active_terminal_id.clone().unwrap();
@@ -24021,6 +24030,12 @@ cyan = "#00ffff"
         app.show_companion_terminal().expect("second terminal");
         let second_id = app.active_terminal_id.clone().unwrap();
 
+        // Neither launch announces itself: both stream into the pane.
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            before,
+            "a launch announced itself"
+        );
         assert_ne!(first_id, second_id);
         assert_eq!(app.engine.companion_terminals.len(), 2);
         assert_eq!(app.terminal_items().len(), 2);
@@ -24897,9 +24912,16 @@ cyan = "#00ffff"
         app.selected_terminal_index = 0;
 
         let initial_count = app.engine.companion_terminals.len();
+        let before = app.status.most_recent_tui().map(|(_, text)| text);
         app.spawn_terminal_for_selected_terminal()
             .expect("spawn from terminals pane");
 
+        // Another terminal launches and streams, so nothing is owed.
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, text)| text),
+            before,
+            "the spawn announced itself"
+        );
         assert_eq!(
             app.engine.companion_terminals.len(),
             initial_count + 1,
