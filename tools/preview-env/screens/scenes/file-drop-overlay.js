@@ -28,12 +28,12 @@ module.exports = {
     // at nine tenths opacity, so afterwards the pane's own pixels are the
     // overlay's and say nothing about the session behind it.
     await expectNoCover(page)
-    // A floor of its own, because this pane is deliberately almost empty: the
-    // restart above gives it two seconds so the overlay is not dimming a grey
-    // wall of test batches, and a pane with a couple of lines on it measures
-    // 0.09% here against the 0.4% a minute-old session paints. Low enough to
-    // tell those two from a pane that never painted at all, which is 0.
-    await expectPanePainted(page, { floor: 0.0002 })
+    // Asked once, and deliberately not again at the shutter: by then the overlay
+    // is painted over the terminal at nine tenths opacity, so a second reading
+    // measures the overlay's own pixels rather than the session behind it. The
+    // shared floor applies, because the pane is not as sparse as the two-second
+    // restart suggests: it measures a couple of percent here.
+    await expectPanePainted(page, { once: true })
     // A real drag through CDP: the pane's gate reads dataTransfer.types, which a
     // hand-built DragEvent does not populate the same way.
     const cdp = await page.createCDPSession()
