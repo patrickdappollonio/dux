@@ -29,6 +29,18 @@ case "$fixture" in
     printf '\033]9;Review requested for the retry policy\007'
     while :; do sleep 60; done
     ;;
+  attention-delayed)
+    # The same bell, rung late, for the terminal UI. There the selected agent's
+    # pane is always on screen and looking at a pane is what clears the flag, so
+    # a bell rung at spawn is cleared by the very act of creating the agent. A
+    # browser scene has no such problem (it relights an agent while the page is
+    # on the home screen), which is why only this one waits. Long enough for a
+    # journey to create the agent and move the selection off it.
+    printf '%s\n' 'Implementation is ready for review.'
+    sleep 20
+    printf '\033]9;Review requested for the retry policy\007'
+    while :; do sleep 60; done
+    ;;
   failure)
     printf '%s\n' 'Error: the fixture dependency could not be resolved.' >&2
     exit 2
