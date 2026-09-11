@@ -2301,6 +2301,86 @@ mod tests {
         assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::LOUD);
     }
 
+    /// The two other creates whose whole answer is "a row appeared and its pane
+    /// launched": from a pull request (the row carries the chip) and from an
+    /// existing managed worktree.
+    #[test]
+    fn the_pull_request_and_import_creates_are_quiet_on_both_surfaces() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        assert!(run.failure.is_none(), "creation must succeed");
+        assert!(
+            run.status_message
+                .as_deref()
+                .expect("a create message")
+                .contains("from PR #42")
+        );
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::BOTH);
+
+        let repo = init_test_repo();
+        let run = drive_create_job_run(
+            repo.path(),
+            CreateAgentRequest::ExistingManagedWorktree {
+                project: test_project(repo.path()),
+                worktree_path: repo.path().to_path_buf(),
+                branch_name: "main".to_string(),
+                custom_name: None,
+            },
+        );
+        assert!(run.failure.is_none(), "creation must succeed");
+        assert!(
+            run.status_message
+                .as_deref()
+                .expect("a create message")
+                .starts_with("Imported ")
+        );
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::BOTH);
+    }
+
+    /// The two creates whose sentence carries a copy rule the screen never
+    /// shows: what travelled from the source, and what was deliberately left.
+    #[test]
+    fn the_fork_and_external_worktree_creates_stay_loud() {
+        let repo = init_test_repo();
+        let run = drive_create_job_run(
+            repo.path(),
+            CreateAgentRequest::ForkSession {
+                project: test_project(repo.path()),
+                source_session: Box::new(fork_source_session(repo.path())),
+                source_label: "src agent".to_string(),
+                custom_name: Some("forked-agent".to_string()),
+            },
+        );
+        assert!(run.failure.is_none(), "creation must succeed");
+        assert!(
+            run.status_message
+                .as_deref()
+                .expect("a create message")
+                .contains("gitignored files are not copied")
+        );
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::LOUD);
+
+        let repo = init_test_repo();
+        let run = drive_create_job_run(
+            repo.path(),
+            CreateAgentRequest::ForkExternalWorktree {
+                project: test_project(repo.path()),
+                source_worktree_path: repo.path().to_path_buf(),
+                source_label: "ext worktree".to_string(),
+                source_branch: "main".to_string(),
+                custom_name: Some("external-agent".to_string()),
+            },
+        );
+        assert!(run.failure.is_none(), "creation must succeed");
+        assert!(
+            run.status_message
+                .as_deref()
+                .expect("a create message")
+                .contains("gitignored files are not copied")
+        );
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::LOUD);
+    }
+
     /// A creation note is a fact the screen does not show, so it makes even an
     /// otherwise quiet create speak.
     #[test]

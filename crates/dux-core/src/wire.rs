@@ -9409,6 +9409,46 @@ mod tests {
         assert!(engine.pending_web_launch_ops.is_empty());
     }
 
+    /// The web half of the reconnect path, end to end: the ready's final still
+    /// arrives on the op's key, so the spinner is replaced rather than stranded,
+    /// and it arrives marked quiet so the emitter raises no toast for it.
+    #[test]
+    fn drive_web_launch_followup_carries_the_quiet_flag_on_a_resumed_reconnect() {
+        use crate::engine::AgentLaunchReadyOutcome;
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+
+        let op = crate::engine::status_op("Launching agent \"feat\"...").resolve_in_handler(
+            |o: &crate::engine::LaunchOutcome| crate::engine::launch_outcome_final(o),
+        );
+        let op_id = op.id().to_string();
+        engine.pending_web_launch_ops.insert("s1".into(), op);
+
+        let reaction = EventReaction::AgentLaunchReadyView(Box::new(AgentLaunchReadyOutcome {
+            tab_id: session.slot_tab_id().to_string(),
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            status_quiet: QuietSurfaces::BOTH,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Resumed claude agent \"feat\".".into(),
+            },
+        }));
+
+        let followup = engine.drive_web_launch_followup(&reaction);
+        assert_eq!(followup.statuses.len(), 1);
+        assert_eq!(
+            followup.statuses[0].key.as_deref(),
+            Some(op_id.as_str()),
+            "the final must stay on the op's key so the spinner is retired"
+        );
+        assert!(
+            followup.statuses[0].quiet_on.web,
+            "a resumed pane relaunches and streams, so the browser raises nothing"
+        );
+    }
+
     #[test]
     fn drive_web_launch_followup_clears_busy_on_session_missing() {
         use crate::engine::AgentLaunchReadyOutcome;

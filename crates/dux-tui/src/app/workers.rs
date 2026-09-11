@@ -1580,6 +1580,12 @@ impl App {
         // No op stashed: apply the SAME final anonymously (no key), preserving the
         // pre-op behavior. `reconnect_final` is the single wording source.
         match dux_core::engine::launch_outcome_final(&outcome) {
+            // An extra tab has no op under its id, so this is the only path its
+            // final takes; it honours the surface flag or a quieted launch would
+            // still print here.
+            dux_core::engine::Final::Message { quiet_on, .. } if quiet_on.tui => {
+                self.status.retire_newest_busy();
+            }
             dux_core::engine::Final::Message { tone, text, .. } => {
                 self.status.set(std::time::Instant::now(), None, tone, text);
             }
@@ -2549,6 +2555,76 @@ mod tests {
         assert!(
             app.pending_reconnect_ops.is_empty(),
             "the reconnect op must be consumed on resolution",
+        );
+    }
+
+    /// End to end on the reconnect path: a resumed launch's busy is shown, its
+    /// ready arrives quiet on both surfaces, and the line ends up empty with the
+    /// spinner retired rather than left spinning behind a withheld sentence.
+    #[test]
+    fn a_quiet_reconnect_ready_leaves_the_line_empty_and_the_spinner_gone() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+
+        let op = app.build_reconnect_status_op("Launching agent...".to_string());
+        let op_key = op.id().to_string();
+        app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+        app.pending_reconnect_ops.insert(session.id.clone(), op);
+        assert!(
+            app.status.most_recent_tui().is_some(),
+            "the busy must be on the line before the ready lands"
+        );
+
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::BOTH,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Resumed claude agent.".to_string(),
+            },
+        });
+
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .all(|s| s.key.as_deref() != Some(op_key.as_str())),
+            "the launch spinner must be gone"
+        );
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "a quiet ready must leave the line empty"
+        );
+        assert!(app.pending_reconnect_ops.is_empty());
+    }
+
+    /// The same, on the extra-tab path, which has no op stashed under its id and
+    /// therefore takes the anonymous fallback rather than the keyed resolve.
+    #[test]
+    fn a_quiet_extra_tab_ready_says_nothing_on_the_line_either() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: "tab-extra".to_string(),
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            wants_fullscreen: false,
+            status_quiet: dux_core::statusline::QuietSurfaces::BOTH,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Resumed the claude conversation in this tab.".to_string(),
+            },
+        });
+
+        assert!(
+            app.status.most_recent_tui().is_none(),
+            "the unkeyed fallback must honour the surface flag too"
         );
     }
 
