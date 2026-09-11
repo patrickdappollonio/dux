@@ -21,6 +21,10 @@ SRC="${DUX_SRC:-$(cd "$PREVIEW/../.." && pwd)}"
 SCREENS="$SRC/website/public/screens"
 PORT="${DUX_PORT:-8790}"
 
+# Exported, not just computed: this is derived from DUX_SRC, and without it
+# run.js writes beside its own file instead, so a run against another checkout
+# rewrites the pictures of the one the tool lives in.
+export SCREENS_DIR="$SCREENS"
 export DUX_PORT="$PORT"
 export DUX_SCREENS=1
 export DUX_NO_TAILSCALE=0
@@ -122,16 +126,21 @@ done
 # exits on the count at the very end.
 FAILED=0
 
-# The names of the scenes that refused to write, one per line. A refused scene
+# The scenes that wrote nothing, one "<verdict> <name>" per line. Such a scene
 # leaves the committed PNG exactly as it was, which from the outside is
 # indistinguishable from a scene that came back identical, so the table reads
-# this rather than guessing from the file size.
+# this rather than guessing from the file size. The two verdicts are different
+# news: "refused" is a guard saying the picture would have been wrong, "failed"
+# is the tool not getting there at all.
 REFUSED_FILE=$(mktemp)
 trap 'rm -f "$REFUSED_FILE"' EXIT
 export SCREENS_REFUSED_FILE="$REFUSED_FILE"
 
-refused() {
-  grep -qxF "$1" "$REFUSED_FILE" 2> /dev/null
+verdict_of() {
+  local line
+  line=$(grep -E "^(refused|failed) $1\$" "$REFUSED_FILE" 2> /dev/null | head -1)
+  [ -n "$line" ] || return 1
+  printf '%s\n' "${line%% *}"
 }
 
 # --- The browser scenes -----------------------------------------------------
@@ -163,7 +172,7 @@ if [ "${#WEB[@]}" -gt 0 ]; then
 
   echo ">> shooting ${#WEB[@]} browser scene(s)"
   if ! (cd "$HERE" && node run.js "${WEB[@]}"); then
-    echo ">> some browser scenes failed" >&2
+    echo ">> some browser scenes wrote nothing; the table says which and why" >&2
     FAILED=$((FAILED + 1))
   fi
 fi
@@ -180,9 +189,19 @@ for name in "${TUI[@]}"; do
   [ -n "$crop" ] && args+=(--crop "$crop")
   # stdin closed: the capture runs `docker compose run`, which would otherwise
   # read from this script's own input.
-  if ! "$PREVIEW/tui-shot.sh" "${args[@]}" < /dev/null; then
-    echo ">> $name refused" >&2
-    printf '%s\n' "$name" >> "$REFUSED_FILE"
+  # 65 is the capture refusing itself: the cells do not say what the scene said
+  # they must, or the picture came back empty. Anything else non-zero is the
+  # capture never getting that far.
+  status=0
+  "$PREVIEW/tui-shot.sh" "${args[@]}" < /dev/null || status=$?
+  if [ "$status" -ne 0 ]; then
+    if [ "$status" -eq 65 ]; then
+      echo ">> $name refused" >&2
+      printf 'refused %s\n' "$name" >> "$REFUSED_FILE"
+    else
+      echo ">> $name failed" >&2
+      printf 'failed %s\n' "$name" >> "$REFUSED_FILE"
+    fi
     FAILED=$((FAILED + 1))
   fi
   # tui-shot.sh writes three companions beside the PNG; the docs want the image
@@ -200,8 +219,12 @@ for name in "${WANTED[@]}"; do
   else
     new=0
   fi
-  if refused "$name"; then
-    note="refused; kept the committed picture"
+  if said=$(verdict_of "$name"); then
+    if [ "$said" = "refused" ]; then
+      note="refused; a guard said the picture was wrong, the committed one is kept"
+    else
+      note="failed; the tool did not get there, the committed one is kept"
+    fi
   elif [ "$new" = "0" ]; then
     note="NOT WRITTEN"
   elif [ "$old" = "0" ]; then
@@ -216,5 +239,5 @@ done
 
 if [ "$FAILED" -gt 0 ]; then
   echo >&2
-  fail "$FAILED scene group(s) failed; the table above says which pictures were rewritten"
+  fail "$FAILED scene group(s) wrote nothing; the table above says which pictures were rewritten and why the rest were not"
 fi
