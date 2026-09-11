@@ -97,6 +97,39 @@ describe("docs screenshots", () => {
     expect(malformed).toEqual([]);
   });
 
+  // A scene that drives itself into the wrong state still produces a perfectly
+  // valid PNG, and the tool reported success for three of those at once. Every
+  // scene therefore states what its own picture must contain, and a new scene
+  // cannot ship without saying so.
+  it("guards every browser scene against writing the wrong picture", () => {
+    const guardless: string[] = [];
+    for (const file of scenes) {
+      const stem = file.replace(/\.js$/, "");
+      if (typeof sceneModule(stem) === "function") continue;
+      // Either style of call site: a destructured `expectNoCover(page)` or a
+      // qualified `lib.expectRows(page, ...)`.
+      const source = readFileSync(resolve(scenesDir, file), "utf8");
+      if (!/\bexpect[A-Z]\w*\s*\(/.test(source)) guardless.push(stem);
+    }
+    expect(guardless).toEqual([]);
+  });
+
+  it("names what every terminal UI scene must show", () => {
+    const unstated: string[] = [];
+    for (const file of scenes) {
+      const stem = file.replace(/\.js$/, "");
+      const mod = sceneModule(stem);
+      if (typeof mod !== "function") continue;
+      const expectText = (mod as unknown as { expectText?: unknown }).expectText;
+      const ok =
+        Array.isArray(expectText) &&
+        expectText.length > 0 &&
+        expectText.every((needle) => typeof needle === "string" && needle.length > 0);
+      if (!ok) unstated.push(stem);
+    }
+    expect(unstated).toEqual([]);
+  });
+
   it("shows every screenshot on a docs page", () => {
     const text = docsText();
     const unreferenced = screenshots.filter((png) => !text.includes(`/screens/${png}`));
