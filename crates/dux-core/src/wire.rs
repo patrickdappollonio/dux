@@ -2362,7 +2362,8 @@ impl Engine {
         // No-op when the session already uses the chosen provider (mirrors the
         // TUI's `is_current` short-circuit, which knows the display label).
         if provider == current {
-            // Quiet on the web: the picker stays open on the provider it names.
+            // Loud: the action did nothing because the state already held, and
+            // silence there is indistinguishable from a silent error.
             return Ok(WireStatus::new(
                 "info",
                 format!(
@@ -2370,8 +2371,7 @@ impl Engine {
                     label,
                     provider.as_str(),
                 ),
-            )
-            .quiet_web());
+            ));
         }
 
         let outcome = self.change_agent_provider(session_id, provider.clone())?;
@@ -10039,8 +10039,8 @@ mod tests {
         let status = outcome.status.expect("no-op still surfaces a status");
         assert_eq!(status.tone, "info");
         assert!(
-            status.quiet_on.web,
-            "the picker the click came from already shows the current provider: {}",
+            !status.quiet_on.web,
+            "the swap did nothing because the state already held, so it says so: {}",
             status.message
         );
         assert!(
