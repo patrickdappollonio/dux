@@ -69,6 +69,35 @@ function withTimeout(promise, name) {
   return Promise.race([promise, bell]).finally(() => clearTimeout(timer))
 }
 
+// Park the working cue on one chosen frame before the shutter opens.
+//
+// A still cannot show an animation, so it has to stand for one, and left alone
+// every capture lands on the same unlucky frame: the animations start when the
+// page mounts and the tool shoots at a fixed offset after that, so the docs all
+// came back on the zero-dot step, showing a bare state word with an empty slot
+// beside it that reads as a spacing bug rather than as a cue mid-cycle.
+//
+// The frame chosen is three dots with the glyph and word at full brightness.
+// That pairing is deliberately NOT a real frame of the live cue, where the dots
+// and the dip share one clock and three dots arrive while the word is halfway
+// down: a dimmed word in a still reads as a rendering fault, and what the
+// picture is for is showing the reader what the row says. Applied to every web
+// scene here rather than scene by scene, so a new one cannot forget.
+async function freezeWorkingCue(page) {
+  await page.addStyleTag({
+    content: `
+      .working-dots::after {
+        animation: none !important;
+        clip-path: inset(0 0 0 0) !important;
+      }
+      [class*="animate-working-pulse"] {
+        animation: none !important;
+        opacity: 1 !important;
+      }
+    `,
+  })
+}
+
 async function shootOne(scene) {
   const mobile = scene.mod.viewport === "phone"
   const { browser, page, reassert } = await lib.open({ mobile })
@@ -86,6 +115,7 @@ async function shootOne(scene) {
       scene.name,
     )
     await reassert()
+    await freezeWorkingCue(page)
     const out = path.join(outDir, scene.mod.file)
     await page.screenshot({ path: out, clip })
     return out
