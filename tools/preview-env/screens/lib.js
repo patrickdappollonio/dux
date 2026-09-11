@@ -7,6 +7,7 @@
 // captured black.
 const { spawnSync } = require("child_process")
 const path = require("path")
+const zlib = require("zlib")
 
 // Required inside `open` rather than here: loading a scene must cost nothing but
 // node, so the website suite's loop test can read every scene without this
@@ -330,24 +331,9 @@ async function armAttention(title = ATTENTION_AGENT, timeoutMs = 40000) {
   throw new Error(`${title} never raised its needs-you flag`)
 }
 
-// Refuse to write a picture of the wrong thing: the sidebar row has to say the
-// words the caption promises. Same idea as the take-over card's guard.
-async function assertNeedsAttention(page, title = ATTENTION_AGENT) {
-  const reads = await page.evaluate((name) => {
-    // Bounded by length so this matches the row rather than an ancestor that
-    // happens to contain every row.
-    const row = [...document.querySelectorAll("a, li, div")].find((el) => {
-      const text = el.textContent || ""
-      return text.length < 200 && text.includes(name) && /Needs you/.test(text)
-    })
-    return Boolean(row)
-  }, title)
-  if (!reads) {
-    throw new Error(
-      `the ${title} row does not read "Needs you"; something cleared the flag before this scene`,
-    )
-  }
-}
+// The word that agent's row wears once the flag is up. A scene about the flag
+// asks for it through `expectStateWord`, which is where every guard lives now.
+const ATTENTION_WORD = "Needs you"
 
 // Relight every agent on the fixture its staging asks for. The fixture is read
 // at spawn, so each agent is stopped and started again with the global
@@ -425,12 +411,398 @@ async function openMoreWays(page) {
   await clickBox(page, box, "More ways to create trigger")
 }
 
+// --- Refusal guards --------------------------------------------------------
+//
+// A capture that shows the wrong thing is worse than one that never happened:
+// the docs carry the picture and nobody looks at it again. Three went out at
+// once (a pane stuck on "Attaching…", a blank sidebar, a menu that had closed
+// itself under a take-over card) and the tool reported success for all three,
+// because nothing it did was about what the picture contains.
+//
+// So every scene states what its own caption promises, immediately before the
+// shutter. A guard reads the live page, returns nothing when the promise holds,
+// and throws one sentence naming the scene and what was missing when it does
+// not; run.js writes no PNG for a scene whose guard threw.
+
+// Set by run.js before each scene, so a refusal says which picture was refused
+// without every call site repeating its own name.
+let sceneUnderShot = "scene"
+const setSceneName = (name) => {
+  sceneUnderShot = name
+}
+
+function refuse(what) {
+  throw new Error(`${sceneUnderShot}: ${what}`)
+}
+
+// Whitespace is normalized on both sides: the DOM's own line breaks and the
+// spaces the UI puts between a glyph and its word are not differences a caption
+// is about.
+const flatten = (text) => (text || "").replace(/\s+/g, " ").trim()
+
+// The smallest visible element carrying a phrase, with its width, or null. The
+// smallest one is the one that OWNS the text: every ancestor up to <body>
+// contains it too, and their widths say nothing.
+async function findText(page, text, selector) {
+  return page.evaluate(
+    (sel, needle) => {
+      const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
+      const want = flat(needle)
+      let best = null
+      for (const el of document.querySelectorAll(sel)) {
+        if (!flat(el.textContent).includes(want)) continue
+        const r = el.getBoundingClientRect()
+        if (r.width < 1 || r.height < 1) continue
+        const style = getComputedStyle(el)
+        if (style.visibility === "hidden" || Number(style.opacity) < 0.05) continue
+        const area = r.width * r.height
+        if (!best || area < best.area) best = { area, width: r.width, height: r.height }
+      }
+      return best
+    },
+    selector,
+    text,
+  )
+}
+
+// A phrase the caption promises, visible somewhere on the page.
+async function expectVisibleText(page, text, { selector = "*", what } = {}) {
+  const found = await findText(page, text, selector)
+  if (!found) refuse(`${what || `the words "${flatten(text)}"`} are not on the page`)
+}
+
+// A visible element, named by what it is rather than by its selector: a scene
+// whose subject is a shape (a flap, a pill, an overlay) has no words of its own
+// to look for.
+async function expectVisible(page, selector, what) {
+  const there = await page.evaluate(
+    (sel) =>
+      [...document.querySelectorAll(sel)].some((el) => {
+        const r = el.getBoundingClientRect()
+        if (r.width < 1 || r.height < 1) return false
+        const style = getComputedStyle(el)
+        return style.visibility !== "hidden" && Number(style.opacity) >= 0.05
+      }),
+    selector,
+  )
+  if (!there) refuse(`${what} is not on screen (nothing visible matches ${selector})`)
+}
+
+// A wide strip of chrome rather than an incidental mention of the same words:
+// the sidebar row's pull-request chip carries the banner's own text at chip
+// width, and a picture of the chip is not a picture of the banner.
+async function expectBanner(page, text, { minWidth = 300, what } = {}) {
+  const found = await findText(page, text, "*")
+  if (!found) refuse(`${what || `the banner reading "${flatten(text)}"`} is not on the page`)
+  if (found.width < minWidth) {
+    refuse(
+      `${what || `"${flatten(text)}"`} is only ${Math.round(found.width)}px wide, which is a chip rather than a banner`,
+    )
+  }
+}
+
+// What a field holds, which is its value rather than anything in the DOM.
+async function expectFieldValue(page, selector, text) {
+  const values = await page.evaluate(
+    (sel) => [...document.querySelectorAll(sel)].map((el) => el.value || ""),
+    selector,
+  )
+  if (!values.some((value) => flatten(value).includes(flatten(text)))) {
+    refuse(
+      `no ${selector} holds "${flatten(text)}"; they hold ${JSON.stringify(values.map(flatten))}`,
+    )
+  }
+}
+
+// --- The pane --------------------------------------------------------------
+
+// Every wording the pane's cover can carry. The card is matched on its button
+// rather than on its words, because an agent row's menu carries a sentence
+// about taking over as ordinary prose.
+const COVER_WORDINGS = [
+  ["Attaching…", "the pane is still attaching"],
+  ["Reconnecting…", "the pane is still reconnecting"],
+  ["Launching terminal…", "the terminal has not come up"],
+  ["Connection lost.", "the pane is showing the reconnect box"],
+  ["Still waiting for the terminal's screen.", "the pane is showing the reconnect box"],
+]
+
+// Nothing is covering the terminal. `card` says the scene is ABOUT the take-over
+// card, which is the one picture where the card is the subject rather than the
+// failure; the spinner and the reconnect box are refused there too.
+async function expectNoCover(page, { card = false } = {}) {
+  const state = await page.evaluate((wordings) => {
+    const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
+    const shown = (el) => {
+      const r = el.getBoundingClientRect()
+      if (r.width < 1 || r.height < 1) return false
+      const style = getComputedStyle(el)
+      return style.visibility !== "hidden" && Number(style.opacity) >= 0.05
+    }
+    const body = flat(document.body.textContent)
+    const hit = wordings.find(([words]) => body.includes(flat(words))) || null
+    const takeOver = [...document.querySelectorAll("button")].some(
+      (b) => flat(b.textContent) === "Take over" && shown(b),
+    )
+    // The provider spinner names the provider, so it is a shape rather than a
+    // fixed phrase.
+    const starting = /\bStarting [^…]{1,40}…/.test(body)
+    return { hit, takeOver, starting }
+  }, COVER_WORDINGS)
+  if (state.hit) refuse(`${state.hit[1]} ("${state.hit[0]}" is on the pane)`)
+  if (state.starting) refuse("the provider is still starting; nothing has painted the pane yet")
+  if (state.takeOver && !card) {
+    refuse("the take-over card is covering the terminal; this scene never took the pty")
+  }
+  if (!state.takeOver && card) {
+    refuse("this scene is about the take-over card and there is no card on the pane")
+  }
+}
+
+// The terminal has something on it, measured off the picture rather than
+// inferred from the socket: a pane that attached and then painted nothing is
+// exactly what a screenshot must not carry.
+//
+// The reading is the fraction of pixels that differ from the commonest colour,
+// which for a terminal is its own background. A session that just came up paints
+// a couple of percent of them; a blank pane paints none.
+const PANE_INK_FLOOR = 0.004
+
+async function expectPanePainted(page, { floor = PANE_INK_FLOOR } = {}) {
+  const rect = await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="terminal-container"]')
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    if (r.width < 8 || r.height < 8) return null
+    return {
+      x: Math.max(0, Math.round(r.x)),
+      y: Math.max(0, Math.round(r.y)),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    }
+  })
+  if (!rect) refuse("there is no terminal on this page for the pane guard to read")
+  // Wrapped rather than used as handed over: puppeteer answers with a plain
+  // Uint8Array, which has none of Buffer's readers.
+  const image = decodePng(Buffer.from(await page.screenshot({ clip: rect })))
+  const { ratio, colors } = inkRatio(image)
+  if (ratio < floor) {
+    refuse(
+      `the terminal is blank: ${(ratio * 100).toFixed(3)}% of its pixels differ from the background (${colors} colours), under the ${(floor * 100).toFixed(3)}% floor`,
+    )
+  }
+}
+
+// --- The sidebar -----------------------------------------------------------
+
+// One entry per agent row on screen, in document order. Keyed on the row's own
+// ⋯ trigger, which every agent row has and no other row does, and read off the
+// wrapper that carries the row's highlight.
+async function agentRowTexts(page) {
+  return page.evaluate(() => {
+    const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
+    return [...document.querySelectorAll('[aria-label="Session actions"]')]
+      .map((trigger) => {
+        let row = trigger
+        while (row && !row.classList.contains("group/flat-row")) row = row.parentElement
+        return row
+      })
+      .filter((row) => row && row.getBoundingClientRect().height > 1)
+      .map((row) => flat(row.textContent))
+  })
+}
+
+// The agent rows the caption counts, and no others.
+async function expectRows(page, names) {
+  const rows = await agentRowTexts(page)
+  const missing = names.filter((name) => !rows.some((row) => row.includes(name)))
+  if (missing.length) {
+    refuse(
+      `the sidebar is missing ${missing.join(", ")}; it shows ${rows.length ? rows.map((row) => JSON.stringify(row)).join(" | ") : "no agent rows at all"}`,
+    )
+  }
+  if (rows.length !== names.length) {
+    refuse(
+      `the sidebar shows ${rows.length} agent rows and the picture is of ${names.length}: ${rows.map((row) => JSON.stringify(row)).join(" | ")}`,
+    )
+  }
+}
+
+// The state word on one agent's row, which is what every scene about state is
+// actually about.
+async function expectStateWord(page, name, word) {
+  const rows = await agentRowTexts(page)
+  const row = rows.find((text) => text.includes(name))
+  if (!row) refuse(`there is no ${name} row on this page to read a state word off`)
+  if (!row.includes(word)) {
+    refuse(`the ${name} row does not read "${word}"; it reads ${JSON.stringify(row)}`)
+  }
+}
+
+// --- Menus and dialogs -----------------------------------------------------
+
+// A menu is open, and it is the right one, named by an item only that menu has.
+async function expectMenuOpen(page, itemText) {
+  const menus = await page.evaluate(() => {
+    const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
+    return [...document.querySelectorAll('[role="menu"]')]
+      .filter((el) => el.getBoundingClientRect().height > 1)
+      .map((el) => flat(el.textContent))
+  })
+  if (!menus.length) {
+    refuse(`no menu is open; this scene is a picture of one offering "${itemText}"`)
+  }
+  if (!menus.some((text) => text.includes(flatten(itemText)))) {
+    refuse(
+      `the open menu does not offer "${itemText}": ${menus.map((text) => JSON.stringify(text)).join(" | ")}`,
+    )
+  }
+}
+
+// A dialog is open, and it is the right one, named by its title.
+async function expectDialogOpen(page, title) {
+  const dialogs = await page.evaluate(() => {
+    const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
+    return [...document.querySelectorAll('[role="dialog"]')]
+      .filter((el) => el.getBoundingClientRect().height > 1)
+      .map((el) => flat(el.textContent).slice(0, 200))
+  })
+  if (!dialogs.length) refuse(`no dialog is open; this scene is a picture of "${title}"`)
+  if (!dialogs.some((text) => text.includes(flatten(title)))) {
+    refuse(
+      `the open dialog is not "${title}": ${dialogs.map((text) => JSON.stringify(text)).join(" | ")}`,
+    )
+  }
+}
+
+// --- Reading a capture -----------------------------------------------------
+
+// Enough of a PNG reader to measure one. Chromium writes 8-bit, non-interlaced
+// RGB or RGBA, and a screenshot is the only picture this ever looks at; a
+// dependency for it would have to be installed before a scene could even be
+// loaded, and the website's loop test loads every scene with nothing installed.
+function decodePng(buffer) {
+  if (buffer.readUInt32BE(0) !== 0x89504e47) throw new Error("the capture is not a PNG")
+  let offset = 8
+  let width = 0
+  let height = 0
+  let depth = 0
+  let colorType = 0
+  const parts = []
+  while (offset + 8 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset)
+    const type = buffer.toString("ascii", offset + 4, offset + 8)
+    const body = buffer.subarray(offset + 8, offset + 8 + length)
+    if (type === "IHDR") {
+      width = body.readUInt32BE(0)
+      height = body.readUInt32BE(4)
+      depth = body[8]
+      colorType = body[9]
+      if (body[12] !== 0) throw new Error("the capture is interlaced")
+    } else if (type === "IDAT") {
+      parts.push(body)
+    } else if (type === "IEND") {
+      break
+    }
+    offset += length + 12
+  }
+  if (depth !== 8 || (colorType !== 2 && colorType !== 6)) {
+    throw new Error(`unsupported capture (bit depth ${depth}, colour type ${colorType})`)
+  }
+  const channels = colorType === 6 ? 4 : 3
+  const raw = zlib.inflateSync(Buffer.concat(parts))
+  const stride = width * channels
+  const pixels = Buffer.alloc(height * stride)
+  let previous = Buffer.alloc(stride)
+  for (let y = 0; y < height; y++) {
+    const at = y * (stride + 1)
+    const filter = raw[at]
+    const line = raw.subarray(at + 1, at + 1 + stride)
+    const out = pixels.subarray(y * stride, (y + 1) * stride)
+    for (let i = 0; i < stride; i++) {
+      const a = i >= channels ? out[i - channels] : 0
+      const b = previous[i]
+      const c = i >= channels ? previous[i - channels] : 0
+      let value
+      switch (filter) {
+        case 0:
+          value = line[i]
+          break
+        case 1:
+          value = line[i] + a
+          break
+        case 2:
+          value = line[i] + b
+          break
+        case 3:
+          value = line[i] + ((a + b) >> 1)
+          break
+        case 4: {
+          const p = a + b - c
+          const pa = Math.abs(p - a)
+          const pb = Math.abs(p - b)
+          const pc = Math.abs(p - c)
+          value = line[i] + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c)
+          break
+        }
+        default:
+          throw new Error(`unknown PNG filter ${filter}`)
+      }
+      out[i] = value & 0xff
+    }
+    previous = out
+  }
+  return { width, height, channels, pixels }
+}
+
+// How much of an image is not its own background. Every other pixel in each
+// direction is sampled, which is four times less arithmetic and cannot miss a
+// glyph: text is many pixels wide at this scale.
+const INK_DISTANCE = 24
+
+// The same reading `expectPanePainted` refuses on, off any PNG. Exported so the
+// floor above can be argued with a number rather than adjusted by feel.
+const measureInk = (png) => inkRatio(decodePng(png))
+
+function inkRatio(image) {
+  const { width, height, channels, pixels } = image
+  const counts = new Map()
+  const sample = []
+  for (let y = 0; y < height; y += 2) {
+    for (let x = 0; x < width; x += 2) {
+      const i = y * width * channels + x * channels
+      const key = (pixels[i] << 16) | (pixels[i + 1] << 8) | pixels[i + 2]
+      counts.set(key, (counts.get(key) || 0) + 1)
+      sample.push(key)
+    }
+  }
+  let background = 0
+  let most = -1
+  for (const [key, n] of counts) {
+    if (n > most) {
+      most = n
+      background = key
+    }
+  }
+  const br = background >> 16
+  const bg = (background >> 8) & 0xff
+  const bb = background & 0xff
+  let ink = 0
+  for (const key of sample) {
+    const dr = Math.abs((key >> 16) - br)
+    const dg = Math.abs(((key >> 8) & 0xff) - bg)
+    const db = Math.abs((key & 0xff) - bb)
+    if (Math.max(dr, dg, db) > INK_DISTANCE) ink++
+  }
+  return { ratio: sample.length ? ink / sample.length : 0, colors: counts.size }
+}
+
 module.exports = {
   ATTENTION_AGENT,
+  ATTENTION_WORD,
   BASE,
   SIDEBAR_ORDER,
   armAttention,
-  assertNeedsAttention,
   openMoreWays,
   openNewAgent,
   containerSh,
@@ -443,12 +815,24 @@ module.exports = {
   clearToasts,
   clickLabel,
   clickText,
+  expectBanner,
+  expectDialogOpen,
+  expectFieldValue,
+  expectMenuOpen,
+  expectNoCover,
+  expectPanePainted,
+  expectRows,
+  expectStateWord,
+  expectVisible,
+  expectVisibleText,
   freshen,
   get,
   goto,
+  measureInk,
   open,
   project,
   setFixture,
+  setSceneName,
   sleep,
   takeOver,
 }

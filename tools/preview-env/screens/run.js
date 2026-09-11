@@ -98,6 +98,14 @@ async function freezeWorkingCue(page) {
   })
 }
 
+// A scene that refused is recorded by name, so reshoot.sh's table can say
+// "refused" against the picture that was left alone rather than "same size",
+// which is what an unchanged file looks like from the outside.
+function recordRefusal(name) {
+  const file = process.env.SCREENS_REFUSED_FILE
+  if (file) fs.appendFileSync(file, `${name}\n`)
+}
+
 async function shootOne(scene) {
   const mobile = scene.mod.viewport === "phone"
   const { browser, page, reassert } = await lib.open({ mobile })
@@ -109,6 +117,9 @@ async function shootOne(scene) {
   // disturbed (an attention flag the pane cleared by being looked at) would be
   // undone again by a page still watching that pane.
   const afterShot = []
+  // Named here so a guard's refusal says which picture it refused; the guards
+  // themselves are shared and know nothing about the scene calling them.
+  lib.setSceneName(scene.name)
   try {
     const clip = await withTimeout(
       scene.mod.shoot(page, { open: lib.open, mobile, after: (fn) => afterShot.push(fn) }),
@@ -161,7 +172,10 @@ async function main() {
         const out = await shootOne(scene)
         console.log("wrote", path.basename(out))
       } catch (error) {
-        console.error(`FAILED ${scene.name}: ${String(error)}`)
+        // The sentence, not a stack: a refusal is a statement about what the
+        // page was showing, and it is the whole reason no PNG was written.
+        console.error(`refused ${scene.name}: ${error && error.message ? error.message : error}`)
+        recordRefusal(scene.name)
         failures.push(scene.name)
       }
     }
@@ -175,7 +189,7 @@ async function main() {
     }
   }
   if (failures.length) {
-    console.error(`\n${failures.length} scene(s) failed: ${failures.join(", ")}`)
+    console.error(`\n${failures.length} scene(s) refused: ${failures.join(", ")}`)
     process.exitCode = 1
   }
 }

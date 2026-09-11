@@ -122,6 +122,18 @@ done
 # exits on the count at the very end.
 FAILED=0
 
+# The names of the scenes that refused to write, one per line. A refused scene
+# leaves the committed PNG exactly as it was, which from the outside is
+# indistinguishable from a scene that came back identical, so the table reads
+# this rather than guessing from the file size.
+REFUSED_FILE=$(mktemp)
+trap 'rm -f "$REFUSED_FILE"' EXIT
+export SCREENS_REFUSED_FILE="$REFUSED_FILE"
+
+refused() {
+  grep -qxF "$1" "$REFUSED_FILE" 2> /dev/null
+}
+
 # --- The browser scenes -----------------------------------------------------
 # Only these need the long-running preview. A terminal UI journey brings up a
 # disposable container of its own, so a reshoot of one of those touches neither
@@ -169,7 +181,8 @@ for name in "${TUI[@]}"; do
   # stdin closed: the capture runs `docker compose run`, which would otherwise
   # read from this script's own input.
   if ! "$PREVIEW/tui-shot.sh" "${args[@]}" < /dev/null; then
-    echo ">> $name failed" >&2
+    echo ">> $name refused" >&2
+    printf '%s\n' "$name" >> "$REFUSED_FILE"
     FAILED=$((FAILED + 1))
   fi
   # tui-shot.sh writes three companions beside the PNG; the docs want the image
@@ -187,7 +200,9 @@ for name in "${WANTED[@]}"; do
   else
     new=0
   fi
-  if [ "$new" = "0" ]; then
+  if refused "$name"; then
+    note="refused; kept the committed picture"
+  elif [ "$new" = "0" ]; then
     note="NOT WRITTEN"
   elif [ "$old" = "0" ]; then
     note="new"
