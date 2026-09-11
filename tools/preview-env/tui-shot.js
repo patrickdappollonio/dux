@@ -1,6 +1,18 @@
 const fs = require("fs")
 const path = require("path")
 const puppeteer = require("puppeteer-core")
+const { captureProblem } = require("./screens/ink.js")
+
+// The exit code that means the capture refused itself: the cells do not say what
+// the scene said they must, or the picture came back empty. reshoot.sh reads it
+// to tell a wrong picture from a run that never got there.
+const REFUSED = 65
+
+function refuse(sentence) {
+  const error = new Error(sentence)
+  error.refusal = true
+  throw error
+}
 
 const [ansiPath, pngPath, colsArg, rowsArg, fontPath, cropArg] = process.argv.slice(2)
 const cols = Number(colsArg)
@@ -65,7 +77,7 @@ const MAX_ASPECT = 1.5
 
 function readGrid(textPath) {
   if (!fs.existsSync(textPath)) {
-    throw new Error(`crop needs the capture's text grid, which is missing: ${textPath}`)
+    throw new Error(`the capture's text grid is missing: ${textPath}`)
   }
   return fs
     .readFileSync(textPath, "utf8")
@@ -112,6 +124,53 @@ function sidebarCropCells(grid, cell) {
   }
 
   return { column: 0, row: topRow, columns: endColumn + 1, rows: endRow - topRow + 1 }
+}
+
+// --- What the picture has to say -------------------------------------------
+//
+// A journey that ends on the wrong screen captures a perfectly valid grid of it,
+// so a scene names the words its picture is about. The check lives here rather
+// than in the driver because only this side knows the CROP: a sidebar shot is a
+// picture of thirty columns, and text in the pane beside it is not in it.
+const journeyPath = process.env.DUX_TUI_JOURNEY
+
+function expectedText() {
+  if (!journeyPath || !fs.existsSync(journeyPath)) return null
+  const journey = require(path.resolve(journeyPath))
+  const wanted = journey.expectText
+  return Array.isArray(wanted) && wanted.length ? wanted : null
+}
+
+// The cells the picture will actually contain, as one string.
+function croppedText(grid, cells) {
+  if (!cells) return grid.map((line) => line.join("")).join("\n")
+  return grid
+    .slice(cells.row, cells.row + cells.rows)
+    .map((line) => line.slice(cells.column, cells.column + cells.columns).join(""))
+    .join("\n")
+}
+
+function checkCells(grid, cells) {
+  const wanted = expectedText()
+  if (!wanted) {
+    console.error("no expectText on this journey, so nothing checked what it captured")
+    return
+  }
+  const text = croppedText(grid, cells)
+  const missing = wanted.filter((needle) => !text.includes(needle))
+  if (missing.length) {
+    refuse(
+      `${path.basename(journeyPath)}: the captured picture does not show ` +
+        `${missing.map((needle) => JSON.stringify(needle)).join(", ")}\n\n${text}`,
+    )
+  }
+}
+
+// The artifact, once it exists. Every check above reads the cells; this reads
+// the picture, which is a separate thing that can come back empty on its own.
+function checkPicture(png) {
+  const problem = captureProblem(png)
+  if (problem) refuse(`${path.basename(pngPath)}: ${problem}`)
 }
 
 ;(async () => {
@@ -236,11 +295,13 @@ function sidebarCropCells(grid, cell) {
   }
   await new Promise((resolve) => setTimeout(resolve, 100))
 
+  const grid = readGrid(ansiPath.replace(/\.ansi$/, ".txt"))
   if (cropArg === "sidebar") {
-    const cells = sidebarCropCells(readGrid(ansiPath.replace(/\.ansi$/, ".txt")), {
+    const cells = sidebarCropCells(grid, {
       width: metrics.cellWidth,
       height: metrics.cellHeight,
     })
+    checkCells(grid, cells)
     const clip = {
       x: metrics.left + cells.column * metrics.cellWidth,
       y: metrics.top + cells.row * metrics.cellHeight,
@@ -252,17 +313,33 @@ function sidebarCropCells(grid, cell) {
         throw new Error(`crop ${name} is ${value} CSS px, which is not a whole device pixel`)
       }
     }
-    await page.screenshot({ path: pngPath, clip, captureBeyondViewport: true })
+    // Into memory and read before it is kept, like every browser scene's
+    // capture: a picture nobody looked at is how an empty frame ships.
+    const png = Buffer.from(
+      await page.screenshot({ clip, captureBeyondViewport: true }),
+    )
+    checkPicture(png)
+    fs.writeFileSync(pngPath, png)
     console.log(
       `wrote ${pngPath} (crop: ${cells.columns}x${cells.rows} cells at ${cells.column},${cells.row})`,
     )
   } else {
+    checkCells(grid, null)
     const capture = await page.$("#capture")
-    await capture.screenshot({ path: pngPath, omitBackground: false })
+    const png = Buffer.from(await capture.screenshot({ omitBackground: false }))
+    checkPicture(png)
+    fs.writeFileSync(pngPath, png)
     console.log(`wrote ${pngPath} (${cols}x${rows} cells)`)
   }
   await browser.close()
 })().catch((error) => {
+  // A refusal is a sentence about the picture and carries its own exit code; a
+  // stack is for everything else, which is the tool failing rather than a
+  // verdict on what was captured.
+  if (error && error.refusal) {
+    console.error(error.message)
+    process.exit(REFUSED)
+  }
   console.error(error.stack || String(error))
   process.exit(1)
 })

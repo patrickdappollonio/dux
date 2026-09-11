@@ -98,16 +98,19 @@ async function freezeWorkingCue(page) {
   })
 }
 
-// A scene that refused is recorded by name, so reshoot.sh's table can say
-// "refused" against the picture that was left alone rather than "same size",
-// which is what an unchanged file looks like from the outside.
-function recordRefusal(name) {
+// A scene that did not write is recorded by name and by verdict, so reshoot.sh's
+// table can say which it was against the picture that was left alone rather than
+// "same size", which is what an unchanged file looks like from the outside.
+function recordVerdict(name, verdict) {
   const file = process.env.SCREENS_REFUSED_FILE
-  if (file) fs.appendFileSync(file, `${name}\n`)
+  if (file) fs.appendFileSync(file, `${verdict} ${name}\n`)
 }
 
 async function shootOne(scene) {
   const mobile = scene.mod.viewport === "phone"
+  // Named before anything can throw: an `open` that fails would otherwise be
+  // reported against whichever scene ran before this one.
+  lib.setSceneName(scene.name)
   const { browser, page, reassert } = await lib.open({ mobile })
   // A scene that opens a second browser must not close it before the capture: a
   // second device leaving is a thing the page reacts to, and the take-over card
@@ -117,23 +120,39 @@ async function shootOne(scene) {
   // disturbed (an attention flag the pane cleared by being looked at) would be
   // undone again by a page still watching that pane.
   const afterShot = []
-  // Named here so a guard's refusal says which picture it refused; the guards
-  // themselves are shared and know nothing about the scene calling them.
-  lib.setSceneName(scene.name)
   try {
     const clip = await withTimeout(
       scene.mod.shoot(page, { open: lib.open, mobile, after: (fn) => afterShot.push(fn) }),
       scene.name,
     )
+    // A scene with nothing checking what it produces is the state this whole
+    // mechanism exists to end, and it is checked here rather than by reading the
+    // source, where a mention of a guard in a comment counts as a call.
+    if (lib.recordedGuardCount() === 0) {
+      throw lib.refusal(`${scene.name}: this scene asked no guards, so nothing checked its picture`)
+    }
     await reassert()
     await freezeWorkingCue(page)
+    // The frame is known now, so "on screen" means inside the crop from here on.
+    lib.setCaptureClip(clip)
     // Asked again with the shutter open. The scene's own call is not the last
     // word: these two steps are page events, and a base-ui menu closes on a
     // viewport change, which is how a picture of an open tab menu came back as
     // a bare strip and was written anyway.
     await lib.recheckGuards()
+    // Taken into memory and read before it is kept. A pure black frame was
+    // written and reported as a success with every guard passing twice, because
+    // nothing ever looked at the artifact.
+    //
+    // The discarded first capture is the fix for the mechanism behind that
+    // frame: a scene that never screenshots while it runs (no terminal, so no
+    // pane guard) can have its first one come back before the compositor has
+    // anything to hand over.
+    await page.screenshot({ clip, captureBeyondViewport: false })
+    const png = Buffer.from(await page.screenshot({ clip, captureBeyondViewport: false }))
+    lib.expectCapturePainted(png)
     const out = path.join(outDir, scene.mod.file)
-    await page.screenshot({ path: out, clip })
+    fs.writeFileSync(out, png)
     return out
   } finally {
     await browser.close()
@@ -179,11 +198,17 @@ async function main() {
       } catch (error) {
         // The sentence, not a stack: a refusal is a statement about what the
         // page was showing, and it is the whole reason no PNG was written. A
-        // guard has already named the scene; anything else thrown has not.
+        // guard has already named the scene; anything else thrown has not, and
+        // it is the tool failing rather than a verdict on the picture.
         const said = error && error.message ? error.message : String(error)
-        console.error(said.startsWith(`${scene.name}:`) ? `refused ${said}` : `refused ${scene.name}: ${said}`)
-        recordRefusal(scene.name)
-        failures.push(scene.name)
+        const verdict = lib.isRefusal(error) ? "refused" : "failed"
+        console.error(
+          said.startsWith(`${scene.name}:`)
+            ? `${verdict} ${said}`
+            : `${verdict} ${scene.name}: ${said}`,
+        )
+        recordVerdict(scene.name, verdict)
+        failures.push(`${scene.name} (${verdict})`)
       }
     }
   } finally {
@@ -196,7 +221,7 @@ async function main() {
     }
   }
   if (failures.length) {
-    console.error(`\n${failures.length} scene(s) refused: ${failures.join(", ")}`)
+    console.error(`\n${failures.length} scene(s) wrote nothing: ${failures.join(", ")}`)
     process.exitCode = 1
   }
 }

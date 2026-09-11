@@ -7,7 +7,7 @@
 // captured black.
 const { spawnSync } = require("child_process")
 const path = require("path")
-const zlib = require("zlib")
+const { captureProblem, decodePng, inkRatio, measureInk } = require("./ink.js")
 
 // Required inside `open` rather than here: loading a scene must cost nothing but
 // node, so the website suite's loop test can read every scene without this
@@ -441,6 +441,8 @@ let sceneUnderShot = "scene"
 const setSceneName = (name) => {
   sceneUnderShot = name
   guardReplay = []
+  guardsAsked = 0
+  captureClip = null
 }
 
 function refuse(what) {
@@ -448,8 +450,20 @@ function refuse(what) {
   // and broke by the time the shutter opened is a different bug from one that
   // never got there, and they read identically without this.
   const when = replaying ? " (asked again with the shutter open)" : ""
-  throw new Error(`${sceneUnderShot}: ${what}${when}`)
+  throw refusal(`${sceneUnderShot}: ${what}${when}`)
 }
+
+// A refusal is a statement about the picture; everything else that can go wrong
+// here (no Chromium, a selector that never appeared, a socket that died) is the
+// tool failing rather than the picture being wrong, and a person reading the
+// table needs to know which they are looking at.
+function refusal(sentence) {
+  const error = new Error(sentence)
+  error.refusal = true
+  return error
+}
+
+const isRefusal = (error) => Boolean(error && error.refusal)
 
 // A guard is a question asked of a live page, and a page settles: a replay
 // arrives, a menu finishes opening, a fixture prints its first line. So a guard
@@ -476,16 +490,31 @@ async function settle(probe) {
 // parking the animations) are page events a menu closes on. That cost a picture
 // of an open tab menu, which came back as a bare strip and passed.
 let guardReplay = []
+let guardsAsked = 0
 let replaying = false
 
 // Wraps a guard so calling it also records the question. The recording is
 // suppressed while replaying, or a replay would grow the list it walks.
+//
+// `once: true` in a guard's options keeps it out of the replay, for the rare
+// question whose answer is SUPPOSED to change before the shutter: a scene that
+// reads the terminal and then covers it with an overlay would otherwise be asked
+// about the terminal again and shown the overlay's pixels.
 function recorded(check) {
   return async (...args) => {
     await check(...args)
-    if (!replaying) guardReplay.push(() => check(...args))
+    const options = args[args.length - 1]
+    const once = Boolean(options && typeof options === "object" && options.once)
+    if (replaying) return
+    guardsAsked += 1
+    if (!once) guardReplay.push(() => check(...args))
   }
 }
+
+// How many questions this scene asked, the once-only ones included. Zero is a
+// scene with nothing checking what it produces, which run.js refuses: a source
+// scan for the word cannot tell a call from a mention of one in a comment.
+const recordedGuardCount = () => guardsAsked
 
 async function recheckGuards() {
   replaying = true
@@ -501,36 +530,72 @@ async function recheckGuards() {
 // is about.
 const flatten = (text) => (text || "").replace(/\s+/g, " ").trim()
 
-// The smallest visible element carrying a phrase, with its width, or null. The
-// smallest one is the one that OWNS the text: every ancestor up to <body>
-// contains it too, and their widths say nothing.
-async function findText(page, text, selector) {
+// The frame the picture is cut from, set by run.js once the scene has handed
+// back its clip and null while the scene is still driving. "On screen" in a
+// guard means IN THE PICTURE, and a crop is most of the difference: an element
+// sitting happily in the viewport but outside the crop is not in the picture the
+// caption is about, and the viewport itself is the frame until the crop is
+// known.
+let captureClip = null
+const setCaptureClip = (clip) => {
+  captureClip = clip || null
+}
+
+// Every visible element matching a selector (and, when given, carrying a
+// phrase), measured and clipped to the frame. One scan behind the three text
+// guards, so "visible" means the same thing to all of them.
+//
+// The rule is a real overlap rather than containment: an element wider than the
+// crop (a diff editor the crop cuts a band out of) is in the picture, while one
+// scrolled out of the viewport overlaps it by nothing at all.
+const MIN_VISIBLE_PX = 4
+
+async function visibleMatches(page, { selector = "*", needle = null, slack = null } = {}) {
+  const frame = captureClip
   return page.evaluate(
-    (sel, needle) => {
+    (sel, want, extra, box, minimum) => {
       const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
-      const want = flat(needle)
-      let best = null
+      const phrase = want === null ? null : flat(want)
+      const clip = box || { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }
+      const out = []
       for (const el of document.querySelectorAll(sel)) {
-        if (!flat(el.textContent).includes(want)) continue
+        if (phrase !== null) {
+          const own = flat(el.textContent)
+          if (!own.includes(phrase)) continue
+          if (extra !== null && own.length > phrase.length + extra) continue
+        }
         const r = el.getBoundingClientRect()
         if (r.width < 1 || r.height < 1) continue
         const style = getComputedStyle(el)
         if (style.visibility === "hidden" || Number(style.opacity) < 0.05) continue
-        const area = r.width * r.height
-        if (!best || area < best.area) best = { area, width: r.width, height: r.height }
+        const overlapWidth = Math.min(r.right, clip.x + clip.width) - Math.max(r.x, clip.x)
+        const overlapHeight = Math.min(r.bottom, clip.y + clip.height) - Math.max(r.y, clip.y)
+        if (overlapWidth < minimum || overlapHeight < minimum) continue
+        out.push({ width: r.width, height: r.height, area: r.width * r.height })
       }
-      return best
+      return out
     },
     selector,
-    text,
+    needle,
+    slack,
+    frame,
+    MIN_VISIBLE_PX,
   )
 }
 
-// A phrase the caption promises, visible somewhere on the page.
+// The smallest visible element carrying a phrase, or null. The smallest one is
+// the one that OWNS the text: every ancestor up to <body> contains it too, and
+// their widths say nothing.
+async function findText(page, text, selector) {
+  const matches = await visibleMatches(page, { selector, needle: text })
+  return matches.reduce((best, one) => (!best || one.area < best.area ? one : best), null)
+}
+
+// A phrase the caption promises, in the picture.
 async function expectVisibleText(page, text, { selector = "*", what } = {}) {
   await settle(async () => {
     const found = await findText(page, text, selector)
-    return found ? null : `${what || `the text "${flatten(text)}"`} is not on the page`
+    return found ? null : `${what || `the text "${flatten(text)}"`} is not in the picture`
   })
 }
 
@@ -539,17 +604,10 @@ async function expectVisibleText(page, text, { selector = "*", what } = {}) {
 // to look for.
 async function expectVisible(page, selector, what) {
   await settle(async () => {
-    const there = await page.evaluate(
-      (sel) =>
-        [...document.querySelectorAll(sel)].some((el) => {
-          const r = el.getBoundingClientRect()
-          if (r.width < 1 || r.height < 1) return false
-          const style = getComputedStyle(el)
-          return style.visibility !== "hidden" && Number(style.opacity) >= 0.05
-        }),
-      selector,
-    )
-    return there ? null : `${what} is not on screen (nothing visible matches ${selector})`
+    const matches = await visibleMatches(page, { selector })
+    return matches.length
+      ? null
+      : `${what} is not in the picture (nothing visible matches ${selector} inside the frame)`
   })
 }
 
@@ -568,27 +626,9 @@ async function expectBanner(page, text, { minWidth = 300, selector = "*", what }
 }
 
 async function bannerProblem(page, text, minWidth, selector, what) {
-  const found = await page.evaluate(
-    (sel, needle, slack) => {
-      const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
-      const want = flat(needle)
-      let best = null
-      for (const el of document.querySelectorAll(sel)) {
-        const own = flat(el.textContent)
-        if (!own.includes(want) || own.length > want.length + slack) continue
-        const r = el.getBoundingClientRect()
-        if (r.width < 1 || r.height < 1) continue
-        const style = getComputedStyle(el)
-        if (style.visibility === "hidden" || Number(style.opacity) < 0.05) continue
-        if (!best || r.width > best.width) best = { width: r.width }
-      }
-      return best
-    },
-    selector,
-    text,
-    BANNER_SLACK,
-  )
-  if (!found) return `${what || `the banner reading "${flatten(text)}"`} is not on the page`
+  const matches = await visibleMatches(page, { selector, needle: text, slack: BANNER_SLACK })
+  const found = matches.reduce((best, one) => (!best || one.width > best.width ? one : best), null)
+  if (!found) return `${what || `the banner reading "${flatten(text)}"`} is not in the picture`
   if (found.width < minWidth) {
     return `${what || `"${flatten(text)}"`} is only ${Math.round(found.width)}px wide, which is a chip rather than a banner`
   }
@@ -636,18 +676,45 @@ async function coverProblem(page, card) {
       const style = getComputedStyle(el)
       return style.visibility !== "hidden" && Number(style.opacity) >= 0.05
     }
-    const body = flat(document.body.textContent)
-    const hit = wordings.find(([words]) => body.includes(flat(words))) || null
-    const takeOver = [...document.querySelectorAll("button")].some(
-      (b) => flat(b.textContent) === "Take over" && shown(b),
-    )
+    // Scoped to the pane rather than to the whole document: a toast, a tooltip
+    // or a menu elsewhere on the page can carry any of these words, and a guard
+    // that refuses a perfectly good picture over one is a guard people turn off.
+    // The pane's own wrapper is the scope where there is one; where the pane is
+    // not mounted at all (a dormant card, a not-found screen, a phone) the
+    // document is, because then the thing being looked for IS what replaced it.
+    const container = document.querySelector('[data-testid="terminal-container"]')
+    const root =
+      document.querySelector('[data-testid="terminal-pane"]') ||
+      (container && container.closest(".group.relative")) ||
+      document.body
+    const text = flat(root.textContent)
+    const hit = wordings.find(([words]) => text.includes(flat(words))) || null
+    const button = (label) =>
+      [...root.querySelectorAll("button")].some((b) => flat(b.textContent) === label && shown(b))
     // The provider spinner names the provider, so it is a shape rather than a
     // fixed phrase.
-    const starting = /\bStarting [^…]{1,40}…/.test(body)
-    return { hit, takeOver, starting }
+    const starting = /\bStarting [^…]{1,40}…/.test(text)
+    return {
+      hit,
+      starting,
+      takeOver: button("Take over"),
+      // A tab with no process behind it. Both surfaces that say so carry this
+      // one button, which is also the only way out of them.
+      dormant: button("Start session"),
+      // The truthful screen for an address naming an agent that is gone. It is
+      // a correct render of a wrong scene: every guard about a pane passes
+      // because there is no pane.
+      notFound: text.includes("Agent not found"),
+    }
   }, COVER_WORDINGS)
   if (state.hit) return `${state.hit[1]} ("${state.hit[0]}" is on the pane)`
   if (state.starting) return "the provider is still starting; nothing has painted the pane yet"
+  if (state.notFound) {
+    return "the pane is the not-found screen; this scene is addressing an agent that is not in the workspace"
+  }
+  if (state.dormant) {
+    return "the tab is dormant and the pane is its start-session card, not a session"
+  }
   if (state.takeOver && !card) {
     return "the take-over card is covering the terminal; this scene never took the pty"
   }
@@ -692,6 +759,18 @@ async function paneProblem(page, floor) {
   return `the terminal is blank: ${(ratio * 100).toFixed(3)}% of its pixels differ from the background (${colors} colours), under the ${(floor * 100).toFixed(3)}% floor`
 }
 
+// --- The artifact ----------------------------------------------------------
+
+// The picture itself, once it exists. Every other guard reads the live page,
+// and what gets kept is a separate thing: a pure black frame was written and
+// reported as a success with every guard passing twice over, because nothing
+// ever looked at the file. This is the last word before it is kept, and it is
+// deliberately a weak claim, that the picture is not empty.
+function expectCapturePainted(png, options) {
+  const problem = captureProblem(png, options)
+  if (problem) refuse(problem)
+}
+
 // --- The sidebar -----------------------------------------------------------
 
 // One entry per agent row on screen, in document order. Keyed on the row's own
@@ -711,16 +790,19 @@ async function agentRowTexts(page) {
   })
 }
 
-// The agent rows the caption counts, and no others.
+// The agent rows the caption counts, in the order it counts them. Order is part
+// of the picture: the staging pins one deliberately, and a sidebar that came
+// back sorted some other way is a different screenshot whatever rows it holds.
 async function expectRows(page, names) {
   await settle(async () => {
     const rows = await agentRowTexts(page)
-    const missing = names.filter((name) => !rows.some((row) => row.includes(name)))
-    if (missing.length) {
-      return `the sidebar is missing ${missing.join(", ")}; it shows ${rows.length ? rows.map((row) => JSON.stringify(row)).join(" | ") : "no agent rows at all"}`
-    }
+    const shown = rows.length ? rows.map((row) => JSON.stringify(row)).join(" | ") : "no agent rows at all"
     if (rows.length !== names.length) {
-      return `the sidebar shows ${rows.length} agent rows and the picture is of ${names.length}: ${rows.map((row) => JSON.stringify(row)).join(" | ")}`
+      return `the sidebar shows ${rows.length} agent rows and the picture is of ${names.length}: ${shown}`
+    }
+    const wrong = names.findIndex((name, at) => !rows[at].includes(name))
+    if (wrong !== -1) {
+      return `the sidebar's row ${wrong + 1} is not ${names[wrong]}; the rows read ${shown}`
     }
     return null
   })
@@ -770,128 +852,6 @@ async function expectDialogOpen(page, title) {
   })
 }
 
-// --- Reading a capture -----------------------------------------------------
-
-// Enough of a PNG reader to measure one. Chromium writes 8-bit, non-interlaced
-// RGB or RGBA, and a screenshot is the only picture this ever looks at; a
-// dependency for it would have to be installed before a scene could even be
-// loaded, and the website's loop test loads every scene with nothing installed.
-function decodePng(buffer) {
-  if (buffer.readUInt32BE(0) !== 0x89504e47) throw new Error("the capture is not a PNG")
-  let offset = 8
-  let width = 0
-  let height = 0
-  let depth = 0
-  let colorType = 0
-  const parts = []
-  while (offset + 8 <= buffer.length) {
-    const length = buffer.readUInt32BE(offset)
-    const type = buffer.toString("ascii", offset + 4, offset + 8)
-    const body = buffer.subarray(offset + 8, offset + 8 + length)
-    if (type === "IHDR") {
-      width = body.readUInt32BE(0)
-      height = body.readUInt32BE(4)
-      depth = body[8]
-      colorType = body[9]
-      if (body[12] !== 0) throw new Error("the capture is interlaced")
-    } else if (type === "IDAT") {
-      parts.push(body)
-    } else if (type === "IEND") {
-      break
-    }
-    offset += length + 12
-  }
-  if (depth !== 8 || (colorType !== 2 && colorType !== 6)) {
-    throw new Error(`unsupported capture (bit depth ${depth}, colour type ${colorType})`)
-  }
-  const channels = colorType === 6 ? 4 : 3
-  const raw = zlib.inflateSync(Buffer.concat(parts))
-  const stride = width * channels
-  const pixels = Buffer.alloc(height * stride)
-  let previous = Buffer.alloc(stride)
-  for (let y = 0; y < height; y++) {
-    const at = y * (stride + 1)
-    const filter = raw[at]
-    const line = raw.subarray(at + 1, at + 1 + stride)
-    const out = pixels.subarray(y * stride, (y + 1) * stride)
-    for (let i = 0; i < stride; i++) {
-      const a = i >= channels ? out[i - channels] : 0
-      const b = previous[i]
-      const c = i >= channels ? previous[i - channels] : 0
-      let value
-      switch (filter) {
-        case 0:
-          value = line[i]
-          break
-        case 1:
-          value = line[i] + a
-          break
-        case 2:
-          value = line[i] + b
-          break
-        case 3:
-          value = line[i] + ((a + b) >> 1)
-          break
-        case 4: {
-          const p = a + b - c
-          const pa = Math.abs(p - a)
-          const pb = Math.abs(p - b)
-          const pc = Math.abs(p - c)
-          value = line[i] + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c)
-          break
-        }
-        default:
-          throw new Error(`unknown PNG filter ${filter}`)
-      }
-      out[i] = value & 0xff
-    }
-    previous = out
-  }
-  return { width, height, channels, pixels }
-}
-
-// How much of an image is not its own background. Every other pixel in each
-// direction is sampled, which is four times less arithmetic and cannot miss a
-// glyph: text is many pixels wide at this scale.
-const INK_DISTANCE = 24
-
-// The same reading `expectPanePainted` refuses on, off any PNG. Exported so the
-// floor above can be argued with a number rather than adjusted by feel.
-const measureInk = (png) => inkRatio(decodePng(png))
-
-function inkRatio(image) {
-  const { width, height, channels, pixels } = image
-  const counts = new Map()
-  const sample = []
-  for (let y = 0; y < height; y += 2) {
-    for (let x = 0; x < width; x += 2) {
-      const i = y * width * channels + x * channels
-      const key = (pixels[i] << 16) | (pixels[i + 1] << 8) | pixels[i + 2]
-      counts.set(key, (counts.get(key) || 0) + 1)
-      sample.push(key)
-    }
-  }
-  let background = 0
-  let most = -1
-  for (const [key, n] of counts) {
-    if (n > most) {
-      most = n
-      background = key
-    }
-  }
-  const br = background >> 16
-  const bg = (background >> 8) & 0xff
-  const bb = background & 0xff
-  let ink = 0
-  for (const key of sample) {
-    const dr = Math.abs((key >> 16) - br)
-    const dg = Math.abs(((key >> 8) & 0xff) - bg)
-    const db = Math.abs((key & 0xff) - bb)
-    if (Math.max(dr, dg, db) > INK_DISTANCE) ink++
-  }
-  return { ratio: sample.length ? ink / sample.length : 0, colors: counts.size }
-}
-
 module.exports = {
   ATTENTION_AGENT,
   ATTENTION_WORD,
@@ -912,6 +872,9 @@ module.exports = {
   clickText,
   // Every guard goes out recorded, so a scene's questions are asked again with
   // the shutter open rather than only where the scene wrote them.
+  // Not recorded: it reads the artifact rather than the page, and it runs once,
+  // when there is an artifact to read.
+  expectCapturePainted,
   expectBanner: recorded(expectBanner),
   expectDialogOpen: recorded(expectDialogOpen),
   expectFieldValue: recorded(expectFieldValue),
@@ -926,9 +889,13 @@ module.exports = {
   freshen,
   get,
   goto,
+  isRefusal,
   measureInk,
+  refusal,
   open,
   project,
+  recordedGuardCount,
+  setCaptureClip,
   setFixture,
   setSceneName,
   sleep,

@@ -106,7 +106,10 @@ else
   sg docker -c "cd '$HERE' && set -- $quoted && export DUX_BIN=\"\$1\" DUX_TUI_OUTPUT_DIR=\"\$2\" DUX_TUI_JOURNEY=\"\$3\" && docker compose --profile capture build tui-shot && docker compose --profile capture run --rm --no-deps -e DUX_TUI_COLS=\"\$4\" -e DUX_TUI_ROWS=\"\$5\" -e DUX_TUI_THEME=\"\$6\" -e DUX_TUI_OUTPUT_STEM=\"\$7\" -e DUX_PREVIEW_REVISION=\"\$8\" -e DUX_TUI_JOURNEY_NAME=\"\$9\" tui-shot"
 fi
 
-CHROME="$CHROME_BIN" node "$HERE/tui-shot.js" \
+# DUX_TUI_JOURNEY reaches the rasterizer too: it is the side that knows the crop,
+# so it is where a scene's expectText is checked against the cells the picture
+# will actually contain.
+CHROME="$CHROME_BIN" DUX_TUI_JOURNEY="$JOURNEY" node "$HERE/tui-shot.js" \
   "$OUTPUT_DIR/$OUTPUT_STEM.ansi" "$OUT" "$COLS" "$ROWS" \
   "$SRC/crates/dux-web/web/src/assets/fonts/dux-mono-regular.woff2" $CROP
 
