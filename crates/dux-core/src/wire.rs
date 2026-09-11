@@ -916,7 +916,8 @@ pub struct WireStatus {
     /// recolouring, a full-screen view opening or closing. A destructive act, a
     /// change landing on a small indicator, an action that did nothing because
     /// the state already held, and an action whose effect can look like a no-op
-    /// are always confirmed. A warning or an error stays loud whatever this says.
+    /// are always confirmed. Only an INFO is ever withheld: a warning, an error
+    /// and a spinner stay loud whatever this says.
     #[serde(
         default,
         rename = "quiet",

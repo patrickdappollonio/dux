@@ -33,8 +33,13 @@ pub enum StatusScope {
 /// not. Every quieted status still rides back to its caller as the command's
 /// answer, so the sentence survives for an API client and for the log.
 ///
-/// A quieted status that carries a KEY still retires the operation behind it on
-/// both surfaces: the spinner goes away, and only the final sentence is withheld.
+/// Only an INFO is ever withheld. A warning, an error and a spinner all report
+/// something the screen cannot be standing in for, so both gates ignore this on
+/// them. A quieted INFO that carries a KEY still retires the operation behind
+/// it: the spinner goes away and only the sentence is withheld, and when the
+/// busy refuses to go (a sticky one waits for the user) the sentence is shown
+/// instead, because a spinner nothing retires is worse than a message nobody
+/// needed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QuietSurfaces {
     /// Withheld from the web's toasts.

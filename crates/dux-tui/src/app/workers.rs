@@ -456,14 +456,22 @@ impl App {
                 quiet_on,
                 ..
             }) => {
-                if quiet_on.tui {
-                    // Withheld from the line, but a keyed final still has a
-                    // spinner to take down: the sentence goes, the busy must not
-                    // be stranded behind it.
-                    if let Some(key) = key {
-                        self.status.clear(&key, None);
+                // Only an INFO may be withheld: a warning, an error and a
+                // spinner all report something the screen cannot be standing in
+                // for, whatever the site asked for.
+                if quiet_on.tui && tone == StatusTone::Info {
+                    // A keyed final still has a spinner to take down: the
+                    // sentence goes, the busy must not be stranded behind it.
+                    // A sticky busy refuses to go, and there the sentence is
+                    // shown instead, because a spinner nothing retires is worse
+                    // than a line nobody needed.
+                    let stranded = match &key {
+                        Some(key) => !self.status.clear(key, None),
+                        None => false,
+                    };
+                    if !stranded {
+                        return;
                     }
-                    return;
                 }
                 // When a `StatusUpdate` carries a key (keyed operation), write it
                 // into the named slot so `most_recent_tui` can pick it up.
@@ -2188,6 +2196,54 @@ mod tests {
             "a quiet keyed final must take its spinner down"
         );
         assert!(app.status.most_recent_tui().is_none());
+    }
+
+    /// Only an info may be withheld. A warning reports something the screen
+    /// cannot be standing in for, so the flag does not apply to it.
+    #[test]
+    fn a_warning_marked_quiet_still_takes_the_line() {
+        use crate::statusline::StatusTone;
+        use dux_core::statusline::QuietSurfaces;
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+
+        app.apply_reaction(EventReaction::Status(
+            StatusUpdate::warning("git is failing").quiet_on(QuietSurfaces::BOTH),
+        ));
+
+        let (tone, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(tone, StatusTone::Warning);
+        assert_eq!(message, "git is failing");
+    }
+
+    /// A sticky busy waits for the user and refuses to be retired, so a quiet
+    /// final against one is shown rather than withheld: a spinner nothing
+    /// retires is worse than a line nobody needed.
+    #[test]
+    fn a_quiet_final_that_cannot_retire_its_busy_is_shown_instead() {
+        use crate::statusline::StatusTone;
+        use dux_core::statusline::QuietSurfaces;
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.status.set_scoped(
+            std::time::Instant::now(),
+            Some("launch:/a".to_string()),
+            StatusTone::Busy,
+            "Launching...",
+            dux_core::statusline::StatusScope::All,
+            true,
+        );
+
+        app.apply_reaction(EventReaction::Status(
+            StatusUpdate::keyed("launch:/a", StatusTone::Info, "launched")
+                .quiet_on(QuietSurfaces::BOTH),
+        ));
+
+        let (_, message) = app
+            .status
+            .most_recent_tui()
+            .expect("the final must be shown rather than strand the spinner");
+        assert_eq!(message, "launched");
     }
 
     #[test]

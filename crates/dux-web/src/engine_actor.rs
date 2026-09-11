@@ -2754,21 +2754,31 @@ impl StatusEmitter {
         &mut self,
         status: WireStatus,
     ) -> Result<usize, broadcast::error::SendError<WireStatus>> {
+        let tone = StatusTone::from_wire(&status.tone);
         // A status quiet on the web is the command's answer and not a
         // notification: it already rode back to its caller in the outcome, so it
         // must not enter the controller (which would replay it to every joining
         // tab) and must not be broadcast. This is the ONE gate, so a site
         // marking a status quiet cannot be undone by whichever path it happens
         // to travel.
-        if status.quiet_on.web {
+        //
+        // Only an INFO may be withheld. A warning, an error and a spinner all
+        // report something the screen cannot be standing in for, whatever the
+        // site asked for.
+        if status.quiet_on.web && tone == StatusTone::Info {
             // A keyed final still has a spinner to take down: withholding the
-            // sentence must not strand the busy it was the answer to.
-            if let Some(key) = status.key.clone() {
-                self.clear(key);
+            // sentence must not strand the busy it was the answer to. When the
+            // busy refuses to go (a sticky one waits for the user), the sentence
+            // is shown instead, because a spinner nothing retires is worse than
+            // a toast nobody needed.
+            let stranded = match status.key.clone() {
+                Some(key) => !self.clear(key),
+                None => false,
+            };
+            if !stranded {
+                return Ok(0);
             }
-            return Ok(0);
         }
-        let tone = StatusTone::from_wire(&status.tone);
         let generation = self.controller.set_scoped(
             Instant::now(),
             status.key.clone(),
@@ -2788,13 +2798,18 @@ impl StatusEmitter {
     /// key onto `clear_tx` so the WS forwarder sends a `StatusCleared` frame,
     /// refresh the snapshot). Guards with the generation stored when the busy
     /// was emitted so a concurrent in-flight cannot be prematurely dismissed.
-    fn clear(&mut self, key: String) {
+    /// Returns whether the entry actually went: the controller refuses to
+    /// retire a sticky one, and a caller that was counting on this to take a
+    /// spinner down has to know it did not.
+    fn clear(&mut self, key: String) -> bool {
         let generation = self.generations.get(&key).copied();
         if self.controller.clear(&key, generation) {
             self.generations.remove(&key);
             let _ = self.snapshot_tx.send(self.controller.snapshot());
             let _ = self.clear_tx.send(Some(key));
+            return true;
         }
+        false
     }
 
     /// Expire timed-out entries: upgrade a stale Busy→Warning and drop finals
@@ -4618,6 +4633,55 @@ mod tests {
         assert_eq!(
             clear_rx.try_recv().expect("the spinner is taken down"),
             Some("launch:a".to_string())
+        );
+    }
+
+    /// Only an info may be withheld. A warning reports something the screen
+    /// cannot be standing in for, so the flag does not apply to it.
+    #[test]
+    fn a_warning_marked_quiet_is_still_broadcast() {
+        let (status_tx, mut status_rx) = broadcast::channel(8);
+        let (clear_tx, _clear_rx) = broadcast::channel(8);
+        let (snapshot_tx, snapshot_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+
+        let mut warning = WireStatus::new("warning", "git is failing");
+        warning.quiet_on = QuietSurfaces::BOTH;
+        let _ = status.send(warning);
+
+        assert_eq!(
+            status_rx
+                .try_recv()
+                .expect("a warning is never withheld")
+                .message,
+            "git is failing"
+        );
+        assert!(!snapshot_rx.borrow().is_empty());
+    }
+
+    /// A sticky busy waits for the user and refuses to be retired, so a quiet
+    /// final against one is shown rather than withheld: a spinner nothing
+    /// retires is worse than a toast nobody needed.
+    #[test]
+    fn a_quiet_final_that_cannot_retire_its_busy_is_broadcast_instead() {
+        let (status_tx, mut status_rx) = broadcast::channel(8);
+        let (clear_tx, _clear_rx) = broadcast::channel(8);
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+
+        let _ = status.send(WireStatus::keyed("launch:a", "busy", "Launching...").sticky());
+        let _ = status_rx.try_recv();
+
+        let mut done = WireStatus::keyed("launch:a", "info", "launched");
+        done.quiet_on = QuietSurfaces::BOTH;
+        let _ = status.send(done);
+
+        assert_eq!(
+            status_rx
+                .try_recv()
+                .expect("the final must be shown rather than strand the spinner")
+                .message,
+            "launched"
         );
     }
 
