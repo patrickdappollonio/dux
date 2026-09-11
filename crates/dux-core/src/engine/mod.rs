@@ -4210,7 +4210,7 @@ impl Engine {
             )
         } else {
             format!(
-                "Started fresh {} session for agent \"{}\" in {}. Use /sessions inside the agent to restore a prior conversation.",
+                "Started fresh {} session for agent \"{}\" in {}. Your provider's own resume command can bring back an earlier conversation.",
                 session.provider.as_str(),
                 session.display_label(),
                 location
@@ -6890,11 +6890,12 @@ mod tests {
             "Resumed claude agent \"s1-title\" in project \"p1-name\"."
         );
 
-        // Fresh → the no-resume variant with the /sessions hint.
+        // Fresh → the no-resume variant, pointing at the provider's own resume
+        // command rather than naming a slash command not every CLI has.
         assert_eq!(
             engine.agent_reconnect_status_message(&session, false),
             "Started fresh claude session for agent \"s1-title\" in project \"p1-name\". \
-             Use /sessions inside the agent to restore a prior conversation."
+             Your provider's own resume command can bring back an earlier conversation."
         );
     }
 

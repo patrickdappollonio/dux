@@ -720,7 +720,7 @@ impl ChangesService {
     /// Reset a session's error streak; emit the keyed recovery info ONLY when a
     /// keyed warning was actually emitted for this session (the streak had reached
     /// the threshold). A 1-2 error blip that never showed a warning therefore does
-    /// not leave an orphaned "available again" toast.
+    /// not leave an orphaned recovery toast.
     fn reset_error_streak(self: &Arc<Self>, session_id: &str) {
         lock(&self.error_streak).remove(session_id);
         let had_warning = lock(&self.warning_emitted).remove(session_id);
@@ -730,7 +730,9 @@ impl ChangesService {
             self.engine.emit_status(WireStatus::keyed(
                 warn_key(session_id),
                 "info",
-                "Changed files are available again.".to_string(),
+                "Changed files are back: git had been failing for this worktree and the latest \
+                 check succeeded."
+                    .to_string(),
             ));
         }
     }
@@ -906,6 +908,41 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("expected Ok"));
         assert_eq!(again.rev, resp.rev, "rev must not advance without a change");
+    }
+
+    /// The recovery line retires a standing warning, so it has to say what it
+    /// recovered from rather than only that things work now.
+    #[tokio::test]
+    async fn the_recovery_line_names_the_failure_it_ended() {
+        let (engine, bus, _tmp, _root) = boot();
+        let svc = ChangesService::new(engine, bus);
+        let mut statuses = svc.engine.subscribe_status();
+
+        for rev in 1..=ERROR_WARN_THRESHOLD as u64 {
+            svc.store_err("s1", rev, 0, "git busy".to_string(), true);
+        }
+        let warning = loop {
+            let status = statuses.recv().await.expect("a status");
+            if status.tone == "warning" {
+                break status;
+            }
+        };
+        assert!(warning.message.contains("temporarily unavailable"));
+
+        svc.reset_error_streak("s1");
+
+        let recovery = loop {
+            let status = statuses.recv().await.expect("a status");
+            if status.tone == "info" {
+                break status;
+            }
+        };
+        assert_eq!(
+            recovery.message,
+            "Changed files are back: git had been failing for this worktree and the latest \
+             check succeeded."
+        );
+        assert_eq!(recovery.key.as_deref(), Some(warn_key("s1").as_str()));
     }
 
     #[tokio::test]
