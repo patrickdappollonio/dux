@@ -1120,12 +1120,12 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
     match reaction {
         EventReaction::Status(update) => Some(WireStatus::from_update(update)),
         EventReaction::Multi(items) => items.iter().find_map(wire_status_from_reaction),
-        // Quiet: the terminal's row leaves the sidebar in the same breath, so
-        // the answer is kept for the caller and raises nothing.
+        // Loud: closing a terminal is destructive, and a row quietly leaving a
+        // sidebar is too small to stand in for the confirmation.
         EventReaction::DeleteTerminalView(view) => view
             .label
             .as_ref()
-            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")).quiet_web()),
+            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\"."))),
         _ => None,
     }
 }
@@ -1188,12 +1188,12 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         // nothing here, avoiding a double status.
         EventReaction::AgentLaunchFailedView(_) | EventReaction::AgentLaunchReadyView(_) => vec![],
         // DeleteTerminal is a one-shot info; no busy precedes it, so it stays
-        // unkeyed (anonymous slot). Quiet for the same reason as its sibling in
-        // `wire_status_from_reaction`: the row is already gone.
+        // unkeyed (anonymous slot). Loud for the same reason as its sibling in
+        // `wire_status_from_reaction`: the act is destructive.
         EventReaction::DeleteTerminalView(view) => view
             .label
             .as_ref()
-            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")).quiet_web())
+            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")))
             .into_iter()
             .collect(),
         EventReaction::OpenConfigReloadFailedModal(message) => {
@@ -1824,8 +1824,12 @@ impl Engine {
             .map_err(|err| anyhow::anyhow!("saving to config failed: {err}"))?;
         self.config.server.title = candidate.server.title;
         self.config.server.favicon = candidate.server.favicon;
-        // The tab title and the favicon are what the user is looking at.
-        Ok(WireStatus::new("info", "Instance name and favicon updated.").quiet_web())
+        // Loud: a tab title and a favicon are about as small as an indicator
+        // gets, and a change that lands on one is owed its confirmation.
+        Ok(WireStatus::new(
+            "info",
+            "Instance name and favicon updated.",
+        ))
     }
 
     /// Persist an explicit set of `[ui]`/`[capabilities]` settings-modal fields
@@ -2430,10 +2434,10 @@ impl Engine {
             (_, Some(closed), _) => format!("Closed the {closed} tab."),
             (_, None, _) => "Closed the tab.".to_string(),
         };
-        // Quiet: the closed pill leaves the strip and the promoted tab is
-        // already the one the user lands on, both of which the browser drives
-        // off `CloseTabOutcome`. The sentence stays as the command's answer.
-        Ok((WireStatus::new("info", message).quiet_web(), outcome))
+        // Loud: closing a tab deletes the tab, and a pill leaving a strip is
+        // too small to stand in for a destructive act's confirmation. The slot
+        // handover it may also report is invisible either way.
+        Ok((WireStatus::new("info", message), outcome))
     }
 
     /// Retarget one tab's provider, validating the choice server-side. The
@@ -5177,11 +5181,11 @@ mod tests {
         assert_eq!(s[0].tone, "info");
         assert!(s[0].message.contains("Closed terminal \"Terminal 1\""));
         assert!(
-            s[0].quiet_on.web,
-            "the row left the sidebar in the same breath, so the answer raises no toast"
+            !s[0].quiet_on.web,
+            "closing a terminal is destructive, so the browser is told in words"
         );
         let single = wire_status_from_reaction(&r).expect("the same answer, singly");
-        assert!(single.quiet_on.web);
+        assert!(!single.quiet_on.web);
     }
 
     #[test]
@@ -5937,6 +5941,28 @@ mod tests {
         assert_eq!(engine.config.ui.agent_sort, "name_desc");
     }
 
+    /// A tab title and a favicon are about as small as an indicator gets, so a
+    /// write that lands on them is confirmed in words.
+    #[test]
+    fn saving_the_instance_identity_reaches_the_browser() {
+        let (mut engine, _tmp) = test_engine();
+
+        let status = engine
+            .apply_wire(WireCommand::SetInstanceIdentity {
+                title: Some("Workshop".to_string()),
+                favicon: None,
+            })
+            .expect("apply set-instance-identity")
+            .status
+            .expect("a status");
+
+        assert_eq!(status.message, "Instance name and favicon updated.");
+        assert!(
+            !status.quiet_on.web,
+            "a favicon is too small an indicator to stand in for the confirmation"
+        );
+    }
+
     /// A preference the user is looking straight at answers its caller and
     /// raises nothing. The arm that takes something OFF the screen keeps its
     /// sentence, because that sentence is where the way back is named.
@@ -5977,23 +6003,15 @@ mod tests {
         // The PR banner visibly moves.
         assert!(quiet_of(&mut engine, WireCommand::TogglePrBannerPosition {}).0);
 
-        // The instance identity trio: an empty body, an unchanged write, and a
-        // real one all land in the tab title the user can see.
+        // The instance identity's two no-ops: an empty body and an unchanged
+        // write both leave the dialog showing what it already sent. A real write
+        // lands on a tab title and a favicon, about as small as an indicator
+        // gets, so it speaks; see the test below.
         assert!(
             quiet_of(
                 &mut engine,
                 WireCommand::SetInstanceIdentity {
                     title: None,
-                    favicon: None,
-                },
-            )
-            .0
-        );
-        assert!(
-            quiet_of(
-                &mut engine,
-                WireCommand::SetInstanceIdentity {
-                    title: Some("Workshop".to_string()),
                     favicon: None,
                 },
             )
@@ -6407,8 +6425,8 @@ mod tests {
             "Closed the first tab, Claude. Codex took its place as the agent's first tab."
         );
         assert!(
-            status.quiet_on.web,
-            "the strip and the landed-on tab already say this, so no toast"
+            !status.quiet_on.web,
+            "closing a tab is destructive, and the slot handover is invisible"
         );
     }
 
@@ -6442,8 +6460,8 @@ mod tests {
         let status = outcome.status.expect("a status");
         assert_eq!(status.message, "Closed the Codex tab.");
         assert!(
-            status.quiet_on.web,
-            "the pill left the strip; nothing more to say"
+            !status.quiet_on.web,
+            "closing a tab is destructive, so the browser is told in words"
         );
     }
 
