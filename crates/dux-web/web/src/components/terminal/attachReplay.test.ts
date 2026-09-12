@@ -355,3 +355,73 @@ describe("attach epochs", () => {
     expect(term.log).toContain("write:gen-2")
   })
 })
+
+describe("the SGR colon form is respelled on the way in", () => {
+  it("respells the live stream, which is where the mis-parse showed", () => {
+    const { term, attach } = setup()
+    attach.noteOpen()
+    attach.onBytes(bytes("replay"))
+    term.pump()
+    attach.onBytes(bytes("\x1b[48:2:0:128:128mteal"))
+    expect(term.log).toEqual([
+      "write:replay",
+      "write:\x1b[48:2::0:128:128mteal",
+    ])
+  })
+
+  it("respells the replay too, which is already correct and must stay so", () => {
+    const { term, attach } = setup()
+    attach.noteOpen()
+    attach.onBytes(bytes("\x1b[48:2::0:128:128mteal"))
+    expect(term.log).toEqual(["write:\x1b[48:2::0:128:128mteal"])
+  })
+
+  it("respells a sequence split across two socket frames", () => {
+    const { term, attach } = setup()
+    attach.noteOpen()
+    attach.onBytes(bytes("replay"))
+    term.pump()
+    attach.onBytes(bytes("\x1b[48:2:0:1"))
+    attach.onBytes(bytes("28:128mteal"))
+    expect(term.log.join("")).toBe(
+      "write:replaywrite:\x1b[48:2::0:128:128mteal",
+    )
+  })
+
+  it("writes nothing for a frame that is entirely a half-read sequence", () => {
+    const { term, attach, firstFrames } = setup()
+    attach.noteOpen()
+    // The whole frame is the head of a sequence, so there is nothing to paint
+    // yet. Writing an empty chunk here would hand the first-frame resize a
+    // completion callback for a write that painted nothing.
+    attach.onBytes(bytes("\x1b[48:2:0"))
+    expect(term.log).toEqual([])
+    term.pump()
+    expect(firstFrames()).toBe(0)
+    attach.onBytes(bytes(":128:128mteal"))
+    expect(term.log).toEqual(["write:\x1b[48:2::0:128:128mteal"])
+    term.pump()
+    expect(firstFrames()).toBe(1)
+  })
+
+  it("still lets an empty repaint frame through, since a quiet pty sends one", () => {
+    const { term, attach } = setup()
+    attach.noteOpen()
+    attach.onBytes(new Uint8Array(0))
+    expect(term.log).toEqual(["drain"])
+  })
+
+  it("drops a half-read sequence when the socket reopens", () => {
+    const { term, attach } = setup()
+    attach.noteOpen()
+    attach.onBytes(bytes("replay"))
+    term.pump()
+    // A dying socket cut a sequence in half. The reopened stream starts at the
+    // replay, so the orphan must not be glued to its front.
+    attach.onBytes(bytes("\x1b[48:2:0"))
+    attach.noteOpen()
+    attach.onBytes(bytes("fresh"))
+    term.pump()
+    expect(term.log).toEqual(["write:replay", "drain", "reset", "write:fresh"])
+  })
+})

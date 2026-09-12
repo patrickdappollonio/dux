@@ -128,10 +128,7 @@ function rewriteSequence(seq: number[]): number[] {
   }
 
   const text = String.fromCharCode(...params)
-  const rewritten = text
-    .split(";")
-    .map(rewriteParameter)
-    .join(";")
+  const rewritten = text.split(";").map(rewriteParameter).join(";")
   if (rewritten === text) return seq
 
   const bytes = [ESC, CSI_BRACKET]

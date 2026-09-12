@@ -6,6 +6,7 @@ import {
   nextAppliedGeneration,
   shouldApplyReplay,
 } from "@/lib/replayGeneration"
+import { createSgrColonNormalizer } from "@/lib/sgrColonForm"
 
 export type AttachReplayDeps = {
   term: Terminal
@@ -70,6 +71,17 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
   // Non-zero while a REPLAY chunk is being applied to xterm.
   let replayWritesInFlight = 0
   let appliedCb: (epoch: number) => void = () => {}
+
+  // Every byte the pty sends passes through here on its way to xterm, the
+  // replay and the live stream alike, which makes this the one seam where the
+  // colon form of a true-colour SGR can be respelled once. xterm.js reads
+  // `48:2:R:G:B` as a colour-space id plus two channels and drops the blue,
+  // painting a teal Neovim scheme in yellows; `lib/sgrColonForm.ts` carries the
+  // reasoning and the measurement. Delete both the day upstream accepts the
+  // short form. The replay already parses correctly and passes through
+  // unchanged, but it goes through the same seam rather than around it, so
+  // there is no second write path to keep in step.
+  const sgr = createSgrColonNormalizer()
 
   /// Report this open's replay as APPLIED, exactly once. Guarded on the epoch
   /// (a superseded open answers for nobody) and on the flag (an open reports one
@@ -140,6 +152,10 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
       awaitingRepaint = true
       draining = false
       heldChunks = []
+      // Including a sequence the dead socket cut in half: it belongs to that
+      // replaced byte stream, and gluing it to the front of the fresh replay
+      // would corrupt the first thing the new open paints.
+      sgr.reset()
       replayWritesInFlight = 0
       appliedEpoch = null
       // Only opens AFTER the first reset the buffer, since the first open starts
@@ -152,8 +168,16 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
       }
       return { firstOpen: wasFirst, epoch }
     },
-    onBytes(bytes) {
+    onBytes(raw) {
       const forEpoch = epoch
+      const bytes = sgr.push(raw)
+      // A frame that ended mid-sequence is entirely in the normaliser's carry,
+      // and there is nothing yet to write. It must not travel on as an empty
+      // chunk: the first-frame resize hangs off a write's completion callback,
+      // and a write that painted nothing is not the first frame. An EMPTY frame
+      // is a different thing and still travels, because the server repaints
+      // even a quiet pty and that frame is what clears the cover.
+      if (raw.length > 0 && bytes.length === 0) return
       // Mid-drain: hold everything (the repaint plus any live bytes that raced
       // in) so it lands in order after reset(), never ahead of the fresh
       // replay.
