@@ -171,12 +171,18 @@ export function createAttachReplay(deps: AttachReplayDeps): AttachReplay {
     onBytes(raw) {
       const forEpoch = epoch
       const bytes = sgr.push(raw)
-      // A frame that ended mid-sequence is entirely in the normaliser's carry,
-      // and there is nothing yet to write. It must not travel on as an empty
-      // chunk: the first-frame resize hangs off a write's completion callback,
-      // and a write that painted nothing is not the first frame. An EMPTY frame
-      // is a different thing and still travels, because the server repaints
-      // even a quiet pty and that frame is what clears the cover.
+      // A frame that ended mid-sequence sits entirely in the normaliser's carry
+      // and has nothing to write yet. It must not travel on as an empty chunk,
+      // for three reasons: the first-frame resize rides a write's completion
+      // callback, and a write that paints nothing is not the first frame; as
+      // the first chunk after an open it runs the replay's done(), clearing the
+      // cover over a terminal with nothing on it; and on the reconnect path it
+      // seeds heldChunks[0], so the real replay arrives as chunks[1] and loses
+      // the focus-report suppression window.
+      //
+      // An EMPTY frame is a different thing and still travels, because the
+      // server repaints even a quiet pty and that frame is what clears the
+      // cover.
       if (raw.length > 0 && bytes.length === 0) return
       // Mid-drain: hold everything (the repaint plus any live bytes that raced
       // in) so it lands in order after reset(), never ahead of the fresh

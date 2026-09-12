@@ -404,6 +404,42 @@ describe("the SGR colon form is respelled on the way in", () => {
     expect(firstFrames()).toBe(1)
   })
 
+  it("does not report a half-read first frame as the applied replay", () => {
+    const { term, attach } = setup()
+    const applied: number[] = []
+    attach.onReplayApplied((e) => applied.push(e))
+    attach.noteOpen()
+    // Nothing has been painted, so the cover must stay up.
+    attach.onBytes(bytes("\x1b[48:2:0"))
+    term.pump()
+    expect(applied).toEqual([])
+    attach.onBytes(bytes(":128:128mteal"))
+    term.pump()
+    expect(applied.length).toBe(1)
+  })
+
+  it("does not let a half-read frame take the replay's place in the drain queue", () => {
+    const { term, attach, settleFirstFrame } = setup()
+    settleFirstFrame()
+    attach.noteOpen()
+    attach.onBytes(bytes("first"))
+    term.pump()
+    attach.noteOpen()
+    // A frame arriving before the replay that is entirely a half-read sequence
+    // must not seed the held chunks: the replay behind it would then be
+    // chunks[1] and lose the focus-report suppression window.
+    attach.onBytes(bytes("\x1b[48:2:0"))
+    attach.onBytes(bytes(":128:128mreplay"))
+    term.pump()
+    expect(attach.replayInFlight()).toBe(true)
+    expect(term.log).toEqual([
+      "write:first",
+      "drain",
+      "reset",
+      "write:\x1b[48:2::0:128:128mreplay",
+    ])
+  })
+
   it("still lets an empty repaint frame through, since a quiet pty sends one", () => {
     const { term, attach } = setup()
     attach.noteOpen()
