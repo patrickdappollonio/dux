@@ -627,15 +627,17 @@ describe("the canRetry gate", () => {
   it("DEFERS connect() itself while the gate is shut, and opens once it clears", () => {
     vi.useFakeTimers()
     setVisibility("visible")
+    publishConnectionTiming({ reconnect_backoff_cap_seconds: 10 })
     let allowed = false
     const sock = new TestSocket("ws://x", { canRetry: () => allowed })
     sock.connect()
     expect(FakeWS.instances).toHaveLength(0)
     allowed = true
-    vi.advanceTimersByTime(RECONNECT_MIN_MS)
+    // The poll is the fallback; whoever shuts the gate is expected to push it
+    // open (the PTY socket subscribes to the identity check for exactly that),
+    // which is what makes the real reattach prompt.
+    vi.advanceTimersByTime(10_000)
     expect(FakeWS.instances).toHaveLength(1)
-    // And it was a genuine reset: the deferred attempt went out at the floor,
-    // not at whatever gap a previous session had grown to.
     expect(sock.socketOpens).toBe(0)
   })
 
@@ -647,16 +649,40 @@ describe("the canRetry gate", () => {
   it("does not spend a doubling of the backoff per wake signal while the gate is shut", () => {
     vi.useFakeTimers()
     setVisibility("visible")
+    publishConnectionTiming({ reconnect_backoff_cap_seconds: 10 })
     let allowed = true
     const sock = new TestSocket("ws://x", { canRetry: () => allowed })
     sock.connect()
     last().open()
+    vi.advanceTimersByTime(HEALTHY_SETTLE_MS)
     allowed = false
     last().triggerClose()
     for (let i = 0; i < 4; i++) window.dispatchEvent(new Event("focus"))
     allowed = true
-    vi.advanceTimersByTime(RECONNECT_MIN_MS)
+    vi.advanceTimersByTime(10_000)
     expect(FakeWS.instances).toHaveLength(2)
+    // And the failure behind it was spent once, by the drop, not once per
+    // signal: the attempt that goes out is the second.
+    last().triggerClose()
+    vi.advanceTimersByTime(1_000)
+    expect(FakeWS.instances).toHaveLength(3)
+  })
+
+  // A HELD RETRY IS NOT A FAILING ONE. It polls, and the hold can last as long
+  // as the app socket's give-up does, so polling it at the floor is a timer
+  // firing twice a second behind a pane that has been told nothing is coming.
+  it("polls a held retry at the cap rather than at the current delay", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    publishConnectionTiming({ reconnect_backoff_cap_seconds: 10 })
+    let allowed = false
+    const sock = new TestSocket("ws://x", { canRetry: () => allowed })
+    sock.connect()
+    allowed = true
+    vi.advanceTimersByTime(10_000 - 1)
+    expect(FakeWS.instances).toHaveLength(0)
+    vi.advanceTimersByTime(1)
+    expect(FakeWS.instances).toHaveLength(1)
   })
 })
 
@@ -991,5 +1017,66 @@ describe("the published plan", () => {
     sock.connect()
     last().open()
     expect(plans.at(-1)).toMatchObject({ phase: "open", attempt: 1 })
+  })
+})
+
+
+// A FROZEN PAGE RUNS NOTHING, and an attempt still connecting when it stops is
+// not going to open. Its deadline was armed before the freeze, so it fired the
+// instant the page resumed and counted a failure the freeze had caused: on a
+// small budget, a phone unlocking twice could arrive at a page that had given
+// up without a single real network failure behind it.
+describe("freezing mid-attempt", () => {
+  it("abandons the connecting attempt and spends nothing", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    // A cap well under the attempt deadline, so the retry and the deadline the
+    // freeze cancelled cannot be confused for one another.
+    publishConnectionTiming({ reconnect_backoff_cap_seconds: 2 })
+    const sock = new TestSocket("ws://x", { attemptBudget: () => 2 })
+    const plans: ReconnectPlanEvent[] = []
+    sock.onPlan = (p) => plans.push(p)
+    sock.connect()
+    const attempt = last()
+    expect(attempt.readyState).toBe(0)
+
+    // Chromium's `freeze`, with the attempt still in CONNECTING.
+    sock.park()
+    expect(attempt.readyState).toBe(3)
+    expect(attempt.onclose).toBeNull()
+
+    // The retry comes on the ordinary schedule...
+    vi.advanceTimersByTime(2_000)
+    expect(FakeWS.instances).toHaveLength(2)
+    // ...as attempt ONE: the freeze cost nothing.
+    expect(plans.at(-1)).toMatchObject({ phase: "connecting", attempt: 1 })
+    // And the deadline armed before the freeze is gone: nothing fires at the
+    // moment it would have.
+    vi.advanceTimersByTime(ATTEMPT_TIMEOUT_MS - 2_001)
+    expect(FakeWS.instances).toHaveLength(2)
+  })
+
+  it("leaves an OPEN socket alone, which is what park has always done", () => {
+    vi.useFakeTimers()
+    setVisibility("visible")
+    const sock = new TestSocket("ws://x")
+    sock.connect()
+    const live = last()
+    live.open()
+    sock.park()
+    expect(live.readyState).toBe(1)
+    expect(FakeWS.instances).toHaveLength(1)
+  })
+
+  it("schedules nothing at all for a parking socket on a hidden page", () => {
+    vi.useFakeTimers()
+    setVisibility("hidden")
+    const sock = new TestSocket("ws://x", { parkWhileHidden: true })
+    sock.connect()
+    sock.park()
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(600_000)
+    expect(FakeWS.instances).toHaveLength(1)
+    setVisibility("visible")
   })
 })

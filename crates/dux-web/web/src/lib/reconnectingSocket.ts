@@ -3,7 +3,7 @@ import {
   reconnectAttemptTimeoutMs,
   reconnectBackoffCapMs,
 } from "./connectionTiming"
-import { RECONNECT_MIN_MS, planNextAttempt, retryDelayMs } from "./reconnectSchedule"
+import { RECONNECT_MIN_MS, planNextAttempt } from "./reconnectSchedule"
 import type { ConnState } from "./types"
 
 // Events and PTY sockets retry network failures with capped backoff, bounded by
@@ -204,8 +204,25 @@ export abstract class ReconnectingSocket {
   // Chromium's `freeze`: cancel anything armed. The page is about to stop
   // executing, and a timer that survives it would fire against a document that
   // has been discarded or resumed hours later.
+  //
+  // An attempt still CONNECTING when the page stops is not going to open, and
+  // its deadline is one of those timers: it fires the instant the page resumes
+  // and counts a failure the freeze caused rather than the network. So the
+  // attempt is abandoned here, spending nothing, and the ordinary schedule
+  // brings the next one. A parking socket schedules nothing and waits for a wake
+  // signal, exactly as it does for a drop while hidden. An OPEN socket is left
+  // alone: it may well survive the freeze, and `close()` is the caller that
+  // takes a live connection down.
   park(): void {
     this.clearRetryTimer()
+    const ws = this.ws
+    if (ws === null) return
+    if (ws.readyState === WebSocket.OPEN) return
+    this.detachAndClose(ws)
+    this.onConn("closed")
+    if (this.closedByUser || this.stopped) return
+    if (this.parked()) return
+    this.armHeldRetry()
   }
 
   private open(): void {
@@ -213,16 +230,7 @@ export abstract class ReconnectingSocket {
     // pressed twice mid-reconnect). Detach the orphan's handlers and close it
     // before assigning the new socket: otherwise its later `onclose` nulls the
     // shared `this.ws` and permanently kills outbound frames, with no error.
-    if (this.ws !== null) {
-      const orphan = this.ws
-      this.clearSettleTimer()
-      orphan.onopen = null
-      orphan.onmessage = null
-      orphan.onclose = null
-      orphan.onerror = null
-      this.ws = null
-      orphan.close()
-    }
+    if (this.ws !== null) this.detachAndClose(this.ws)
     this.attempt = this.failures + 1
     this.onConn("connecting")
     this.emitPlan("connecting", this.attempt, null)
@@ -323,12 +331,18 @@ export abstract class ReconnectingSocket {
     )
   }
 
-  // Re-arm at the CURRENT failure count's delay, spending no doubling. Every
-  // arming the gate caused rather than a failure goes through here: the backoff
-  // measures how badly the far end is answering, so a gate-held socket polls
-  // steadily instead of drifting out to the cap.
+  // Re-arm without spending a doubling. Every arming the gate caused rather than
+  // a failure goes through here: nothing has failed, so the failure count must
+  // not move.
+  //
+  // It polls at the CAP, not at the current delay. A hold is not a failing
+  // connection and it can last as long as the app socket's give-up does, so a
+  // floor-rate poll is a timer firing twice a second behind a pane that has been
+  // told nothing is coming. The poll is only the fallback anyway: whoever shuts
+  // the gate pushes it back open (the PTY socket subscribes to the identity
+  // check), which is what makes the real reattach prompt.
   private armHeldRetry(): void {
-    this.armRetryTimer(retryDelayMs(this.failures, this.policy.backoffCapMs()))
+    this.armRetryTimer(this.policy.backoffCapMs())
   }
 
   // Arm the next attempt at the delay the schedule chose, and publish it.
@@ -373,17 +387,26 @@ export abstract class ReconnectingSocket {
     this.connectTimer = setTimeout(() => {
       this.connectTimer = null
       if (this.ws !== ws) return
-      ws.onopen = null
-      ws.onmessage = null
-      ws.onclose = null
-      ws.onerror = null
-      this.ws = null
-      this.clearSettleTimer()
-      ws.close()
+      this.detachAndClose(ws)
       this.onConn("closed")
       if (this.closedByUser || this.stopped) return
       this.scheduleReconnect()
     }, reconnectAttemptTimeoutMs())
+  }
+
+  // Take a socket out of service: detach its handlers first, so a callback it
+  // has already queued cannot touch shared state, then drop the reference and
+  // close it. The one place that does this; every caller decides for itself what
+  // to emit and what to schedule afterwards.
+  private detachAndClose(ws: WebSocket): void {
+    this.clearConnectTimer()
+    this.clearSettleTimer()
+    ws.onopen = null
+    ws.onmessage = null
+    ws.onclose = null
+    ws.onerror = null
+    if (this.ws === ws) this.ws = null
+    ws.close()
   }
 
   private clearConnectTimer(): void {
