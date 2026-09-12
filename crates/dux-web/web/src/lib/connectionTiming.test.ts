@@ -3,11 +3,15 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
   DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
   DEFAULT_HEARTBEAT_SECONDS,
+  DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS,
+  DEFAULT_RECONNECT_ATTEMPTS,
   DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
   DEFAULT_REPLAY_WAIT_SECONDS,
   heartbeatDeadlineMs,
   heartbeatPeriodMs,
   publishConnectionTiming,
+  reconnectAttemptBudget,
+  reconnectAttemptTimeoutMs,
   reconnectBackoffCapMs,
   replayWaitMs,
 } from "./connectionTiming"
@@ -17,11 +21,13 @@ afterEach(() => {
 })
 
 describe("the documented defaults", () => {
-  it("are the four values an older server or a pre-bootstrap render falls back to", () => {
+  it("are the values an older server or a pre-bootstrap render falls back to", () => {
     expect(DEFAULT_REPLAY_WAIT_SECONDS).toBe(8)
     expect(DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS).toBe(10)
     expect(DEFAULT_HEARTBEAT_SECONDS).toBe(15)
     expect(DEFAULT_HEARTBEAT_DEADLINE_SECONDS).toBe(30)
+    expect(DEFAULT_RECONNECT_ATTEMPTS).toBe(8)
+    expect(DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS).toBe(10)
   })
 
   it("are what every reader returns before the bootstrap document lands", () => {
@@ -29,6 +35,8 @@ describe("the documented defaults", () => {
     expect(reconnectBackoffCapMs()).toBe(10_000)
     expect(heartbeatPeriodMs()).toBe(15_000)
     expect(heartbeatDeadlineMs()).toBe(30_000)
+    expect(reconnectAttemptBudget()).toBe(8)
+    expect(reconnectAttemptTimeoutMs()).toBe(10_000)
   })
 
   it("are what a server that omits the keys falls back to", () => {
@@ -37,6 +45,8 @@ describe("the documented defaults", () => {
     expect(reconnectBackoffCapMs()).toBe(10_000)
     expect(heartbeatPeriodMs()).toBe(15_000)
     expect(heartbeatDeadlineMs()).toBe(30_000)
+    expect(reconnectAttemptBudget()).toBe(8)
+    expect(reconnectAttemptTimeoutMs()).toBe(10_000)
   })
 })
 
@@ -52,6 +62,36 @@ describe("a published document", () => {
     expect(reconnectBackoffCapMs()).toBe(4_000)
     expect(heartbeatPeriodMs()).toBe(5_000)
     expect(heartbeatDeadlineMs()).toBe(6_000)
+  })
+
+  it("reads the budget and the attempt deadline too", () => {
+    publishConnectionTiming({
+      reconnect_attempts: 3,
+      reconnect_attempt_timeout_seconds: 4,
+    })
+    expect(reconnectAttemptBudget()).toBe(3)
+    expect(reconnectAttemptTimeoutMs()).toBe(4_000)
+  })
+
+  it("keeps a configured zero for the budget, which means never give up", () => {
+    publishConnectionTiming({ reconnect_attempts: 0 })
+    expect(reconnectAttemptBudget()).toBe(0)
+  })
+
+  it("refuses a negative, fractional or non-finite budget and falls back", () => {
+    publishConnectionTiming({ reconnect_attempts: -2 })
+    expect(reconnectAttemptBudget()).toBe(8)
+    publishConnectionTiming({ reconnect_attempts: 2.5 })
+    expect(reconnectAttemptBudget()).toBe(8)
+    publishConnectionTiming({ reconnect_attempts: Number.NaN })
+    expect(reconnectAttemptBudget()).toBe(8)
+  })
+
+  it("floors the attempt deadline, which cannot meaningfully be zero", () => {
+    publishConnectionTiming({ reconnect_attempt_timeout_seconds: 0 })
+    expect(reconnectAttemptTimeoutMs()).toBe(10_000)
+    publishConnectionTiming({ reconnect_attempt_timeout_seconds: -1 })
+    expect(reconnectAttemptTimeoutMs()).toBe(10_000)
   })
 
   it("keeps a configured zero for the replay wait, which DISABLES it", () => {

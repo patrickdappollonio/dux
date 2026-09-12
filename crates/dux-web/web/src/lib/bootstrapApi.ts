@@ -167,6 +167,13 @@ export interface Bootstrap {
   /** Mirrors `config.server.reconnect_backoff_cap_seconds`: the longest gap
    * between two automatic reconnect attempts. */
   reconnect_backoff_cap_seconds?: number
+  /** Mirrors `config.server.reconnect_attempts`: how many consecutive reconnect
+   * attempts the browser makes before it stops trying, where 0 means never give
+   * up. */
+  reconnect_attempts?: number
+  /** Mirrors `config.server.reconnect_attempt_timeout_seconds`: how long one
+   * attempt may sit unopened before it is abandoned and counted as failed. */
+  reconnect_attempt_timeout_seconds?: number
   /** Mirrors `config.server.heartbeat_seconds`: how often a visible page checks
    * its terminal connection is really alive. */
   heartbeat_seconds?: number
