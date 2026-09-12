@@ -136,13 +136,20 @@ The full scrollback comes back when you open it, and the "Reconnecting…" cover
 until that screen has actually been painted, not merely until the connection is back, so
 you never end up looking at an empty black pane wondering whether anything is happening.
 
-**dux keeps trying while the page is open, and reconnects the moment you come back.**
-There is no give-up count. A visible tab retries with a widening gap between attempts, up
-to `reconnect_backoff_cap_seconds` (10 seconds by default), for as long as you leave it
-open. A hidden tab stops trying altogether rather than burning your battery on a
-connection you are not looking at, and picks it straight back up when you switch back to
-it, unlock the phone, or the network returns. Your scrollback and anything half-typed in
-the compose box survive all of it.
+**dux keeps trying while the page is open, tells you how it is going, and reconnects the
+moment you come back.** A visible tab retries with a widening gap between attempts, up to
+`reconnect_backoff_cap_seconds` (10 seconds by default), and the cover says which attempt
+failed and counts down to the next one. It stops after `reconnect_attempts` of them
+(8 by default) rather than spinning forever in front of a server that is not there, and
+says so plainly with a **Reconnect** button that starts over; set `reconnect_attempts` to
+`0` to keep trying indefinitely. An attempt that never connects is abandoned after
+`reconnect_attempt_timeout_seconds` (10 by default) and counted as a failure, because a
+host you cannot reach does not refuse the connection, it just never answers. Anything that
+connects gives the whole budget back, and so does coming back to the tab, unlocking the
+phone or the network returning. A hidden tab stops trying altogether rather than burning
+your battery on a connection you are not looking at, and picks it straight back up when
+you switch back to it, unlock the phone, or the network returns. Your scrollback and
+anything half-typed in the compose box survive all of it.
 
 Two things can still stop the wait, and both offer you a **Reconnect** button rather than
 leaving you stuck. If the terminal's screen has not arrived within
@@ -155,7 +162,7 @@ so and offers to try again. And if the connection is really gone, the blocking
 > but answers nothing. dux checks, from the browser, every `heartbeat_seconds`
 > (15 by default), and if the answer has not come back within
 > `heartbeat_deadline_seconds` (30 by default) it reconnects rather than leaving you
-> typing into a dead terminal. All four of those live under `[server]` in your config
+> typing into a dead terminal. All of these live under `[server]` in your config
 > file; see [Server mode](/docs/server-mode#the-server-config-keys).
 
 ### Theater mode: one pane, no chrome
