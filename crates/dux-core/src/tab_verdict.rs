@@ -156,16 +156,27 @@ pub fn refused_resume_warning(agent_label: &str, excerpt: &[String]) -> Option<S
     // The excerpt caps each LINE; the joined quote is capped again so two full
     // lines cannot double the budget on their way to a toast.
     let quote = crate::device_label::truncate_chars(&quote, VERDICT_EXCERPT_MAX_CHARS);
-    // The provider usually ends its own sentence. Adding a second full stop
-    // reads as a typo in dux's prose rather than as a quotation.
-    let stop = if quote.ends_with(['.', '!', '?', '\u{2026}', ':']) {
+    // Both ends of the quote say whether they are a cut. There were rows before
+    // these ones whenever the excerpt held more than the quoted lines, and the
+    // reader has no other way to know the provider said more.
+    let head = if excerpt.len() > RESUME_REFUSAL_QUOTED_LINES {
+        "\u{2026} "
+    } else {
+        ""
+    };
+    // A quote that ended its own sentence is left exactly as the provider wrote
+    // it; adding a second full stop reads as a typo rather than as a quotation.
+    // Anything else was cut, by a wrapped terminal row or by the character cap,
+    // and an ellipsis is the honest mark for that. A full stop there would be
+    // dux claiming the provider finished a sentence it did not finish.
+    let tail = if quote.ends_with(['.', '!', '?', '\u{2026}']) {
         ""
     } else {
-        "."
+        "\u{2026}"
     };
     Some(format!(
         "Agent \"{agent_label}\" could not resume its previous session; the provider said: \
-         {quote}{stop} Open the agent to see the full output, or start a fresh session."
+         {head}{quote}{tail} Open the agent to see the full output, or start a fresh session."
     ))
 }
 
@@ -328,6 +339,10 @@ mod tests {
         let warning = refused_resume_warning(
             "feat/x",
             &[
+                "Resuming your conversation.".to_string(),
+                "Looking for a session to continue.".to_string(),
+                "Found session 9f2 for this directory.".to_string(),
+                "That session cannot be continued here.".to_string(),
                 "Your most recent conversation is running in the background (session 9f2)."
                     .to_string(),
                 "Use `claude agents` to find and attach to it.".to_string(),
@@ -336,22 +351,24 @@ mod tests {
         .expect("real provider output produces the refusal warning");
         assert_eq!(
             warning,
-            "Agent \"feat/x\" could not resume its previous session; the provider said: Your most \
-             recent conversation is running in the background (session 9f2). Use `claude agents` \
-             to find and attach to it. Open the agent to see the full output, or start a fresh \
-             session."
+            "Agent \"feat/x\" could not resume its previous session; the provider said: \u{2026} \
+             Your most recent conversation is running in the background (session 9f2). Use \
+             `claude agents` to find and attach to it. Open the agent to see the full output, or \
+             start a fresh session."
         );
     }
 
     /// Only the LAST couple of lines are quoted, so a screenful of banner does
     /// not ride into a status line, and the quote itself is capped by the same
-    /// character budget the excerpt lines are.
+    /// character budget the excerpt lines are. Both cuts are marked: the head
+    /// one because the provider said more before these rows, the tail one
+    /// because the budget stopped mid-sentence.
     #[test]
     fn the_refusal_quotes_the_tail_and_caps_it() {
         let excerpt: Vec<String> = (1..=6).map(|n| format!("line {n}")).collect();
         let warning = refused_resume_warning("feat/x", &excerpt).expect("a warning");
         assert!(
-            warning.contains("said: line 5 line 6."),
+            warning.contains("said: \u{2026} line 5 line 6\u{2026}"),
             "only the last {RESUME_REFUSAL_QUOTED_LINES} lines are quoted, got {warning:?}"
         );
         assert!(!warning.contains("line 4"));
@@ -360,11 +377,44 @@ mod tests {
         let capped = refused_resume_warning("feat/x", &long).expect("a warning");
         assert!(
             capped.contains(&format!(
-                "{}\u{2026}",
+                "said: {}\u{2026} ",
                 "x".repeat(VERDICT_EXCERPT_MAX_CHARS - 1)
             )),
-            "the quote is cut at the excerpt character budget, got {capped:?}"
+            "one line is cut at the character budget, with no head mark, got {capped:?}"
         );
+    }
+
+    /// What the mark at the end of the quote means. A provider that finished its
+    /// sentence is quoted verbatim; anything else was cut, by a wrapped terminal
+    /// row or by the character cap, and an ellipsis is the honest mark for that.
+    /// A full stop there would be dux finishing a sentence the provider did not.
+    #[test]
+    fn the_quote_ends_in_an_ellipsis_unless_the_provider_ended_its_own_sentence() {
+        for finished in [
+            "it is running.",
+            "is it running?",
+            "it is running!",
+            "it is running\u{2026}",
+        ] {
+            let warning = refused_resume_warning("a", &[finished.to_string()]).expect("a warning");
+            assert!(
+                warning.contains(&format!("said: {finished} Open")),
+                "a finished sentence is quoted exactly as written, got {warning:?}"
+            );
+        }
+        for cut in [
+            "it is running,",
+            "it is running;",
+            "it is running-",
+            "it is runnin",
+            "attach to it:",
+        ] {
+            let warning = refused_resume_warning("a", &[cut.to_string()]).expect("a warning");
+            assert!(
+                warning.contains(&format!("said: {cut}\u{2026} Open")),
+                "a quote the row cut says it was cut, got {warning:?}"
+            );
+        }
     }
 
     /// Nothing to quote means nothing to say in the provider's words, so the

@@ -2878,6 +2878,10 @@ mod tests {
     fn a_refused_resume_status_quotes_the_provider_and_names_the_relaunch_key() {
         let mut pty = pruned_agent("feat/x");
         pty.refused_resume_excerpt = Some(vec![
+            "Resuming your conversation.".to_string(),
+            "Looking for a session to continue.".to_string(),
+            "Found session 9f2 for this directory.".to_string(),
+            "That session cannot be continued here.".to_string(),
             "Your most recent conversation is running in the background.".to_string(),
             "Use `claude agents` to attach to it.".to_string(),
         ]);

@@ -4703,6 +4703,10 @@ mod tests {
         let mut refused = pruned(PrunedPtyKind::Agent, true, false);
         refused.label = "feat/x".to_string();
         refused.refused_resume_excerpt = Some(vec![
+            "Resuming your conversation.".to_string(),
+            "Looking for a session to continue.".to_string(),
+            "Found session 9f2 for this directory.".to_string(),
+            "That session cannot be continued here.".to_string(),
             "Your most recent conversation is running in the background.".to_string(),
             "Use `claude agents` to attach to it.".to_string(),
         ]);
@@ -4710,9 +4714,9 @@ mod tests {
         assert_eq!(status.tone, "warning");
         assert_eq!(
             status.message,
-            "Agent \"feat/x\" could not resume its previous session; the provider said: Your most \
-             recent conversation is running in the background. Use `claude agents` to attach to \
-             it. Open the agent to see the full output, or start a fresh session."
+            "Agent \"feat/x\" could not resume its previous session; the provider said: \u{2026} \
+             Your most recent conversation is running in the background. Use `claude agents` to \
+             attach to it. Open the agent to see the full output, or start a fresh session."
         );
     }
 
