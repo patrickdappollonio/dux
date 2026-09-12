@@ -436,6 +436,15 @@ pub struct Engine {
     /// attempt began. Used for one-shot fallbacks when resume exits quickly or
     /// hangs without rendering visible output.
     pub resume_fallback_candidates: HashMap<TabId, Instant>,
+    /// Tabs whose CURRENT run was launched with the provider's resume flag.
+    ///
+    /// Distinct from `resume_fallback_candidates`, which the fallback sweep
+    /// retires the moment it decides a resume needs no retry: a resume that the
+    /// provider REFUSED with real output is exactly the case that sweep drops,
+    /// and the exit path still has to know the run was a resume so it can say
+    /// so. Seeded with the candidate and cleared with the rest of the tab's
+    /// runtime, so it never outlives the run it describes.
+    pub resumed_tab_runs: HashSet<TabId>,
     /// Session IDs whose worktree is currently being removed by a background
     /// worker. Prevents duplicate delete requests from spawning a second
     /// worker while the first is still running; also drives the dimmed

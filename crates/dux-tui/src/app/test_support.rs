@@ -176,6 +176,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         refs_watcher: None,
         refs_watch_paths: std::collections::HashMap::new(),
         resume_fallback_candidates: std::collections::HashMap::new(),
+        resumed_tab_runs: std::collections::HashSet::new(),
         pending_deletions: std::collections::HashSet::new(),
         folder_repo_statuses: std::collections::HashMap::new(),
         closing_sessions: std::collections::HashSet::new(),

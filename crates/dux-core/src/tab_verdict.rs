@@ -129,6 +129,46 @@ pub fn verdict_excerpt(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// How many of the run's LAST excerpt lines a refused resume quotes. Two, not
+/// the whole excerpt: this sentence lands on a status line and in a toast, and
+/// a CLI's refusal says the thing and then says what to do about it.
+pub const RESUME_REFUSAL_QUOTED_LINES: usize = 2;
+
+/// The warning both surfaces raise when a RESUME run was refused: the provider
+/// came up, said why it would not resume, and quit at once.
+///
+/// The provider's own words carry the remedy, so dux quotes them rather than
+/// interpreting them. Nothing here knows any provider: a CLI that refuses for a
+/// reason dux has never heard of is reported exactly as well as one that does
+/// not. `None` when there is nothing to quote, which leaves the caller with the
+/// ordinary exit wording rather than an empty pair of words.
+pub fn refused_resume_warning(agent_label: &str, excerpt: &[String]) -> Option<String> {
+    let start = excerpt.len().saturating_sub(RESUME_REFUSAL_QUOTED_LINES);
+    let quote = excerpt[start..]
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if quote.is_empty() {
+        return None;
+    }
+    // The excerpt caps each LINE; the joined quote is capped again so two full
+    // lines cannot double the budget on their way to a toast.
+    let quote = crate::device_label::truncate_chars(&quote, VERDICT_EXCERPT_MAX_CHARS);
+    // The provider usually ends its own sentence. Adding a second full stop
+    // reads as a typo in dux's prose rather than as a quotation.
+    let stop = if quote.ends_with(['.', '!', '?', '\u{2026}', ':']) {
+        ""
+    } else {
+        "."
+    };
+    Some(format!(
+        "Agent \"{agent_label}\" could not resume its previous session; the provider said: \
+         {quote}{stop} Open the agent to see the full output, or start a fresh session."
+    ))
+}
+
 /// "moments ago", "about 2 minutes ago": a coarse, prose-shaped age for a
 /// sentence, deliberately not the compact `2m` the agent list uses.
 ///
@@ -281,6 +321,58 @@ mod tests {
         assert_eq!(spell_seconds(1), "one second");
         assert_eq!(spell_seconds(10), "ten seconds");
         assert_eq!(spell_seconds(11), "11 seconds");
+    }
+
+    #[test]
+    fn a_refused_resume_quotes_the_provider_and_says_what_to_do() {
+        let warning = refused_resume_warning(
+            "feat/x",
+            &[
+                "Your most recent conversation is running in the background (session 9f2)."
+                    .to_string(),
+                "Use `claude agents` to find and attach to it.".to_string(),
+            ],
+        )
+        .expect("real provider output produces the refusal warning");
+        assert_eq!(
+            warning,
+            "Agent \"feat/x\" could not resume its previous session; the provider said: Your most \
+             recent conversation is running in the background (session 9f2). Use `claude agents` \
+             to find and attach to it. Open the agent to see the full output, or start a fresh \
+             session."
+        );
+    }
+
+    /// Only the LAST couple of lines are quoted, so a screenful of banner does
+    /// not ride into a status line, and the quote itself is capped by the same
+    /// character budget the excerpt lines are.
+    #[test]
+    fn the_refusal_quotes_the_tail_and_caps_it() {
+        let excerpt: Vec<String> = (1..=6).map(|n| format!("line {n}")).collect();
+        let warning = refused_resume_warning("feat/x", &excerpt).expect("a warning");
+        assert!(
+            warning.contains("said: line 5 line 6."),
+            "only the last {RESUME_REFUSAL_QUOTED_LINES} lines are quoted, got {warning:?}"
+        );
+        assert!(!warning.contains("line 4"));
+
+        let long = vec!["x".repeat(500)];
+        let capped = refused_resume_warning("feat/x", &long).expect("a warning");
+        assert!(
+            capped.contains(&format!(
+                "{}\u{2026}",
+                "x".repeat(VERDICT_EXCERPT_MAX_CHARS - 1)
+            )),
+            "the quote is cut at the excerpt character budget, got {capped:?}"
+        );
+    }
+
+    /// Nothing to quote means nothing to say in the provider's words, so the
+    /// caller keeps whatever wording it already had.
+    #[test]
+    fn a_refusal_with_nothing_to_quote_has_no_warning_of_its_own() {
+        assert!(refused_resume_warning("feat/x", &[]).is_none());
+        assert!(refused_resume_warning("feat/x", &["   ".to_string()]).is_none());
     }
 
     #[test]

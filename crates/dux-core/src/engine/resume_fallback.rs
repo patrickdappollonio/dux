@@ -90,6 +90,19 @@ pub enum ResumeFallbackOutcome {
 }
 
 impl Engine {
+    /// Record that a tab's run just started as a RESUME, in the two places that
+    /// care, so they cannot disagree about one launch.
+    ///
+    /// The candidacy is what the fallback sweep watches and retires; the run
+    /// fact outlives that decision and is what the exit path reads to tell a
+    /// refused resume from an ordinary exit. Both are cleared together by
+    /// `Engine::clear_tab_runtime`.
+    pub(crate) fn note_resume_launch(&mut self, tab_id: &TabId) {
+        self.resume_fallback_candidates
+            .insert(tab_id.clone(), std::time::Instant::now());
+        self.resumed_tab_runs.insert(tab_id.clone());
+    }
+
     /// Build an `AgentLaunchRequest` from engine state. `pty_size` is the only
     /// front-end-sourced input; provider config, resolved env and scrollback all
     /// come from engine state. Every surface delegates here, so request

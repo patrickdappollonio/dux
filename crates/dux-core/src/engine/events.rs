@@ -1065,8 +1065,7 @@ impl Engine {
             // yet" (which fails closed). A no-op for every other kind.
             self.spawn_folder_repo_probe(&session.id);
             if inserted.kept() && request.resume {
-                self.resume_fallback_candidates
-                    .insert(tab_id.clone(), Instant::now());
+                self.note_resume_launch(&tab_id);
             }
             self.update_branch_sync_sessions();
 
@@ -1179,8 +1178,7 @@ impl Engine {
         if inserted.kept() {
             self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
             if request.resume {
-                self.resume_fallback_candidates
-                    .insert(tab_id.clone(), Instant::now());
+                self.note_resume_launch(&tab_id);
             }
         }
         // AUTO-REOPEN INTENT follows the SLOT tab only: an extra-tab launch must
@@ -1408,6 +1406,7 @@ impl Engine {
         self.running_provider_pins.remove(tab_id);
         self.launched_drop_paste.remove(tab_id);
         self.resume_fallback_candidates.remove(tab_id);
+        self.resumed_tab_runs.remove(tab_id);
         self.pty_activity.remove(tab_id.as_str());
         self.pty_input.remove(tab_id.as_str());
         self.pty_pointer.remove(tab_id.as_str());

@@ -85,6 +85,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         refs_watcher: None,
         refs_watch_paths: HashMap::new(),
         resume_fallback_candidates: HashMap::new(),
+        resumed_tab_runs: HashSet::new(),
         pending_deletions: HashSet::new(),
         folder_repo_statuses: HashMap::new(),
         closing_sessions: HashSet::new(),

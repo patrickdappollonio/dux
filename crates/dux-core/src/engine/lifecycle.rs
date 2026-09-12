@@ -113,6 +113,35 @@ pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_typed_into:
     !was_typed_into && run_duration.is_some_and(|ran_for| ran_for < RAPID_EXIT_WINDOW)
 }
 
+/// The provider's last words when a RESUME run was REFUSED, or `None` when this
+/// exit was not one.
+///
+/// The shape a refusal has: the launch asked the provider to continue a previous
+/// conversation, the provider printed why it would not and quit at once with a
+/// non-zero status, and nobody had time to type into it. A resume that ran a
+/// real conversation and ended later is not this, however it exited, which is
+/// why the rapid-exit rule is asked here rather than re-derived: a session that
+/// lasted an hour is a session ending.
+///
+/// Provider-agnostic by construction: the excerpt is whatever the CLI left on
+/// screen, and nothing in dux reads it.
+pub fn refused_resume_excerpt(
+    was_resume: bool,
+    exit_success: Option<bool>,
+    run_duration: Option<Duration>,
+    was_typed_into: bool,
+    verdict_excerpt: &[String],
+) -> Option<Vec<String>> {
+    if !was_resume
+        || exit_success != Some(false)
+        || !rapid_exit_ends_run_badly(run_duration, was_typed_into)
+        || verdict_excerpt.iter().all(|line| line.trim().is_empty())
+    {
+        return None;
+    }
+    Some(verdict_excerpt.to_vec())
+}
+
 /// Which kind of PTY was pruned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrunedPtyKind {
@@ -235,6 +264,12 @@ pub struct PrunedPty {
     /// always `None`, which reads identically to a child that simply was not
     /// reaped in time. Always `None` for a companion terminal.
     pub read_error: Option<String>,
+    /// The provider's last words when this exit was a REFUSED RESUME: see
+    /// [`refused_resume_excerpt`] for the shape. `Some` turns both surfaces'
+    /// exit notice into the refused-resume warning, which quotes these lines;
+    /// `None` leaves the ordinary exit wording alone. Always `None` for a
+    /// companion terminal, which never resumes anything.
+    pub refused_resume_excerpt: Option<Vec<String>>,
 }
 
 /// The facts `prune_exited_ptys` reads off a dying agent PTY in its first pass,
@@ -512,6 +547,13 @@ impl Engine {
             // the rest of a tab's runtime, so an entry here can only have been
             // made since this provider came up.
             let was_typed_into = self.pty_input.contains_key(tab_id.as_str());
+            // Whether THIS run asked the provider to continue a previous
+            // conversation, read before the teardown below forgets it. The
+            // resume-fallback candidacy cannot answer it: the sweep retires a
+            // candidate that exited with real output, which is exactly the
+            // refusal case, so the fact is recorded separately and lives for as
+            // long as the run does.
+            let was_resume = self.resumed_tab_runs.contains(&tab_id);
             // Clear every runtime map keyed by this tab through the
             // single-source helper. `running_provider_pins`, set when a live tab
             // is retargeted, would otherwise leak an entry per exited tab and
@@ -564,6 +606,16 @@ impl Engine {
             // nobody typing it is judged here like any other run.
             let ended_badly = exit_success == Some(false)
                 || rapid_exit_ends_run_badly(run_duration, was_typed_into);
+            // Read before `mark_tab_run_failed` below consumes the excerpt: the
+            // verdict's tail and the warning's quote are the same lines, read
+            // off the same once-only capture.
+            let refused_resume = refused_resume_excerpt(
+                was_resume,
+                exit_success,
+                run_duration,
+                was_typed_into,
+                &verdict_excerpt,
+            );
             if ended_badly && owning.is_some() {
                 // Which ending, in priority order. A non-zero status is the most
                 // informative answer, so it wins even over a run that was also
@@ -603,6 +655,7 @@ impl Engine {
                 is_minimal,
                 output_excerpt,
                 read_error,
+                refused_resume_excerpt: refused_resume,
             });
         }
 
@@ -642,6 +695,7 @@ impl Engine {
                 is_minimal: false,
                 output_excerpt: String::new(),
                 read_error: None,
+                refused_resume_excerpt: None,
             });
         }
 
@@ -1083,7 +1137,7 @@ mod tests {
 
     use super::PrunedPtyKind;
     use super::TerminatingPty;
-    use super::{RAPID_EXIT_WINDOW, rapid_exit_ends_run_badly};
+    use super::{RAPID_EXIT_WINDOW, rapid_exit_ends_run_badly, refused_resume_excerpt};
     use super::{REAPED_DRAIN_GRACE, agent_pty_ready_to_prune};
     use super::{format_shutdown_result, format_shutdown_start};
     use crate::engine::Engine;
@@ -1656,6 +1710,202 @@ mod tests {
             );
             sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The shape a refused resume has, and the three near misses that are NOT
+    /// one. The provider's words are the whole remedy, so the only question the
+    /// engine answers is whether they are worth quoting as a refusal.
+    #[test]
+    fn only_a_brief_non_zero_resume_with_output_is_a_refused_resume() {
+        let words = vec!["it is already running".to_string()];
+        assert_eq!(
+            refused_resume_excerpt(
+                true,
+                Some(false),
+                Some(Duration::from_millis(90)),
+                false,
+                &words
+            ),
+            Some(words.clone()),
+            "a resume that printed why it would not resume and quit at once"
+        );
+        assert_eq!(
+            refused_resume_excerpt(
+                false,
+                Some(false),
+                Some(Duration::from_millis(90)),
+                false,
+                &words
+            ),
+            None,
+            "a run that never asked to resume cannot have been refused one"
+        );
+        assert_eq!(
+            refused_resume_excerpt(
+                true,
+                Some(false),
+                Some(Duration::from_secs(600)),
+                false,
+                &words
+            ),
+            None,
+            "a resumed conversation that ran for ten minutes and ended is a session ending"
+        );
+        assert_eq!(
+            refused_resume_excerpt(
+                true,
+                Some(true),
+                Some(Duration::from_millis(90)),
+                false,
+                &words
+            ),
+            None,
+            "status 0 is not a refusal"
+        );
+        assert_eq!(
+            refused_resume_excerpt(
+                true,
+                Some(false),
+                Some(Duration::from_millis(90)),
+                true,
+                &words
+            ),
+            None,
+            "somebody typed into it, so it came up and they ended it"
+        );
+        assert_eq!(
+            refused_resume_excerpt(
+                true,
+                Some(false),
+                Some(Duration::from_millis(90)),
+                false,
+                &["   ".to_string()]
+            ),
+            None,
+            "with nothing on screen there is nothing to quote, and the fresh-start \
+             fallback owns that case anyway"
+        );
+    }
+
+    /// End to end: the refusal's words ride out on the PrunedPty, off the same
+    /// once-only screen read the tab's verdict takes.
+    #[test]
+    fn prune_carries_a_refused_resume_excerpt_for_a_resumed_run() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        // A provider refusing to continue: two lines of explanation, then out.
+        let client = PtyClient::spawn_with_env(
+            "sh",
+            &[
+                "-c".to_string(),
+                "printf 'Your most recent conversation is running in the background.\\n\
+                 Use `agents` to attach to it.\\n'; exit 1"
+                    .to_string(),
+            ],
+            worktree.path(),
+            24,
+            80,
+            1000,
+            &[],
+        )
+        .expect("spawn sh");
+        engine.providers.insert(TabId::new("s1-slot"), client);
+        engine.note_resume_launch(&TabId::new("s1-slot"));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if pruned.iter().any(|p| p.id == "s1-slot") {
+                break pruned;
+            }
+            assert!(Instant::now() < deadline, "agent provider never exited");
+            sleep(Duration::from_millis(50));
+        };
+        let agent = pruned
+            .iter()
+            .find(|p| p.id == "s1-slot")
+            .expect("the slot tab pruned");
+        let excerpt = agent
+            .refused_resume_excerpt
+            .as_ref()
+            .expect("a resumed run that quit non-zero at once is a refused resume");
+        let warning = crate::tab_verdict::refused_resume_warning(&agent.label, excerpt)
+            .expect("the provider left words to quote");
+        assert!(
+            warning.contains("could not resume its previous session"),
+            "got {warning:?}"
+        );
+        assert!(
+            warning.contains("Use `agents` to attach to it."),
+            "the provider's own remedy must be in the sentence, got {warning:?}"
+        );
+        assert!(
+            !engine.resumed_tab_runs.contains(&TabId::new("s1-slot")),
+            "the resume fact is torn down with the run it described"
+        );
+    }
+
+    /// The same run, launched WITHOUT a resume, keeps the ordinary exit wording:
+    /// nothing about it says anything about a previous session.
+    #[test]
+    fn prune_carries_no_refusal_for_a_fresh_run_that_crashed() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let client = PtyClient::spawn_with_env(
+            "sh",
+            &["-c".to_string(), "printf 'boom\\n'; exit 1".to_string()],
+            worktree.path(),
+            24,
+            80,
+            1000,
+            &[],
+        )
+        .expect("spawn sh");
+        engine.providers.insert(TabId::new("s1-slot"), client);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if pruned.iter().any(|p| p.id == "s1-slot") {
+                break pruned;
+            }
+            assert!(Instant::now() < deadline, "agent provider never exited");
+            sleep(Duration::from_millis(50));
+        };
+        let agent = pruned
+            .iter()
+            .find(|p| p.id == "s1-slot")
+            .expect("the slot tab pruned");
+        assert!(
+            agent.refused_resume_excerpt.is_none(),
+            "a fresh launch has no previous session to have been refused"
+        );
     }
 
     #[test]
