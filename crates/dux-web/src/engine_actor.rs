@@ -368,6 +368,7 @@ pub(crate) struct ActorLoopEnds {
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
+    status_late_finals_tx: watch::Sender<Vec<KeyedWireStatus>>,
     /// Fires `()` once per successful config reload so the web layer can emit a
     /// `config.changed` event on its event bus (clients then refetch
     /// `/api/v1/bootstrap`). Broadcast: the web forwarder is the only listener,
@@ -555,6 +556,11 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
     let (status_clear_tx, _status_clear_rx) = broadcast::channel::<Option<String>>(256);
     let (status_snapshot_tx, status_snapshot_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+    // The last warning and the last error to leave that snapshot, on their own
+    // channel: they are handed to a connection when it JOINS and must not be
+    // mistaken for open work by anything reading the live snapshot.
+    let (status_late_finals_tx, status_late_finals_rx) =
+        watch::channel::<Vec<KeyedWireStatus>>(vec![]);
     // Config-reload notifier: the loop fires `()` on each successful reload and the
     // web layer's forwarder turns it into a `config.changed` event. A small buffer
     // is plenty: reloads are rare and the forwarder drains promptly.
@@ -591,6 +597,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             status_tx: status_tx.clone(),
             status_clear_tx: status_clear_tx.clone(),
             status_snapshot_rx,
+            status_late_finals_rx,
             config_reload_tx: config_reload_tx.clone(),
             spine_change_tx: spine_change_tx.clone(),
             workspace_rx,
@@ -607,6 +614,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             status_tx,
             status_clear_tx,
             status_snapshot_tx,
+            status_late_finals_tx,
             config_reload_tx,
             spine_change_tx,
             workspace_tx,
@@ -654,6 +662,7 @@ pub struct EngineHandle {
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_rx: watch::Receiver<Vec<KeyedWireStatus>>,
+    status_late_finals_rx: watch::Receiver<Vec<KeyedWireStatus>>,
     /// Notifies on each successful config reload (see [`ActorLoopEnds`]). The web
     /// layer subscribes via [`EngineHandle::subscribe_config_reloads`] and re-emits
     /// a `config.changed` event so clients refetch `/api/v1/bootstrap`.
@@ -751,6 +760,13 @@ impl EngineHandle {
     /// line until the next live update. An empty `Vec` means nothing is showing.
     pub fn status_snapshot(&self) -> Vec<KeyedWireStatus> {
         self.status_snapshot_rx.borrow().clone()
+    }
+
+    /// The last warning and the last error that have aged out of the replay
+    /// snapshot. Handed to a connection at the moment it joins and never
+    /// re-broadcast; see `KeyedStatusController::late_finals` for the rule.
+    pub fn late_status_finals(&self) -> Vec<KeyedWireStatus> {
+        self.status_late_finals_rx.borrow().clone()
     }
 
     /// A receiver for the pushed workspace document. Each `/ws/events`
@@ -2001,6 +2017,7 @@ impl EngineService {
             status_tx,
             status_clear_tx,
             status_snapshot_tx,
+            status_late_finals_tx,
             config_reload_tx,
             spine_change_tx,
             workspace_tx,
@@ -2016,6 +2033,7 @@ impl EngineService {
                 status_tx,
                 status_clear_tx,
                 status_snapshot_tx,
+                status_late_finals_tx,
                 engine.live_status_keys.clone(),
             ),
             config_reload_tx,
@@ -2715,6 +2733,7 @@ struct StatusEmitter {
     tx: broadcast::Sender<WireStatus>,
     clear_tx: broadcast::Sender<Option<String>>,
     snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
+    late_finals_tx: watch::Sender<Vec<KeyedWireStatus>>,
     controller: KeyedStatusController,
     /// Most recent generation for each keyed status so `clear` can guard
     /// against dismissing a newer status placed on the same key by a
@@ -2727,6 +2746,7 @@ impl StatusEmitter {
         tx: broadcast::Sender<WireStatus>,
         clear_tx: broadcast::Sender<Option<String>>,
         snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
+        late_finals_tx: watch::Sender<Vec<KeyedWireStatus>>,
         live: dux_core::statusline::LiveStatusKeys,
     ) -> Self {
         Self {
@@ -2743,8 +2763,18 @@ impl StatusEmitter {
             // from an abandoned one; without it a spinner is timed out on
             // twenty seconds of silence however long the work really takes.
             controller: KeyedStatusController::emitting_finals().with_live_keys(live),
+            late_finals_tx,
             generations: std::collections::HashMap::new(),
         }
+    }
+
+    /// Republish both views of the controller: the live snapshot a joining or
+    /// lagging connection replays, and the last bad outcomes it has aged out.
+    /// One method, so a path that refreshes the first can never forget the
+    /// second and leave a joining page reading a stale pair.
+    fn publish_snapshot(&self) {
+        let _ = self.snapshot_tx.send(self.controller.snapshot());
+        let _ = self.late_finals_tx.send(self.controller.late_finals());
     }
 
     /// Upsert the status in the controller (keyed or anonymous), refresh the
@@ -2790,7 +2820,7 @@ impl StatusEmitter {
         if let Some(ref k) = status.key {
             self.generations.insert(k.clone(), generation);
         }
-        let _ = self.snapshot_tx.send(self.controller.snapshot());
+        self.publish_snapshot();
         self.tx.send(status)
     }
 
@@ -2805,7 +2835,7 @@ impl StatusEmitter {
         let generation = self.generations.get(&key).copied();
         if self.controller.clear(&key, generation) {
             self.generations.remove(&key);
-            let _ = self.snapshot_tx.send(self.controller.snapshot());
+            self.publish_snapshot();
             let _ = self.clear_tx.send(Some(key));
             return true;
         }
@@ -2837,7 +2867,7 @@ impl StatusEmitter {
         {
             return;
         }
-        let _ = self.snapshot_tx.send(self.controller.snapshot());
+        self.publish_snapshot();
         for key in changes.cleared_keys {
             let _ = self.clear_tx.send(key);
         }
@@ -4384,7 +4414,14 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(
+            status_tx,
+            clear_tx,
+            snapshot_tx,
+            late_finals_tx,
+            Default::default(),
+        );
         let (tx, rx) = oneshot::channel();
         handle_subscribe(
             &mut engine,
@@ -4496,7 +4533,14 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(
+            status_tx,
+            clear_tx,
+            snapshot_tx,
+            late_finals_tx,
+            Default::default(),
+        );
         let (tx, rx) = oneshot::channel();
         handle_subscribe(
             &mut engine,
@@ -4577,7 +4621,14 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(
+            status_tx,
+            clear_tx,
+            snapshot_tx,
+            late_finals_tx,
+            Default::default(),
+        );
 
         let _ =
             status.send(WireStatus::new("info", "the pane you are looking at moved").quiet_web());
@@ -4608,7 +4659,14 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, mut clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(
+            status_tx,
+            clear_tx,
+            snapshot_tx,
+            late_finals_tx,
+            Default::default(),
+        );
 
         let mut tui_quiet = WireStatus::new("info", "the status line withholds this");
         tui_quiet.quiet_on = QuietSurfaces::TUI;
@@ -4643,7 +4701,14 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(
+            status_tx,
+            clear_tx,
+            snapshot_tx,
+            late_finals_tx,
+            Default::default(),
+        );
 
         let mut warning = WireStatus::new("warning", "git is failing");
         warning.quiet_on = QuietSurfaces::BOTH;
@@ -4667,7 +4732,14 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(status_tx, clear_tx, snapshot_tx, Default::default());
+        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(
+            status_tx,
+            clear_tx,
+            snapshot_tx,
+            late_finals_tx,
+            Default::default(),
+        );
 
         let _ = status.send(WireStatus::keyed("launch:a", "busy", "Launching...").sticky());
         let _ = status_rx.try_recv();
@@ -4899,10 +4971,42 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
+            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
         (emitter, snap_rx)
+    }
+
+    #[test]
+    fn the_emitter_publishes_the_last_bad_outcome_for_a_page_that_joins_later() {
+        // The reported failure: while the terminal UI serves in its background,
+        // an engine error can be raised with no browser open, and the browser
+        // that opens later never learned it existed.
+        let (tx, _rx) = broadcast::channel::<WireStatus>(16);
+        let (clear_tx, _crx) = broadcast::channel::<Option<String>>(16);
+        let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+        let (late_tx, late_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+        let mut e = StatusEmitter {
+            tx,
+            clear_tx,
+            snapshot_tx: snap_tx,
+            late_finals_tx: late_tx,
+            controller: KeyedStatusController::emitting_finals(),
+            generations: std::collections::HashMap::new(),
+        };
+
+        let _ = e.send(WireStatus::keyed("pr", "error", "gh could not resolve it"));
+        e.tick(Instant::now() + dux_core::statusline::FINAL_REPLAY_WINDOW);
+
+        assert!(
+            snap_rx.borrow().is_empty(),
+            "the live replay snapshot still lets it go, as before"
+        );
+        let late = late_rx.borrow().clone();
+        assert_eq!(late.len(), 1, "{late:?}");
+        assert_eq!(late[0].message, "gh could not resolve it");
+        assert_eq!(late[0].tone, "error");
     }
 
     #[test]
@@ -5007,6 +5111,7 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
+            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
@@ -5041,6 +5146,7 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
+            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
@@ -5132,6 +5238,7 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
+            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
@@ -5214,6 +5321,7 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
+            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
             controller: KeyedStatusController::emitting_finals().with_live_keys(live.clone()),
             generations: std::collections::HashMap::new(),
         };
@@ -5253,6 +5361,7 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
+            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
@@ -6378,7 +6487,14 @@ mod tests {
         let (tx, _rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let mut status = StatusEmitter::new(tx, clear_tx, snapshot_tx, Default::default());
+        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(
+            tx,
+            clear_tx,
+            snapshot_tx,
+            late_finals_tx,
+            Default::default(),
+        );
         let (config_reload_tx, _config_rx) = broadcast::channel(8);
         let mut disk_ahead = false;
         let owners = crate::pty_owners::PtySizeOwners::default();

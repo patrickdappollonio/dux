@@ -2703,6 +2703,20 @@ async fn handle_events_socket(
         }
     }
 
+    // The last warning and the last error that aged out of that snapshot. Sent
+    // ONLY here, when a connection joins, and never re-broadcast: while the
+    // terminal UI serves in its background, a failure can be raised with no
+    // browser open at all, and the terminal keeps showing it until something
+    // replaces it. Without this, the browser that opens afterwards is the one
+    // surface that never learns what went wrong. The Lagged resend deliberately
+    // does not carry them: that client was already here.
+    for ev in status_events(&engine.late_status_finals(), &connection_id, &connections) {
+        if send_json(&sink, &ev).await.is_err() {
+            console.client_disconnected(peer_ip);
+            return;
+        }
+    }
+
     // This connection's fine + coarse topic set (the sole owner), wrapped in a Drop
     // guard so the held fine-topic interests are drained on EVERY exit, including
     // task cancellation (a runtime shutdown drops this future at an `.await`), not
