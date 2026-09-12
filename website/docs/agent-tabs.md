@@ -184,3 +184,9 @@ an exit status, or a run that was over in under five seconds), and, under *Last 
 last few lines the run had on screen. That is usually where the answer is: a provider
 refusing to resume a conversation that is already open somewhere else says so on its way
 out.
+
+You do not have to open the agent to find that out. When a resume is refused, and the run
+was over in seconds, the notice dux raises (the status line in the terminal UI, a toast in
+the browser) says the agent could not resume its previous session and quotes the
+provider's own last words, remedy and all. Whatever the CLI told you to do about it is in
+the message; the card still has the full output.

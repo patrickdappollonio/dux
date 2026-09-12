@@ -1908,9 +1908,19 @@ fn prune_wire_status(pruned: &dux_core::engine::PrunedPty) -> Option<WireStatus>
         // event worth a warning. A tab exit that leaves siblings running is
         // routine and scoped: never the loud "Agent exited" warning (which would
         // falsely imply the agent died).
+        // A resume the provider REFUSED is the one exit whose reason is already
+        // on screen and about to be thrown away with the pane: the CLI said why
+        // it would not continue and what to do instead, so the warning quotes it
+        // rather than making the user open the agent to find out.
         PrunedPtyKind::Agent if pruned.agent_detached => Some(WireStatus::new(
             "warning",
-            format!("Agent \"{}\" exited.", pruned.label),
+            pruned
+                .refused_resume_excerpt
+                .as_deref()
+                .and_then(|excerpt| {
+                    dux_core::tab_verdict::refused_resume_warning(&pruned.label, excerpt)
+                })
+                .unwrap_or_else(|| format!("Agent \"{}\" exited.", pruned.label)),
         )),
         // The tab closed itself on a clean exit, taking its pill out of the
         // strip. The strip is the announcement.
@@ -4241,6 +4251,7 @@ mod tests {
             is_minimal: false,
             output_excerpt: String::new(),
             read_error: None,
+            refused_resume_excerpt: None,
         }
     }
 
@@ -4653,6 +4664,7 @@ mod tests {
             is_minimal: false,
             output_excerpt: String::new(),
             read_error: None,
+            refused_resume_excerpt: None,
         }
     }
 
@@ -4680,7 +4692,28 @@ mod tests {
         let detached = prune_wire_status(&pruned(PrunedPtyKind::Agent, true, false))
             .expect("losing the whole agent stays a warning");
         assert_eq!(detached.tone, "warning");
+        assert!(detached.message.contains("exited."));
         assert!(!detached.quiet_on.web);
+    }
+
+    /// A refused resume says so, in the provider's own words. The toast is the
+    /// only place the user sees them: the pane they were printed in is gone.
+    #[test]
+    fn a_refused_resume_warning_quotes_the_provider() {
+        let mut refused = pruned(PrunedPtyKind::Agent, true, false);
+        refused.label = "feat/x".to_string();
+        refused.refused_resume_excerpt = Some(vec![
+            "Your most recent conversation is running in the background.".to_string(),
+            "Use `claude agents` to attach to it.".to_string(),
+        ]);
+        let status = prune_wire_status(&refused).expect("a detaching exit is still a warning");
+        assert_eq!(status.tone, "warning");
+        assert_eq!(
+            status.message,
+            "Agent \"feat/x\" could not resume its previous session; the provider said: Your most \
+             recent conversation is running in the background. Use `claude agents` to attach to \
+             it. Open the agent to see the full output, or start a fresh session."
+        );
     }
 
     /// The quiet flag is honored at the one gate, so a status marked quiet

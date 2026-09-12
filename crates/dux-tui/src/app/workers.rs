@@ -240,13 +240,7 @@ impl App {
             return;
         }
         self.log_minimal_agent_exit(pty);
-        let status = agent_exit_status_message(
-            pty.exit_success,
-            pty.is_minimal,
-            &pty.output_excerpt,
-            pty.read_error.as_deref(),
-            &key,
-        );
+        let status = pruned_agent_exit_message(pty, &key);
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.focus = FocusPane::Left;
@@ -1678,7 +1672,31 @@ fn initial_commit_project_status(
     }
 }
 
-/// The status line for an agent PTY that has been pruned.
+/// The status line for one pruned agent PTY, whichever kind of ending it had.
+///
+/// A REFUSED RESUME is its own sentence, built in `dux_core` so the terminal and
+/// the browser quote the provider in the same words. Everything else falls
+/// through to the ordinary exit message below. The relaunch key is appended
+/// rather than baked into the shared sentence, because only this surface has one
+/// and it is user-configurable.
+fn pruned_agent_exit_message(pty: &PrunedPty, reconnect_key: &str) -> String {
+    if let Some(warning) = pty
+        .refused_resume_excerpt
+        .as_deref()
+        .and_then(|excerpt| dux_core::tab_verdict::refused_resume_warning(&pty.label, excerpt))
+    {
+        return format!("{warning} Press \"{reconnect_key}\" to relaunch.");
+    }
+    agent_exit_status_message(
+        pty.exit_success,
+        pty.is_minimal,
+        &pty.output_excerpt,
+        pty.read_error.as_deref(),
+        reconnect_key,
+    )
+}
+
+/// The ordinary exit status line for an agent PTY that has been pruned.
 ///
 /// `read_error` is the one fact no other field carries. After a read error there
 /// is almost never an exit status, so without it the message is identical to the
@@ -2834,6 +2852,61 @@ mod tests {
             !ordinary.contains("read error"),
             "an ordinary end of input must not gain a read-error clause: {ordinary}"
         );
+    }
+
+    /// A pruned agent whose exit detached it, with no refusal recorded.
+    fn pruned_agent(label: &str) -> PrunedPty {
+        PrunedPty {
+            kind: PrunedPtyKind::Agent,
+            id: "s1-slot".to_string(),
+            owner: Some(dux_core::model::TerminalOwner::Session("s1".to_string())),
+            agent_detached: true,
+            label: label.to_string(),
+            tab_closed: false,
+            exit_success: Some(false),
+            is_minimal: true,
+            output_excerpt: "boom".to_string(),
+            read_error: None,
+            refused_resume_excerpt: None,
+        }
+    }
+
+    /// A refused resume tells the user what the provider said and how to get out
+    /// of it. Without it the line says only that the agent exited, and the words
+    /// that explain why leave the screen with the pane.
+    #[test]
+    fn a_refused_resume_status_quotes_the_provider_and_names_the_relaunch_key() {
+        let mut pty = pruned_agent("feat/x");
+        pty.refused_resume_excerpt = Some(vec![
+            "Your most recent conversation is running in the background.".to_string(),
+            "Use `claude agents` to attach to it.".to_string(),
+        ]);
+
+        let message = pruned_agent_exit_message(&pty, "Ctrl-r");
+        assert!(
+            message.starts_with("Agent \"feat/x\" could not resume its previous session;"),
+            "the line must name the failure as a refused resume: {message}"
+        );
+        assert!(
+            message.contains("Use `claude agents` to attach to it."),
+            "the provider's own remedy is what makes the line actionable: {message}"
+        );
+        assert!(
+            message.contains("Press \"Ctrl-r\" to relaunch."),
+            "the relaunch key is looked up, never hardcoded: {message}"
+        );
+    }
+
+    /// An ordinary exit keeps the wording it had.
+    #[test]
+    fn an_ordinary_agent_exit_status_is_unchanged() {
+        let message = pruned_agent_exit_message(&pruned_agent("feat/x"), "Ctrl-r");
+        assert_eq!(
+            message,
+            agent_exit_status_message(Some(false), true, "boom", None, "Ctrl-r"),
+            "with no refusal recorded the line is the ordinary exit message"
+        );
+        assert!(!message.contains("could not resume"));
     }
 
     #[test]
