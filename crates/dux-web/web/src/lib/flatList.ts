@@ -28,6 +28,11 @@ export const FLAT_SORT_LABELS: Record<FlatSortKey, string> = {
 
 // A session is "quiet" when it is not active (detached or exited): dormant work
 // that collapses into the Quiet tail instead of hogging the main list.
+//
+// The hand-written twin of `dux_core::flat_list::is_inactive`, which decides the
+// same thing for the terminal UI's tail AND for which clock the pull-request
+// poller puts an agent on. Nothing checks that the two agree, so change one and
+// change the other in the same commit.
 export function isQuietSession(session: SessionView): boolean {
   return session.status !== "active"
 }

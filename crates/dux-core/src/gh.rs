@@ -144,12 +144,16 @@ pub fn run_pr_sync_scoped(
         Ok(guard) => guard.clone(),
         Err(_) => return (Vec::new(), Vec::new()),
     };
+    let entries = entries_for_scope(snapshot, scope);
+    run_entries(&entries, backoff, policy, trigger)
+}
+
+/// The entries a cycle of the given [`SyncScope`] asks GitHub about. Pure, so
+/// which agents a narrowed cycle leaves alone can be asserted without a `gh`.
+pub fn entries_for_scope(entries: Vec<PrSyncEntry>, scope: SyncScope) -> Vec<PrSyncEntry> {
     match scope {
-        SyncScope::Everything => run_entries(&snapshot, backoff, policy, trigger),
-        SyncScope::ActiveOnly => {
-            let active: Vec<PrSyncEntry> = snapshot.into_iter().filter(|e| !e.inactive).collect();
-            run_entries(&active, backoff, policy, trigger)
-        }
+        SyncScope::Everything => entries,
+        SyncScope::ActiveOnly => entries.into_iter().filter(|e| !e.inactive).collect(),
     }
 }
 
@@ -3795,25 +3799,30 @@ mod tests {
 
     #[test]
     fn an_active_only_cycle_leaves_the_inactive_entries_alone() {
-        // The worktree paths are bogus, so an entry that reached the planner
-        // would fail loudly rather than quietly returning nothing.
-        let mut inactive = planning_entry();
-        inactive.session_id = "dormant".to_string();
-        inactive.inactive = true;
-        let plan = Arc::new(Mutex::new(vec![inactive]));
+        // Asserted on the pure narrowing rather than on an empty result, which
+        // an entry with an unresolvable remote would produce either way and so
+        // would pass with the filter removed.
+        let mut working = planning_entry();
+        working.session_id = "working".to_string();
+        let mut dormant = planning_entry();
+        dormant.session_id = "dormant".to_string();
+        dormant.inactive = true;
+        let plan = vec![working, dormant];
 
-        let (results, signals) = run_pr_sync_scoped(
-            &plan,
-            &std::collections::HashMap::new(),
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-            SyncScope::ActiveOnly,
-        );
+        let narrowed: Vec<String> = entries_for_scope(plan.clone(), SyncScope::ActiveOnly)
+            .into_iter()
+            .map(|e| e.session_id)
+            .collect();
+        assert_eq!(narrowed, vec!["working".to_string()]);
 
-        assert!(results.is_empty(), "{results:?}");
-        assert!(
-            signals.is_empty(),
-            "no host was even named, so none signalled"
+        let whole: Vec<String> = entries_for_scope(plan, SyncScope::Everything)
+            .into_iter()
+            .map(|e| e.session_id)
+            .collect();
+        assert_eq!(
+            whole,
+            vec!["working".to_string(), "dormant".to_string()],
+            "every other cycle still asks about both"
         );
     }
 

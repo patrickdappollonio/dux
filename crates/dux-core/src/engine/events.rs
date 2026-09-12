@@ -5857,6 +5857,58 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_return_check_is_owed_and_retried_on_the_next_rebuild() {
+        // Coming back while GitHub is unavailable is the common case: the check
+        // is refused, and without an owed set the badge would stay as stale as
+        // the slow clock left it until something else asked.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut session = sample_session("s1", "p1", "feat/a");
+        session.status = crate::model::SessionStatus::Detached;
+        engine.sessions.push(session);
+        engine.update_pr_sync_sessions();
+
+        // gh is not available, so the return check cannot be dispatched.
+        engine.sessions[0].status = crate::model::SessionStatus::Active;
+        engine.update_pr_sync_sessions();
+        assert!(
+            engine.pr_return_checks_owed.contains("s1"),
+            "a refused check is owed, not forgotten"
+        );
+        assert!(!engine.is_in_flight(&InFlightKey::PrCheck("s1".into())));
+
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine.update_pr_sync_sessions();
+
+        assert!(engine.is_in_flight(&InFlightKey::PrCheck("s1".into())));
+        assert!(
+            engine.pr_return_checks_owed.is_empty(),
+            "owed once, then let go: the agent is active and the ordinary poll has it"
+        );
+    }
+
+    #[test]
+    fn an_owed_return_check_is_let_go_after_one_retry() {
+        // The retry is one attempt, not a queue nobody drains: still refused,
+        // still dropped.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut session = sample_session("s1", "p1", "feat/a");
+        session.status = crate::model::SessionStatus::Detached;
+        engine.sessions.push(session);
+        engine.update_pr_sync_sessions();
+        engine.sessions[0].status = crate::model::SessionStatus::Active;
+        engine.update_pr_sync_sessions();
+        assert!(engine.pr_return_checks_owed.contains("s1"));
+
+        // gh is still unavailable.
+        engine.update_pr_sync_sessions();
+
+        assert!(engine.pr_return_checks_owed.is_empty());
+    }
+
+    #[test]
     fn a_deleted_agent_is_not_mistaken_for_one_returning_from_inactive() {
         // It left the Inactive set by ceasing to exist, which is not a return.
         let (mut engine, _tmp) = test_engine();

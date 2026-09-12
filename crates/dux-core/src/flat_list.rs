@@ -38,13 +38,18 @@ pub struct FlatOrder {
     pub inactive: Vec<usize>,
 }
 
-/// Whether a session belongs in the list's INACTIVE tail: the "Inactive" section
-/// both surfaces collapse detached and exited agents under.
+/// Whether a session belongs in the list's INACTIVE tail: the "Inactive"
+/// section both surfaces collapse detached and exited agents under.
 ///
-/// One predicate, because "inactive" is now more than a place in a list: the
-/// pull-request poller puts exactly these agents on its slow clock, and a second
-/// definition of the word would let the sidebar and the poller disagree about
-/// which agent is which.
+/// One predicate for the whole Rust side, because "inactive" is now more than a
+/// place in a list: the pull-request poller puts exactly these agents on its
+/// slow clock, and a second Rust definition of the word would let the sidebar
+/// and the poller disagree about which agent is which.
+///
+/// The web does NOT share this one. Its mirror is `isQuietSession` in
+/// `crates/dux-web/web/src/lib/flatList.ts`, hand-written like the rest of that
+/// module's twins of this one, and the two must stay in step: change the rule
+/// here and change it there in the same commit.
 pub fn is_inactive(session: &AgentSession) -> bool {
     matches!(
         session.status,

@@ -388,11 +388,27 @@ pub struct Engine {
     /// `config.ui.pr_poll_inactive_interval_seconds` at spawn and in
     /// [`Engine::retune_after_config_swap`].
     pub pr_poll_inactive_interval_secs: Arc<AtomicU64>,
+    /// When the blind poll last swept the Inactive tail, shared with the poller
+    /// thread so the twelve-hour clock survives a poller respawn. The poller is
+    /// torn down and started again on every GitHub-availability flip and on
+    /// several config paths; a sweep instant living in the loop closure would
+    /// reset to zero each time, which on a flapping `gh` means the slow clock
+    /// never elapses. `None` is "never swept": the first iteration starts the
+    /// clock rather than sweeping at once, because boot's own one-shot refresh
+    /// has already covered every entry.
+    pub pr_inactive_sweep_at: Arc<Mutex<Option<Instant>>>,
     /// The session ids that were in the Inactive tail the last time the PR-sync
     /// plan was derived. An id that leaves this set has just come back to life,
     /// and gets one immediate check rather than waiting out the slow clock it
     /// was on.
     pub pr_inactive_sessions: std::collections::HashSet<String>,
+    /// Sessions that left the Inactive tail and whose one immediate
+    /// pull-request check was refused (GitHub unavailable, a check already in
+    /// flight, the debounce). The next plan rebuild retries each of them once
+    /// and then lets it go: the agent is active now, so the ordinary poll is
+    /// looking after it, and a set that retried forever would be a queue nobody
+    /// drains.
+    pub pr_return_checks_owed: std::collections::HashSet<String>,
     /// Seconds between branch-sync sweeps, shared with the loop thread so a
     /// config reload can retune it live. `0` reaching the loop means "nap and
     /// look again", never "exit": the thread stays live so
@@ -2896,10 +2912,11 @@ impl Engine {
         // probes, so it must see a re-probe's answer rather than the one dux
         // held when it started.
         let policy = Arc::clone(&self.gh_probe.policy);
-        // Boot's own one-shot refresh has just covered every entry, inactive
-        // ones included, so the slow clock starts now rather than firing an
-        // immediate second sweep over the agents nobody is working in.
-        let mut last_inactive_sweep = Instant::now();
+        // Shared with the engine so a poller respawn (a GitHub-availability
+        // flip, a config path that re-arms) does not restart the twelve-hour
+        // clock from zero. Boot's own one-shot refresh has already covered every
+        // entry, so an unset clock starts here rather than sweeping at once.
+        let last_inactive_sweep = Arc::clone(&self.pr_inactive_sweep_at);
         let spawned = self.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "pr-sync".into(),
@@ -2939,14 +2956,27 @@ impl Engine {
                 // clock: nobody is working in it, nothing on screen is waiting
                 // on the answer, and its pull request moves rarely. Most cycles
                 // therefore cover the active half alone.
-                let scope = if crate::gh::inactive_sweep_due(
-                    last_inactive_sweep.elapsed(),
-                    inactive_interval_secs.load(Ordering::Relaxed),
-                ) {
-                    last_inactive_sweep = Instant::now();
-                    crate::gh::SyncScope::Everything
-                } else {
-                    crate::gh::SyncScope::ActiveOnly
+                let scope = {
+                    let mut swept_at = last_inactive_sweep
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let since = match *swept_at {
+                        Some(at) => at.elapsed(),
+                        // Never swept: start the clock, sweep nothing.
+                        None => {
+                            *swept_at = Some(Instant::now());
+                            Duration::ZERO
+                        }
+                    };
+                    if crate::gh::inactive_sweep_due(
+                        since,
+                        inactive_interval_secs.load(Ordering::Relaxed),
+                    ) {
+                        *swept_at = Some(Instant::now());
+                        crate::gh::SyncScope::Everything
+                    } else {
+                        crate::gh::SyncScope::ActiveOnly
+                    }
                 };
                 // The blind poll: nobody asked, so a dormant agent whose pull
                 // request is already closed is left alone until a one-shot
@@ -3261,12 +3291,12 @@ impl Engine {
     /// of finished agents from spawning a `gh` process per agent passed: a
     /// terminal pull request on an exited agent is answered from SQLite here and
     /// re-queried on the deliberate triggers instead.
-    pub fn spawn_foreground_pr_check(&mut self, session_id: &str) {
+    pub fn spawn_foreground_pr_check(&mut self, session_id: &str) -> bool {
         self.spawn_pr_check_for_session_with(
             session_id,
             PR_FOREGROUND_DEBOUNCE,
             crate::gh::SyncTrigger::Focus,
-        );
+        )
     }
 
     /// Seed `pr_statuses` from the persisted `latest_prs` rows, so a startup
@@ -3328,12 +3358,15 @@ impl Engine {
     /// of triggers within one event-loop tick, before the first worker's
     /// `PrStatusReady` has been processed, cannot bypass the rate limit and
     /// spawn concurrent `gh` subprocesses.
-    pub fn spawn_pr_check_for_session(&mut self, session_id: &str, min_interval: Duration) {
+    ///
+    /// Reports whether a check was actually dispatched, so a caller that must
+    /// not silently lose one can retry.
+    pub fn spawn_pr_check_for_session(&mut self, session_id: &str, min_interval: Duration) -> bool {
         self.spawn_pr_check_for_session_with(
             session_id,
             min_interval,
             crate::gh::SyncTrigger::OneShot,
-        );
+        )
     }
 
     /// [`Self::spawn_pr_check_for_session`] with the trigger named. Only the
@@ -3343,11 +3376,11 @@ impl Engine {
         session_id: &str,
         min_interval: Duration,
         trigger: crate::gh::SyncTrigger,
-    ) {
+    ) -> bool {
         if !self.github_integration_enabled
             || !matches!(self.gh_status, crate::model::GhStatus::Available)
         {
-            return;
+            return false;
         }
         // Don't stack concurrent gh subprocesses for the same session: a call can
         // run up to GH_CALL_TIMEOUT, which exceeds the debounce, so guard on an
@@ -3355,7 +3388,7 @@ impl Engine {
         // the debounce forward). Backed-off hosts are skipped inside the sync
         // itself (per-host), so no host check is needed here.
         if self.is_in_flight(&InFlightKey::PrCheck(session_id.to_string())) {
-            return;
+            return false;
         }
         // The user detached this agent's pull request, so there is nothing to
         // detect for it. Checked before the debounce stamp so a resume gets a
@@ -3363,7 +3396,7 @@ impl Engine {
         // out. `update_pr_sync_sessions` drops the session from the batched
         // loop for the same reason; this is the one-shot half.
         if self.pr_suppressions.contains(session_id) {
-            return;
+            return false;
         }
         // A standalone agent has no branch, so there is no pull request to
         // check for. Refused HERE rather than only in the batched enumerator
@@ -3375,18 +3408,18 @@ impl Engine {
             .iter()
             .any(|s| s.id == session_id && s.supports_branch_git())
         {
-            return;
+            return false;
         }
         // Rate-limit: skip if checked more recently than `min_interval` ago.
         if let Some(last) = self.pr_last_checked.get(session_id)
             && last.elapsed() < min_interval
         {
-            return;
+            return false;
         }
         self.pr_last_checked
             .insert(session_id.to_string(), Instant::now());
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
-            return;
+            return false;
         };
         // A pinned session checks against its PIN, exactly like the batched
         // loop: the override row is the known PR and the pin identity rides
@@ -3405,7 +3438,7 @@ impl Engine {
         // managed workspace is guaranteed here; reading it is what keeps the
         // entry from being built with an empty branch name.
         let Some(managed) = session.workspace.as_managed() else {
-            return;
+            return false;
         };
         let entry = PrSyncEntry {
             session_id: session.id.clone(),
@@ -3445,6 +3478,7 @@ impl Engine {
                 let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
             },
         );
+        true
     }
 }
 
@@ -3720,6 +3754,14 @@ impl Engine {
     /// exactly the moment its user starts reading that badge again.
     pub fn update_pr_sync_sessions(&mut self) {
         let returned = self.rebuild_pr_sync_plan();
+        // Owed from a previous rebuild, whose check was refused. Retried once
+        // each and then let go whatever happens, so this can never become a
+        // queue nobody drains.
+        for session_id in std::mem::take(&mut self.pr_return_checks_owed) {
+            if self.sessions.iter().any(|s| s.id == session_id) {
+                self.spawn_pr_check_for_session(&session_id, PR_CHECK_MIN_INTERVAL);
+            }
+        }
         for session_id in returned {
             // The ordinary deliberate-event debounce rather than none: the
             // startup auto-reopen sweep flips a whole workspace of agents out of
@@ -3727,7 +3769,12 @@ impl Engine {
             // already answered for all of them in one batched query. The
             // debounce is what collapses that burst back into the batch, while
             // a genuine return, minutes or hours later, still gets its check.
-            self.spawn_pr_check_for_session(&session_id, PR_CHECK_MIN_INTERVAL);
+            if !self.spawn_pr_check_for_session(&session_id, PR_CHECK_MIN_INTERVAL) {
+                // Refused, commonly because GitHub was unavailable at the
+                // moment the agent came back. Owe it one retry rather than
+                // leaving the badge as stale as the slow clock left it.
+                self.pr_return_checks_owed.insert(session_id);
+            }
         }
     }
 
