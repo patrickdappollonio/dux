@@ -836,9 +836,25 @@ pub enum PrAttachOutcome {
     /// The lookup resolved and the pin was applied; `message` is the
     /// already-formatted confirmation from [`Engine::apply_pr_attach`].
     Attached { message: String },
-    /// The lookup failed, the session vanished mid-resolve, or applying the
-    /// pin failed; `message` is the already-formatted error line.
+    /// The lookup failed or applying the pin failed; `message` is the
+    /// already-formatted error line.
     Failed { message: String },
+    /// The agent the lookup was for is gone by the time the answer landed.
+    /// There is nothing to attach it to and nothing on either surface the
+    /// sentence could be about, so the operation ends with its spinner retired
+    /// and no message at all.
+    AgentGone,
+}
+
+/// The one mapping from a manual PR-attach outcome to the status the surfaces
+/// show. Shared by the dispatch site and the tests so a fourth outcome cannot
+/// be given a different ending in one of them.
+pub fn pr_attach_final(outcome: &PrAttachOutcome) -> Final {
+    match outcome {
+        PrAttachOutcome::Attached { message } => Final::info(message.clone()),
+        PrAttachOutcome::Failed { message } => Final::error(message.clone()),
+        PrAttachOutcome::AgentGone => Final::Clear,
+    }
 }
 
 /// How recently an agent must have emitted PTY output to count as actively
@@ -3916,10 +3932,7 @@ impl Engine {
         let op = status_op(format!(
             "Resolving PR to attach to agent \"{agent_name}\"..."
         ))
-        .resolve_in_handler(|o: &PrAttachOutcome| match o {
-            PrAttachOutcome::Attached { message } => Final::info(message.clone()),
-            PrAttachOutcome::Failed { message } => Final::error(message.clone()),
-        })
+        .resolve_in_handler(pr_attach_final)
         .with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
         let pending = self.begin_status_op(&op);

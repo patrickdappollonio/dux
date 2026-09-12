@@ -7618,7 +7618,7 @@ mod tests {
     /// SAME keyed op carries the final; a session deleted mid-lookup attaches
     /// nothing (the real vanished-session guard for both surfaces).
     #[test]
-    fn pr_attach_resolution_applies_the_pin_or_refuses_a_vanished_session() {
+    fn pr_attach_resolution_applies_the_pin_or_drops_a_vanished_session() {
         let (mut engine, _tmp) = test_engine();
         enable_gh(&mut engine);
         engine.projects.push(sample_project("p1", "/tmp/p1"));
@@ -7657,8 +7657,10 @@ mod tests {
         assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
         assert_eq!(engine.session_store.load_pr_overrides().unwrap().len(), 1);
 
-        // Session deleted mid-lookup: nothing is attached, the keyed final is
-        // an error, and no orphan row is written for the dead id.
+        // Session deleted mid-lookup: nothing is attached, the operation ends
+        // with its spinner retired and no sentence (an answer about an agent
+        // that is gone is nobody's news), and no orphan row is written for the
+        // dead id.
         engine.pr_overrides.clear();
         engine.pr_statuses.clear();
         engine.session_store.delete_pr_override("s1").unwrap();
@@ -7674,10 +7676,15 @@ mod tests {
                 },
                 status_op_id: Some(op_id.clone()),
             });
-        let statuses = wire_statuses_from_reaction(&reaction);
-        let final_status = statuses.last().expect("keyed final");
-        assert_eq!(final_status.tone, "error");
-        assert!(final_status.message.contains("deleted"), "{final_status:?}");
+        assert!(
+            wire_statuses_from_reaction(&reaction).is_empty(),
+            "the browser is told nothing about an agent that is gone"
+        );
+        assert!(matches!(
+            reaction,
+            crate::engine::EventReaction::ClearStatus(ref key) if key == &op_id
+        ));
+        assert!(!engine.pending_pr_attach_ops.contains_key(&op_id));
         assert!(engine.pr_overrides.is_empty());
         assert!(
             engine.session_store.load_pr_overrides().unwrap().is_empty(),

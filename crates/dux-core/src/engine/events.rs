@@ -3110,17 +3110,23 @@ impl Engine {
             },
             crate::worker::PrLookupPurpose::Attach { session_id } => {
                 self.clear_in_flight(&InFlightKey::PrAttach(session_id.clone()));
-                let outcome = match result {
-                    Ok(pr) => {
-                        if !self.sessions.iter().any(|session| session.id == session_id) {
-                            crate::engine::PrAttachOutcome::Failed {
-                                message: format!(
-                                    "The agent was deleted while PR #{} was being resolved; \
-                                     nothing was attached.",
-                                    pr.number,
-                                ),
-                            }
-                        } else {
+                // An answer about an agent that no longer exists is nobody's
+                // news: there is nothing to attach it to, no row it could
+                // describe, and no action the sentence could invite. It is
+                // dropped here for BOTH purposes and both results, so neither
+                // surface reports a gh failure about a pull request the user
+                // stopped tracking when they deleted the agent. The log line is
+                // where it goes instead.
+                let session_gone = !self.sessions.iter().any(|session| session.id == session_id);
+                let outcome = if session_gone {
+                    crate::logger::debug(&format!(
+                        "[gh-integration] discarding a pull-request lookup answer for \
+                         session {session_id}, which no longer exists",
+                    ));
+                    crate::engine::PrAttachOutcome::AgentGone
+                } else {
+                    match result {
+                        Ok(pr) => {
                             match self.apply_pr_attach(
                                 &session_id,
                                 &pr.host,
@@ -3139,8 +3145,8 @@ impl Engine {
                                 },
                             }
                         }
+                        Err(message) => crate::engine::PrAttachOutcome::Failed { message },
                     }
-                    Err(message) => crate::engine::PrAttachOutcome::Failed { message },
                 };
                 let attached = matches!(outcome, crate::engine::PrAttachOutcome::Attached { .. });
                 let final_reaction = if let Some(id) = status_op_id
@@ -3155,6 +3161,9 @@ impl Engine {
                         crate::engine::PrAttachOutcome::Failed { message } => {
                             EventReaction::Status(StatusUpdate::error(message))
                         }
+                        // No op to resolve and nothing to say: the answer is
+                        // dropped whole.
+                        crate::engine::PrAttachOutcome::AgentGone => EventReaction::Nothing,
                     }
                 };
                 if attached {
@@ -5470,6 +5479,53 @@ mod tests {
         });
 
         assert!(!engine.is_in_flight(&InFlightKey::PrAttach("deleted".into())));
+        assert!(
+            matches!(reaction, EventReaction::Nothing),
+            "an answer about an agent that is gone is nobody's news, got {}",
+            reaction_kind(&reaction),
+        );
+    }
+
+    #[test]
+    fn a_failed_pull_request_lookup_for_a_deleted_session_says_nothing() {
+        // The agent the lookup was for is gone, so the gh failure is about
+        // nothing the user can see or act on. Neither surface is told.
+        let (mut engine, _tmp) = test_engine();
+        engine.mark_in_flight(InFlightKey::PrAttach("deleted".into()));
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullRequestResolved {
+            result: Err("Failed to resolve PR #48 from o/r: no such pull request.".into()),
+            purpose: crate::worker::PrLookupPurpose::Attach {
+                session_id: "deleted".into(),
+            },
+            status_op_id: None,
+        });
+
+        assert!(!engine.is_in_flight(&InFlightKey::PrAttach("deleted".into())));
+        assert!(
+            matches!(reaction, EventReaction::Nothing),
+            "a lookup failure for a deleted agent must reach no surface, got {}",
+            reaction_kind(&reaction),
+        );
+    }
+
+    #[test]
+    fn a_failed_pull_request_lookup_for_a_live_session_still_reports() {
+        // The other half of the rule: the agent is there, so its user is owed
+        // the reason the attach did not happen.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine.sessions.push(sample_session("s1", "p1", "feat/x"));
+        engine.mark_in_flight(InFlightKey::PrAttach("s1".into()));
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullRequestResolved {
+            result: Err("Failed to resolve PR #48 from o/r: no such pull request.".into()),
+            purpose: crate::worker::PrLookupPurpose::Attach {
+                session_id: "s1".into(),
+            },
+            status_op_id: None,
+        });
+
         assert!(matches!(
             reaction,
             EventReaction::Status(StatusUpdate {
@@ -5477,6 +5533,36 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_discarded_lookup_answer_still_retires_its_spinner() {
+        // Saying nothing must not mean leaving the busy up: the thread cannot
+        // be killed, so the answer landing is where the operation ends, and it
+        // ends with the spinner taken down and no sentence behind it.
+        let (mut engine, _tmp) = test_engine();
+        engine.mark_in_flight(InFlightKey::PrAttach("deleted".into()));
+        let op = crate::engine::status_op("Resolving PR to attach...".to_string())
+            .resolve_in_handler(crate::engine::pr_attach_final);
+        let op_id = op.id().to_string();
+        engine.pending_pr_attach_ops.insert(op_id.clone(), op);
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullRequestResolved {
+            result: Err("Failed to resolve PR #48 from o/r: no such pull request.".into()),
+            purpose: crate::worker::PrLookupPurpose::Attach {
+                session_id: "deleted".into(),
+            },
+            status_op_id: Some(op_id.clone()),
+        });
+
+        assert!(!engine.pending_pr_attach_ops.contains_key(&op_id));
+        match reaction {
+            EventReaction::ClearStatus(cleared) => assert_eq!(cleared, op_id),
+            other => panic!(
+                "expected the spinner retired, got {}",
+                reaction_kind(&other)
+            ),
+        }
     }
 
     #[test]
