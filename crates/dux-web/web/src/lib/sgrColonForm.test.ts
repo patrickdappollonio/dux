@@ -93,6 +93,40 @@ describe("everything else passes through untouched", () => {
   })
 })
 
+describe("an escape-free chunk costs nothing", () => {
+  // Most of what a pty sends contains no escape at all, and the whole chunk is
+  // then already the answer. Returning it by IDENTITY is the observable proof
+  // that no copy and no per-byte work happened: scanning for the escape is
+  // roughly forty times cheaper than walking the bytes.
+  it("returns the caller's own array when there is no escape and no carry", () => {
+    const n = createSgrColonNormalizer()
+    const chunk = enc.encode("no escapes here at all")
+    expect(n.push(chunk)).toBe(chunk)
+  })
+
+  it("takes the fast path again on the chunk after a completed sequence", () => {
+    const n = createSgrColonNormalizer()
+    n.push(enc.encode("\x1b[38:2:1:2:3m"))
+    const chunk = enc.encode("plain again")
+    expect(n.push(chunk)).toBe(chunk)
+  })
+
+  it("does NOT take it while a sequence is still being carried", () => {
+    const n = createSgrColonNormalizer()
+    n.push(enc.encode("\x1b[38:2:1"))
+    const chunk = enc.encode(":2:3m tail")
+    expect(n.push(chunk)).not.toBe(chunk)
+    expect(dec.decode(n.push(enc.encode("")))).toBe("")
+  })
+
+  it("does NOT take it for a chunk that contains an escape", () => {
+    const n = createSgrColonNormalizer()
+    const chunk = enc.encode("text \x1b[0m more")
+    expect(n.push(chunk)).not.toBe(chunk)
+    expect(dec.decode(n.push(new Uint8Array(0)))).toBe("")
+  })
+})
+
 describe("the stream may break at any byte", () => {
   const samples = [
     "\x1b[48:2:0:128:128m",
