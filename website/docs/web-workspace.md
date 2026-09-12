@@ -146,10 +146,14 @@ says so plainly with a **Reconnect** button that starts over; set `reconnect_att
 `reconnect_attempt_timeout_seconds` (10 by default) and counted as a failure, because a
 host you cannot reach does not refuse the connection, it just never answers. Anything that
 connects gives the whole budget back, and so does coming back to the tab, unlocking the
-phone or the network returning. A hidden tab stops trying altogether rather than burning
-your battery on a connection you are not looking at, and picks it straight back up when
-you switch back to it, unlock the phone, or the network returns. Your scrollback and
-anything half-typed in the compose box survive all of it.
+phone or the network returning. The page's own connection keeps counting while the tab is
+in the background, so that it can still reach you with attention alerts, and it can run
+out of attempts back there; you will find it stopped when you return, and returning is
+itself what starts it over. Your terminals are the half that waits: a hidden tab stops
+retrying them altogether rather than burning your battery on a screen you are not looking
+at, and picks them straight back up when you switch back to it, unlock the phone, or the
+network returns. Your scrollback and anything half-typed in the compose box survive all of
+it.
 
 Two things can still stop the wait, and both offer you a **Reconnect** button rather than
 leaving you stuck. If the terminal's screen has not arrived within
