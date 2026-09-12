@@ -65,9 +65,16 @@ describe("everything else passes through untouched", () => {
     ["a non-SGR CSI", "\x1b[38:2:1:2:3H"],
     ["a private CSI", "\x1b[?1049h"],
     ["a cursor position report", "\x1b[2J"],
-    ["an OSC title", "\x1b]0;38:2:1:2:3\x07"],
-    ["an OSC 8 hyperlink", "\x1b]8;;https://example.com/38:2:1:2:3\x1b\\"],
-    ["a DCS string", "\x1bP38:2:1:2:3\x1b\\"],
+    // These three carry a parameter-shaped payload after a NON-CSI introducer,
+    // so what they pin is that `ESC ]` and `ESC P` end the normaliser's
+    // interest immediately. A payload can only be reached at all if it contains
+    // a literal `ESC [`, which is the tmux case recorded below.
+    ["an OSC title, whose payload is never entered", "\x1b]0;38:2:1:2:3\x07"],
+    [
+      "an OSC 8 hyperlink, whose payload is never entered",
+      "\x1b]8;;https://example.com/38:2:1:2:3\x1b\\",
+    ],
+    ["a DCS string, whose payload is never entered", "\x1bP38:2:1:2:3\x1b\\"],
     ["plain text that looks like a parameter", "38:2:1:2:3m"],
     ["an escape that is not a CSI", "\x1b(B"],
     ["a lone escape followed by text", "\x1bZhello"],
@@ -124,6 +131,19 @@ describe("an escape-free chunk costs nothing", () => {
     const chunk = enc.encode("text \x1b[0m more")
     expect(n.push(chunk)).not.toBe(chunk)
     expect(dec.decode(n.push(new Uint8Array(0)))).toBe("")
+  })
+})
+
+describe("a payload holding a literal ESC [ is rewritten, and that is accepted", () => {
+  it("respells inside a tmux DCS passthrough", () => {
+    // The normaliser does not track string states, so the escaped `ESC [` in a
+    // tmux passthrough is respelled like any other. It is harmless: tmux
+    // unescapes the payload and forwards the equivalent spelling to the outer
+    // terminal. No other payload can reach this, because sixel, kitty graphics
+    // and OSC 8 payloads cannot contain a literal `ESC [` at all.
+    expect(once("\x1bPtmux;\x1b\x1b[48:2:0:128:128m\x1b\\")).toBe(
+      "\x1bPtmux;\x1b\x1b[48:2::0:128:128m\x1b\\",
+    )
   })
 })
 
