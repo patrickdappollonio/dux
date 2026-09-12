@@ -696,8 +696,12 @@ mod tests {
             .refused_resume_excerpt
             .as_ref()
             .expect("a wordy refusal reaches the exit path");
-        let warning = crate::tab_verdict::refused_resume_warning(&agent.label, excerpt)
-            .expect("there are words to quote");
+        let warning = crate::tab_verdict::refused_resume_warning(
+            &agent.label,
+            excerpt,
+            "Open the agent to see the full output, or start a fresh session.",
+        )
+        .expect("there are words to quote");
         assert!(
             warning.contains("could not resume its previous session"),
             "got {warning:?}"

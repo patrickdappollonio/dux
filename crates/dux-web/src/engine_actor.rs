@@ -1918,7 +1918,13 @@ fn prune_wire_status(pruned: &dux_core::engine::PrunedPty) -> Option<WireStatus>
                 .refused_resume_excerpt
                 .as_deref()
                 .and_then(|excerpt| {
-                    dux_core::tab_verdict::refused_resume_warning(&pruned.label, excerpt)
+                    dux_core::tab_verdict::refused_resume_warning(
+                        &pruned.label,
+                        excerpt,
+                        // The browser's own way out: the pane is a click away and
+                        // the agent's menu is where a fresh run is started.
+                        "Open the agent to see the full output, or start a fresh session.",
+                    )
                 })
                 .unwrap_or_else(|| format!("Agent \"{}\" exited.", pruned.label)),
         )),

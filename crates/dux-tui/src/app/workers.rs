@@ -1675,17 +1675,23 @@ fn initial_commit_project_status(
 /// The status line for one pruned agent PTY, whichever kind of ending it had.
 ///
 /// A REFUSED RESUME is its own sentence, built in `dux_core` so the terminal and
-/// the browser quote the provider in the same words. Everything else falls
-/// through to the ordinary exit message below. The relaunch key is appended
-/// rather than baked into the shared sentence, because only this surface has one
-/// and it is user-configurable.
+/// the browser quote the provider in the same words; only the closing remedy is
+/// this surface's own, because it is the half that differs.
+///
+/// The remedy names both ways out, and it is deliberately not "press the
+/// relaunch key to start fresh": that key resumes again whenever the provider is
+/// eligible, which after a refusal is exactly what just failed. The fresh run is
+/// the palette's `force-reconnect-agent`, which is palette-only and has no key of
+/// its own to name.
 fn pruned_agent_exit_message(pty: &PrunedPty, reconnect_key: &str) -> String {
-    if let Some(warning) = pty
-        .refused_resume_excerpt
-        .as_deref()
-        .and_then(|excerpt| dux_core::tab_verdict::refused_resume_warning(&pty.label, excerpt))
-    {
-        return format!("{warning} Press \"{reconnect_key}\" to relaunch.");
+    let remedy = format!(
+        "Press \"{reconnect_key}\" to try again, or run force-reconnect-agent from the palette \
+         to start a fresh session; the full output is in the agent's pane."
+    );
+    if let Some(warning) = pty.refused_resume_excerpt.as_deref().and_then(|excerpt| {
+        dux_core::tab_verdict::refused_resume_warning(&pty.label, excerpt, &remedy)
+    }) {
+        return warning;
     }
     agent_exit_status_message(
         pty.exit_success,
@@ -2886,18 +2892,12 @@ mod tests {
             "Use `claude agents` to attach to it.".to_string(),
         ]);
 
-        let message = pruned_agent_exit_message(&pty, "Ctrl-r");
-        assert!(
-            message.starts_with("Agent \"feat/x\" could not resume its previous session;"),
-            "the line must name the failure as a refused resume: {message}"
-        );
-        assert!(
-            message.contains("Use `claude agents` to attach to it."),
-            "the provider's own remedy is what makes the line actionable: {message}"
-        );
-        assert!(
-            message.contains("Press \"Ctrl-r\" to relaunch."),
-            "the relaunch key is looked up, never hardcoded: {message}"
+        assert_eq!(
+            pruned_agent_exit_message(&pty, "Ctrl-r"),
+            "Agent \"feat/x\" could not resume its previous session; the provider said: \u{2026} \
+             Your most recent conversation is running in the background. Use `claude agents` to \
+             attach to it. Press \"Ctrl-r\" to try again, or run force-reconnect-agent from the \
+             palette to start a fresh session; the full output is in the agent's pane."
         );
     }
 

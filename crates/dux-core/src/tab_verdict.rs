@@ -142,7 +142,17 @@ pub const RESUME_REFUSAL_QUOTED_LINES: usize = 2;
 /// reason dux has never heard of is reported exactly as well as one that does
 /// not. `None` when there is nothing to quote, which leaves the caller with the
 /// ordinary exit wording rather than an empty pair of words.
-pub fn refused_resume_warning(agent_label: &str, excerpt: &[String]) -> Option<String> {
+///
+/// `remedy` is the surface's own closing sentence, passed in rather than written
+/// here: what to do next is different on a page you can click and in a terminal
+/// with a keybinding, and a shared sentence would have to be vague enough to fit
+/// both. What must not differ is everything before it, which is why the quote
+/// and its cut marks live here.
+pub fn refused_resume_warning(
+    agent_label: &str,
+    excerpt: &[String],
+    remedy: &str,
+) -> Option<String> {
     let start = excerpt.len().saturating_sub(RESUME_REFUSAL_QUOTED_LINES);
     let quote = excerpt[start..]
         .iter()
@@ -176,7 +186,7 @@ pub fn refused_resume_warning(agent_label: &str, excerpt: &[String]) -> Option<S
     };
     Some(format!(
         "Agent \"{agent_label}\" could not resume its previous session; the provider said: \
-         {head}{quote}{tail} Open the agent to see the full output, or start a fresh session."
+         {head}{quote}{tail} {remedy}"
     ))
 }
 
@@ -250,6 +260,9 @@ pub fn ending_sentence(ending: &TabRunEnding, seconds_ago: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for a surface's own closing sentence.
+    const REMEDY: &str = "Open the agent to see the full output, or start a fresh session.";
 
     #[test]
     fn the_excerpt_keeps_the_tail_not_the_head() {
@@ -347,6 +360,7 @@ mod tests {
                     .to_string(),
                 "Use `claude agents` to find and attach to it.".to_string(),
             ],
+            "Open the agent to see the full output, or start a fresh session.",
         )
         .expect("real provider output produces the refusal warning");
         assert_eq!(
@@ -366,7 +380,7 @@ mod tests {
     #[test]
     fn the_refusal_quotes_the_tail_and_caps_it() {
         let excerpt: Vec<String> = (1..=6).map(|n| format!("line {n}")).collect();
-        let warning = refused_resume_warning("feat/x", &excerpt).expect("a warning");
+        let warning = refused_resume_warning("feat/x", &excerpt, REMEDY).expect("a warning");
         assert!(
             warning.contains("said: \u{2026} line 5 line 6\u{2026}"),
             "only the last {RESUME_REFUSAL_QUOTED_LINES} lines are quoted, got {warning:?}"
@@ -374,7 +388,7 @@ mod tests {
         assert!(!warning.contains("line 4"));
 
         let long = vec!["x".repeat(500)];
-        let capped = refused_resume_warning("feat/x", &long).expect("a warning");
+        let capped = refused_resume_warning("feat/x", &long, REMEDY).expect("a warning");
         assert!(
             capped.contains(&format!(
                 "said: {}\u{2026} ",
@@ -396,7 +410,8 @@ mod tests {
             "it is running!",
             "it is running\u{2026}",
         ] {
-            let warning = refused_resume_warning("a", &[finished.to_string()]).expect("a warning");
+            let warning =
+                refused_resume_warning("a", &[finished.to_string()], REMEDY).expect("a warning");
             assert!(
                 warning.contains(&format!("said: {finished} Open")),
                 "a finished sentence is quoted exactly as written, got {warning:?}"
@@ -409,7 +424,8 @@ mod tests {
             "it is runnin",
             "attach to it:",
         ] {
-            let warning = refused_resume_warning("a", &[cut.to_string()]).expect("a warning");
+            let warning =
+                refused_resume_warning("a", &[cut.to_string()], REMEDY).expect("a warning");
             assert!(
                 warning.contains(&format!("said: {cut}\u{2026} Open")),
                 "a quote the row cut says it was cut, got {warning:?}"
@@ -421,8 +437,8 @@ mod tests {
     /// caller keeps whatever wording it already had.
     #[test]
     fn a_refusal_with_nothing_to_quote_has_no_warning_of_its_own() {
-        assert!(refused_resume_warning("feat/x", &[]).is_none());
-        assert!(refused_resume_warning("feat/x", &["   ".to_string()]).is_none());
+        assert!(refused_resume_warning("feat/x", &[], REMEDY).is_none());
+        assert!(refused_resume_warning("feat/x", &["   ".to_string()], REMEDY).is_none());
     }
 
     #[test]
