@@ -565,14 +565,14 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "pr_poll_interval_seconds",
             comment: Some(CommentSource::Static(
-                "# Seconds between blind GitHub PR-status safety polls.\n# Most PR updates arrive from events (pushing a branch, or focusing an\n# agent), so this is only the backstop for changes made on GitHub itself.\n# Each cycle is batched into as few GraphQL requests as possible (one per\n# host, up to ~100 PRs each) to stay cheap on your API quota.\n# Set to 0 to disable the blind poll (updates then come only from events).",
+                "# Seconds between blind GitHub PR-status safety polls.\n# Most PR updates arrive from events (pushing a branch, or focusing an\n# agent), so this is only the backstop for changes made on GitHub itself.\n# Each cycle is batched into as few GraphQL requests as possible (one per\n# host, up to ~100 PRs each) to stay cheap on your API quota.\n# Set to 0 to disable the blind poll (updates then come only from events).\n# That switches off the inactive poll below as well: it rides these same\n# cycles, so with no cycles there is nothing for it to ride.",
             )),
             value_fn: |c| FieldValue::U16(c.ui.pr_poll_interval_seconds),
         },
         ConfigEntry::Field {
             key: "pr_poll_inactive_interval_seconds",
             comment: Some(CommentSource::Static(
-                "# Seconds between blind GitHub PR-status polls for INACTIVE agents: the\n# ones the agent list puts under \"Inactive\" (detached, or whose process\n# exited). Nobody is working in one, so its pull request is polled on this\n# much slower clock instead of the one above; the default is 12 hours.\n# An agent that becomes active again is checked immediately, and the\n# deliberate triggers (opening it, an agent exit, a branch push) always\n# check whatever clock it is on.\n# Set to 0 to stop polling inactive agents entirely.\n# Any other value is clamped to between 30 seconds and 604800 seconds\n# (7 days), and dux logs a warning once when it clamps one.",
+                "# Seconds between blind GitHub PR-status polls for INACTIVE agents: the\n# ones the agent list puts under \"Inactive\" (detached, or whose process\n# exited). Nobody is working in one, so its pull request is polled on this\n# much slower clock instead of the one above; the default is 12 hours.\n# An agent that becomes active again is checked right away, and the\n# deliberate triggers (opening an agent, an agent exit, a branch push)\n# ignore which section an agent is in.\n# The slow sweep rides the cycles of the poll above rather than running a\n# timer of its own, so its real period rounds up to the next of those\n# cycles, and a value below pr_poll_interval_seconds behaves as that\n# interval. Setting pr_poll_interval_seconds to 0 stops this poll too.\n# Set to 0 to stop polling inactive agents entirely.\n# Any other value is clamped to between 30 seconds and 604800 seconds\n# (7 days), and dux logs a warning when it clamps one.",
             )),
             value_fn: |c| FieldValue::U32(c.ui.pr_poll_inactive_interval_seconds),
         },

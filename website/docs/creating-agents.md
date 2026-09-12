@@ -263,9 +263,15 @@ pr_poll_interval_seconds = 180
 pr_poll_inactive_interval_seconds = 43200
 ```
 
+The slow clock rides the cycles of the poll above rather than running a timer of its
+own, so its real period rounds up to the next of those cycles, and a value below
+`pr_poll_interval_seconds` behaves as that interval. Setting `pr_poll_interval_seconds`
+to `0` therefore turns the inactive poll off as well: with no cycles, there is nothing
+for it to ride.
+
 An agent that comes back from Inactive, because you reconnected to it or started it
 again, is checked right away rather than waiting out that slow clock, and the
-event-driven refreshes above never look at which section an agent is in.
+event-driven refreshes above ignore which section an agent is in.
 
 When a branch name is reused, dux follows the most recent pull request on it, preferring
 one that is open.
