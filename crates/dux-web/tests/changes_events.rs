@@ -177,6 +177,22 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
             ),
         )
         .route(
+            "/api/_emit_error",
+            post(|State(state): State<AppState>| async move {
+                state.engine.emit_status(WireStatus::keyed(
+                    "probe-late",
+                    "error",
+                    "the poller could not reach GitHub",
+                ));
+            }),
+        )
+        .route(
+            "/api/_late_finals_waiting",
+            get(|State(state): State<AppState>| async move {
+                axum::Json(state.engine.late_status_finals_waiting().await)
+            }),
+        )
+        .route(
             "/api/_clear_status",
             post(|State(state): State<AppState>| async move {
                 state
@@ -843,4 +859,75 @@ async fn status_toast_is_scoped_to_origin_connection() {
         b_saw.is_none(),
         "a scoped operation toast must not leak to another connection: {b_saw:?}"
     );
+}
+
+/// A warning or an error raised while NO browser is connected is held for the
+/// first page to open. Emitted through the real status path with nothing
+/// attached, then read back through the real actor.
+#[tokio::test]
+async fn a_failure_raised_with_no_browser_open_is_held() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("http://{addr}/api/_emit_error"))
+        .send()
+        .await
+        .unwrap();
+
+    let held: usize = client
+        .get(format!("http://{addr}/api/_late_finals_waiting"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        held, 1,
+        "nobody was watching, so it waits for the first page"
+    );
+}
+
+/// The other half, through the REAL join path: the held failure reaches the
+/// socket that joins, and the join is what drains it, so no later page is told
+/// again.
+///
+/// What this pins is the wiring: the emit, the actor round trip the join makes,
+/// the scope filter and the frame shape. It does not pin the replay-window
+/// timing, because inside that window the on-connect snapshot carries the same
+/// key as well and the client would see one toast either way; the controller's
+/// own unit tests drive that with a clock they control.
+#[tokio::test]
+async fn a_held_failure_reaches_the_page_that_opens_and_is_then_gone() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("http://{addr}/api/_emit_error"))
+        .send()
+        .await
+        .unwrap();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .unwrap();
+    let saw = wait_for_frame(&mut ws, 5, |t| {
+        t.contains("\"event\":\"status\"") && t.contains("could not reach GitHub")
+    })
+    .await;
+    assert!(
+        saw.is_some(),
+        "the page that opens must be told what went wrong"
+    );
+
+    let left: usize = client
+        .get(format!("http://{addr}/api/_late_finals_waiting"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the join took it, so no later page is told again");
 }

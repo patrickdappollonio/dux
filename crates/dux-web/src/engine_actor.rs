@@ -65,6 +65,17 @@ pub enum EngineRequest {
     /// operation whose success is already on screen, such as rendered release notes.
     /// Errors still post a real final on the same key.
     ClearStatus(String),
+    /// Hand over the warning and the error that were raised while no browser was
+    /// connected, and forget them. Asked once by each `/ws/events` connection as
+    /// it joins, so the FIRST page to open learns what went wrong while nobody
+    /// was looking and no later one is told again. See
+    /// `dux_core::statusline::KeyedStatusController::take_late_finals`.
+    TakeLateStatusFinals(oneshot::Sender<Vec<KeyedWireStatus>>),
+    /// How many of those are waiting right now, without taking them. The
+    /// observability read behind the same rule: it answers "is there bad news
+    /// nobody has been told yet", which a take cannot be used to ask because
+    /// asking would be the telling.
+    LateStatusFinalsWaiting(oneshot::Sender<usize>),
     SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
     WritePty(String, Vec<u8>),
     /// Resize a PTY: id, rows, cols, and the apply-order seq the owners lock
@@ -368,7 +379,8 @@ pub(crate) struct ActorLoopEnds {
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
-    status_late_finals_tx: watch::Sender<Vec<KeyedWireStatus>>,
+    /// The same counter as [`EngineHandle::events_watchers`].
+    events_watchers: Arc<AtomicUsize>,
     /// Fires `()` once per successful config reload so the web layer can emit a
     /// `config.changed` event on its event bus (clients then refetch
     /// `/api/v1/bootstrap`). Broadcast: the web forwarder is the only listener,
@@ -556,11 +568,6 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
     let (status_clear_tx, _status_clear_rx) = broadcast::channel::<Option<String>>(256);
     let (status_snapshot_tx, status_snapshot_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
-    // The last warning and the last error to leave that snapshot, on their own
-    // channel: they are handed to a connection when it JOINS and must not be
-    // mistaken for open work by anything reading the live snapshot.
-    let (status_late_finals_tx, status_late_finals_rx) =
-        watch::channel::<Vec<KeyedWireStatus>>(vec![]);
     // Config-reload notifier: the loop fires `()` on each successful reload and the
     // web layer's forwarder turns it into a `config.changed` event. A small buffer
     // is plenty: reloads are rare and the forwarder drains promptly.
@@ -577,6 +584,11 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     // pre-first-build value; the loop replaces it before it serves anything.
     let (workspace_tx, workspace_rx) = watch::channel::<Option<Arc<WorkspaceDoc>>>(None);
     let shutdown_flag = Arc::new(AtomicBool::new(false));
+    // How many `/ws/events` connections are up. Built here for the same reason as
+    // `pty_input_owners`: the loop starts before the router exists, so both sides
+    // have to be handed the same Arc. It is what tells a status raised while a
+    // browser was watching from one raised into an empty room.
+    let events_watchers = Arc::new(AtomicUsize::new(0));
     // The input-ownership registry is built alongside the channels because it,
     // too, is a bridge between the loop and the web layer: the PTY socket
     // handlers write claims into it and the loop's spine check reads them back
@@ -597,7 +609,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             status_tx: status_tx.clone(),
             status_clear_tx: status_clear_tx.clone(),
             status_snapshot_rx,
-            status_late_finals_rx,
+            events_watchers: Arc::clone(&events_watchers),
             config_reload_tx: config_reload_tx.clone(),
             spine_change_tx: spine_change_tx.clone(),
             workspace_rx,
@@ -614,7 +626,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             status_tx,
             status_clear_tx,
             status_snapshot_tx,
-            status_late_finals_tx,
+            events_watchers,
             config_reload_tx,
             spine_change_tx,
             workspace_tx,
@@ -662,7 +674,12 @@ pub struct EngineHandle {
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_rx: watch::Receiver<Vec<KeyedWireStatus>>,
-    status_late_finals_rx: watch::Receiver<Vec<KeyedWireStatus>>,
+    /// How many `/ws/events` connections are up. The events socket bumps it
+    /// beside its connection-registry insert and drops it in the same guard that
+    /// deregisters, so the count and the registry cannot come apart. The status
+    /// emitter reads it to decide whether a bad final was raised into an empty
+    /// room and should wait for the next page to open.
+    events_watchers: Arc<AtomicUsize>,
     /// Notifies on each successful config reload (see [`ActorLoopEnds`]). The web
     /// layer subscribes via [`EngineHandle::subscribe_config_reloads`] and re-emits
     /// a `config.changed` event so clients refetch `/api/v1/bootstrap`.
@@ -762,13 +779,6 @@ impl EngineHandle {
         self.status_snapshot_rx.borrow().clone()
     }
 
-    /// The last warning and the last error that have aged out of the replay
-    /// snapshot. Handed to a connection at the moment it joins and never
-    /// re-broadcast; see `KeyedStatusController::late_finals` for the rule.
-    pub fn late_status_finals(&self) -> Vec<KeyedWireStatus> {
-        self.status_late_finals_rx.borrow().clone()
-    }
-
     /// A receiver for the pushed workspace document. Each `/ws/events`
     /// connection clones one and forwards every new document to the client that
     /// asked for the coarse topics, which is what keeps N clients from each
@@ -816,6 +826,42 @@ impl EngineHandle {
                 "engine request channel full: dropped a status clear (key={key})"
             ));
         }
+    }
+
+    /// The warning and the error raised while no browser was connected, taken
+    /// out of the controller in the same call. Asked once per joining
+    /// `/ws/events` connection; see [`EngineRequest::TakeLateStatusFinals`].
+    /// The counter the events socket keeps up to date; see the field.
+    pub(crate) fn events_watchers(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.events_watchers)
+    }
+
+    pub async fn take_late_status_finals(&self) -> Vec<KeyedWireStatus> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::TakeLateStatusFinals(tx))
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// How much bad news is waiting for the next page to open, without taking
+    /// it. See [`EngineRequest::LateStatusFinalsWaiting`].
+    pub async fn late_status_finals_waiting(&self) -> usize {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::LateStatusFinalsWaiting(tx))
+            .await
+            .is_err()
+        {
+            return 0;
+        }
+        rx.await.unwrap_or(0)
     }
 
     pub async fn apply_wire(&self, command: WireCommand) -> Result<WireCommandOutcome, String> {
@@ -1835,7 +1881,10 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
 
         // Broadcast on the status channels only. Statuses are their own transport
         // (toasts on the web); no spine field carries them.
-        EngineRequest::EmitStatus(..) | EngineRequest::ClearStatus(..) => false,
+        EngineRequest::EmitStatus(..)
+        | EngineRequest::ClearStatus(..)
+        | EngineRequest::TakeLateStatusFinals(..)
+        | EngineRequest::LateStatusFinalsWaiting(..) => false,
     }
 }
 
@@ -2017,7 +2066,7 @@ impl EngineService {
             status_tx,
             status_clear_tx,
             status_snapshot_tx,
-            status_late_finals_tx,
+            events_watchers,
             config_reload_tx,
             spine_change_tx,
             workspace_tx,
@@ -2033,7 +2082,7 @@ impl EngineService {
                 status_tx,
                 status_clear_tx,
                 status_snapshot_tx,
-                status_late_finals_tx,
+                events_watchers,
                 engine.live_status_keys.clone(),
             ),
             config_reload_tx,
@@ -2733,7 +2782,12 @@ struct StatusEmitter {
     tx: broadcast::Sender<WireStatus>,
     clear_tx: broadcast::Sender<Option<String>>,
     snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
-    late_finals_tx: watch::Sender<Vec<KeyedWireStatus>>,
+    /// How many `/ws/events` connections are up right now, so the emitter can
+    /// tell a status raised while a browser was watching from one raised while
+    /// none was. The controller cannot answer that; it knows about statuses, not
+    /// sockets. Bumped by the events socket beside its registry insert, and by
+    /// the guard that deregisters it, so the two cannot come apart.
+    watchers: Arc<AtomicUsize>,
     controller: KeyedStatusController,
     /// Most recent generation for each keyed status so `clear` can guard
     /// against dismissing a newer status placed on the same key by a
@@ -2746,13 +2800,14 @@ impl StatusEmitter {
         tx: broadcast::Sender<WireStatus>,
         clear_tx: broadcast::Sender<Option<String>>,
         snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
-        late_finals_tx: watch::Sender<Vec<KeyedWireStatus>>,
+        watchers: Arc<AtomicUsize>,
         live: dux_core::statusline::LiveStatusKeys,
     ) -> Self {
         Self {
             tx,
             clear_tx,
             snapshot_tx,
+            watchers,
             // The web REPLAYS this snapshot to every `/ws/events` connection at
             // connect and again after a broadcast lag, so a retained final would
             // be re-raised as a fresh toast on every page load, every new tab and
@@ -2763,18 +2818,8 @@ impl StatusEmitter {
             // from an abandoned one; without it a spinner is timed out on
             // twenty seconds of silence however long the work really takes.
             controller: KeyedStatusController::emitting_finals().with_live_keys(live),
-            late_finals_tx,
             generations: std::collections::HashMap::new(),
         }
-    }
-
-    /// Republish both views of the controller: the live snapshot a joining or
-    /// lagging connection replays, and the last bad outcomes it has aged out.
-    /// One method, so a path that refreshes the first can never forget the
-    /// second and leave a joining page reading a stale pair.
-    fn publish_snapshot(&self) {
-        let _ = self.snapshot_tx.send(self.controller.snapshot());
-        let _ = self.late_finals_tx.send(self.controller.late_finals());
     }
 
     /// Upsert the status in the controller (keyed or anonymous), refresh the
@@ -2820,7 +2865,14 @@ impl StatusEmitter {
         if let Some(ref k) = status.key {
             self.generations.insert(k.clone(), generation);
         }
-        self.publish_snapshot();
+        // Nobody is connected, so this is being broadcast to an empty room and
+        // replayed to nobody. Tell the controller, which holds a bad final in
+        // that case for the first client to arrive. The ONE place the web emits,
+        // so the flag and the entry cannot come apart.
+        if self.watchers.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            self.controller.mark_unwatched(status.key.as_deref());
+        }
+        let _ = self.snapshot_tx.send(self.controller.snapshot());
         self.tx.send(status)
     }
 
@@ -2831,11 +2883,25 @@ impl StatusEmitter {
     /// Returns whether the entry actually went: the controller refuses to
     /// retire a sticky one, and a caller that was counting on this to take a
     /// spinner down has to know it did not.
+    /// Hand over the held bad finals and forget them, refreshing the published
+    /// snapshot so nothing downstream reads a controller state that has moved.
+    fn late_finals_waiting(&self) -> usize {
+        self.controller.late_finals_waiting()
+    }
+
+    fn take_late_finals(&mut self) -> Vec<KeyedWireStatus> {
+        let taken = self.controller.take_late_finals();
+        if !taken.is_empty() {
+            let _ = self.snapshot_tx.send(self.controller.snapshot());
+        }
+        taken
+    }
+
     fn clear(&mut self, key: String) -> bool {
         let generation = self.generations.get(&key).copied();
         if self.controller.clear(&key, generation) {
             self.generations.remove(&key);
-            self.publish_snapshot();
+            let _ = self.snapshot_tx.send(self.controller.snapshot());
             let _ = self.clear_tx.send(Some(key));
             return true;
         }
@@ -2867,7 +2933,7 @@ impl StatusEmitter {
         {
             return;
         }
-        self.publish_snapshot();
+        let _ = self.snapshot_tx.send(self.controller.snapshot());
         for key in changes.cleared_keys {
             let _ = self.clear_tx.send(key);
         }
@@ -3446,6 +3512,12 @@ fn handle_request(
         }
         EngineRequest::ClearStatus(key) => {
             status_tx.clear(key);
+        }
+        EngineRequest::TakeLateStatusFinals(reply) => {
+            let _ = reply.send(status_tx.take_late_finals());
+        }
+        EngineRequest::LateStatusFinalsWaiting(reply) => {
+            let _ = reply.send(status_tx.late_finals_waiting());
         }
         EngineRequest::AttachPullRequest(session_id, raw, origin, reply) => {
             handle_attach_pull_request(engine, session_id, raw, origin, reply, status_tx);
@@ -4414,12 +4486,11 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
         let mut status = StatusEmitter::new(
             status_tx,
             clear_tx,
             snapshot_tx,
-            late_finals_tx,
+            Arc::new(AtomicUsize::new(1)),
             Default::default(),
         );
         let (tx, rx) = oneshot::channel();
@@ -4533,12 +4604,11 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
         let mut status = StatusEmitter::new(
             status_tx,
             clear_tx,
             snapshot_tx,
-            late_finals_tx,
+            Arc::new(AtomicUsize::new(1)),
             Default::default(),
         );
         let (tx, rx) = oneshot::channel();
@@ -4621,12 +4691,11 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, snapshot_rx) = watch::channel(Vec::new());
-        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
         let mut status = StatusEmitter::new(
             status_tx,
             clear_tx,
             snapshot_tx,
-            late_finals_tx,
+            Arc::new(AtomicUsize::new(1)),
             Default::default(),
         );
 
@@ -4659,12 +4728,11 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, mut clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
         let mut status = StatusEmitter::new(
             status_tx,
             clear_tx,
             snapshot_tx,
-            late_finals_tx,
+            Arc::new(AtomicUsize::new(1)),
             Default::default(),
         );
 
@@ -4701,12 +4769,11 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, snapshot_rx) = watch::channel(Vec::new());
-        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
         let mut status = StatusEmitter::new(
             status_tx,
             clear_tx,
             snapshot_tx,
-            late_finals_tx,
+            Arc::new(AtomicUsize::new(1)),
             Default::default(),
         );
 
@@ -4732,12 +4799,11 @@ mod tests {
         let (status_tx, mut status_rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
         let mut status = StatusEmitter::new(
             status_tx,
             clear_tx,
             snapshot_tx,
-            late_finals_tx,
+            Arc::new(AtomicUsize::new(1)),
             Default::default(),
         );
 
@@ -4971,42 +5037,59 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
+            // One watcher: these tests are about the snapshot, not about the
+            // hold-for-the-next-arrival rule, which needs an empty room.
+            watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
         (emitter, snap_rx)
     }
 
-    #[test]
-    fn the_emitter_publishes_the_last_bad_outcome_for_a_page_that_joins_later() {
-        // The reported failure: while the terminal UI serves in its background,
-        // an engine error can be raised with no browser open, and the browser
-        // that opens later never learned it existed.
+    /// An emitter with nobody connected, which is the state the hold rule is
+    /// about: the terminal UI serving in its background with no browser open.
+    fn emitter_with_nobody_watching() -> StatusEmitter {
         let (tx, _rx) = broadcast::channel::<WireStatus>(16);
         let (clear_tx, _crx) = broadcast::channel::<Option<String>>(16);
-        let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
-        let (late_tx, late_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
-        let mut e = StatusEmitter {
+        let (snap_tx, _snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+        StatusEmitter {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            late_finals_tx: late_tx,
+            watchers: Arc::new(AtomicUsize::new(0)),
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
-        };
+        }
+    }
 
+    #[test]
+    fn an_error_raised_into_an_empty_room_waits_for_the_first_page_to_open() {
+        // The reported failure: while the terminal UI serves in its background,
+        // an engine error can be raised with no browser open, and the browser
+        // that opens later never learned it existed.
+        let mut e = emitter_with_nobody_watching();
         let _ = e.send(WireStatus::keyed("pr", "error", "gh could not resolve it"));
         e.tick(Instant::now() + dux_core::statusline::FINAL_REPLAY_WINDOW);
 
+        let first = e.take_late_finals();
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(first[0].message, "gh could not resolve it");
+        assert_eq!(first[0].tone, "error");
         assert!(
-            snap_rx.borrow().is_empty(),
-            "the live replay snapshot still lets it go, as before"
+            e.take_late_finals().is_empty(),
+            "the second page to open is not told again"
         );
-        let late = late_rx.borrow().clone();
-        assert_eq!(late.len(), 1, "{late:?}");
-        assert_eq!(late[0].message, "gh could not resolve it");
-        assert_eq!(late[0].tone, "error");
+    }
+
+    #[test]
+    fn an_error_raised_while_a_page_was_open_is_not_held() {
+        // It was broadcast live to the browser that was there, so holding it
+        // would re-toast the same news at the next page load.
+        let (mut e, _snap) = make_emitter();
+        let _ = e.send(WireStatus::keyed("pr", "error", "gh could not resolve it"));
+        e.tick(Instant::now() + dux_core::statusline::FINAL_REPLAY_WINDOW);
+
+        assert!(e.take_late_finals().is_empty());
     }
 
     #[test]
@@ -5111,7 +5194,9 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
+            // One watcher: these tests are about the snapshot, not about the
+            // hold-for-the-next-arrival rule, which needs an empty room.
+            watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
@@ -5146,7 +5231,9 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
+            // One watcher: these tests are about the snapshot, not about the
+            // hold-for-the-next-arrival rule, which needs an empty room.
+            watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
@@ -5238,7 +5325,9 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
+            // One watcher: these tests are about the snapshot, not about the
+            // hold-for-the-next-arrival rule, which needs an empty room.
+            watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
@@ -5321,7 +5410,9 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
+            // One watcher: these tests are about the snapshot, not about the
+            // hold-for-the-next-arrival rule, which needs an empty room.
+            watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals().with_live_keys(live.clone()),
             generations: std::collections::HashMap::new(),
         };
@@ -5361,7 +5452,9 @@ mod tests {
             tx,
             clear_tx,
             snapshot_tx: snap_tx,
-            late_finals_tx: watch::channel::<Vec<KeyedWireStatus>>(vec![]).0,
+            // One watcher: these tests are about the snapshot, not about the
+            // hold-for-the-next-arrival rule, which needs an empty room.
+            watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
             generations: std::collections::HashMap::new(),
         };
@@ -6487,12 +6580,11 @@ mod tests {
         let (tx, _rx) = broadcast::channel(8);
         let (clear_tx, _clear_rx) = broadcast::channel(8);
         let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
-        let (late_finals_tx, _late_finals_rx) = watch::channel(Vec::new());
         let mut status = StatusEmitter::new(
             tx,
             clear_tx,
             snapshot_tx,
-            late_finals_tx,
+            Arc::new(AtomicUsize::new(1)),
             Default::default(),
         );
         let (config_reload_tx, _config_rx) = broadcast::channel(8);

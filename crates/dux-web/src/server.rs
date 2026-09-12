@@ -1702,6 +1702,7 @@ async fn handle_pty_socket(
     let _conn_guard = ConnectionGuard {
         id: registry_id,
         registry: Arc::clone(&connections),
+        watchers: None,
     };
     // The console's live-client count, decremented on every exit path including
     // an unwind. Declared immediately after the increment above so the pair is
@@ -2651,9 +2652,16 @@ async fn handle_events_socket(
     // echoed `X-Connection-Id` against it. The guard deregisters on EVERY exit path
     // (loop break or task cancellation), freeing the slot.
     connections.insert(connection_id.clone(), crate::rest_common::ConnClass::Events);
+    // Bumped beside the registry insert and dropped by the same guard, so the
+    // status emitter's "was anybody watching" answer cannot drift from the
+    // registry. It is what decides whether a warning or an error raised now is
+    // held for the next page to open.
+    let watchers = engine.events_watchers();
+    watchers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _conn_guard = ConnectionGuard {
         id: connection_id.clone(),
         registry: Arc::clone(&connections),
+        watchers: Some(watchers),
     };
     let (sink, stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
@@ -2703,14 +2711,19 @@ async fn handle_events_socket(
         }
     }
 
-    // The last warning and the last error that aged out of that snapshot. Sent
-    // ONLY here, when a connection joins, and never re-broadcast: while the
-    // terminal UI serves in its background, a failure can be raised with no
-    // browser open at all, and the terminal keeps showing it until something
-    // replaces it. Without this, the browser that opens afterwards is the one
-    // surface that never learns what went wrong. The Lagged resend deliberately
-    // does not carry them: that client was already here.
-    for ev in status_events(&engine.late_status_finals(), &connection_id, &connections) {
+    // The warning and the error that were raised while NO browser was
+    // connected. Taking them is what removes them, so this FIRST page to open
+    // learns what went wrong while nobody was looking and no later page is told
+    // again. While the terminal UI serves in its background, a failure can be
+    // raised with no browser open at all, and the terminal keeps showing it
+    // until something replaces it; without this the browser that opens
+    // afterwards is the one surface that never learns of it. The Lagged resend
+    // deliberately does not carry them: that client was already here.
+    for ev in status_events(
+        &engine.take_late_status_finals().await,
+        &connection_id,
+        &connections,
+    ) {
         if send_json(&sink, &ev).await.is_err() {
             console.client_disconnected(peer_ip);
             return;
@@ -3452,11 +3465,20 @@ async fn send_ping(sink: &SharedSink) -> Result<(), ()> {
 struct ConnectionGuard {
     id: String,
     registry: Arc<crate::rest_common::ConnectionRegistry>,
+    /// The status emitter's watcher count, decremented here so it leaves on
+    /// EVERY exit path the registry entry leaves on. A count that outlived a
+    /// closed socket would tell the emitter somebody was watching when nobody
+    /// was, and a failure raised then would be held for nobody. `None` for a PTY
+    /// socket, which is not a browser tab watching for statuses.
+    watchers: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.registry.remove(&self.id);
+        if let Some(watchers) = &self.watchers {
+            watchers.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 

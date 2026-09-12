@@ -301,6 +301,12 @@ pub struct KeyedStatus {
     /// Whether this status waits for the user instead of leaving on its own.
     /// See the field of the same name on [`KeyedWireStatus`].
     pub sticky: bool,
+    /// Whether this status was raised while NOBODY was watching this surface.
+    /// Set by [`KeyedStatusController::mark_unwatched`], because only the
+    /// surface knows how many clients are connected. It is what decides whether
+    /// a bad final is held for the next arrival; see
+    /// [`KeyedStatusController::take_late_finals`].
+    unwatched: bool,
     pub generation: Generation,
     /// Wall-clock time when this status was last set. Used for auto-clear and
     /// busy-timeout decisions in `tick`.
@@ -445,10 +451,10 @@ pub struct KeyedStatusController {
     /// and has nothing to queue, so under `Emit` this stays empty and every
     /// queue-aware path is skipped.
     queue: VecDeque<String>,
-    /// The last bad outcome of each of the two bad tones, held past the replay
-    /// window under [`StatusRetention::Emit`] alone. See
-    /// [`Self::late_finals`] for the rule and why the window is not simply
-    /// longer. At most two entries: one `Warning`, one `Error`.
+    /// Bad news raised while nobody was connected, waiting for the first client
+    /// to arrive. Held under [`StatusRetention::Emit`] alone; see
+    /// [`Self::take_late_finals`] for the rule and why the replay window is not
+    /// simply longer. At most two entries: one `Warning`, one `Error`.
     late_finals: Vec<KeyedStatus>,
     /// Which entry is on the line and when it went there.
     ///
@@ -647,15 +653,22 @@ impl KeyedStatusController {
             message: message.into(),
             scope,
             sticky,
+            // Nobody has said otherwise yet; `mark_unwatched` is called by the
+            // surface right after this, where the client count is known.
+            unwatched: false,
             generation,
             since: now,
             heartbeat: now,
             seq,
         };
 
-        // Whatever this key is saying now supersedes any bad news held under it
-        // from a previous run, so a joining page is never handed both.
-        self.drop_late_final_for_key(key.as_deref());
+        // Whatever this KEY is saying now supersedes any bad news held under it
+        // from a previous run, so a joining page is never handed both. Only a
+        // real key speaks for an operation: an unkeyed message is a transient
+        // from some unrelated producer and says nothing about the held one.
+        if let Some(k) = key.as_deref() {
+            self.drop_late_final_for_key(k);
+        }
 
         // Under `Retain` every entry, unkeyed ones included, lives in `entries`
         // under a storage key so it can hold a position in the queue.
@@ -1110,7 +1123,7 @@ impl KeyedStatusController {
             if matches {
                 // An explicit clear is somebody saying this operation is over,
                 // so any bad news held under the key goes with it.
-                self.drop_late_final_for_key(Some(key));
+                self.drop_late_final_for_key(key);
                 if self.retention == StatusRetention::Retain {
                     // The queue must let go of the position too, wherever the
                     // entry was in it: on the line, the line moves on.
@@ -1187,9 +1200,7 @@ impl KeyedStatusController {
         changes: &mut StatusTickChanges,
     ) {
         if self.anonymous_final_expired(now) {
-            if let Some(entry) = self.anon.take() {
-                self.hold_late_final(entry);
-            }
+            self.anon = None;
             self.record_anonymous_expiry(changes);
         }
         if self.anonymous_busy_timed_out(now, busy_timeout) {
@@ -1312,46 +1323,76 @@ impl KeyedStatusController {
     fn purge_keyed_finals(&mut self, keys: Vec<String>, changes: &mut StatusTickChanges) {
         // Replay expiry is silent so it cannot dismiss a toast still shown by a client.
         for key in keys {
-            if let Some(entry) = self.entries.shift_remove(&key) {
-                self.hold_late_final(entry);
-            }
+            self.entries.shift_remove(&key);
             changes.purged += 1;
         }
     }
 
-    /// Keep a `Warning` or an `Error` that has just left the replay snapshot, so
-    /// a page that joins afterwards still learns it. See [`Self::late_finals`].
+    /// Record that the status just written under `key` was raised while nobody
+    /// was watching this surface, and hold it if it is bad news.
     ///
-    /// One slot per tone: the newer bad news about a workspace replaces the
-    /// older, and an `Info` is not held at all (a page that missed a
-    /// confirmation of something that worked has missed nothing it must act on).
-    fn hold_late_final(&mut self, entry: KeyedStatus) {
+    /// The controller cannot answer "was anybody watching": it knows about
+    /// statuses, not about sockets. The surface calls this immediately after its
+    /// `set`, from the ONE place it emits, so the flag and the entry cannot come
+    /// apart.
+    ///
+    /// Holding happens HERE, at emit, rather than when the replay window lapses,
+    /// because "this was broadcast to nobody" is known now. Waiting would also
+    /// lose the news entirely whenever dux exits inside the window.
+    ///
+    /// Three conditions, all required. `Emit` only, because the terminal's
+    /// single line has already shown it and there is nobody to catch up. A bad
+    /// tone only: a page that missed a confirmation of something that worked has
+    /// missed nothing it must act on. And an empty room, which is what the
+    /// caller is asserting by calling this at all.
+    ///
+    /// One slot per tone, so the newer bad news replaces the older and the pair
+    /// cannot grow into a transcript.
+    pub fn mark_unwatched(&mut self, key: Option<&str>) {
+        let entry = match key {
+            Some(key) => self.entries.get_mut(key),
+            None => self.anon.as_mut(),
+        };
+        let Some(entry) = entry else {
+            return;
+        };
+        entry.unwatched = true;
         if self.retention != StatusRetention::Emit {
             return;
         }
         if !matches!(entry.tone, StatusTone::Warning | StatusTone::Error) {
             return;
         }
-        self.late_finals.retain(|held| held.tone != entry.tone);
-        self.late_finals.push(entry);
+        let held = entry.clone();
+        self.late_finals.retain(|other| other.tone != held.tone);
+        self.late_finals.push(held);
     }
 
     /// Drop any held late final under `key`, because the key has been written
     /// again: whatever the operation is saying now is the current truth, and a
     /// joining page must not be handed both.
-    fn drop_late_final_for_key(&mut self, key: Option<&str>) {
-        self.late_finals.retain(|held| held.key.as_deref() != key);
+    fn drop_late_final_for_key(&mut self, key: &str) {
+        self.late_finals
+            .retain(|held| held.key.as_deref() != Some(key));
     }
 
-    /// The last warning and the last error this controller has seen leave the
-    /// replay window, newest of each tone, oldest first.
+    /// Hand over the bad news raised while nobody was watching, and forget it.
+    /// Newest of each tone, oldest first; empty when there is none.
     ///
-    /// THE RULE, stated where it lives: under [`StatusRetention::Emit`] a final
+    /// THE RULE, stated where it lives. Under [`StatusRetention::Emit`] a final
     /// is broadcast live and replayable for [`FINAL_REPLAY_WINDOW`], after which
-    /// an `Info` is simply gone, while the newest `Warning` and the newest
-    /// `Error` are held here until a newer final replaces them on the same tone
-    /// or the same key. They are handed to a connection when it JOINS and are
-    /// never re-broadcast, so a client learns each of them once, on arrival.
+    /// it is dropped. The one exception: a `Warning` or an `Error` raised while
+    /// NO client was connected was broadcast to nobody, so it is also held here
+    /// and handed to the FIRST client that connects afterwards. Taking it is
+    /// what removes it. So a client learns it exactly once, a reconnecting tab
+    /// never sees it twice, and nothing is held for the life of the process: at
+    /// most one warning and one error wait, and only until somebody arrives to
+    /// be told. A client that arrives inside the replay window is handed it by
+    /// the snapshot instead, and this filters it out rather than duplicating it.
+    ///
+    /// While one waits, the same replacement rules apply as anywhere else: newer
+    /// bad news of the same tone replaces it, a newer status on the same key
+    /// supersedes it, and an explicit clear on that key takes it back.
     ///
     /// Deliberately not a longer replay window. The window answers "did the tab
     /// I already had miss the outcome it was watching", and stretching it to
@@ -1361,17 +1402,29 @@ impl KeyedStatusController {
     /// background, a warning or an error can be raised with no browser open at
     /// all, and the terminal keeps showing it until something replaces it; a
     /// browser that then opens learned nothing about it, ever.
-    pub fn late_finals(&self) -> Vec<KeyedWireStatus> {
-        self.late_finals
-            .iter()
+    pub fn take_late_finals(&mut self) -> Vec<KeyedWireStatus> {
+        std::mem::take(&mut self.late_finals)
+            .into_iter()
+            // Still inside its replay window, so the joiner is being handed it
+            // by the snapshot already and must not be told twice.
+            .filter(|entry| match entry.key.as_deref() {
+                Some(key) => !self.entries.contains_key(key),
+                None => self.anon.is_none(),
+            })
             .map(|entry| KeyedWireStatus {
-                key: entry.key.clone(),
+                key: entry.key,
                 tone: entry.tone.as_wire().to_string(),
-                message: entry.message.clone(),
-                scope: entry.scope.clone(),
+                message: entry.message,
+                scope: entry.scope,
                 sticky: entry.sticky,
             })
             .collect()
+    }
+
+    /// How many bad finals are waiting for the next arrival. For tests and for
+    /// a caller that wants to know without consuming them.
+    pub fn late_finals_waiting(&self) -> usize {
+        self.late_finals.len()
     }
 
     fn upgrade_keyed_busys(
@@ -2315,26 +2368,83 @@ mod tests {
         }
     }
 
+    /// Set a final and say it was raised with nobody connected, the way the web
+    /// emitter does from the one place it emits.
+    fn set_unwatched(
+        c: &mut KeyedStatusController,
+        now: Instant,
+        key: Option<&str>,
+        tone: StatusTone,
+        message: &str,
+    ) {
+        c.set(now, key.map(str::to_string), tone, message);
+        c.mark_unwatched(key);
+    }
+
     #[test]
-    fn an_error_raised_with_nobody_watching_is_still_there_when_a_page_joins() {
+    fn an_error_raised_with_nobody_watching_waits_for_the_first_page_to_open() {
         // The failing case behind the report: while the terminal UI serves in
         // its background, an engine error can be raised with no browser open.
         // The terminal shows it until something replaces it; the replay window
         // lapses, and a browser opened afterwards used to learn nothing at all.
         let t0 = Instant::now();
         let mut c = KeyedStatusController::emitting_finals();
-        c.set(t0, Some("pr".into()), StatusTone::Error, "gh said no");
+        set_unwatched(&mut c, t0, Some("pr"), StatusTone::Error, "gh said no");
         let _ = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
 
         assert!(
             c.snapshot().is_empty(),
             "it is out of the live replay snapshot, as before"
         );
-        let late = c.late_finals();
+        let late = c.take_late_finals();
         assert_eq!(late.len(), 1);
         assert_eq!(late[0].message, "gh said no");
         assert_eq!(late[0].tone, "error");
         assert_eq!(late[0].key.as_deref(), Some("pr"));
+    }
+
+    #[test]
+    fn a_final_raised_while_a_client_was_watching_is_not_held() {
+        // It was broadcast live to the browser that was there, so holding it
+        // would re-toast the same news at the next page load.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals();
+        c.set(t0, Some("pr".into()), StatusTone::Error, "gh said no");
+        let _ = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
+
+        assert_eq!(c.late_finals_waiting(), 0);
+    }
+
+    #[test]
+    fn the_first_page_to_open_takes_the_bad_news_and_the_second_gets_none() {
+        // Taking is what removes it, so a client learns it exactly once and a
+        // reconnecting tab never sees it twice.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals();
+        set_unwatched(&mut c, t0, Some("pr"), StatusTone::Error, "gh said no");
+        let _ = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
+
+        assert_eq!(c.take_late_finals().len(), 1, "the first page is told");
+        assert!(
+            c.take_late_finals().is_empty(),
+            "the second page is not told again, and nothing is held on"
+        );
+        assert_eq!(c.late_finals_waiting(), 0);
+    }
+
+    #[test]
+    fn a_page_that_arrives_inside_the_replay_window_is_told_only_once() {
+        // The snapshot is already handing it over, so the held copy must not be
+        // handed over as well.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals();
+        set_unwatched(&mut c, t0, Some("pr"), StatusTone::Error, "gh said no");
+
+        assert_eq!(c.snapshot().len(), 1, "still inside the replay window");
+        assert!(
+            c.take_late_finals().is_empty(),
+            "the snapshot is telling this joiner already"
+        );
     }
 
     #[test]
@@ -2343,14 +2453,14 @@ mod tests {
         // is not held at all, and the pair cannot grow into a transcript.
         let t0 = Instant::now();
         let mut c = KeyedStatusController::emitting_finals();
-        c.set(t0, Some("a".into()), StatusTone::Error, "first error");
-        c.set(t0, Some("b".into()), StatusTone::Error, "second error");
-        c.set(t0, Some("c".into()), StatusTone::Warning, "a warning");
-        c.set(t0, Some("d".into()), StatusTone::Info, "all fine");
+        set_unwatched(&mut c, t0, Some("a"), StatusTone::Error, "first error");
+        set_unwatched(&mut c, t0, Some("b"), StatusTone::Error, "second error");
+        set_unwatched(&mut c, t0, Some("c"), StatusTone::Warning, "a warning");
+        set_unwatched(&mut c, t0, Some("d"), StatusTone::Info, "all fine");
         let _ = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
 
         let held: Vec<(String, String)> = c
-            .late_finals()
+            .take_late_finals()
             .into_iter()
             .map(|s| (s.tone, s.message))
             .collect();
@@ -2367,23 +2477,44 @@ mod tests {
     fn a_key_speaking_again_takes_back_the_bad_news_held_under_it() {
         let t0 = Instant::now();
         let mut c = KeyedStatusController::emitting_finals();
-        c.set(t0, Some("pr".into()), StatusTone::Error, "gh said no");
+        set_unwatched(&mut c, t0, Some("pr"), StatusTone::Error, "gh said no");
         let _ = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
-        assert_eq!(c.late_finals().len(), 1);
+        assert_eq!(c.late_finals_waiting(), 1);
 
         let t1 = t0 + FINAL_REPLAY_WINDOW;
         c.set(t1, Some("pr".into()), StatusTone::Info, "attached");
-        assert!(
-            c.late_finals().is_empty(),
+        assert_eq!(
+            c.late_finals_waiting(),
+            0,
             "the current truth about an operation replaces the old failure"
         );
+    }
+
+    #[test]
+    fn an_unkeyed_status_leaves_the_held_bad_news_alone() {
+        // Only a real key speaks for an operation. An unkeyed transient from
+        // some unrelated producer must not swallow the failure waiting for the
+        // next page to open.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals();
+        set_unwatched(&mut c, t0, Some("pr"), StatusTone::Error, "gh said no");
+        let _ = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
+
+        c.set(
+            t0 + FINAL_REPLAY_WINDOW,
+            None,
+            StatusTone::Info,
+            "something else entirely",
+        );
+
+        assert_eq!(c.late_finals_waiting(), 1);
     }
 
     #[test]
     fn clearing_a_key_takes_back_the_bad_news_held_under_it() {
         let t0 = Instant::now();
         let mut c = KeyedStatusController::emitting_finals();
-        c.set(t0, Some("pr".into()), StatusTone::Error, "gh said no");
+        set_unwatched(&mut c, t0, Some("pr"), StatusTone::Error, "gh said no");
         let _ = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
         c.set(
             t0 + FINAL_REPLAY_WINDOW,
@@ -2392,7 +2523,7 @@ mod tests {
             "retrying",
         );
         assert!(c.clear("pr", None));
-        assert!(c.late_finals().is_empty());
+        assert_eq!(c.late_finals_waiting(), 0);
     }
 
     #[test]
@@ -2402,9 +2533,9 @@ mod tests {
         // nobody to catch up.
         let t0 = Instant::now();
         let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(1));
-        c.set(t0, Some("pr".into()), StatusTone::Error, "gh said no");
+        set_unwatched(&mut c, t0, Some("pr"), StatusTone::Error, "gh said no");
         let _ = c.tick(t0 + Duration::from_secs(60), BUSY_TIMEOUT);
-        assert!(c.late_finals().is_empty());
+        assert_eq!(c.late_finals_waiting(), 0);
     }
 
     #[test]
