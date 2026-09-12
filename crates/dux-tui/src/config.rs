@@ -1165,7 +1165,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # that connects gives you the whole budget back, and coming back to the\n\
                  # tab, unlocking the phone or the network returning all start it over, so\n\
                  # this only runs out on a page left sitting in front of a server that is\n\
-                 # not there. Set to 0 to keep trying forever. Default 8.\n\
+                 # not there. Set to 0 to keep trying forever, though each attempt is\n\
+                 # still abandoned on the deadline below: dux's older behaviour was\n\
+                 # 0 attempts with that deadline at 30. Default 8.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.reconnect_attempts as usize),
@@ -1177,8 +1179,10 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # the web UI abandons it and counts it as a failure. A server you cannot\n\
                  # reach at all does not refuse the connection, it simply never answers, so\n\
                  # without this an attempt could hang for most of a minute with nothing to\n\
-                 # show for it. Too small and a slow connection never finishes connecting;\n\
-                 # too large and each failure takes longer to notice. Default 10.\n\
+                 # show for it. It bounds a terminal pane's attach attempt too, not just\n\
+                 # the page's own connection. Too small and a slow connection never\n\
+                 # finishes connecting; too large and each failure takes longer to\n\
+                 # notice. Default 10.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.reconnect_attempt_timeout_seconds as usize),
