@@ -620,8 +620,12 @@ impl Engine {
             // Read before `mark_tab_run_failed` below consumes the excerpt: the
             // verdict's tail and the warning's quote are the same lines, read
             // off the same once-only capture.
+            //
+            // Guarded on the owning session for the same reason the verdict is:
+            // an orphan's label is a bare tab id, so the sentence would name no
+            // agent anybody can go and look at.
             let refused_resume = refused_resume_excerpt(
-                was_resume,
+                was_resume && owning.is_some(),
                 exit_success,
                 run_duration,
                 was_typed_into,
@@ -1473,6 +1477,47 @@ mod tests {
         assert!(
             engine.failed_tab_runs.is_empty(),
             "an orphan PTY's bad exit leaves no entry behind"
+        );
+    }
+
+    /// And an orphan gets no refused-resume warning either, however its run
+    /// started. There is no agent left to name, so the label is a bare tab id
+    /// and the sentence would be about nothing the user can act on.
+    #[test]
+    fn prune_carries_no_refusal_for_an_orphan_pty() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.providers.insert(
+            TabId::new("tab-orphan"),
+            PtyClient::spawn_with_env(
+                "sh",
+                &["-c".to_string(), format!("printf '{REFUSAL_ROWS}'; exit 1")],
+                worktree.path(),
+                24,
+                80,
+                1000,
+                &[],
+            )
+            .expect("spawn sh"),
+        );
+        engine.note_resume_launch(&TabId::new("tab-orphan"));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if pruned.iter().any(|p| p.id == "tab-orphan") {
+                break pruned;
+            }
+            assert!(Instant::now() < deadline, "the orphan PTY never exited");
+            sleep(Duration::from_millis(20));
+        };
+        let orphan = pruned
+            .iter()
+            .find(|p| p.id == "tab-orphan")
+            .expect("the orphan pruned");
+        assert!(
+            orphan.refused_resume_excerpt.is_none(),
+            "with no session behind it there is no agent to warn about"
         );
     }
 
