@@ -270,7 +270,7 @@ export abstract class ReconnectingSocket {
       // A server may close with an app-specific code meaning "do not retry", such
       // as a PTY whose provider is gone, where re-subscribing would relaunch a
       // doomed provider. `shouldReconnect()` surfaces the stop state and returns
-      // false for those; any other close retries, indefinitely.
+      // false for those; any other close retries, until the budget says stop.
       if (!this.shouldReconnect(event.code)) {
         this.stopped = true
         return

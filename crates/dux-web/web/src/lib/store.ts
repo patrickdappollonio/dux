@@ -1421,9 +1421,10 @@ function applyBootstrap(b: Bootstrap): void {
   // notification raised anywhere in the app, including one raised from a mount
   // effect that ran long before the bootstrap document landed.
   setStatusClearSeconds(b.status_clear_seconds)
-  // The four connection timings, on the same idiom and for the same reason: the
-  // socket, cover and heartbeat callbacks that read them are long-lived, so they
-  // read through the module rather than closing over a render's copy.
+  // The connection timings and the retry budget, on the same idiom and for the
+  // same reason: the socket, cover and heartbeat callbacks that read them are
+  // long-lived, so they read through the module rather than closing over a
+  // render's copy.
   publishConnectionTiming(b)
   setState({
     bootstrap: b,

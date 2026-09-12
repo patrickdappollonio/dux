@@ -17,13 +17,15 @@
 //     and is the only frame this client sends while it knows it is not the owner.
 //   - Close = detach.
 //
-// Reconnect is the shared `ReconnectingSocket` base with two PTY-specific
+// Reconnect is the shared `ReconnectingSocket` base with three PTY-specific
 // policies: a hidden page schedules nothing, because a PTY nobody is looking at
-// is worth nothing until they look again; and a retry is held until the
-// run-identity check has resolved, never merely until the events socket is open,
-// because attaching an agent's pty launches its provider (`serverValidated.ts`).
-// Retrying is otherwise indefinite, `failed` means a terminal close code, and
-// `close()` is the deliberate teardown that suppresses the reconnect loop.
+// is worth nothing until they look again; a retry is held until the run-identity
+// check has resolved and while the app socket has stopped trying, never merely
+// until the events socket is open, because attaching an agent's pty launches its
+// provider (`serverValidated.ts`, `appSocketGiveUp.ts`); and the attempt budget
+// is zero, so this socket itself never gives up. `failed` means a terminal close
+// code, and `close()` is the deliberate teardown that suppresses the reconnect
+// loop.
 
 import { assertNever } from "./assertNever"
 import { ReconnectingSocket } from "./reconnectingSocket"

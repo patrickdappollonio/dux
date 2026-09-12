@@ -13,7 +13,7 @@ import type { Bootstrap } from "./bootstrapApi"
 export const DEFAULT_REPLAY_WAIT_SECONDS = 8
 
 /// The longest gap between two automatic reconnect attempts. The backoff doubles
-/// up to this and then stays there, indefinitely, while the page is visible.
+/// up to this and then stays there for the rest of the budget below.
 export const DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS = 10
 
 /// How many consecutive attempts a socket makes before it stops trying and says
