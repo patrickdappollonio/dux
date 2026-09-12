@@ -14,6 +14,7 @@ import { nextActiveSessionId, type FlatSortKey } from "./flatList"
 import { isMobileViewport } from "@/hooks/use-mobile"
 import { EventsSocket } from "./eventsSocket"
 import { getActivePtySocket } from "./ptySocket"
+import type { ReconnectPlanEvent } from "./reconnectingSocket"
 import { getComposeInsertSink } from "./composeInsert"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
@@ -28,6 +29,7 @@ import {
   type ServerIdentity,
 } from "./buildApi"
 import { reloadPage } from "./reloadPage"
+import { setAppSocketGivenUp } from "./appSocketGiveUp"
 import { noteServerRunProbe } from "./serverRun"
 import {
   DIVIDER_STORAGE_KEYS,
@@ -303,6 +305,11 @@ export interface DuxState {
   // flicker the modal off on every retry: this latches on a drop and clears
   // only on `open`. False during the first boot connect, with nothing lost yet.
   offline: boolean
+  /// What the events socket is doing about the connection: which attempt failed
+  /// or is in flight, when the next one is due, and whether it has stopped
+  /// trying. Published by the socket, never derived here; null until it has
+  /// something to say. The offline overlay is the only reader.
+  reconnectPlan: ReconnectPlanEvent | null
   selectedTarget: SelectedTarget | null
   // THEATER MODE: the focused pane fills the surface and every piece of dux's
   // own chrome around it leaves. A property of the POSITION, not of the app: it
@@ -894,6 +901,7 @@ let state: DuxState = {
   booted: false,
   conn: "connecting",
   offline: false,
+  reconnectPlan: null,
   selectedTarget: null,
   theater: bootIsTheater(),
   selectedSessionId: null,
@@ -1914,6 +1922,15 @@ function focusNewlyCreatedSession(spine: Spine): void {
 export function setProjectOpen(projectId: string, open: boolean): void {
   if (state.projectOpen[projectId] === open) return
   setState({ projectOpen: { ...state.projectOpen, [projectId]: open } })
+}
+
+eventsSocket.onPlan = (plan) => {
+  setState({ reconnectPlan: plan })
+  // The terminals follow the app socket: while it has stopped trying, their own
+  // retry gate holds them shut. Written from the plan rather than from the
+  // connection state, because "closed" and "stopped trying" are different
+  // things and only one of them means nothing is coming.
+  setAppSocketGivenUp(plan.phase === "given_up")
 }
 
 eventsSocket.onConn = (conn) => {
@@ -5651,10 +5668,11 @@ export function composeDraft(s: DuxState, targetId: string): string {
 }
 
 export function reconnect(): void {
-  // Retrying is indefinite, so this is not a rescue: it is the user asking to
-  // stop waiting out the backoff. `connect()` resets the events backoff to the
-  // floor, and the `terminalEpoch` bump remounts the focused TerminalPane so
-  // its PTY socket does the same rather than waiting out its own gap.
+  // The one way back that is always offered, in every face of the overlay:
+  // waiting out a backoff, mid-attempt, or stopped for good. `connect()` resets
+  // the events budget to attempt one and the backoff to the floor, and the
+  // `terminalEpoch` bump remounts the focused TerminalPane so its PTY socket
+  // reattaches rather than waiting out its own gap.
   //
   // That remount is why the compose draft lives in this store and not the pane.
   eventsSocket.connect()

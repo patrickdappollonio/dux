@@ -27,6 +27,7 @@
 
 import { assertNever } from "./assertNever"
 import { ReconnectingSocket } from "./reconnectingSocket"
+import { appSocketGivenUp } from "./appSocketGiveUp"
 import { onServerValidated, serverValidated } from "./serverValidated"
 import type { TerminalOwnerRef } from "./terminalOwner"
 
@@ -140,11 +141,12 @@ export class PtySocket extends ReconnectingSocket {
   constructor(url: string) {
     // No attempt budget of its own. The budget exists so a page in front of an
     // unreachable server says so instead of spinning, and that is the events
-    // socket's job to say: while it is down this socket's gate is shut anyway,
-    // and a second give-up underneath would need a second way back.
+    // socket's job to say: a second give-up underneath would need a second way
+    // back. What this socket does instead is HOLD while the app socket has
+    // stopped trying, which is the gate's other half.
     super(url, {
       parkWhileHidden: true,
-      canRetry: serverValidated,
+      canRetry: () => serverValidated() && !appSocketGivenUp(),
       attemptBudget: () => 0,
     })
     // The gate pushes as well as blocking: a retry held by it re-arms at whatever

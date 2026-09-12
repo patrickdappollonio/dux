@@ -155,3 +155,57 @@ describe("manual reconnect() (the Retry button)", () => {
     expect(mod.getSnapshot().offline).toBe(false)
   })
 })
+
+// The overlay says which attempt failed and when the next one is due, so the
+// plan the socket publishes has to reach the store. It is the socket's answer
+// verbatim: nothing here re-derives it.
+describe("the reconnect plan", () => {
+  it("holds whatever the socket last published", async () => {
+    const mod = await loadStore()
+    // The boot connect has already published one: the first attempt, in flight.
+    expect(mod.getSnapshot().reconnectPlan).toMatchObject({
+      phase: "connecting",
+      attempt: 1,
+    })
+
+    mod.eventsSocket.onPlan({
+      phase: "waiting",
+      attempt: 3,
+      budget: 8,
+      nextAttemptAt: 1_000,
+      attemptTimeoutMs: 10_000,
+    })
+    expect(mod.getSnapshot().reconnectPlan).toEqual({
+      phase: "waiting",
+      attempt: 3,
+      budget: 8,
+      nextAttemptAt: 1_000,
+      attemptTimeoutMs: 10_000,
+    })
+  })
+
+  it("holds the terminals shut while the app socket has given up, and lets go after", async () => {
+    const mod = await loadStore()
+    // The store is loaded through a reset module registry, so read the gate from
+    // that same registry rather than from a copy this file imported earlier.
+    const { appSocketGivenUp } = await import("./appSocketGiveUp")
+    mod.eventsSocket.onPlan({
+      phase: "given_up",
+      attempt: 8,
+      budget: 8,
+      nextAttemptAt: null,
+      attemptTimeoutMs: 10_000,
+    })
+    expect(appSocketGivenUp()).toBe(true)
+
+    // The button, or a wake signal: the very next attempt clears it.
+    mod.eventsSocket.onPlan({
+      phase: "connecting",
+      attempt: 1,
+      budget: 8,
+      nextAttemptAt: null,
+      attemptTimeoutMs: 10_000,
+    })
+    expect(appSocketGivenUp()).toBe(false)
+  })
+})

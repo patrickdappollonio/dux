@@ -12,6 +12,7 @@ import {
   terminalPtyUrl,
   terminalSocketUrl,
 } from "./ptySocket"
+import { setAppSocketGivenUp } from "./appSocketGiveUp"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import type { ConnState } from "./types"
 
@@ -905,6 +906,36 @@ describe("the run-identity retry gate", () => {
     // had grown to after everything was already healthy.
     noteServerValidated()
     expect(FakeWS.instances).toHaveLength(2)
+    sock.dispose()
+  })
+})
+
+// A TERMINAL FOLLOWS THE APP SOCKET. When the events socket has stopped trying,
+// the page is in front of a server it cannot reach and has said so; a terminal
+// still opening sockets underneath that would be spending the same dead network
+// with nothing on screen to show for it, and any one of them could win a race
+// the user was told was over.
+describe("while the app socket has given up", () => {
+  afterEach(() => {
+    setAppSocketGivenUp(false)
+  })
+
+  it("fires no attempt, and resumes when the app socket is back", () => {
+    vi.useFakeTimers()
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    setAppSocketGivenUp(true)
+    const before = FakeWS.instances.length
+    last().triggerClose()
+    vi.advanceTimersByTime(600_000)
+    expect(FakeWS.instances.length).toBe(before)
+
+    // The events socket came back: the held retry resumes on its own at its next
+    // poll, exactly as it does when the run-identity gate beside it opens.
+    setAppSocketGivenUp(false)
+    vi.advanceTimersByTime(10_000)
+    expect(FakeWS.instances.length).toBe(before + 1)
     sock.dispose()
   })
 })
