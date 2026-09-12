@@ -3449,7 +3449,18 @@ impl Engine {
 }
 
 impl Engine {
-    pub fn mark_session_status(&mut self, session_id: &str, status: SessionStatus) {
+    /// Move a session's status, persist it, and report whether it actually
+    /// moved.
+    ///
+    /// A status move can take a session into or out of the Inactive tail, which
+    /// is what decides which clock its pull request is polled on, so a caller
+    /// that moves one owes the plan a rebuild. It is NOT done here: this is
+    /// called in loops over a whole workspace at boot and at shutdown, and a
+    /// rebuild per call would read the pull-request table once per agent.
+    /// Callers that move ONE session call [`Self::update_pr_sync_sessions`]
+    /// themselves; the loops call it once when they are done. The boolean is
+    /// what lets a loop skip the rebuild when nothing moved.
+    pub fn mark_session_status(&mut self, session_id: &str, status: SessionStatus) -> bool {
         let mut changed = false;
         if let Some(session) = self
             .sessions
@@ -3457,7 +3468,7 @@ impl Engine {
             .find(|candidate| candidate.id == session_id)
         {
             if session.status == status {
-                return;
+                return false;
             }
             session.status = status;
             session.updated_at = Utc::now();
@@ -3469,14 +3480,7 @@ impl Engine {
                 ));
             }
         }
-        if changed {
-            // This is the one chokepoint for a session moving into or out of
-            // the Inactive tail, and the tail is what decides which clock its
-            // pull request is polled on. Re-derive the plan here, so an agent
-            // coming back to life gets its one immediate check at the moment it
-            // came back rather than whenever something else happened to rebuild.
-            self.update_pr_sync_sessions();
-        }
+        changed
     }
 
     pub fn mark_session_desired_running(&mut self, session_id: &str, desired: bool) {
@@ -5087,7 +5091,9 @@ impl Engine {
             if promoted.is_some() {
                 self.mark_session_desired_running(session_id, false);
             }
-            self.mark_session_status(session_id, crate::model::SessionStatus::Detached);
+            if self.mark_session_status(session_id, crate::model::SessionStatus::Detached) {
+                self.update_pr_sync_sessions();
+            }
         }
         Ok(CloseTabOutcome { detached, promoted })
     }

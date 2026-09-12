@@ -2241,7 +2241,9 @@ impl Engine {
                 format!("Agent \"{}\" is not running.", session.display_label()),
             ));
         }
-        self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
+        if self.mark_session_status(&session.id, crate::model::SessionStatus::Detached) {
+            self.update_pr_sync_sessions();
+        }
         self.mark_session_desired_running(&session.id, false);
         Ok(WireStatus::new(
             "info",

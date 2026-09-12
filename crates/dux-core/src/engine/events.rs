@@ -880,7 +880,9 @@ impl Engine {
         // This also drops the tabs' `pty_activity`/`pty_input` entries, so the
         // callers no longer need their own follow-up clear.
         self.clear_session_tab_runtime(&conflicting.id);
-        self.mark_session_status(&conflicting.id, SessionStatus::Detached);
+        if self.mark_session_status(&conflicting.id, SessionStatus::Detached) {
+            self.update_pr_sync_sessions();
+        }
 
         logger::info(&format!(
             "auto-detached {} agent \"{}\" to avoid worktree conflict",
@@ -1193,7 +1195,9 @@ impl Engine {
         // on both surfaces, with a live provider in it and nothing saying so.
         // The exit path already agrees: it detaches the agent only once its LAST
         // live tab is gone.
-        self.mark_session_status(&session.id, SessionStatus::Active);
+        if self.mark_session_status(&session.id, SessionStatus::Active) {
+            self.update_pr_sync_sessions();
+        }
         // Record the provider that actually launched (the effective per-tab
         // provider), so directory-scoped resume state stays correct even when a
         // extra tab ran a different provider than the session default. "Actually
@@ -2107,7 +2111,9 @@ impl Engine {
                     "fallback PTY spawn failed for {}: {}",
                     session.id, message,
                 ));
-                self.mark_session_status(&session.id, SessionStatus::Detached);
+                if self.mark_session_status(&session.id, SessionStatus::Detached) {
+                    self.update_pr_sync_sessions();
+                }
                 (AgentLaunchFailedOutcome::ResumeFallback, None)
             }
             AgentLaunchKind::StartupAutoReopen => {
@@ -5761,6 +5767,67 @@ mod tests {
         assert!(
             engine.is_in_flight(&InFlightKey::PrCheck("s1".into())),
             "leaving the Inactive tail is worth exactly one immediate check"
+        );
+    }
+
+    #[test]
+    fn marking_one_session_status_does_not_rebuild_the_pr_plan() {
+        // A rebuild per call would read the pull-request table once per agent
+        // through the boot and shutdown loops. The observable: a plan poked out
+        // of band stays poked until somebody asks for a rebuild.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut session = sample_session("s1", "p1", "feat/a");
+        session.status = crate::model::SessionStatus::Detached;
+        engine.sessions.push(session);
+        engine.update_pr_sync_sessions();
+        engine.pr_sync_sessions.lock().unwrap().clear();
+
+        let moved = engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+
+        assert!(moved, "the status did move, and the caller is told so");
+        assert!(
+            engine.pr_sync_sessions.lock().unwrap().is_empty(),
+            "the rebuild belongs to the caller, so a loop pays for one, not N"
+        );
+    }
+
+    #[test]
+    fn restoring_a_workspace_of_sessions_rebuilds_the_pr_plan_once_at_the_end() {
+        // Every restored agent is in the plan when the loop is done, and the
+        // loop asked for exactly one rebuild to get there.
+        let (mut engine, _tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("worktree root");
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        for id in ["s1", "s2", "s3"] {
+            let mut session = sample_session(id, "p1", &format!("feat/{id}"));
+            if let crate::model::AgentWorkspace::Managed(managed) = &mut session.workspace {
+                managed.worktree_path = dir.path().to_string_lossy().to_string();
+            }
+            session.status = crate::model::SessionStatus::Active;
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+        }
+        engine.pr_sync_sessions.lock().unwrap().clear();
+
+        engine.normalize_restored_sessions();
+
+        let planned: Vec<String> = engine
+            .pr_sync_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.session_id.clone())
+            .collect();
+        assert_eq!(planned, vec!["s1", "s2", "s3"]);
+        assert!(
+            engine
+                .pr_sync_sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|entry| entry.inactive),
+            "boot leaves every restored agent in the Inactive tail"
         );
     }
 

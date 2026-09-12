@@ -288,8 +288,11 @@ impl Engine {
             &reaction,
             EventReaction::DispatchAgentLaunchView(view) if view.launched
         );
-        if !launched && is_session_slot {
-            self.mark_session_status(&session_id, SessionStatus::Detached);
+        if !launched
+            && is_session_slot
+            && self.mark_session_status(&session_id, SessionStatus::Detached)
+        {
+            self.update_pr_sync_sessions();
         }
         ResumeFallbackOutcome::Retried {
             reaction: Box::new(reaction),

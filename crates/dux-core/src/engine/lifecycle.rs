@@ -545,7 +545,9 @@ impl Engine {
                 if is_session_slot && exit_success == Some(true) {
                     self.mark_session_desired_running(sid, false);
                 }
-                self.mark_session_status(sid, SessionStatus::Detached);
+                if self.mark_session_status(sid, SessionStatus::Detached) {
+                    self.update_pr_sync_sessions();
+                }
             }
             // A run ends badly either by exiting non-zero or by being over
             // within `RAPID_EXIT_WINDOW` with nobody typing into it, which says
@@ -687,7 +689,9 @@ impl Engine {
         self.clear_tab_runtime(tab_id);
         let detached = match &session_id {
             Some(sid) if !self.any_tab_active(sid) => {
-                self.mark_session_status(sid, SessionStatus::Detached);
+                if self.mark_session_status(sid, SessionStatus::Detached) {
+                    self.update_pr_sync_sessions();
+                }
                 self.mark_session_desired_running(sid, false);
                 true
             }
@@ -868,13 +872,19 @@ impl Engine {
             .iter()
             .map(|s| (s.id.clone(), std::path::Path::new(s.directory()).exists()))
             .collect();
+        let mut moved = false;
         for (id, exists) in ids {
             let status = if exists {
                 SessionStatus::Detached
             } else {
                 SessionStatus::Exited
             };
-            self.mark_session_status(&id, status);
+            moved |= self.mark_session_status(&id, status);
+        }
+        // ONCE, after the whole workspace has been normalized. A rebuild per
+        // agent would read the pull-request table once per agent at every boot.
+        if moved {
+            self.update_pr_sync_sessions();
         }
         // Classify every restored standalone agent's folder off-thread now. An
         // unprobed folder reads as Indeterminate, which fails closed for
@@ -1052,8 +1062,13 @@ impl Engine {
             .collect();
         session_ids.sort();
         session_ids.dedup();
+        let mut moved = false;
         for id in session_ids {
-            self.mark_session_status(&id, SessionStatus::Detached);
+            moved |= self.mark_session_status(&id, SessionStatus::Detached);
+        }
+        // Once, for the same reason the boot normalization does it once.
+        if moved {
+            self.update_pr_sync_sessions();
         }
     }
 }
