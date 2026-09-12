@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { publishConnectionTiming } from "./connectionTiming"
 import { EventsSocket } from "./eventsSocket"
 import type { ConnState, EventsServerMessage, ResourceEvent } from "./types"
 
@@ -53,6 +54,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  publishConnectionTiming(undefined)
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -255,14 +257,15 @@ describe("EventsSocket", () => {
   // The events socket does NOT park while hidden, which is the other half of the
   // policy: attention indicators and OS notifications ride this socket precisely
   // when the tab is in the background.
-  it("never gives up: it retries indefinitely, hidden or not", () => {
+  it("retries indefinitely on a zero budget, hidden or not", () => {
     vi.useFakeTimers()
+    publishConnectionTiming({ reconnect_attempts: 0 })
     const sock = new EventsSocket("ws://x/ws/events")
     const states: ConnState[] = []
     sock.onConn = (s) => states.push(s)
     sock.connect()
-    // A real cycle each time: open, drop, retry. The advance stays under
-    // `CONNECT_TIMEOUT_MS`, so nothing here is a socket abandoned for never
+    // A real cycle each time: open, drop, retry. The advance stays under the
+    // attempt deadline, so nothing here is a socket abandoned for never
     // opening.
     for (let i = 0; i < 20; i++) {
       last().open()
@@ -274,8 +277,28 @@ describe("EventsSocket", () => {
     sock.close()
   })
 
+  // And with a budget, the spine socket is the one that stops: it is what the
+  // whole page rides on, so a page that has quietly stopped updating must say so
+  // rather than spin forever behind a modal that promises it is still trying.
+  it("gives up after the configured number of attempts and says so", () => {
+    vi.useFakeTimers()
+    publishConnectionTiming({ reconnect_attempts: 2 })
+    const sock = new EventsSocket("ws://x/ws/events")
+    const states: ConnState[] = []
+    sock.onConn = (s) => states.push(s)
+    sock.connect()
+    last().triggerClose()
+    vi.advanceTimersByTime(500)
+    last().triggerClose()
+    expect(states.at(-1)).toBe("failed")
+    vi.advanceTimersByTime(600_000)
+    expect(FakeWS.instances.length).toBe(2)
+    sock.close()
+  })
+
   it("a manual connect() attempts at once instead of waiting out the backoff", () => {
     vi.useFakeTimers()
+    publishConnectionTiming({ reconnect_attempts: 0 })
     const sock = new EventsSocket("ws://x/ws/events")
     const states: ConnState[] = []
     sock.onConn = (s) => states.push(s)

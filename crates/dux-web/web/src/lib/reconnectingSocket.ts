@@ -1,12 +1,38 @@
-import { reconnectBackoffCapMs } from "./connectionTiming"
+import {
+  reconnectAttemptBudget,
+  reconnectAttemptTimeoutMs,
+  reconnectBackoffCapMs,
+} from "./connectionTiming"
+import { RECONNECT_MIN_MS, planNextAttempt, retryDelayMs } from "./reconnectSchedule"
 import type { ConnState } from "./types"
 
-// Events and PTY sockets retry network failures indefinitely with capped backoff.
-// Terminal close codes fail; wake signals are idempotent and health resets delay.
-export const RECONNECT_MIN_MS = 500
+// Events and PTY sockets retry network failures with capped backoff, bounded by
+// the configured attempt budget. Terminal close codes fail; wake signals are
+// idempotent and health resets the schedule.
+export { RECONNECT_MIN_MS }
 
-/// Maximum time a socket may remain in CONNECTING before it is retried.
-export const CONNECT_TIMEOUT_MS = 30_000
+/// What the socket is doing about the connection right now, published through
+/// `onPlan` so a surface can say it out loud rather than showing an
+/// indeterminate spinner over an unknown wait.
+export type ReconnectPhase = "waiting" | "connecting" | "given_up" | "open"
+
+export type ReconnectPlanEvent = {
+  phase: ReconnectPhase
+  /// The attempt this phase is about: the one that just failed while waiting,
+  /// the one in flight while connecting, the number made in total on a give-up,
+  /// and the one that succeeded on an open. Zero only before anything has
+  /// failed, which a gate-held first arming can produce.
+  attempt: number
+  /// The configured budget, where `0` means unlimited. Carried so a surface can
+  /// say "of 8" without reading config itself.
+  budget: number
+  /// `Date.now()` of the next attempt while waiting; null in every other phase.
+  /// Wall clock rather than a countdown, so a surface ticking once a second
+  /// stays honest whatever its own cadence does.
+  nextAttemptAt: number | null
+  /// How long the attempt in flight (or the next one) may sit unopened.
+  attemptTimeoutMs: number
+}
 
 /// How long a socket must STAY open before the open counts as evidence that the
 /// connection works. Receiving a frame proves health immediately.
@@ -27,6 +53,13 @@ export type ReconnectPolicy = {
   /// The backoff ceiling, read at each doubling so a config change applies to
   /// the next gap rather than to the next page load.
   backoffCapMs: () => number
+  /// How many consecutive failed attempts end the loop, where `0` is never.
+  /// Consulted per failure, so a config reload applies to the outage in
+  /// progress. The events socket takes the configured budget, because it is the
+  /// one connection whose absence the user can see and act on; a PTY socket
+  /// passes `0` and leans on `canRetry`, which already holds it shut for as long
+  /// as the events socket is down.
+  attemptBudget: () => number
 }
 
 // The shared reconnecting WebSocket base. Subclasses supply the socket-specific
@@ -35,9 +68,18 @@ export type ReconnectPolicy = {
 export abstract class ReconnectingSocket {
   protected url: string
   protected ws: WebSocket | null = null
-  private reconnectDelay = RECONNECT_MIN_MS
+  // Consecutive attempts that failed, an attempt abandoned for never opening
+  // included. Zeroed by a healthy open and by `connect()`; the whole input to
+  // the schedule.
+  private failures = 0
+  // The number of the attempt in flight, for the plan a surface renders.
+  private attempt = 0
+  // The budget is spent: no timer is armed and nothing automatic will try again.
+  // Distinct from `stopped`, which is the far end saying do not come back; this
+  // one a wake signal revives.
+  private givenUp = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  // Armed while a socket is CONNECTING; see `CONNECT_TIMEOUT_MS`.
+  // Armed while a socket is CONNECTING; see `reconnectAttemptTimeoutMs`.
   private connectTimer: ReturnType<typeof setTimeout> | null = null
   // Armed from an open until that open has earned the reset; see
   // `HEALTHY_SETTLE_MS`.
@@ -66,6 +108,10 @@ export abstract class ReconnectingSocket {
   // `close()` and never when the far end said stop. Fired for a parked socket
   // too: parking changes when the next attempt happens, not whether one is coming.
   onReconnecting: () => void = () => {}
+  // The retry schedule, published on every arming, every attempt, the give-up
+  // and every open. The offline overlay reads it to say which attempt failed and
+  // when the next one is due.
+  onPlan: (plan: ReconnectPlanEvent) => void = () => {}
 
   constructor(url: string, policy: Partial<ReconnectPolicy> = {}) {
     this.url = url
@@ -73,6 +119,7 @@ export abstract class ReconnectingSocket {
       parkWhileHidden: policy.parkWhileHidden ?? false,
       canRetry: policy.canRetry ?? (() => true),
       backoffCapMs: policy.backoffCapMs ?? reconnectBackoffCapMs,
+      attemptBudget: policy.attemptBudget ?? reconnectAttemptBudget,
     }
   }
 
@@ -88,13 +135,14 @@ export abstract class ReconnectingSocket {
     }
     this.closedByUser = false
     this.stopped = false
-    this.reconnectDelay = RECONNECT_MIN_MS
+    this.givenUp = false
+    this.failures = 0
     this.clearRetryTimer()
     this.attachWakeSignals()
     // Explicit connects obey the same identity gate as automatic retries. A
     // closed gate defers the attach and polls without growing the fresh backoff.
     if (!this.policy.canRetry()) {
-      this.armRetryTimer({ grow: false })
+      this.armHeldRetry()
       return
     }
     this.open()
@@ -116,12 +164,20 @@ export abstract class ReconnectingSocket {
     // page is visible so its first resize can establish PTY ownership.
     if (this.parked()) return
     this.closedByUser = false
+    // A wake signal is the one thing that revives a spent budget: the page came
+    // back, or the device did, which is new evidence that the failures behind it
+    // may no longer describe the world. Silence in a visible tab is not, or the
+    // give-up would be a slower spinner rather than a stop.
+    if (this.givenUp) {
+      this.givenUp = false
+      this.failures = 0
+    }
     if (!this.policy.canRetry()) {
       // The gate is shut: fall back to the ordinary polling retry rather than
       // opening, since a return signal is not permission to attach to a server
       // whose identity has not been confirmed. Repeated wake signals leave an
       // armed timer unchanged and never grow the delay.
-      if (this.reconnectTimer === null) this.armRetryTimer({ grow: false })
+      if (this.reconnectTimer === null) this.armHeldRetry()
       return
     }
     this.clearRetryTimer()
@@ -167,7 +223,9 @@ export abstract class ReconnectingSocket {
       this.ws = null
       orphan.close()
     }
+    this.attempt = this.failures + 1
     this.onConn("connecting")
+    this.emitPlan("connecting", this.attempt, null)
     const ws = new WebSocket(this.url)
     this.configureSocket(ws)
     this.ws = ws
@@ -185,6 +243,7 @@ export abstract class ReconnectingSocket {
       this.armHealthySettle()
       this.onSocketOpen()
       this.onConn("open")
+      this.emitPlan("open", this.attempt, null)
       this.onOpen()
     }
 
@@ -227,14 +286,33 @@ export abstract class ReconnectingSocket {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer !== null) return
+    // One more attempt has failed, however it failed: a refused connection and
+    // an attempt abandoned for never opening spend the budget alike.
+    this.failures++
     // Signal the consumer so it can show a non-blocking "Reconnecting…" state.
     // Once per drop: the timer guard above keeps a single retry in flight.
     this.onReconnecting()
     // Parked: schedule nothing at all. A hidden page's timer is throttled to
     // roughly one fire a minute and frozen outright after a few, so an armed retry
     // there is a promise the platform will not keep. A wake signal picks it up.
+    // A parked socket does not give up either: a phone in a pocket has been told
+    // nothing about the server.
     if (this.parked()) return
-    this.armRetryTimer()
+    const step = planNextAttempt({
+      failures: this.failures,
+      capMs: this.policy.backoffCapMs(),
+      budget: this.policy.attemptBudget(),
+    })
+    if (step.kind === "give_up") {
+      // No timer, and a terminal connection state: nothing automatic happens
+      // from here until the button or a wake signal says otherwise.
+      this.givenUp = true
+      this.clearRetryTimer()
+      this.onConn("failed")
+      this.emitPlan("given_up", step.attempts, null)
+      return
+    }
+    this.armRetryTimer(step.delayMs)
   }
 
   private parked(): boolean {
@@ -245,18 +323,17 @@ export abstract class ReconnectingSocket {
     )
   }
 
-  // Arm the next attempt. `grow` says whether this arming spends a doubling of
-  // the backoff, and it is false for every arming the gate caused rather than a
-  // failure: the backoff measures how badly the far end is answering, so a
-  // gate-held socket polls steadily instead of drifting out to the cap.
-  private armRetryTimer({ grow }: { grow: boolean } = { grow: true }): void {
-    const delay = this.reconnectDelay
-    if (grow) {
-      this.reconnectDelay = Math.min(
-        this.reconnectDelay * 2,
-        this.policy.backoffCapMs(),
-      )
-    }
+  // Re-arm at the CURRENT failure count's delay, spending no doubling. Every
+  // arming the gate caused rather than a failure goes through here: the backoff
+  // measures how badly the far end is answering, so a gate-held socket polls
+  // steadily instead of drifting out to the cap.
+  private armHeldRetry(): void {
+    this.armRetryTimer(retryDelayMs(this.failures, this.policy.backoffCapMs()))
+  }
+
+  // Arm the next attempt at the delay the schedule chose, and publish it.
+  private armRetryTimer(delay: number): void {
+    this.emitPlan("waiting", this.failures, Date.now() + delay)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       if (this.closedByUser || this.stopped) return
@@ -265,11 +342,27 @@ export abstract class ReconnectingSocket {
       // time: whether the identity check has resolved is a fact about now, and a
       // retry it holds re-arms rather than ending, so it resumes unprompted.
       if (!this.policy.canRetry()) {
-        this.armRetryTimer({ grow: false })
+        this.armHeldRetry()
         return
       }
       this.open()
     }, delay)
+  }
+
+  // Publish the schedule. The timeout and the budget are read here rather than
+  // captured, so a config reload reaches the next plan a surface renders.
+  private emitPlan(
+    phase: ReconnectPhase,
+    attempt: number,
+    nextAttemptAt: number | null,
+  ): void {
+    this.onPlan({
+      phase,
+      attempt,
+      budget: this.policy.attemptBudget(),
+      nextAttemptAt,
+      attemptTimeoutMs: reconnectAttemptTimeoutMs(),
+    })
   }
 
   // Abandon a socket that has sat in CONNECTING past the deadline and let the
@@ -290,7 +383,7 @@ export abstract class ReconnectingSocket {
       this.onConn("closed")
       if (this.closedByUser || this.stopped) return
       this.scheduleReconnect()
-    }, CONNECT_TIMEOUT_MS)
+    }, reconnectAttemptTimeoutMs())
   }
 
   private clearConnectTimer(): void {
@@ -400,7 +493,7 @@ export abstract class ReconnectingSocket {
   // own readiness signal instead.
   protected markHealthy(): void {
     this.clearSettleTimer()
-    this.reconnectDelay = RECONNECT_MIN_MS
+    this.failures = 0
   }
 
   // ---- Subclass extension hooks ----------------------------------------------

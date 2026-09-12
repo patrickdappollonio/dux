@@ -643,19 +643,20 @@ describe("PtySocket", () => {
     expect(reconnecting).toBe(0)
   })
 
-  // FLIPPED. This used to assert the socket gave up after the shared 3-attempt
-  // budget and emitted `failed`. The budget is gone: it was never actually spent
-  // in practice (every successful open refilled it), and giving up is the wrong
-  // answer for a phone whose signal comes back in a minute. `failed` is now
-  // reserved for a terminal close code, tested immediately below.
+  // A PTY socket has no attempt budget: the events socket carries the one the
+  // user can see and act on, and while it is down this socket's identity gate is
+  // shut anyway, so a give-up here would only add a second stopped state with no
+  // surface of its own. Twenty consecutive failures is well past the default
+  // events budget, and none of them ends this loop. `failed` here stays reserved
+  // for a terminal close code, tested immediately below.
   it("never gives up on transient closes: it retries indefinitely while visible", () => {
     vi.useFakeTimers()
     const sock = new PtySocket("ws://x/pty")
     const states: ConnState[] = []
     sock.onConn = (s) => states.push(s)
     sock.connect()
-    // A real cycle each time: open, drop, retry. The advance stays under
-    // `CONNECT_TIMEOUT_MS`, so nothing counted here is a socket abandoned for
+    // A real cycle each time: open, drop, retry. The advance stays under the
+    // attempt deadline, so nothing counted here is a socket abandoned for
     // never opening.
     for (let i = 0; i < 20; i++) {
       last().open()

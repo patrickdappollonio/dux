@@ -138,7 +138,15 @@ export class PtySocket extends ReconnectingSocket {
   private readonly unsubscribeGate: () => void
 
   constructor(url: string) {
-    super(url, { parkWhileHidden: true, canRetry: serverValidated })
+    // No attempt budget of its own. The budget exists so a page in front of an
+    // unreachable server says so instead of spinning, and that is the events
+    // socket's job to say: while it is down this socket's gate is shut anyway,
+    // and a second give-up underneath would need a second way back.
+    super(url, {
+      parkWhileHidden: true,
+      canRetry: serverValidated,
+      attemptBudget: () => 0,
+    })
     // The gate pushes as well as blocking: a retry held by it re-arms at whatever
     // delay it had reached, and the gate opening is the moment to try.
     this.unsubscribeGate = onServerValidated(() => {
