@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { Terminal } from "@xterm/xterm"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createSgrColonNormalizer } from "./sgrColonForm"
 
@@ -16,7 +16,8 @@ import { createSgrColonNormalizer } from "./sgrColonForm"
 // AND: the same colour spelled `48:2::R:G:B` parses correctly, which is what
 // makes respelling the stream a fix rather than a workaround with a cost.
 //
-// VERSION DEPENDENCE: pinned to the xterm version in `package.json`. If an
+// VERSION DEPENDENCE: a property of the xterm build the lockfile resolves.
+// `package.json` carries a caret range and pins nothing on its own. If an
 // upgrade turns the first case red, upstream has accepted the short form and
 // `lib/sgrColonForm.ts` can be deleted whole; do not loosen this test.
 
@@ -46,8 +47,16 @@ function stubMatchMedia(): () => void {
   }
 }
 
+// The stub is installed ONCE per test rather than once per terminal, so a test
+// may open as many as it likes. Installing it per call would leave the second
+// stub recording the first as the value to restore, and the real `matchMedia`
+// would never come back.
 let restoreMedia: (() => void) | null = null
 const opened: Terminal[] = []
+
+beforeEach(() => {
+  restoreMedia = stubMatchMedia()
+})
 
 afterEach(() => {
   for (const term of opened.splice(0)) term.dispose()
@@ -61,7 +70,6 @@ afterEach(() => {
 async function backgroundOfFirstCell(
   data: string,
 ): Promise<[number, number, number] | null> {
-  restoreMedia = stubMatchMedia()
   const host = document.createElement("div")
   document.body.appendChild(host)
   const term = new Terminal({ cols: 40, rows: 10 })
@@ -116,5 +124,15 @@ describe("the respelled stream paints the colour the child asked for", () => {
       normalize("\x1b[48:2:255:255:255mX"),
     )
     expect(painted).toEqual([255, 255, 255])
+  })
+
+  it("agrees with the semicolon form, both terminals in one test", async () => {
+    // Two terminals in a single test, which is also what keeps the matchMedia
+    // stub honest: it is installed per test, not per terminal.
+    const respelled = await backgroundOfFirstCell(
+      normalize("\x1b[48:2:0:128:128mX"),
+    )
+    const semicolon = await backgroundOfFirstCell("\x1b[48;2;0;128;128mX")
+    expect(respelled).toEqual(semicolon)
   })
 })
