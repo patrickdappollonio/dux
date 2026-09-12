@@ -3717,10 +3717,13 @@ impl Engine {
     pub fn update_pr_sync_sessions(&mut self) {
         let returned = self.rebuild_pr_sync_plan();
         for session_id in returned {
-            // Zero debounce: coming back to life is a deliberate event, and the
-            // spawn's own in-flight guard still stops a burst from stacking
-            // subprocesses.
-            self.spawn_pr_check_for_session(&session_id, Duration::from_secs(0));
+            // The ordinary deliberate-event debounce rather than none: the
+            // startup auto-reopen sweep flips a whole workspace of agents out of
+            // the Inactive tail at once, right after the boot refresh has
+            // already answered for all of them in one batched query. The
+            // debounce is what collapses that burst back into the batch, while
+            // a genuine return, minutes or hours later, still gets its check.
+            self.spawn_pr_check_for_session(&session_id, PR_CHECK_MIN_INTERVAL);
         }
     }
 

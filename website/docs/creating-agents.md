@@ -264,7 +264,7 @@ pr_poll_inactive_interval_seconds = 43200
 ```
 
 An agent that comes back from Inactive, because you reconnected to it or started it
-again, is checked immediately rather than waiting out that slow clock, and the
+again, is checked right away rather than waiting out that slow clock, and the
 event-driven refreshes above never look at which section an agent is in.
 
 When a branch name is reused, dux follows the most recent pull request on it, preferring

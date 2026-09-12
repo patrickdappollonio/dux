@@ -5765,6 +5765,31 @@ mod tests {
     }
 
     #[test]
+    fn a_startup_burst_of_returning_agents_collapses_into_the_boot_refresh() {
+        // The auto-reopen sweep flips a workspace of agents out of Inactive at
+        // once, right after the boot refresh answered for all of them in one
+        // batched query. The ordinary deliberate-event debounce is what stops
+        // that becoming one gh subprocess per agent.
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut session = sample_session("s1", "p1", "feat/a");
+        session.status = crate::model::SessionStatus::Detached;
+        engine.sessions.push(session);
+        engine.update_pr_sync_sessions();
+        // The boot refresh has just answered for it.
+        engine
+            .pr_last_checked
+            .insert("s1".to_string(), Instant::now());
+
+        engine.sessions[0].status = crate::model::SessionStatus::Active;
+        engine.update_pr_sync_sessions();
+
+        assert!(!engine.is_in_flight(&InFlightKey::PrCheck("s1".into())));
+    }
+
+    #[test]
     fn a_deleted_agent_is_not_mistaken_for_one_returning_from_inactive() {
         // It left the Inactive set by ceasing to exist, which is not a return.
         let (mut engine, _tmp) = test_engine();
