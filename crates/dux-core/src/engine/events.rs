@@ -1539,6 +1539,11 @@ impl Engine {
         // The detach state goes with the session too, so a later session that
         // reuses the id does not inherit a detach it never asked for.
         self.pr_suppressions.remove(&session.id);
+        // Re-derive the PR-sync plan from the surviving sessions. The periodic
+        // poller snapshots this list every cycle, so leaving the deleted
+        // agent's entry in it means dux keeps asking GitHub about a pull
+        // request nothing on either surface can show, for as long as it runs.
+        self.update_pr_sync_sessions();
         self.update_branch_sync_sessions();
 
         // A standalone agent belongs to no project, so "does its project still
@@ -5621,6 +5626,33 @@ mod tests {
         assert!(
             !engine.pr_overrides.contains_key(&session_id),
             "the in-memory pin must not outlive its session"
+        );
+    }
+
+    #[test]
+    fn deleting_a_session_takes_it_out_of_the_pr_sync_plan() {
+        // The periodic poller reads the shared plan every cycle, so a plan that
+        // still names a deleted agent keeps asking GitHub about its pull
+        // request for as long as dux runs.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.update_pr_sync_sessions();
+        assert_eq!(
+            engine.pr_sync_sessions.lock().unwrap().len(),
+            1,
+            "the live agent is in the plan to begin with"
+        );
+
+        engine
+            .finish_delete_session_memory("s1")
+            .expect("delete the session");
+
+        assert!(
+            engine.pr_sync_sessions.lock().unwrap().is_empty(),
+            "a deleted agent must leave the plan before the next poll cycle reads it"
         );
     }
 
