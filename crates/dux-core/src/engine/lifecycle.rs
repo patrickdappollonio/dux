@@ -125,6 +125,17 @@ pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_typed_into:
 ///
 /// Provider-agnostic by construction: the excerpt is whatever the CLI left on
 /// screen, and nothing in dux reads it.
+///
+/// REACHABLE ONLY FOR A REFUSAL LONGER THAN `RESUME_MINIMAL_OUTPUT_LINES`
+/// VISIBLE ROWS (the resume-fallback module's own threshold).
+/// The resume-fallback sweep runs before the prune, and a resumed provider that
+/// exited with no scrollback and at most that many rows on screen is read as
+/// "there was nothing to resume": the sweep relaunches fresh and this exit never
+/// reaches the prune at all. So a one-line refusal becomes a fresh session with
+/// the sweep's own message, and only a wordier one arrives here to be quoted.
+/// That is the fallback's behavior, deliberately left alone: it recovers the
+/// common case without asking. Said out loud here, and in the docs, because a
+/// threshold nobody wrote down is a mystery the first time it bites.
 pub fn refused_resume_excerpt(
     was_resume: bool,
     exit_success: Option<bool>,
@@ -1146,6 +1157,19 @@ mod tests {
     use crate::pty::PtyClient;
     use tempfile::TempDir;
 
+    /// A refusal long enough to REACH the exit path, as a `printf` argument.
+    ///
+    /// The resume-fallback sweep runs first and relaunches fresh for anything at
+    /// or under its minimal-output threshold, so a two-line refusal never gets
+    /// here. Six rows is the shape the warning actually has to word; the last
+    /// two are the ones it quotes.
+    const REFUSAL_ROWS: &str = "Resuming your conversation.\\n\
+                                Looking for a session to continue.\\n\
+                                Found session 9f2 for this directory.\\n\
+                                That session cannot be continued here.\\n\
+                                Your most recent conversation is running in the background.\\n\
+                                Use `agents` to attach to it.\\n";
+
     /// Spawn a real `cat`-backed PtyClient in the given working directory.
     /// `cat` echoes stdin and exits 0 on EOF, and exits on SIGTERM, making it
     /// a safe stand-in for both clean-exit and shutdown tests.
@@ -1806,14 +1830,14 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        // A provider refusing to continue: two lines of explanation, then out.
+        // A provider refusing to continue, at the length that actually reaches
+        // this path: more rows than the fallback sweep's minimal-output
+        // threshold, which swallows a shorter refusal and relaunches fresh.
         let client = PtyClient::spawn_with_env(
             "sh",
             &[
                 "-c".to_string(),
-                "printf 'Your most recent conversation is running in the background.\\n\
-                 Use `agents` to attach to it.\\n'; exit 1"
-                    .to_string(),
+                format!("printf '{}'; exit 1", REFUSAL_ROWS),
             ],
             worktree.path(),
             24,

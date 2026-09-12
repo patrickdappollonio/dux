@@ -607,6 +607,158 @@ mod tests {
         );
     }
 
+    /// A resumed provider that exited after printing `rows` lines, in an engine
+    /// whose provider command cannot be spawned, so a fresh relaunch fails at
+    /// once instead of starting a real CLI on this machine. Returns once the
+    /// child has exited, which is the state the maintenance order below expects.
+    fn engine_with_an_exited_resume(rows: &[&str]) -> (Engine, tempfile::TempDir) {
+        use crate::pty::PtyClient;
+        use std::time::Instant;
+
+        let (mut engine, tmp) = test_engine();
+        engine.config.providers.commands.insert(
+            "claude".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "dux-test-no-such-provider-binary".to_string(),
+                ..Default::default()
+            },
+        );
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = tmp.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        let script = format!("printf '{}'; exit 1", rows.join("\\n") + "\\n");
+        let client = PtyClient::spawn_with_env(
+            "sh",
+            &["-c".to_string(), script],
+            tmp.path(),
+            24,
+            80,
+            1000,
+            &[],
+        )
+        .expect("spawn sh");
+        engine.providers.insert(TabId::new("s1-slot"), client);
+        engine.note_resume_launch(&TabId::new("s1-slot"));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !engine
+            .providers
+            .get(TabIdRef::new("s1-slot"))
+            .is_some_and(crate::pty::PtyClient::is_exited)
+        {
+            assert!(Instant::now() < deadline, "child never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        (engine, tmp)
+    }
+
+    /// The real maintenance order, sweep then prune, for a refusal WORDIER than
+    /// the sweep's minimal-output threshold: the sweep leaves it alone and the
+    /// prune carries the provider's words out for the warning to quote.
+    #[test]
+    fn a_wordy_refusal_survives_the_sweep_and_reaches_the_warning() {
+        use std::time::Instant;
+
+        let (mut engine, _tmp) = engine_with_an_exited_resume(&[
+            "Resuming your conversation.",
+            "Looking for a session to continue.",
+            "Found session 9f2 for this directory.",
+            "That session cannot be continued here.",
+            "Your most recent conversation is running in the background.",
+            "Use `agents` to attach to it.",
+        ]);
+
+        let reactions = engine.sweep_resume_fallbacks((24, 80));
+        assert!(
+            reactions.is_empty(),
+            "a resume that printed real output is dropped by the sweep, never retried"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if pruned.iter().any(|p| p.id == "s1-slot") {
+                break pruned;
+            }
+            assert!(Instant::now() < deadline, "the provider was never pruned");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let agent = pruned
+            .iter()
+            .find(|p| p.id == "s1-slot")
+            .expect("the slot tab pruned");
+        let excerpt = agent
+            .refused_resume_excerpt
+            .as_ref()
+            .expect("a wordy refusal reaches the exit path");
+        let warning = crate::tab_verdict::refused_resume_warning(&agent.label, excerpt)
+            .expect("there are words to quote");
+        assert!(
+            warning.contains("could not resume its previous session"),
+            "got {warning:?}"
+        );
+        assert!(
+            warning.contains("Use `agents` to attach to it."),
+            "the provider's own remedy must survive the whole path, got {warning:?}"
+        );
+    }
+
+    /// The same order for a SHORT refusal, which is the threshold this pair
+    /// exists to document: the sweep reads it as nothing to resume, starts a
+    /// fresh session with its own message, and the exit never reaches the prune,
+    /// so no refused-resume warning is raised at all.
+    #[test]
+    fn a_short_refusal_is_taken_as_nothing_to_resume_and_starts_fresh() {
+        let (mut engine, _tmp) = engine_with_an_exited_resume(&[
+            "Your most recent conversation is running in the background.",
+            "Use `agents` to attach to it.",
+        ]);
+
+        let reactions = engine.sweep_resume_fallbacks((24, 80));
+        assert_eq!(reactions.len(), 1, "the sweep retried the resume fresh");
+        assert!(
+            !engine.providers.contains_key(TabIdRef::new("s1-slot")),
+            "the retry pulled the exited provider before the prune could see it"
+        );
+        assert!(
+            engine
+                .prune_exited_ptys()
+                .iter()
+                .all(|pruned| pruned.id != "s1-slot"),
+            "there is nothing left for the prune to report, warning included"
+        );
+
+        // And the user is told what happened, in the fallback's own words. The
+        // relaunch cannot start (the command does not exist), so the request
+        // comes back on the worker channel carrying the message it would have
+        // shown.
+        let event = engine
+            .worker_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the fresh relaunch reports back");
+        let kind = match event {
+            crate::worker::WorkerEvent::AgentLaunchFailed(data) => data.request.kind,
+            crate::worker::WorkerEvent::AgentLaunchReady(data) => data.request.kind,
+            _ => panic!("expected a launch outcome from the fresh relaunch"),
+        };
+        let AgentLaunchKind::ResumeFallback { status_message } = kind else {
+            panic!("the relaunch is a resume fallback");
+        };
+        assert!(
+            status_message.starts_with("No prior session to resume for agent"),
+            "the fresh-start message is unchanged, got {status_message:?}"
+        );
+        assert!(
+            status_message.contains("Started a fresh claude session in"),
+            "and it says what it started and where, got {status_message:?}"
+        );
+    }
+
     /// A healthy resume candidate (still running, within its timeout window) is
     /// left alone by the sweep.
     #[test]

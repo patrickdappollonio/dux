@@ -190,3 +190,9 @@ was over in seconds, the notice dux raises (the status line in the terminal UI, 
 the browser) says the agent could not resume its previous session and quotes the
 provider's own last words, remedy and all. Whatever the CLI told you to do about it is in
 the message; the card still has the full output.
+
+That is the notice you get when the refusal is more than a few lines long. A one-line
+refusal is treated as nothing to resume, and dux quietly starts a fresh session instead
+and tells you it did, which is the right answer far more often than not: most of the time
+a short message on the way out of `--continue` really does mean there was no conversation
+there to continue.
