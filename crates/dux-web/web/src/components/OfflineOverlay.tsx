@@ -41,6 +41,11 @@ function attemptsWord(n: number): string {
 
 /// The line that carries the countdown, mounted fresh for every attempt.
 ///
+/// Hidden from assistive technology, and the live region below says the same
+/// attempt without the seconds: a polite region holding a number that changes
+/// once a second re-announces the whole sentence once a second, for as long as
+/// the outage lasts.
+///
 /// KEYED ON `at` BY ITS CALLER, and that key is the whole design. The clock
 /// cannot be read during a render, so the moment a countdown starts has to come
 /// from somewhere; a clock ticking in the parent is stale by however long the
@@ -54,7 +59,7 @@ function CountdownLine({ prefix, at }: { prefix: string; at: number }) {
     const id = setInterval(() => setNow(Date.now()), COUNTDOWN_SAMPLE_MS)
     return () => clearInterval(id)
   }, [])
-  return <p>{`${prefix} Retrying in ${secondsUntil(at, now)} s.`}</p>
+  return <p aria-hidden>{`${prefix} Retrying in ${secondsUntil(at, now)} s.`}</p>
 }
 
 /// What the overlay says, derived from the socket's own plan. Three faces: one
@@ -156,21 +161,26 @@ export function OfflineOverlay() {
           ) : null}
           {face.title}
         </h1>
-        <div
-          id="offline-overlay-desc"
-          aria-live="polite"
-          className="mb-6 space-y-1 text-sm leading-relaxed text-muted-foreground"
-        >
-          {face.counter === null ? null : face.counter.at === null ? (
-            <p>{face.counter.text}</p>
-          ) : (
+        <div className="mb-6 space-y-1 text-sm leading-relaxed text-muted-foreground">
+          {face.counter !== null && face.counter.at !== null ? (
             <CountdownLine
               key={face.counter.at}
               prefix={face.counter.text}
               at={face.counter.at}
             />
-          )}
-          <p>{face.stable}</p>
+          ) : null}
+          {/* What is SPOKEN. A counter with no countdown behind it is plain text
+              and lives here; one that ticks is drawn above and repeated here
+              without its seconds, so the attempt is announced once per attempt
+              rather than once per second. */}
+          <div id="offline-overlay-desc" aria-live="polite" className="space-y-1">
+            {face.counter === null ? null : face.counter.at === null ? (
+              <p>{face.counter.text}</p>
+            ) : (
+              <p className="sr-only">{face.counter.text}</p>
+            )}
+            <p>{face.stable}</p>
+          </div>
         </div>
         <Button onClick={reconnect}>
           <RefreshCw aria-hidden />

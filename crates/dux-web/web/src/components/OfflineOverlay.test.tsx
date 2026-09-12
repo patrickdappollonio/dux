@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { ReconnectPlanEvent } from "@/lib/reconnectingSocket"
@@ -241,5 +241,59 @@ describe("the button", () => {
       cleanup()
     }
     expect(reconnectMock).toHaveBeenCalledTimes(3)
+  })
+})
+
+// A LIVE REGION MUST NOT CARRY A TICKING NUMBER. The countdown changes once a
+// second, and a polite region holding it re-announces the whole sentence once a
+// second for as long as the outage lasts. The number stays on screen; what is
+// spoken is the attempt, which changes once per attempt, and the sentence for
+// the face.
+describe("what a screen reader hears", () => {
+  function liveRegion(): HTMLElement {
+    const region = document.getElementById("offline-overlay-desc")
+    if (region === null) throw new Error("no description region")
+    return region
+  }
+
+  it("keeps the ticking seconds out of the live region and hides them from the tree", () => {
+    seed({
+      offline: true,
+      conn: "closed",
+      reconnectPlan: plan({ attempt: 3, budget: 8, nextAttemptAt: Date.now() + 4_000 }),
+    })
+    render(<OfflineOverlay />)
+    const counter = screen.getByText("Attempt 3 of 8 failed. Retrying in 4 s.")
+    expect(counter.getAttribute("aria-hidden")).toBe("true")
+    expect(within(liveRegion()).queryByText(/Retrying in/)).toBeNull()
+  })
+
+  it("still says which attempt failed, once per attempt rather than once per second", () => {
+    seed({
+      offline: true,
+      conn: "closed",
+      reconnectPlan: plan({ attempt: 3, budget: 8, nextAttemptAt: Date.now() + 4_000 }),
+    })
+    render(<OfflineOverlay />)
+    expect(within(liveRegion()).getByText("Attempt 3 of 8 failed.")).toBeTruthy()
+    expect(
+      within(liveRegion()).getByText(
+        "The server may be down or this device may be offline.",
+      ),
+    ).toBeTruthy()
+  })
+
+  it("announces the give-up, which is the change that matters most", () => {
+    seed({
+      offline: true,
+      conn: "failed",
+      reconnectPlan: plan({ phase: "given_up", attempt: 8, budget: 8, nextAttemptAt: null }),
+    })
+    render(<OfflineOverlay />)
+    expect(
+      within(liveRegion()).getByText(
+        "dux stopped trying after 8 attempts. Reconnect when the server is back, or check that this device is online.",
+      ),
+    ).toBeTruthy()
   })
 })
