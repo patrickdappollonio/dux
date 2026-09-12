@@ -382,6 +382,17 @@ pub struct Engine {
     /// then come only from the refs watcher and foreground focus). Seeded from
     /// `config.ui.pr_poll_interval_seconds` at spawn and in `apply_reloaded_config`.
     pub pr_poll_interval_secs: Arc<AtomicU64>,
+    /// Seconds between blind PR-sync polls for the agents in the list's Inactive
+    /// tail, shared with the loop thread so a config reload can retune it live.
+    /// `0` stops polling them at all. Seeded from
+    /// `config.ui.pr_poll_inactive_interval_seconds` at spawn and in
+    /// [`Engine::retune_after_config_swap`].
+    pub pr_poll_inactive_interval_secs: Arc<AtomicU64>,
+    /// The session ids that were in the Inactive tail the last time the PR-sync
+    /// plan was derived. An id that leaves this set has just come back to life,
+    /// and gets one immediate check rather than waiting out the slow clock it
+    /// was on.
+    pub pr_inactive_sessions: std::collections::HashSet<String>,
     /// Seconds between branch-sync sweeps, shared with the loop thread so a
     /// config reload can retune it live. `0` reaching the loop means "nap and
     /// look again", never "exit": the thread stays live so
@@ -2051,6 +2062,12 @@ impl Engine {
             )),
             Ordering::Relaxed,
         );
+        self.pr_poll_inactive_interval_secs.store(
+            u64::from(crate::config::normalized_pr_poll_inactive_interval(
+                self.config.ui.pr_poll_inactive_interval_seconds,
+            )),
+            Ordering::Relaxed,
+        );
         self.spawn_branch_sync_worker();
     }
 
@@ -2853,12 +2870,19 @@ impl Engine {
         let sessions = Arc::clone(&self.pr_sync_sessions);
         let control = Arc::clone(&self.pr_sync);
         let interval_secs = Arc::clone(&self.pr_poll_interval_secs);
-        // Seed the shared interval from config so the first iteration honors it,
-        // and arm BEFORE spawning so the kill switch observes the live state on
-        // the first iteration.
+        let inactive_interval_secs = Arc::clone(&self.pr_poll_inactive_interval_secs);
+        // Seed the shared intervals from config so the first iteration honors
+        // them, and arm BEFORE spawning so the kill switch observes the live
+        // state on the first iteration.
         interval_secs.store(
             u64::from(crate::config::normalized_pr_poll_interval(
                 self.config.ui.pr_poll_interval_seconds,
+            )),
+            Ordering::Relaxed,
+        );
+        inactive_interval_secs.store(
+            u64::from(crate::config::normalized_pr_poll_inactive_interval(
+                self.config.ui.pr_poll_inactive_interval_seconds,
             )),
             Ordering::Relaxed,
         );
@@ -2872,6 +2896,10 @@ impl Engine {
         // probes, so it must see a re-probe's answer rather than the one dux
         // held when it started.
         let policy = Arc::clone(&self.gh_probe.policy);
+        // Boot's own one-shot refresh has just covered every entry, inactive
+        // ones included, so the slow clock starts now rather than firing an
+        // immediate second sweep over the agents nobody is working in.
+        let mut last_inactive_sweep = Instant::now();
         let spawned = self.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "pr-sync".into(),
@@ -2907,14 +2935,28 @@ impl Engine {
                 // pause is needed here.
                 let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let policy = policy.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                // An agent in the Inactive tail is on its own, much slower
+                // clock: nobody is working in it, nothing on screen is waiting
+                // on the answer, and its pull request moves rarely. Most cycles
+                // therefore cover the active half alone.
+                let scope = if crate::gh::inactive_sweep_due(
+                    last_inactive_sweep.elapsed(),
+                    inactive_interval_secs.load(Ordering::Relaxed),
+                ) {
+                    last_inactive_sweep = Instant::now();
+                    crate::gh::SyncScope::Everything
+                } else {
+                    crate::gh::SyncScope::ActiveOnly
+                };
                 // The blind poll: nobody asked, so a dormant agent whose pull
                 // request is already closed is left alone until a one-shot
                 // trigger looks at it.
-                let (results, signals) = crate::gh::run_pr_sync(
+                let (results, signals) = crate::gh::run_pr_sync_scoped(
                     &sessions,
                     &snapshot,
                     &policy,
                     crate::gh::SyncTrigger::BlindPoll,
+                    scope,
                 );
                 Self::apply_pr_backoff(&backoff, &signals, tx);
                 if !results.is_empty() && tx.send(WorkerEvent::PrStatusReady(results)).is_err() {
@@ -3372,6 +3414,10 @@ impl Engine {
             known_pr,
             agent_exited: !self.providers.contains_key(session.slot_tab_id()),
             pinned: pinned_row.as_ref().map(pinned_pr_from_stored),
+            // A single-session check is somebody asking about THIS agent, so
+            // the flag the blind poll narrows on has nothing to say here; it is
+            // recorded truthfully all the same.
+            inactive: crate::flat_list::is_inactive(session),
         };
         let label = format!("pr-check:{}", entry.session_id);
         let backoff = Arc::clone(&self.pr_backoff);
@@ -3404,6 +3450,7 @@ impl Engine {
 
 impl Engine {
     pub fn mark_session_status(&mut self, session_id: &str, status: SessionStatus) {
+        let mut changed = false;
         if let Some(session) = self
             .sessions
             .iter_mut()
@@ -3414,12 +3461,21 @@ impl Engine {
             }
             session.status = status;
             session.updated_at = Utc::now();
+            changed = true;
             if let Err(err) = self.session_store.upsert_session(session) {
                 crate::logger::error(&format!(
                     "failed to persist session status update for {}: {err}",
                     session.id,
                 ));
             }
+        }
+        if changed {
+            // This is the one chokepoint for a session moving into or out of
+            // the Inactive tail, and the tail is what decides which clock its
+            // pull request is polled on. Re-derive the plan here, so an agent
+            // coming back to life gets its one immediate check at the moment it
+            // came back rather than whenever something else happened to rebuild.
+            self.update_pr_sync_sessions();
         }
     }
 
@@ -3651,7 +3707,47 @@ impl Engine {
     /// Refreshes the shared session snapshot used by the PR-sync background
     /// worker. Includes the latest known PR per session so the worker can use
     /// `gh pr view` for sessions that already have a persisted PR association.
-    pub fn update_pr_sync_sessions(&self) {
+    /// Rebuild the plan and give one immediate check to every agent that has
+    /// just left the Inactive tail.
+    ///
+    /// The slow clock is the whole reason this is owed: an agent coming back
+    /// from Inactive could otherwise sit for hours showing a pull-request badge
+    /// that was last refreshed before it was put away, and reconnecting to it is
+    /// exactly the moment its user starts reading that badge again.
+    pub fn update_pr_sync_sessions(&mut self) {
+        let returned = self.rebuild_pr_sync_plan();
+        for session_id in returned {
+            // Zero debounce: coming back to life is a deliberate event, and the
+            // spawn's own in-flight guard still stops a burst from stacking
+            // subprocesses.
+            self.spawn_pr_check_for_session(&session_id, Duration::from_secs(0));
+        }
+    }
+
+    /// The plan derivation itself. Returns the session ids that were in the
+    /// Inactive tail last time and are not now, for the caller to re-check.
+    fn rebuild_pr_sync_plan(&mut self) -> Vec<String> {
+        let now_inactive: std::collections::HashSet<String> = self
+            .sessions
+            .iter()
+            .filter(|s| crate::flat_list::is_inactive(s))
+            .map(|s| s.id.clone())
+            .collect();
+        // Only ids that are still sessions: one that left the set by being
+        // deleted has not come back to life.
+        let returned: Vec<String> = self
+            .pr_inactive_sessions
+            .iter()
+            .filter(|id| !now_inactive.contains(*id))
+            .filter(|id| self.sessions.iter().any(|s| &&s.id == id))
+            .cloned()
+            .collect();
+        self.pr_inactive_sessions = now_inactive;
+        self.write_pr_sync_plan();
+        returned
+    }
+
+    fn write_pr_sync_plan(&self) {
         let known_prs = self.session_store.load_all_latest_prs().unwrap_or_default();
         let known_map: HashMap<String, crate::storage::StoredPr> = known_prs
             .into_iter()
@@ -3685,6 +3781,7 @@ impl Engine {
                             .or_else(|| known_map.get(&s.id).cloned()),
                         agent_exited: !self.providers.contains_key(s.slot_tab_id()),
                         pinned: pinned_row.map(pinned_pr_from_stored),
+                        inactive: crate::flat_list::is_inactive(s),
                     })
                 })
                 .collect();
@@ -5686,7 +5783,7 @@ mod tests {
 
     #[test]
     fn the_pull_request_watcher_never_enrols_a_standalone_agent() {
-        let (engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        let (mut engine, _tmp, _folder) = engine_with_a_standalone_agent();
         engine.update_pr_sync_sessions();
         let enrolled: Vec<String> = engine
             .pr_sync_sessions

@@ -38,6 +38,20 @@ pub struct FlatOrder {
     pub inactive: Vec<usize>,
 }
 
+/// Whether a session belongs in the list's INACTIVE tail: the "Inactive" section
+/// both surfaces collapse detached and exited agents under.
+///
+/// One predicate, because "inactive" is now more than a place in a list: the
+/// pull-request poller puts exactly these agents on its slow clock, and a second
+/// definition of the word would let the sidebar and the poller disagree about
+/// which agent is which.
+pub fn is_inactive(session: &AgentSession) -> bool {
+    matches!(
+        session.status,
+        SessionStatus::Detached | SessionStatus::Exited
+    )
+}
+
 /// Order the sessions for the flat list. `is_hot(index)` reports whether the
 /// session is working or needs attention (used only by `Active`'s float).
 /// `is_visible(index)` is a symmetric display filter: an index that fails it never
@@ -64,9 +78,10 @@ pub fn order_sessions(
         if !is_visible(index) {
             continue;
         }
-        match session.status {
-            SessionStatus::Detached | SessionStatus::Exited => inactive.push(index),
-            _ => active.push(index),
+        if is_inactive(session) {
+            inactive.push(index);
+        } else {
+            active.push(index);
         }
     }
 

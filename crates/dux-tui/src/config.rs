@@ -570,6 +570,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::U16(c.ui.pr_poll_interval_seconds),
         },
         ConfigEntry::Field {
+            key: "pr_poll_inactive_interval_seconds",
+            comment: Some(CommentSource::Static(
+                "# Seconds between blind GitHub PR-status polls for INACTIVE agents: the\n# ones the agent list puts under \"Inactive\" (detached, or whose process\n# exited). Nobody is working in one, so its pull request is polled on this\n# much slower clock instead of the one above; the default is 12 hours.\n# An agent that becomes active again is checked immediately, and the\n# deliberate triggers (opening it, an agent exit, a branch push) always\n# check whatever clock it is on.\n# Set to 0 to stop polling inactive agents entirely.\n# Any other value is clamped to between 30 seconds and 604800 seconds\n# (7 days), and dux logs a warning once when it clamps one.",
+            )),
+            value_fn: |c| FieldValue::U32(c.ui.pr_poll_inactive_interval_seconds),
+        },
+        ConfigEntry::Field {
             key: "copy_on_select",
             comment: Some(CommentSource::Static(
                 "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it, and so does lifting your finger after a\n# press-and-hold selection on a touch screen; Ctrl-Shift-c / Ctrl-Insert (or\n# Cmd-c on a Mac) copy regardless. Change it at runtime from the web UI's\n# Preferences dialog.",

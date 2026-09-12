@@ -748,6 +748,15 @@ pub struct PrSyncEntry {
     /// the host policy gates the PINNED host, and the only alias emitted is the
     /// by-number one for the pinned PR (no head-ref discovery).
     pub pinned: Option<PinnedPr>,
+    /// Whether the agent sits in the list's INACTIVE tail (detached or exited),
+    /// as decided by the one `flat_list::is_inactive` predicate the sidebar
+    /// uses. The blind poll puts these entries on `ui.pr_poll_inactive_interval_seconds`
+    /// instead of the active clock; every other trigger ignores the flag.
+    ///
+    /// Distinct from `agent_exited`, which is about a live PTY rather than the
+    /// session's own status, and which the alias planner reads for a different
+    /// question (whether a terminal pull request is worth a call at all).
+    pub inactive: bool,
 }
 
 #[derive(Clone, Debug)]

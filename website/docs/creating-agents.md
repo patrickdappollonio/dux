@@ -255,7 +255,17 @@ on GitHub itself:
 # Seconds between blind PR-status safety polls. Most updates come from events,
 # so this is just the backstop. Set to 0 to rely on events alone.
 pr_poll_interval_seconds = 180
+
+# Seconds between those polls for agents under "Inactive" in the agent list:
+# the detached ones, and the ones whose process exited. Nobody is working in
+# one, so its pull request is polled on this much slower clock. The default is
+# 12 hours. Set to 0 to stop polling inactive agents entirely.
+pr_poll_inactive_interval_seconds = 43200
 ```
+
+An agent that comes back from Inactive, because you reconnected to it or started it
+again, is checked immediately rather than waiting out that slow clock, and the
+event-driven refreshes above never look at which section an agent is in.
 
 When a branch name is reused, dux follows the most recent pull request on it, preferring
 one that is open.

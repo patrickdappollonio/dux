@@ -3626,6 +3626,8 @@ impl App {
             pr_sync_sessions,
             pr_sync,
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pr_poll_inactive_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pr_inactive_sessions: Default::default(),
             branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             branch_sync_wait: Arc::new(Default::default()),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

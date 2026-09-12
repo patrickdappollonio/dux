@@ -5716,6 +5716,75 @@ mod tests {
     }
 
     #[test]
+    fn the_pr_sync_plan_marks_the_sidebar_s_inactive_agents() {
+        // The poller's slow clock and the sidebar's Inactive tail must mean the
+        // same thing, so the plan carries the sidebar's own verdict.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut live = sample_session("live", "p1", "feat/a");
+        live.status = crate::model::SessionStatus::Active;
+        let mut detached = sample_session("detached", "p1", "feat/b");
+        detached.status = crate::model::SessionStatus::Detached;
+        let mut exited = sample_session("exited", "p1", "feat/c");
+        exited.status = crate::model::SessionStatus::Exited;
+        engine.sessions.extend([live, detached, exited]);
+
+        engine.update_pr_sync_sessions();
+
+        let plan = engine.pr_sync_sessions.lock().unwrap().clone();
+        let flag = |id: &str| plan.iter().find(|e| e.session_id == id).map(|e| e.inactive);
+        assert_eq!(flag("live"), Some(false));
+        assert_eq!(flag("detached"), Some(true));
+        assert_eq!(flag("exited"), Some(true));
+    }
+
+    #[test]
+    fn an_agent_returning_from_inactive_is_checked_at_once() {
+        // Coming back to life is the moment its user starts reading the badge
+        // again, and the slow clock could otherwise leave it hours out of date.
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut session = sample_session("s1", "p1", "feat/a");
+        session.status = crate::model::SessionStatus::Detached;
+        engine.sessions.push(session);
+        engine.update_pr_sync_sessions();
+        assert!(
+            !engine.is_in_flight(&InFlightKey::PrCheck("s1".into())),
+            "sitting in the Inactive tail buys no check"
+        );
+
+        engine.sessions[0].status = crate::model::SessionStatus::Active;
+        engine.update_pr_sync_sessions();
+
+        assert!(
+            engine.is_in_flight(&InFlightKey::PrCheck("s1".into())),
+            "leaving the Inactive tail is worth exactly one immediate check"
+        );
+    }
+
+    #[test]
+    fn a_deleted_agent_is_not_mistaken_for_one_returning_from_inactive() {
+        // It left the Inactive set by ceasing to exist, which is not a return.
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut session = sample_session("s1", "p1", "feat/a");
+        session.status = crate::model::SessionStatus::Detached;
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.update_pr_sync_sessions();
+
+        engine
+            .finish_delete_session_memory("s1")
+            .expect("delete the session");
+
+        assert!(!engine.is_in_flight(&InFlightKey::PrCheck("s1".into())));
+    }
+
+    #[test]
     fn deleting_a_session_takes_it_out_of_the_pr_sync_plan() {
         // The periodic poller reads the shared plan every cycle, so a plan that
         // still names a deleted agent keeps asking GitHub about its pull

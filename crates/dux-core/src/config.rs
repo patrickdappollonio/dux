@@ -374,6 +374,48 @@ pub fn normalized_pr_poll_interval(seconds: u16) -> u16 {
     seconds
 }
 
+/// Default seconds between blind GitHub PR-status polls for INACTIVE agents
+/// (twelve hours). An agent the sidebar has put under Inactive is one nobody is
+/// working in, so its pull request moves rarely and nothing on screen is waiting
+/// on the answer; it is still worth an occasional look, because a merge or a
+/// close is exactly what happens to a branch after its agent is put away.
+pub const DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 43_200;
+
+/// Hard ceiling on the inactive PR poll interval (seven days). Far beyond any
+/// useful backstop already, so a fat-fingered value is clamped rather than
+/// silently turning the slow clock off; `0` is how you turn it off on purpose.
+pub const MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 604_800;
+
+/// Normalize a configured `pr_poll_inactive_interval_seconds`: `0` means "never
+/// poll an inactive agent" and is preserved; any other value is clamped into
+/// `[MIN_PR_POLL_INTERVAL_SECONDS, MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS]`.
+///
+/// It shares the ACTIVE poll's floor deliberately: the floor exists to stop dux
+/// hammering the GitHub API, which is the same concern whichever clock the
+/// entries are on, and a second, different number would be one more thing to
+/// keep in step for no gain.
+pub fn normalized_pr_poll_inactive_interval(seconds: u32) -> u32 {
+    if seconds == 0 {
+        return 0;
+    }
+    if seconds > MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS {
+        crate::logger::warn(&format!(
+            "pr_poll_inactive_interval_seconds = {seconds} exceeds the maximum of \
+             {MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS}s and is being clamped."
+        ));
+        return MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS;
+    }
+    let floor = u32::from(MIN_PR_POLL_INTERVAL_SECONDS);
+    if seconds < floor {
+        crate::logger::warn(&format!(
+            "pr_poll_inactive_interval_seconds = {seconds} is below the minimum of \
+             {floor}s and is being clamped (use 0 to stop polling inactive agents)."
+        ));
+        return floor;
+    }
+    seconds
+}
+
 /// Default seconds between re-checks of `gh` while dux cannot use it. Five
 /// minutes is short enough that a rate limit or a brief outage clears itself
 /// long before anyone thinks to restart dux, and long enough that a machine
@@ -1441,6 +1483,13 @@ pub struct UiConfig {
     /// entirely (updates then come only from those events). Clamped to
     /// [`MAX_PR_POLL_INTERVAL_SECONDS`].
     pub pr_poll_interval_seconds: u16,
+    /// Seconds between blind GitHub PR-status polls for agents the sidebar puts
+    /// under Inactive (detached or exited). Nobody is working in one, so its
+    /// pull request is polled on a much slower clock than an active agent's.
+    /// `0` stops polling inactive agents entirely; they still refresh the
+    /// moment they become active again, and on the deliberate one-shot
+    /// triggers. Clamped to [`MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS`].
+    pub pr_poll_inactive_interval_seconds: u32,
     /// Seconds between re-checks of the `gh` CLI while dux cannot use it.
     ///
     /// dux asks `gh` once at startup. When that answer is anything but "installed
@@ -2066,6 +2115,7 @@ impl Default for UiConfig {
             diff_tab_width: 4,
             github_integration: true,
             pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
+            pr_poll_inactive_interval_seconds: DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS,
             github_probe_interval_secs: DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
             copy_on_select: true,
             terminal_font_family: String::new(),
@@ -2605,6 +2655,7 @@ impl Default for Config {
                 diff_tab_width: 4,
                 github_integration: true,
                 pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
+                pr_poll_inactive_interval_seconds: DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS,
                 github_probe_interval_secs: DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
                 copy_on_select: true,
                 terminal_font_family: String::new(),
@@ -4932,6 +4983,40 @@ mod agent_tabs_cap_tests {
             MIN_GITHUB_PROBE_INTERVAL_SECONDS
         );
         assert_eq!(normalized_github_probe_interval(300), 300);
+    }
+
+    #[test]
+    fn the_inactive_pr_poll_default_is_twelve_hours() {
+        assert_eq!(DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS, 43_200);
+        assert_eq!(
+            UiConfig::default().pr_poll_inactive_interval_seconds,
+            DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS
+        );
+    }
+
+    #[test]
+    fn normalized_pr_poll_inactive_interval_keeps_zero_and_clamps_the_rest() {
+        // 0 is the user turning the slow clock off, not a mistake.
+        assert_eq!(normalized_pr_poll_inactive_interval(0), 0);
+        assert_eq!(
+            normalized_pr_poll_inactive_interval(43_200),
+            43_200,
+            "a sane value passes through"
+        );
+        assert_eq!(
+            normalized_pr_poll_inactive_interval(1),
+            u32::from(MIN_PR_POLL_INTERVAL_SECONDS),
+            "the active poll's floor is shared, because it is the same API"
+        );
+        assert_eq!(
+            normalized_pr_poll_inactive_interval(u32::MAX),
+            MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS
+        );
+        assert_eq!(
+            normalized_pr_poll_inactive_interval(MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS),
+            MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS,
+            "the ceiling itself is allowed"
+        );
     }
 
     #[test]

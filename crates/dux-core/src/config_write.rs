@@ -321,6 +321,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "pr_poll_interval_seconds",
         config.ui.pr_poll_interval_seconds,
     );
+    patch_table_u32(
+        doc,
+        "ui",
+        "pr_poll_inactive_interval_seconds",
+        config.ui.pr_poll_inactive_interval_seconds,
+    );
     patch_table_u16(
         doc,
         "ui",

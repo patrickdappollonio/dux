@@ -115,11 +115,52 @@ pub fn run_pr_sync(
     policy: &GithubHostPolicy,
     trigger: SyncTrigger,
 ) -> PrSyncOutcome {
+    run_pr_sync_scoped(sessions, backoff, policy, trigger, SyncScope::Everything)
+}
+
+/// Which half of the plan a cycle covers.
+///
+/// Only the blind poll narrows: an agent in the list's Inactive tail is polled
+/// on `ui.pr_poll_inactive_interval_seconds` rather than the active clock, so
+/// most of its cycles leave those entries alone. Every deliberate trigger asks
+/// about whatever it was pointed at, whichever tail the agent is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncScope {
+    /// Every entry in the plan.
+    Everything,
+    /// Only the agents the sidebar shows as active.
+    ActiveOnly,
+}
+
+/// [`run_pr_sync`] with the cycle's [`SyncScope`] named.
+pub fn run_pr_sync_scoped(
+    sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
+    backoff: &BackoffSnapshot,
+    policy: &GithubHostPolicy,
+    trigger: SyncTrigger,
+    scope: SyncScope,
+) -> PrSyncOutcome {
     let snapshot = match sessions.lock() {
         Ok(guard) => guard.clone(),
         Err(_) => return (Vec::new(), Vec::new()),
     };
-    run_entries(&snapshot, backoff, policy, trigger)
+    match scope {
+        SyncScope::Everything => run_entries(&snapshot, backoff, policy, trigger),
+        SyncScope::ActiveOnly => {
+            let active: Vec<PrSyncEntry> = snapshot.into_iter().filter(|e| !e.inactive).collect();
+            run_entries(&active, backoff, policy, trigger)
+        }
+    }
+}
+
+/// Whether the blind poll should include the plan's INACTIVE entries this cycle.
+///
+/// `interval_secs == 0` is the user turning the slow clock off, and no elapsed
+/// time ever brings it back. Otherwise an inactive sweep is due once that many
+/// seconds have passed since the last one. Pure so the cadence is testable
+/// without a poller, a clock or a `gh`.
+pub fn inactive_sweep_due(since_last: Duration, interval_secs: u64) -> bool {
+    interval_secs != 0 && since_last >= Duration::from_secs(interval_secs)
 }
 
 /// What caused this sync, which decides how much a dormant session is worth
@@ -3716,6 +3757,7 @@ mod tests {
             known_pr: Some(stored(42, "MERGED")),
             agent_exited: true,
             pinned: None,
+            inactive: false,
         };
         let trigger = SyncTrigger::BlindPoll;
         let (results, signals) = run_entries(
@@ -3733,6 +3775,49 @@ mod tests {
     }
 
     #[test]
+    fn the_inactive_sweep_is_due_only_after_its_own_interval() {
+        assert!(
+            !inactive_sweep_due(Duration::from_secs(0), 43_200),
+            "a cycle that has just run is not due again"
+        );
+        assert!(!inactive_sweep_due(Duration::from_secs(43_199), 43_200));
+        assert!(inactive_sweep_due(Duration::from_secs(43_200), 43_200));
+        assert!(inactive_sweep_due(Duration::from_secs(999_999), 43_200));
+    }
+
+    #[test]
+    fn a_zero_inactive_interval_never_sweeps_however_long_it_has_been() {
+        // 0 is the user turning the slow clock off; no amount of elapsed time
+        // is allowed to turn it back on.
+        assert!(!inactive_sweep_due(Duration::from_secs(0), 0));
+        assert!(!inactive_sweep_due(Duration::from_secs(u32::MAX.into()), 0));
+    }
+
+    #[test]
+    fn an_active_only_cycle_leaves_the_inactive_entries_alone() {
+        // The worktree paths are bogus, so an entry that reached the planner
+        // would fail loudly rather than quietly returning nothing.
+        let mut inactive = planning_entry();
+        inactive.session_id = "dormant".to_string();
+        inactive.inactive = true;
+        let plan = Arc::new(Mutex::new(vec![inactive]));
+
+        let (results, signals) = run_pr_sync_scoped(
+            &plan,
+            &std::collections::HashMap::new(),
+            &legacy_policy(),
+            SyncTrigger::BlindPoll,
+            SyncScope::ActiveOnly,
+        );
+
+        assert!(results.is_empty(), "{results:?}");
+        assert!(
+            signals.is_empty(),
+            "no host was even named, so none signalled"
+        );
+    }
+
+    #[test]
     fn run_entries_closed_exited_makes_no_call_on_the_blind_poll() {
         // A wall of dormant sessions with closed pull requests must not tick the
         // API every interval, so the blind poll still reconstructs from SQLite.
@@ -3743,6 +3828,7 @@ mod tests {
             known_pr: Some(stored(42, "CLOSED")),
             agent_exited: true,
             pinned: None,
+            inactive: false,
         };
         let (results, signals) = run_entries(
             std::slice::from_ref(&entry),
@@ -4367,6 +4453,7 @@ mod tests {
             known_pr: None,
             agent_exited: false,
             pinned: None,
+            inactive: false,
         }
     }
 
