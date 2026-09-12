@@ -17,8 +17,10 @@ const DUX_ART = `       ░██
 ░██   ░███ ░██   ░███  ░██  ░██
  ░█████░██  ░█████░██ ░██    ░██ `
 
-/// How often the countdown's clock is re-read. See the effect that uses it.
-const COUNTDOWN_SAMPLE_MS = 250
+/// How often the countdown re-reads the clock. One second, because that is the
+/// resolution it shows and the sampling starts from the moment the countdown
+/// itself does.
+const COUNTDOWN_SAMPLE_MS = 1000
 
 // Whole seconds until the next attempt, floored at zero. Wall clock, not a tick
 // count, so the number is right however the render cadence behaves; ceiling, so
@@ -37,58 +39,85 @@ function attemptsWord(n: number): string {
   return n === 1 ? "1 attempt" : `${n} attempts`
 }
 
+/// The line that carries the countdown, mounted fresh for every attempt.
+///
+/// KEYED ON `at` BY ITS CALLER, and that key is the whole design. The clock
+/// cannot be read during a render, so the moment a countdown starts has to come
+/// from somewhere; a clock ticking in the parent is stale by however long the
+/// previous face was on screen, which after a connecting face that sat out its
+/// ten second deadline meant a first frame reading "Retrying in 11 s". A new
+/// attempt is a new key, so this remounts and reads the clock in its own state
+/// initializer, at the moment it is actually showing.
+function CountdownLine({ prefix, at }: { prefix: string; at: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), COUNTDOWN_SAMPLE_MS)
+    return () => clearInterval(id)
+  }, [])
+  return <p>{`${prefix} Retrying in ${secondsUntil(at, now)} s.`}</p>
+}
+
 /// What the overlay says, derived from the socket's own plan. Three faces: one
 /// for the gap between attempts, one for an attempt in flight, and one for a
 /// loop that has ended. The button is in all three and is always instant, so
 /// there is no face without a way out.
-function copyFor(
-  plan: ReconnectPlanEvent | null,
-  now: number,
-): { title: string; spinner: boolean; lines: string[]; button: string } {
+///
+/// `counter` is the line that moves, and `at` on it is when the next attempt is
+/// due, which is what the countdown counts to; `stable` is the sentence that
+/// stays put for the whole face.
+type OverlayFace = {
+  title: string
+  spinner: boolean
+  counter: { text: string; at: number | null } | null
+  stable: string
+  button: string
+}
+
+function copyFor(plan: ReconnectPlanEvent | null): OverlayFace {
   if (plan?.phase === "given_up") {
     return {
       title: "Not connected to dux",
       spinner: false,
-      lines: [
-        `dux stopped trying after ${attemptsWord(plan.attempt)}. Reconnect when the server is back, or check that this device is online.`,
-      ],
+      counter: null,
+      stable: `dux stopped trying after ${attemptsWord(plan.attempt)}. Reconnect when the server is back, or check that this device is online.`,
       button: "Reconnect",
     }
   }
   const title = "Reconnecting to dux…"
+  const button = "Reconnect now"
   if (plan?.phase === "connecting") {
     return {
       title,
       spinner: true,
-      lines: [
-        plan.budget > 0
-          ? `Attempt ${plan.attempt} of ${plan.budget}, connecting…`
-          : `Attempt ${plan.attempt}, connecting…`,
-        `If the server is unreachable this can take up to ${secs(plan.attemptTimeoutMs)}.`,
-      ],
-      button: "Reconnect now",
+      counter: {
+        text:
+          plan.budget > 0
+            ? `Attempt ${plan.attempt} of ${plan.budget}, connecting…`
+            : `Attempt ${plan.attempt}, connecting…`,
+        at: null,
+      },
+      stable: `If the server is unreachable this can take up to ${secs(plan.attemptTimeoutMs)}.`,
+      button,
     }
   }
   // Waiting, and the pre-plan window: after the first drop but before the socket
   // has published anything there is no attempt to count, so the overlay says the
   // half it does know rather than inventing a number.
   const countable = plan !== null && plan.attempt >= 1 && plan.nextAttemptAt !== null
-  const wait = countable
-    ? `Retrying in ${secondsUntil(plan.nextAttemptAt as number, now)} s.`
-    : ""
-  const attempt = !countable
-    ? null
-    : plan.budget > 0
-      ? `Attempt ${plan.attempt} of ${plan.budget} failed. ${wait}`
-      : `Attempt ${plan.attempt} failed. ${wait}`
   return {
     title,
     spinner: true,
-    lines: [
-      ...(attempt === null ? [] : [attempt]),
-      "The server may be down or this device may be offline.",
-    ],
-    button: "Reconnect now",
+    counter: countable
+      ? {
+          text:
+            plan.budget > 0
+              ? `Attempt ${plan.attempt} of ${plan.budget} failed.`
+              : `Attempt ${plan.attempt} failed.`,
+          at: plan.nextAttemptAt,
+        }
+      : null,
+    stable: "The server may be down or this device may be offline.",
+    button,
   }
 }
 
@@ -97,26 +126,8 @@ function copyFor(
 // and attempts at once, in every face.
 export function OfflineOverlay() {
   const { offline, reconnectPlan } = useDux()
-  const waiting =
-    offline &&
-    reconnectPlan !== null &&
-    reconnectPlan.phase === "waiting" &&
-    reconnectPlan.nextAttemptAt !== null
-  // The clock behind the countdown, sampled only while a countdown is on screen:
-  // the other two faces have no number that moves, and an interval behind them
-  // would be a timer nobody reads. The DIGIT changes once a second; the sampling
-  // is finer than that on purpose, because the clock cannot be read during a
-  // render, so a plan landing between two samples would otherwise start its
-  // countdown from a moment already past.
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!waiting) return
-    const id = setInterval(() => setNow(Date.now()), COUNTDOWN_SAMPLE_MS)
-    return () => clearInterval(id)
-  }, [waiting])
-
   if (!offline) return null
-  const copy = copyFor(reconnectPlan, now)
+  const face = copyFor(reconnectPlan)
 
   return createPortal(
     <div
@@ -137,26 +148,33 @@ export function OfflineOverlay() {
           id="offline-overlay-title"
           className="mb-1.5 flex items-center justify-center gap-2 text-lg font-semibold"
         >
-          {copy.spinner ? (
+          {face.spinner ? (
             <Loader2
               className="size-4 animate-spin text-muted-foreground"
               aria-hidden
             />
           ) : null}
-          {copy.title}
+          {face.title}
         </h1>
         <div
           id="offline-overlay-desc"
           aria-live="polite"
           className="mb-6 space-y-1 text-sm leading-relaxed text-muted-foreground"
         >
-          {copy.lines.map((line) => (
-            <p key={line}>{line}</p>
-          ))}
+          {face.counter === null ? null : face.counter.at === null ? (
+            <p>{face.counter.text}</p>
+          ) : (
+            <CountdownLine
+              key={face.counter.at}
+              prefix={face.counter.text}
+              at={face.counter.at}
+            />
+          )}
+          <p>{face.stable}</p>
         </div>
         <Button onClick={reconnect}>
           <RefreshCw aria-hidden />
-          {copy.button}
+          {face.button}
         </Button>
       </div>
     </div>,

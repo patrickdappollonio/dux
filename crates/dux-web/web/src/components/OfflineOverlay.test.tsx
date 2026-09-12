@@ -127,6 +127,37 @@ describe("the waiting face", () => {
     expect(screen.getByText("Attempt 2 of 8 failed. Retrying in 2 s.")).toBeTruthy()
   })
 
+  // MEASURED, AND WRONG BEFORE THE FIX. The clock behind the countdown only
+  // ticked while a countdown was on screen, so after ten seconds of the
+  // connecting face it was ten seconds stale: the first frame of the next
+  // waiting face read "Retrying in 11 s" and only snapped to 1 s at the next
+  // sample. Every cycle, on the face the user looks at longest.
+  it("is right on its FIRST frame, after a long connecting face", () => {
+    vi.useFakeTimers()
+    seed({
+      offline: true,
+      conn: "connecting",
+      reconnectPlan: plan({
+        phase: "connecting",
+        attempt: 4,
+        nextAttemptAt: null,
+      }),
+    })
+    const { rerender } = render(<OfflineOverlay />)
+    // The attempt sits unopened for the whole configured deadline.
+    act(() => {
+      vi.advanceTimersByTime(10_000)
+    })
+    // It is abandoned, and the next attempt is a second away.
+    seed({
+      offline: true,
+      conn: "closed",
+      reconnectPlan: plan({ attempt: 4, budget: 8, nextAttemptAt: Date.now() + 1_000 }),
+    })
+    rerender(<OfflineOverlay />)
+    expect(screen.getByText("Attempt 4 of 8 failed. Retrying in 1 s.")).toBeTruthy()
+  })
+
   it("says nothing about attempts before the socket has published one", () => {
     // The window between the first drop and the first plan. The overlay still
     // has something true to say; it just cannot count yet.
