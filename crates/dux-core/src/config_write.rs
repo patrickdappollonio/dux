@@ -543,6 +543,18 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_usize(
         doc,
         "server",
+        "reconnect_attempts",
+        config.server.reconnect_attempts as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "reconnect_attempt_timeout_seconds",
+        config.server.reconnect_attempt_timeout_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
         "heartbeat_seconds",
         config.server.heartbeat_seconds as usize,
     );
@@ -1789,7 +1801,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         );
     }
 
-    /// The four browser-side reconnect timings render at their defaults, parse
+    /// The browser-side reconnect timings render at their defaults, parse
     /// back, and a user value survives a regenerate. They are read live by the
     /// browser off the bootstrap document, so a wrong value is silent until
     /// somebody's phone loses its socket.
@@ -1817,6 +1829,14 @@ build = { text = \"cargo build\", surface = \"terminal\" }
             parsed.server.pty_send_timeout_seconds,
             crate::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS
         );
+        assert_eq!(
+            parsed.server.reconnect_attempts,
+            crate::config::DEFAULT_RECONNECT_ATTEMPTS
+        );
+        assert_eq!(
+            parsed.server.reconnect_attempt_timeout_seconds,
+            crate::config::DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS
+        );
 
         let config = Config {
             server: crate::config::ServerConfig {
@@ -1825,6 +1845,8 @@ build = { text = \"cargo build\", surface = \"terminal\" }
                 heartbeat_seconds: 23,
                 heartbeat_deadline_seconds: 24,
                 pty_send_timeout_seconds: 25,
+                reconnect_attempts: 26,
+                reconnect_attempt_timeout_seconds: 27,
                 ..Default::default()
             },
             ..Default::default()
@@ -1836,6 +1858,8 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         assert_eq!(parsed.server.heartbeat_seconds, 23);
         assert_eq!(parsed.server.heartbeat_deadline_seconds, 24);
         assert_eq!(parsed.server.pty_send_timeout_seconds, 25);
+        assert_eq!(parsed.server.reconnect_attempts, 26);
+        assert_eq!(parsed.server.reconnect_attempt_timeout_seconds, 27);
     }
 
     /// And a patch rewrites each of them in a file that already carries other
@@ -1848,7 +1872,8 @@ build = { text = \"cargo build\", surface = \"terminal\" }
             &path,
             "[server]\nreplay_wait_seconds = 1\nreconnect_backoff_cap_seconds = 2\n\
              heartbeat_seconds = 3\nheartbeat_deadline_seconds = 4\n\
-             pty_send_timeout_seconds = 5\n",
+             pty_send_timeout_seconds = 5\nreconnect_attempts = 6\n\
+             reconnect_attempt_timeout_seconds = 7\n",
         )
         .expect("seed config");
 
@@ -1859,6 +1884,8 @@ build = { text = \"cargo build\", surface = \"terminal\" }
                 heartbeat_seconds: 33,
                 heartbeat_deadline_seconds: 34,
                 pty_send_timeout_seconds: 35,
+                reconnect_attempts: 36,
+                reconnect_attempt_timeout_seconds: 37,
                 ..Default::default()
             },
             ..Default::default()
@@ -1878,6 +1905,11 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         );
         assert_eq!(
             parsed.server.pty_send_timeout_seconds, 35,
+            "saved:\n{saved}"
+        );
+        assert_eq!(parsed.server.reconnect_attempts, 36, "saved:\n{saved}");
+        assert_eq!(
+            parsed.server.reconnect_attempt_timeout_seconds, 37,
             "saved:\n{saved}"
         );
     }

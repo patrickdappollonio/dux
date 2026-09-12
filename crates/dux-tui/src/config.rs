@@ -1158,6 +1158,32 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.server.reconnect_backoff_cap_seconds as usize),
         },
         ConfigEntry::Field {
+            key: "reconnect_attempts",
+            comment: Some(CommentSource::Static(
+                "# How many times in a row the web UI tries to reconnect before it stops\n\
+                 # and tells you so, with a Reconnect button to start again. Each attempt\n\
+                 # that connects gives you the whole budget back, and coming back to the\n\
+                 # tab, unlocking the phone or the network returning all start it over, so\n\
+                 # this only runs out on a page left sitting in front of a server that is\n\
+                 # not there. Set to 0 to keep trying forever. Default 8.\n\
+                 # A config reload applies this to every open browser tab right away.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.reconnect_attempts as usize),
+        },
+        ConfigEntry::Field {
+            key: "reconnect_attempt_timeout_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long one of those attempts may sit there without connecting before\n\
+                 # the web UI abandons it and counts it as a failure. A server you cannot\n\
+                 # reach at all does not refuse the connection, it simply never answers, so\n\
+                 # without this an attempt could hang for most of a minute with nothing to\n\
+                 # show for it. Too small and a slow connection never finishes connecting;\n\
+                 # too large and each failure takes longer to notice. Default 10.\n\
+                 # A config reload applies this to every open browser tab right away.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.reconnect_attempt_timeout_seconds as usize),
+        },
+        ConfigEntry::Field {
             key: "heartbeat_seconds",
             comment: Some(CommentSource::Static(
                 "# How often a browser tab you are looking at checks that its terminal\n\
@@ -2544,6 +2570,8 @@ mod tests {
         assert!(rendered.contains("heartbeat_seconds = 15"));
         assert!(rendered.contains("heartbeat_deadline_seconds = 30"));
         assert!(rendered.contains("pty_send_timeout_seconds = 60"));
+        assert!(rendered.contains("reconnect_attempts = 8"));
+        assert!(rendered.contains("reconnect_attempt_timeout_seconds = 10"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that
@@ -2962,10 +2990,10 @@ name = "test"
         assert_eq!(parsed.server.shutdown_timeout_seconds, 30);
     }
 
-    /// The four browser-side reconnect timings, and the server-side send
-    /// deadline beside them, survive the canonical template. The four only ever
-    /// reach the browser through the bootstrap document, so a key the renderer
-    /// drops is invisible until a phone loses its socket.
+    /// The browser-side reconnect settings, and the server-side send deadline
+    /// beside them, survive the canonical template. The browser-side ones only
+    /// ever reach the browser through the bootstrap document, so a key the
+    /// renderer drops is invisible until a phone loses its socket.
     #[test]
     fn default_config_round_trips_the_reconnect_timings() {
         let mut config = Config::default();
@@ -2974,6 +3002,8 @@ name = "test"
         config.server.heartbeat_seconds = 43;
         config.server.heartbeat_deadline_seconds = 44;
         config.server.pty_send_timeout_seconds = 45;
+        config.server.reconnect_attempts = 46;
+        config.server.reconnect_attempt_timeout_seconds = 47;
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.server.replay_wait_seconds, 41);
@@ -2981,6 +3011,8 @@ name = "test"
         assert_eq!(parsed.server.heartbeat_seconds, 43);
         assert_eq!(parsed.server.heartbeat_deadline_seconds, 44);
         assert_eq!(parsed.server.pty_send_timeout_seconds, 45);
+        assert_eq!(parsed.server.reconnect_attempts, 46);
+        assert_eq!(parsed.server.reconnect_attempt_timeout_seconds, 47);
     }
 
     #[test]

@@ -300,6 +300,13 @@ pub struct BootstrapView {
     /// Mirrors `config.server.reconnect_backoff_cap_seconds`: the longest gap
     /// the browser leaves between two automatic reconnect attempts.
     pub reconnect_backoff_cap_seconds: u32,
+    /// Mirrors `config.server.reconnect_attempts`: how many consecutive
+    /// reconnect attempts the browser makes before it stops trying, where `0`
+    /// means never give up.
+    pub reconnect_attempts: u32,
+    /// Mirrors `config.server.reconnect_attempt_timeout_seconds`: how long one
+    /// attempt may sit unopened before it is abandoned and counted as failed.
+    pub reconnect_attempt_timeout_seconds: u32,
     /// Mirrors `config.server.heartbeat_seconds`: how often a visible page
     /// checks that its terminal connection is really alive.
     pub heartbeat_seconds: u32,
@@ -1418,6 +1425,8 @@ impl Engine {
             file_drop_max_bytes: self.config.server.file_drop_max_bytes,
             replay_wait_seconds: self.config.server.replay_wait_seconds,
             reconnect_backoff_cap_seconds: self.config.server.reconnect_backoff_cap_seconds,
+            reconnect_attempts: self.config.server.reconnect_attempts,
+            reconnect_attempt_timeout_seconds: self.config.server.reconnect_attempt_timeout_seconds,
             heartbeat_seconds: self.config.server.heartbeat_seconds,
             heartbeat_deadline_seconds: self.config.server.heartbeat_deadline_seconds,
         }
@@ -3216,6 +3225,8 @@ mod tests {
             "reconnect_backoff_cap_seconds",
             "heartbeat_seconds",
             "heartbeat_deadline_seconds",
+            "reconnect_attempts",
+            "reconnect_attempt_timeout_seconds",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),
@@ -3224,7 +3235,8 @@ mod tests {
         }
     }
 
-    /// The four reconnect timings are projected verbatim from `[server]`.
+    /// The reconnect timings and the retry budget are projected verbatim from
+    /// `[server]`.
     ///
     /// Nothing in the server reads them: they exist for the BROWSER's attach
     /// state machine, which can only learn them through this document. A config
@@ -3250,6 +3262,14 @@ mod tests {
             b.heartbeat_deadline_seconds,
             crate::config::DEFAULT_HEARTBEAT_DEADLINE_SECONDS
         );
+        assert_eq!(
+            b.reconnect_attempts,
+            crate::config::DEFAULT_RECONNECT_ATTEMPTS
+        );
+        assert_eq!(
+            b.reconnect_attempt_timeout_seconds,
+            crate::config::DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS
+        );
 
         engine.config.server.replay_wait_seconds = 3;
         engine.config.server.reconnect_backoff_cap_seconds = 4;
@@ -3260,6 +3280,12 @@ mod tests {
         assert_eq!(b.reconnect_backoff_cap_seconds, 4);
         assert_eq!(b.heartbeat_seconds, 5);
         assert_eq!(b.heartbeat_deadline_seconds, 6);
+
+        engine.config.server.reconnect_attempts = 7;
+        engine.config.server.reconnect_attempt_timeout_seconds = 8;
+        let b = engine.bootstrap();
+        assert_eq!(b.reconnect_attempts, 7);
+        assert_eq!(b.reconnect_attempt_timeout_seconds, 8);
     }
 
     #[test]

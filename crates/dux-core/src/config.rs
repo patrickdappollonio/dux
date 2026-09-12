@@ -258,6 +258,21 @@ pub const DEFAULT_REPLAY_WAIT_SECONDS: u32 = 8;
 /// ten seconds rather than once an hour.
 pub const DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS: u32 = 10;
 
+/// Default number of consecutive reconnect attempts the browser makes before it
+/// stops trying and says so. Consumed by the BROWSER; the server never reads it.
+/// `0` means never give up, which is what dux did before the budget existed. The
+/// budget refills on every attempt that connects, and a wake signal (the page
+/// coming back, the network returning) restarts a spent one, so the give-up
+/// state is reserved for a page that has been sitting in front of an unreachable
+/// server.
+pub const DEFAULT_RECONNECT_ATTEMPTS: u32 = 8;
+
+/// Default deadline, in seconds, on one reconnect attempt: an attempt that has
+/// not opened by then is abandoned and counted as failed. An unreachable host on
+/// a remote network does not refuse a connection, it hangs, so without this the
+/// budget above would take most of an hour to spend.
+pub const DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS: u32 = 10;
+
 /// Default interval, in seconds, at which a visible page asks its terminal
 /// connection to prove it is really alive. The WebSocket-level ping the server
 /// sends is send-only with no deadline, so it cannot detect the half-open
@@ -1009,8 +1024,25 @@ pub struct ServerConfig {
     ///
     /// The delay grows after each failure and stops growing here, so a device
     /// that has been out of coverage for a long time still reconnects promptly
-    /// once it is back. Browser-side, hot-reloadable, like its three siblings.
+    /// once it is back. Browser-side, hot-reloadable, like its siblings.
     pub reconnect_backoff_cap_seconds: u32,
+    /// How many consecutive reconnect attempts the web UI makes before it stops
+    /// trying and offers a Reconnect button instead. Default 8; `0` means never
+    /// give up.
+    ///
+    /// An attempt that opens refills the budget, and a wake signal (the tab
+    /// becoming visible again, the device coming back online) restarts a spent
+    /// one, so this is a budget against a server that is genuinely not there
+    /// rather than against a bad minute of network. Browser-side,
+    /// hot-reloadable.
+    pub reconnect_attempts: u32,
+    /// How long, in seconds, one reconnect attempt may sit unopened before it is
+    /// abandoned and counted against the budget above. Default 10.
+    ///
+    /// An unreachable host on a remote network does not refuse the connection,
+    /// it hangs, so this is what turns "nothing is happening" into a visible
+    /// failed attempt. Browser-side, hot-reloadable.
+    pub reconnect_attempt_timeout_seconds: u32,
     /// How often, in seconds, a visible page checks that its terminal
     /// connection is really alive. Default 15.
     ///
@@ -1074,8 +1106,9 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
 /// - The `tailscale` mode: a live switch. A reload hands the new mode to the
 ///   running serve, which stops or starts the watcher, binds or drops the leg, and
 ///   moves the Host guard's Tailscale-literal rule with it.
-/// - The browser-side reconnect timings (`replay_wait_seconds`,
-///   `reconnect_backoff_cap_seconds`, `heartbeat_seconds`,
+/// - The browser-side reconnect settings (`replay_wait_seconds`,
+///   `reconnect_backoff_cap_seconds`, `reconnect_attempts`,
+///   `reconnect_attempt_timeout_seconds`, `heartbeat_seconds`,
 ///   `heartbeat_deadline_seconds`): nothing on the server reads them. They ride
 ///   the bootstrap document, which every client refetches on a config reload, so a
 ///   change retimes every open tab live.
@@ -2084,6 +2117,8 @@ impl Default for ServerConfig {
             file_drop_max_concurrency: DEFAULT_FILE_DROP_MAX_CONCURRENCY,
             replay_wait_seconds: DEFAULT_REPLAY_WAIT_SECONDS,
             reconnect_backoff_cap_seconds: DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
+            reconnect_attempts: DEFAULT_RECONNECT_ATTEMPTS,
+            reconnect_attempt_timeout_seconds: DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS,
             heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
             heartbeat_deadline_seconds: DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
             pty_send_timeout_seconds: DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
