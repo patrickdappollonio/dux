@@ -186,10 +186,10 @@ refusing to resume a conversation that is already open somewhere else says so on
 out.
 
 You do not have to open the agent to find that out. When a resume is refused, and the run
-was over in seconds, the notice dux raises (the status line in the terminal UI, a toast in
-the browser) says the agent could not resume its previous session and quotes the
-provider's own last words, remedy and all. Whatever the CLI told you to do about it is in
-the message; the card still has the full output.
+was over in seconds, the notice dux raises says the agent could not resume its previous
+session and quotes the provider's own last words, remedy and all: a toast in the browser,
+and in the terminal UI the status line, when that agent is the one on screen. Whatever the
+CLI told you to do about it is in the message; the card still has the full output.
 
 That is the notice you get when the refusal is more than a few lines long. A one-line
 refusal is treated as nothing to resume, and dux quietly starts a fresh session instead
