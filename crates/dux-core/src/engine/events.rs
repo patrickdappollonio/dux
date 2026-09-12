@@ -5832,11 +5832,15 @@ mod tests {
     }
 
     #[test]
-    fn a_startup_burst_of_returning_agents_collapses_into_the_boot_refresh() {
-        // The auto-reopen sweep flips a workspace of agents out of Inactive at
-        // once, right after the boot refresh answered for all of them in one
-        // batched query. The ordinary deliberate-event debounce is what stops
-        // that becoming one gh subprocess per agent.
+    fn a_return_check_is_skipped_when_a_batch_just_answered_for_that_agent() {
+        // What the debounce actually guards, stated precisely. It is NOT boot:
+        // the boot refresh is asynchronous, so nothing has stamped
+        // `pr_last_checked` by the time the auto-reopen sweep flips agents out
+        // of Inactive, and the debounce lets every one of those through. It
+        // guards any burst of status flips that lands AFTER a batch's answers
+        // have been applied, which stamps every agent in it: the re-arm path
+        // that seeds, replans and refreshes together is the one that does this
+        // today, and any future path that stamps before flipping gets it free.
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine.gh_status = crate::model::GhStatus::Available;
@@ -5845,7 +5849,7 @@ mod tests {
         session.status = crate::model::SessionStatus::Detached;
         engine.sessions.push(session);
         engine.update_pr_sync_sessions();
-        // The boot refresh has just answered for it.
+        // A batch's answers have just landed and stamped it.
         engine
             .pr_last_checked
             .insert("s1".to_string(), Instant::now());

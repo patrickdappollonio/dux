@@ -3763,12 +3763,13 @@ impl Engine {
             }
         }
         for session_id in returned {
-            // The ordinary deliberate-event debounce rather than none: the
-            // startup auto-reopen sweep flips a whole workspace of agents out of
-            // the Inactive tail at once, right after the boot refresh has
-            // already answered for all of them in one batched query. The
-            // debounce is what collapses that burst back into the batch, while
-            // a genuine return, minutes or hours later, still gets its check.
+            // The ordinary deliberate-event debounce rather than none, so a
+            // burst of status flips landing just after a batch's answers were
+            // applied does not re-ask about every agent that batch stamped. It
+            // is deliberately NOT a boot guard: the boot refresh is
+            // asynchronous and has stamped nothing by the time the auto-reopen
+            // sweep runs, so those returns all go through. A genuine return,
+            // minutes or hours later, always gets its check.
             if !self.spawn_pr_check_for_session(&session_id, PR_CHECK_MIN_INTERVAL) {
                 // Refused, commonly because GitHub was unavailable at the
                 // moment the agent came back. Owe it one retry rather than
