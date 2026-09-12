@@ -205,6 +205,13 @@ impl ConnectionRegistry {
     pub fn class_of(&self, id: &str) -> Option<ConnClass> {
         self.entries.lock().unwrap().get(id).copied()
     }
+
+    /// Whether `id` names a connection that is still up, whatever its class.
+    /// Asked by the status forwarder, which needs to know only whether the
+    /// address a scoped status carries still has anybody at it.
+    pub fn is_live(&self, id: &str) -> bool {
+        self.entries.lock().unwrap().contains_key(id)
+    }
 }
 
 /// Derive the [`StatusScope`] for a REST action from the optional

@@ -2696,7 +2696,7 @@ async fn handle_events_socket(
     // Initial statuses: a client connecting mid-operation sees ALL active toasts
     // (keyed and anonymous) immediately, scoped to itself. An empty/fully-filtered
     // snapshot sends nothing.
-    for ev in status_events(&engine.status_snapshot(), &connection_id) {
+    for ev in status_events(&engine.status_snapshot(), &connection_id, &connections) {
         if send_json(&sink, &ev).await.is_err() {
             console.client_disconnected(peer_ip);
             return;
@@ -2725,6 +2725,7 @@ async fn handle_events_socket(
         workspace_alive,
         interest,
         connection_id,
+        connections,
         peer_ip,
     };
     let _ = connection.run().await;
@@ -2745,6 +2746,9 @@ struct EventsSocketLoop {
     workspace_alive: bool,
     interest: InterestGuard,
     connection_id: String,
+    /// The live-connection registry, so a status addressed to a connection that
+    /// has gone can fall back to a broadcast instead of reaching nobody.
+    connections: Arc<crate::rest_common::ConnectionRegistry>,
     peer_ip: IpAddr,
 }
 
@@ -2847,7 +2851,7 @@ impl EventsSocketLoop {
         status: Result<WireStatus, tokio::sync::broadcast::error::RecvError>,
     ) -> Result<(), ()> {
         match status {
-            Ok(status) if scope_delivers(&status.scope, &self.connection_id) => {
+            Ok(status) if scope_delivers(&status.scope, &self.connection_id, &self.connections) => {
                 send_json(
                     &self.sink,
                     &WireStatusEvent {
@@ -2868,7 +2872,13 @@ impl EventsSocketLoop {
                      dropped {n} update(s); resending scoped snapshot",
                     self.peer_ip
                 ));
-                resend_status_snapshot(&self.sink, &self.engine, &self.connection_id).await
+                resend_status_snapshot(
+                    &self.sink,
+                    &self.engine,
+                    &self.connection_id,
+                    &self.connections,
+                )
+                .await
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
         }
@@ -2895,7 +2905,13 @@ impl EventsSocketLoop {
                      dropped {n} clear(s); resending scoped snapshot",
                     self.peer_ip
                 ));
-                resend_status_snapshot(&self.sink, &self.engine, &self.connection_id).await
+                resend_status_snapshot(
+                    &self.sink,
+                    &self.engine,
+                    &self.connection_id,
+                    &self.connections,
+                )
+                .await
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(()),
         }
@@ -3217,13 +3233,25 @@ async fn send_json<T: serde::Serialize + ?Sized>(sink: &SharedSink, value: &T) -
 }
 
 /// Whether a status of the given [`StatusScope`] is delivered to the connection
-/// with id `conn_id`: `All` reaches everyone; `Connection(id)` reaches only the
-/// matching connection. Shared by the live status arm and the on-connect snapshot
+/// with id `conn_id`. Shared by the live status arm and the on-connect snapshot
 /// so both delivery paths filter identically.
-fn scope_delivers(scope: &StatusScope, conn_id: &str) -> bool {
+///
+/// `All` reaches everyone. `Connection(id)` reaches the matching connection, and
+/// ALSO everyone else once that connection is no longer live: a scope is an
+/// address, and an address nobody is at cannot be allowed to swallow the
+/// message. The tab that asked for a long operation routinely closes or reloads
+/// while it runs, and without this fallback the outcome reaches no browser at
+/// all while the terminal, which has no notion of scope, shows it. Broadcasting
+/// is safe here for the reason the scope is only a courtesy in the first place:
+/// dux is single-tenant and every client shares the one workspace.
+fn scope_delivers(
+    scope: &StatusScope,
+    conn_id: &str,
+    live: &crate::rest_common::ConnectionRegistry,
+) -> bool {
     match scope {
         StatusScope::All => true,
-        StatusScope::Connection(id) => id == conn_id,
+        StatusScope::Connection(id) => id == conn_id || !live.is_live(id),
     }
 }
 
@@ -3243,8 +3271,9 @@ async fn resend_status_snapshot(
     sink: &SharedSink,
     engine: &EngineHandle,
     connection_id: &str,
+    live: &crate::rest_common::ConnectionRegistry,
 ) -> Result<(), ()> {
-    for ev in status_events(&engine.status_snapshot(), connection_id) {
+    for ev in status_events(&engine.status_snapshot(), connection_id, live) {
         send_json(sink, &ev).await?;
     }
     Ok(())
@@ -3261,11 +3290,15 @@ async fn resend_status_snapshot(
 /// receive another connection's in-progress `Busy` (a ghost spinner that never
 /// clears). Pure and side-effect-free so it can be unit-tested without a
 /// WebSocket. An empty (or fully-filtered) snapshot produces an empty `Vec`.
-fn status_events(snapshot: &[KeyedWireStatus], conn_id: &str) -> Vec<WireStatusEvent> {
+fn status_events(
+    snapshot: &[KeyedWireStatus],
+    conn_id: &str,
+    live: &crate::rest_common::ConnectionRegistry,
+) -> Vec<WireStatusEvent> {
     snapshot
         .iter()
         .filter(|e| !e.message.is_empty())
-        .filter(|e| scope_delivers(&e.scope, conn_id))
+        .filter(|e| scope_delivers(&e.scope, conn_id, live))
         .map(|e| WireStatusEvent {
             event: "status",
             key: e.key.clone(),
@@ -4765,7 +4798,7 @@ mod tests {
     /// An empty snapshot produces no events.
     #[test]
     fn status_events_empty_snapshot_is_empty() {
-        assert!(status_events(&[], "conn").is_empty());
+        assert!(status_events(&[], "conn", &live_connections(&["conn"])).is_empty());
     }
 
     /// A snapshot with one open entry produces one status event with the correct
@@ -4779,7 +4812,7 @@ mod tests {
             scope: StatusScope::All,
             sticky: false,
         }];
-        let events = status_events(&snapshot, "conn");
+        let events = status_events(&snapshot, "conn", &live_connections(&["conn"]));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, "status");
         assert_eq!(events[0].key.as_deref(), Some("pull"));
@@ -4819,7 +4852,7 @@ mod tests {
                 sticky: false,
             },
         ];
-        let events = status_events(&snapshot, "conn");
+        let events = status_events(&snapshot, "conn", &live_connections(&["conn"]));
         assert_eq!(events.len(), 3, "one event per open status entry");
         let keys: Vec<Option<&str>> = events.iter().map(|e| e.key.as_deref()).collect();
         assert_eq!(keys, vec![Some("pull"), Some("commit"), None]);
@@ -4844,7 +4877,7 @@ mod tests {
                 sticky: false,
             },
         ];
-        let events = status_events(&snapshot, "conn");
+        let events = status_events(&snapshot, "conn", &live_connections(&["conn"]));
         assert_eq!(
             events.len(),
             1,
@@ -5434,17 +5467,43 @@ mod tests {
 
     // --- status scope filtering ---
 
+    /// A registry holding the given live Events connections.
+    fn live_connections(ids: &[&str]) -> crate::rest_common::ConnectionRegistry {
+        let registry = crate::rest_common::ConnectionRegistry::new();
+        for id in ids {
+            registry.insert((*id).to_string(), crate::rest_common::ConnClass::Events);
+        }
+        registry
+    }
+
     #[test]
     fn scope_delivers_all_reaches_every_connection() {
-        assert!(scope_delivers(&StatusScope::All, "A"));
-        assert!(scope_delivers(&StatusScope::All, "B"));
+        let live = live_connections(&["A", "B"]);
+        assert!(scope_delivers(&StatusScope::All, "A", &live));
+        assert!(scope_delivers(&StatusScope::All, "B", &live));
     }
 
     #[test]
     fn scope_delivers_connection_matches_only_its_own_id() {
+        let live = live_connections(&["A", "B"]);
         let scope = StatusScope::Connection("A".to_string());
-        assert!(scope_delivers(&scope, "A"));
-        assert!(!scope_delivers(&scope, "B"));
+        assert!(scope_delivers(&scope, "A", &live));
+        assert!(
+            !scope_delivers(&scope, "B", &live),
+            "A is right there listening, so B must not inherit its toast"
+        );
+    }
+
+    #[test]
+    fn a_status_addressed_to_a_gone_connection_reaches_everybody() {
+        // The tab that asked for the operation closed while it ran. Delivering
+        // only to its id means delivering to nobody, so the outcome would be
+        // lost on this surface while the terminal still shows it. Falling back
+        // to a broadcast is the least-bad answer for a single-tenant tool where
+        // every client shares the one workspace.
+        let live = live_connections(&["B"]);
+        let scope = StatusScope::Connection("A".to_string());
+        assert!(scope_delivers(&scope, "B", &live));
     }
 
     /// The on-connect snapshot drops another connection's in-progress `Busy`: a
@@ -5469,11 +5528,14 @@ mod tests {
             },
         ];
         // Connection B joins: it sees only the `All` status, not A's busy.
-        let events = status_events(&snapshot, "B");
+        let events = status_events(&snapshot, "B", &live_connections(&["A", "B"]));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].key.as_deref(), Some("commit"));
         // Connection A sees both (its own busy + the broadcast).
-        assert_eq!(status_events(&snapshot, "A").len(), 2);
+        assert_eq!(
+            status_events(&snapshot, "A", &live_connections(&["A", "B"])).len(),
+            2
+        );
     }
 
     /// An older peer's / the TUI's `WireStatus` JSON with no `scope` field
@@ -5483,7 +5545,11 @@ mod tests {
         let json = r#"{"tone":"info","message":"Saved."}"#;
         let ws: dux_core::wire::WireStatus = serde_json::from_str(json).unwrap();
         assert_eq!(ws.scope, StatusScope::All);
-        assert!(scope_delivers(&ws.scope, "any-connection"));
+        assert!(scope_delivers(
+            &ws.scope,
+            "any-connection",
+            &live_connections(&["any-connection"])
+        ));
     }
 
     // --- bootstrap route ---
