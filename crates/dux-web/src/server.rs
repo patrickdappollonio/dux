@@ -3313,10 +3313,18 @@ async fn resend_status_snapshot(
 /// operations still in flight plus finals still inside `FINAL_REPLAY_WINDOW`, so
 /// this is what tells a mid-operation joiner about running work AND what tells a
 /// reconnecting tab how the operation it was watching ended. The scope filter
-/// mirrors the live status arm so a client connecting mid-operation does NOT
-/// receive another connection's in-progress `Busy` (a ghost spinner that never
-/// clears). Pure and side-effect-free so it can be unit-tested without a
-/// WebSocket. An empty (or fully-filtered) snapshot produces an empty `Vec`.
+/// mirrors the live status arm, so a client connecting mid-operation does not
+/// receive the in-progress `Busy` of a connection that is still there (a ghost
+/// spinner it has no business showing).
+///
+/// It DOES receive the `Busy` of a connection that has GONE, for the same reason
+/// the live arm delivers one: an address nobody is at cannot swallow the
+/// message. That spinner is not stranded, because the operation's final and the
+/// busy timeout both reach this joiner through the same fallback. The cost,
+/// accepted: a joiner briefly shows a spinner for work somebody else started.
+///
+/// Pure and side-effect-free so it can be unit-tested without a WebSocket. An
+/// empty (or fully-filtered) snapshot produces an empty `Vec`.
 fn status_events(
     snapshot: &[KeyedWireStatus],
     conn_id: &str,
@@ -5572,6 +5580,38 @@ mod tests {
             status_events(&snapshot, "A", &live_connections(&["A", "B"])).len(),
             2
         );
+    }
+
+    /// A gone connection's in-progress `Busy` DOES reach a joiner, and so does
+    /// its final. Stated as a test because it is the price of the fallback: a
+    /// joiner briefly shows a spinner for work somebody else started, and what
+    /// makes that acceptable is that the same fallback delivers the answer.
+    #[test]
+    fn a_gone_connections_busy_and_its_final_both_reach_the_joiner() {
+        let live = live_connections(&["B"]);
+        let mid_flight = vec![KeyedWireStatus {
+            key: Some("push".into()),
+            tone: "busy".into(),
+            message: "Pushing\u{2026}".into(),
+            scope: StatusScope::Connection("A".into()),
+            sticky: false,
+        }];
+        let events = status_events(&mid_flight, "B", &live);
+        assert_eq!(events.len(), 1, "the spinner is not swallowed");
+        assert_eq!(events[0].tone, "busy");
+
+        // The same scope on the final, which is what takes the spinner down.
+        let answered = vec![KeyedWireStatus {
+            key: Some("push".into()),
+            tone: "info".into(),
+            message: "Pushed.".into(),
+            scope: StatusScope::Connection("A".into()),
+            sticky: false,
+        }];
+        let events = status_events(&answered, "B", &live);
+        assert_eq!(events.len(), 1, "and neither is the answer to it");
+        assert_eq!(events[0].tone, "info");
+        assert_eq!(events[0].key.as_deref(), Some("push"));
     }
 
     /// An older peer's / the TUI's `WireStatus` JSON with no `scope` field
