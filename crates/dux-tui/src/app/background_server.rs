@@ -967,6 +967,7 @@ pub(crate) mod tests {
             EventReaction::ApplyReloadedConfig(_) => "ApplyReloadedConfig",
             EventReaction::OpenNewAgentPromptForPr { .. } => "OpenNewAgentPromptForPr",
             EventReaction::Nothing => "Nothing",
+            EventReaction::Status(_) => "Status",
             _ => "other",
         }
     }
@@ -1161,6 +1162,69 @@ pub(crate) mod tests {
         assert!(
             !reactions.is_empty(),
             "the drain must hand every reaction to the seam; it handed over nothing"
+        );
+    }
+
+    /// A status the engine produced from a worker reaches BOTH surfaces while
+    /// both are up. The reported failure was a gh error on the terminal's status
+    /// line that no browser ever saw, in exactly this mode, so the drained path
+    /// is walked end to end rather than the seam being poked directly.
+    #[test]
+    fn a_worker_born_status_reaches_the_terminal_and_the_seam() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.engine.projects.push(sample_project("p1", "/tmp/p1"));
+        app.engine.sessions.push(dux_core::model::AgentSession {
+            id: "s1".to_string(),
+            slot_tab_id: "s1-slot".to_string(),
+            provider: dux_core::model::ProviderKind::from_str("codex"),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: dux_core::model::SessionStatus::Detached,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: "p1".to_string(),
+                    project_path: Some("/tmp/p1".to_string()),
+                    source_branch: "main".to_string(),
+                    branch_name: "feat/x".to_string(),
+                    initial_branch: "feat/x".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: "/tmp/p1/wt".to_string(),
+                },
+            ),
+        });
+        app.engine
+            .worker_tx
+            .send(dux_core::worker::WorkerEvent::PullRequestResolved {
+                result: Err("Failed to resolve PR #48 from o/r: no such pull request.".to_string()),
+                purpose: dux_core::worker::PrLookupPurpose::Attach {
+                    session_id: "s1".to_string(),
+                },
+                status_op_id: None,
+            })
+            .expect("the engine's worker channel is open");
+
+        app.drain_events();
+
+        assert!(
+            app.status
+                .most_recent_tui()
+                .is_some_and(|(_, message)| message.contains("#48")),
+            "the terminal shows it, as it always did"
+        );
+        assert!(
+            recorded
+                .lock()
+                .expect("not poisoned")
+                .reactions
+                .contains(&"Status".to_string()),
+            "and the seam is handed the same reaction, or the browser never learns"
         );
     }
 
