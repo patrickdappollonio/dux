@@ -271,13 +271,17 @@ pub enum WireCommand {
     KillSessionPty {
         session_id: String,
     },
-    /// Detach an agent WHOLE: stop every one of its tabs' provider processes,
-    /// mark the session Detached, and clear `desired_running` so startup
-    /// auto-reopen does not relaunch it. This is the agent-level "Detach agent"
-    /// action (the sidebar/menu), DISTINCT from closing a single tab (which stops
-    /// only that tab and detaches the agent only when it was the last live one).
-    /// The row and worktree are kept, so the agent can be reconnected. Unknown
-    /// session is an `Err`; an agent with no live tabs is an idempotent no-op.
+    /// Detach an agent WHOLE: ask every one of its tabs' provider processes to
+    /// shut down, mark the session Detached, and clear `desired_running` so
+    /// startup auto-reopen does not relaunch it. This is the agent-level "Detach
+    /// agent" action (the row menu), DISTINCT from closing a single tab (which
+    /// stops only that tab and detaches the agent only when it was the last live
+    /// one). The row and worktree are kept, so the agent can be reconnected.
+    /// Unknown session is an `Err`; an agent with no live tabs is an idempotent
+    /// no-op.
+    ///
+    /// Answers with a keyed BUSY: the shutdown is the polite path, so the
+    /// outcome only exists once the child is gone or the grace has run out.
     DetachAgent {
         session_id: String,
     },
@@ -2209,50 +2213,35 @@ impl Engine {
         ))
     }
 
-    /// Detach an agent WHOLE: stop every one of its tabs' provider processes and
-    /// mark the session Detached. Unlike `kill_session_pty` (which stops a single
-    /// tab and detaches only when it was the last live one), this is the explicit
-    /// agent-level "Detach agent" action and always tears down every tab. The row
-    /// and worktree are kept so the agent can be reconnected; `desired_running` is
-    /// cleared so startup auto-reopen does not relaunch it. Unknown session is an
-    /// `Err`; an agent with no live tabs is an idempotent no-op.
+    /// Detach an agent WHOLE: ask every one of its tabs' provider processes to
+    /// shut down and mark the session Detached. Unlike `kill_session_pty` (which
+    /// stops a single tab and detaches only when it was the last live one), this
+    /// is the explicit agent-level "Detach agent" action and always tears down
+    /// every tab. The row and worktree are kept so the agent can be reconnected;
+    /// `desired_running` is cleared so startup auto-reopen does not relaunch it.
+    /// Unknown session is an `Err`; an agent with no live tabs is an idempotent
+    /// no-op.
+    ///
+    /// The teardown itself is [`Engine::begin_detach_session`], the polite path
+    /// both surfaces share: SIGTERM, then the configured grace, then a force-kill
+    /// by the background reaper. So the status this returns is a keyed BUSY, and
+    /// the reaper's own final replaces it once the last tab is actually gone.
     fn detach_agent(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
-        let session = self
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
-        let tabs = self.tab_ids_for_session(&session.id);
-        let stopped = tabs
-            .iter()
-            .filter(|tab_id| self.providers.contains_key(*tab_id))
-            .count();
-        // Clear every tab's runtime maps (drops each live provider on the way,
-        // SIGKILL on Drop), whether or not it was live, so no stale entry leaks.
-        for tab_id in &tabs {
-            self.clear_tab_runtime(tab_id);
-        }
-        if stopped == 0 {
+        match self.begin_detach_session(session_id) {
+            crate::engine::DetachSessionOutcome::UnknownSession => {
+                Err(anyhow::anyhow!("unknown session: {session_id}"))
+            }
             // Loud, for the same reason as the kill's own no-op arm: nothing
-            // happened because the state already held.
-            return Ok(WireStatus::new(
+            // happened because the state already held, and an unchanged row
+            // cannot be told from a silent failure.
+            crate::engine::DetachSessionOutcome::NotRunning { label } => Ok(WireStatus::new(
                 "info",
-                format!("Agent \"{}\" is not running.", session.display_label()),
-            ));
+                crate::engine::detach_not_running_message(&label),
+            )),
+            crate::engine::DetachSessionOutcome::Started { key, busy, .. } => {
+                Ok(WireStatus::keyed(key, "busy", busy))
+            }
         }
-        if self.mark_session_status(&session.id, crate::model::SessionStatus::Detached) {
-            self.update_pr_sync_sessions();
-        }
-        self.mark_session_desired_running(&session.id, false);
-        Ok(WireStatus::new(
-            "info",
-            format!(
-                "Detached agent \"{}\" and stopped {}. It stays in Projects. Reconnect it from the agent menu.",
-                session.display_label(),
-                crate::text::count_of(stopped, "tab"),
-            ),
-        ))
     }
 
     /// Rename an agent session's display title, mirroring the title half of the
@@ -6817,11 +6806,11 @@ mod tests {
             })
             .expect("apply detach");
         let status = outcome.status.expect("a status");
-        assert!(
-            status.message.contains("Detached agent") && status.message.contains("stopped 2 tabs."),
-            "msg: {}",
-            status.message
-        );
+        // A spinner, not a success: the children were ASKED to go, and whether
+        // they went on their own or had to be forced is not known yet.
+        assert_eq!(status.tone, "busy", "msg: {}", status.message);
+        assert_eq!(status.key.as_deref(), Some("detach-agent:s1"));
+        assert_eq!(status.message, "Asking \"s1-title\" to shut down…");
         // EVERY tab's provider is gone, not just the session-slot one.
         assert!(
             !engine.providers.contains_key(TabIdRef::new("s1-slot")),
