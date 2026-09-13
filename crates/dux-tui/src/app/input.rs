@@ -27686,7 +27686,7 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn resume_fallback_skipped_when_pty_had_substantial_output() {
+    fn resume_fallback_skipped_when_the_pty_left_readable_text() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
@@ -27695,7 +27695,7 @@ cyan = "#00ffff"
                 .managed_worktree()
                 .expect("managed test session"),
         );
-        // Spawn a process that produces many lines of output before exiting.
+        // Spawn a process that leaves readable text on screen before exiting.
         // This simulates a real agent session that ran and then exited normally.
         let args = vec!["-c".to_string(), "seq 1 30".to_string()];
         let client =
@@ -27717,8 +27717,8 @@ cyan = "#00ffff"
             app.engine.sessions[0].status == SessionStatus::Detached
         });
 
-        // Since the PTY had substantial output (>5 lines), the fallback
-        // should NOT have triggered. The session should be detached.
+        // The PTY left readable text behind, so the provider spoke and the
+        // fallback must NOT trigger. The session should be detached.
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
         assert!(
             !app.engine
@@ -27729,7 +27729,7 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn resume_fallback_triggers_on_one_liner_output() {
+    fn resume_fallback_triggers_when_the_run_left_nothing_readable() {
         let mut app = test_app(default_bindings());
         // Override the "codex" provider to use /bin/sh so the fallback spawn
         // works on CI where codex is not installed.
@@ -27747,15 +27747,16 @@ cyan = "#00ffff"
                 .managed_worktree()
                 .expect("managed test session"),
         );
-        // Spawn a process that prints a single line (like a failed --continue)
-        // and then exits. The fallback should still trigger because the output
-        // is minimal (≤5 lines with no scrollback).
+        // Spawn a process that writes only control codes and blanks before
+        // exiting, the way a CLI that came up and gave up at once does. Nothing
+        // readable is left on screen, so there is nothing to resume and nothing
+        // to quote: the fallback triggers.
         let args = vec![
             "-c".to_string(),
-            "echo 'No session found to resume'".to_string(),
+            "printf '\\033[?1049h\\033[2J\\033[H  \\n\\033[?25l'".to_string(),
         ];
         let client =
-            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn one-liner");
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn silent run");
         app.engine
             .providers
             .insert(TabId::new(slot_tab.clone()), client);
@@ -27777,8 +27778,7 @@ cyan = "#00ffff"
                 && app.status.text().contains("No prior session to resume")
         });
 
-        // Despite having output, the fallback should trigger because the
-        // output is minimal (one line, no scrollback).
+        // Bytes arrived but no words did, so the fallback triggers.
         assert!(
             app.engine.providers.contains_key(TabIdRef::new(&slot_tab)),
             "provider should still be present after fallback retry"
