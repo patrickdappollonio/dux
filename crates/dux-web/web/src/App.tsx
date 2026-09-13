@@ -19,6 +19,7 @@ import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalD
 import { ConfirmCloseTabDialog } from "@/components/ConfirmCloseTabDialog"
 import { ConfirmDetachAgentDialog } from "@/components/ConfirmDetachAgentDialog"
 import { ConfirmForceReconnectDialog } from "@/components/ConfirmForceReconnectDialog"
+import { ConfirmForceStopAgentDialog } from "@/components/ConfirmForceStopAgentDialog"
 import { ConfirmUseExistingBranchDialog } from "@/components/ConfirmUseExistingBranchDialog"
 import { TaskManagerDialog } from "@/components/TaskManagerDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
@@ -82,9 +83,10 @@ function GlobalOverlays() {
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />
       <ConfirmCloseTabDialog />
-      {/* At the root, not inside the Task Manager: the agent row menu opens it
-          with the Task Manager closed. */}
+      {/* At the root, not inside the Task Manager: the agent row menu opens the
+          polite one with the Task Manager closed, and both are target-keyed. */}
       <ConfirmDetachAgentDialog />
+      <ConfirmForceStopAgentDialog />
       <ConfirmForceReconnectDialog />
       <ConfirmUseExistingBranchDialog />
       <TaskManagerDialog />

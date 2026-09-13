@@ -288,7 +288,7 @@ describe("store companion-terminal lifecycle", () => {
   })
 
   it("stopAllRunning deletes project terminals too", async () => {
-    // "Stop all" must cover project terminals too, not only sessions'
+    // "Force stop everything" must cover project terminals too, not only sessions'
     // terminals.
     spineBody = {
       projects: [{ id: "p1", name: "Repo" }],

@@ -44,7 +44,7 @@ import {
   closeTaskManager,
   openCloseTab,
   openDeleteTerminal,
-  openStopAgent,
+  openForceStopAgent,
   openStopAll,
   stopAllRunning,
   useDux,
@@ -192,10 +192,12 @@ function TaskManagerBody() {
       return
     }
     if (row.sessionId === null) return
-    // Two acts wear the same Stop control: a first tab is STOPPED, an extra tab is
-    // CLOSED. Slot-ness comes from `nested`, resolved when the row was built.
+    // Two acts wear the same Force stop control: a first tab FORCE-STOPS the
+    // agent, an extra tab is CLOSED. Both are immediate, which is what the one
+    // label promises. Slot-ness comes from `nested`, resolved when the row was
+    // built.
     if (!row.nested) {
-      openStopAgent(row.sessionId)
+      openForceStopAgent(row.sessionId)
       return
     }
     openCloseTab(row.sessionId, row.targetId)
@@ -297,7 +299,7 @@ function TaskManagerBody() {
               // Destructive here, unlike a `⋯` menu's neutral items: a dialog footer
               // button is the surface `variant="destructive"` is reserved for.
               <Button variant="destructive" onClick={openStopAll}>
-                Stop all…
+                Force stop everything…
               </Button>
             )}
             <Button variant="outline" autoFocus onClick={closeTaskManager}>
@@ -468,7 +470,7 @@ function DesktopRow({
               aria-label={row.stopLabel}
             >
               <CircleStop aria-hidden />
-              Stop
+              Force stop
             </Button>
           ) : (
             <NoStop />
@@ -569,7 +571,7 @@ function MobileRow({
             className="max-md:min-h-10 shrink-0"
           >
             <CircleStop aria-hidden />
-            Stop
+            Force stop
           </Button>
         ) : null}
       </div>
@@ -627,7 +629,7 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
-          <DialogTitle>Stop everything?</DialogTitle>
+          <DialogTitle>Force stop everything?</DialogTitle>
           <DialogDescription>
             {`This stops ${formatRegularCount(agents, "agent")} and ${formatRegularCount(terminals, "terminal")} immediately, with no shutdown wait. `}
             Agents detach and stay in Projects, reopenable; terminals are
@@ -641,7 +643,7 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
             Cancel
           </Button>
           <Button variant="destructive" onClick={handleConfirm}>
-            Stop all
+            Force stop everything
           </Button>
         </DialogFooter>
       </DialogContent>

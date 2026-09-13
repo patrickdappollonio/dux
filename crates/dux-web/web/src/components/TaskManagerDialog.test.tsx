@@ -12,6 +12,7 @@ import type { AgentTabView, SessionView, TerminalView } from "@/lib/types"
 // so these are the assertions that prove "every stop confirms".
 const openCloseTab = vi.fn()
 const openStopAgent = vi.fn()
+const openForceStopAgent = vi.fn()
 const closeStopAgent = vi.fn()
 const killSessionPty = vi.fn()
 const openDeleteTerminal = vi.fn()
@@ -28,6 +29,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     openCloseTab: (s: string, t: string) => openCloseTab(s, t),
     openStopAgent: (s: string) => openStopAgent(s),
+    openForceStopAgent: (s: string) => openForceStopAgent(s),
     closeStopAgent: () => closeStopAgent(),
     killSessionPty: (s: string) => killSessionPty(s),
     openDeleteTerminal: (t: string) => openDeleteTerminal(t),
@@ -240,30 +242,33 @@ describe("TaskManagerDialog", () => {
 
     await waitFor(() => expect(screen.getByText("dux")).toBeTruthy())
     // dux and TOTAL never offer a Stop; only the agent row does.
-    expect(screen.queryByLabelText("Stop dux")).toBeNull()
-    expect(screen.queryByLabelText("Stop TOTAL")).toBeNull()
+    expect(screen.queryByLabelText("Force stop dux")).toBeNull()
+    expect(screen.queryByLabelText("Force stop TOTAL")).toBeNull()
   })
 
-  // The row for an agent's FIRST tab stops the agent. It must never route
+  // The row for an agent's FIRST tab FORCE-STOPS the agent. It must never route
   // through the close-tab confirmation: that tab is closable (the close promotes
   // the next tab into the slot), but closing it is not what a process monitor's
-  // Stop means, and routing there would leave no way to stop an agent from the
-  // Task Manager at all.
-  it("stop_agent_opens_the_stop_confirmation_not_the_close_tab_one", async () => {
+  // Force stop means, and routing there would leave no way to stop an agent from
+  // the Task Manager at all. Nor may it route through the polite detach: this
+  // surface is the panic button and does not wait out a shutdown grace.
+  it("stop_agent_opens_the_force_confirmation_not_the_polite_or_close_tab_one", async () => {
     seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
     render(<TaskManagerDialog />)
 
-    const stop = await screen.findByLabelText("Stop fix-auth")
+    const stop = await screen.findByLabelText("Force stop fix-auth")
     fireEvent.click(stop)
-    expect(openStopAgent).toHaveBeenCalledWith("s1")
+    expect(openForceStopAgent).toHaveBeenCalledWith("s1")
+    expect(openStopAgent).not.toHaveBeenCalled()
     expect(openCloseTab).not.toHaveBeenCalled()
     // Still a confirmation, never an act on the click itself.
     expect(killSessionPty).not.toHaveBeenCalled()
   })
 
-  // The confirmation itself lives at the app root (ConfirmDetachAgentDialog),
-  // because the agent row menu opens it with this dialog closed. What it does on
-  // confirm is covered there; what this dialog owes is the routing above.
+  // The confirmation itself lives at the app root
+  // (ConfirmForceStopAgentDialog), beside the polite one the agent row menu
+  // opens with this dialog closed. What it does on confirm is covered there;
+  // what this dialog owes is the routing above.
 
   // An EXTRA tab's row keeps the close routing: that tab really is deleted.
   it("stop_on_an_extra_tab_row_still_opens_the_close_tab_confirmation", async () => {
@@ -280,9 +285,10 @@ describe("TaskManagerDialog", () => {
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
 
-    const stop = await screen.findByLabelText("Stop codex tab 1 in fix-auth")
+    const stop = await screen.findByLabelText("Force stop codex tab 1 in fix-auth")
     fireEvent.click(stop)
     expect(openCloseTab).toHaveBeenCalledWith("s1", "b2")
+    expect(openForceStopAgent).not.toHaveBeenCalled()
     expect(openStopAgent).not.toHaveBeenCalled()
   })
 
@@ -295,7 +301,7 @@ describe("TaskManagerDialog", () => {
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
 
-    const stop = await screen.findByLabelText("Stop Terminal 1")
+    const stop = await screen.findByLabelText("Force stop Terminal 1")
     fireEvent.click(stop)
     // Routes through the EXISTING terminal confirmation, not a direct delete.
     expect(openDeleteTerminal).toHaveBeenCalledWith("term-1")
@@ -315,7 +321,7 @@ describe("TaskManagerDialog", () => {
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
 
-    const stop = await screen.findByLabelText("Stop Terminal 2")
+    const stop = await screen.findByLabelText("Force stop Terminal 2")
     fireEvent.click(stop)
     expect(openDeleteTerminal).toHaveBeenCalledWith("pt-1")
     // The row's detail column names the owning project.
@@ -335,7 +341,7 @@ describe("TaskManagerDialog", () => {
       },
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
-    await screen.findByLabelText("Stop Terminal 2")
+    await screen.findByLabelText("Force stop Terminal 2")
     expect(screen.queryByText("Nothing is running.")).toBeNull()
     expect(closeTaskManager).not.toHaveBeenCalled()
   })
@@ -368,7 +374,7 @@ describe("TaskManagerDialog", () => {
     seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
     const { rerender } = render(<TaskManagerDialog />)
 
-    fireEvent.click(await screen.findByText("Stop all…"))
+    fireEvent.click(await screen.findByText("Force stop everything…"))
     expect(openStopAll).toHaveBeenCalledOnce()
     // Nothing is stopped by opening the confirmation.
     expect(stopAllRunning).not.toHaveBeenCalled()
@@ -379,14 +385,14 @@ describe("TaskManagerDialog", () => {
       spine: { sessions: [session({ id: "s1" })] },
     } as Partial<DuxState>)
     rerender(<TaskManagerDialog />)
-    fireEvent.click(await screen.findByText("Stop all"))
+    fireEvent.click(await screen.findByText("Force stop everything"))
     expect(stopAllRunning).toHaveBeenCalledOnce()
   })
 
   it("auto_closes_when_last_runtime_stops", async () => {
     seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
     const { rerender } = render(<TaskManagerDialog />)
-    await screen.findByLabelText("Stop feat")
+    await screen.findByLabelText("Force stop feat")
     expect(closeTaskManager).not.toHaveBeenCalled()
 
     // The last runtime went away while the dialog was open.
@@ -409,7 +415,7 @@ describe("TaskManagerDialog", () => {
     render(<TaskManagerDialog />)
     await waitFor(() => expect(screen.getByText("Nothing is running.")).toBeTruthy())
     // The bulk stop is pointless with nothing to stop.
-    expect(screen.queryByText("Stop all…")).toBeNull()
+    expect(screen.queryByText("Force stop everything…")).toBeNull()
   })
 
   it("renders_a_row_without_stats_as_dashes_but_still_stoppable", async () => {
@@ -434,7 +440,7 @@ describe("TaskManagerDialog", () => {
     // The extra tab's Stop label carries the owning agent and its position,
     // not just the bare provider: "Stop codex" alone would
     // collide with any other codex extra tab on any other agent.
-    expect(screen.getByLabelText("Stop codex tab 1 in feat")).toBeTruthy()
+    expect(screen.getByLabelText("Force stop codex tab 1 in feat")).toBeTruthy()
   })
 
   it("expands_child_processes_for_a_terminal", async () => {
@@ -668,20 +674,46 @@ describe("TaskManagerDialog", () => {
     await waitFor(() => expect(screen.getByText("129.5%")).toBeTruthy())
   })
 
+  it("bulk_confirmation_names_the_force", async () => {
+    // The Task Manager is the panic surface, so every one of its stops is
+    // immediate. The title has to say "Force" or the dialog reads like the
+    // polite detach that lives in the agent's own menu.
+    seed({
+      stopAllOpen: true,
+      spine: { sessions: [session({ id: "s1" })] },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    expect(await screen.findByText("Force stop everything?")).toBeTruthy()
+  })
+
+  it("every_row_control_reads_force_stop", async () => {
+    // The visible word, not just the accessible name: the control acts at once
+    // on every kind of row, and a bare "Stop" would promise a graceful one.
+    seed({
+      spine: {
+        sessions: [session({ id: "s1", title: "fix-auth" })],
+        terminals: [terminal({ id: "term-1", label: "Terminal 1" })],
+      },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    await screen.findByLabelText("Force stop fix-auth")
+    expect(screen.getAllByText("Force stop").length).toBe(2)
+  })
+
   it("stop_all_trigger_is_destructive", async () => {
-    // The user's own words: "The 'Stop all' button should also be red." Unlike
+    // The bulk trigger is red. Unlike
     // a `⋯` menu's neutral destructive items, a dialog footer button IS where
     // CLAUDE.md's menu tenet reserves `variant="destructive"`.
     seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
     render(<TaskManagerDialog />)
-    const trigger = await screen.findByText("Stop all…")
+    const trigger = await screen.findByText("Force stop everything…")
     expect(trigger.className).toContain("destructive")
   })
 
   it("each_stoppable_rows_stop_button_renders_an_icon", async () => {
     seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
     render(<TaskManagerDialog />)
-    const stop = await screen.findByLabelText("Stop fix-auth")
+    const stop = await screen.findByLabelText("Force stop fix-auth")
     expect(stop.querySelector("svg")).toBeTruthy()
   })
 
@@ -690,7 +722,7 @@ describe("TaskManagerDialog", () => {
     render(<TaskManagerDialog />)
     await screen.findByText("dux")
     expect(screen.getByText("this process")).toBeTruthy()
-    expect(screen.queryByLabelText("Stop dux")).toBeNull()
+    expect(screen.queryByLabelText("Force stop dux")).toBeNull()
   })
 
   it("header_shows_the_live_interval_derived_from_the_poll_constant", async () => {

@@ -126,7 +126,7 @@ describe("taskManagerRows", () => {
 
   it("emits a standalone terminal row, with its directory as the detail", () => {
     // The kind with no owner section of its own. The Task Manager's rows and its
-    // "Stop all" count are computed from two different things (the rows here,
+    // "Force stop everything" count are computed from two different things (the rows here,
     // the flat terminal collection there), so a terminal missing a row would
     // leave the user reading a count of things it offers no way to stop.
     const terminals = [
@@ -317,7 +317,7 @@ describe("taskManagerRows", () => {
   //
   // The Task Manager's bulk confirmation counts EVERY terminal in the flat
   // collection, so a terminal the row walk fails to place would make the rows
-  // and the count disagree about what "Stop all" is about to stop: the dialog
+  // and the count disagree about what "Force stop everything" is about to stop: the dialog
   // would say "stop 3" while showing 2. Rows are therefore emitted from the flat
   // list itself, and one the walk over sessions and projects never reaches lands
   // at the END rather than being dropped.
@@ -358,7 +358,7 @@ describe("taskManagerRows", () => {
     expect(orphan?.stoppable).toBe(true)
     expect(orphan?.targetId).toBe("term-orphan")
     // The count of terminal rows always equals the count of terminals, which is
-    // the number the "Stop all" confirmation puts in front of the user. This is
+    // the number the "Force stop everything" confirmation puts in front of the user. This is
     // the assertion the test is really for.
     expect(rows.filter((r) => r.kind === "terminal")).toHaveLength(
       terminals.length,
@@ -470,7 +470,7 @@ describe("taskManagerRows", () => {
 describe("taskManagerSummary", () => {
   it("is_null_when_nothing_is_running", () => {
     // Nothing to stop, so nothing to total: the footer's summary disappears
-    // along with "Stop all…" in this state.
+    // along with "Force stop everything…" in this state.
     const rows = taskManagerRows([], [duxStat, totalStat], [], [])
     expect(taskManagerSummary(rows)).toBeNull()
   })
@@ -539,9 +539,9 @@ describe("agentTabRows", () => {
       tabs: [tab({ id: "t1" }), tab({ id: "t2", order: 1 }), tab({ id: "t3", order: 2 })],
     })
     expect(agentTabRows(s, noStats).map((r) => r.stopLabel)).toEqual([
-      "Stop feat",
-      "Stop claude tab 1 in feat",
-      "Stop claude tab 2 in feat",
+      "Force stop feat",
+      "Force stop claude tab 1 in feat",
+      "Force stop claude tab 2 in feat",
     ])
   })
 

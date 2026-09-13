@@ -352,11 +352,16 @@ export interface DuxState {
   // to the next tab in strip order, and closing the agent's last live tab
   // detaches the agent (which stays in Projects, reopenable).
   closeTabTarget: { sessionId: string; tabId: string } | null
-  // The agent pending stop confirmation, or null. Distinct from
-  // `closeTabTarget`: stopping ends the agent's first tab's process and leaves
-  // the tab and the agent in the list, where closing destroys the tab for good.
-  // Raised by the Task Manager's row for an agent's first tab.
+  // The agent pending the POLITE detach confirmation, or null. Distinct from
+  // `closeTabTarget`: detaching ends the agent's processes and leaves the tab
+  // and the agent in the list, where closing destroys the tab for good. Raised
+  // by the agent row menu's Detach agent.
   stopAgentTarget: string | null
+  // The agent pending the FORCED stop confirmation, or null. Its own target
+  // rather than a mode on `stopAgentTarget`, because the two dialogs promise
+  // different things and both can be reached from the same session. Raised by
+  // the Task Manager's row for an agent's first tab.
+  forceStopAgentTarget: string | null
   // Session ids with a tab-create request in flight, so the strip's "+" disables
   // until it resolves (a double-click can't spawn two tabs). The per-agent tab
   // cap still guards the server; this is the common-case UX guard.
@@ -529,7 +534,8 @@ export interface DuxState {
   // The rows are derived live from the spine joined to the polled stats, so the
   // dialog needs no state beyond this open flag.
   taskManagerOpen: boolean
-  // Whether the "Stop all…" confirmation (nested inside the Task Manager) is up.
+  // Whether the "Force stop everything…" confirmation (nested inside the Task
+  // Manager) is up.
   // Every stop confirms, the bulk one most of all: it ends every agent and
   // terminal at once.
   stopAllOpen: boolean
@@ -913,6 +919,7 @@ let state: DuxState = {
   deleteTerminalTarget: null,
   closeTabTarget: null,
   stopAgentTarget: null,
+  forceStopAgentTarget: null,
   createTabInFlight: [],
   startedDormantTabs: [],
   discardTarget: null,
@@ -3582,10 +3589,7 @@ export function closeCloseTab(): void {
   setState({ closeTabTarget: null })
 }
 
-// Open the detach confirmation, from the agent's row menu or from the Task
-// Manager's row for an agent's first tab. That row is a Stop control, not a
-// close: what the user is asking for on a process monitor is to end the process
-// the row is showing numbers for, not to delete the tab it runs in.
+// Open the POLITE detach confirmation, from the agent's row menu.
 // `killSessionPty` behind it asks every one of the agent's provider processes to
 // shut down, waits the configured grace, then forces whatever is left; the agent
 // stays in the list as Detached.
@@ -3595,6 +3599,20 @@ export function openStopAgent(sessionId: string): void {
 
 export function closeStopAgent(): void {
   setState({ stopAgentTarget: null })
+}
+
+// Open the FORCED stop confirmation, from the Task Manager's row for an agent's
+// first tab. That row is a Force stop control, not a close: what the user is
+// asking for on a process monitor is to end the process the row is showing
+// numbers for, not to delete the tab it runs in. It is the immediate path, like
+// everything else on that surface, so nothing waits out the shutdown grace; the
+// agent still stays in the list as Detached.
+export function openForceStopAgent(sessionId: string): void {
+  setState({ forceStopAgentTarget: sessionId })
+}
+
+export function closeForceStopAgent(): void {
+  setState({ forceStopAgentTarget: null })
 }
 
 // Close a tab via REST. Any tab may go, the slot tab included: the server hands
@@ -5983,7 +6001,7 @@ export function closeTaskManager(): void {
   setState({ taskManagerOpen: false, stopAllOpen: false })
 }
 
-// The "Stop all…" confirmation nested inside the Task Manager.
+// The "Force stop everything…" confirmation nested inside the Task Manager.
 export function openStopAll(): void {
   setState({ stopAllOpen: true })
 }
@@ -5999,10 +6017,11 @@ export function closeStopAll(): void {
 // much recoverable as possible. Terminals have no detached state (existence ==
 // running), so they are destroyed. Gated by its own confirmation.
 //
-// FORCED, deliberately, unlike the per-agent detach beside it: this is the
-// escape hatch somebody reaches for when the machine is already in trouble, and
-// waiting out a shutdown grace per agent is the opposite of what they asked for.
-// The dialog says "immediately" so the difference is stated, not implied.
+// FORCED, like every other stop on the Task Manager: this is the escape hatch
+// somebody reaches for when the machine is already in trouble, and waiting out a
+// shutdown grace per agent is the opposite of what they asked for. The polite
+// path is the agent row menu's Detach agent. Both dialogs say "immediately" so
+// the difference is stated, not implied.
 export function stopAllRunning(): void {
   const sessions = state.spine?.sessions ?? []
   for (const s of sessions) {
@@ -6194,8 +6213,10 @@ export function saveSettings(
 // surface a transport failure. Companion terminals are killed through the
 // existing `deleteTerminal`.
 //
-// `force` ends the processes at once with no grace, and is for "Stop
-// everything" alone: see `stopAllRunning`.
+// `force` ends the processes at once with no grace. It belongs to the Task
+// Manager, which is the panic surface: both its per-row Force stop and its
+// "Force stop everything" pass it, and the polite detach in the agent's row
+// menu is the only caller that does not.
 export function killSessionPty(sessionId: string, force = false): void {
   sessionsApi
     .kill(sessionId, force)

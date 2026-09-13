@@ -35,11 +35,11 @@ export interface TaskRow {
    * authoritative slot-ness answer: a consumer reads `!nested` rather than
    * deriving it again from the ids. False for dux, TOTAL and terminal rows. */
   nested: boolean
-  /** Whether this row offers a Stop control (dux and TOTAL do not). */
+  /** Whether this row offers a Force stop control (dux and TOTAL do not). */
   stoppable: boolean
-  /** The Stop control's accessible name, which always carries the owning agent
-   * and the tab's position. `name` cannot serve: a nested tab's is only its
-   * provider, which collides across sibling tabs of the same provider. */
+  /** The Force stop control's accessible name, which always carries the owning
+   * agent and the tab's position. `name` cannot serve: a nested tab's is only
+   * its provider, which collides across sibling tabs of the same provider. */
   stopLabel: string
   /** The owning session, for the stop action. Null for dux/total AND for a
    * project terminal (whose owner is a project, not a session). */
@@ -116,7 +116,7 @@ export function taskManagerRows(
       detail: owner.detail,
       nested: false,
       stoppable: true,
-      stopLabel: `Stop ${title}`,
+      stopLabel: `Force stop ${title}`,
       sessionId: owner.sessionId,
       projectId: owner.projectId,
       targetId: terminal.id,
@@ -173,7 +173,7 @@ export function taskManagerRows(
   emitTerminalGroup(ownerKey({ kind: "standalone", cwd_label: "" }))
 
   // Anything the walks above never reached, emitted rather than dropped: the
-  // "Stop all" confirmation counts EVERY terminal in the flat collection, so a
+  // "Force stop everything" confirmation counts EVERY terminal in the flat collection, so a
   // terminal with no row leaves rows and count disagreeing about what is about
   // to be stopped, and takes away the only control for stopping it.
   for (const key of terminalGroups.keys()) emitTerminalGroup(key)
@@ -237,8 +237,8 @@ export function agentTabRows(
       // the row it is showing numbers for.
       stoppable: true,
       stopLabel: isSlot
-        ? `Stop ${label}`
-        : `Stop ${tab.provider} tab ${nestedIndex} in ${label}`,
+        ? `Force stop ${label}`
+        : `Force stop ${tab.provider} tab ${nestedIndex} in ${label}`,
       sessionId: session.id,
       projectId: null,
       targetId: tab.id,
@@ -256,7 +256,7 @@ export function nothingRunning(rows: readonly TaskRow[]): boolean {
 // The footer's muted totals line, read straight off the TOTAL row rather than
 // summed here: core computes that aggregate once, and re-deriving it would risk
 // drifting from the collector's own rounding. `null` when nothing is running,
-// so the summary disappears alongside the footer's "Stop all…".
+// so the summary disappears alongside the footer's "Force stop everything…".
 export function taskManagerSummary(rows: readonly TaskRow[]): string | null {
   const runningCount = rows.filter((r) => r.stoppable).length
   if (runningCount === 0) return null

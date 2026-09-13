@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   agentIsDetachable,
   detachConfirmBody,
+  forceStopConfirmBody,
   shutdownGraceSeconds,
 } from "./detachAgent"
 
@@ -82,5 +83,22 @@ describe("agentIsDetachable", () => {
       false,
     )
     expect(agentIsDetachable({ tabs: [] })).toBe(false)
+  })
+})
+
+describe("forceStopConfirmBody", () => {
+  it("promises no wait at all and says the agent survives as detached", () => {
+    // The Task Manager's own words. It must not quote a grace period: there is
+    // none, and the whole point of that surface is that it acts at once.
+    expect(forceStopConfirmBody("fix-auth")).toBe(
+      'dux will stop "fix-auth" immediately, with no shutdown wait. Anything ' +
+        "it is doing right now is lost. The agent stays in the list as " +
+        "Detached, and you can resume it later.",
+    )
+  })
+
+  it("never quotes the grace the polite body is built around", () => {
+    expect(forceStopConfirmBody("feat")).not.toContain("wait up to")
+    expect(detachConfirmBody("feat", 30, 1)).toContain("wait up to 30 seconds")
   })
 })

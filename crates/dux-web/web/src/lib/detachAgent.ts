@@ -45,6 +45,20 @@ export function detachConfirmBody(
     : body
 }
 
+/** The body of the Task Manager's force-stop confirmation, the immediate
+ * sibling of `detachConfirmBody`. Separate copy rather than a parameter on the
+ * polite one, because the two now promise DIFFERENT things: the Task Manager is
+ * the panic surface and ends the processes at once, while the agent menu's
+ * Detach agent asks first and waits out the configured grace. No number appears
+ * here, because there is no wait to quote. */
+export function forceStopConfirmBody(label: string): string {
+  return (
+    `dux will stop "${label}" immediately, with no shutdown wait. Anything it ` +
+    `is doing right now is lost. The agent stays in the list as Detached, and ` +
+    `you can resume it later.`
+  )
+}
+
 /** Whether the agent has anything to detach: a detach asks a PROCESS to go, so
  * with none running there is nothing to ask. The menu item is absent rather
  * than disabled in that case, because a disabled row promises an action that is
