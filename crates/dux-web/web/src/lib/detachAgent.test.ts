@@ -22,18 +22,37 @@ describe("shutdownGraceSeconds", () => {
 })
 
 describe("detachConfirmBody", () => {
-  it("quotes the agent and the wait, and says the agent stays reopenable", () => {
-    const body = detachConfirmBody("feat/login", 45)
-    expect(body).toContain('"feat/login"')
-    expect(body).toContain("wait up to 45 seconds")
-    expect(body).toContain("stays in the list as Detached")
-    expect(body).toContain("resume it later")
-    expect(body).toContain("interrupted")
+  // The exact sentences, pinned verbatim. The Rust half asserts these same two
+  // strings (`the_confirm_body_reads_the_same_on_both_surfaces` in
+  // crates/dux-core/src/engine/lifecycle.rs), so a change to either surface's
+  // copy fails on the side that changed instead of quietly leaving the two
+  // dialogs disagreeing about the same act.
+  it("reads exactly as the terminal UI's does, for one running tab", () => {
+    expect(detachConfirmBody("feat/login", 30, 1)).toBe(
+      'dux will ask "feat/login" to shut down and wait up to 30 seconds for it ' +
+        "to exit before forcing it. The agent stays in the list as Detached, and " +
+        "you can resume it later. Anything the agent is doing right now is " +
+        "interrupted.",
+    )
+  })
+
+  it("reads exactly as the terminal UI's does, for three running tabs", () => {
+    expect(detachConfirmBody("feat/login", 45, 3)).toBe(
+      'dux will ask "feat/login" to shut down and wait up to 45 seconds for it ' +
+        "to exit before forcing it. The agent stays in the list as Detached, and " +
+        "you can resume it later. Anything the agent is doing right now is " +
+        "interrupted. All 3 running tabs stop together.",
+    )
+  })
+
+  it("adds no tail below two running tabs", () => {
+    expect(detachConfirmBody("a", 30, 0)).not.toContain("stop together")
+    expect(detachConfirmBody("a", 30, 1)).not.toContain("stop together")
   })
 
   it("never hardcodes the default wait", () => {
-    expect(detachConfirmBody("a", 7)).toContain("7 seconds")
-    expect(detachConfirmBody("a", 7)).not.toContain("30 seconds")
+    expect(detachConfirmBody("a", 7, 1)).toContain("7 seconds")
+    expect(detachConfirmBody("a", 7, 1)).not.toContain("30 seconds")
   })
 })
 

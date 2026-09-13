@@ -10,7 +10,6 @@ import {
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { detachConfirmBody, shutdownGraceSeconds } from "@/lib/detachAgent"
-import { formatRegularCount } from "@/lib/formatRegularCount"
 import { closeStopAgent, killSessionPty, useDux } from "@/lib/store"
 
 // The confirmation behind detaching an agent, from the agent's row menu and
@@ -31,9 +30,9 @@ export function ConfirmDetachAgentDialog() {
     : undefined
   const label = session ? sessionLabel(session) : ""
   // How many processes this actually ends. Counted by liveness, because a
-  // dormant tab left over from a restart keeps nothing alive.
-  const liveTabs =
-    session?.tabs.filter((t) => t.has_live_process).length ?? 0
+  // dormant tab left over from a restart keeps nothing alive. The shared body
+  // builder decides whether that earns a sentence.
+  const liveTabs = session?.tabs.filter((t) => t.has_live_process).length ?? 0
 
   // Closes itself when the agent leaves the live view model, like every other
   // target-keyed dialog.
@@ -59,10 +58,7 @@ export function ConfirmDetachAgentDialog() {
         <DialogHeader>
           <DialogTitle>Detach agent?</DialogTitle>
           <DialogDescription>
-            {detachConfirmBody(label, shutdownGraceSeconds(bootstrap))}
-            {liveTabs > 1
-              ? ` All ${formatRegularCount(liveTabs, "running tab")} stop together.`
-              : ""}
+            {detachConfirmBody(label, shutdownGraceSeconds(bootstrap), liveTabs)}
           </DialogDescription>
         </DialogHeader>
         {/* Misclick-safe spacing between the body and the buttons. */}

@@ -24,14 +24,25 @@ export function shutdownGraceSeconds(
 
 /** The body of the detach confirmation. Mirrors
  * `dux_core::engine::detach_confirm_body`, word for word, so the browser and
- * the terminal UI promise the same thing. */
-export function detachConfirmBody(label: string, graceSeconds: number): string {
-  return (
+ * the terminal UI promise the same thing. Each side has a test asserting these
+ * exact strings, so a change on one fails on the side that changed.
+ *
+ * `liveTabs` is how many of the agent's tabs are running. Past one it earns a
+ * sentence: the menu names one agent and the act ends several conversations,
+ * which is a scope the user has to be told about before agreeing. */
+export function detachConfirmBody(
+  label: string,
+  graceSeconds: number,
+  liveTabs: number,
+): string {
+  const body =
     `dux will ask "${label}" to shut down and wait up to ${graceSeconds} seconds ` +
     `for it to exit before forcing it. The agent stays in the list as Detached, ` +
     `and you can resume it later. Anything the agent is doing right now is ` +
     `interrupted.`
-  )
+  return liveTabs > 1
+    ? `${body} All ${liveTabs} running tabs stop together.`
+    : body
 }
 
 /** Whether the agent has anything to detach: a detach asks a PROCESS to go, so

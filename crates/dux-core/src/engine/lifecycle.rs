@@ -466,13 +466,27 @@ pub fn detach_final(label: &str, forced: bool, grace_seconds: u64) -> crate::eng
 /// The body both surfaces' detach confirmations show, so the TUI dialog and the
 /// browser dialog cannot promise different things. `grace_seconds` is read from
 /// config at render time rather than baked in, because the wait is configurable.
-pub fn detach_confirm_body(label: &str, grace_seconds: u64) -> String {
-    format!(
+///
+/// `live_tabs` is how many of the agent's tabs are actually running. Past one it
+/// earns a sentence: the menu names one agent and the act ends several
+/// conversations, which is a scope the user has to be told about before
+/// agreeing. Counted by liveness, because a dormant tab left over from a restart
+/// keeps nothing alive. Both surfaces pass it, so neither can quietly drop it.
+///
+/// The TypeScript half is `lib/detachAgent.ts`; the two are pinned by a test
+/// each asserting the exact sentence, so a change on one side fails visibly on
+/// the side that changed.
+pub fn detach_confirm_body(label: &str, grace_seconds: u64, live_tabs: usize) -> String {
+    let mut body = format!(
         "dux will ask \"{label}\" to shut down and wait up to {grace_seconds} seconds \
          for it to exit before forcing it. The agent stays in the list as Detached, \
          and you can resume it later. Anything the agent is doing right now is \
          interrupted."
-    )
+    );
+    if live_tabs > 1 {
+        body.push_str(&format!(" All {live_tabs} running tabs stop together."));
+    }
+    body
 }
 
 /// Outcome of [`Engine::shutdown_ptys`], so a caller can echo the result to its
@@ -967,6 +981,34 @@ impl Engine {
         None
     }
 
+    /// The tabs of one agent that have a live provider process RIGHT NOW.
+    ///
+    /// The one oracle for "is there anything to detach", asked by the engine's
+    /// own teardown, by the terminal UI's palette gate, and (through
+    /// `SessionView::detachable`) by the browser's menu gate, so the three
+    /// cannot answer differently for the same agent.
+    ///
+    /// Deliberately narrower than [`Engine::any_tab_active`], which is in-flight
+    /// aware: a tab whose launch has not produced a PTY yet has no process to
+    /// ask anything of, so a detach would report success over something that
+    /// never came up. Detach asks a live process to go, and nothing else.
+    pub fn live_tab_ids(&self, session_id: &str) -> Vec<TabId> {
+        self.tab_ids_for_session(session_id)
+            .into_iter()
+            .filter(|id| self.providers.contains_key(id.as_ref_id()))
+            .collect()
+    }
+
+    /// How many of an agent's tabs are running. The confirmation copy's count.
+    pub fn live_tab_count(&self, session_id: &str) -> usize {
+        self.live_tab_ids(session_id).len()
+    }
+
+    /// Whether this agent has anything to detach. See [`Engine::live_tab_ids`].
+    pub fn is_detachable(&self, session_id: &str) -> bool {
+        !self.live_tab_ids(session_id).is_empty()
+    }
+
     /// Ask one agent to shut down from outside its own app, leaving it in the
     /// list as `Detached` so it can be resumed later. The engine half of the web
     /// row menu's "Detach agent" and the TUI palette's `detach-agent`, so both
@@ -996,14 +1038,7 @@ impl Engine {
         else {
             return DetachSessionOutcome::UnknownSession;
         };
-        // Live PTYs only. A tab whose launch is still in flight has no process to
-        // ask anything of, so it reads as not running rather than being reported
-        // as detached from something that never came up.
-        let live_tabs: Vec<TabId> = self
-            .tab_ids_for_session(session_id)
-            .into_iter()
-            .filter(|id| self.providers.contains_key(id.as_ref_id()))
-            .collect();
+        let live_tabs = self.live_tab_ids(session_id);
         if live_tabs.is_empty() {
             return DetachSessionOutcome::NotRunning { label };
         }
@@ -5197,6 +5232,36 @@ mod tests {
             ),
             "the forced sentence quotes the wait the confirmation promised, not \
              whatever config says now"
+        );
+    }
+
+    /// The exact confirmation sentence, for one tab and for three. Pinned
+    /// verbatim, and mirrored by a TypeScript test asserting the same two
+    /// strings, so a change to either surface's copy fails on the side that
+    /// changed instead of quietly leaving the two dialogs disagreeing.
+    #[test]
+    fn the_confirm_body_reads_the_same_on_both_surfaces() {
+        assert_eq!(
+            super::detach_confirm_body("feat/login", 30, 1),
+            "dux will ask \"feat/login\" to shut down and wait up to 30 seconds for it \
+             to exit before forcing it. The agent stays in the list as Detached, and \
+             you can resume it later. Anything the agent is doing right now is \
+             interrupted.",
+            "one running tab needs no sentence about the others"
+        );
+        assert_eq!(
+            super::detach_confirm_body("feat/login", 45, 3),
+            "dux will ask \"feat/login\" to shut down and wait up to 45 seconds for it \
+             to exit before forcing it. The agent stays in the list as Detached, and \
+             you can resume it later. Anything the agent is doing right now is \
+             interrupted. All 3 running tabs stop together.",
+            "the menu names one agent, so a scope of three conversations is said out loud"
+        );
+        // Nothing running is not a case the dialog can be opened in, but the
+        // builder must not invent a tail for it either.
+        assert!(
+            !super::detach_confirm_body("feat/login", 30, 0).contains("stop together"),
+            "no tail below two running tabs"
         );
     }
 

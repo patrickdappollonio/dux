@@ -969,6 +969,7 @@ mod tests {
                     session_id: "s1".to_string(),
                     label: "feat".to_string(),
                     grace_seconds: 30,
+                    live_tabs: 1,
                     focus: ConfirmFocus::Cancel,
                 },
             ),

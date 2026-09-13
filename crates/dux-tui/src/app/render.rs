@@ -7713,6 +7713,7 @@ impl App {
         let PromptState::ConfirmDetachAgent {
             label,
             grace_seconds,
+            live_tabs,
             focus,
             ..
         } = &self.prompt
@@ -7720,7 +7721,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let body = dux_core::engine::detach_confirm_body(label, *grace_seconds);
+        let body = dux_core::engine::detach_confirm_body(label, *grace_seconds, *live_tabs);
         let lines = vec![Line::from(""), Line::from(Span::raw(format!(" {body}")))];
         // Sized to the WRAPPED prose, like the other prose modals here: the body
         // does not scroll, and a fixed percentage clips the tail on an 80x24

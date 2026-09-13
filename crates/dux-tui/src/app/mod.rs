@@ -2281,6 +2281,10 @@ pub(crate) enum PromptState {
         session_id: String,
         label: String,
         grace_seconds: u64,
+        /// How many of the agent's tabs are running, so the shared body can say
+        /// that several conversations end at once. Captured with the label and
+        /// the grace, for the same reason.
+        live_tabs: usize,
         focus: ConfirmFocus, // Cancel (default) or Detach
     },
     ConfirmQuit {

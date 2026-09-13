@@ -1816,6 +1816,7 @@ impl App {
                 self.engine.config.shutdown_timeout_seconds,
             )
             .as_secs(),
+            live_tabs: self.engine.live_tab_count(&session.id),
             focus: ConfirmFocus::Cancel, // Cancel is the safe default
         };
         Ok(())
@@ -7830,6 +7831,7 @@ mod tests {
             session_id,
             label,
             grace_seconds,
+            live_tabs,
             focus,
         } = &app.prompt
         else {
@@ -7837,13 +7839,21 @@ mod tests {
         };
         assert_eq!(session_id, "s1");
         assert_eq!(*grace_seconds, 45);
+        assert_eq!(
+            *live_tabs, 1,
+            "the engine's own live-PTY count, carried into the copy"
+        );
         assert_eq!(*focus, ConfirmFocus::Cancel, "Cancel is the safe default");
         // The same sentence the browser's dialog renders.
-        let body = dux_core::engine::detach_confirm_body(label, *grace_seconds);
+        let body = dux_core::engine::detach_confirm_body(label, *grace_seconds, *live_tabs);
         assert!(body.contains("wait up to 45 seconds"), "body: {body}");
         assert!(
             body.contains("stays in the list as Detached"),
             "body: {body}"
+        );
+        assert!(
+            !body.contains("stop together"),
+            "one running tab needs no sentence about the others: {body}"
         );
         // Still a confirmation: nothing has been asked to stop yet.
         assert!(!app.engine.providers.is_empty());
