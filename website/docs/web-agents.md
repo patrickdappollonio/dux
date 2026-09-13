@@ -130,7 +130,7 @@ its own name), change its provider, view its info, inspect its project's environ
 it off), which is the same group the pane's own `⋯` carries, then the agent's actions below
 it.
 
-![An agent's menu open beside its sidebar row: an Input group with Attach a file and Use virtual input at the top, then rename, fork, change provider, editor and delete actions.](/screens/agent-session-menu.png)
+![An agent's menu open beside its sidebar row: an Input group with Attach a file and Use virtual input at the top, then force recreate, detach and auto-reopen, then rename, fork, change provider, editor and delete actions.](/screens/agent-session-menu.png)
 
 **Change provider** and **Force recreate** are the two knobs around resume:
 
