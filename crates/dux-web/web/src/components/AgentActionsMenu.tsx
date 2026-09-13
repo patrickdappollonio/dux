@@ -20,6 +20,7 @@ import {
   SquareTerminal,
   Trash2,
   Unlink,
+  Unplug,
   Variable,
 } from "lucide-react"
 
@@ -41,6 +42,7 @@ import {
   workspaceProjectId,
 } from "@/lib/agentWorkspace"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
+import { agentHasLiveProcess } from "@/lib/detachAgent"
 import { agentRoot } from "@/lib/editorRoot"
 import { clipboardWorktree } from "@/lib/flatClipboard"
 import {
@@ -58,6 +60,7 @@ import {
   openForkAgent,
   openRename,
   openStartupLogs,
+  openStopAgent,
   rerunStartupCommand,
   resumePullRequestAutodetection,
   sessionActiveElsewhere,
@@ -108,6 +111,9 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   // device's own view preferences stay usable. The reason is an inline label,
   // because a disabled item is pointer-events-none and touch has no hover.
   const activeElsewhere = sessionActiveElsewhere(duxState, session)
+  // Whether there is a process to ask to shut down at all, over every tab
+  // rather than the first alone.
+  const liveProcess = agentHasLiveProcess(session)
 
   return (
     <DropdownMenuGroup>
@@ -140,6 +146,19 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         <RotateCcw />
         Force recreate agent…
       </DropdownMenuItem>
+      {/* Absent, not disabled, with nothing running: a detach asks a process to
+        * go, so with none there is nothing to ask, and a disabled row would
+        * promise an action that is not waiting on the user. Neutral colour like
+        * every other destructive item here; the dialog is the danger signal. */}
+      {liveProcess ? (
+        <DropdownMenuItem
+          disabled={activeElsewhere}
+          onClick={() => openStopAgent(session.id)}
+        >
+          <Unplug />
+          Detach agent…
+        </DropdownMenuItem>
+      ) : null}
       <DropdownMenuItem
         disabled={activeElsewhere}
         onClick={() => toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)}

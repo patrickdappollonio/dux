@@ -3582,11 +3582,13 @@ export function closeCloseTab(): void {
   setState({ closeTabTarget: null })
 }
 
-// Open the stop-agent confirmation. The Task Manager's row for an agent's first
-// tab is a Stop control, not a close: what the user is asking for on a process
-// monitor is to end the process the row is showing numbers for, not to delete
-// the tab it runs in. `killSessionPty` behind it stops that tab's provider and leaves the agent
-// in the list.
+// Open the detach confirmation, from the agent's row menu or from the Task
+// Manager's row for an agent's first tab. That row is a Stop control, not a
+// close: what the user is asking for on a process monitor is to end the process
+// the row is showing numbers for, not to delete the tab it runs in.
+// `killSessionPty` behind it asks every one of the agent's provider processes to
+// shut down, waits the configured grace, then forces whatever is left; the agent
+// stays in the list as Detached.
 export function openStopAgent(sessionId: string): void {
   setState({ stopAgentTarget: sessionId })
 }
@@ -6180,10 +6182,12 @@ export function saveSettings(
     })
 }
 
-// Force-kill one agent's PTY. The agent detaches (it is NOT deleted) and can be
-// reconnected; the spine refetch flips its row to detached. A success toast is
-// the engine's routed status; here we only surface a failure. Companion
-// terminals are killed through the existing `deleteTerminal`.
+// Ask every one of an agent's provider processes to shut down. The agent
+// detaches (it is NOT deleted) and can be reconnected; the spine refetch flips
+// its row to detached. The engine answers with a keyed spinner and replaces it
+// with the outcome once the last process is actually gone, so here we only
+// surface a transport failure. Companion terminals are killed through the
+// existing `deleteTerminal`.
 export function killSessionPty(sessionId: string): void {
   sessionsApi
     .kill(sessionId)

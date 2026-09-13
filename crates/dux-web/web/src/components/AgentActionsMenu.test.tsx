@@ -22,6 +22,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     openAttachPullRequest: vi.fn(),
     detachPullRequest: vi.fn(),
     resumePullRequestAutodetection: vi.fn(),
+    openStopAgent: vi.fn(),
   }
 })
 
@@ -68,6 +69,7 @@ const detachPullRequest = vi.mocked(store.detachPullRequest)
 const resumePullRequestAutodetection = vi.mocked(
   store.resumePullRequestAutodetection,
 )
+const openStopAgent = vi.mocked(store.openStopAgent)
 
 function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
   return {
@@ -135,6 +137,7 @@ beforeEach(() => {
   openAttachPullRequest.mockClear()
   detachPullRequest.mockClear()
   resumePullRequestAutodetection.mockClear()
+  openStopAgent.mockClear()
 })
 
 afterEach(() => {
@@ -537,5 +540,79 @@ describe("AgentActionsMenu pull-request entries", () => {
     await openMenu(session)
     expect(screen.queryByText(/pull request…/)).toBeNull()
     expect(screen.getByText("Detach pull request")).toBeTruthy()
+  })
+})
+
+// Detaching asks the agent's processes to shut down and leaves the agent in the
+// list. What is pinned here is the GATING (a live process, over every tab, not
+// the first alone), the shape (leading icon, trailing ellipsis, neutral colour)
+// and that it only ever opens the confirmation.
+describe("AgentActionsMenu detach entry", () => {
+  function liveTab(id: string) {
+    return {
+      id,
+      provider: "claude",
+      order: 0,
+      has_live_process: true,
+    } as unknown as SessionView["tabs"][number]
+  }
+
+  function dormantTab(id: string) {
+    return {
+      id,
+      provider: "claude",
+      order: 0,
+      has_live_process: false,
+    } as unknown as SessionView["tabs"][number]
+  }
+
+  it("is absent, not disabled, when nothing is running", async () => {
+    const session = makeSession({ id: "s1", tabs: [dormantTab("s1")] })
+    seed(session, true)
+    await openMenu(session)
+    expect(screen.queryByText("Detach agent…")).toBeNull()
+  })
+
+  it("appears when any tab is running, not only the first", async () => {
+    const session = makeSession({
+      id: "s1",
+      tabs: [dormantTab("s1"), liveTab("b2")],
+    })
+    seed(session, true)
+    await openMenu(session)
+    expect(screen.getByText("Detach agent…")).toBeTruthy()
+  })
+
+  it("carries an icon, a trailing ellipsis, and no destructive colour", async () => {
+    const session = makeSession({ id: "s1", tabs: [liveTab("s1")] })
+    seed(session, true)
+    await openMenu(session)
+    const item = screen.getByText("Detach agent…").closest('[role="menuitem"]')
+    expect(item).toBeTruthy()
+    expect(item!.querySelector("svg")).toBeTruthy()
+    expect(item!.textContent?.endsWith("…")).toBe(true)
+    // The ellipsis and the dialog are the danger signal; only Delete is red.
+    expect(item!.getAttribute("data-variant")).not.toBe("destructive")
+  })
+
+  it("opens the confirmation and never acts on the click itself", async () => {
+    const session = makeSession({ id: "s1", tabs: [liveTab("s1")] })
+    seed(session, true)
+    await openMenu(session)
+    fireEvent.click(screen.getByText("Detach agent…"))
+    expect(openStopAgent).toHaveBeenCalledWith("s1")
+  })
+
+  it("is disabled while the agent is driven from another device", async () => {
+    const session = makeSession({
+      id: "s1",
+      tabs: [
+        { ...liveTab("s1"), input_owner: "42" } as unknown as SessionView["tabs"][number],
+      ],
+    })
+    seed(session, true)
+    await openMenu(session)
+    const item = screen.getByText("Detach agent…").closest('[role="menuitem"]')
+    expect(item!.getAttribute("aria-disabled")).toBe("true")
   })
 })

@@ -116,6 +116,11 @@ export interface Bootstrap {
    * off in `lib/notify.ts`, not info/success alone. 0 never auto-clears a final
    * state; absent is 6. */
   status_clear_seconds: number
+  /** Mirrors the top-level `shutdown_timeout_seconds`, already clamped by the
+   * server: how many seconds dux waits for a child it has asked to shut down
+   * before forcing it. The detach confirmation quotes it. Older servers omit it,
+   * so consumers fall back to `DEFAULT_SHUTDOWN_TIMEOUT_SECONDS`. */
+  shutdown_timeout_seconds?: number
   /** The operator-chosen display name for this instance (`config.server.title`),
    * shown as the tab title and wordmark. A missing or blank value resolves to "dux"
    * via `resolveInstanceTitle`. */
@@ -220,6 +225,12 @@ export interface PendingFirstLoad {
  * literal that must stay equal to `dux_core::config::DEFAULT_AGENT_TABS_MAX` in
  * `crates/dux-core/src/config.rs`; bump one and bump the other. */
 export const DEFAULT_AGENT_TABS_MAX = 20
+
+/** Fallback shutdown grace when the server omits `shutdown_timeout_seconds`. A
+ * duplicated literal that must stay equal to
+ * `dux_core::config::DEFAULT_SHUTDOWN_TIMEOUT_SECONDS` in
+ * `crates/dux-core/src/config.rs`; bump one and bump the other. */
+export const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 30
 
 // A failed bootstrap fetch; `status` is 0 for a transport failure with no response.
 // The boot path swallows it and keeps the last-known bootstrap, retrying on a later

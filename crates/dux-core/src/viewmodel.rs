@@ -203,6 +203,15 @@ pub struct BootstrapView {
     /// retires it on its own fixed leak guard, comfortably longer than
     /// `statusline::BUSY_TIMEOUT`.)
     pub status_clear_seconds: u16,
+    /// Mirrors the top-level `shutdown_timeout_seconds`, already clamped to
+    /// [`MAX_SHUTDOWN_TIMEOUT_SECONDS`](crate::config::MAX_SHUTDOWN_TIMEOUT_SECONDS):
+    /// how long dux waits for a child it has asked to shut down before forcing
+    /// it. Deliberately the top-level value and not `server.shutdown_timeout_seconds`,
+    /// because this is the grace a per-agent detach actually gets. The detach
+    /// confirmation quotes it, so it is projected rather than hardcoded in the
+    /// browser, and clamped so the dialog cannot promise a wait that will not
+    /// happen.
+    pub shutdown_timeout_seconds: u64,
     /// Mirrors `config.server.title`: the operator-chosen display name for this
     /// dux instance. The web shows it as the browser tab title and the brand
     /// wordmark above the version in the projects pane, and resolves an
@@ -1404,6 +1413,12 @@ impl Engine {
             show_changes_pane: self.config.ui.show_changes_pane,
             global_env: self.config.env.clone(),
             status_clear_seconds: self.config.ui.status_clear_seconds,
+            // Through the same clamp every shutdown path uses, so the browser
+            // quotes the wait it will actually get.
+            shutdown_timeout_seconds: crate::config::shutdown_grace(
+                self.config.shutdown_timeout_seconds,
+            )
+            .as_secs(),
             title: self.config.server.title.clone(),
             favicon: self.config.server.favicon.clone(),
             agent_tabs_max: self.agent_tabs_max(),
@@ -1622,6 +1637,23 @@ mod tests {
                 .as_str()
                 .expect("a quiet reason")
                 .contains("still looking")
+        );
+    }
+
+    /// The detach confirmation quotes how long dux will wait, so the number has
+    /// to reach the browser. Clamped on the way out, because that is the value
+    /// the wait will actually use.
+    #[test]
+    fn the_shutdown_grace_is_projected_on_bootstrap() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.shutdown_timeout_seconds = 45;
+        assert_eq!(engine.bootstrap().shutdown_timeout_seconds, 45);
+
+        engine.config.shutdown_timeout_seconds = u16::MAX;
+        assert_eq!(
+            engine.bootstrap().shutdown_timeout_seconds,
+            u64::from(crate::config::MAX_SHUTDOWN_TIMEOUT_SECONDS),
+            "a dialog must not promise a wait the engine would clamp away"
         );
     }
 

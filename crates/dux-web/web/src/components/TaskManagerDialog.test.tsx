@@ -261,17 +261,9 @@ describe("TaskManagerDialog", () => {
     expect(killSessionPty).not.toHaveBeenCalled()
   })
 
-  it("stop_agent_confirmation_stops_the_agent_and_never_deletes_a_tab", async () => {
-    seed({
-      spine: { sessions: [session({ id: "s1", title: "fix-auth" })] },
-      stopAgentTarget: "s1",
-    } as Partial<DuxState>)
-    render(<TaskManagerDialog />)
-
-    fireEvent.click(await screen.findByText("Stop agent"))
-    expect(killSessionPty).toHaveBeenCalledWith("s1")
-    expect(closeStopAgent).toHaveBeenCalled()
-  })
+  // The confirmation itself lives at the app root (ConfirmDetachAgentDialog),
+  // because the agent row menu opens it with this dialog closed. What it does on
+  // confirm is covered there; what this dialog owes is the routing above.
 
   // An EXTRA tab's row keeps the close routing: that tab really is deleted.
   it("stop_on_an_extra_tab_row_still_opens_the_close_tab_confirmation", async () => {
