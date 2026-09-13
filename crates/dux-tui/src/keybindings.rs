@@ -1154,6 +1154,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
     },
+    BindingDef {
+        action: Action::DetachAgent,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
     // Web-surface action, deliberately inert in the TUI (no key, no scope, no
     // help, no palette row): the web's app menu opens the Monaco config.toml
     // editor for it. The `BindingDef` stays because `config.rs` validates every
@@ -3013,6 +3020,28 @@ mod tests {
         assert!(names.contains(&"kill-running"));
     }
 
+    /// The per-agent shutdown request is reachable by typing what it is called,
+    /// and it says what the wait is about rather than just "detach", which does
+    /// not read as "close" everywhere.
+    #[test]
+    fn filtered_palette_includes_detach_agent_command() {
+        let bindings = default_bindings();
+        let results = bindings.filtered_palette("detach-agent");
+        let entry = results
+            .iter()
+            .find(|binding| binding.palette_name == Some("detach-agent"))
+            .expect("detach-agent is listed");
+        let description = entry.palette_description.expect("a description");
+        assert!(description.contains("shut down"), "{description}");
+        assert!(description.contains("shutdown timeout"), "{description}");
+        assert!(description.contains("Detached"), "{description}");
+        // Palette-only: no default key, so it takes none from anybody.
+        assert!(
+            entry.keys.is_empty(),
+            "detach-agent must not claim a default key"
+        );
+    }
+
     #[test]
     fn filtered_palette_includes_resource_monitor_command() {
         let bindings = default_bindings();
@@ -3161,6 +3190,7 @@ mod tests {
             "delete-agent",
             "delete-project",
             "delete-terminal",
+            "detach-agent",
             "detach-pull-request",
             "edit-macros",
             "filter-agents",

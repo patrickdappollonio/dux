@@ -393,6 +393,18 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // everything.
     },
     PaletteCommand {
+        action: Action::DetachAgent,
+        name: "detach-agent",
+        description: "Ask the selected agent to shut down and wait the configured \
+                      shutdown timeout before forcing it; it stays listed as Detached \
+                      and can be resumed",
+        // Per-session, so the web counterpart is a ROW action rather than an
+        // app-menu entry: "Detach agent…" in the agent's ⋯ menu
+        // (`AgentActionsMenu.tsx`), behind the same confirmation the Task
+        // Manager's Stop on an agent row opens. Both surfaces reach the same
+        // engine entry point and quote the same configured wait.
+    },
+    PaletteCommand {
         action: Action::NewTerminal,
         name: "new-terminal-for-agent",
         description: "Spawn a new companion terminal in the selected agent's directory",

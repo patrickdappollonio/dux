@@ -2270,6 +2270,19 @@ pub(crate) enum PromptState {
         promoted_label: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Close
     },
+    /// Ask the selected agent to shut down and leave it Detached. Destructive
+    /// (whatever the agent is doing is interrupted), so it defaults to Cancel.
+    ///
+    /// The label and the grace are captured when the dialog opens rather than
+    /// re-read while it renders: the sentence promises a specific wait for a
+    /// specific agent, and a reload behind an open dialog must not silently
+    /// change what the user is agreeing to.
+    ConfirmDetachAgent {
+        session_id: String,
+        label: String,
+        grace_seconds: u64,
+        focus: ConfirmFocus, // Cancel (default) or Detach
+    },
     ConfirmQuit {
         agent_count: usize,
         terminal_count: usize,
@@ -3113,6 +3126,10 @@ pub(crate) enum OverlayMouseLayout {
         delete_button: Rect,
     },
     ConfirmCloseTab {
+        cancel_button: Rect,
+        confirm_button: Rect,
+    },
+    ConfirmDetachAgent {
         cancel_button: Rect,
         confirm_button: Rect,
     },
@@ -4867,6 +4884,7 @@ impl App {
             "rename-agent" => self.open_rename_session(),
             "agent-info" => self.open_agent_info(),
             "kill-running" => self.open_kill_running(),
+            "detach-agent" => self.confirm_detach_selected_session(),
             "reconnect-agent" => self.reconnect_selected_session(false),
             "force-reconnect-agent" => self.force_reconnect_agent(),
             "refresh-changes" => self.refresh_changed_files_now(),

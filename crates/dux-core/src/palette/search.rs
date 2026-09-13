@@ -413,6 +413,7 @@ mod tests {
                 "show-agent",
                 "reconnect-agent",
                 "delete-agent",
+                "detach-agent",
                 "new-terminal-for-agent",
                 "new-standalone-agent",
                 "rename-agent",

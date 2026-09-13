@@ -232,6 +232,8 @@ enum PromptMouseTarget {
     ConfirmDeleteTerminalConfirm,
     ConfirmCloseTabCancel,
     ConfirmCloseTabConfirm,
+    ConfirmDetachAgentCancel,
+    ConfirmDetachAgentConfirm,
     ConfirmDeleteMacroCancel,
     ConfirmDeleteMacroConfirm,
     ConfirmQuitCancel,
@@ -314,6 +316,12 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::ConfirmCloseTabConfirm => {
                 Some(ButtonPressedTarget::ConfirmCloseTabConfirm)
+            }
+            PromptMouseTarget::ConfirmDetachAgentCancel => {
+                Some(ButtonPressedTarget::ConfirmDetachAgentCancel)
+            }
+            PromptMouseTarget::ConfirmDetachAgentConfirm => {
+                Some(ButtonPressedTarget::ConfirmDetachAgentConfirm)
             }
             PromptMouseTarget::ConfirmDeleteMacroCancel => {
                 Some(ButtonPressedTarget::ConfirmDeleteMacroCancel)
@@ -1849,6 +1857,7 @@ impl App {
             | PromptState::ConfirmDeleteAgent { .. }
             | PromptState::ConfirmDeleteTerminal { .. }
             | PromptState::ConfirmCloseTab { .. }
+            | PromptState::ConfirmDetachAgent { .. }
             | PromptState::ConfirmQuit { .. }
             | PromptState::ConfirmDiscardFile { .. }
             | PromptState::ConfirmInitRepo { .. }
@@ -4738,6 +4747,23 @@ impl App {
         Some(false)
     }
 
+    fn handle_confirm_detach_agent_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmDetachAgent { focus, .. } = &mut self.prompt else {
+            return None;
+        };
+        let confirm = focus.is_confirm();
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, false) {
+            ModalKeyStep::Close => self.prompt = PromptState::None,
+            ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
+                return Some(self.resolve_confirm_detach_agent(confirm));
+            }
+            ModalKeyStep::FallThroughToField => {}
+        }
+        Some(false)
+    }
+
     fn handle_confirm_quit_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
         let PromptState::ConfirmQuit { focus, .. } = &mut self.prompt else {
             return None;
@@ -4933,6 +4959,9 @@ impl App {
             return Some(exit);
         }
         if let Some(exit) = self.handle_confirm_close_tab_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_detach_agent_prompt_key(key) {
             return Some(exit);
         }
         if let Some(exit) = self.handle_confirm_quit_prompt_key(key) {
@@ -6421,6 +6450,17 @@ impl App {
                 column,
                 row,
             ),
+            OverlayMouseLayout::ConfirmDetachAgent {
+                cancel_button,
+                confirm_button,
+            } => click_target(
+                &[
+                    (cancel_button, PromptMouseTarget::ConfirmDetachAgentCancel),
+                    (confirm_button, PromptMouseTarget::ConfirmDetachAgentConfirm),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmDeleteMacro {
                 cancel_button,
                 delete_button,
@@ -7499,6 +7539,42 @@ impl App {
         self.prompt = PromptState::None;
         if confirm {
             self.do_delete_terminal(&terminal_id);
+        }
+        false
+    }
+
+    /// Answer the detach confirmation. On confirm the shared engine teardown
+    /// asks every live tab to shut down and the row goes Detached at once; the
+    /// spinner raised here is retired by the reaper's own outcome, once the last
+    /// child is actually gone or the grace has run out.
+    pub(super) fn resolve_confirm_detach_agent(&mut self, confirm: bool) -> bool {
+        let session_id = match &self.prompt {
+            PromptState::ConfirmDetachAgent { session_id, .. } => session_id.clone(),
+            _ => return false,
+        };
+        self.prompt = PromptState::None;
+        if !confirm {
+            return false;
+        }
+        match self.engine.begin_detach_session(&session_id) {
+            // The row went between opening the dialog and answering it.
+            dux_core::engine::DetachSessionOutcome::UnknownSession => {
+                self.set_warning("That agent is gone, so there was nothing to detach.");
+            }
+            // It stopped on its own while the dialog was up. Loud: the row looks
+            // the same either way.
+            dux_core::engine::DetachSessionOutcome::NotRunning { label } => {
+                self.set_warning(dux_core::engine::detach_not_running_message(&label));
+            }
+            dux_core::engine::DetachSessionOutcome::Started { key, busy, .. } => {
+                self.status.set(
+                    std::time::Instant::now(),
+                    Some(key),
+                    dux_core::statusline::StatusTone::Busy,
+                    busy,
+                );
+                self.rebuild_left_items();
+            }
         }
         false
     }
@@ -8696,6 +8772,8 @@ impl App {
             | PromptMouseTarget::ConfirmDeleteTerminalConfirm
             | PromptMouseTarget::ConfirmCloseTabCancel
             | PromptMouseTarget::ConfirmCloseTabConfirm
+            | PromptMouseTarget::ConfirmDetachAgentCancel
+            | PromptMouseTarget::ConfirmDetachAgentConfirm
             | PromptMouseTarget::ConfirmDeleteMacroCancel
             | PromptMouseTarget::ConfirmDeleteMacroConfirm
             | PromptMouseTarget::MacroCancel
@@ -8802,6 +8880,12 @@ impl App {
             }
             ButtonPressedTarget::ConfirmCloseTabCancel => self.resolve_confirm_close_tab(false),
             ButtonPressedTarget::ConfirmCloseTabConfirm => self.resolve_confirm_close_tab(true),
+            ButtonPressedTarget::ConfirmDetachAgentCancel => {
+                self.resolve_confirm_detach_agent(false)
+            }
+            ButtonPressedTarget::ConfirmDetachAgentConfirm => {
+                self.resolve_confirm_detach_agent(true)
+            }
             ButtonPressedTarget::ConfirmDeleteMacroCancel => {
                 self.resolve_confirm_delete_macro(false)
             }

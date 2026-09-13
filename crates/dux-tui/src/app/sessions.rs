@@ -1792,6 +1792,35 @@ impl App {
         Ok(())
     }
 
+    /// The palette's `detach-agent`: raise the confirmation for the selected
+    /// agent, or say plainly why there is nothing to confirm.
+    ///
+    /// Both refusals are loud. With nothing selected the palette closed onto an
+    /// unchanged screen, and with a dormant agent the row already looks exactly
+    /// as it would after a successful detach, so silence in either case is
+    /// indistinguishable from a failure.
+    pub(crate) fn confirm_detach_selected_session(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent first, then run detach-agent on it.");
+            return Ok(());
+        };
+        let label = session.display_label();
+        if !self.engine.any_tab_active(&session.id) {
+            self.set_warning(dux_core::engine::detach_not_running_message(&label));
+            return Ok(());
+        }
+        self.prompt = PromptState::ConfirmDetachAgent {
+            session_id: session.id.clone(),
+            label,
+            grace_seconds: dux_core::config::shutdown_grace(
+                self.engine.config.shutdown_timeout_seconds,
+            )
+            .as_secs(),
+            focus: ConfirmFocus::Cancel, // Cancel is the safe default
+        };
+        Ok(())
+    }
+
     pub(crate) fn confirm_delete_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select a session first.");
@@ -7747,6 +7776,124 @@ mod tests {
         assert!(
             app.tui_launched_ptys.is_empty(),
             "the extra-tab launch path must not start the agent's own tab"
+        );
+    }
+
+    // ── detach-agent (the palette's per-agent shutdown request) ──────
+
+    /// With nothing selected the palette closed onto an unchanged screen, so
+    /// the refusal has to say why in words.
+    #[test]
+    fn detach_agent_refuses_with_no_agent_selected() {
+        let mut app = test_app_with_sessions(vec![], vec![make_project("p1", "claude")]);
+        app.confirm_detach_selected_session().expect("dispatch");
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            app.status.text().contains("Select an agent first"),
+            "status: {}",
+            app.status.text()
+        );
+    }
+
+    /// A dormant agent's row already looks exactly as it would after a
+    /// successful detach, so silence here is indistinguishable from a failure.
+    #[test]
+    fn detach_agent_refuses_a_dormant_agent_out_loud() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
+        app.selected_left = 1;
+        app.confirm_detach_selected_session().expect("dispatch");
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "nothing to confirm, so no dialog"
+        );
+        assert!(
+            app.status
+                .text()
+                .contains("is not running, so there is nothing to detach"),
+            "status: {}",
+            app.status.text()
+        );
+    }
+
+    /// The confirmation quotes the CONFIGURED wait, never a fixed number.
+    #[test]
+    fn detach_agent_confirms_first_and_quotes_the_configured_wait() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
+        app.selected_left = 1;
+        app.engine.config.shutdown_timeout_seconds = 45;
+        mark_active(&mut app, "s1");
+
+        app.confirm_detach_selected_session().expect("dispatch");
+        let PromptState::ConfirmDetachAgent {
+            session_id,
+            label,
+            grace_seconds,
+            focus,
+        } = &app.prompt
+        else {
+            panic!("a live agent raises the confirmation");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(*grace_seconds, 45);
+        assert_eq!(*focus, ConfirmFocus::Cancel, "Cancel is the safe default");
+        // The same sentence the browser's dialog renders.
+        let body = dux_core::engine::detach_confirm_body(label, *grace_seconds);
+        assert!(body.contains("wait up to 45 seconds"), "body: {body}");
+        assert!(
+            body.contains("stays in the list as Detached"),
+            "body: {body}"
+        );
+        // Still a confirmation: nothing has been asked to stop yet.
+        assert!(!app.engine.providers.is_empty());
+    }
+
+    /// Cancelling abandons, exactly as Escape does, and touches nothing.
+    #[test]
+    fn detach_agent_cancel_leaves_the_agent_running() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
+        app.selected_left = 1;
+        mark_active(&mut app, "s1");
+        app.confirm_detach_selected_session().expect("dispatch");
+
+        app.resolve_confirm_detach_agent(false);
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(!app.engine.providers.is_empty(), "nothing was stopped");
+        assert!(app.engine.pending_detachments.is_empty());
+    }
+
+    /// Confirming reaches the shared engine teardown: the provider leaves for
+    /// the terminating set (SIGTERM, not a drop), the row goes Detached at once,
+    /// and a keyed spinner explains the wait until the reaper replaces it.
+    #[test]
+    fn detach_agent_confirm_asks_the_engine_and_raises_the_keyed_busy() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let mut app = test_app_with_sessions(vec![session], vec![make_project("p1", "claude")]);
+        app.selected_left = 1;
+        mark_active(&mut app, "s1");
+        app.confirm_detach_selected_session().expect("dispatch");
+
+        app.resolve_confirm_detach_agent(true);
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            app.engine.providers.is_empty(),
+            "the provider left for the terminating set"
+        );
+        assert_eq!(app.engine.terminating_ptys.len(), 1);
+        assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
+        assert!(!app.engine.sessions[0].desired_running);
+        assert_eq!(
+            app.engine.pending_detachments.len(),
+            1,
+            "one outcome is owed, and the reaper owes it"
+        );
+        assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Busy);
+        assert!(
+            app.status.text().contains("to shut down"),
+            "status: {}",
+            app.status.text()
         );
     }
 }

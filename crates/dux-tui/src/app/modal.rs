@@ -164,6 +164,7 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         PromptState::ConfirmDeleteAgent { .. }
         | PromptState::ConfirmDeleteTerminal { .. }
         | PromptState::ConfirmCloseTab { .. }
+        | PromptState::ConfirmDetachAgent { .. }
         | PromptState::ConfirmQuit { .. }
         | PromptState::ConfirmDiscardFile { .. }
         | PromptState::ConfirmKillRunning(_)
@@ -261,6 +262,7 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::ConfirmDeleteAgent { .. }
         | PromptState::ConfirmDeleteTerminal { .. }
         | PromptState::ConfirmCloseTab { .. }
+        | PromptState::ConfirmDetachAgent { .. }
         | PromptState::ConfirmQuit { .. }
         | PromptState::ConfirmDiscardFile { .. }
         | PromptState::ConfirmInitRepo { .. }
@@ -357,6 +359,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::ConfirmDeleteWorktree { .. }
         | OverlayMouseLayout::ConfirmDeleteTerminal { .. }
         | OverlayMouseLayout::ConfirmCloseTab { .. }
+        | OverlayMouseLayout::ConfirmDetachAgent { .. }
         | OverlayMouseLayout::ConfirmDeleteMacro { .. }
         | OverlayMouseLayout::ConfirmQuit { .. }
         | OverlayMouseLayout::ConfirmDiscardFile { .. }
@@ -957,6 +960,15 @@ mod tests {
                     tab_id: "t1".to_string(),
                     provider_label: "Claude".to_string(),
                     promoted_label: None,
+                    focus: ConfirmFocus::Cancel,
+                },
+            ),
+            (
+                "ConfirmDetachAgent",
+                PromptState::ConfirmDetachAgent {
+                    session_id: "s1".to_string(),
+                    label: "feat".to_string(),
+                    grace_seconds: 30,
                     focus: ConfirmFocus::Cancel,
                 },
             ),

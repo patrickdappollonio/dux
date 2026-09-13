@@ -7703,6 +7703,95 @@ impl App {
         };
     }
 
+    /// The detach confirmation. Prose plus a Cancel/Detach pair, the Confirm
+    /// family, Cancel focused.
+    ///
+    /// The body is `dux_core::engine::detach_confirm_body`, the same sentence
+    /// the browser's dialog renders, so the two surfaces cannot promise
+    /// different things about the same act.
+    fn render_confirm_detach_agent_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::ConfirmDetachAgent {
+            label,
+            grace_seconds,
+            focus,
+            ..
+        } = &self.prompt
+        else {
+            return;
+        };
+        self.render_dim_overlay(frame);
+        let body = dux_core::engine::detach_confirm_body(label, *grace_seconds);
+        let lines = vec![Line::from(""), Line::from(Span::raw(format!(" {body}")))];
+        // Sized to the WRAPPED prose, like the other prose modals here: the body
+        // does not scroll, and a fixed percentage clips the tail on an 80x24
+        // terminal, which is exactly where the "you can resume it later" half
+        // has to be readable.
+        let dialog_width = 60u16.min(frame.area().width.max(1));
+        let inner_width = dialog_width.saturating_sub(2);
+        let body_height = wrapped_line_count(&lines, inner_width, false);
+        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
+        self.clear_overlay_area(frame, area);
+        let outer = self.themed_overlay_block("Detach Agent");
+        let inner = outer.inner(area);
+        outer.render(area, frame.buffer_mut());
+
+        let [body_area, _, buttons_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(body_height),
+                Constraint::Length(1),
+                Constraint::Length(3),
+            ])
+            .areas(inner);
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(body_area, frame.buffer_mut());
+
+        let btn_width = 16u16;
+        let gap = 2u16;
+        let total = btn_width * 2 + gap;
+        let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+        let cancel_area = Rect {
+            x: buttons_area.x + left_offset,
+            y: buttons_area.y,
+            width: btn_width,
+            height: 3,
+        };
+        let confirm_area = Rect {
+            x: cancel_area.x + btn_width + gap,
+            y: buttons_area.y,
+            width: btn_width,
+            height: 3,
+        };
+
+        Button::new("Cancel")
+            .kind(ButtonKind::Confirm)
+            .state(button_state_for(
+                ButtonPressedTarget::ConfirmDetachAgentCancel,
+                self.pressed_button,
+                !focus.is_confirm(),
+                true,
+            ))
+            .render(frame, cancel_area, &self.theme);
+
+        Button::new("Detach")
+            .kind(ButtonKind::Danger)
+            .state(button_state_for(
+                ButtonPressedTarget::ConfirmDetachAgentConfirm,
+                self.pressed_button,
+                focus.is_confirm(),
+                true,
+            ))
+            .render(frame, confirm_area, &self.theme);
+
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmDetachAgent {
+            cancel_button: cancel_area,
+            confirm_button: confirm_area,
+        };
+    }
+
     fn render_confirm_quit_prompt(&mut self, frame: &mut Frame) {
         let PromptState::ConfirmQuit {
             agent_count,
@@ -10282,6 +10371,9 @@ impl App {
                 self.render_confirm_delete_terminal_prompt(frame)
             }
             PromptState::ConfirmCloseTab { .. } => self.render_confirm_close_tab_prompt(frame),
+            PromptState::ConfirmDetachAgent { .. } => {
+                self.render_confirm_detach_agent_prompt(frame)
+            }
             PromptState::ConfirmQuit { .. } => self.render_confirm_quit_prompt(frame),
             PromptState::ConfirmDiscardFile { .. } => {
                 self.render_confirm_discard_file_prompt(frame)
