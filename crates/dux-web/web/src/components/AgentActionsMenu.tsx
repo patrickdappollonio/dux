@@ -42,7 +42,7 @@ import {
   workspaceProjectId,
 } from "@/lib/agentWorkspace"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
-import { agentHasLiveProcess } from "@/lib/detachAgent"
+import { agentIsDetachable } from "@/lib/detachAgent"
 import { agentRoot } from "@/lib/editorRoot"
 import { clipboardWorktree } from "@/lib/flatClipboard"
 import {
@@ -111,9 +111,10 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   // device's own view preferences stay usable. The reason is an inline label,
   // because a disabled item is pointer-events-none and touch has no hover.
   const activeElsewhere = sessionActiveElsewhere(duxState, session)
-  // Whether there is a process to ask to shut down at all, over every tab
-  // rather than the first alone.
-  const liveProcess = agentHasLiveProcess(session)
+  // Whether there is a process to ask to shut down at all. The SERVER's answer,
+  // from the same oracle the engine's teardown and the terminal UI's palette
+  // gate ask, rather than a scan of the tab rows here.
+  const liveProcess = agentIsDetachable(session)
 
   return (
     <DropdownMenuGroup>

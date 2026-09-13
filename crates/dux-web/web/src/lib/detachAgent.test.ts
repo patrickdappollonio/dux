@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
-  agentHasLiveProcess,
+  agentIsDetachable,
   detachConfirmBody,
   shutdownGraceSeconds,
 } from "./detachAgent"
@@ -56,19 +56,31 @@ describe("detachConfirmBody", () => {
   })
 })
 
-describe("agentHasLiveProcess", () => {
-  it("is true when any tab is running, not only the first", () => {
+describe("agentIsDetachable", () => {
+  // The server's answer wins, because it is the same oracle the engine's own
+  // teardown asks. A menu that offered a detach the server would refuse, or hid
+  // one it would accept, is the drift this field exists to remove.
+  it("takes the server's answer when it is there", () => {
     expect(
-      agentHasLiveProcess({
+      agentIsDetachable({ detachable: true, tabs: [] }),
+    ).toBe(true)
+    expect(
+      agentIsDetachable({
+        detachable: false,
+        tabs: [{ has_live_process: true }],
+      }),
+    ).toBe(false)
+  })
+
+  it("falls back to the tab scan against an older server", () => {
+    expect(
+      agentIsDetachable({
         tabs: [{ has_live_process: false }, { has_live_process: true }],
       }),
     ).toBe(true)
-  })
-
-  it("is false for a dormant agent and for one with no tabs at all", () => {
-    expect(agentHasLiveProcess({ tabs: [{ has_live_process: false }] })).toBe(
+    expect(agentIsDetachable({ tabs: [{ has_live_process: false }] })).toBe(
       false,
     )
-    expect(agentHasLiveProcess({ tabs: [] })).toBe(false)
+    expect(agentIsDetachable({ tabs: [] })).toBe(false)
   })
 })

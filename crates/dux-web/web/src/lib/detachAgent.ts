@@ -48,9 +48,17 @@ export function detachConfirmBody(
 /** Whether the agent has anything to detach: a detach asks a PROCESS to go, so
  * with none running there is nothing to ask. The menu item is absent rather
  * than disabled in that case, because a disabled row promises an action that is
- * not waiting on the user. */
-export function agentHasLiveProcess(session: {
+ * not waiting on the user.
+ *
+ * The answer is the SERVER's (`SessionView::detachable`, from the engine's own
+ * `live_tab_ids`), read here rather than re-derived from the tab rows: the
+ * engine's teardown and the terminal UI's palette gate ask that same oracle, and
+ * a third implementation here is a third chance to disagree about one agent. An
+ * older server that does not send the field falls back to the tab scan, which is
+ * what the field is computed from anyway. */
+export function agentIsDetachable(session: {
+  detachable?: boolean
   tabs: { has_live_process: boolean }[]
 }): boolean {
-  return session.tabs.some((tab) => tab.has_live_process)
+  return session.detachable ?? session.tabs.some((tab) => tab.has_live_process)
 }

@@ -167,6 +167,12 @@ export interface SessionView {
    * comparing a tab id against the session id. Missing is filled with the session
    * id, the placeholder for "the first tab, whichever it is". */
   slot_tab_id: string
+  /** Whether the agent has a live provider process to ask to shut down: the
+   * server's answer, from the same oracle its own teardown and the terminal UI's
+   * palette gate ask. Read it through `agentIsDetachable` in
+   * `lib/detachAgent.ts`, never by scanning `tabs` again. An older server omits
+   * it and that helper falls back to the tab scan. */
+  detachable?: boolean
   /** The agent's provider tabs in creation order; a session always has at least
    * one, and the strip renders only when there are two or more. Missing coerces
    * to `[]` at ingestion. */

@@ -575,6 +575,17 @@ pub struct SessionView {
     /// from the session id (see `AgentSession::slot_tab_id`); every slot-ness
     /// decision in the web client reads this field.
     pub slot_tab_id: String,
+    /// Whether this agent has a live provider process to ask to shut down, which
+    /// is what the browser's "Detach agent…" entry is gated on.
+    ///
+    /// Projected rather than derived in the browser from the tab rows: the
+    /// engine's own [`Engine::live_tab_ids`] is the one oracle the teardown and
+    /// the terminal UI's palette gate also ask, and three surfaces re-deriving
+    /// it is three chances to answer differently for the same agent. In
+    /// particular it is NOT `status == "active"` and not in-flight aware: a tab
+    /// whose launch has not produced a PTY yet has no process to ask anything
+    /// of.
+    pub detachable: bool,
     /// Provider tabs for this session: the session-slot tab (`tabs[0]`, the one
     /// named by `slot_tab_id`) first, then extra tabs in creation order. Always
     /// non-empty. The client shows the tab strip only when `tabs.len() >= 2`.
@@ -1024,6 +1035,7 @@ impl SessionView {
         working: bool,
         typing: bool,
         needs_attention: bool,
+        detachable: bool,
         repo_status: crate::git::FolderRepoStatus,
     ) -> Self {
         Self {
@@ -1036,6 +1048,7 @@ impl SessionView {
             pr: pr.map(|pr| PrView::from_pr(pr, pr_overridden)),
             pr_autodetect_suppressed,
             slot_tab_id: s.slot_tab_id().to_string(),
+            detachable,
             tabs,
             has_output,
             working,
@@ -1265,6 +1278,7 @@ impl Engine {
             working,
             typing,
             needs_attention,
+            self.is_detachable(&s.id),
             self.folder_repo_status(&s.id),
         )
     }

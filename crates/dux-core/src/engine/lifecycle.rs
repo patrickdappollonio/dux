@@ -5235,6 +5235,49 @@ mod tests {
         );
     }
 
+    /// One oracle, and it is the LIVE-PTY one. A tab whose launch is in flight
+    /// makes `any_tab_active` true, but there is no process to ask to shut down,
+    /// so the detach must refuse it rather than report success over something
+    /// that never came up. The surfaces gate on this answer, so they refuse the
+    /// same agents the engine refuses.
+    #[test]
+    fn a_launch_still_in_flight_is_not_something_to_detach() {
+        let (mut engine, _tmp, _wt) = detach_test_engine();
+        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch(TabId::new(
+            "s1-slot",
+        )));
+
+        assert!(
+            engine.any_tab_active("s1"),
+            "an in-flight launch does count as active",
+        );
+        assert!(
+            !engine.is_detachable("s1"),
+            "but there is no process to ask anything of"
+        );
+        assert_eq!(engine.live_tab_count("s1"), 0);
+        assert!(matches!(
+            engine.begin_detach_session("s1"),
+            super::DetachSessionOutcome::NotRunning { .. }
+        ));
+    }
+
+    /// The projected answer is the engine's own, so the browser's menu gate and
+    /// the engine cannot disagree.
+    #[test]
+    fn the_view_model_projects_the_engines_own_detachable_answer() {
+        let (mut engine, _tmp, worktree) = detach_test_engine();
+        let view = engine.session_view("s1").expect("a view");
+        assert!(!view.detachable, "nothing running, nothing to detach");
+
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        let view = engine.session_view("s1").expect("a view");
+        assert!(view.detachable);
+        assert_eq!(view.detachable, engine.is_detachable("s1"));
+    }
+
     /// The exact confirmation sentence, for one tab and for three. Pinned
     /// verbatim, and mirrored by a TypeScript test asserting the same two
     /// strings, so a change to either surface's copy fails on the side that

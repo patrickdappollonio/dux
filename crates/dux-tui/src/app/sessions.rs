@@ -1805,7 +1805,12 @@ impl App {
             return Ok(());
         };
         let label = session.display_label();
-        if !self.engine.any_tab_active(&session.id) {
+        // The engine's own oracle, not `any_tab_active`, which is in-flight
+        // aware: a tab whose launch has not produced a PTY yet has nothing to
+        // ask to shut down, and the teardown would refuse it anyway. Asking the
+        // same question the engine and the browser's menu gate ask is what keeps
+        // the three from disagreeing about the same agent.
+        if !self.engine.is_detachable(&session.id) {
             self.set_warning(dux_core::engine::detach_not_running_message(&label));
             return Ok(());
         }
