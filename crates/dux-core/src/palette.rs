@@ -385,12 +385,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // GLOBAL: acts on every running agent/terminal; no target. Web
         // equivalent: the app menu's "Task Manager…" opens TaskManagerDialog,
         // which lists dux itself, every running agent tab, and every
-        // companion terminal with live CPU/RSS numbers. Each row's Stop
-        // control CONFIRMS before acting (via the existing close-tab/delete-
-        // terminal dialogs) rather than force-killing on click; agents
-        // detach via WireCommand::KillSessionPty, terminals via
-        // DeleteTerminal. A "Stop all…" action confirms once and stops
-        // everything.
+        // companion terminal with live CPU/RSS numbers. Every control there
+        // is an immediate one and CONFIRMS before acting: a row's "Force
+        // stop" ends an agent at once (WireCommand::DetachAgent with force),
+        // closes an extra tab, or deletes a terminal, and "Force stop
+        // everything…" confirms once and does the same to all of them. The
+        // polite, waited shutdown is the agent menu's "Detach agent…" and
+        // the detach-agent palette command below.
     },
     PaletteCommand {
         action: Action::DetachAgent,

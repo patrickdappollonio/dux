@@ -712,8 +712,8 @@ async fn rerun_startup_command(
 #[derive(Deserialize)]
 struct KillSessionBody {
     /// End the processes at once instead of asking them to shut down and
-    /// waiting the configured grace. The Task Manager's "Stop everything" sends
-    /// it; nothing else does.
+    /// waiting the configured grace. The Task Manager sends it, from a row's
+    /// "Force stop" and from "Force stop everything"; nothing else does.
     #[serde(default)]
     force: bool,
 }

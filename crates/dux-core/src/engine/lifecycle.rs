@@ -1087,7 +1087,7 @@ impl Engine {
     /// Detached: the panic button's path, with no grace and nothing to wait for.
     ///
     /// The deliberate opposite of [`Engine::begin_detach_session`]. Somebody
-    /// reaching for "Stop everything" wants the machine quiet now, so a polite
+    /// reaching for "Force stop" in the Task Manager wants the machine quiet now, so a polite
     /// wait per agent is the opposite of what they asked for. `clear_tab_runtime`
     /// drops each provider, which SIGKILLs it.
     ///
