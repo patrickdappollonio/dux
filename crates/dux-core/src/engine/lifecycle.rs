@@ -1233,14 +1233,30 @@ impl Engine {
             }
             let mut still_pending = Vec::new();
             for detach in std::mem::take(&mut self.pending_detachments) {
-                if detach.pending_ids.is_empty() {
-                    detach_finals.push(crate::engine::ResolvedFinal::new(
-                        detach_status_key(&detach.session_id),
-                        detach_final(&detach.label, detach.forced, detach.grace_seconds),
-                    ));
-                } else {
+                if !detach.pending_ids.is_empty() {
                     still_pending.push(detach);
+                    continue;
                 }
+                // The agent may have moved on while the child was being waited
+                // out: deleted, or relaunched by somebody who did not want to
+                // wait. Saying "it is now detached" about an agent that is
+                // running again, or gone, is a lie the screen contradicts. The
+                // spinner still has to come down, so the outcome is a clear with
+                // no sentence rather than no outcome at all.
+                let still_detached = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == detach.session_id)
+                    .is_some_and(|s| s.status == SessionStatus::Detached);
+                let outcome = if still_detached {
+                    detach_final(&detach.label, detach.forced, detach.grace_seconds)
+                } else {
+                    crate::engine::Final::clear()
+                };
+                detach_finals.push(crate::engine::ResolvedFinal::new(
+                    detach_status_key(&detach.session_id),
+                    outcome,
+                ));
             }
             self.pending_detachments = still_pending;
         }
@@ -5171,6 +5187,56 @@ mod tests {
             "the forced sentence quotes the wait the confirmation promised, not \
              whatever config says now"
         );
+    }
+
+    /// The agent was relaunched while dux was still waiting for the old child.
+    /// Announcing "it is now detached" over a running agent would be a sentence
+    /// the screen contradicts, so the spinner is retired with nothing said.
+    #[test]
+    fn a_detach_says_nothing_when_the_agent_was_relaunched_while_it_waited() {
+        let (mut engine, _tmp, worktree) = detach_test_engine();
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        assert!(matches!(
+            engine.begin_detach_session("s1"),
+            super::DetachSessionOutcome::Started { .. }
+        ));
+
+        // Somebody did not want to wait and started the agent again on the very
+        // same tab, which is the reviewer's probe.
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        engine.mark_session_status("s1", SessionStatus::Active);
+
+        let finals = reap_until_detach_final(&mut engine, Duration::from_secs(5));
+        assert_eq!(finals.len(), 1, "the spinner still has to come down");
+        assert_eq!(
+            finals[0].outcome,
+            crate::engine::Final::Clear,
+            "a running agent must not be told it is detached"
+        );
+        assert_eq!(finals[0].key, "detach-agent:s1");
+    }
+
+    /// Same rule for an agent that was deleted mid-wait: there is no row left to
+    /// say anything about, so nothing is said.
+    #[test]
+    fn a_detach_says_nothing_when_the_agent_was_deleted_while_it_waited() {
+        let (mut engine, _tmp, worktree) = detach_test_engine();
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        assert!(matches!(
+            engine.begin_detach_session("s1"),
+            super::DetachSessionOutcome::Started { .. }
+        ));
+        engine.sessions.clear();
+
+        let finals = reap_until_detach_final(&mut engine, Duration::from_secs(5));
+        assert_eq!(finals.len(), 1);
+        assert_eq!(finals[0].outcome, crate::engine::Final::Clear);
     }
 
     /// One agent, two tabs, one message: the final waits for the LAST tab, and a
