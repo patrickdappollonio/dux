@@ -415,13 +415,16 @@ pub fn detach_not_running_message(label: &str) -> String {
 /// agent up again, and a force-close is a Warning that quotes the wait it gave
 /// first, because something the agent was doing was cut off mid-way.
 ///
-/// "Forced" means the grace elapsed and the reaper had to SIGKILL, which is what
-/// the Warning claims and all it claims. It is deliberately not a claim about
-/// the child's exit status: the reaper treats an EOF on the PTY read side as
-/// reaped, and `PtyClient::terminate` ends that read side, so a child that
-/// survives the signal and is SIGKILLed by the client's own drop still reads as
-/// a clean ending here. The user-visible outcome is the same either way, the
-/// agent is gone and detached, so the Info sentence stays true.
+/// "Forced" means the grace elapsed with the child still there and the reaper
+/// had to SIGKILL it. Measured, not assumed: a child that traps and ignores the
+/// SIGTERM/SIGHUP salvo really does reach that branch, and one that exits on the
+/// signal really does reach the clean one. `terminate()` only signals; it does
+/// not end the PTY read side, so the reaper's `is_exited` check does not
+/// short-circuit a survivor into the clean branch. See
+/// `detaching_reports_a_force_close_when_the_child_ignores_the_signals`, whose
+/// readiness handshake is what keeps the distinction from being a race: signals
+/// that land before the child's `trap` is installed kill it by default, and a
+/// fixture without that wait reports clean for a child written to survive.
 pub fn detach_final(label: &str, forced: bool, grace_seconds: u64) -> crate::engine::Final {
     if forced {
         crate::engine::Final::warning(format!(
@@ -3483,13 +3486,15 @@ mod tests {
     /// poll `has_output()` to know the trap is live before signalling.
     /// Otherwise a signal that lands during shell startup (before `trap` runs)
     /// would kill it by default and the test would not exercise the force-kill
-    /// path. The busy loop keeps it alive.
+    /// path. The sleep loop keeps it alive without burning a core: the `sleep`
+    /// runs in the same process group and inherits the ignore, so the salvo
+    /// reaches neither half and the shell keeps looping until the SIGKILL.
     fn spawn_sigterm_ignorer(cwd: &Path) -> PtyClient {
         PtyClient::spawn_with_env(
             "sh",
             &[
                 "-c".to_string(),
-                "trap '' TERM HUP; echo ready; while true; do :; done".to_string(),
+                "trap '' TERM HUP; echo ready; while true; do sleep 0.2; done".to_string(),
             ],
             cwd,
             24,
@@ -4882,19 +4887,27 @@ mod tests {
 
     // ── Detaching an agent from outside its own app ──────────────────
 
-    /// Put a terminating PTY into the state the reaper's force-close branch
-    /// exists for: a child that is still there when the grace runs out.
+    /// Poll the reaper until a detach outcome lands, or fail loudly.
     ///
-    /// The client is swapped for a fresh, unsignalled one rather than a child
-    /// that ignores SIGTERM, because a SIGTERM-deaf child does not produce this
-    /// state. Measured: `terminate()` ends the master's read side (`is_exited`
-    /// goes true) even when the child survives the signals, and the reaper reads
-    /// that first, so a real trap-and-survive child reaps down the CLEAN branch.
-    /// Expiring the deadline over a live client is the honest way to reach the
-    /// branch, and it is the idiom the straggler test above already uses.
-    fn expire_terminating_grace(engine: &mut Engine, index: usize, cwd: &Path) {
-        engine.terminating_ptys[index].client = spawn_cat(cwd);
-        engine.terminating_ptys[index].deadline = Instant::now() - Duration::from_millis(1);
+    /// A wall-clock wait rather than a fixed sleep, because the grace is a real
+    /// deadline the reaper compares against `Instant::now()`: the outcome cannot
+    /// arrive before it, and the machine decides how long after.
+    fn reap_until_detach_final(
+        engine: &mut Engine,
+        within: Duration,
+    ) -> Vec<crate::engine::ResolvedFinal> {
+        let deadline = Instant::now() + within;
+        loop {
+            let reaped = engine.reap_terminating_ptys();
+            if !reaped.detach_finals.is_empty() {
+                return reaped.detach_finals;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no detach outcome within {within:?}"
+            );
+            sleep(Duration::from_millis(20));
+        }
     }
 
     fn detach_test_engine() -> (Engine, TempDir, TempDir) {
@@ -5026,30 +5039,43 @@ mod tests {
         assert!(engine.pending_detachments.is_empty());
     }
 
-    /// The forced ending: the grace runs out with the child still there, and the
-    /// final says it was force-closed and quotes the wait it promised.
+    /// The forced ending, with a child that really does survive the salvo: the
+    /// grace runs out, the reaper SIGKILLs, and the final says so and quotes the
+    /// wait it promised.
+    ///
+    /// `wait_until_ready` before the detach is what makes this honest. Without
+    /// it the signals land during shell startup, before `trap` runs, the shell
+    /// dies by default and the reaper takes the CLEAN branch, which is a racy
+    /// fixture rather than a fact about `terminate()`.
     #[test]
-    fn detaching_reports_a_force_close_when_the_grace_runs_out() {
+    fn detaching_reports_a_force_close_when_the_child_ignores_the_signals() {
         let (mut engine, _tmp, worktree) = detach_test_engine();
-        engine.config.shutdown_timeout_seconds = 7;
-        engine
-            .providers
-            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        engine.config.shutdown_timeout_seconds = 2;
+        engine.providers.insert(
+            TabId::new("s1-slot"),
+            spawn_sigterm_ignorer(worktree.path()),
+        );
+        wait_until_ready(&engine, "s1-slot");
 
         let super::DetachSessionOutcome::Started { grace_seconds, .. } =
             engine.begin_detach_session("s1")
         else {
             panic!("a live agent detaches");
         };
-        assert_eq!(grace_seconds, 7);
+        assert_eq!(grace_seconds, 2);
 
-        expire_terminating_grace(&mut engine, 0, worktree.path());
-        let reaped = engine.reap_terminating_ptys();
-        assert_eq!(reaped.detach_finals.len(), 1);
+        // Nothing is due before the deadline: the child is alive and ignoring.
+        assert!(
+            engine.reap_terminating_ptys().detach_finals.is_empty(),
+            "the outcome must wait out the grace, not pre-empt it"
+        );
+
+        let finals = reap_until_detach_final(&mut engine, Duration::from_secs(10));
+        assert_eq!(finals.len(), 1);
         assert_eq!(
-            reaped.detach_finals[0].outcome,
+            finals[0].outcome,
             crate::engine::Final::warning(
-                "Agent \"s1-title\" did not exit within 7 seconds and was \
+                "Agent \"s1-title\" did not exit within 2 seconds and was \
                  force-closed; it is now detached."
             ),
             "the forced sentence quotes the wait the confirmation promised, not \
@@ -5062,6 +5088,10 @@ mod tests {
     #[test]
     fn a_multi_tab_detach_emits_one_final_once_every_tab_is_reaped() {
         let (mut engine, _tmp, worktree) = detach_test_engine();
+        engine.config.shutdown_timeout_seconds = 2;
+        // One tab exits on the signal, the other ignores it and has to be
+        // killed. Both endings inside one detach, which is exactly the case the
+        // barrier has to answer with ONE sentence.
         engine
             .providers
             .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
@@ -5070,25 +5100,14 @@ mod tests {
             .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
         engine
             .providers
-            .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
+            .insert(TabId::new("tab-2"), spawn_sigterm_ignorer(worktree.path()));
+        wait_until_ready(&engine, "tab-2");
 
         assert!(matches!(
             engine.begin_detach_session("s1"),
             super::DetachSessionOutcome::Started { .. }
         ));
-        // One tab is left alive past its deadline, so it is force-closed; the
-        // other reaps cleanly. Both endings land in the same pass here, which is
-        // exactly the case the barrier has to answer with ONE sentence.
-        expire_terminating_grace(&mut engine, 0, worktree.path());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let finals = loop {
-            let reaped = engine.reap_terminating_ptys();
-            if !reaped.detach_finals.is_empty() {
-                break reaped.detach_finals;
-            }
-            assert!(Instant::now() < deadline, "the detached agent never reaped");
-            sleep(Duration::from_millis(20));
-        };
+        let finals = reap_until_detach_final(&mut engine, Duration::from_secs(10));
         assert_eq!(
             finals.len(),
             1,
