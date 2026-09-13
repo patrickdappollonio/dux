@@ -355,8 +355,12 @@ describe("TaskManagerDialog", () => {
       },
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
+    // "immediately" is load-bearing: unlike the per-agent detach beside it,
+    // this one gives nothing a shutdown grace, and the dialog has to say so.
     expect(
-      await screen.findByText(/This stops 1 agent and 2 terminals\./),
+      await screen.findByText(
+        /This stops 1 agent and 2 terminals immediately, with no shutdown wait\./,
+      ),
     ).toBeTruthy()
   })
 

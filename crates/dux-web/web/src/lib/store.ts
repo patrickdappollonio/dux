@@ -5998,10 +5998,15 @@ export function closeStopAll(): void {
 // would also destroy the extra tabs' pills, and the panic button should leave as
 // much recoverable as possible. Terminals have no detached state (existence ==
 // running), so they are destroyed. Gated by its own confirmation.
+//
+// FORCED, deliberately, unlike the per-agent detach beside it: this is the
+// escape hatch somebody reaches for when the machine is already in trouble, and
+// waiting out a shutdown grace per agent is the opposite of what they asked for.
+// The dialog says "immediately" so the difference is stated, not implied.
 export function stopAllRunning(): void {
   const sessions = state.spine?.sessions ?? []
   for (const s of sessions) {
-    if (s.status === "active") killSessionPty(s.id)
+    if (s.status === "active") killSessionPty(s.id, true)
   }
   // One flat collection, so every terminal of every owner is reached by one
   // loop and no owner kind can be missed.
@@ -6188,9 +6193,12 @@ export function saveSettings(
 // with the outcome once the last process is actually gone, so here we only
 // surface a transport failure. Companion terminals are killed through the
 // existing `deleteTerminal`.
-export function killSessionPty(sessionId: string): void {
+//
+// `force` ends the processes at once with no grace, and is for "Stop
+// everything" alone: see `stopAllRunning`.
+export function killSessionPty(sessionId: string, force = false): void {
   sessionsApi
-    .kill(sessionId)
+    .kill(sessionId, force)
     .catch((e) =>
       notifyError(
         e instanceof Error ? e.message : "Could not kill the agent.",

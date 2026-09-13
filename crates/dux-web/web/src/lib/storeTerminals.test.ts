@@ -321,6 +321,42 @@ describe("store companion-terminal lifecycle", () => {
     expect(sessionDel).toBeDefined()
     expect(projectDel).toBeDefined()
   })
+
+  // The panic button is the ONE caller that skips the shutdown grace. A polite
+  // wait per agent is the opposite of what somebody pressing "Stop everything"
+  // is asking for, so the flag has to be on this path and off every other one.
+  it("stopAllRunning forces the agent stop rather than waiting out the grace", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [{ id: "s1", project_id: "p1", status: "active" }],
+      terminals: [],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    mod.stopAllRunning()
+    await tick()
+    const kill = find(
+      (u, init) => u === "/api/v1/sessions/s1/kill" && init?.method === "POST",
+    )
+    expect(kill).toBeDefined()
+    expect(JSON.parse(String(kill?.[1]?.body))).toEqual({ force: true })
+  })
+
+  it("the per-agent detach asks for the grace instead of forcing", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [{ id: "s1", project_id: "p1", status: "active" }],
+      terminals: [],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    mod.killSessionPty("s1")
+    await tick()
+    const kill = find(
+      (u, init) => u === "/api/v1/sessions/s1/kill" && init?.method === "POST",
+    )
+    expect(JSON.parse(String(kill?.[1]?.body))).toEqual({ force: false })
+  })
 })
 
 describe("store terminal reorder overlay", () => {

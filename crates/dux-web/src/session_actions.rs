@@ -705,7 +705,18 @@ async fn rerun_startup_command(
     }
 }
 
-// ── Kill (force-detach a running agent) ──────────────────────────────────────
+// ── Kill (detach a running agent) ────────────────────────────────────────────
+
+/// Body of `POST /api/v1/sessions/:id/kill`. Optional: no body is the polite
+/// path.
+#[derive(Deserialize)]
+struct KillSessionBody {
+    /// End the processes at once instead of asking them to shut down and
+    /// waiting the configured grace. The Task Manager's "Stop everything" sends
+    /// it; nothing else does.
+    #[serde(default)]
+    force: bool,
+}
 
 /// Detach the agent WHOLE: stop every tab's provider process without deleting the
 /// session or worktree, marking the session Detached so it can be reconnected.
@@ -721,14 +732,21 @@ async fn kill_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    body: Option<Json<KillSessionBody>>,
 ) -> Response {
     if !id_within_bound(&id) {
         return unknown_session();
     }
+    // Absent body means the polite path, which is what every per-agent gesture
+    // sends; only the panic button asks for `force`.
+    let force = body.map(|Json(b)| b.force).unwrap_or(false);
     match state
         .engine
         .apply_wire_scoped(
-            WireCommand::DetachAgent { session_id: id },
+            WireCommand::DetachAgent {
+                session_id: id,
+                force,
+            },
             scope_from_headers(&headers, &state.connections),
         )
         .await

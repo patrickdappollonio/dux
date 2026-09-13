@@ -629,7 +629,7 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
         <DialogHeader>
           <DialogTitle>Stop everything?</DialogTitle>
           <DialogDescription>
-            {`This stops ${formatRegularCount(agents, "agent")} and ${formatRegularCount(terminals, "terminal")}. `}
+            {`This stops ${formatRegularCount(agents, "agent")} and ${formatRegularCount(terminals, "terminal")} immediately, with no shutdown wait. `}
             Agents detach and stay in Projects, reopenable; terminals are
             destroyed and cannot be recovered.
           </DialogDescription>

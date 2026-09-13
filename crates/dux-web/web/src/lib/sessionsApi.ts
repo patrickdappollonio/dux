@@ -178,10 +178,14 @@ export const sessionsApi = {
     request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/reconnect`, {
       force,
     }),
-  // Force-kill the agent's running PTY (it detaches; it is NOT deleted). Used by
-  // the kill-running modal. A non-2xx throws.
-  kill: (id: string) =>
-    request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/kill`),
+  // Stop the agent's processes (it detaches; it is NOT deleted). `force` skips
+  // the shutdown grace and ends them at once, for the Task Manager's "Stop
+  // everything"; without it the agent is asked to shut down and given the
+  // configured wait. A non-2xx throws.
+  kill: (id: string, force = false) =>
+    request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/kill`, {
+      force,
+    }),
   // Attaches a pull request from the raw typed reference. Replies 202 with the keyed
   // status op id, and the outcome rides the status stream; a synchronous refusal is a
   // 400 and throws.

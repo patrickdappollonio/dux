@@ -126,6 +126,24 @@ describe("sessionsApi", () => {
     expect(c.body).toEqual({ force: true })
   })
 
+  // The polite path is the DEFAULT, and the panic button is the only caller
+  // that opts out of it. A flipped default here would silently turn every
+  // per-agent detach into an immediate kill.
+  it("kill POSTs /kill asking for the shutdown grace by default", async () => {
+    const fetchMock = stubOkFetch(200)
+    await sessionsApi.kill("s1")
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe("/api/v1/sessions/s1/kill")
+    expect(c.method).toBe("POST")
+    expect(c.body).toEqual({ force: false })
+  })
+
+  it("kill POSTs /kill with force when the caller asks for it", async () => {
+    const fetchMock = stubOkFetch(200)
+    await sessionsApi.kill("s1", true)
+    expect(lastCall(fetchMock).body).toEqual({ force: true })
+  })
+
   it("reorder POSTs /sessions/reorder with project + ordered ids", async () => {
     const fetchMock = stubOkFetch(200)
     await sessionsApi.reorder("p1", ["s2", "s1"])

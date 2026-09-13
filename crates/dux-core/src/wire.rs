@@ -282,8 +282,17 @@ pub enum WireCommand {
     ///
     /// Answers with a keyed BUSY: the shutdown is the polite path, so the
     /// outcome only exists once the child is gone or the grace has run out.
+    ///
+    /// `force` drops the grace and ends the processes at once, answering with a
+    /// plain final instead of a spinner. It exists for the Task Manager's "Stop
+    /// everything", which is the panic button: somebody pressing it wants the
+    /// machine quiet NOW, and a polite wait per agent is the opposite of what
+    /// they asked for. Everything else (the row menu, the palette, a single
+    /// row's Stop) leaves it false and gets the polite path.
     DetachAgent {
         session_id: String,
+        #[serde(default)]
+        force: bool,
     },
     /// Register an existing git repository on the server as a project. `name`
     /// may be empty to derive the display name from the path's basename.
@@ -1588,8 +1597,8 @@ impl Engine {
                     status, detached,
                 )))
             }
-            WireCommand::DetachAgent { session_id } => {
-                let status = self.detach_agent(&session_id)?;
+            WireCommand::DetachAgent { session_id, force } => {
+                let status = self.detach_agent(&session_id, force)?;
                 Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -2226,7 +2235,14 @@ impl Engine {
     /// both surfaces share: SIGTERM, then the configured grace, then a force-kill
     /// by the background reaper. So the status this returns is a keyed BUSY, and
     /// the reaper's own final replaces it once the last tab is actually gone.
-    fn detach_agent(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
+    ///
+    /// `force` takes the immediate path instead ([`Engine::kill_session_runtime`]),
+    /// for the panic button. It answers with a plain final, because there is
+    /// nothing left to wait for by the time it returns.
+    fn detach_agent(&mut self, session_id: &str, force: bool) -> anyhow::Result<WireStatus> {
+        if force {
+            return self.force_detach_agent(session_id);
+        }
         match self.begin_detach_session(session_id) {
             crate::engine::DetachSessionOutcome::UnknownSession => {
                 Err(anyhow::anyhow!("unknown session: {session_id}"))
@@ -2240,6 +2256,38 @@ impl Engine {
             )),
             crate::engine::DetachSessionOutcome::Started { key, busy, .. } => {
                 Ok(WireStatus::keyed(key, "busy", busy))
+            }
+        }
+    }
+
+    /// The panic button's arm of [`Self::detach_agent`]: end the agent's
+    /// processes at once and answer with a final, since nothing is pending by
+    /// the time this returns. Keyed to whatever spinner it overtook, so a polite
+    /// detach already in flight is replaced rather than left running forever.
+    fn force_detach_agent(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
+        match self.force_detach_session(session_id) {
+            crate::engine::ForceDetachOutcome::UnknownSession => {
+                Err(anyhow::anyhow!("unknown session: {session_id}"))
+            }
+            crate::engine::ForceDetachOutcome::NotRunning { label } => Ok(WireStatus::new(
+                "info",
+                crate::engine::detach_not_running_message(&label),
+            )),
+            crate::engine::ForceDetachOutcome::Stopped {
+                label,
+                stopped,
+                clear_key,
+            } => {
+                let message = format!(
+                    "Stopped {} of agent \"{label}\" immediately. It is now detached and \
+                     stays in Projects; reconnect it from the agent menu.",
+                    crate::text::count_of(stopped, "tab"),
+                );
+                Ok(match clear_key {
+                    // Replaces the spinner the overtaken polite detach raised.
+                    Some(key) => WireStatus::keyed(key, "info", message),
+                    None => WireStatus::new("info", message),
+                })
             }
         }
     }
@@ -6103,6 +6151,7 @@ mod tests {
         let status = engine
             .apply_wire(WireCommand::DetachAgent {
                 session_id: "s1".to_string(),
+                force: false,
             })
             .expect("apply detach")
             .status
@@ -6803,6 +6852,7 @@ mod tests {
         let outcome = engine
             .apply_wire(WireCommand::DetachAgent {
                 session_id: "s1".to_string(),
+                force: false,
             })
             .expect("apply detach");
         let status = outcome.status.expect("a status");
@@ -6832,6 +6882,150 @@ mod tests {
         assert!(
             !engine.sessions[0].desired_running,
             "detach clears desired_running"
+        );
+    }
+
+    /// The panic button stays the fast escape hatch. Its arm waits for nothing:
+    /// the processes are gone when it returns, so it answers with a final rather
+    /// than a spinner, and nothing lands in the terminating set to be waited on.
+    #[test]
+    fn apply_wire_forced_detach_stops_at_once_and_answers_with_a_final() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.providers.insert(
+            TabId::new("s1-slot"),
+            crate::pty::PtyClient::spawn_with_env(
+                "cat",
+                &[],
+                worktree.path(),
+                24,
+                80,
+                engine.config.ui.agent_scrollback_lines,
+                &[],
+            )
+            .expect("spawn provider"),
+        );
+        engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+
+        let status = engine
+            .apply_wire(WireCommand::DetachAgent {
+                session_id: "s1".to_string(),
+                force: true,
+            })
+            .expect("apply forced detach")
+            .status
+            .expect("a status");
+
+        assert_eq!(status.tone, "info", "msg: {}", status.message);
+        assert!(
+            status.message.contains("immediately"),
+            "the forced arm says it did not wait: {}",
+            status.message
+        );
+        assert!(engine.providers.is_empty());
+        assert!(
+            engine.terminating_ptys.is_empty(),
+            "nothing was left for the reaper to wait on"
+        );
+        assert!(engine.pending_detachments.is_empty());
+        assert_eq!(
+            engine.sessions[0].status,
+            crate::model::SessionStatus::Detached
+        );
+    }
+
+    /// A forced stop over a polite detach already in flight overtakes it and
+    /// takes its spinner down, keyed to it. Otherwise the panic button leaves a
+    /// spinner promising a wait that is already over.
+    #[test]
+    fn a_forced_detach_overtakes_a_polite_one_and_replaces_its_spinner() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.providers.insert(
+            TabId::new("s1-slot"),
+            crate::pty::PtyClient::spawn_with_env(
+                "cat",
+                &[],
+                worktree.path(),
+                24,
+                80,
+                engine.config.ui.agent_scrollback_lines,
+                &[],
+            )
+            .expect("spawn provider"),
+        );
+        engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+
+        let busy = engine
+            .apply_wire(WireCommand::DetachAgent {
+                session_id: "s1".to_string(),
+                force: false,
+            })
+            .expect("apply detach")
+            .status
+            .expect("a status");
+        assert_eq!(busy.tone, "busy");
+        assert_eq!(engine.terminating_ptys.len(), 1);
+
+        let forced = engine
+            .apply_wire(WireCommand::DetachAgent {
+                session_id: "s1".to_string(),
+                force: true,
+            })
+            .expect("apply forced detach")
+            .status
+            .expect("a status");
+
+        assert_eq!(forced.tone, "info");
+        assert_eq!(
+            forced.key, busy.key,
+            "the forced final must retire the spinner the polite detach raised"
+        );
+        assert!(engine.terminating_ptys.is_empty());
+        assert!(engine.pending_detachments.is_empty());
+        // No second outcome is owed: the barrier went with the spinner.
+        assert!(
+            engine.reap_terminating_ptys().detach_finals.is_empty(),
+            "an overtaken detach must not also emit its own final"
+        );
+    }
+
+    /// `force` is optional on the wire, and its absence is the polite path. An
+    /// older client that never learned the flag must not get the panic button.
+    #[test]
+    fn wire_detach_agent_defaults_to_the_polite_path() {
+        let json = r#"{"command":"detach_agent","args":{"session_id":"s1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::DetachAgent {
+                session_id: "s1".to_string(),
+                force: false,
+            }
         );
     }
 

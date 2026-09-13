@@ -383,6 +383,23 @@ pub enum DetachSessionOutcome {
     },
 }
 
+/// What [`Engine::force_detach_session`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForceDetachOutcome {
+    UnknownSession,
+    /// Nothing of the agent was running, so nothing was stopped.
+    NotRunning {
+        label: String,
+    },
+    /// Every process the agent had is gone. `clear_key` is set when this
+    /// overtook a polite detach whose spinner the caller must now retire.
+    Stopped {
+        label: String,
+        stopped: usize,
+        clear_key: Option<String>,
+    },
+}
+
 /// What one [`Engine::reap_terminating_ptys`] pass produced. Two independent
 /// outputs, returned together because a reap is one pass over one set: worktree
 /// removals that were waiting on a dead process, and the finals that retire the
@@ -1020,6 +1037,79 @@ impl Engine {
             key,
             grace_seconds,
             busy,
+        }
+    }
+
+    /// End every one of an agent's provider processes AT ONCE and leave it
+    /// Detached: the panic button's path, with no grace and nothing to wait for.
+    ///
+    /// The deliberate opposite of [`Engine::begin_detach_session`]. Somebody
+    /// reaching for "Stop everything" wants the machine quiet now, so a polite
+    /// wait per agent is the opposite of what they asked for. `clear_tab_runtime`
+    /// drops each provider, which SIGKILLs it.
+    ///
+    /// A polite detach already in flight for this agent is overtaken rather than
+    /// left running: its terminating PTYs are killed immediately and its pending
+    /// outcome is withdrawn, so the returned `clear_key` is the spinner the
+    /// caller must retire. Without that the panic button would leave a spinner
+    /// promising a wait that is already over.
+    pub fn force_detach_session(&mut self, session_id: &str) -> ForceDetachOutcome {
+        let Some(label) = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| s.display_label())
+        else {
+            return ForceDetachOutcome::UnknownSession;
+        };
+        let tabs = self.tab_ids_for_session(session_id);
+        let stopped = tabs
+            .iter()
+            .filter(|id| self.providers.contains_key(id.as_ref_id()))
+            .count();
+        // Clear every tab's runtime, live or not, so no stale entry leaks.
+        for id in &tabs {
+            self.clear_tab_runtime(id.as_ref_id());
+        }
+
+        // Overtake an in-flight polite detach of the same agent.
+        let mut clear_key = None;
+        let tab_ids: std::collections::HashSet<String> =
+            tabs.iter().map(|id| id.as_str().to_string()).collect();
+        let mut still_terminating = Vec::with_capacity(self.terminating_ptys.len());
+        let mut overtaken = 0usize;
+        for entry in std::mem::take(&mut self.terminating_ptys) {
+            if entry.kind == PrunedPtyKind::Agent && tab_ids.contains(&entry.id) {
+                entry.client.force_terminate();
+                overtaken += 1;
+                // Dropped here rather than pushed back: its `Drop` SIGKILL is a
+                // benign no-op now, and nothing is left to reap it for.
+            } else {
+                still_terminating.push(entry);
+            }
+        }
+        self.terminating_ptys = still_terminating;
+        self.pending_detachments.retain(|detach| {
+            let mine = detach.session_id == session_id;
+            if mine {
+                clear_key = Some(detach_status_key(&detach.session_id));
+            }
+            !mine
+        });
+
+        if stopped == 0 && overtaken == 0 {
+            return ForceDetachOutcome::NotRunning { label };
+        }
+        if self.mark_session_status(session_id, SessionStatus::Detached) {
+            self.update_pr_sync_sessions();
+        }
+        self.mark_session_desired_running(session_id, false);
+        ForceDetachOutcome::Stopped {
+            label,
+            // The overtaken tabs were already out of `providers` when this ran,
+            // so they are counted here or they vanish from the tally.
+            stopped: stopped + overtaken,
+            clear_key,
         }
     }
 
