@@ -191,8 +191,12 @@ session and quotes the provider's own last words, remedy and all: a toast in the
 and in the terminal UI the status line, when that agent is the one on screen. Whatever the
 CLI told you to do about it is in the message; the card still has the full output.
 
-That is the notice you get when the refusal is more than a few lines long. A one-line
-refusal is treated as nothing to resume, and dux quietly starts a fresh session instead
-and tells you it did, which is the right answer far more often than not: most of the time
-a short message on the way out of `--continue` really does mean there was no conversation
-there to continue.
+That is the notice you get whenever the refusal left something readable behind, however
+short it was. A single line saying *No conversation found to continue* is the provider
+telling you something, so dux keeps the tab exactly as it ended, repeats those words, and
+waits for you to start a fresh session yourself.
+
+The one resume dux restarts on its own is one that ended with nothing readable on screen
+at all: a blank screen, or nothing but the control codes a CLI writes on its way in and
+out. There is no ending to read and nothing to quote, so dux treats it as nothing to
+resume, starts a fresh session, and tells you it did.
