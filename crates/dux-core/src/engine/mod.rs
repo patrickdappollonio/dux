@@ -34,9 +34,10 @@ pub use in_flight::{
     RenameExpectation,
 };
 pub use lifecycle::{
-    DeferredWorktreeRemoval, GroupWorktreeRemoval, PrunedPty, PrunedPtyKind, RAPID_EXIT_WINDOW,
-    ShutdownReport, TerminatingPty, clean_exit_closes_tab_row, format_shutdown_result,
-    format_shutdown_start,
+    DeferredWorktreeRemoval, DetachSessionOutcome, GroupWorktreeRemoval, PendingDetach, PrunedPty,
+    PrunedPtyKind, RAPID_EXIT_WINDOW, ReapedTerminations, ShutdownReport, TerminatingPty,
+    clean_exit_closes_tab_row, detach_busy_message, detach_confirm_body, detach_final,
+    detach_not_running_message, detach_status_key, format_shutdown_result, format_shutdown_start,
 };
 pub use pr_sync_control::PrSyncControl;
 pub use resume_fallback::ResumeFallbackOutcome;
@@ -332,6 +333,11 @@ pub struct Engine {
     /// [`GroupWorktreeRemoval`]). `reap_terminating_ptys` drains these as their
     /// members reap.
     pub pending_group_removals: Vec<lifecycle::GroupWorktreeRemoval>,
+    /// In-flight detach requests, each waiting for every tab of one agent to
+    /// reap before its one outcome sentence is emitted (see
+    /// [`PendingDetach`]). `reap_terminating_ptys` drains these as their members
+    /// reap, the same way it drains `pending_group_removals`.
+    pub pending_detachments: Vec<lifecycle::PendingDetach>,
     pub gh_status: GhStatus,
     /// Test-only injection point for the rare synchronous worker-spawn failure
     /// (PID/RLIMIT exhaustion in production). Consumed by the next

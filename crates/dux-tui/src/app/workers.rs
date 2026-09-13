@@ -324,9 +324,20 @@ impl App {
     }
 
     fn dispatch_reaped_worktree_removals(&mut self) {
-        for removal in self.engine.reap_terminating_ptys() {
+        let reaped = self.engine.reap_terminating_ptys();
+        for removal in reaped.removals {
             self.mark_frame_dirty();
             let _busy = self.engine.dispatch_deferred_worktree_removal(removal);
+        }
+        // A detach request's spinner is retired by what actually happened to the
+        // child, not by a timer: the reaper is the only place that knows whether
+        // the agent went on its own or had to be forced.
+        for outcome in reaped.detach_finals {
+            self.mark_frame_dirty();
+            let routing = self.companion_routing();
+            let reaction = outcome.into_reaction();
+            self.notify_companion(&reaction);
+            self.apply_routed_reaction(reaction, &routing);
         }
     }
 

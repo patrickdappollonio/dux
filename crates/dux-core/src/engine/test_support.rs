@@ -64,6 +64,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         agent_tabs: HashMap::new(),
         terminating_ptys: Vec::new(),
         pending_group_removals: Vec::new(),
+        pending_detachments: Vec::new(),
         gh_status: GhStatus::Unknown,
         force_worker_spawn_failure: false,
         force_loop_worker_spawn_failure: AtomicBool::new(false),

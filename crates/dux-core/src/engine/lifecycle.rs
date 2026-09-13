@@ -337,6 +337,117 @@ pub struct GroupWorktreeRemoval {
     pub removal: DeferredWorktreeRemoval,
 }
 
+/// A detach asked for from outside the agent's own app: every live tab of one
+/// session was SIGTERMed together and the session is already marked `Detached`.
+///
+/// The barrier that keeps ONE outcome sentence per detach however many tabs the
+/// agent had, the same shape [`GroupWorktreeRemoval`] uses for a multi-tab
+/// delete: [`Engine::reap_terminating_ptys`] drops each tab id as it reaps and
+/// emits the keyed final only once the set empties.
+pub struct PendingDetach {
+    pub session_id: String,
+    /// The agent's display label, captured at request time so the outcome names
+    /// the agent even if the row has since been renamed or removed.
+    pub label: String,
+    /// The tab ids still to be reaped.
+    pub pending_ids: std::collections::HashSet<String>,
+    /// True once ANY of the agent's tabs had to be force-killed. One forced tab
+    /// makes the whole agent's outcome forced: the detach promised a polite
+    /// shutdown and did not get one, and saying otherwise would be a lie about
+    /// whatever that tab was in the middle of.
+    pub forced: bool,
+    /// The grace the request promised, so the forced sentence quotes the number
+    /// the confirmation quoted rather than re-reading a config that may have
+    /// changed while the child was being waited on.
+    pub grace_seconds: u64,
+}
+
+/// What [`Engine::begin_detach_session`] did, so a surface can raise the busy or
+/// say why there was nothing to do without re-deriving either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DetachSessionOutcome {
+    /// No such agent (a stale row id from a client that has not caught up).
+    UnknownSession,
+    /// The agent has no live process, so there is nothing to ask to shut down.
+    NotRunning { label: String },
+    /// Every live tab was asked to shut down and the agent is already listed as
+    /// `Detached`; the reaper resolves `key` when the last of them is gone.
+    Started {
+        label: String,
+        /// The status key correlating the busy with the reaper's eventual final.
+        key: String,
+        /// The wait the request promised, in seconds.
+        grace_seconds: u64,
+        /// The busy sentence to show while the wait runs.
+        busy: String,
+    },
+}
+
+/// What one [`Engine::reap_terminating_ptys`] pass produced. Two independent
+/// outputs, returned together because a reap is one pass over one set: worktree
+/// removals that were waiting on a dead process, and the finals that retire the
+/// spinners of completed detach requests.
+#[derive(Default)]
+pub struct ReapedTerminations {
+    pub removals: Vec<DeferredWorktreeRemoval>,
+    pub detach_finals: Vec<crate::engine::ResolvedFinal>,
+}
+
+/// The status key correlating a detach request's busy with the reaper's final.
+/// Per session, because a detach is about the agent rather than any one tab.
+pub fn detach_status_key(session_id: &str) -> String {
+    format!("detach-agent:{session_id}")
+}
+
+/// The spinner shown while dux waits for the agent to exit on its own.
+pub fn detach_busy_message(label: &str) -> String {
+    format!("Asking \"{label}\" to shut down…")
+}
+
+/// The refusal when the agent has no live process. Loud rather than silent: the
+/// row looks the same either way, so silence is indistinguishable from a failure.
+pub fn detach_not_running_message(label: &str) -> String {
+    format!("Agent \"{label}\" is not running, so there is nothing to detach.")
+}
+
+/// What replaces the detach spinner. Two genuinely different endings, so two
+/// sentences and two tones: a clean exit is an Info that says where to pick the
+/// agent up again, and a force-close is a Warning that quotes the wait it gave
+/// first, because something the agent was doing was cut off mid-way.
+///
+/// "Forced" means the grace elapsed and the reaper had to SIGKILL, which is what
+/// the Warning claims and all it claims. It is deliberately not a claim about
+/// the child's exit status: the reaper treats an EOF on the PTY read side as
+/// reaped, and `PtyClient::terminate` ends that read side, so a child that
+/// survives the signal and is SIGKILLed by the client's own drop still reads as
+/// a clean ending here. The user-visible outcome is the same either way, the
+/// agent is gone and detached, so the Info sentence stays true.
+pub fn detach_final(label: &str, forced: bool, grace_seconds: u64) -> crate::engine::Final {
+    if forced {
+        crate::engine::Final::warning(format!(
+            "Agent \"{label}\" did not exit within {grace_seconds} seconds and was \
+             force-closed; it is now detached."
+        ))
+    } else {
+        crate::engine::Final::info(format!(
+            "Agent \"{label}\" shut down and is now detached. Resume it from its row \
+             when you need it again."
+        ))
+    }
+}
+
+/// The body both surfaces' detach confirmations show, so the TUI dialog and the
+/// browser dialog cannot promise different things. `grace_seconds` is read from
+/// config at render time rather than baked in, because the wait is configurable.
+pub fn detach_confirm_body(label: &str, grace_seconds: u64) -> String {
+    format!(
+        "dux will ask \"{label}\" to shut down and wait up to {grace_seconds} seconds \
+         for it to exit before forcing it. The agent stays in the list as Detached, \
+         and you can resume it later. Anything the agent is doing right now is \
+         interrupted."
+    )
+}
+
 /// Outcome of [`Engine::shutdown_ptys`], so a caller can echo the result to its
 /// own surface (e.g. the TUI to its restored terminal) using the same pure
 /// formatters this routine logs with.
@@ -829,6 +940,86 @@ impl Engine {
         None
     }
 
+    /// Ask one agent to shut down from outside its own app, leaving it in the
+    /// list as `Detached` so it can be resumed later. The engine half of the web
+    /// row menu's "Detach agent" and the TUI palette's `detach-agent`, so both
+    /// surfaces get the same behavior and the same words.
+    ///
+    /// Deliberately the polite path rather than [`Engine::kill_tab_runtime`]'s
+    /// SIGKILL-on-drop: every live tab is SIGTERMed and moved into the
+    /// terminating set, and the background reaper force-kills whatever is left
+    /// once [`Engine::individual_close_grace`] has elapsed.
+    ///
+    /// The row says `Detached` immediately rather than when the child is
+    /// actually reaped: the providers are already out of the engine, so the
+    /// alternative is a row that claims to be Active with nothing behind it for
+    /// up to the whole grace period. `desired_running` is cleared for the same
+    /// reason `kill_tab_runtime` clears it, or the startup auto-reopen pass
+    /// would relaunch the agent the user just asked to stop.
+    ///
+    /// The eventual outcome rides [`ReapedTerminations::detach_finals`], keyed
+    /// to the busy this returns, so the spinner is retired by what actually
+    /// happened rather than by a timer.
+    pub fn begin_detach_session(&mut self, session_id: &str) -> DetachSessionOutcome {
+        let Some(label) = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| s.display_label())
+        else {
+            return DetachSessionOutcome::UnknownSession;
+        };
+        // Live PTYs only. A tab whose launch is still in flight has no process to
+        // ask anything of, so it reads as not running rather than being reported
+        // as detached from something that never came up.
+        let live_tabs: Vec<TabId> = self
+            .tab_ids_for_session(session_id)
+            .into_iter()
+            .filter(|id| self.providers.contains_key(id.as_ref_id()))
+            .collect();
+        if live_tabs.is_empty() {
+            return DetachSessionOutcome::NotRunning { label };
+        }
+
+        let grace_seconds = self.individual_close_grace().as_secs();
+        let pending_ids = live_tabs
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect::<std::collections::HashSet<String>>();
+        for id in &live_tabs {
+            // No worktree removal is deferred on a detach, so the return is None.
+            let _ = self.begin_close_provider(id, label.clone(), None);
+            // `begin_close_provider` only drops `providers`; the rest of the
+            // tab-keyed runtime (attention, progress, the in-flight launch key)
+            // goes through the shared teardown, which finds `providers` already
+            // empty and treats that as the no-op it is.
+            self.clear_tab_runtime(id.as_ref_id());
+        }
+        if self.mark_session_status(session_id, SessionStatus::Detached) {
+            self.update_pr_sync_sessions();
+        }
+        self.mark_session_desired_running(session_id, false);
+
+        let key = detach_status_key(session_id);
+        // Registered as live work, so the wait is never mistaken for an
+        // abandoned spinner however long the child takes to go.
+        self.live_status_keys.register(&key);
+        self.pending_detachments.push(PendingDetach {
+            session_id: session_id.to_string(),
+            label: label.clone(),
+            pending_ids,
+            forced: false,
+            grace_seconds,
+        });
+        let busy = detach_busy_message(&label);
+        DetachSessionOutcome::Started {
+            label,
+            key,
+            grace_seconds,
+            busy,
+        }
+    }
+
     /// SIGTERM every companion terminal belonging to a session and move them all
     /// into the terminating set (used when the owning agent is deleted).
     ///
@@ -872,15 +1063,19 @@ impl Engine {
     /// Drop every terminating PTY that has exited, and force-kill (then drop) any
     /// whose grace deadline has passed. Called once per engine tick on both
     /// surfaces (alongside `prune_exited_ptys`). Returns the deferred worktree
-    /// removals for any reaped agents so the caller can dispatch them; logs each
+    /// removals for any reaped agents so the caller can dispatch them, plus the
+    /// keyed finals of any detach request whose last tab has now gone; logs each
     /// reap at debug. A no-op when nothing is terminating.
-    pub fn reap_terminating_ptys(&mut self) -> Vec<DeferredWorktreeRemoval> {
+    pub fn reap_terminating_ptys(&mut self) -> ReapedTerminations {
         if self.terminating_ptys.is_empty() {
-            return Vec::new();
+            return ReapedTerminations::default();
         }
         let now = Instant::now();
         let mut dispatch = Vec::new();
         let mut reaped_ids = Vec::new();
+        // The ids that had to be SIGKILLed, which is the only thing that tells a
+        // detach's two outcome sentences apart.
+        let mut forced_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut remaining = Vec::with_capacity(self.terminating_ptys.len());
         for mut entry in std::mem::take(&mut self.terminating_ptys) {
             let exited = entry.client.is_exited() || entry.client.try_wait().is_some();
@@ -891,6 +1086,7 @@ impl Engine {
                 ));
             } else if now >= entry.deadline {
                 entry.client.force_terminate();
+                forced_ids.insert(entry.id.clone());
                 crate::logger::debug(&format!(
                     "force-killed terminating {:?} {} (\"{}\") after the grace period elapsed",
                     entry.kind, entry.id, entry.label
@@ -929,7 +1125,37 @@ impl Engine {
             }
             self.pending_group_removals = still_pending;
         }
-        dispatch
+
+        // Detach barrier: one request covers every tab the agent had, so its
+        // outcome waits for the LAST of them and a force-close anywhere in the
+        // agent makes the whole outcome forced.
+        let mut detach_finals = Vec::new();
+        if !self.pending_detachments.is_empty() {
+            for id in &reaped_ids {
+                for detach in &mut self.pending_detachments {
+                    if detach.pending_ids.remove(id) && forced_ids.contains(id) {
+                        detach.forced = true;
+                    }
+                }
+            }
+            let mut still_pending = Vec::new();
+            for detach in std::mem::take(&mut self.pending_detachments) {
+                if detach.pending_ids.is_empty() {
+                    detach_finals.push(crate::engine::ResolvedFinal::new(
+                        detach_status_key(&detach.session_id),
+                        detach_final(&detach.label, detach.forced, detach.grace_seconds),
+                    ));
+                } else {
+                    still_pending.push(detach);
+                }
+            }
+            self.pending_detachments = still_pending;
+        }
+
+        ReapedTerminations {
+            removals: dispatch,
+            detach_finals,
+        }
     }
 
     /// Boot-time normalization of persisted session statuses: nothing is running
@@ -3820,7 +4046,10 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !engine.terminating_ptys.is_empty() {
             let dispatched = engine.reap_terminating_ptys();
-            assert!(dispatched.is_empty(), "a terminal has no deferred worktree");
+            assert!(
+                dispatched.removals.is_empty(),
+                "a terminal has no deferred worktree"
+            );
             assert!(Instant::now() < deadline, "terminal was never reaped");
             sleep(Duration::from_millis(20));
         }
@@ -4138,7 +4367,7 @@ mod tests {
         });
 
         let dispatched = engine.reap_terminating_ptys();
-        assert!(dispatched.is_empty());
+        assert!(dispatched.removals.is_empty());
         assert!(
             engine.terminating_ptys.is_empty(),
             "a past-deadline straggler is force-killed and removed in one reap"
@@ -4148,7 +4377,9 @@ mod tests {
     #[test]
     fn reap_terminating_ptys_is_a_noop_when_empty() {
         let (mut engine, _tmp) = test_engine();
-        assert!(engine.reap_terminating_ptys().is_empty());
+        let reaped = engine.reap_terminating_ptys();
+        assert!(reaped.removals.is_empty());
+        assert!(reaped.detach_finals.is_empty());
     }
 
     #[test]
@@ -4193,7 +4424,7 @@ mod tests {
         // dispatched, never before.
         let deadline = Instant::now() + Duration::from_secs(3);
         let removals = loop {
-            let r = engine.reap_terminating_ptys();
+            let r = engine.reap_terminating_ptys().removals;
             if !r.is_empty() {
                 break r;
             }
@@ -4578,7 +4809,7 @@ mod tests {
         loop {
             let dispatched = engine.reap_terminating_ptys();
             assert!(
-                dispatched.is_empty(),
+                dispatched.removals.is_empty(),
                 "removal must not fire while a sibling tab is still terminating"
             );
             if engine.terminating_ptys.len() == 1 {
@@ -4597,7 +4828,7 @@ mod tests {
         // Expire the survivor's deadline: the next reap force-kills it, empties the
         // group, and dispatches the worktree removal EXACTLY ONCE.
         engine.terminating_ptys[0].deadline = Instant::now() - Duration::from_millis(1);
-        let dispatched = engine.reap_terminating_ptys();
+        let dispatched = engine.reap_terminating_ptys().removals;
         assert_eq!(
             dispatched.len(),
             1,
@@ -4646,6 +4877,230 @@ mod tests {
             format_shutdown_result(&forced),
             "1 agent and 2 terminals exited successfully. \
              Force-closing 2 agents and 0 terminals, then exiting..."
+        );
+    }
+
+    // ── Detaching an agent from outside its own app ──────────────────
+
+    /// Put a terminating PTY into the state the reaper's force-close branch
+    /// exists for: a child that is still there when the grace runs out.
+    ///
+    /// The client is swapped for a fresh, unsignalled one rather than a child
+    /// that ignores SIGTERM, because a SIGTERM-deaf child does not produce this
+    /// state. Measured: `terminate()` ends the master's read side (`is_exited`
+    /// goes true) even when the child survives the signals, and the reaper reads
+    /// that first, so a real trap-and-survive child reaps down the CLEAN branch.
+    /// Expiring the deadline over a live client is the honest way to reach the
+    /// branch, and it is the idiom the straggler test above already uses.
+    fn expire_terminating_grace(engine: &mut Engine, index: usize, cwd: &Path) {
+        engine.terminating_ptys[index].client = spawn_cat(cwd);
+        engine.terminating_ptys[index].deadline = Instant::now() - Duration::from_millis(1);
+    }
+
+    fn detach_test_engine() -> (Engine, TempDir, TempDir) {
+        let (mut engine, tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.mark_session_status("s1", SessionStatus::Active);
+        engine.mark_session_desired_running("s1", true);
+        (engine, tmp, worktree)
+    }
+
+    #[test]
+    fn begin_detach_session_reports_an_unknown_session() {
+        let (mut engine, _tmp, _wt) = detach_test_engine();
+        assert!(matches!(
+            engine.begin_detach_session("nope"),
+            super::DetachSessionOutcome::UnknownSession
+        ));
+    }
+
+    #[test]
+    fn begin_detach_session_refuses_an_agent_with_no_live_process() {
+        let (mut engine, _tmp, _wt) = detach_test_engine();
+        let super::DetachSessionOutcome::NotRunning { label } = engine.begin_detach_session("s1")
+        else {
+            panic!("a dormant agent has nothing to detach");
+        };
+        assert_eq!(
+            super::detach_not_running_message(&label),
+            "Agent \"s1-title\" is not running, so there is nothing to detach."
+        );
+        // The refusal changed nothing.
+        assert!(engine.pending_detachments.is_empty());
+        assert!(engine.terminating_ptys.is_empty());
+    }
+
+    /// The polite path: every live tab leaves `providers` for the terminating
+    /// set (SIGTERMed, not SIGKILLed by a drop), and the agent is already
+    /// Detached in the list rather than waiting for the reaper to say so.
+    #[test]
+    fn begin_detach_session_terminates_every_live_tab_and_detaches_at_once() {
+        let (mut engine, _tmp, worktree) = detach_test_engine();
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        engine
+            .agent_tabs
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
+        engine
+            .providers
+            .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
+
+        let super::DetachSessionOutcome::Started {
+            label,
+            key,
+            grace_seconds,
+            busy,
+        } = engine.begin_detach_session("s1")
+        else {
+            panic!("a live agent detaches");
+        };
+        assert_eq!(label, "s1-title");
+        assert_eq!(key, "detach-agent:s1");
+        assert_eq!(grace_seconds, 30, "the configured shutdown grace");
+        assert_eq!(busy, "Asking \"s1-title\" to shut down…");
+        assert!(
+            engine.live_status_keys.is_live(&key),
+            "the busy is registered as live work, so it is never timed out"
+        );
+
+        assert!(!engine.providers.contains_key(TabIdRef::new("s1-slot")));
+        assert!(!engine.providers.contains_key(TabIdRef::new("tab-2")));
+        assert_eq!(engine.terminating_ptys.len(), 2);
+        assert_eq!(
+            engine.sessions[0].status,
+            SessionStatus::Detached,
+            "the row says Detached immediately, not once the child is reaped"
+        );
+        assert!(
+            !engine.sessions[0].desired_running,
+            "a deliberate detach must not be undone by the auto-reopen sweep"
+        );
+        // ONE outcome for the whole agent, however many tabs it had.
+        assert_eq!(engine.pending_detachments.len(), 1);
+        assert_eq!(engine.pending_detachments[0].pending_ids.len(), 2);
+    }
+
+    /// The clean ending: the child exits on SIGTERM inside the grace, and the
+    /// keyed final that retires the busy says so.
+    #[test]
+    fn detaching_reports_a_clean_shutdown_when_the_child_exits() {
+        let (mut engine, _tmp, worktree) = detach_test_engine();
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        let super::DetachSessionOutcome::Started { key, .. } = engine.begin_detach_session("s1")
+        else {
+            panic!("a live agent detaches");
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let finals = loop {
+            let reaped = engine.reap_terminating_ptys();
+            if !reaped.detach_finals.is_empty() {
+                break reaped.detach_finals;
+            }
+            assert!(Instant::now() < deadline, "the detached agent never reaped");
+            sleep(Duration::from_millis(20));
+        };
+        assert_eq!(finals.len(), 1);
+        assert_eq!(finals[0].key, key);
+        assert_eq!(
+            finals[0].outcome,
+            crate::engine::Final::info(
+                "Agent \"s1-title\" shut down and is now detached. Resume it from its \
+                 row when you need it again."
+            )
+        );
+        assert!(engine.pending_detachments.is_empty());
+    }
+
+    /// The forced ending: the grace runs out with the child still there, and the
+    /// final says it was force-closed and quotes the wait it promised.
+    #[test]
+    fn detaching_reports_a_force_close_when_the_grace_runs_out() {
+        let (mut engine, _tmp, worktree) = detach_test_engine();
+        engine.config.shutdown_timeout_seconds = 7;
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+
+        let super::DetachSessionOutcome::Started { grace_seconds, .. } =
+            engine.begin_detach_session("s1")
+        else {
+            panic!("a live agent detaches");
+        };
+        assert_eq!(grace_seconds, 7);
+
+        expire_terminating_grace(&mut engine, 0, worktree.path());
+        let reaped = engine.reap_terminating_ptys();
+        assert_eq!(reaped.detach_finals.len(), 1);
+        assert_eq!(
+            reaped.detach_finals[0].outcome,
+            crate::engine::Final::warning(
+                "Agent \"s1-title\" did not exit within 7 seconds and was \
+                 force-closed; it is now detached."
+            ),
+            "the forced sentence quotes the wait the confirmation promised, not \
+             whatever config says now"
+        );
+    }
+
+    /// One agent, two tabs, one message: the final waits for the LAST tab, and a
+    /// single force-close anywhere in the agent makes the whole outcome forced.
+    #[test]
+    fn a_multi_tab_detach_emits_one_final_once_every_tab_is_reaped() {
+        let (mut engine, _tmp, worktree) = detach_test_engine();
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        engine
+            .agent_tabs
+            .insert(TabId::new("tab-2"), sample_tab("tab-2", "s1", "codex", 1));
+        engine
+            .providers
+            .insert(TabId::new("tab-2"), spawn_cat(worktree.path()));
+
+        assert!(matches!(
+            engine.begin_detach_session("s1"),
+            super::DetachSessionOutcome::Started { .. }
+        ));
+        // One tab is left alive past its deadline, so it is force-closed; the
+        // other reaps cleanly. Both endings land in the same pass here, which is
+        // exactly the case the barrier has to answer with ONE sentence.
+        expire_terminating_grace(&mut engine, 0, worktree.path());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let finals = loop {
+            let reaped = engine.reap_terminating_ptys();
+            if !reaped.detach_finals.is_empty() {
+                break reaped.detach_finals;
+            }
+            assert!(Instant::now() < deadline, "the detached agent never reaped");
+            sleep(Duration::from_millis(20));
+        };
+        assert_eq!(
+            finals.len(),
+            1,
+            "one detach is one message, never one per tab"
+        );
+        let crate::engine::Final::Message { text, tone, .. } = &finals[0].outcome else {
+            panic!("a detach always says what happened");
+        };
+        assert_eq!(tone, &crate::statusline::StatusTone::Warning);
+        assert!(
+            text.contains("force-closed"),
+            "one forced tab makes the agent's outcome forced: {text}"
         );
     }
 }

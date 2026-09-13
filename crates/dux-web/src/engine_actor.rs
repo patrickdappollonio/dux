@@ -2354,8 +2354,18 @@ impl EngineService {
         // delete also removes its worktree, dispatch that removal now, only after
         // the agent's process is actually gone (the existing
         // `WorktreeRemoveCompleted` path then drives its status).
-        for removal in engine.reap_terminating_ptys() {
+        let reaped = engine.reap_terminating_ptys();
+        for removal in reaped.removals {
             let _busy = engine.dispatch_deferred_worktree_removal(removal);
+        }
+        // A detach request's spinner is retired by what actually happened to the
+        // child, not by a timer: the reaper is the only place that knows whether
+        // the agent went on its own or had to be forced.
+        for outcome in reaped.detach_finals {
+            self.note_mutation();
+            for status in dux_core::wire::wire_statuses_from_reaction(&outcome.into_reaction()) {
+                let _ = self.status.send(status);
+            }
         }
 
         // Resume-fallback sweep (both detection windows), BEFORE the exit prune:
