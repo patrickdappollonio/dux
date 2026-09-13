@@ -2620,6 +2620,14 @@ pub struct Config {
     /// knob. This governs the plain TUI quit; once the TUI is flipped into server
     /// mode, that shutdown uses `[server].shutdown_timeout_seconds` instead (even
     /// though you started in the TUI).
+    ///
+    /// It also governs the per-agent DETACH grace on both surfaces, server mode
+    /// included: `Engine::begin_detach_session` reads it through
+    /// [`shutdown_grace`], so the wait quoted in the detach confirmation and the
+    /// wait the background reaper actually gives are this one number, whether
+    /// the request came from the terminal UI's palette or a browser's row menu.
+    /// The `[server]` key stays about quitting `dux server`, not about detaching
+    /// one agent while it runs.
     pub shutdown_timeout_seconds: u16,
     pub defaults: Defaults,
     #[serde(default)]

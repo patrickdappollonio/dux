@@ -328,7 +328,13 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # it. Set to 0 to skip the wait and force-kill immediately; values above 600\n\
                  # are clamped (the unit is SECONDS, not milliseconds). Press Ctrl-c again\n\
                  # during the wait to force an immediate exit.\n\
-                 # The web server has its own [server].shutdown_timeout_seconds.",
+                 #\n\
+                 # It is also how long detaching ONE agent waits: \"Detach agent\" in the\n\
+                 # browser's agent menu and the detach-agent palette command ask that agent\n\
+                 # to shut down, wait this many seconds, then force-close what is left. That\n\
+                 # applies in server mode too, and the confirmation quotes this number.\n\
+                 # The web server has its own [server].shutdown_timeout_seconds, which is\n\
+                 # about quitting the server rather than detaching one agent while it runs.",
             )),
             value_fn: |c| FieldValue::U16(c.shutdown_timeout_seconds),
         },
