@@ -1519,6 +1519,23 @@ impl PtyClient {
         self.has_output.load(Ordering::Acquire)
     }
 
+    /// Whether the child left any READABLE TEXT on screen: a printable,
+    /// non-whitespace character in any cell of the viewport or the scrollback.
+    ///
+    /// This is the question a resume that exited at once is judged by, so it
+    /// asks about the characters rather than the rows they took: a one-line "no
+    /// conversation to continue" is the provider speaking just as much as a
+    /// paragraph is, while a run that only cleared the screen and quit said
+    /// nothing at all. A poisoned lock answers `false`, which is the safe way
+    /// round: it starts a fresh session rather than sitting on words nobody can
+    /// read.
+    pub fn has_readable_output(&self) -> bool {
+        self.terminal
+            .lock()
+            .map(|t| t.has_readable_output())
+            .unwrap_or(false)
+    }
+
     /// Returns `true` if the terminal has only minimal output (no scrollback
     /// and at most `threshold` visible lines). Used to detect failed resume
     /// attempts that print a short error and exit.
@@ -2274,6 +2291,19 @@ impl TerminalState {
             }
         }
         seen_rows.len()
+    }
+
+    /// Whether the grid holds any readable text: a cell anywhere in the
+    /// viewport or the scrollback carrying a printable, non-whitespace
+    /// character. Escape sequences leave no such cell behind, and neither does
+    /// a screen the child only cleared and blanked.
+    fn has_readable_output(&self) -> bool {
+        let grid = self.term.grid();
+        (grid.topmost_line().0..=grid.bottommost_line().0).any(|line| {
+            grid[Line(line)]
+                .into_iter()
+                .any(|cell| !cell.c.is_whitespace() && !cell.c.is_control())
+        })
     }
 
     /// Returns `true` if the terminal contains only a small amount of output:
@@ -3637,6 +3667,65 @@ mod tests {
         assert_eq!(top.scrollback_total, 3);
         assert!(lines.iter().any(|line| line.contains("one")));
         assert!(lines.iter().any(|line| line.contains("two")));
+    }
+
+    /// "Did the provider say anything a human could read" is asked of the whole
+    /// grid, viewport and scrollback alike, and answered by the characters
+    /// rather than by how many rows they took.
+    #[test]
+    fn readable_output_is_decided_by_characters_not_rows() {
+        // Nothing written at all.
+        let terminal = TerminalState::with_scrollback(6, 20, 100);
+        assert!(
+            !terminal.has_readable_output(),
+            "a blank grid holds nothing to read"
+        );
+
+        // Escape sequences and whitespace only: bytes arrived, no words did.
+        let mut terminal = TerminalState::with_scrollback(6, 20, 100);
+        terminal.process(b"\x1b[?1049h\x1b[2J\x1b[H   \t\r\n  \r\n\x1b[?25l");
+        assert!(
+            !terminal.has_readable_output(),
+            "escape sequences and blanks are not readable text"
+        );
+
+        // One visible word is the whole bar.
+        let mut terminal = TerminalState::with_scrollback(6, 20, 100);
+        terminal.process(b"no\r\n");
+        assert!(
+            terminal.has_readable_output(),
+            "a single visible word means the provider spoke"
+        );
+
+        // A word that has scrolled out of the viewport is still on screen as far
+        // as this question goes: the scrollback is part of the grid.
+        let mut terminal = TerminalState::with_scrollback(2, 20, 100);
+        terminal.process(b"gone\r\n");
+        for _ in 0..8 {
+            terminal.process(b"\r\n");
+        }
+        assert!(
+            terminal.term.grid().history_size() > 0,
+            "the fixture must actually push the word into history"
+        );
+        assert!(
+            terminal.has_readable_output(),
+            "a word in the scrollback still counts"
+        );
+
+        // Wide and non-ASCII characters are text like any other.
+        let mut terminal = TerminalState::with_scrollback(6, 20, 100);
+        terminal.process("日本語".as_bytes());
+        assert!(
+            terminal.has_readable_output(),
+            "a wide character is readable text"
+        );
+        let mut terminal = TerminalState::with_scrollback(6, 20, 100);
+        terminal.process("¿qué?".as_bytes());
+        assert!(
+            terminal.has_readable_output(),
+            "a non-ASCII character is readable text"
+        );
     }
 
     #[test]
