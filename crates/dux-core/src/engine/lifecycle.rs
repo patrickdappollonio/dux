@@ -360,6 +360,13 @@ pub struct PendingDetach {
     /// the confirmation quoted rather than re-reading a config that may have
     /// changed while the child was being waited on.
     pub grace_seconds: u64,
+    /// Who the outcome is for, captured from `Engine::current_origin` when the
+    /// request came in. It must travel here rather than be re-read: the reaper
+    /// runs ticks later, with the origin long reset to `All`, and a final
+    /// broadcast to everybody would answer a question only one browser tab
+    /// asked. The busy this replaces was scoped the same way, so scoping the
+    /// final is what keeps the spinner and its answer on one screen.
+    pub scope: crate::statusline::StatusScope,
 }
 
 /// What [`Engine::begin_detach_session`] did, so a surface can raise the busy or
@@ -1030,6 +1037,7 @@ impl Engine {
             pending_ids,
             forced: false,
             grace_seconds,
+            scope: self.current_origin.clone(),
         });
         let busy = detach_busy_message(&label);
         DetachSessionOutcome::Started {
@@ -1253,10 +1261,13 @@ impl Engine {
                 } else {
                     crate::engine::Final::clear()
                 };
-                detach_finals.push(crate::engine::ResolvedFinal::new(
-                    detach_status_key(&detach.session_id),
-                    outcome,
-                ));
+                detach_finals.push(
+                    crate::engine::ResolvedFinal::new(
+                        detach_status_key(&detach.session_id),
+                        outcome,
+                    )
+                    .with_scope(detach.scope.clone()),
+                );
             }
             self.pending_detachments = still_pending;
         }
@@ -5218,6 +5229,47 @@ mod tests {
             "a running agent must not be told it is detached"
         );
         assert_eq!(finals[0].key, "detach-agent:s1");
+    }
+
+    /// The outcome is for whoever asked. A browser tab's detach raises a spinner
+    /// scoped to that connection, so its answer has to be scoped the same way or
+    /// the spinner and the sentence explaining it land on different screens.
+    #[test]
+    fn a_detach_outcome_is_addressed_to_whoever_asked_for_it() {
+        let (mut engine, _tmp, worktree) = detach_test_engine();
+        engine.current_origin = crate::statusline::StatusScope::Connection("conn-7".to_string());
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        assert!(matches!(
+            engine.begin_detach_session("s1"),
+            super::DetachSessionOutcome::Started { .. }
+        ));
+        // Reset the way the engine actor does once the command is processed, so
+        // the scope can only have survived by travelling on the request.
+        engine.current_origin = crate::statusline::StatusScope::All;
+
+        let finals = reap_until_detach_final(&mut engine, Duration::from_secs(5));
+        assert_eq!(
+            finals[0].scope,
+            crate::statusline::StatusScope::Connection("conn-7".to_string())
+        );
+    }
+
+    /// A detach the terminal UI started has no originating connection, so its
+    /// outcome stays a broadcast, exactly as its busy was.
+    #[test]
+    fn a_detach_with_no_originating_connection_stays_a_broadcast() {
+        let (mut engine, _tmp, worktree) = detach_test_engine();
+        engine
+            .providers
+            .insert(TabId::new("s1-slot"), spawn_cat(worktree.path()));
+        assert!(matches!(
+            engine.begin_detach_session("s1"),
+            super::DetachSessionOutcome::Started { .. }
+        ));
+        let finals = reap_until_detach_final(&mut engine, Duration::from_secs(5));
+        assert_eq!(finals[0].scope, crate::statusline::StatusScope::All);
     }
 
     /// Same rule for an agent that was deleted mid-wait: there is no row left to
