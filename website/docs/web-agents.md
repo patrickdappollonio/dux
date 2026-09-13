@@ -204,9 +204,14 @@ lists every running agent tab and companion terminal with its CPU, memory, and p
 expands any of them to show the child processes underneath, and stops them one by one or all
 at once. Every stop confirms first.
 
-**Stop everything** in that dialog is the exception to the shutdown wait described below: it
-ends every agent and terminal at once, with no grace period, because it is the button you
-reach for when the machine is already in trouble. Its confirmation says so.
+Everything the Task Manager stops, it stops **immediately**, with no shutdown wait: it is the
+surface you reach for when the machine is already in trouble. **Detach agent…** in the agent's
+`⋯` menu is the polite alternative, and waits for a clean shutdown before forcing anything.
+
+**Force stop** on a row ends that row at once. On an agent's first row that means the agent
+and every tab it is running; on an extra tab it closes the tab; on a companion terminal it
+destroys the terminal. **Force stop everything…** does the same to every agent and terminal
+in one go. Both confirmations say so before you commit.
 
 > [!WARNING]
 > Companion terminals, unlike agents, are **destroyed** when killed, not detached.
@@ -217,9 +222,9 @@ You do not have to be inside the agent's own CLI to end its session. **Detach ag
 the agent's `⋯` menu asks every process the agent is running to shut down, the same way
 closing dux does: a polite signal first, then a wait, then a force-close for anything still
 there. The agent stays in your list as **Detached** and you can resume it later; whatever it
-was doing at that moment is interrupted. The Task Manager's **Stop** on an agent row is the
-same action behind the same confirmation, and the terminal UI reaches it with the
-`detach-agent` palette command on the selected agent.
+was doing at that moment is interrupted. The terminal UI reaches the same action with the
+`detach-agent` palette command on the selected agent. The Task Manager's **Force stop** on an
+agent row ends the same processes without the wait, and says so in its own confirmation.
 
 The entry only appears while the agent has something running, and it always confirms first.
 The confirmation names the wait, which is the top-level `shutdown_timeout_seconds` in your

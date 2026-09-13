@@ -143,8 +143,8 @@ same process if it was running, same link. It simply becomes the tab the agent o
 > rather than closing it, in the same words on both surfaces: on the web the *Close tab*
 > entry is greyed out with the reason above it, and in the terminal UI the close key
 > answers with that note instead of a confirmation. Add another tab first, or detach the
-> agent to stop everything it is running (the Task Manager's **Stop** on the agent's row
-> does the same).
+> agent to stop everything it is running (the Task Manager's **Force stop** on the agent's
+> row does the same, without the shutdown wait).
 
 ### Closing a tab is one-way
 
