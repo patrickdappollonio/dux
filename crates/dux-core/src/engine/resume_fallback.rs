@@ -12,23 +12,20 @@ use crate::ids::{TabId, TabIdRef};
 use crate::model::{AgentSession, ProviderKind, SessionStatus};
 use crate::worker::{AgentLaunchKind, AgentLaunchRequest};
 
-/// Visible-line threshold below which a resumed provider's output counts as
-/// minimal, meaning no real conversation: a `--continue` that found nothing
-/// prints a short error and exits. Shared by both detection windows.
-pub const RESUME_MINIMAL_OUTPUT_LINES: usize = 5;
-
 /// What the resume-fallback sweep should do with one resume candidate, decided
 /// purely from its observable state, so both detection windows (`--continue`
 /// exits empty, and a resume hangs past its timeout) live in one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeFallbackDecision {
-    /// The resumed provider EXITED with only minimal output: the resume found no
-    /// prior conversation, so relaunch fresh (window a).
-    RetryExitedMinimal,
-    /// The resumed provider exited with real output, so it ran a conversation
-    /// that ended normally: drop the candidate and let the exit-prune path
-    /// detach it, never relaunch.
-    DropNonMinimalExit,
+    /// The resumed provider EXITED leaving NO READABLE TEXT on screen: it said
+    /// nothing, so there was nothing to resume and nothing to report. Relaunch
+    /// fresh (window a).
+    RetryExitedSilent,
+    /// The resumed provider exited having left READABLE TEXT on screen, so it
+    /// spoke: either it ran a conversation that ended, or it printed why it
+    /// would not continue. Drop the candidate and let the exit-prune path keep
+    /// the dormant tab with those words, never relaunch.
+    DropSpokenExit,
     /// The resumed provider is still running but produced no visible output
     /// past its `resume_wait_timeout_ms` window: hung, so relaunch fresh.
     RetryHungTimeout,
@@ -36,22 +33,28 @@ pub enum ResumeFallbackDecision {
     Wait,
 }
 
-/// The pure resume-fallback decision. `exited`, `minimal` and `has_output` are
+/// The pure resume-fallback decision. `exited`, `readable` and `has_output` are
 /// the provider's observable flags, `timeout_ms` is its configured
 /// `resume_wait_timeout_ms` (`None` or `0` disables the hung window) and
 /// `elapsed` is how long the resume has been running.
+///
+/// `readable` is whether the dying screen holds any printable, non-whitespace
+/// character. It is deliberately a question about the characters and not about
+/// how many rows they filled: a provider that says "no conversation found to
+/// continue" in one line has told the user something, and dux keeps that ending
+/// and repeats the words rather than silently starting over.
 pub(crate) fn resume_fallback_decision(
     exited: bool,
-    minimal: bool,
+    readable: bool,
     has_output: bool,
     timeout_ms: Option<u64>,
     elapsed: Duration,
 ) -> ResumeFallbackDecision {
     if exited {
-        return if minimal {
-            ResumeFallbackDecision::RetryExitedMinimal
+        return if readable {
+            ResumeFallbackDecision::DropSpokenExit
         } else {
-            ResumeFallbackDecision::DropNonMinimalExit
+            ResumeFallbackDecision::RetryExitedSilent
         };
     }
     match timeout_ms {
@@ -318,11 +321,11 @@ impl Engine {
     /// here, so continue-then-fresh behavior cannot drift between them.
     ///
     /// Each candidate is decided by the pure `resume_fallback_decision`:
-    /// - `RetryExitedMinimal` and `RetryHungTimeout` go to
+    /// - `RetryExitedSilent` and `RetryHungTimeout` go to
     ///   `retry_resume_fallback` with the window-appropriate status message,
     ///   collecting a `Retried` reaction. The retry tears down every tab-keyed
     ///   map itself, through `clear_tab_runtime`, so this loop names none.
-    /// - `DropNonMinimalExit` drops the candidate so the normal exit-prune path
+    /// - `DropSpokenExit` drops the candidate so the normal exit-prune path
     ///   detaches it.
     /// - `Wait` leaves it alone.
     ///
@@ -356,14 +359,14 @@ impl Engine {
                 crate::config::provider_config(&self.config, &provider).resume_wait_timeout_ms;
             let decision = resume_fallback_decision(
                 client.is_exited(),
-                client.has_minimal_output(RESUME_MINIMAL_OUTPUT_LINES),
+                client.has_readable_output(),
                 client.has_output(),
                 timeout_ms,
                 started_at.elapsed(),
             );
             let location = self.session_location_phrase(&session);
             let status_message = match decision {
-                ResumeFallbackDecision::RetryExitedMinimal => format!(
+                ResumeFallbackDecision::RetryExitedSilent => format!(
                     "No prior session to resume for agent \"{}\". Started a fresh {} session in {}.",
                     session.display_label(),
                     provider.as_str(),
@@ -375,9 +378,10 @@ impl Engine {
                     provider.as_str(),
                     location,
                 ),
-                ResumeFallbackDecision::DropNonMinimalExit => {
-                    // A real conversation ended: drop the candidate, let the
-                    // exit-prune path detach the agent normally.
+                ResumeFallbackDecision::DropSpokenExit => {
+                    // The provider left words on screen: drop the candidate and
+                    // let the exit-prune path detach the agent normally, keeping
+                    // the dormant tab and quoting what it said.
                     self.resume_fallback_candidates.remove(&tab_id);
                     continue;
                 }
@@ -387,8 +391,8 @@ impl Engine {
                 "resume fallback for agent \"{}\": {}",
                 session.display_label(),
                 match decision {
-                    ResumeFallbackDecision::RetryExitedMinimal =>
-                        "resume exited without output, retrying fresh",
+                    ResumeFallbackDecision::RetryExitedSilent =>
+                        "resume exited without saying anything, retrying fresh",
                     _ => "resume produced no visible output within timeout, retrying fresh",
                 }
             ));
@@ -515,23 +519,25 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn resume_that_exited_with_minimal_output_relaunches_fresh() {
-        // Window (a): `--continue` found no prior conversation, printed a short
-        // error, and exited. Minimal output after a resume launch => retry fresh.
+    fn resume_that_exited_saying_nothing_relaunches_fresh() {
+        // Window (a): the resume exited at once having left no readable text on
+        // screen, so there is nothing for the user to read and nothing that was
+        // resumed. Retry fresh.
         assert_eq!(
-            resume_fallback_decision(true, true, false, Some(3000), Duration::from_secs(1)),
-            D::RetryExitedMinimal,
+            resume_fallback_decision(true, false, false, Some(3000), Duration::from_secs(1)),
+            D::RetryExitedSilent,
         );
     }
 
     #[test]
-    fn resume_that_exited_with_real_output_is_dropped_not_retried() {
-        // A non-minimal exit means the resume actually ran a conversation that
-        // then ended; that is a normal exit, so drop the candidate and let the
-        // exit-prune path detach it (never a fresh relaunch).
+    fn resume_that_exited_having_said_something_is_dropped_not_retried() {
+        // Readable text on screen means the provider spoke, whether it ran a
+        // whole conversation or printed one line saying it would not continue.
+        // Either way the words are the answer: drop the candidate and let the
+        // exit-prune path keep the dormant tab and quote them.
         assert_eq!(
-            resume_fallback_decision(true, false, true, Some(3000), Duration::from_secs(1)),
-            D::DropNonMinimalExit,
+            resume_fallback_decision(true, true, true, Some(3000), Duration::from_secs(1)),
+            D::DropSpokenExit,
         );
     }
 
@@ -540,17 +546,17 @@ mod tests {
         // Window (b): still running, past `resume_wait_timeout_ms`, produced no
         // visible output => treat the resume as hung and retry fresh.
         assert_eq!(
-            resume_fallback_decision(false, true, false, Some(2000), Duration::from_millis(2500)),
+            resume_fallback_decision(false, false, false, Some(2000), Duration::from_millis(2500)),
             D::RetryHungTimeout,
         );
     }
 
-    /// End to end: a resume candidate whose provider exited with minimal output
-    /// is retried fresh by the sweep (candidate + provider gone, a launch now in
-    /// flight), so `dux serve` (which calls the same sweep) recovers instead of
-    /// showing "Agent exited".
+    /// End to end: a resume candidate whose provider exited without leaving a
+    /// readable character behind is retried fresh by the sweep (candidate +
+    /// provider gone, a launch now in flight), so `dux serve` (which calls the
+    /// same sweep) recovers instead of showing "Agent exited".
     #[test]
-    fn sweep_retries_a_minimal_exited_resume_candidate() {
+    fn sweep_retries_a_silent_exited_resume_candidate() {
         use crate::pty::PtyClient;
         use std::path::Path;
         use std::time::Instant;
@@ -563,10 +569,10 @@ mod tests {
             .expect("managed test session")
             .worktree_path = tmp.path().to_string_lossy().to_string();
         engine.sessions.push(session);
-        // A clean-exiting provider with minimal output (prints one short line).
+        // A provider that exits having said nothing readable at all.
         let client = PtyClient::spawn(
             "sh",
-            &["-c".to_string(), "echo x".to_string()],
+            &["-c".to_string(), "printf '\\033[2J'".to_string()],
             Path::new("."),
             10,
             40,
@@ -607,11 +613,18 @@ mod tests {
         );
     }
 
-    /// A resumed provider that exited after printing `rows` lines, in an engine
-    /// whose provider command cannot be spawned, so a fresh relaunch fails at
-    /// once instead of starting a real CLI on this machine. Returns once the
-    /// child has exited, which is the state the maintenance order below expects.
+    /// A resumed provider that exited after printing `rows` lines.
     fn engine_with_an_exited_resume(rows: &[&str]) -> (Engine, tempfile::TempDir) {
+        engine_with_an_exited_resume_printing(&(rows.join("\\n") + "\\n"))
+    }
+
+    /// A resumed provider that exited after `printf`-ing `payload` (a shell
+    /// single-quoted `printf` format, so escapes are written as they would be in
+    /// the script), in an engine whose provider command cannot be spawned, so a
+    /// fresh relaunch fails at once instead of starting a real CLI on this
+    /// machine. Returns once the child has exited, which is the state the
+    /// maintenance order below expects.
+    fn engine_with_an_exited_resume_printing(payload: &str) -> (Engine, tempfile::TempDir) {
         use crate::pty::PtyClient;
         use std::time::Instant;
 
@@ -631,7 +644,7 @@ mod tests {
             .worktree_path = tmp.path().to_string_lossy().to_string();
         engine.sessions.push(session);
 
-        let script = format!("printf '{}'; exit 1", rows.join("\\n") + "\\n");
+        let script = format!("printf '{payload}'; exit 1");
         let client = PtyClient::spawn_with_env(
             "sh",
             &["-c".to_string(), script],
@@ -657,18 +670,15 @@ mod tests {
         (engine, tmp)
     }
 
-    /// The real maintenance order, sweep then prune, for a refusal WORDIER than
-    /// the sweep's minimal-output threshold: the sweep leaves it alone and the
-    /// prune carries the provider's words out for the warning to quote.
+    /// The real maintenance order, sweep then prune, for the refusal the rule
+    /// exists for: two lines of plain English. The screen holds readable text,
+    /// so the sweep leaves it alone and the prune carries the provider's words
+    /// out for the warning to quote. Short is not the same as silent.
     #[test]
-    fn a_wordy_refusal_survives_the_sweep_and_reaches_the_warning() {
+    fn a_two_line_refusal_survives_the_sweep_and_reaches_the_warning() {
         use std::time::Instant;
 
         let (mut engine, _tmp) = engine_with_an_exited_resume(&[
-            "Resuming your conversation.",
-            "Looking for a session to continue.",
-            "Found session 9f2 for this directory.",
-            "That session cannot be continued here.",
             "Your most recent conversation is running in the background.",
             "Use `agents` to attach to it.",
         ]);
@@ -695,7 +705,7 @@ mod tests {
         let excerpt = agent
             .refused_resume_excerpt
             .as_ref()
-            .expect("a wordy refusal reaches the exit path");
+            .expect("a refusal with words in it reaches the exit path");
         let warning = crate::tab_verdict::refused_resume_warning(
             &agent.label,
             excerpt,
@@ -712,16 +722,18 @@ mod tests {
         );
     }
 
-    /// The same order for a SHORT refusal, which is the threshold this pair
-    /// exists to document: the sweep reads it as nothing to resume, starts a
-    /// fresh session with its own message, and the exit never reaches the prune,
-    /// so no refused-resume warning is raised at all.
+    /// The same order for a resume that left NOTHING READABLE behind: it wrote
+    /// only escape sequences and blanks before quitting. That is the line this
+    /// pair exists to document: the sweep reads it as nothing to resume, starts
+    /// a fresh session with its own message, and the exit never reaches the
+    /// prune, so no refused-resume warning is raised at all.
     #[test]
-    fn a_short_refusal_is_taken_as_nothing_to_resume_and_starts_fresh() {
-        let (mut engine, _tmp) = engine_with_an_exited_resume(&[
-            "Your most recent conversation is running in the background.",
-            "Use `agents` to attach to it.",
-        ]);
+    fn a_silent_refusal_is_taken_as_nothing_to_resume_and_starts_fresh() {
+        // Alternate screen on, clear, home, a couple of blank rows, cursor
+        // hidden: bytes on the wire, not one character a person could read.
+        let (mut engine, _tmp) = engine_with_an_exited_resume_printing(
+            "\\033[?1049h\\033[2J\\033[H   \\n \\n\\033[?25l",
+        );
 
         let reactions = engine.sweep_resume_fallbacks((24, 80));
         assert_eq!(reactions.len(), 1, "the sweep retried the resume fresh");
@@ -804,22 +816,22 @@ mod tests {
     fn a_healthy_resume_waits() {
         // Still running, within the timeout: leave it alone.
         assert_eq!(
-            resume_fallback_decision(false, true, false, Some(3000), Duration::from_millis(500)),
+            resume_fallback_decision(false, false, false, Some(3000), Duration::from_millis(500)),
             D::Wait,
         );
         // Still running, past the timeout but it HAS produced output: healthy.
         assert_eq!(
-            resume_fallback_decision(false, false, true, Some(2000), Duration::from_secs(5)),
+            resume_fallback_decision(false, true, true, Some(2000), Duration::from_secs(5)),
             D::Wait,
         );
         // Still running, no timeout configured: never treated as hung.
         assert_eq!(
-            resume_fallback_decision(false, true, false, None, Duration::from_secs(60)),
+            resume_fallback_decision(false, false, false, None, Duration::from_secs(60)),
             D::Wait,
         );
         // Still running, timeout of 0 disables the hung window.
         assert_eq!(
-            resume_fallback_decision(false, true, false, Some(0), Duration::from_secs(60)),
+            resume_fallback_decision(false, false, false, Some(0), Duration::from_secs(60)),
             D::Wait,
         );
     }

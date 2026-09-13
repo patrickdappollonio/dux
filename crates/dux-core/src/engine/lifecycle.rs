@@ -126,16 +126,14 @@ pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_typed_into:
 /// Provider-agnostic by construction: the excerpt is whatever the CLI left on
 /// screen, and nothing in dux reads it.
 ///
-/// REACHABLE ONLY FOR A REFUSAL LONGER THAN `RESUME_MINIMAL_OUTPUT_LINES`
-/// VISIBLE ROWS (the resume-fallback module's own threshold).
+/// REACHABLE ONLY FOR A REFUSAL THAT LEFT READABLE TEXT ON SCREEN.
 /// The resume-fallback sweep runs before the prune, and a resumed provider that
-/// exited with no scrollback and at most that many rows on screen is read as
-/// "there was nothing to resume": the sweep relaunches fresh and this exit never
-/// reaches the prune at all. So a one-line refusal becomes a fresh session with
-/// the sweep's own message, and only a wordier one arrives here to be quoted.
-/// That is the fallback's behavior, deliberately left alone: it recovers the
-/// common case without asking. Said out loud here, and in the docs, because a
-/// threshold nobody wrote down is a mystery the first time it bites.
+/// exited having printed nothing a human could read (a blank screen, or only
+/// escape sequences and whitespace) is read as "there was nothing to resume":
+/// the sweep relaunches fresh and this exit never reaches the prune at all. Any
+/// refusal with words in it, one line included, arrives here to be quoted. Said
+/// out loud here, and in the docs, because a rule nobody wrote down is a mystery
+/// the first time it bites.
 pub fn refused_resume_excerpt(
     was_resume: bool,
     exit_success: Option<bool>,
@@ -612,9 +610,9 @@ impl Engine {
             //
             // A resumed launch usually never reaches here, because the
             // resume-fallback sweep runs first and relaunches fresh. The one arm
-            // that falls through is `DropNonMinimalExit`, a resume that printed
-            // real output and then ended, and inside the rapid window with
-            // nobody typing it is judged here like any other run.
+            // that falls through is `DropSpokenExit`, a resume that left
+            // readable text on screen and then ended, and inside the rapid
+            // window with nobody typing it is judged here like any other run.
             let ended_badly = exit_success == Some(false)
                 || rapid_exit_ends_run_badly(run_duration, was_typed_into);
             // Read before `mark_tab_run_failed` below consumes the excerpt: the
@@ -1161,11 +1159,11 @@ mod tests {
     use crate::pty::PtyClient;
     use tempfile::TempDir;
 
-    /// A refusal long enough to REACH the exit path, as a `printf` argument.
+    /// A refusal that REACHES the exit path, as a `printf` argument.
     ///
-    /// The resume-fallback sweep runs first and relaunches fresh for anything at
-    /// or under its minimal-output threshold, so a two-line refusal never gets
-    /// here. Six rows is the shape the warning actually has to word; the last
+    /// Any refusal with readable words in it reaches here: the resume-fallback
+    /// sweep runs first and relaunches fresh only for a resume that said nothing
+    /// at all. Six rows is the shape the warning actually has to word; the last
     /// two are the ones it quotes.
     const REFUSAL_ROWS: &str = "Resuming your conversation.\\n\
                                 Looking for a session to continue.\\n\
