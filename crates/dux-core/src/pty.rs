@@ -1519,8 +1519,10 @@ impl PtyClient {
         self.has_output.load(Ordering::Acquire)
     }
 
-    /// Whether the child left any READABLE TEXT on screen: a printable,
-    /// non-whitespace character in any cell of the viewport or the scrollback.
+    /// Whether the child left any READABLE TEXT behind: a non-whitespace
+    /// character in any cell of the ACTIVE screen or of the scrollback behind
+    /// it. A child sitting in the alternate screen has no scrollback to look
+    /// at, which is the right answer there: what it painted is all there is.
     ///
     /// This is the question a resume that exited at once is judged by, so it
     /// asks about the characters rather than the rows they took: a one-line "no
@@ -2293,10 +2295,18 @@ impl TerminalState {
         seen_rows.len()
     }
 
-    /// Whether the grid holds any readable text: a cell anywhere in the
-    /// viewport or the scrollback carrying a printable, non-whitespace
-    /// character. Escape sequences leave no such cell behind, and neither does
-    /// a screen the child only cleared and blanked.
+    /// Whether the grid holds any readable text: a non-whitespace character in
+    /// a cell of the ACTIVE screen or of the scrollback behind it. An escape
+    /// sequence is consumed as it is parsed and reaches no cell at all, so a
+    /// child that only cleared the screen and quit answers `false`, as does one
+    /// that painted nothing but blanks.
+    ///
+    /// While the child holds the alternate screen there is no scrollback to
+    /// walk, and the active screen is the whole answer.
+    ///
+    /// The `is_control` guard is a cheap belt: the emulator does not put a
+    /// control character in a cell, and nothing here depends on that staying
+    /// true.
     fn has_readable_output(&self) -> bool {
         let grid = self.term.grid();
         (grid.topmost_line().0..=grid.bottommost_line().0).any(|line| {
