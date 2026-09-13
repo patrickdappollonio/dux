@@ -117,11 +117,17 @@ pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_typed_into:
 /// exit was not one.
 ///
 /// The shape a refusal has: the launch asked the provider to continue a previous
-/// conversation, the provider printed why it would not and quit at once with a
-/// non-zero status, and nobody had time to type into it. A resume that ran a
-/// real conversation and ended later is not this, however it exited, which is
-/// why the rapid-exit rule is asked here rather than re-derived: a session that
-/// lasted an hour is a session ending.
+/// conversation, the provider printed why it would not, it quit before anybody
+/// could type into it, and it was over in a blink. A resume that ran a real
+/// conversation and ended later is not this, which is why the rapid-exit rule is
+/// asked here rather than re-derived: a session that lasted an hour is a session
+/// ending.
+///
+/// The EXIT STATUS is deliberately no part of it. CLIs disagree about how to
+/// report "there is nothing here to continue": some exit non-zero, and some
+/// print a banner saying so and exit 0. Requiring a failure status threw away
+/// the words of every provider in the second group, which is the whole message
+/// the user needed.
 ///
 /// Provider-agnostic by construction: the excerpt is whatever the CLI left on
 /// screen, and nothing in dux reads it.
@@ -136,13 +142,11 @@ pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, was_typed_into:
 /// the first time it bites.
 pub fn refused_resume_excerpt(
     was_resume: bool,
-    exit_success: Option<bool>,
     run_duration: Option<Duration>,
     was_typed_into: bool,
     verdict_excerpt: &[String],
 ) -> Option<Vec<String>> {
     if !was_resume
-        || exit_success != Some(false)
         || !rapid_exit_ends_run_badly(run_duration, was_typed_into)
         || verdict_excerpt.iter().all(|line| line.trim().is_empty())
     {
@@ -624,7 +628,6 @@ impl Engine {
             // agent anybody can go and look at.
             let refused_resume = refused_resume_excerpt(
                 was_resume && owning.is_some(),
-                exit_success,
                 run_duration,
                 was_typed_into,
                 &verdict_excerpt,
@@ -1779,71 +1782,45 @@ mod tests {
         }
     }
 
-    /// The shape a refused resume has, and the three near misses that are NOT
-    /// one. The provider's words are the whole remedy, so the only question the
+    /// The shape a refused resume has, and the near misses that are NOT one.
+    /// The provider's words are the whole remedy, so the only question the
     /// engine answers is whether they are worth quoting as a refusal.
+    ///
+    /// The exit STATUS is deliberately not part of the shape. A CLI that finds
+    /// no conversation to continue is as likely to say so and exit 0 as it is to
+    /// exit non-zero, and a run that was over in a blink with words on screen
+    /// and nobody typing into it is a refusal either way.
     #[test]
-    fn only_a_brief_non_zero_resume_with_output_is_a_refused_resume() {
+    fn a_brief_resume_that_left_words_on_screen_is_a_refused_resume() {
         let words = vec!["it is already running".to_string()];
         assert_eq!(
-            refused_resume_excerpt(
-                true,
-                Some(false),
-                Some(Duration::from_millis(90)),
-                false,
-                &words
-            ),
+            refused_resume_excerpt(true, Some(Duration::from_millis(90)), false, &words),
             Some(words.clone()),
             "a resume that printed why it would not resume and quit at once"
         );
         assert_eq!(
-            refused_resume_excerpt(
-                false,
-                Some(false),
-                Some(Duration::from_millis(90)),
-                false,
-                &words
-            ),
+            refused_resume_excerpt(false, Some(Duration::from_millis(90)), false, &words),
             None,
             "a run that never asked to resume cannot have been refused one"
         );
         assert_eq!(
-            refused_resume_excerpt(
-                true,
-                Some(false),
-                Some(Duration::from_secs(600)),
-                false,
-                &words
-            ),
+            refused_resume_excerpt(true, Some(Duration::from_secs(600)), false, &words),
             None,
             "a resumed conversation that ran for ten minutes and ended is a session ending"
         );
         assert_eq!(
-            refused_resume_excerpt(
-                true,
-                Some(true),
-                Some(Duration::from_millis(90)),
-                false,
-                &words
-            ),
-            None,
-            "status 0 is not a refusal"
-        );
-        assert_eq!(
-            refused_resume_excerpt(
-                true,
-                Some(false),
-                Some(Duration::from_millis(90)),
-                true,
-                &words
-            ),
+            refused_resume_excerpt(true, Some(Duration::from_millis(90)), true, &words),
             None,
             "somebody typed into it, so it came up and they ended it"
         );
         assert_eq!(
+            refused_resume_excerpt(true, None, false, &words),
+            None,
+            "a run still in flight has not ended at all"
+        );
+        assert_eq!(
             refused_resume_excerpt(
                 true,
-                Some(false),
                 Some(Duration::from_millis(90)),
                 false,
                 &["   ".to_string()]
@@ -1873,9 +1850,9 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        // A provider refusing to continue, at the length that actually reaches
-        // this path: more rows than the fallback sweep's minimal-output
-        // threshold, which swallows a shorter refusal and relaunches fresh.
+        // A provider refusing to continue in words, which is what reaches this
+        // path: the fallback sweep relaunches fresh only for a resume that left
+        // nothing readable on screen, and this one left six rows of it.
         let client = PtyClient::spawn_with_env(
             "sh",
             &[
@@ -1926,6 +1903,81 @@ mod tests {
         assert!(
             !engine.resumed_tab_runs.contains(&TabId::new("s1-slot")),
             "the resume fact is torn down with the run it described"
+        );
+    }
+
+    /// The same refusal, reported by a provider that says its piece and exits
+    /// ZERO. The words reach the warning exactly as they do from a failing
+    /// status, and the card still gets `RapidCleanExit`, whose whole point is
+    /// that the status said nothing was wrong.
+    #[test]
+    fn a_refusal_that_exits_zero_reaches_the_warning_and_still_reads_as_a_rapid_clean_exit() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let client = PtyClient::spawn_with_env(
+            "sh",
+            &["-c".to_string(), format!("printf '{REFUSAL_ROWS}'; exit 0")],
+            worktree.path(),
+            24,
+            80,
+            1000,
+            &[],
+        )
+        .expect("spawn sh");
+        engine.providers.insert(TabId::new("s1-slot"), client);
+        engine.note_resume_launch(&TabId::new("s1-slot"));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if pruned.iter().any(|p| p.id == "s1-slot") {
+                break pruned;
+            }
+            assert!(Instant::now() < deadline, "agent provider never exited");
+            sleep(Duration::from_millis(50));
+        };
+        let agent = pruned
+            .iter()
+            .find(|p| p.id == "s1-slot")
+            .expect("the slot tab pruned");
+        assert_eq!(
+            agent.exit_success,
+            Some(true),
+            "the fixture must really exit 0, or this test proves nothing"
+        );
+        let excerpt = agent
+            .refused_resume_excerpt
+            .as_ref()
+            .expect("a clean status is no reason to throw the refusal away");
+        let warning = crate::tab_verdict::refused_resume_warning(
+            &agent.label,
+            excerpt,
+            "Open the agent to see the full output, or start a fresh session.",
+        )
+        .expect("the provider left words to quote");
+        assert!(
+            warning.contains("could not resume its previous session"),
+            "got {warning:?}"
+        );
+        assert_eq!(
+            engine
+                .tab_run_verdict("s1-slot")
+                .map(|verdict| verdict.ending.clone()),
+            Some(TabRunEnding::RapidCleanExit),
+            "the card's own reading of a clean exit in a blink is unchanged"
         );
     }
 
