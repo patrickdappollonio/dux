@@ -7014,6 +7014,78 @@ mod tests {
         );
     }
 
+    /// The whole round trip, spinner AND answer. Every other test here stops at
+    /// the busy, which is the half that cannot strand a user: a keyed busy with
+    /// no final behind it sits on screen until the timeout guesses at it, so the
+    /// final is the half worth pinning.
+    #[test]
+    fn a_detach_answers_its_own_spinner_with_a_final_on_the_same_key() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.providers.insert(
+            TabId::new("s1-slot"),
+            crate::pty::PtyClient::spawn_with_env(
+                "cat",
+                &[],
+                worktree.path(),
+                24,
+                80,
+                engine.config.ui.agent_scrollback_lines,
+                &[],
+            )
+            .expect("spawn provider"),
+        );
+        engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+
+        let busy = engine
+            .apply_wire(WireCommand::DetachAgent {
+                session_id: "s1".to_string(),
+                force: false,
+            })
+            .expect("apply detach")
+            .status
+            .expect("a status");
+        assert_eq!(busy.tone, "busy");
+        let key = busy.key.clone().expect("a keyed busy");
+
+        // The reaper's answer, turned into the wire statuses a browser is fed,
+        // through the same call the engine actor makes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let statuses = loop {
+            let finals = engine.reap_terminating_ptys().detach_finals;
+            if let Some(outcome) = finals.into_iter().next() {
+                break crate::wire::wire_statuses_from_reaction(&outcome.into_reaction());
+            }
+            assert!(std::time::Instant::now() < deadline, "no final arrived");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(
+            statuses[0].key.as_deref(),
+            Some(key.as_str()),
+            "the answer has to carry the spinner's key or it retires nothing"
+        );
+        assert_eq!(statuses[0].tone, "info");
+        assert_eq!(
+            statuses[0].message,
+            "Agent \"s1-title\" shut down and is now detached. Resume it from its \
+             row when you need it again."
+        );
+    }
+
     /// `force` is optional on the wire, and its absence is the polite path. An
     /// older client that never learned the flag must not get the panic button.
     #[test]

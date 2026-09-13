@@ -7071,6 +7071,82 @@ mod tests {
         );
     }
 
+    /// The reaper's detach outcome has to reach the status stream, which is what
+    /// a browser's toast is fed from. Everything before this seam is engine
+    /// state no tab can see; a final dropped here leaves the spinner up until
+    /// the busy timeout guesses at it, which is exactly the wrong answer for an
+    /// operation that really did finish.
+    #[tokio::test]
+    async fn a_detach_outcome_reaches_the_web_status_stream() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = bootstrap_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+        let mut statuses = handle.subscribe_status();
+
+        let worktree = tempfile::tempdir().expect("worktree");
+        let now = chrono::Utc::now();
+        engine.sessions.push(dux_core::model::AgentSession {
+            id: "s1".to_string(),
+            slot_tab_id: "s1-slot".to_string(),
+            provider: dux_core::model::ProviderKind::new("claude"),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: true,
+            auto_reopen_enabled: false,
+            status: dux_core::model::SessionStatus::Active,
+            created_at: now,
+            updated_at: now,
+            last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: "p1".to_string(),
+                    project_path: None,
+                    source_branch: "main".to_string(),
+                    branch_name: "feat".to_string(),
+                    initial_branch: "feat".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: worktree.path().to_string_lossy().to_string(),
+                },
+            ),
+        });
+        engine.providers.insert(
+            dux_core::ids::TabId::new("s1-slot"),
+            dux_core::pty::PtyClient::spawn("cat", &[], worktree.path(), 24, 80, 1000)
+                .expect("spawn provider"),
+        );
+
+        assert!(matches!(
+            engine.begin_detach_session("s1"),
+            dux_core::engine::DetachSessionOutcome::Started { .. }
+        ));
+
+        // The maintenance sweep is where the reaper runs on this surface.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let final_status = loop {
+            svc.run_maintenance(&mut engine);
+            match statuses.try_recv() {
+                Ok(status) => break status,
+                Err(_) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the detach outcome never reached the status stream"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        };
+        assert_eq!(final_status.key.as_deref(), Some("detach-agent:s1"));
+        assert_eq!(final_status.tone, "info");
+        assert!(
+            final_status
+                .message
+                .contains("shut down and is now detached"),
+            "msg: {}",
+            final_status.message
+        );
+    }
+
     #[test]
     fn the_auto_reopen_log_line_counts_the_agents() {
         assert_eq!(

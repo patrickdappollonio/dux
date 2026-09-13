@@ -94,7 +94,7 @@ impl App {
         self.drain_pending_diff();
         self.drain_worker_events();
         self.apply_resume_fallback_sweep();
-        self.dispatch_reaped_worktree_removals();
+        self.apply_reaped_terminations();
         let maintenance = self.apply_pruned_pty_events();
         self.note_companion_maintenance(&maintenance);
         self.refresh_resource_monitor_if_due();
@@ -323,7 +323,10 @@ impl App {
         }
     }
 
-    fn dispatch_reaped_worktree_removals(&mut self) {
+    /// Apply one reaper pass: dispatch the worktree removals that were waiting
+    /// on a dead process, and deliver the outcomes of completed detach requests
+    /// to the status line.
+    pub(crate) fn apply_reaped_terminations(&mut self) {
         let reaped = self.engine.reap_terminating_ptys();
         for removal in reaped.removals {
             self.mark_frame_dirty();
@@ -332,6 +335,10 @@ impl App {
         // A detach request's spinner is retired by what actually happened to the
         // child, not by a timer: the reaper is the only place that knows whether
         // the agent went on its own or had to be forced.
+        //
+        // A detach a BROWSER started lands on this line too, by design: while
+        // this process is serving, one agent stopping is a fact about the shared
+        // workspace, not about the tab that asked for it.
         for outcome in reaped.detach_finals {
             self.mark_frame_dirty();
             let routing = self.companion_routing();
@@ -3234,6 +3241,56 @@ mod tests {
             app.status.most_recent_tui().is_none(),
             "the spinner must be gone, not waiting on the busy timeout: {:?}",
             app.status.most_recent_tui()
+        );
+    }
+
+    /// The reaper's detach outcome has to travel the whole way to the status
+    /// line. Everything before this seam is engine state nobody sees; a final
+    /// the seam drops leaves a spinner up until the busy timeout guesses at it.
+    #[test]
+    fn a_detach_outcome_reaches_the_status_line() {
+        let worktree = tempdir().expect("worktree");
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = test_session(worktree.path());
+        let session_id = session.id.clone();
+        app.engine.sessions.push(session);
+        app.engine.providers.insert(
+            dux_core::ids::TabId::new(format!("{session_id}-slot")),
+            crate::pty::PtyClient::spawn("cat", &[], worktree.path(), 24, 80, 1000)
+                .expect("spawn provider"),
+        );
+
+        let dux_core::engine::DetachSessionOutcome::Started { busy, .. } =
+            app.engine.begin_detach_session(&session_id)
+        else {
+            panic!("a live agent detaches");
+        };
+        app.status.set(
+            std::time::Instant::now(),
+            Some(dux_core::engine::detach_status_key(&session_id)),
+            dux_core::statusline::StatusTone::Busy,
+            busy,
+        );
+        assert_eq!(
+            app.status.tone(),
+            dux_core::statusline::StatusTone::Busy,
+            "the spinner is up while the child is being waited out"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.status.tone() == dux_core::statusline::StatusTone::Busy {
+            app.apply_reaped_terminations();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the detach outcome never reached the status line"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            app.status.text().contains("shut down and is now detached"),
+            "the outcome replaces the spinner in words: {}",
+            app.status.text()
         );
     }
 }
