@@ -207,6 +207,27 @@ at once. Every stop confirms first.
 > [!WARNING]
 > Companion terminals, unlike agents, are **destroyed** when killed, not detached.
 
+### Detaching an agent
+
+You do not have to be inside the agent's own CLI to end its session. **Detach agent…** in
+the agent's `⋯` menu asks every process the agent is running to shut down, the same way
+closing dux does: a polite signal first, then a wait, then a force-close for anything still
+there. The agent stays in your list as **Detached** and you can resume it later; whatever it
+was doing at that moment is interrupted. The Task Manager's **Stop** on an agent row is the
+same action behind the same confirmation, and the terminal UI reaches it with the
+`detach-agent` palette command on the selected agent.
+
+The entry only appears while the agent has something running, and it always confirms first.
+The confirmation names the wait, which is the top-level `shutdown_timeout_seconds` in your
+`config.toml` (30 seconds by default, and not the same key as the one under `[server]`). dux
+then says which way it went: that the agent shut down and is detached, or that it did not
+exit in time and was force-closed.
+
+> [!CAUTION]
+> Detaching interrupts work in progress. A CLI part-way through an edit or a command is
+> given the shutdown grace to finish and then killed, so anything it had not written out is
+> lost. There is no undo; you can start the agent again, but not the run you stopped.
+
 **Delete** removes the agent from dux entirely. It is the one destructive per-agent action
 dux tints red, and it always confirms first. The confirmation includes an unchecked "also
 delete the git worktree" box, so by default your worktree survives a delete.

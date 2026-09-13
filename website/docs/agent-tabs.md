@@ -128,7 +128,9 @@ but stays in Projects, ready to reopen.
 ![A tab's menu open over the tab strip, offering Change provider and Close tab.](/screens/agent-tab-actions-menu.png)
 
 A separate **Detach agent** action stops every one of the agent's tabs at once and parks
-it in Projects. Deleting the agent takes every tab with it.
+it in Projects. Deleting the agent takes every tab with it. See
+[Detaching an agent](/docs/web-agents#detaching-an-agent) for what detaching does and how
+long it waits.
 
 ### Closing the first tab hands its place on
 

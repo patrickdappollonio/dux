@@ -138,6 +138,8 @@ That sort order is one setting shared by the terminal UI and the browser (activi
 
 Move focus between the panes with the keyboard, and resize them with keyboard or mouse. Collapse the sidebar or git pane when you want more room. Toggle the agent fullscreen when you want every key and every cell to belong to it. It's your layout.
 
+You can also end an agent's session from outside its own CLI. **Detach agent…** in the agent's `⋯` menu in the browser, and the `detach-agent` palette command on the selected agent in the terminal UI, ask everything the agent is running to shut down, wait the top-level `shutdown_timeout_seconds` from your config (30 seconds by default), and force-close whatever is still there. Both confirm first and name that wait. The agent stays in your list as detached and can be resumed later, but whatever it was in the middle of is interrupted.
+
 ### Bring Any CLI
 
 Any terminal command can be a provider. The four defaults (Claude, Codex, Copilot, and OpenCode) are pre-configured, but adding your own is a config-only change:
