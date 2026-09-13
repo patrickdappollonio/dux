@@ -204,6 +204,10 @@ lists every running agent tab and companion terminal with its CPU, memory, and p
 expands any of them to show the child processes underneath, and stops them one by one or all
 at once. Every stop confirms first.
 
+**Stop everything** in that dialog is the exception to the shutdown wait described below: it
+ends every agent and terminal at once, with no grace period, because it is the button you
+reach for when the machine is already in trouble. Its confirmation says so.
+
 > [!WARNING]
 > Companion terminals, unlike agents, are **destroyed** when killed, not detached.
 
@@ -219,9 +223,10 @@ same action behind the same confirmation, and the terminal UI reaches it with th
 
 The entry only appears while the agent has something running, and it always confirms first.
 The confirmation names the wait, which is the top-level `shutdown_timeout_seconds` in your
-`config.toml` (30 seconds by default, and not the same key as the one under `[server]`). dux
-then says which way it went: that the agent shut down and is detached, or that it did not
-exit in time and was force-closed.
+`config.toml` (30 seconds by default, and not the same key as the one under `[server]`), and
+says how many of the agent's tabs stop together when it has more than one running. dux then
+says which way it went: that the agent shut down and is detached, or that it did not exit in
+time and was force-closed.
 
 > [!CAUTION]
 > Detaching interrupts work in progress. A CLI part-way through an edit or a command is
