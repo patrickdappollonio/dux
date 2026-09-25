@@ -170,6 +170,9 @@ impl<'a> Checkbox<'a> {
 
 impl Widget for CheckboxLayout {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Never index past the buffer: a caller on a tiny screen can hand in a
+        // rect that reaches beyond it.
+        let area = area.intersection(buf.area);
         let clear_style = self
             .background
             .map(|background| Style::default().bg(background))

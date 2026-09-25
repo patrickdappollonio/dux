@@ -35,16 +35,16 @@ use std::cell::Cell;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 
-use super::App;
 use super::components::{
     BUTTON_HEIGHT, Button, ButtonKind, ButtonPressedTarget, ScrollViewRender, button_row,
     button_state_for, render_scroll_view, shared_button_width, wrap_styled_lines,
 };
 use super::modal::{ModalFamily, modal_spec};
 use super::render::centered_rect_exact;
+use super::{App, PromptState};
 use crate::keybindings::{Action, BindingScope};
 
 /// The width every Confirm dialog asks for, border included. Narrower only on
@@ -124,17 +124,36 @@ pub(crate) struct ConfirmLayout {
     pub(crate) act: Rect,
 }
 
+/// Which Confirm dialog a body scroll belongs to: the prompt variant that is
+/// open and the title it paints. A title alone is not an identity, since two
+/// dialogs may share one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConfirmOwner {
+    prompt: std::mem::Discriminant<PromptState>,
+    title: &'static str,
+}
+
+impl ConfirmOwner {
+    fn new(prompt: &PromptState, title: &'static str) -> Self {
+        Self {
+            prompt: std::mem::discriminant(prompt),
+            title,
+        }
+    }
+}
+
 /// The open Confirm dialog's body scroll: the offset the user has moved it to,
 /// and the extent the last frame painted.
 ///
-/// Kept per frame in [`super::OverlayMouseLayoutState`] rather than in each
-/// prompt, so no dialog carries a scroll field of its own. It follows the
-/// dialog on screen: a frame that paints a different dialog starts it at the
-/// top, and a frame that paints none forgets it.
+/// Kept in [`super::OverlayMouseLayoutState`] rather than in each prompt, so no
+/// dialog carries a scroll field of its own. It follows the dialog: input that
+/// replaces the open prompt with another kind forgets it at once (see
+/// [`App::forget_confirm_scroll_of_a_closed_dialog`]), a frame that paints a
+/// different dialog starts at the top, and a frame that paints none forgets it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ConfirmBodyScroll {
-    /// Which dialog (by title) the offset belongs to.
-    owner: Option<&'static str>,
+    /// Which dialog the offset belongs to.
+    owner: Option<ConfirmOwner>,
     offset: usize,
     viewport: ScrollViewRender,
     /// Whether the current frame painted a Confirm body. Read after the frame,
@@ -155,7 +174,7 @@ impl ConfirmBodyScroll {
     }
 
     /// The offset to paint `owner`'s body from.
-    fn offset_for(self, owner: &'static str) -> usize {
+    fn offset_for(self, owner: ConfirmOwner) -> usize {
         if self.owner == Some(owner) {
             self.offset
         } else {
@@ -164,7 +183,7 @@ impl ConfirmBodyScroll {
     }
 
     /// What `owner`'s body painted this frame.
-    fn painted(owner: &'static str, viewport: ScrollViewRender) -> Self {
+    fn painted(owner: ConfirmOwner, viewport: ScrollViewRender) -> Self {
         Self {
             owner: Some(owner),
             offset: viewport.offset,
@@ -196,6 +215,35 @@ pub(crate) fn confirm_inner_width(screen: Rect) -> u16 {
 
 fn confirm_width(screen: Rect) -> u16 {
     CONFIRM_DIALOG_WIDTH.min(screen.width.max(1))
+}
+
+/// Stack rows of the given heights down `area`, top first, each as tall as it
+/// asked for or as what is left of `area`, whichever is less.
+///
+/// The Confirm family's layout: the caller sizes the prose to give up rows
+/// first, so on a screen too short for even the controls and buttons the
+/// shortfall lands on whatever comes last, clipped inside `area`. No two rows
+/// ever overlap and none reaches past `area`, which a constraint solver asked
+/// for more than it has does not promise.
+pub(crate) fn stack_rows<const N: usize>(area: Rect, heights: [u16; N]) -> [Rect; N] {
+    let mut top = area.y;
+    heights.map(|height| {
+        let height = height.min(area.bottom().saturating_sub(top));
+        let row = Rect::new(area.x, top, area.width, height);
+        top = top.saturating_add(height);
+        row
+    })
+}
+
+/// `rect` clipped to `bounds`, or an empty rect at `bounds`' corner when none
+/// of it is inside: a control nobody can see publishes nothing to click.
+pub(crate) fn clip_to(rect: Rect, bounds: Rect) -> Rect {
+    let clipped = rect.intersection(bounds);
+    if clipped.is_empty() {
+        Rect::new(bounds.x, bounds.y, 0, 0)
+    } else {
+        clipped
+    }
 }
 
 impl App {
@@ -232,29 +280,30 @@ impl App {
         );
         let inner = self.open_modal_frame(frame, dialog.title, area).inner;
 
-        let [body, _, controls, _, buttons] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_rows),
-                Constraint::Length(controls_gap),
-                Constraint::Length(dialog.controls_height),
-                Constraint::Length(1),
-                Constraint::Length(BUTTON_HEIGHT),
-            ])
-            .areas(inner);
+        let [body, _, controls, _, buttons] = stack_rows(
+            inner,
+            [
+                body_rows,
+                controls_gap,
+                dialog.controls_height,
+                1,
+                BUTTON_HEIGHT,
+            ],
+        );
 
+        let owner = ConfirmOwner::new(&self.prompt, dialog.title);
         let scroll = self.overlay_layout.confirm_scroll.get();
         let viewport = render_scroll_view(
             frame,
             area,
             body,
             wrapped,
-            scroll.offset_for(dialog.title),
+            scroll.offset_for(owner),
             &self.theme,
         );
         self.overlay_layout
             .confirm_scroll
-            .set(ConfirmBodyScroll::painted(dialog.title, viewport));
+            .set(ConfirmBodyScroll::painted(owner, viewport));
 
         let [cancel, act] = self.render_confirm_buttons(
             frame,
@@ -283,8 +332,16 @@ impl App {
     ) -> [Rect; 2] {
         let mut labels = vec![cancel.label, act.label];
         labels.extend_from_slice(reserve_labels);
-        let rects = button_row::<2>(area, shared_button_width(&labels));
+        // Clipped to the row and the screen: a screen narrower or shorter than
+        // the pair gets the part that fits, and publishes only that, so a click
+        // can never land on a cell nobody can see.
+        let bounds = area.intersection(frame.area());
+        let rects =
+            button_row::<2>(area, shared_button_width(&labels)).map(|rect| clip_to(rect, bounds));
         for (button, rect) in [cancel, act].into_iter().zip(rects) {
+            if rect.is_empty() {
+                continue;
+            }
             Button::new(button.label)
                 .kind(button.kind)
                 .state(button_state_for(
@@ -306,6 +363,13 @@ impl App {
     /// dialogs scroll by, so it stays rebindable.
     pub(crate) fn scroll_confirm_body_for(&mut self, key: &KeyEvent) -> bool {
         if !self.confirm_body_scrollable() {
+            return false;
+        }
+        // The dialog's own keys win: a key the user bound to one of its
+        // actions keeps that meaning, and only a key that means nothing to the
+        // dialog scrolls. The startup conflict check reports a key bound both
+        // ways (`keybindings::conflict_scope`).
+        if self.bindings.lookup(key, BindingScope::Dialog).is_some() {
             return false;
         }
         let Some(action) = self.bindings.lookup(key, BindingScope::Help) else {
@@ -341,6 +405,21 @@ impl App {
         Some(false)
     }
 
+    /// Forget the body scroll once the dialog it belongs to is no longer the
+    /// open prompt. Run at every input transition that can replace the prompt,
+    /// so a dialog closed and opened again inside one batch of input, with no
+    /// frame drawn between, still opens at the top.
+    pub(crate) fn forget_confirm_scroll_of_a_closed_dialog(&self) {
+        let cell = &self.overlay_layout.confirm_scroll;
+        let still_open = cell
+            .get()
+            .owner
+            .is_some_and(|owner| owner.prompt == std::mem::discriminant(&self.prompt));
+        if !still_open {
+            cell.set(ConfirmBodyScroll::default());
+        }
+    }
+
     fn confirm_body_scrollable(&self) -> bool {
         modal_spec(&self.prompt).map(|spec| spec.family) == Some(ModalFamily::Confirm)
             && self.overlay_layout.confirm_scroll.get().scrollable()
@@ -368,6 +447,8 @@ mod tests {
     use super::super::modal::{ModalFamily, modal_spec};
     use super::super::test_support::{default_bindings, test_app};
     use super::super::*;
+    use super::{ConfirmBodyScroll, ConfirmOwner};
+    use crate::app::components::ScrollViewRender;
 
     /// The smallest terminal dux is expected to be usable in.
     const SMALL: (u16, u16) = (80, 24);
@@ -1009,5 +1090,267 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Bindings with `extra` keys added to `action`'s defaults, the way a user
+    /// writes them in `[keys]`.
+    fn bindings_with(action: &str, keys: &[&str]) -> crate::keybindings::RuntimeBindings {
+        let mut config = crate::config::KeysConfig::default();
+        config.bindings.insert(
+            action.to_string(),
+            keys.iter().map(|key| key.to_string()).collect(),
+        );
+        crate::keybindings::RuntimeBindings::from_keys_config(&config)
+    }
+
+    fn long_recreate_prompt() -> PromptState {
+        PromptState::ConfirmRecreateWorkingCopy {
+            session_id: "s1".to_string(),
+            worktree_path: std::path::PathBuf::from("/tmp/worktrees/repo/feat"),
+            branch_name: "feat".to_string(),
+            source_branch: "main".to_string(),
+            conversation_resumes: true,
+            running_providers: vec!["claude".to_string()],
+            focus: ConfirmFocus::Cancel,
+        }
+    }
+
+    /// A key the user bound to one of the dialog's own actions keeps meaning
+    /// that action while the body scrolls: `q` added to the close key closes a
+    /// scrolling dialog rather than scrolling it to the end, and `j` added to
+    /// the focus key moves focus rather than scrolling a row.
+    #[test]
+    fn a_dialog_key_the_user_bound_wins_over_scrolling_the_body() {
+        let tiny = (60, 14);
+        let mut app = test_app(bindings_with("close_overlay", &["esc", "q"]));
+        let buf = render_at(&mut app, long_recreate_prompt(), tiny);
+        let modal = app.overlay_layout.frame.get().expect("modal");
+        assert!(scroll_marker(&buf, modal).is_some(), "the body scrolls");
+        app.handle_key(key(KeyCode::Char('q'))).expect("key");
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "q is the close key here, so it closes: {:?}",
+            app.prompt
+        );
+
+        let mut app = test_app(bindings_with(
+            "toggle_selection",
+            &["h", "l", "left", "right", "tab", "shift-tab", "j"],
+        ));
+        render_at(&mut app, long_recreate_prompt(), tiny);
+        app.handle_key(key(KeyCode::Char('j'))).expect("key");
+        assert!(
+            matches!(
+                app.prompt,
+                PromptState::ConfirmRecreateWorkingCopy {
+                    focus: ConfirmFocus::Confirm,
+                    ..
+                }
+            ),
+            "j is a focus key here, so it moves focus: {:?}",
+            app.prompt
+        );
+    }
+
+    /// The error dialogs scroll the same way and yield the same way: `q` bound
+    /// to close closes a reload-failed dialog whose message scrolls.
+    #[test]
+    fn a_dialog_key_the_user_bound_wins_over_scrolling_an_error_dialog() {
+        let tiny = (60, 14);
+        let mut app = test_app(bindings_with("close_overlay", &["esc", "q"]));
+        let error = (1..=60)
+            .map(|n| format!("line {n} of a long validation error"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let buf = render_at(
+            &mut app,
+            PromptState::ConfigReloadFailed {
+                error,
+                recover_old_config: false,
+                focus: ConfigReloadFailedFocus::Close,
+                scroll: 0,
+            },
+            tiny,
+        );
+        let modal = app.overlay_layout.frame.get().expect("modal");
+        assert!(scroll_marker(&buf, modal).is_some(), "the message scrolls");
+        app.handle_key(key(KeyCode::Char('q'))).expect("key");
+        assert!(
+            !matches!(app.prompt, PromptState::ConfigReloadFailed { .. }),
+            "q is the close key here, so it closes: {:?}",
+            app.prompt
+        );
+    }
+
+    /// Scrolled to the end, closed and opened again in one batch of input with
+    /// no frame drawn between: the reopened dialog starts at the top.
+    #[test]
+    fn a_scroll_offset_is_forgotten_when_the_dialog_closes_without_a_draw() {
+        let tiny = (60, 14);
+        let mut app = test_app(default_bindings());
+        let top = render_at(&mut app, long_recreate_prompt(), tiny);
+        let modal = app.overlay_layout.frame.get().expect("modal");
+        let first_row = row_text(&top, modal.y + 1, modal.x + 1, modal.right() - 1);
+
+        app.handle_key(key(KeyCode::End))
+            .expect("scroll to the end");
+        app.handle_key(key(KeyCode::Esc)).expect("close");
+        assert!(matches!(app.prompt, PromptState::None));
+        let reopened = render_at(&mut app, long_recreate_prompt(), tiny);
+        assert_eq!(
+            row_text(&reopened, modal.y + 1, modal.x + 1, modal.right() - 1),
+            first_row,
+            "{}",
+            screen(&reopened)
+        );
+    }
+
+    /// A different dialog that happens to share a title never inherits
+    /// another's offset: the offset is keyed by which dialog it is.
+    #[test]
+    fn a_scroll_offset_belongs_to_the_dialog_not_its_title() {
+        let (first, second) = (
+            ConfirmBodyScroll::painted(
+                ConfirmOwner::new(&PromptState::None, "Same"),
+                ScrollViewRender {
+                    offset: 5,
+                    viewport: 3,
+                    total: 20,
+                },
+            ),
+            ConfirmOwner::new(
+                &PromptState::ConfirmQuit {
+                    agent_count: 1,
+                    terminal_count: 0,
+                    focus: ConfirmFocus::Cancel,
+                },
+                "Same",
+            ),
+        );
+        assert_eq!(first.offset_for(second), 0);
+    }
+
+    /// The checkbox rects and button rects a Confirm dialog published.
+    fn published_controls(layout: &OverlayMouseLayout) -> Vec<Rect> {
+        use OverlayMouseLayout as L;
+        let mut rects: Vec<Rect> = confirm_buttons(layout).into_iter().flatten().collect();
+        match layout {
+            L::ConfirmDeleteAgent {
+                checkbox,
+                branch_checkbox,
+                ..
+            } => rects.extend(checkbox.iter().chain(branch_checkbox).map(|c| c.rect)),
+            L::ConfirmDeleteWorktree { checkbox, .. }
+            | L::ConfirmNonDefaultBranch { checkbox, .. } => {
+                rects.extend(checkbox.iter().map(|c| c.rect));
+            }
+            L::ConfigReloadFailed { checkbox, .. } => rects.push(checkbox.rect),
+            _ => {}
+        }
+        rects
+    }
+
+    /// No Confirm dialog panics on a tiny screen, and whatever it publishes
+    /// stays on the screen: every checkbox and button is clipped to the frame
+    /// rather than drawn past the buffer's edge.
+    #[test]
+    fn every_confirm_dialog_survives_a_tiny_screen() {
+        let mut app = test_app(default_bindings());
+        let mut sizes: Vec<(u16, u16)> = (1..=20)
+            .flat_map(|width| (1..=12).map(move |height| (width, height)))
+            .collect();
+        sizes.extend([(45, 2), (30, 3), (20, 6), (35, 12)]);
+        for (name, prompt) in confirm_dialogs(&app) {
+            for &(width, height) in &sizes {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    render_at(&mut app, prompt.clone(), (width, height));
+                }));
+                assert!(outcome.is_ok(), "{name} panicked at {width}x{height}");
+                let screen = Rect::new(0, 0, width, height);
+                for rect in published_controls(&app.overlay_layout.active) {
+                    assert_eq!(
+                        rect.intersection(screen),
+                        rect,
+                        "{name} at {width}x{height} published {rect:?} past the screen"
+                    );
+                }
+            }
+        }
+    }
+
+    /// On a short screen the prose gives up rows first. Below the dialog's
+    /// minimum everything is clipped inside the frame: no published control
+    /// reaches past the dialog's border and no two of them overlap.
+    #[test]
+    fn a_short_screen_clips_the_body_first_and_never_overlaps_the_controls() {
+        let mut app = test_app(default_bindings());
+        let mut failures = Vec::new();
+        for (name, prompt) in confirm_dialogs(&app) {
+            for height in 6..=10 {
+                let buf = render_at(&mut app, prompt.clone(), (80, height));
+                let modal = app.overlay_layout.frame.get().expect("modal");
+                let inner = Rect::new(
+                    modal.x + 1,
+                    modal.y + 1,
+                    modal.width.saturating_sub(2),
+                    modal.height.saturating_sub(2),
+                );
+                let rects: Vec<Rect> = published_controls(&app.overlay_layout.active)
+                    .into_iter()
+                    .filter(|rect| rect.area() > 0)
+                    .collect();
+                for rect in &rects {
+                    if rect.intersection(inner) != *rect {
+                        failures.push(format!(
+                            "{name} at 80x{height}: {rect:?} reaches past the frame {modal:?}\n{}",
+                            screen(&buf)
+                        ));
+                    }
+                }
+                for (i, a) in rects.iter().enumerate() {
+                    for b in &rects[i + 1..] {
+                        if a.intersects(*b) {
+                            failures.push(format!(
+                                "{name} at 80x{height}: {a:?} overlaps {b:?}\n{}",
+                                screen(&buf)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    }
+
+    /// A checkbox dialog on a screen just tall enough for its controls keeps
+    /// the blank row between its checkbox and its buttons and shows both
+    /// buttons whole: the prose scrolls in the one row left to it.
+    #[test]
+    fn a_checkbox_dialog_keeps_its_spacer_and_whole_buttons_at_its_minimum() {
+        let mut app = test_app(default_bindings());
+        let prompt = every_prompt(&app)
+            .into_iter()
+            .find(|(name, _)| *name == "ConfirmDeleteWorktree")
+            .expect("fixture")
+            .1;
+        // Border, one row of prose, gap, one-row checkbox, spacer, buttons,
+        // border.
+        let buf = render_at(&mut app, prompt, (80, 10));
+        let layout = app.overlay_layout.active;
+        let OverlayMouseLayout::ConfirmDeleteWorktree {
+            cancel_button,
+            checkbox: Some(checkbox),
+            ..
+        } = layout
+        else {
+            panic!("a delete-worktree layout with its checkbox: {layout:?}");
+        };
+        assert_eq!(cancel_button.height, 3, "{}", screen(&buf));
+        assert_eq!(
+            cancel_button.y,
+            checkbox.rect.bottom() + 1,
+            "one blank row between the checkbox and the buttons:\n{}",
+            screen(&buf)
+        );
     }
 }

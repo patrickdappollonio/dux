@@ -5469,6 +5469,14 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let result = self.dispatch_prompt_key(key);
+        // A key that closed or replaced a Confirm dialog takes its body scroll
+        // with it, before any frame is drawn.
+        self.forget_confirm_scroll_of_a_closed_dialog();
+        result
+    }
+
+    fn dispatch_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
         // Any keystroke cancels a held mouse press, preventing its release from
         // firing an action after the user has switched to the keyboard.
         self.pressed_button = None;
@@ -7489,6 +7497,12 @@ impl App {
     /// how a user learns something is broken, so every line has to be reachable.
     /// The vocabulary is the Help scope's, so it stays rebindable.
     pub(crate) fn scroll_error_dialog_for(&mut self, key: &KeyEvent) -> bool {
+        // The dialog's own keys win, exactly as in a scrolling Confirm body: a
+        // key bound to one of its actions keeps that meaning, and the startup
+        // conflict check reports a key bound both ways.
+        if self.bindings.lookup(key, BindingScope::Dialog).is_some() {
+            return false;
+        }
         let Some(action) = self.bindings.lookup(key, BindingScope::Help) else {
             return false;
         };
@@ -8914,6 +8928,14 @@ impl App {
     }
 
     fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let exit = self.dispatch_prompt_mouse(mouse);
+        // A click that closed or replaced a Confirm dialog takes its body
+        // scroll with it, before any frame is drawn.
+        self.forget_confirm_scroll_of_a_closed_dialog();
+        exit
+    }
+
+    fn dispatch_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
         if let Some(result) = self.handle_first_load_prompt_mouse(&mouse) {
             return result;
         }

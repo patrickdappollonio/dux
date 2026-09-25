@@ -12,7 +12,9 @@ use super::components::{
     render_scroll_marker, shared_button_width, wrap_styled_lines,
 };
 use super::components::{PickerList, render_scroll_indicator};
-use super::confirm_dialog::{ConfirmButton, ConfirmDialog, confirm_inner_width};
+use super::confirm_dialog::{
+    ConfirmButton, ConfirmDialog, clip_to, confirm_inner_width, stack_rows,
+};
 use super::pty_ownership::PtyTakeoverCard;
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
@@ -1300,35 +1302,43 @@ impl App {
         let hint_height = u16::from(hint.is_some());
         let total_height = checkbox_height.saturating_add(hint_height);
 
-        layout.render(
+        // Everything is clipped to the area it was given and to the screen: a
+        // checkbox taller than the rows left for it on a short screen draws
+        // the part that fits, never past the buffer, and publishes only that.
+        let bounds = area.intersection(frame.area());
+        let checkbox_rect = clip_to(
             Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
                 height: checkbox_height,
+                ..area
             },
-            frame.buffer_mut(),
+            bounds,
         );
+        if !checkbox_rect.is_empty() {
+            layout.render(checkbox_rect, frame.buffer_mut());
+        }
 
         if let Some(hint_line) = hint {
-            Paragraph::new(hint_line).render(
+            let hint_rect = clip_to(
                 Rect {
-                    x: area.x,
                     y: area.y.saturating_add(checkbox_height),
-                    width: area.width,
                     height: 1,
+                    ..area
                 },
-                frame.buffer_mut(),
+                bounds,
             );
+            if !hint_rect.is_empty() {
+                Paragraph::new(hint_line).render(hint_rect, frame.buffer_mut());
+            }
         }
 
         (
-            Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: total_height,
-            },
+            clip_to(
+                Rect {
+                    height: total_height,
+                    ..area
+                },
+                bounds,
+            ),
             total_height,
         )
     }
@@ -7105,15 +7115,8 @@ impl App {
 
         // The Confirm frame's spacing: a blank row above the checkbox and one
         // below it, so it never sits flush against a button.
-        let [_, checkbox_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(checkbox_height),
-                Constraint::Length(1),
-                Constraint::Length(BUTTON_HEIGHT),
-            ])
-            .areas(dialog.rest);
+        let [_, checkbox_area, _, buttons_area] =
+            stack_rows(dialog.rest, [1, checkbox_height, 1, BUTTON_HEIGHT]);
 
         let (checkbox_rect, _) = self.render_overlay_checkbox(
             frame,
@@ -9589,13 +9592,8 @@ impl App {
                 reserve_labels: &[],
             },
         );
-        let [checkbox_area, branch_checkbox_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(checkbox_height),
-                Constraint::Length(branch_checkbox_height),
-            ])
-            .areas(layout.controls);
+        let [checkbox_area, branch_checkbox_area] =
+            stack_rows(layout.controls, [checkbox_height, branch_checkbox_height]);
 
         let checkbox_rect = if offers_checkbox {
             let checkbox_state = if *focus == DeleteAgentFocus::WorktreeCheckbox {

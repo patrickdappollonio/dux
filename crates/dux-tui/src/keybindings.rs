@@ -2071,8 +2071,11 @@ fn resolve_keys(
 /// the scope the user can see, not whichever was declared first.
 ///
 /// The project chooser is such a ladder: its handler asks `ProjectChooser` and
-/// then `Palette` (`app::input`). Add a rule here whenever a handler grows
-/// another fallback, or the shadowing goes unreported.
+/// then `Palette` (`app::input`). So is a dialog whose body scrolls (a Confirm
+/// dialog too tall for the screen, an error dialog's message): its own
+/// `Dialog` keys win and the `Help` scope's scroll keys are the fallback, so a
+/// key bound in both reports under `Dialog`. Add a rule here whenever a handler
+/// grows another fallback, or the shadowing goes unreported.
 fn conflict_scope(a: BindingScope, b: BindingScope) -> Option<BindingScope> {
     if a == b {
         return Some(a);
@@ -2081,6 +2084,9 @@ fn conflict_scope(a: BindingScope, b: BindingScope) -> Option<BindingScope> {
         (BindingScope::ProjectChooser, BindingScope::Palette)
         | (BindingScope::Palette, BindingScope::ProjectChooser) => {
             Some(BindingScope::ProjectChooser)
+        }
+        (BindingScope::Dialog, BindingScope::Help) | (BindingScope::Help, BindingScope::Dialog) => {
+            Some(BindingScope::Dialog)
         }
         _ => None,
     }
@@ -3580,6 +3586,28 @@ mod tests {
         assert!(
             !bad,
             "plain 'd' and 'ctrl-d' should not conflict: {conflicts:?}"
+        );
+    }
+
+    /// A dialog whose body scrolls asks its own Dialog scope first and falls
+    /// back to the Help scope's scroll keys, so a key bound in both is a
+    /// collision the user must hear about at startup: the dialog's action wins
+    /// and the scroll it also names is silently lost.
+    #[test]
+    fn detect_conflicts_reports_a_dialog_key_that_is_also_a_scroll_key() {
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings.insert(
+            "close_overlay".to_string(),
+            vec!["esc".to_string(), "q".to_string()],
+        );
+        let conflicts = detect_conflicts(&keys);
+        assert!(
+            conflicts.iter().any(|c| c.key_label == "q"
+                && c.scope == BindingScope::Dialog
+                && [c.action_a, c.action_b].contains(&"close_overlay")
+                && [c.action_a, c.action_b].contains(&"scroll_to_bottom")),
+            "expected close_overlay and scroll_to_bottom to collide on q in the \
+             dialog scope, got: {conflicts:?}"
         );
     }
 
