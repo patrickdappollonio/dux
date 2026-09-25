@@ -13,6 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use super::centered::centered_x;
+use super::ellipsis::ellipsize_end;
+use super::wrap_lines::display_width;
 use crate::theme::Theme;
 
 /// Standard minimum button width used across modal dialogs. Longer labels grow
@@ -20,11 +22,11 @@ use crate::theme::Theme;
 pub(crate) const MIN_BUTTON_WIDTH: u16 = 16;
 
 /// Width that fits `label` between two rounded borders with one column of
-/// padding on each side, never narrower than [`MIN_BUTTON_WIDTH`]. Counted in
-/// chars, not UTF-8 bytes.
+/// padding on each side, never narrower than [`MIN_BUTTON_WIDTH`]. Measured in
+/// display columns, the unit the label is drawn in.
 pub(crate) fn button_width_for(label: &str) -> u16 {
-    let label_chars = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-    MIN_BUTTON_WIDTH.max(label_chars.saturating_add(4))
+    let label_width = u16::try_from(display_width(label)).unwrap_or(u16::MAX);
+    MIN_BUTTON_WIDTH.max(label_width.saturating_add(4))
 }
 
 /// Largest [`button_width_for`] across `labels`, so buttons sharing a row keep
@@ -51,8 +53,8 @@ pub(crate) const BUTTON_GAP: u16 = 2;
 /// [`BUTTON_HEIGHT`] rows tall from the top of `area`. Size `width` with
 /// [`shared_button_width`] so every button in the row is the same width.
 ///
-/// A row wider than `area` starts at its left edge; the caller sizes its
-/// dialog so that does not happen.
+/// A row wider than `area` starts at its left edge and runs past it; the
+/// caller clips each rect to what it can show (the Confirm frame does).
 pub(crate) fn button_row<const N: usize>(area: Rect, width: u16) -> [Rect; N] {
     let count = u16::try_from(N).unwrap_or(u16::MAX);
     let total = width
@@ -265,15 +267,17 @@ impl<'a> Button<'a> {
         block.render(area, frame.buffer_mut());
         // Centred through the shared helper, not `Alignment::Center`, so the odd
         // column of slack falls on the right like every other centred thing in
-        // the app. Measured in chars, the unit `button_width_for` sizes the
-        // button in.
-        let label_w = u16::try_from(self.label.chars().count()).unwrap_or(u16::MAX);
+        // the app. Measured in display columns, the unit `button_width_for`
+        // sizes the button in; a button squeezed narrower than its label (a
+        // clipped row on a narrow screen) cuts it with the shared ellipsis.
+        let label = ellipsize_end(self.label, usize::from(inner.width));
+        let label_w = u16::try_from(display_width(&label)).unwrap_or(u16::MAX);
         let label_area = Rect {
             x: centered_x(inner, label_w),
             width: label_w.min(inner.width),
             ..inner
         };
-        Paragraph::new(Line::from(Span::styled(self.label, label_style)))
+        Paragraph::new(Line::from(Span::styled(label, label_style)))
             .alignment(Alignment::Left)
             .render(label_area, frame.buffer_mut());
     }
@@ -338,6 +342,32 @@ mod tests {
         // CJK character "世" is 3 UTF-8 bytes but 1 visible char.
         // Helper must measure by visible width, not byte length.
         assert_eq!(button_width_for("世界"), MIN_BUTTON_WIDTH);
+    }
+
+    /// A label is measured in the columns it is drawn in: nine wide glyphs are
+    /// eighteen columns, so the button is twenty-two wide, not thirteen chars'
+    /// worth clamped up to the minimum.
+    #[test]
+    fn button_width_for_counts_display_columns() {
+        assert_eq!(button_width_for("ワークツリーを削除"), 22);
+    }
+
+    /// A button squeezed narrower than its label (a clipped row on a narrow
+    /// screen) cuts the label with the shared ellipsis inside its ring.
+    #[test]
+    fn a_squeezed_button_marks_its_cut_label() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(10, 3)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                Button::new("Delete worktree").render(frame, frame.area(), &Theme::default_dark());
+            })
+            .expect("render frame");
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..10).map(|x| buffer[(x, 1u16)].symbol()).collect();
+        assert_eq!(row, "│Delete …│");
     }
 
     #[test]
