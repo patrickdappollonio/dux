@@ -265,12 +265,16 @@ worktree, which is handy when you want a second agent to review the work with no
 first one's leftovers. The copy is the pull request as GitHub shows it, and the message
 that confirms it says where the original branch is checked out. The new agent is linked
 to the pull request, so its status pill follows it, and a push from it goes to its own
-branch, never to the pull request's.
+branch, never to the pull request's. If the link cannot be made, the confirmation says so
+as a warning, and you can attach the pull request to the agent yourself.
 
 > [!WARNING]
-> Commits you have not pushed yet are not in the copy. When the busy branch has commits
-> the copy lacks, the confirmation leads with how many, as a warning. Push first if the
-> reviewer should see them.
+> Commits you have not pushed yet are not in the copy. When the copy is simply behind the
+> busy branch, the confirmation leads with how many commits it lacks, as a warning. Push
+> first if the reviewer should see them. When the two have gone separate ways instead (a
+> pull request that was rebased or force-pushed, or one from a fork whose branch happens to
+> share a name with yours, such as `main`), there is no count and no warning, because the
+> copy is not an older version of the busy branch and nothing in it is simply missing.
 
 A name you typed yourself that is checked out elsewhere, and is not the pull request's
 branch, is refused with the place it is checked out, so you can pick another.

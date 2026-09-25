@@ -83,9 +83,10 @@ struct ManagedCreatePlan {
     title: Option<String>,
     launch_with_resume: bool,
     pending_copy: Option<PendingCopy>,
-    /// The final is a warning rather than an info: it says something the user
-    /// must act on (a fresh copy that lacks commits the busy branch has).
-    status_warns: bool,
+    /// A warning sentence that leads the final, ahead of the success line, and
+    /// makes it a warning rather than an info: something the user must act on
+    /// (a fresh copy that lacks commits the busy branch has).
+    status_lead: Option<crate::status_text::StatusText>,
     /// The pull request to pin the agent to once it is committed; see
     /// [`crate::worker::PullRequestPin`].
     pull_request_pin: Option<Box<crate::worker::PullRequestPin>>,
@@ -135,7 +136,7 @@ impl FreshCopy {
                 n("git worktree prune"),
                 " frees it."
             ]
-        } else if self.holder.is_main {
+        } else if self.holder.is_project_folder {
             crate::status_text![" is checked out in the project folder ", q(label), "."]
         } else {
             crate::status_text![" is checked out at ", q(label), "."]
@@ -472,7 +473,7 @@ impl CreatePlanContext<'_> {
             title,
             launch_with_resume: false,
             pending_copy,
-            status_warns: false,
+            status_lead: None,
             pull_request_pin: None,
             branch_provenance: if attach_existing {
                 BranchProvenance::AttachedExisting
@@ -509,7 +510,7 @@ impl CreatePlanContext<'_> {
             Ok(None) => return BusyBranchCheck::Free,
             Err(err) => {
                 logger::error(&format!(
-                    "could not check whether branch \"{resolved_name}\" is checked out in {}: {err}",
+                    "could not check whether branch \"{resolved_name}\" is checked out in {}: {err:#}",
                     project.path
                 ));
                 return BusyBranchCheck::Free;
@@ -530,15 +531,7 @@ impl CreatePlanContext<'_> {
         }
         let free = (1..=REVIEW_NAME_LIMIT)
             .map(|n| review_name(resolved_name, n))
-            .find(|candidate| {
-                git::branch_exists(repo_path, candidate).is_none()
-                    && std::fs::symlink_metadata(git::managed_worktree_path(
-                        &self.paths.worktrees_root,
-                        &project.name,
-                        candidate,
-                    ))
-                    .is_err()
-            });
+            .find(|candidate| self.review_name_is_free(project, repo_path, candidate));
         let Some(new_branch) = free else {
             self.send_failure(crate::status_text![
                 "Branch ",
@@ -564,68 +557,123 @@ impl CreatePlanContext<'_> {
         })
     }
 
-    /// Say what a fresh copy is, once its worktree exists. Returns the success
-    /// line and whether the final is a warning.
+    /// Whether a fresh copy can be made on branch `candidate`: no branch has
+    /// the name, locally or on `origin`; no branch lives below it (git stores
+    /// refs as paths, so `<candidate>/x` blocks `<candidate>`); and nothing is
+    /// at the folder its worktree would get. Only a folder that is certainly
+    /// absent is free, and a question that cannot be answered counts as
+    /// taken: passing a free name over costs a `-2`, while using a name that
+    /// was not free fails the create part-way.
+    fn review_name_is_free(
+        &self,
+        project: &crate::model::Project,
+        repo_path: &Path,
+        candidate: &str,
+    ) -> bool {
+        if git::branch_exists(repo_path, candidate).is_some() {
+            return false;
+        }
+        match git::refs_exist_below(repo_path, candidate) {
+            Ok(false) => {}
+            Ok(true) => return false,
+            Err(err) => {
+                logger::error(&format!(
+                    "could not check for branches below \"{candidate}\" in {}; passing the name over: {err:#}",
+                    project.path
+                ));
+                return false;
+            }
+        }
+        let folder =
+            git::managed_worktree_path(&self.paths.worktrees_root, &project.name, candidate);
+        match std::fs::symlink_metadata(&folder) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+            Ok(_) => false,
+            Err(err) => {
+                logger::error(&format!(
+                    "could not check the folder {} for \"{candidate}\"; passing the name over: {err:#}",
+                    folder.display()
+                ));
+                false
+            }
+        }
+    }
+
+    /// Say what a fresh copy is, once its worktree exists. Returns the
+    /// warning sentence that leads the final, when there is one.
     ///
     /// The explanation rides as a creation note, which also makes the create
     /// speak on both surfaces: nothing on screen says the agent is a copy, or
-    /// why. When the busy branch has commits the copy lacks, that warning is
-    /// put FIRST, ahead of the success line, so the terminal UI's two-row
-    /// status footer cannot cut the one part the user must act on, and the
-    /// final becomes a warning so it stays on screen longer. A count that
-    /// cannot be taken is logged and left out; the rest of the note stays.
+    /// why. When the copy is behind the busy branch, the count of commits it
+    /// lacks is the returned lead, which the job puts FIRST and which makes the
+    /// final a warning. That the copy is linked to its pull request is said
+    /// by the engine, which makes the link, and only once it is made.
     fn announce_fresh_copy(
         &mut self,
         repo_path: &Path,
         copy: &FreshCopy,
         number: u64,
-        created: crate::status_text::StatusText,
-    ) -> (crate::status_text::StatusText, bool) {
-        let missing = match git::commits_missing_from(
-            repo_path,
-            &copy.busy_branch,
-            &copy.new_branch,
-        ) {
-            Ok(count) => count,
-            Err(err) => {
-                logger::error(&format!(
-                    "could not count the commits \"{}\" has and its fresh copy \"{}\" lacks: {err}",
-                    copy.busy_branch, copy.new_branch
-                ));
-                0
-            }
-        };
-        let pr = format!("#{}", number);
+    ) -> Option<crate::status_text::StatusText> {
+        let missing = self.commits_the_copy_lacks(repo_path, copy);
         self.creation_notes.push(crate::status_text![
-            "It is a fresh copy of PR ",
-            n(pr),
+            "Fresh copy of PR ",
+            n(format!("#{}", number)),
             " on its own branch ",
             q(copy.new_branch),
-            ", because ",
+            ": ",
             q(copy.busy_branch),
-            copy.holder_clause(),
-            " It is linked to PR ",
-            n(pr),
-            "; a push from it goes to its own branch ",
-            q(copy.new_branch),
-            ", never to ",
-            q(copy.busy_branch),
-            "."
+            copy.holder_clause()
         ]);
         if missing == 0 {
-            return (created, false);
+            return None;
         }
         let commits = if missing == 1 { " commit" } else { " commits" };
-        let warning = crate::status_text![
+        Some(crate::status_text![
             "This copy is missing ",
             n(missing),
             commits,
             " that ",
             q(copy.busy_branch),
-            " has and GitHub does not show yet. ",
-            created
-        ];
-        (warning, true)
+            " has and GitHub does not show yet."
+        ])
+    }
+
+    /// How many commits the busy branch has that its fresh copy lacks, counted
+    /// only when the copy is BEHIND the busy branch (the copy's tip is an
+    /// ancestor of it). Otherwise the two are different lines of work that
+    /// share a name, such as a fork's pull request whose branch is called
+    /// `main`, or a pull request that was force-pushed or rebased, and the
+    /// commits one has and the other lacks are not "missing" from anything.
+    /// Zero stands for "nothing to warn about", including when git cannot
+    /// answer (logged).
+    fn commits_the_copy_lacks(&self, repo_path: &Path, copy: &FreshCopy) -> u32 {
+        match git::branch_is_ancestor(repo_path, &copy.new_branch, &copy.busy_branch) {
+            Ok(true) => {}
+            Ok(false) => {
+                logger::info(&format!(
+                    "fresh copy \"{}\" is not behind \"{}\", so no commits are counted as missing",
+                    copy.new_branch, copy.busy_branch
+                ));
+                return 0;
+            }
+            Err(err) => {
+                logger::error(&format!(
+                    "could not tell whether fresh copy \"{}\" is behind \"{}\": {err:#}",
+                    copy.new_branch, copy.busy_branch
+                ));
+                return 0;
+            }
+        }
+        match git::commits_missing_from(repo_path, &copy.busy_branch, &copy.new_branch) {
+            Ok(count) => count,
+            Err(err) => {
+                logger::error(&format!(
+                    "could not count the commits \"{}\" has and its fresh copy \"{}\" lacks: {err:#}",
+                    copy.busy_branch, copy.new_branch
+                ));
+                0
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -775,19 +823,20 @@ impl CreatePlanContext<'_> {
                 q(project.name),
                 "."
             ];
-            let (status_message, status_warns, pull_request_pin) = match &fresh_copy {
-                None => (created, false, None),
+            let (status_lead, pull_request_pin) = match &fresh_copy {
+                None => (None, None),
                 Some(copy) => {
-                    let (message, warns) =
-                        self.announce_fresh_copy(&repo_path, copy, number, created);
+                    let lead = self.announce_fresh_copy(&repo_path, copy, number);
                     let pin = crate::worker::PullRequestPin {
                         host: host.clone(),
                         owner_repo: owner_repo.clone(),
                         number,
                         title: title.clone(),
                         state: state.clone(),
+                        busy_branch: copy.busy_branch.clone(),
+                        new_branch: copy.new_branch.clone(),
                     };
-                    (message, warns, Some(Box::new(pin)))
+                    (lead, Some(Box::new(pin)))
                 }
             };
             logger::info(&format!(
@@ -800,7 +849,7 @@ impl CreatePlanContext<'_> {
                 project: project.clone(),
                 provider: project.default_provider.clone(),
                 source_branch: project.current_branch.clone(),
-                status_message,
+                status_message: created,
                 // Quiet on both: the new row carries the pull-request chip and
                 // its pane launches and streams. A fresh copy's note makes it
                 // loud when the job folds the notes in.
@@ -811,7 +860,7 @@ impl CreatePlanContext<'_> {
                 title: agent_title,
                 launch_with_resume: false,
                 pending_copy: None,
-                status_warns,
+                status_lead,
                 pull_request_pin,
                 // Whether the fetch minted `refs/heads/<name>` or the worktree
                 // add DWIMed it out of `origin/<name>`, dux made the local branch
@@ -944,7 +993,7 @@ impl CreatePlanContext<'_> {
                 title: Some(custom_name),
                 launch_with_resume: false,
                 pending_copy,
-                status_warns: false,
+                status_lead: None,
                 pull_request_pin: None,
                 // A fork always creates a new branch off the source's HEAD.
                 branch_provenance: BranchProvenance::CreatedByDux,
@@ -993,7 +1042,7 @@ impl CreatePlanContext<'_> {
                 title: custom_name,
                 launch_with_resume: true,
                 pending_copy: None,
-                status_warns: false,
+                status_lead: None,
                 pull_request_pin: None,
                 // Adopting an existing worktree adopts its branch too: it
                 // predates the agent and is not dux's to delete.
@@ -1095,7 +1144,7 @@ impl CreatePlanContext<'_> {
                 title: custom_name,
                 launch_with_resume: false,
                 pending_copy,
-                status_warns: false,
+                status_lead: None,
                 pull_request_pin: None,
                 // The managed worktree is created here on a new branch; the
                 // external worktree it was seeded from is untouched.
@@ -1371,6 +1420,7 @@ fn run_create_standalone_agent_job(
         kind: AgentLaunchKind::Create {
             status_message,
             status_warns: false,
+            status_notes: None,
             pull_request_pin: None,
             // There is no repository behind this agent. The field is only read
             // by the rollback, which `owns_worktree: false` switches off.
@@ -1413,7 +1463,7 @@ fn launch_managed_create(
         title,
         launch_with_resume,
         pending_copy,
-        status_warns,
+        status_lead,
         pull_request_pin,
         branch_provenance,
     } = plan;
@@ -1495,19 +1545,34 @@ fn launch_managed_create(
     }
     // Notes ride the keyed create-op final so they surface as the visible
     // status/toast, never log-only. A note is a fact the screen does not show,
-    // so it makes even an otherwise quiet create speak.
-    let (status_message, status_quiet) = if creation_notes.is_empty() {
-        (status_message, status_quiet)
-    } else {
-        (
-            creation_notes
-                .into_iter()
-                .fold(status_message, |joined, note| {
-                    crate::status_text![joined, " ", note]
-                }),
-            crate::statusline::QuietSurfaces::LOUD,
-        )
+    // so it makes even an otherwise quiet create speak. A leading warning goes
+    // ahead of the success line, so the terminal UI's two-row status footer
+    // cannot cut the one part the user must act on, and it makes the final a
+    // warning so it stays on screen longer.
+    //
+    // The lead and the notes are also kept on their own, so a create whose
+    // startup command fails can still say them after its failure sentence.
+    let join = |joined: crate::status_text::StatusText, part: crate::status_text::StatusText| {
+        crate::status_text![joined, " ", part]
     };
+    let status_warns = status_lead.is_some();
+    let trailing_notes = creation_notes.into_iter().reduce(join);
+    let status_notes = status_lead
+        .clone()
+        .into_iter()
+        .chain(trailing_notes.clone())
+        .reduce(join);
+    let status_quiet = if status_notes.is_some() {
+        crate::statusline::QuietSurfaces::LOUD
+    } else {
+        status_quiet
+    };
+    let status_message = status_lead
+        .into_iter()
+        .chain(std::iter::once(status_message))
+        .chain(trailing_notes)
+        .reduce(join)
+        .unwrap_or_default();
     let env = match crate::config::resolve_agent_env(&config.env, &project.env) {
         Ok(env) => env,
         Err(err) => {
@@ -1601,6 +1666,7 @@ fn launch_managed_create(
         kind: AgentLaunchKind::Create {
             status_message,
             status_warns,
+            status_notes: status_notes.map(Box::new),
             pull_request_pin,
             repo_path: repo_path.to_string_lossy().to_string(),
             owns_worktree,
@@ -2601,13 +2667,16 @@ mod tests {
             "the busy branch did not move"
         );
         let message = run.status_message.expect("a create message");
+        let folder = crate::home_path::shorten_home(&holder);
         assert!(
-            message.contains("It is a fresh copy of PR #42 on its own branch \"pr-head-review\", because \"pr-head\" is checked out at "),
+            message.ends_with(&format!(
+                ". Fresh copy of PR #42 on its own branch \"pr-head-review\": \"pr-head\" is checked out at \"{folder}\"."
+            )),
             "the note says what happened and why: {message}"
         );
         assert!(
-            message.contains(" It is linked to PR #42; a push from it goes to its own branch \"pr-head-review\", never to \"pr-head\"."),
-            "the note says where a push goes: {message}"
+            !message.contains("It is linked"),
+            "the worker cannot know the link will hold, so it never claims it: {message}"
         );
         assert!(
             !message.contains("This copy is missing"),
@@ -2650,7 +2719,7 @@ mod tests {
         );
         let message = run.status_message.expect("a create message");
         assert!(
-            message.contains("because \"pr-head\" is checked out in the project folder "),
+            message.contains(": \"pr-head\" is checked out in the project folder "),
             "the note names the project folder: {message}"
         );
     }
@@ -2711,7 +2780,7 @@ mod tests {
         let folder = crate::home_path::shorten_home(&holder);
         assert!(
             message.contains(&format!(
-                "because \"pr-head\" is still reserved by a working copy whose folder is gone (\"{folder}\"); git worktree prune frees it."
+                ": \"pr-head\" is still reserved by a working copy whose folder is gone (\"{folder}\"); git worktree prune frees it."
             )),
             "the note says how to free the branch: {message}"
         );
@@ -2759,6 +2828,162 @@ mod tests {
             run.session.unwrap().branch_name().unwrap(),
             "pr-head-review-2"
         );
+    }
+
+    /// Git stores refs as paths, so a branch below the review name, such as
+    /// `pr-head-review/x`, keeps `pr-head-review` itself from being created.
+    #[test]
+    fn a_fresh_copy_skips_a_review_name_with_a_branch_below_it() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
+        create_branch(repo.path(), "pr-head-review/x");
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        assert_eq!(
+            run.session.unwrap().branch_name().unwrap(),
+            "pr-head-review-2"
+        );
+    }
+
+    /// Only a folder that is certainly absent is free. When the question
+    /// cannot be answered (here, the project's worktree folder is a plain
+    /// file, so asking about anything inside it fails with "not a directory"),
+    /// the name counts as taken, and nothing is fetched into a branch.
+    #[test]
+    fn a_fresh_copy_counts_a_review_folder_it_cannot_inspect_as_taken() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
+        let branches_before = branches_in(repo.path());
+
+        let run = drive_create_job_run_with_setup(
+            repo.path(),
+            pull_request_request(repo.path(), None, false),
+            |paths| std::fs::write(paths.worktrees_root.join("repo"), b"in the way").unwrap(),
+        );
+
+        let failure = run.failure.expect("the create must fail");
+        assert!(
+            failure.ends_with(
+                " and every name up to \"pr-head-review-20\" is taken. Type another name for the agent from PR #42."
+            ),
+            "{failure}"
+        );
+        assert_eq!(
+            branches_in(repo.path()),
+            branches_before,
+            "no branch is fetched"
+        );
+    }
+
+    /// A pull request from a fork whose head branch is called `main`, while
+    /// the project folder's own `main` has moved on past the pull request's
+    /// base. The copy is not behind `main`: they are different lines of work
+    /// that share a name, so no commit is "missing" and nothing warns.
+    #[test]
+    fn a_fork_pull_request_named_like_the_project_folders_branch_gets_no_missing_count() {
+        let origin = init_test_repo();
+        git_in(origin.path(), &["checkout", "--detach"]);
+        git_in(
+            origin.path(),
+            &["commit", "--allow-empty", "-m", "fork work"],
+        );
+        git_in(origin.path(), &["update-ref", "refs/pull/42/head", "HEAD"]);
+        git_in(origin.path(), &["checkout", "main"]);
+        git_in(
+            origin.path(),
+            &["commit", "--allow-empty", "-m", "main moves on"],
+        );
+        let repo = init_test_repo();
+        git_in(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.path().to_string_lossy().as_ref(),
+            ],
+        );
+        git_in(repo.path(), &["fetch", "origin"]);
+        git_in(repo.path(), &["reset", "--hard", "origin/main"]);
+        let mut request = pull_request_request(repo.path(), Some("main"), false);
+        if let CreateAgentRequest::PullRequest { head_branch, .. } = &mut request {
+            *head_branch = "main".to_string();
+        }
+
+        let run = drive_create_job_run(repo.path(), request);
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        assert_eq!(run.session.unwrap().branch_name().unwrap(), "main-review");
+        let message = run.status_message.expect("a create message");
+        let folder = crate::home_path::shorten_home(repo.path());
+        assert!(
+            message.starts_with("Created "),
+            "no warning leads the line: {message}"
+        );
+        assert!(
+            message.ends_with(&format!(
+                ". Fresh copy of PR #42 on its own branch \"main-review\": \"main\" is checked out in the project folder \"{folder}\"."
+            )),
+            "{message}"
+        );
+        assert!(!message.contains("missing"), "{message}");
+        assert!(
+            !run.status_warns,
+            "an unrelated branch is no reason to warn"
+        );
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::LOUD);
+    }
+
+    /// A project added from a LINKED worktree: its folder is that worktree,
+    /// so the repository's own folder holding the branch is named by its
+    /// path, never as "the project folder".
+    #[test]
+    fn a_fresh_copy_in_a_project_on_a_linked_worktree_names_the_repository_folder_by_path() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        git_in(repo.path(), &["fetch", "origin"]);
+        git_in(
+            repo.path(),
+            &["checkout", "-b", "pr-head", "origin/pr-head"],
+        );
+        let project_root = tempfile::tempdir().unwrap();
+        let project_folder = project_root.path().join("project");
+        git_in(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                project_folder.to_string_lossy().as_ref(),
+                "main",
+            ],
+        );
+
+        let run = drive_create_job_run(
+            &project_folder,
+            pull_request_request(&project_folder, None, false),
+        );
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        let message = run.status_message.expect("a create message");
+        let folder = crate::home_path::shorten_home(repo.path());
+        assert!(
+            message.ends_with(&format!(": \"pr-head\" is checked out at \"{folder}\".")),
+            "{message}"
+        );
+        assert!(!message.contains("project folder"), "{message}");
     }
 
     #[test]
@@ -2831,18 +3056,21 @@ mod tests {
     #[test]
     fn a_failed_fresh_copy_worktree_deletes_the_review_branch_the_fetch_minted() {
         // The busy-branch variant of
-        // `a_failed_pr_worktree_deletes_the_branch_the_fetch_minted`. A plain
-        // file at the copy's own path would only move it to `-review-2`, so the
-        // PROJECT's worktree folder is made a file: the name is free, the fetch
-        // mints the branch, and only then does the worktree step fail.
+        // `a_failed_pr_worktree_deletes_the_branch_the_fetch_minted`. Anything
+        // in the way of the copy's own folder only moves it to another name, so
+        // the REPOSITORY's worktree bookkeeping is made a file instead: the name
+        // is free, the fetch mints the branch, and only then does git refuse to
+        // record the new worktree. The project folder holds the branch, so no
+        // linked worktree needs that bookkeeping to exist.
         let (_origin, repo) = pr_repo_with_fake_origin();
-        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
-
-        let run = drive_create_job_run_with_setup(
+        git_in(repo.path(), &["fetch", "origin"]);
+        git_in(
             repo.path(),
-            pull_request_request(repo.path(), None, false),
-            |paths| std::fs::write(paths.worktrees_root.join("repo"), b"in the way").unwrap(),
+            &["checkout", "-b", "pr-head", "origin/pr-head"],
         );
+        std::fs::write(repo.path().join(".git").join("worktrees"), b"in the way").unwrap();
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
 
         let failure = run.failure.expect("the worktree step must fail loudly");
         assert!(
@@ -3064,6 +3292,13 @@ mod tests {
             "{}",
             copy_final.message
         );
+        assert!(
+            copy_final.message.ends_with(
+                " It is linked to PR #42; a push from it goes to its own branch \"pr-head-review\", never to \"pr-head\"."
+            ),
+            "the link is claimed once it is made: {}",
+            copy_final.message
+        );
         let copy = engine
             .sessions
             .iter()
@@ -3085,6 +3320,124 @@ mod tests {
                 .iter()
                 .any(|row| row.session_id == copy && row.pr_number == 42),
             "the pin is persisted"
+        );
+    }
+
+    /// The link is made in the engine, after the worker said its piece, so a
+    /// link that cannot be made must never be announced. A state dux cannot
+    /// track makes the attach fail deterministically.
+    #[test]
+    fn a_fresh_copy_that_cannot_be_linked_says_so_and_never_claims_the_link() {
+        let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
+        let mut request = pull_request_request(repo.path(), None, false);
+        if let CreateAgentRequest::PullRequest { state, .. } = &mut request {
+            *state = "DRAFTISH".to_string();
+        }
+
+        let reactions = drive_create_through_engine(&mut engine, request);
+
+        let copy_final = create_final(&reactions);
+        assert_eq!(
+            copy_final.tone,
+            crate::statusline::StatusTone::Warning,
+            "an unlinked copy is something to act on: {}",
+            copy_final.message
+        );
+        assert!(
+            !copy_final.message.contains("It is linked"),
+            "{}",
+            copy_final.message
+        );
+        assert!(
+            copy_final
+                .message
+                .contains(" dux could not link it to PR #42: ")
+                && copy_final
+                    .message
+                    .ends_with(". Attach the pull request to the agent by hand."),
+            "{}",
+            copy_final.message
+        );
+        let copy = engine
+            .sessions
+            .iter()
+            .find(|s| s.branch_name() == Some("pr-head-review"))
+            .expect("the copy is committed all the same")
+            .id
+            .clone();
+        assert!(!engine.pr_overrides.contains_key(&copy));
+    }
+
+    /// A startup command that fails ends the create in a sticky error, and
+    /// what the create's notes said (here, that the agent is a fresh copy
+    /// lacking two commits) still reaches the user after that sentence.
+    #[test]
+    fn a_fresh_copy_whose_startup_command_fails_keeps_its_notes() {
+        let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
+        commit_local_work(&holder, 2);
+        let mut request = pull_request_request(repo.path(), None, false);
+        if let CreateAgentRequest::PullRequest { project, .. } = &mut request {
+            project.startup_command = Some("exit 3".to_string());
+        }
+
+        let reactions = drive_create_through_engine(&mut engine, request);
+
+        let failed = create_final(&reactions);
+        assert_eq!(failed.tone, crate::statusline::StatusTone::Error);
+        assert!(failed.sticky, "a failed startup command stays on screen");
+        assert!(
+            failed
+                .message
+                .starts_with("Startup command failed for agent \"pr-head-review\": "),
+            "the startup failure still leads: {}",
+            failed.message
+        );
+        let (startup, notes) = failed
+            .message
+            .split_once(" Open the startup command logs for details. ")
+            .unwrap_or_else(|| panic!("the notes follow the failure: {}", failed.message));
+        assert!(!startup.contains("Fresh copy"), "{}", failed.message);
+        assert!(
+            notes.starts_with(
+                "This copy is missing 2 commits that \"pr-head\" has and GitHub does not show yet. Fresh copy of PR #42 on its own branch \"pr-head-review\": \"pr-head\" is checked out at "
+            ),
+            "{}",
+            failed.message
+        );
+        assert!(
+            notes.ends_with(
+                " It is linked to PR #42; a push from it goes to its own branch \"pr-head-review\", never to \"pr-head\"."
+            ),
+            "{}",
+            failed.message
+        );
+    }
+
+    /// An ordinary create whose startup command fails says exactly what it
+    /// always said: it has no notes to add.
+    #[test]
+    fn an_ordinary_create_whose_startup_command_fails_adds_nothing() {
+        let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let mut request = pull_request_request(repo.path(), None, false);
+        if let CreateAgentRequest::PullRequest { project, .. } = &mut request {
+            project.startup_command = Some("exit 3".to_string());
+        }
+
+        let reactions = drive_create_through_engine(&mut engine, request);
+
+        let failed = create_final(&reactions);
+        assert_eq!(failed.tone, crate::statusline::StatusTone::Error);
+        assert!(
+            failed
+                .message
+                .ends_with(". Open the startup command logs for details."),
+            "{}",
+            failed.message
         );
     }
 

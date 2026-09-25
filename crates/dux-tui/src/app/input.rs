@@ -16442,6 +16442,7 @@ not_a_real_action = ["x"]
             AgentLaunchKind::Create {
                 status_message: "imported".to_string().into(),
                 status_warns: false,
+                status_notes: None,
                 pull_request_pin: None,
                 repo_path: app.engine.projects[0].path.clone(),
                 owns_worktree: false,

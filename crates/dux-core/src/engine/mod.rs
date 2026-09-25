@@ -766,8 +766,14 @@ pub enum CreateLaunchOutcome {
         warns: bool,
     },
     /// The session committed but its startup command failed; `branch_name` and
-    /// `error` build the startup-failure line.
-    StartupFailed { branch_name: String, error: String },
+    /// `error` build the startup-failure line, and `notes` (what the create's
+    /// notes said, such as that the agent is a fresh copy of a pull request)
+    /// follow it when there were any.
+    StartupFailed {
+        branch_name: String,
+        error: String,
+        notes: Option<StatusText>,
+    },
     /// `session_store.upsert_session` failed before the session could be
     /// committed; `error` is the persistence error.
     PersistFailed { error: String },

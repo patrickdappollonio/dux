@@ -1106,6 +1106,7 @@ impl Engine {
             let AgentLaunchKind::Create {
                 mut status_message,
                 mut status_warns,
+                mut status_notes,
                 pull_request_pin,
                 startup_result,
                 ..
@@ -1114,12 +1115,14 @@ impl Engine {
                 unreachable!("matched AgentLaunchKind::Create above")
             };
             // A fresh copy of a pull request is pinned to it now that its row
-            // exists, exactly as a manual attach would pin it. The agent is
-            // committed either way: a pin that cannot be written is logged and
-            // told in the create's own final, which becomes a warning, and the
-            // user can still attach the pull request by hand.
-            if let Some(pin) = pull_request_pin
-                && let Err(err) = self.apply_pr_attach(
+            // exists, exactly as a manual attach would pin it, and only here,
+            // where the pin is actually made, does the final say it is linked.
+            // The agent is committed either way: a pin that cannot be written
+            // is logged and told in the create's own final, which becomes a
+            // warning, and the user can still attach the pull request by hand.
+            if let Some(pin) = pull_request_pin {
+                let pr = format!("#{}", pin.number);
+                let told = match self.apply_pr_attach(
                     &session.id,
                     &pin.host,
                     &pin.owner_repo,
@@ -1127,19 +1130,38 @@ impl Engine {
                     &pin.title,
                     &pin.state,
                     "",
-                )
-            {
-                logger::error(&format!(
-                    "could not pin agent {} to PR #{} of {}: {err:#}",
-                    session.id, pin.number, pin.owner_repo
-                ));
-                status_message = crate::status_text![
-                    status_message,
-                    " dux could not link it to PR ",
-                    n(format!("#{}", pin.number)),
-                    format!(": {err:#}. Attach the pull request to the agent by hand.")
-                ];
-                status_warns = true;
+                ) {
+                    Ok(_) => crate::status_text![
+                        "It is linked to PR ",
+                        n(pr),
+                        "; a push from it goes to its own branch ",
+                        q(pin.new_branch),
+                        ", never to ",
+                        q(pin.busy_branch),
+                        "."
+                    ],
+                    Err(err) => {
+                        logger::error(&format!(
+                            "could not pin agent {} to PR #{} of {}: {err:#}",
+                            session.id, pin.number, pin.owner_repo
+                        ));
+                        status_warns = true;
+                        let reason = format!("{err:#}");
+                        crate::status_text![
+                            "dux could not link it to PR ",
+                            n(pr),
+                            format!(
+                                ": {}. Attach the pull request to the agent by hand.",
+                                reason.trim_end_matches('.')
+                            )
+                        ]
+                    }
+                };
+                status_message = crate::status_text![status_message, " ", told.clone()];
+                status_notes = Some(Box::new(match status_notes {
+                    Some(notes) => crate::status_text![*notes, " ", told],
+                    None => told,
+                }));
             }
             let startup_result_error = startup_result.and_then(|r| r.status.err());
 
@@ -1149,6 +1171,7 @@ impl Engine {
                 Some(error) => CreateLaunchOutcome::StartupFailed {
                     branch_name: session.display_label(),
                     error: error.clone(),
+                    notes: status_notes.map(|notes| *notes),
                 },
                 None => CreateLaunchOutcome::Committed {
                     status_message: status_message.clone(),
@@ -7395,6 +7418,7 @@ mod tests {
             AgentLaunchKind::Create {
                 status_message: crate::status_text::StatusText::default(),
                 status_warns: false,
+                status_notes: None,
                 pull_request_pin: None,
                 repo_path: String::from("/tmp/wt"),
                 owns_worktree: true,
@@ -7483,6 +7507,7 @@ mod tests {
             AgentLaunchKind::Create {
                 status_message: crate::status_text::StatusText::default(),
                 status_warns: false,
+                status_notes: None,
                 pull_request_pin: None,
                 repo_path: String::from("/tmp/wt"),
                 owns_worktree: true,

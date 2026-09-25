@@ -1245,13 +1245,81 @@ pub fn commits_missing_from(repo_path: &Path, have: &str, want: &str) -> Result<
         .map_err(|_| anyhow!("git rev-list printed an unexpected count: {text}"))
 }
 
+/// Whether branch `ancestor` is an ancestor of branch `descendant` (a branch
+/// counts as its own ancestor).
+///
+/// It shells out to git, so callers run it in a background worker. Both
+/// branches are passed fully qualified as `refs/heads/<name>`, which cannot
+/// begin with a dash, and the trailing `--` pins the pathspec boundary.
+/// `merge-base --is-ancestor` answers through its exit status alone: 0 is yes,
+/// 1 is no, and anything else (a branch that does not exist) is an error.
+pub fn branch_is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let ancestor_ref = format!("refs/heads/{ancestor}");
+    let descendant_ref = format!("refs/heads/{descendant}");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &ancestor_ref,
+            &descendant_ref,
+            "--",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to ask whether \"{ancestor}\" is an ancestor of \"{descendant}\" for {}",
+                repo_path.display()
+            )
+        })?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(anyhow!(
+            "failed to ask whether \"{ancestor}\" is an ancestor of \"{descendant}\" for {}: {}",
+            repo_path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Whether any local or `origin` remote-tracking branch lives BELOW `name`,
+/// such as `<name>/x`. Git stores refs as paths, so a branch `<name>` cannot
+/// be created while one of those exists, even though no branch is called
+/// `<name>` itself (which is [`branch_exists`]'s question).
+///
+/// It shells out to git, so callers run it in a background worker.
+/// `for-each-ref` is plumbing; the patterns are fully qualified, so they
+/// cannot begin with a dash, and they follow `--` besides.
+pub fn refs_exist_below(repo_path: &Path, name: &str) -> Result<bool> {
+    let local = format!("refs/heads/{name}/");
+    let remote = format!("refs/remotes/origin/{name}/");
+    let text = run_git_capture(
+        repo_path,
+        &[
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "--",
+            &local,
+            &remote,
+        ],
+        &format!("list the branches below \"{name}\""),
+    )?;
+    Ok(!text.is_empty())
+}
+
 /// A worktree that keeps a branch from being checked out anywhere else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchHolder {
     pub worktree: GitWorktree,
-    /// The first worktree git lists: the repository's own folder (the project
-    /// folder), rather than a linked worktree.
-    pub is_main: bool,
+    /// The worktree is the folder the caller asked about (the project's own
+    /// path), compared by canonical path. That is the repository's own folder
+    /// for an ordinary project, and a linked worktree for a project added from
+    /// one.
+    pub is_project_folder: bool,
 }
 
 /// The worktree that reserves branch `name`, if any, by the same rules git
@@ -1266,18 +1334,20 @@ pub struct BranchHolder {
 /// a worktree whose folder is gone (listed as prunable) still counts, exactly
 /// as it does for git until the entry is pruned.
 ///
+/// `repo_path` is the project's own folder, and the holder is flagged as the
+/// project folder when it is that path.
+///
 /// It shells out to git and reads files, so callers run it in a background
 /// worker.
 pub fn worktree_holding_branch(repo_path: &Path, name: &str) -> Result<Option<BranchHolder>> {
     let worktrees = list_worktrees(repo_path)?;
-    if let Some((index, worktree)) = worktrees
+    if let Some(worktree) = worktrees
         .iter()
-        .enumerate()
-        .find(|(_, w)| w.branch_name.as_deref() == Some(name))
+        .find(|w| w.branch_name.as_deref() == Some(name))
     {
         return Ok(Some(BranchHolder {
             worktree: worktree.clone(),
-            is_main: index == 0,
+            is_project_folder: same_folder(&worktree.path, repo_path),
         }));
     }
     if !worktrees.iter().any(|w| w.detached) {
@@ -1304,11 +1374,21 @@ pub fn worktree_holding_branch(repo_path: &Path, name: &str) -> Result<Option<Br
         if admin_dir.is_some_and(|admin| admin_dir_reserves_branch(&admin, name)) {
             return Ok(Some(BranchHolder {
                 worktree: worktree.clone(),
-                is_main: index == 0,
+                is_project_folder: same_folder(&worktree.path, repo_path),
             }));
         }
     }
     Ok(None)
+}
+
+/// Whether two paths name the same folder: compared canonically, so a symlink
+/// or a relative spelling cannot tell them apart, and lexically when either
+/// cannot be canonicalized (a worktree whose folder is gone).
+fn same_folder(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => normalize_lexically(a) == normalize_lexically(b),
+    }
 }
 
 /// Every linked worktree's administrative directory under
@@ -7104,7 +7184,7 @@ mod tests {
             .unwrap()
             .expect("the linked worktree has it checked out");
         assert_eq!(found.worktree.path, holder);
-        assert!(!found.is_main);
+        assert!(!found.is_project_folder);
     }
 
     #[test]
@@ -7114,8 +7194,8 @@ mod tests {
             .unwrap()
             .expect("the project folder has main checked out");
         assert!(
-            found.is_main,
-            "the first listed worktree is the project folder"
+            found.is_project_folder,
+            "the repository's own folder is the project folder"
         );
     }
 
@@ -7203,6 +7283,151 @@ mod tests {
     fn worktree_holding_branch_fails_outside_a_repository() {
         let dir = tempfile::tempdir().unwrap();
         assert!(worktree_holding_branch(dir.path(), "main").is_err());
+    }
+
+    /// A rebase that stops in the repository's own folder leaves it detached
+    /// with the rebase recorded in the common git directory, and git still
+    /// reserves the branch there.
+    #[test]
+    fn worktree_holding_branch_finds_the_project_folder_rebasing_the_branch() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["checkout", "-b", "feature"]);
+        commit_on_branch(repo.path(), "feature", "one");
+        start_a_stopped_rebase(repo.path());
+        let listed = list_worktrees(repo.path()).unwrap();
+        assert!(
+            listed[0].detached && listed[0].branch_name.is_none(),
+            "a rebasing project folder lists no branch: {listed:?}"
+        );
+        assert!(
+            git_refuses_another_checkout(repo.path(), "feature"),
+            "git still reserves the branch mid-rebase"
+        );
+        let found = worktree_holding_branch(repo.path(), "feature")
+            .unwrap()
+            .expect("the rebasing project folder holds the branch");
+        assert_eq!(
+            found.worktree.path.canonicalize().unwrap(),
+            repo.path().canonicalize().unwrap()
+        );
+        assert!(found.is_project_folder);
+    }
+
+    /// The project folder is the path the caller asked about, not whichever
+    /// worktree git lists first: a project added from a LINKED worktree is
+    /// that worktree, and the repository's own folder is just another place a
+    /// branch can be checked out.
+    #[test]
+    fn worktree_holding_branch_names_a_linked_worktree_project_as_the_project_folder() {
+        let (repo, _root, holder) = repo_with_feature_worktree();
+        let in_main = worktree_holding_branch(&holder, "main")
+            .unwrap()
+            .expect("the repository's own folder has main checked out");
+        assert_eq!(
+            in_main.worktree.path.canonicalize().unwrap(),
+            repo.path().canonicalize().unwrap()
+        );
+        assert!(
+            !in_main.is_project_folder,
+            "the project is the linked worktree, so the repository's folder is not it"
+        );
+        let in_project = worktree_holding_branch(&holder, "feature")
+            .unwrap()
+            .expect("the linked worktree has feature checked out");
+        assert!(in_project.is_project_folder);
+    }
+
+    // ── branch_is_ancestor ───────────────────────────────────
+
+    #[test]
+    fn branch_is_ancestor_follows_history() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["branch", "--", "base"]);
+        commit_on_branch(repo.path(), "ahead", "one");
+        assert!(branch_is_ancestor(repo.path(), "base", "ahead").unwrap());
+        assert!(!branch_is_ancestor(repo.path(), "ahead", "base").unwrap());
+        assert!(
+            branch_is_ancestor(repo.path(), "base", "base").unwrap(),
+            "a branch is its own ancestor"
+        );
+    }
+
+    #[test]
+    fn branch_is_ancestor_is_false_for_diverged_branches() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["branch", "--", "base"]);
+        commit_on_branch(repo.path(), "left", "left");
+        run_git(repo.path(), &["reset", "--hard", "refs/heads/base"]);
+        commit_on_branch(repo.path(), "right", "right");
+        assert!(!branch_is_ancestor(repo.path(), "left", "right").unwrap());
+        assert!(!branch_is_ancestor(repo.path(), "right", "left").unwrap());
+    }
+
+    #[test]
+    fn branch_is_ancestor_fails_for_a_branch_that_does_not_exist() {
+        let repo = init_test_repo();
+        let result = branch_is_ancestor(repo.path(), "nope", "main");
+        assert!(result.is_err(), "expected an error: {result:?}");
+    }
+
+    /// `--all` in either slot, read as a flag, would make merge-base refuse or
+    /// answer about something else. Fully qualified, it is just a branch.
+    #[test]
+    fn branch_is_ancestor_reads_an_option_looking_branch_as_a_ref() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["branch", "--", "base"]);
+        commit_on_branch(repo.path(), "--all", "one");
+        assert!(branch_is_ancestor(repo.path(), "base", "--all").unwrap());
+        assert!(!branch_is_ancestor(repo.path(), "--all", "base").unwrap());
+    }
+
+    // ── refs_exist_below ─────────────────────────────────────
+
+    #[test]
+    fn refs_exist_below_finds_a_local_branch_under_the_name() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["branch", "--", "pr-head-review/x"]);
+        assert!(refs_exist_below(repo.path(), "pr-head-review").unwrap());
+        assert!(!refs_exist_below(repo.path(), "pr-head-review-2").unwrap());
+        assert!(
+            !refs_exist_below(repo.path(), "pr-head").unwrap(),
+            "a sibling name that merely shares a prefix is not below it"
+        );
+    }
+
+    #[test]
+    fn refs_exist_below_finds_a_remote_tracking_branch_under_the_name() {
+        let repo = init_test_repo();
+        run_git(
+            repo.path(),
+            &["update-ref", "refs/remotes/origin/pr-head-review/x", "HEAD"],
+        );
+        assert!(refs_exist_below(repo.path(), "pr-head-review").unwrap());
+    }
+
+    #[test]
+    fn refs_exist_below_ignores_a_branch_with_the_name_itself() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["branch", "--", "pr-head-review"]);
+        assert!(
+            !refs_exist_below(repo.path(), "pr-head-review").unwrap(),
+            "the name itself is branch_exists's question, not this one's"
+        );
+    }
+
+    /// A dash-leading name must be read as a ref pattern, never as a flag.
+    #[test]
+    fn refs_exist_below_reads_an_option_looking_name_as_a_pattern() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["update-ref", "refs/heads/--all/x", "HEAD"]);
+        assert!(refs_exist_below(repo.path(), "--all").unwrap());
+        assert!(!refs_exist_below(repo.path(), "--sort").unwrap());
+    }
+
+    #[test]
+    fn refs_exist_below_fails_outside_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(refs_exist_below(dir.path(), "main").is_err());
     }
 
     /// Every local branch of the repo, one per line, for the drift tests below.

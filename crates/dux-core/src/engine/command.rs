@@ -379,12 +379,18 @@ impl Engine {
                                 Final::info(status_message.clone())
                             }
                             .quiet_on(*quiet_on),
-                            CreateLaunchOutcome::StartupFailed { branch_name, error } => {
+                            CreateLaunchOutcome::StartupFailed {
+                                branch_name,
+                                error,
+                                notes,
+                            } => {
                                 // Sticky: provisioning stopped part-way, so the
                                 // worktree is in an unknown state and the
                                 // message sends the user to the startup command
-                                // logs, an action outside the toast.
-                                Final::error(crate::status_text![
+                                // logs, an action outside the toast. The
+                                // failure leads; what the create's notes said
+                                // is still true and follows it.
+                                let failure = crate::status_text![
                                     "Startup command failed for agent ",
                                     q(branch_name),
                                     format!(
@@ -392,7 +398,13 @@ impl Engine {
                                      Open the startup command logs for details.",
                                         error
                                     )
-                                ])
+                                ];
+                                Final::error(match notes {
+                                    Some(notes) => {
+                                        crate::status_text![failure, " ", notes.clone()]
+                                    }
+                                    None => failure,
+                                })
                                 .sticky()
                             }
                             CreateLaunchOutcome::PersistFailed { error } => {

@@ -241,6 +241,11 @@ pub struct PullRequestPin {
     pub number: u64,
     pub title: String,
     pub state: String,
+    /// The pull request's own branch, which is checked out elsewhere; named in
+    /// the sentence that says where a push from the copy goes.
+    pub busy_branch: String,
+    /// The copy's own branch, where a push from it goes.
+    pub new_branch: String,
 }
 
 #[derive(Clone, Debug)]
@@ -251,6 +256,10 @@ pub enum AgentLaunchKind {
         /// something the user must act on, such as a fresh copy of a pull
         /// request that lacks commits the busy branch has.
         status_warns: bool,
+        /// What the create's notes said, on their own (any leading warning
+        /// included), so a create whose startup command fails can still say
+        /// them after its failure sentence. `None` when there were none.
+        status_notes: Option<Box<crate::status_text::StatusText>>,
         /// A pull request to pin the new agent to once it is committed.
         pull_request_pin: Option<Box<PullRequestPin>>,
         repo_path: String,
