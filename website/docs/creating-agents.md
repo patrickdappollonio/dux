@@ -256,6 +256,25 @@ dux fetched the pull request head or checked out a copy your project had already
 from the remote, and the box is ticked by default. Nothing dux does to it reaches the
 remote: the branch on GitHub, and the pull request itself, are untouched either way.
 
+If the pull request's branch is already checked out somewhere, say by another agent you
+started on it, by your project folder, or by a worktree in the middle of a rebase or a
+bisect, git will not check it out a second time. dux makes a fresh copy instead: it
+fetches the pull request into a new branch named after it, `feat-x-review` for a branch
+called `feat-x` (then `feat-x-review-2` and so on, up to `-review-20`), in a clean
+worktree, which is handy when you want a second agent to review the work with none of the
+first one's leftovers. The copy is the pull request as GitHub shows it, and the message
+that confirms it says where the original branch is checked out. The new agent is linked
+to the pull request, so its status pill follows it, and a push from it goes to its own
+branch, never to the pull request's.
+
+> [!WARNING]
+> Commits you have not pushed yet are not in the copy. When the busy branch has commits
+> the copy lacks, the confirmation leads with how many, as a warning. Push first if the
+> reviewer should see them.
+
+A name you typed yourself that is checked out elsewhere, and is not the pull request's
+branch, is refused with the place it is checked out, so you can pick another.
+
 ### How PR status stays fresh
 
 With `github_integration` on, dux shows a PR status pill on each agent branch. Updates

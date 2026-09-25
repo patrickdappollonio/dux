@@ -3118,6 +3118,8 @@ mod tests {
             },
             AgentLaunchKind::Create {
                 status_message: String::new().into(),
+                status_warns: false,
+                pull_request_pin: None,
                 repo_path: String::new(),
                 owns_worktree: false,
                 startup_result: None,

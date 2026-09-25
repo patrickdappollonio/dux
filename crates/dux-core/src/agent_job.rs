@@ -83,7 +83,75 @@ struct ManagedCreatePlan {
     title: Option<String>,
     launch_with_resume: bool,
     pending_copy: Option<PendingCopy>,
+    /// The final is a warning rather than an info: it says something the user
+    /// must act on (a fresh copy that lacks commits the busy branch has).
+    status_warns: bool,
+    /// The pull request to pin the agent to once it is committed; see
+    /// [`crate::worker::PullRequestPin`].
+    pull_request_pin: Option<Box<crate::worker::PullRequestPin>>,
     branch_provenance: BranchProvenance,
+}
+
+/// How many review names a fresh copy of a pull request tries before giving
+/// up: `<branch>-review`, then `<branch>-review-2` up to this number. The limit
+/// bounds the git calls the worker makes.
+const REVIEW_NAME_LIMIT: u32 = 20;
+
+/// The `n`th review name for `busy`: `<busy>-review`, `<busy>-review-2`, ...
+fn review_name(busy: &str, n: u32) -> String {
+    if n == 1 {
+        format!("{busy}-review")
+    } else {
+        format!("{busy}-review-{n}")
+    }
+}
+
+/// A pull request whose own branch is checked out elsewhere, so the new agent
+/// gets a fresh copy of the pull request on a branch of its own instead.
+struct FreshCopy {
+    /// The pull request's branch, which another worktree holds.
+    busy_branch: String,
+    holder: git::BranchHolder,
+    /// The review branch the copy is made on.
+    new_branch: String,
+}
+
+impl FreshCopy {
+    /// The holder's folder as shown to the user, home written as `~`.
+    fn holder_label(&self) -> String {
+        crate::home_path::shorten_home(&self.holder.worktree.path)
+    }
+
+    /// Where the busy branch is held, finishing a sentence that has just named
+    /// it: a listed worktree whose folder is gone still reserves the branch
+    /// until git prunes it, and the project folder is named as such.
+    fn holder_clause(&self) -> crate::status_text::StatusText {
+        let label = self.holder_label();
+        if std::fs::symlink_metadata(&self.holder.worktree.path).is_err() {
+            crate::status_text![
+                " is still reserved by a working copy whose folder is gone (",
+                q(label),
+                "); ",
+                n("git worktree prune"),
+                " frees it."
+            ]
+        } else if self.holder.is_main {
+            crate::status_text![" is checked out in the project folder ", q(label), "."]
+        } else {
+            crate::status_text![" is checked out at ", q(label), "."]
+        }
+    }
+}
+
+/// What the busy-branch check decided for a pull-request create.
+enum BusyBranchCheck {
+    /// Nothing holds the chosen name (or the check could not run): today's
+    /// attach-or-fetch path runs unchanged.
+    Free,
+    /// The pull request's own branch is held elsewhere: make a fresh copy.
+    FreshCopy(FreshCopy),
+    /// The create was refused and the failure already sent.
+    Refused,
 }
 
 struct CreatePlanContext<'a> {
@@ -404,6 +472,8 @@ impl CreatePlanContext<'_> {
             title,
             launch_with_resume: false,
             pending_copy,
+            status_warns: false,
+            pull_request_pin: None,
             branch_provenance: if attach_existing {
                 BranchProvenance::AttachedExisting
             } else {
@@ -412,9 +482,155 @@ impl CreatePlanContext<'_> {
         })
     }
 
+    /// Decide what to do when the chosen branch name is checked out somewhere,
+    /// before today's attach-or-fetch path would hand it to `git worktree add`
+    /// and relay git's refusal.
+    ///
+    /// Git reserves a branch for the worktree that has it checked out (the
+    /// project folder included), for one in the middle of a rebase or a bisect
+    /// that started from it, and for a listed worktree whose folder is gone. A
+    /// busy name that is the pull request's own branch gets a fresh copy of the
+    /// pull request on the first free review name; any other busy name is one
+    /// the user typed, and filling `main-review` with the pull request's code
+    /// would be wrong, so that is refused with the place it is checked out.
+    ///
+    /// A check that cannot run is logged and treated as "free": the check is an
+    /// improvement on a path that works, never a new way to fail.
+    fn check_busy_pr_branch(
+        &self,
+        project: &crate::model::Project,
+        repo_path: &Path,
+        resolved_name: &str,
+        head_branch: &str,
+        number: u64,
+    ) -> BusyBranchCheck {
+        let holder = match git::worktree_holding_branch(repo_path, resolved_name) {
+            Ok(Some(holder)) => holder,
+            Ok(None) => return BusyBranchCheck::Free,
+            Err(err) => {
+                logger::error(&format!(
+                    "could not check whether branch \"{resolved_name}\" is checked out in {}: {err}",
+                    project.path
+                ));
+                return BusyBranchCheck::Free;
+            }
+        };
+        let holder_label = crate::home_path::shorten_home(&holder.worktree.path);
+        if resolved_name != head_branch {
+            self.send_failure(crate::status_text![
+                "Branch ",
+                q(resolved_name),
+                " is checked out at ",
+                q(holder_label),
+                ". Choose another name for the agent from PR ",
+                n(format!("#{}", number)),
+                "."
+            ]);
+            return BusyBranchCheck::Refused;
+        }
+        let free = (1..=REVIEW_NAME_LIMIT)
+            .map(|n| review_name(resolved_name, n))
+            .find(|candidate| {
+                git::branch_exists(repo_path, candidate).is_none()
+                    && std::fs::symlink_metadata(git::managed_worktree_path(
+                        &self.paths.worktrees_root,
+                        &project.name,
+                        candidate,
+                    ))
+                    .is_err()
+            });
+        let Some(new_branch) = free else {
+            self.send_failure(crate::status_text![
+                "Branch ",
+                q(resolved_name),
+                " is checked out at ",
+                q(holder_label),
+                " and every name up to ",
+                q(review_name(resolved_name, REVIEW_NAME_LIMIT)),
+                " is taken. Type another name for the agent from PR ",
+                n(format!("#{}", number)),
+                "."
+            ]);
+            return BusyBranchCheck::Refused;
+        };
+        logger::info(&format!(
+            "branch \"{resolved_name}\" of PR #{number} is checked out at {}; making a fresh copy on \"{new_branch}\"",
+            holder.worktree.path.display()
+        ));
+        BusyBranchCheck::FreshCopy(FreshCopy {
+            busy_branch: resolved_name.to_string(),
+            holder,
+            new_branch,
+        })
+    }
+
+    /// Say what a fresh copy is, once its worktree exists. Returns the success
+    /// line and whether the final is a warning.
+    ///
+    /// The explanation rides as a creation note, which also makes the create
+    /// speak on both surfaces: nothing on screen says the agent is a copy, or
+    /// why. When the busy branch has commits the copy lacks, that warning is
+    /// put FIRST, ahead of the success line, so the terminal UI's two-row
+    /// status footer cannot cut the one part the user must act on, and the
+    /// final becomes a warning so it stays on screen longer. A count that
+    /// cannot be taken is logged and left out; the rest of the note stays.
+    fn announce_fresh_copy(
+        &mut self,
+        repo_path: &Path,
+        copy: &FreshCopy,
+        number: u64,
+        created: crate::status_text::StatusText,
+    ) -> (crate::status_text::StatusText, bool) {
+        let missing = match git::commits_missing_from(
+            repo_path,
+            &copy.busy_branch,
+            &copy.new_branch,
+        ) {
+            Ok(count) => count,
+            Err(err) => {
+                logger::error(&format!(
+                    "could not count the commits \"{}\" has and its fresh copy \"{}\" lacks: {err}",
+                    copy.busy_branch, copy.new_branch
+                ));
+                0
+            }
+        };
+        let pr = format!("#{}", number);
+        self.creation_notes.push(crate::status_text![
+            "It is a fresh copy of PR ",
+            n(pr),
+            " on its own branch ",
+            q(copy.new_branch),
+            ", because ",
+            q(copy.busy_branch),
+            copy.holder_clause(),
+            " It is linked to PR ",
+            n(pr),
+            "; a push from it goes to its own branch ",
+            q(copy.new_branch),
+            ", never to ",
+            q(copy.busy_branch),
+            "."
+        ]);
+        if missing == 0 {
+            return (created, false);
+        }
+        let commits = if missing == 1 { " commit" } else { " commits" };
+        let warning = crate::status_text![
+            "This copy is missing ",
+            n(missing),
+            commits,
+            " that ",
+            q(copy.busy_branch),
+            " has and GitHub does not show yet. ",
+            created
+        ];
+        (warning, true)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn plan_pull_request(
-        &self,
+        &mut self,
         project: crate::model::Project,
         host: String,
         owner_repo: String,
@@ -430,8 +646,25 @@ impl CreatePlanContext<'_> {
             // A typed name is the agent's durable title; falling back to the PR
             // head branch means no user-authored name, so leave title empty.
             // (Named `agent_title` to avoid shadowing the PR `title` above.)
-            let agent_title = custom_name.clone();
-            let resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
+            let mut agent_title = custom_name.clone();
+            let mut resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
+            let fresh_copy = match self.check_busy_pr_branch(
+                &project,
+                &repo_path,
+                &resolved_name,
+                &head_branch,
+                number,
+            ) {
+                BusyBranchCheck::Refused => return None,
+                BusyBranchCheck::Free => None,
+                BusyBranchCheck::FreshCopy(copy) => {
+                    // The copy is named after the branch it actually got, so
+                    // the sidebar does not show two rows with the busy name.
+                    resolved_name = copy.new_branch.clone();
+                    agent_title = Some(copy.new_branch.clone());
+                    Some(copy)
+                }
+            };
             // Two separate questions. `attach_existing` decides how the worktree
             // is made: a name git already resolves is checked out rather than
             // re-fetched, which keeps a same-repo PR branch tracking origin.
@@ -441,9 +674,13 @@ impl CreatePlanContext<'_> {
             // existence, so dux made that local branch and deleting the agent
             // takes it. Only a local branch that was there first is the user's,
             // and the ref on origin is never touched either way.
+            //
+            // A fresh copy's name was chosen because no branch has it, so the
+            // copy always takes the fetch path and its branch is always dux's.
             let local_branch_existed = git::local_branch_exists(&repo_path, &resolved_name);
-            let attach_existing =
-                use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
+            let attach_existing = fresh_copy.is_none()
+                && (use_existing_branch
+                    || git::branch_exists(&repo_path, &resolved_name).is_some());
 
             if attach_existing {
                 let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
@@ -525,7 +762,7 @@ impl CreatePlanContext<'_> {
                     return None;
                 }
             };
-            let status_message = crate::status_text![
+            let created = crate::status_text![
                 "Created ",
                 n(project.default_provider.as_str()),
                 " agent ",
@@ -538,6 +775,21 @@ impl CreatePlanContext<'_> {
                 q(project.name),
                 "."
             ];
+            let (status_message, status_warns, pull_request_pin) = match &fresh_copy {
+                None => (created, false, None),
+                Some(copy) => {
+                    let (message, warns) =
+                        self.announce_fresh_copy(&repo_path, copy, number, created);
+                    let pin = crate::worker::PullRequestPin {
+                        host: host.clone(),
+                        owner_repo: owner_repo.clone(),
+                        number,
+                        title: title.clone(),
+                        state: state.clone(),
+                    };
+                    (message, warns, Some(Box::new(pin)))
+                }
+            };
             logger::info(&format!(
                 "created PR worktree from {} #{} ({state}) {}",
                 owner_repo,
@@ -550,7 +802,8 @@ impl CreatePlanContext<'_> {
                 source_branch: project.current_branch.clone(),
                 status_message,
                 // Quiet on both: the new row carries the pull-request chip and
-                // its pane launches and streams.
+                // its pane launches and streams. A fresh copy's note makes it
+                // loud when the job folds the notes in.
                 status_quiet: crate::statusline::QuietSurfaces::BOTH,
                 branch_name,
                 worktree_path,
@@ -558,6 +811,8 @@ impl CreatePlanContext<'_> {
                 title: agent_title,
                 launch_with_resume: false,
                 pending_copy: None,
+                status_warns,
+                pull_request_pin,
                 // Whether the fetch minted `refs/heads/<name>` or the worktree
                 // add DWIMed it out of `origin/<name>`, dux made the local branch
                 // and it is dux's to clean up. Only a local branch that was
@@ -689,6 +944,8 @@ impl CreatePlanContext<'_> {
                 title: Some(custom_name),
                 launch_with_resume: false,
                 pending_copy,
+                status_warns: false,
+                pull_request_pin: None,
                 // A fork always creates a new branch off the source's HEAD.
                 branch_provenance: BranchProvenance::CreatedByDux,
             }
@@ -736,6 +993,8 @@ impl CreatePlanContext<'_> {
                 title: custom_name,
                 launch_with_resume: true,
                 pending_copy: None,
+                status_warns: false,
+                pull_request_pin: None,
                 // Adopting an existing worktree adopts its branch too: it
                 // predates the agent and is not dux's to delete.
                 branch_provenance: BranchProvenance::Adopted,
@@ -836,6 +1095,8 @@ impl CreatePlanContext<'_> {
                 title: custom_name,
                 launch_with_resume: false,
                 pending_copy,
+                status_warns: false,
+                pull_request_pin: None,
                 // The managed worktree is created here on a new branch; the
                 // external worktree it was seeded from is untouched.
                 branch_provenance: BranchProvenance::CreatedByDux,
@@ -1109,6 +1370,8 @@ fn run_create_standalone_agent_job(
         scrollback_lines: config.ui.agent_scrollback_lines,
         kind: AgentLaunchKind::Create {
             status_message,
+            status_warns: false,
+            pull_request_pin: None,
             // There is no repository behind this agent. The field is only read
             // by the rollback, which `owns_worktree: false` switches off.
             repo_path: String::new(),
@@ -1150,6 +1413,8 @@ fn launch_managed_create(
         title,
         launch_with_resume,
         pending_copy,
+        status_warns,
+        pull_request_pin,
         branch_provenance,
     } = plan;
     let repo_path = PathBuf::from(&project.path);
@@ -1246,6 +1511,13 @@ fn launch_managed_create(
     let env = match crate::config::resolve_agent_env(&config.env, &project.env) {
         Ok(env) => env,
         Err(err) => {
+            // The worktree exists by now, so a failed create removes it like
+            // every other failure past this point: left behind, it (and a
+            // branch dux made) would push the next attempt onto another name
+            // for no visible reason.
+            if owns_worktree && let Some(managed) = session.workspace.as_managed() {
+                rollback_created_worktree(&repo_path, managed);
+            }
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                 status_op_id: create_key.clone(),
                 message: crate::status_text![
@@ -1328,6 +1600,8 @@ fn launch_managed_create(
         scrollback_lines: config.ui.agent_scrollback_lines,
         kind: AgentLaunchKind::Create {
             status_message,
+            status_warns,
+            pull_request_pin,
             repo_path: repo_path.to_string_lossy().to_string(),
             owns_worktree,
             startup_result,
@@ -1528,6 +1802,8 @@ mod tests {
         session: Option<AgentSession>,
         status_message: Option<String>,
         status_quiet: crate::statusline::QuietSurfaces,
+        /// Whether the create's final is a warning rather than an info.
+        status_warns: bool,
         failure: Option<String>,
         progress: Vec<String>,
         /// Keeps the temporary worktrees root alive so tests can inspect the
@@ -1575,6 +1851,7 @@ mod tests {
             session: None,
             status_message: None,
             status_quiet: crate::statusline::QuietSurfaces::LOUD,
+            status_warns: false,
             failure: None,
             progress: Vec::new(),
             _paths_root: paths_root,
@@ -1583,9 +1860,15 @@ mod tests {
             match event {
                 WorkerEvent::AgentLaunchReady(data) => {
                     run.session = Some(data.request.session.clone());
-                    if let AgentLaunchKind::Create { status_message, .. } = &data.request.kind {
+                    if let AgentLaunchKind::Create {
+                        status_message,
+                        status_warns,
+                        ..
+                    } = &data.request.kind
+                    {
                         run.status_message = Some(status_message.to_string());
                         run.status_quiet = data.request.status_quiet;
+                        run.status_warns = *status_warns;
                     }
                 }
                 WorkerEvent::CreateAgentFailed { message, .. } => {
@@ -2226,6 +2509,582 @@ mod tests {
         assert!(
             crate::git::local_branch_exists(repo.path(), "pr-agent"),
             "dux did not create this branch, so a failed create must keep it"
+        );
+    }
+
+    // ── a pull request whose branch is checked out elsewhere ─────
+
+    /// Check the pull request's branch out in a second worktree, the way a
+    /// first agent on the pull request holds it. Returns the folder that keeps
+    /// the worktree alive and the worktree's path.
+    fn hold_pr_branch_in_another_worktree(repo: &Path) -> (tempfile::TempDir, PathBuf) {
+        git_in(repo, &["fetch", "origin"]);
+        let holder_root = tempfile::tempdir().unwrap();
+        let holder = holder_root.path().join("first-agent");
+        git_in(
+            repo,
+            &[
+                "worktree",
+                "add",
+                holder.to_string_lossy().as_ref(),
+                "-b",
+                "pr-head",
+                "origin/pr-head",
+            ],
+        );
+        (holder_root, holder)
+    }
+
+    /// Commit `count` empty commits in `worktree`, which the pull request on
+    /// GitHub does not have.
+    fn commit_local_work(worktree: &Path, count: usize) {
+        for n in 0..count {
+            git_in(
+                worktree,
+                &["commit", "--allow-empty", "-m", &format!("local work {n}")],
+            );
+        }
+    }
+
+    fn pr_commit(origin: &Path) -> String {
+        git_stdout(origin, &["rev-parse", "refs/pull/42/head"])
+    }
+
+    /// Everything a worktree listing says, for "nothing was created" checks.
+    fn worktree_paths(repo: &Path) -> Vec<PathBuf> {
+        crate::git::list_worktrees(repo)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.path)
+            .collect()
+    }
+
+    #[test]
+    fn a_pull_request_branch_checked_out_in_another_worktree_gets_a_fresh_copy() {
+        let (origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
+        let busy_tip = git_stdout(repo.path(), &["rev-parse", "refs/heads/pr-head"]);
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        let session = run.session.expect("a session");
+        assert_eq!(session.branch_name().unwrap(), "pr-head-review");
+        assert_eq!(
+            session.branch_provenance().unwrap(),
+            crate::model::BranchProvenance::CreatedByDux,
+            "dux made the copy's branch, so it is dux's to delete"
+        );
+        let copy = Path::new(session.directory());
+        assert_eq!(
+            git_stdout(copy, &["rev-parse", "HEAD"]),
+            pr_commit(origin.path()),
+            "the copy is the pull request as GitHub shows it"
+        );
+        assert_eq!(
+            git_stdout(copy, &["status", "--porcelain"]),
+            "",
+            "the copy starts clean"
+        );
+        assert_eq!(
+            git_stdout(&holder, &["symbolic-ref", "--short", "HEAD"]),
+            "pr-head",
+            "the first agent's worktree is still on its branch"
+        );
+        assert_eq!(
+            git_stdout(repo.path(), &["rev-parse", "refs/heads/pr-head"]),
+            busy_tip,
+            "the busy branch did not move"
+        );
+        let message = run.status_message.expect("a create message");
+        assert!(
+            message.contains("It is a fresh copy of PR #42 on its own branch \"pr-head-review\", because \"pr-head\" is checked out at "),
+            "the note says what happened and why: {message}"
+        );
+        assert!(
+            message.contains(" It is linked to PR #42; a push from it goes to its own branch \"pr-head-review\", never to \"pr-head\"."),
+            "the note says where a push goes: {message}"
+        );
+        assert!(
+            !message.contains("This copy is missing"),
+            "nothing is missing, so no count is claimed: {message}"
+        );
+        assert_eq!(
+            run.status_quiet,
+            crate::statusline::QuietSurfaces::LOUD,
+            "the screen cannot vouch for a fresh copy, so it speaks"
+        );
+        assert!(!run.status_warns, "a complete copy is an info");
+    }
+
+    #[test]
+    fn a_pull_request_branch_checked_out_in_the_project_folder_gets_a_fresh_copy() {
+        let (origin, repo) = pr_repo_with_fake_origin();
+        git_in(repo.path(), &["fetch", "origin"]);
+        git_in(
+            repo.path(),
+            &["checkout", "-b", "pr-head", "origin/pr-head"],
+        );
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        let session = run.session.expect("a session");
+        assert_eq!(session.branch_name().unwrap(), "pr-head-review");
+        assert_eq!(
+            git_stdout(Path::new(session.directory()), &["rev-parse", "HEAD"]),
+            pr_commit(origin.path())
+        );
+        assert_eq!(
+            git_stdout(repo.path(), &["symbolic-ref", "--short", "HEAD"]),
+            "pr-head",
+            "the project folder is still on the branch"
+        );
+        let message = run.status_message.expect("a create message");
+        assert!(
+            message.contains("because \"pr-head\" is checked out in the project folder "),
+            "the note names the project folder: {message}"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_branch_held_by_a_rebase_gets_a_fresh_copy() {
+        let (origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
+        commit_local_work(&holder, 1);
+        // A rebase that stops on its first step leaves the worktree detached,
+        // listing no branch, while git still reserves `pr-head`.
+        let out = crate::git::test_support::git_command()
+            .args(["rebase", "--exec", "exit 1", "HEAD~1"])
+            .current_dir(&holder)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "the rebase must stop part-way");
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        let session = run.session.expect("a session");
+        assert_eq!(session.branch_name().unwrap(), "pr-head-review");
+        assert_eq!(
+            git_stdout(Path::new(session.directory()), &["rev-parse", "HEAD"]),
+            pr_commit(origin.path())
+        );
+        assert!(
+            holder.join(".git").exists()
+                && git_stdout(repo.path(), &["worktree", "list", "--porcelain"])
+                    .contains("detached"),
+            "the rebase is left exactly where it stopped"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_branch_held_by_a_worktree_whose_folder_is_gone_gets_a_fresh_copy() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
+        std::fs::remove_dir_all(&holder).unwrap();
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        assert_eq!(
+            run.session.unwrap().branch_name().unwrap(),
+            "pr-head-review"
+        );
+        let message = run.status_message.expect("a create message");
+        let folder = crate::home_path::shorten_home(&holder);
+        assert!(
+            message.contains(&format!(
+                "because \"pr-head\" is still reserved by a working copy whose folder is gone (\"{folder}\"); git worktree prune frees it."
+            )),
+            "the note says how to free the branch: {message}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_copy_skips_a_review_name_that_is_already_a_branch() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
+        create_branch(repo.path(), "pr-head-review");
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        assert_eq!(
+            run.session.unwrap().branch_name().unwrap(),
+            "pr-head-review-2"
+        );
+    }
+
+    #[test]
+    fn a_fresh_copy_skips_a_review_name_whose_folder_is_occupied() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
+
+        let run = drive_create_job_run_with_setup(
+            repo.path(),
+            pull_request_request(repo.path(), None, false),
+            |paths| {
+                std::fs::create_dir_all(paths.worktrees_root.join("repo").join("pr-head-review"))
+                    .unwrap();
+            },
+        );
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        assert_eq!(
+            run.session.unwrap().branch_name().unwrap(),
+            "pr-head-review-2"
+        );
+    }
+
+    #[test]
+    fn a_fresh_copy_with_every_review_name_taken_fails_and_creates_nothing() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
+        create_branch(repo.path(), "pr-head-review");
+        for n in 2..=20 {
+            create_branch(repo.path(), &format!("pr-head-review-{n}"));
+        }
+        let branches_before = branches_in(repo.path());
+        let worktrees_before = worktree_paths(repo.path());
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+
+        let failure = run.failure.expect("the create must fail");
+        assert!(
+            failure.starts_with("Branch \"pr-head\" is checked out at ")
+                && failure.ends_with(
+                    " and every name up to \"pr-head-review-20\" is taken. Type another name for the agent from PR #42."
+                ),
+            "the refusal says why and what to do: {failure}"
+        );
+        assert!(run.session.is_none());
+        assert_eq!(
+            branches_in(repo.path()),
+            branches_before,
+            "no branch is created"
+        );
+        assert_eq!(
+            worktree_paths(repo.path()),
+            worktrees_before,
+            "no worktree is created"
+        );
+    }
+
+    #[test]
+    fn a_typed_name_checked_out_elsewhere_that_is_not_the_pr_branch_is_refused() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let branches_before = branches_in(repo.path());
+        let worktrees_before = worktree_paths(repo.path());
+
+        // `main` is checked out in the project folder.
+        let run = drive_create_job_run(
+            repo.path(),
+            pull_request_request(repo.path(), Some("main"), false),
+        );
+
+        let failure = run.failure.expect("the create must fail");
+        let folder = crate::home_path::shorten_home(repo.path());
+        assert_eq!(
+            failure,
+            format!(
+                "Branch \"main\" is checked out at \"{folder}\". Choose another name for the agent from PR #42."
+            )
+        );
+        assert!(run.session.is_none());
+        assert_eq!(
+            branches_in(repo.path()),
+            branches_before,
+            "no branch is created"
+        );
+        assert_eq!(
+            worktree_paths(repo.path()),
+            worktrees_before,
+            "no worktree is created"
+        );
+    }
+
+    #[test]
+    fn a_failed_fresh_copy_worktree_deletes_the_review_branch_the_fetch_minted() {
+        // The busy-branch variant of
+        // `a_failed_pr_worktree_deletes_the_branch_the_fetch_minted`. A plain
+        // file at the copy's own path would only move it to `-review-2`, so the
+        // PROJECT's worktree folder is made a file: the name is free, the fetch
+        // mints the branch, and only then does the worktree step fail.
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
+
+        let run = drive_create_job_run_with_setup(
+            repo.path(),
+            pull_request_request(repo.path(), None, false),
+            |paths| std::fs::write(paths.worktrees_root.join("repo"), b"in the way").unwrap(),
+        );
+
+        let failure = run.failure.expect("the worktree step must fail loudly");
+        assert!(
+            failure.contains("Failed to create a worktree for PR #42"),
+            "the error must still surface: {failure}"
+        );
+        assert!(
+            run.progress
+                .iter()
+                .any(|p| p.contains("into branch \"pr-head-review\"")),
+            "the fetch ran into the review branch first: {:?}",
+            run.progress
+        );
+        assert!(
+            !crate::git::local_branch_exists(repo.path(), "pr-head-review"),
+            "the branch dux minted moments ago must not outlive the failed create"
+        );
+    }
+
+    #[test]
+    fn a_fresh_copy_missing_commits_ends_in_a_warning_that_leads_with_the_count() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
+        commit_local_work(&holder, 2);
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+
+        assert!(
+            run.failure.is_none(),
+            "creation must succeed: {:?}",
+            run.failure
+        );
+        let message = run.status_message.expect("a create message");
+        assert!(
+            message.starts_with(
+                "This copy is missing 2 commits that \"pr-head\" has and GitHub does not show yet. "
+            ),
+            "the warning goes first, so a two-row footer cannot cut it: {message}"
+        );
+        assert!(run.status_warns, "a copy that lacks work is a warning");
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::LOUD);
+    }
+
+    #[test]
+    fn a_fresh_copy_missing_one_commit_says_commit_in_the_singular() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
+        commit_local_work(&holder, 1);
+
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+
+        let message = run.status_message.expect("a create message");
+        assert!(
+            message.starts_with("This copy is missing 1 commit that "),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn pull_request_arm_titles_a_fresh_copy_after_its_new_branch() {
+        // The busy-branch variant of
+        // `pull_request_arm_sets_title_and_initial_branch_from_typed_name`: the
+        // terminal UI sends the head branch as the typed name, and the copy is
+        // titled after the branch it actually got, so two sidebar rows do not
+        // both read `pr-head`.
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
+
+        let session = drive_create_job(
+            repo.path(),
+            pull_request_request(repo.path(), Some("pr-head"), false),
+        );
+
+        assert_eq!(session.title.as_deref(), Some("pr-head-review"));
+        assert_eq!(session.branch_name().unwrap(), "pr-head-review");
+        assert_eq!(session.initial_branch().unwrap(), "pr-head-review");
+    }
+
+    #[test]
+    fn an_invalid_project_environment_removes_the_worktree_and_the_branch_dux_made() {
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
+        let mut request = pull_request_request(repo.path(), None, false);
+        if let CreateAgentRequest::PullRequest { project, .. } = &mut request {
+            project
+                .env
+                .insert("NOT A VALID NAME".to_string(), "x".to_string());
+        }
+        let worktrees_before = worktree_paths(repo.path());
+        let mut copy_path = None;
+
+        let run = drive_create_job_run_with_setup(repo.path(), request, |paths| {
+            copy_path = Some(paths.worktrees_root.join("repo").join("pr-head-review"));
+        });
+
+        let failure = run.failure.expect("the create must fail");
+        assert!(
+            failure.starts_with("Invalid environment variables for project \"repo\""),
+            "{failure}"
+        );
+        assert!(
+            !copy_path.unwrap().exists(),
+            "the worktree the failed create made is removed"
+        );
+        assert_eq!(worktree_paths(repo.path()), worktrees_before);
+        assert!(
+            !crate::git::local_branch_exists(repo.path(), "pr-head-review"),
+            "the branch dux made for the failed create is deleted"
+        );
+    }
+
+    /// Drive a create through the engine, the way either surface does, and
+    /// feed every worker event back until the create settles.
+    fn drive_create_through_engine(
+        engine: &mut crate::engine::Engine,
+        request: CreateAgentRequest,
+    ) -> Vec<crate::engine::EventReaction> {
+        engine
+            .apply(crate::engine::Command::DispatchCreateAgentRequest {
+                request: Box::new(request),
+                busy_message: "Creating...".to_string().into(),
+                term_size: (24, 80),
+            })
+            .expect("the dispatch is accepted");
+        let mut reactions = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = engine
+                .worker_rx
+                .recv_timeout(remaining)
+                .expect("the create settles in time");
+            let settled = matches!(
+                event,
+                WorkerEvent::AgentLaunchReady(_)
+                    | WorkerEvent::AgentLaunchFailed(_)
+                    | WorkerEvent::CreateAgentFailed { .. }
+            );
+            reactions.push(engine.process_worker_event(event));
+            if settled {
+                return reactions;
+            }
+        }
+    }
+
+    /// The create op's keyed final among an engine run's reactions.
+    fn create_final(reactions: &[crate::engine::EventReaction]) -> crate::engine::StatusUpdate {
+        fn walk(reaction: &crate::engine::EventReaction) -> Option<crate::engine::StatusUpdate> {
+            match reaction {
+                crate::engine::EventReaction::Status(update) if update.key.is_some() => {
+                    Some(update.clone())
+                }
+                crate::engine::EventReaction::Multi(all) => all.iter().rev().find_map(walk),
+                _ => None,
+            }
+        }
+        reactions
+            .iter()
+            .rev()
+            .find_map(walk)
+            .expect("the create resolves to a keyed final")
+    }
+
+    #[test]
+    fn a_fresh_copy_is_pinned_to_its_pull_request_and_an_ordinary_create_is_not() {
+        let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
+        let (_origin, repo) = pr_repo_with_fake_origin();
+        let reactions = drive_create_through_engine(
+            &mut engine,
+            pull_request_request(repo.path(), None, false),
+        );
+        let ordinary_final = create_final(&reactions);
+        assert_eq!(ordinary_final.tone, crate::statusline::StatusTone::Info);
+        assert_eq!(
+            ordinary_final.quiet_on,
+            crate::statusline::QuietSurfaces::BOTH,
+            "an ordinary create stays quiet, as before"
+        );
+        let ordinary = engine
+            .sessions
+            .iter()
+            .find(|s| s.branch_name() == Some("pr-head"))
+            .expect("the ordinary create committed")
+            .id
+            .clone();
+        assert!(
+            !engine.pr_overrides.contains_key(&ordinary),
+            "an ordinary create finds its pull request by branch name, as before"
+        );
+
+        // The ordinary agent now holds `pr-head`, exactly the case the ask is
+        // about: a second agent from the same pull request, after the first
+        // one committed work it has not pushed.
+        let first_worktree = PathBuf::from(
+            engine
+                .sessions
+                .iter()
+                .find(|s| s.id == ordinary)
+                .unwrap()
+                .directory(),
+        );
+        commit_local_work(&first_worktree, 2);
+        let reactions = drive_create_through_engine(
+            &mut engine,
+            pull_request_request(repo.path(), None, false),
+        );
+        let copy_final = create_final(&reactions);
+        assert_eq!(
+            copy_final.tone,
+            crate::statusline::StatusTone::Warning,
+            "a copy that lacks work ends in a warning: {}",
+            copy_final.message
+        );
+        assert_eq!(copy_final.quiet_on, crate::statusline::QuietSurfaces::LOUD);
+        assert!(
+            copy_final
+                .message
+                .starts_with("This copy is missing 2 commits that \"pr-head\" has"),
+            "{}",
+            copy_final.message
+        );
+        let copy = engine
+            .sessions
+            .iter()
+            .find(|s| s.branch_name() == Some("pr-head-review"))
+            .expect("the fresh copy committed")
+            .id
+            .clone();
+        let pin = engine
+            .pr_overrides
+            .get(&copy)
+            .expect("the copy is pinned to its pull request");
+        assert_eq!(pin.pr_number, 42);
+        assert_eq!(pin.owner_repo, "owner/repo");
+        assert_eq!(pin.state, "OPEN");
+        assert_eq!(pin.title, "Fix the bug");
+        let stored = engine.session_store.load_pr_overrides().unwrap();
+        assert!(
+            stored
+                .iter()
+                .any(|row| row.session_id == copy && row.pr_number == 42),
+            "the pin is persisted"
         );
     }
 

@@ -227,10 +227,32 @@ pub struct BrowserEntry {
     pub is_parent: bool,
 }
 
+/// The pull request a freshly created agent is pinned to once its row is
+/// committed, exactly as a manual attach would pin it.
+///
+/// Only a fresh copy of a pull request carries one: its branch is named after
+/// the pull request's branch rather than being it, so finding the pull request
+/// by branch name, which every other pull-request agent relies on, would find
+/// nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestPin {
+    pub host: String,
+    pub owner_repo: String,
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum AgentLaunchKind {
     Create {
         status_message: crate::status_text::StatusText,
+        /// The success line is a warning rather than an info: it carries
+        /// something the user must act on, such as a fresh copy of a pull
+        /// request that lacks commits the busy branch has.
+        status_warns: bool,
+        /// A pull request to pin the new agent to once it is committed.
+        pull_request_pin: Option<Box<PullRequestPin>>,
         repo_path: String,
         owns_worktree: bool,
         startup_result: Option<crate::startup::StartupCommandResult>,

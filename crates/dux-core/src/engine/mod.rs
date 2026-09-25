@@ -761,6 +761,9 @@ pub enum CreateLaunchOutcome {
         /// streams confirms nothing; one whose sentence carries a fact the
         /// screen does not show still does.
         quiet_on: crate::statusline::QuietSurfaces,
+        /// The line is a warning rather than an info: it carries something the
+        /// user must act on, so it stays on screen longer.
+        warns: bool,
     },
     /// The session committed but its startup command failed; `branch_name` and
     /// `error` build the startup-failure line.

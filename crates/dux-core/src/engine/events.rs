@@ -1104,13 +1104,43 @@ impl Engine {
 
             // Extract Create-kind payload for the view outcome.
             let AgentLaunchKind::Create {
-                status_message,
+                mut status_message,
+                mut status_warns,
+                pull_request_pin,
                 startup_result,
                 ..
             } = request.kind
             else {
                 unreachable!("matched AgentLaunchKind::Create above")
             };
+            // A fresh copy of a pull request is pinned to it now that its row
+            // exists, exactly as a manual attach would pin it. The agent is
+            // committed either way: a pin that cannot be written is logged and
+            // told in the create's own final, which becomes a warning, and the
+            // user can still attach the pull request by hand.
+            if let Some(pin) = pull_request_pin
+                && let Err(err) = self.apply_pr_attach(
+                    &session.id,
+                    &pin.host,
+                    &pin.owner_repo,
+                    pin.number,
+                    &pin.title,
+                    &pin.state,
+                    "",
+                )
+            {
+                logger::error(&format!(
+                    "could not pin agent {} to PR #{} of {}: {err:#}",
+                    session.id, pin.number, pin.owner_repo
+                ));
+                status_message = crate::status_text![
+                    status_message,
+                    " dux could not link it to PR ",
+                    n(format!("#{}", pin.number)),
+                    format!(": {err:#}. Attach the pull request to the agent by hand.")
+                ];
+                status_warns = true;
+            }
             let startup_result_error = startup_result.and_then(|r| r.status.err());
 
             // Resolve the shared create op engine-side so both surfaces replace the
@@ -1123,6 +1153,7 @@ impl Engine {
                 None => CreateLaunchOutcome::Committed {
                     status_message: status_message.clone(),
                     quiet_on: status_quiet,
+                    warns: status_warns,
                 },
             };
             let create_final = self.resolve_create_op(&status_op_id, create_outcome);
@@ -7363,6 +7394,8 @@ mod tests {
             "feat/x",
             AgentLaunchKind::Create {
                 status_message: crate::status_text::StatusText::default(),
+                status_warns: false,
+                pull_request_pin: None,
                 repo_path: String::from("/tmp/wt"),
                 owns_worktree: true,
                 startup_result: None,
@@ -7449,6 +7482,8 @@ mod tests {
             "feat/x",
             AgentLaunchKind::Create {
                 status_message: crate::status_text::StatusText::default(),
+                status_warns: false,
+                pull_request_pin: None,
                 repo_path: String::from("/tmp/wt"),
                 owns_worktree: true,
                 startup_result: None,

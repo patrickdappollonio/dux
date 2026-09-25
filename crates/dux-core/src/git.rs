@@ -1223,6 +1223,149 @@ pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<Unpu
     })
 }
 
+/// How many commits branch `have` has that branch `want` lacks.
+///
+/// It compares the two local branches directly, never either one against a
+/// remote, so the answer does not depend on what this clone last fetched.
+///
+/// It shells out to git, so callers run it in a background worker. Git-config
+/// immune by construction: `rev-list --count` is plumbing and prints one
+/// integer, both branches are passed fully qualified as `refs/heads/<name>`,
+/// which cannot begin with a dash, and the trailing `--` pins the pathspec
+/// boundary.
+pub fn commits_missing_from(repo_path: &Path, have: &str, want: &str) -> Result<u32> {
+    let have_ref = format!("refs/heads/{have}");
+    let want_ref = format!("refs/heads/{want}");
+    let text = run_git_capture(
+        repo_path,
+        &["rev-list", "--count", &have_ref, "--not", &want_ref, "--"],
+        &format!("count the commits \"{have}\" has and \"{want}\" lacks"),
+    )?;
+    text.parse::<u32>()
+        .map_err(|_| anyhow!("git rev-list printed an unexpected count: {text}"))
+}
+
+/// A worktree that keeps a branch from being checked out anywhere else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchHolder {
+    pub worktree: GitWorktree,
+    /// The first worktree git lists: the repository's own folder (the project
+    /// folder), rather than a linked worktree.
+    pub is_main: bool,
+}
+
+/// The worktree that reserves branch `name`, if any, by the same rules git
+/// applies before it refuses `git worktree add` with "is already used by
+/// worktree".
+///
+/// A worktree reserves a branch when it has it checked out, and also when it
+/// is DETACHED in the middle of a rebase or a bisect that started from it: git
+/// lists no branch for such a worktree but still refuses a second checkout.
+/// The rebase and bisect state is read from the worktree's administrative
+/// directory inside the repository, not through the worktree's own folder, so
+/// a worktree whose folder is gone (listed as prunable) still counts, exactly
+/// as it does for git until the entry is pruned.
+///
+/// It shells out to git and reads files, so callers run it in a background
+/// worker.
+pub fn worktree_holding_branch(repo_path: &Path, name: &str) -> Result<Option<BranchHolder>> {
+    let worktrees = list_worktrees(repo_path)?;
+    if let Some((index, worktree)) = worktrees
+        .iter()
+        .enumerate()
+        .find(|(_, w)| w.branch_name.as_deref() == Some(name))
+    {
+        return Ok(Some(BranchHolder {
+            worktree: worktree.clone(),
+            is_main: index == 0,
+        }));
+    }
+    if !worktrees.iter().any(|w| w.detached) {
+        return Ok(None);
+    }
+    let common_dir = PathBuf::from(run_git_capture(
+        repo_path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        "find the repository's git directory",
+    )?);
+    let linked_admin_dirs = linked_worktree_admin_dirs(&common_dir);
+    for (index, worktree) in worktrees.iter().enumerate() {
+        if !worktree.detached {
+            continue;
+        }
+        let admin_dir = if index == 0 {
+            Some(common_dir.clone())
+        } else {
+            linked_admin_dirs
+                .iter()
+                .find(|(path, _)| *path == normalize_lexically(&worktree.path))
+                .map(|(_, admin)| admin.clone())
+        };
+        if admin_dir.is_some_and(|admin| admin_dir_reserves_branch(&admin, name)) {
+            return Ok(Some(BranchHolder {
+                worktree: worktree.clone(),
+                is_main: index == 0,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Every linked worktree's administrative directory under
+/// `<common dir>/worktrees/`, keyed by the worktree folder its `gitdir` file
+/// points at. The file may hold a path relative to the administrative
+/// directory (git's `worktree.useRelativePaths`), so it is resolved against it.
+fn linked_worktree_admin_dirs(common_dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let Ok(entries) = fs::read_dir(common_dir.join("worktrees")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let admin = entry.path();
+            let recorded = fs::read_to_string(admin.join("gitdir")).ok()?;
+            let dot_git = admin.join(recorded.trim_end_matches(['\n', '\r']));
+            let folder = normalize_lexically(&dot_git).parent()?.to_path_buf();
+            Some((folder, admin))
+        })
+        .collect()
+}
+
+/// Resolve `.` and `..` components without touching the filesystem, so a path
+/// to a folder that no longer exists can still be compared.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Whether a detached worktree's administrative directory records a rebase or
+/// a bisect that started from branch `name`. Git writes the rebase's branch as
+/// `refs/heads/<name>` in `head-name`, and the bisect's as the plain name in
+/// `BISECT_START`; both spellings are accepted for either.
+fn admin_dir_reserves_branch(admin_dir: &Path, name: &str) -> bool {
+    let full = format!("refs/heads/{name}");
+    [
+        admin_dir.join("rebase-merge").join("head-name"),
+        admin_dir.join("rebase-apply").join("head-name"),
+        admin_dir.join("BISECT_START"),
+    ]
+    .iter()
+    .filter_map(|file| fs::read_to_string(file).ok())
+    .any(|recorded| {
+        let recorded = recorded.trim_end_matches(['\n', '\r']);
+        recorded == full || recorded == name
+    })
+}
+
 fn ref_exists(repo_path: &Path, ref_name: &str) -> bool {
     let repo = repo_path.to_string_lossy();
     Command::new("git")
@@ -1239,6 +1382,17 @@ fn ref_exists(repo_path: &Path, ref_name: &str) -> bool {
         .is_some_and(|o| o.status.success())
 }
 
+/// Where [`create_worktree_existing_branch`] puts the worktree for `branch_name`
+/// of project `project_name`, so a caller can ask whether that folder is free
+/// before asking git to create it.
+pub fn managed_worktree_path(
+    worktrees_root: &Path,
+    project_name: &str,
+    branch_name: &str,
+) -> PathBuf {
+    worktrees_root.join(project_name).join(branch_name)
+}
+
 /// Creates a worktree that checks out an **existing** branch (no `-b`).
 ///
 /// When the branch exists only as a remote tracking ref, git automatically
@@ -1249,9 +1403,8 @@ pub fn create_worktree_existing_branch(
     project_name: &str,
     branch_name: &str,
 ) -> Result<(String, PathBuf)> {
-    let project_root = worktrees_root.join(project_name);
-    fs::create_dir_all(&project_root)?;
-    let worktree_path = project_root.join(branch_name);
+    fs::create_dir_all(worktrees_root.join(project_name))?;
+    let worktree_path = managed_worktree_path(worktrees_root, project_name, branch_name);
     let canonical = add_worktree_existing_branch_at(repo_path, &worktree_path, branch_name)?;
     Ok((branch_name.to_string(), canonical))
 }
@@ -6828,6 +6981,228 @@ mod tests {
         let repo = init_test_repo();
         let result = unpushed_commit_count(repo.path(), &["nope"]);
         assert!(result.is_err(), "expected an error: {result:?}");
+    }
+
+    // ── commits_missing_from ─────────────────────────────────
+
+    #[test]
+    fn commits_missing_from_counts_what_one_branch_has_and_the_other_lacks() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["branch", "--", "copy"]);
+        commit_on_branch(repo.path(), "busy", "one");
+        commit_on_branch(repo.path(), "busy", "two");
+        assert_eq!(
+            commits_missing_from(repo.path(), "busy", "copy").unwrap(),
+            2
+        );
+        assert_eq!(
+            commits_missing_from(repo.path(), "copy", "busy").unwrap(),
+            0,
+            "the copy has nothing the busy branch lacks"
+        );
+    }
+
+    #[test]
+    fn commits_missing_from_fails_for_a_branch_that_does_not_exist() {
+        let repo = init_test_repo();
+        let result = commits_missing_from(repo.path(), "nope", "main");
+        assert!(result.is_err(), "expected an error: {result:?}");
+    }
+
+    /// Without the fully-qualified `refs/heads/` form, `--all` in either slot
+    /// would be read as a flag and count (or exclude) every commit of every
+    /// ref. The count here must be the branch's own.
+    #[test]
+    fn commits_missing_from_reads_an_option_looking_branch_as_a_ref() {
+        let repo = init_test_repo();
+        run_git(repo.path(), &["branch", "--", "copy"]);
+        // A commit only `elsewhere` reaches, which `--all` read as a flag
+        // would count.
+        commit_on_branch(repo.path(), "elsewhere", "unrelated");
+        run_git(repo.path(), &["reset", "--hard", "refs/heads/copy"]);
+        commit_on_branch(repo.path(), "--all", "one");
+        assert_eq!(
+            commits_missing_from(repo.path(), "--all", "copy").unwrap(),
+            1
+        );
+        assert_eq!(
+            commits_missing_from(repo.path(), "copy", "--all").unwrap(),
+            0
+        );
+    }
+
+    // ── worktree_holding_branch ──────────────────────────────
+
+    /// A repository with a `feature` branch two commits past `main`, checked
+    /// out in a linked worktree. Returns the repo, the worktree's parent (kept
+    /// alive by the caller) and the worktree itself.
+    fn repo_with_feature_worktree() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+        let repo = init_test_repo();
+        let holder_root = tempfile::tempdir().unwrap();
+        let holder = holder_root.path().join("holder");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                holder.to_string_lossy().as_ref(),
+            ],
+        );
+        for n in ["one", "two"] {
+            std::fs::write(holder.join(n), n).unwrap();
+            run_git(&holder, &["add", "--", n]);
+            run_git(&holder, &["commit", "-m", n]);
+        }
+        (repo, holder_root, holder)
+    }
+
+    /// Start a rebase in `worktree` that stops on its first step. The exec
+    /// runs through `sh`, and `exit 1` is a shell builtin, so nothing else is
+    /// spawned.
+    fn start_a_stopped_rebase(worktree: &Path) {
+        let out = test_support::git_command()
+            .args(["rebase", "--exec", "exit 1", "HEAD~1"])
+            .current_dir(worktree)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "the rebase must stop part-way");
+    }
+
+    /// Whether git itself refuses to check `branch` out in one more worktree,
+    /// which is the question the helper exists to answer before git does.
+    fn git_refuses_another_checkout(repo: &Path, branch: &str) -> bool {
+        let spare_root = tempfile::tempdir().unwrap();
+        let spare = spare_root.path().join("spare");
+        let out = test_support::git_command()
+            .args(["worktree", "add"])
+            .arg(&spare)
+            .args(["--", branch])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        if out.status.success() {
+            run_git(
+                repo,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    spare.to_string_lossy().as_ref(),
+                ],
+            );
+            return false;
+        }
+        String::from_utf8_lossy(&out.stderr).contains("is already used by worktree")
+    }
+
+    #[test]
+    fn worktree_holding_branch_finds_a_linked_worktree_on_the_branch() {
+        let (repo, _root, holder) = repo_with_feature_worktree();
+        let found = worktree_holding_branch(repo.path(), "feature")
+            .unwrap()
+            .expect("the linked worktree has it checked out");
+        assert_eq!(found.worktree.path, holder);
+        assert!(!found.is_main);
+    }
+
+    #[test]
+    fn worktree_holding_branch_finds_the_project_folder() {
+        let repo = init_test_repo();
+        let found = worktree_holding_branch(repo.path(), "main")
+            .unwrap()
+            .expect("the project folder has main checked out");
+        assert!(
+            found.is_main,
+            "the first listed worktree is the project folder"
+        );
+    }
+
+    #[test]
+    fn worktree_holding_branch_finds_nothing_for_a_branch_checked_out_nowhere() {
+        let (repo, _root, _holder) = repo_with_feature_worktree();
+        run_git(repo.path(), &["branch", "--", "idle"]);
+        assert!(
+            worktree_holding_branch(repo.path(), "idle")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn worktree_holding_branch_finds_a_worktree_rebasing_the_branch() {
+        let (repo, _root, holder) = repo_with_feature_worktree();
+        start_a_stopped_rebase(&holder);
+        let listed = list_worktrees(repo.path()).unwrap();
+        let entry = listed.iter().find(|w| w.path == holder).unwrap();
+        assert!(
+            entry.detached && entry.branch_name.is_none(),
+            "a rebasing worktree lists no branch: {entry:?}"
+        );
+        assert!(
+            git_refuses_another_checkout(repo.path(), "feature"),
+            "git still reserves the branch mid-rebase"
+        );
+        let found = worktree_holding_branch(repo.path(), "feature")
+            .unwrap()
+            .expect("the rebasing worktree holds the branch");
+        assert_eq!(found.worktree.path, holder);
+    }
+
+    #[test]
+    fn worktree_holding_branch_finds_a_worktree_bisecting_from_the_branch() {
+        let (repo, _root, holder) = repo_with_feature_worktree();
+        run_git(&holder, &["bisect", "start", "HEAD", "HEAD~2"]);
+        let listed = list_worktrees(repo.path()).unwrap();
+        let entry = listed.iter().find(|w| w.path == holder).unwrap();
+        assert!(
+            entry.detached && entry.branch_name.is_none(),
+            "a bisecting worktree lists no branch: {entry:?}"
+        );
+        assert!(
+            git_refuses_another_checkout(repo.path(), "feature"),
+            "git still reserves the branch mid-bisect"
+        );
+        let found = worktree_holding_branch(repo.path(), "feature")
+            .unwrap()
+            .expect("the bisecting worktree holds the branch");
+        assert_eq!(found.worktree.path, holder);
+    }
+
+    #[test]
+    fn worktree_holding_branch_finds_a_worktree_whose_folder_is_gone() {
+        let (repo, _root, holder) = repo_with_feature_worktree();
+        std::fs::remove_dir_all(&holder).unwrap();
+        assert!(
+            git_refuses_another_checkout(repo.path(), "feature"),
+            "git reserves the branch until the worktree is pruned"
+        );
+        let found = worktree_holding_branch(repo.path(), "feature")
+            .unwrap()
+            .expect("the vanished worktree still holds the branch");
+        assert_eq!(found.worktree.path, holder);
+    }
+
+    /// A rebase in a worktree whose folder is gone is still recorded in the
+    /// repository's own administrative directory, so the reservation is read
+    /// from there rather than through the missing folder.
+    #[test]
+    fn worktree_holding_branch_finds_a_rebase_in_a_worktree_whose_folder_is_gone() {
+        let (repo, _root, holder) = repo_with_feature_worktree();
+        start_a_stopped_rebase(&holder);
+        std::fs::remove_dir_all(&holder).unwrap();
+        assert!(git_refuses_another_checkout(repo.path(), "feature"));
+        let found = worktree_holding_branch(repo.path(), "feature")
+            .unwrap()
+            .expect("the vanished rebasing worktree still holds the branch");
+        assert_eq!(found.worktree.path, holder);
+    }
+
+    #[test]
+    fn worktree_holding_branch_fails_outside_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(worktree_holding_branch(dir.path(), "main").is_err());
     }
 
     /// Every local branch of the repo, one per line, for the drift tests below.

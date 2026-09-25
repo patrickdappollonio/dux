@@ -372,7 +372,13 @@ impl Engine {
                             CreateLaunchOutcome::Committed {
                                 status_message,
                                 quiet_on,
-                            } => Final::info(status_message.clone()).quiet_on(*quiet_on),
+                                warns,
+                            } => if *warns {
+                                Final::warning(status_message.clone())
+                            } else {
+                                Final::info(status_message.clone())
+                            }
+                            .quiet_on(*quiet_on),
                             CreateLaunchOutcome::StartupFailed { branch_name, error } => {
                                 // Sticky: provisioning stopped part-way, so the
                                 // worktree is in an unknown state and the
