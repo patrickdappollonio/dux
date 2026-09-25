@@ -169,7 +169,6 @@ enum KeyRoute {
 }
 
 struct BrowseProjectsFooterKeys {
-    confirm: String,
     close: String,
     search: String,
     open: String,

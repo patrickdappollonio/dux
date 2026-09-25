@@ -35466,6 +35466,88 @@ cyan = "#00ffff"
         );
     }
 
+    /// While the browser's search row is up, its footer names what each key
+    /// really does there: the open key opens the highlighted entry (it does not
+    /// merely end the search) and the close key clears the search. Each named
+    /// key is then pressed, rebound, and does what the footer said.
+    #[test]
+    fn browse_projects_search_footer_names_what_its_keys_do() {
+        let ctrl_alt = |n: u8| {
+            crokey::KeyCombination::new(KeyCode::F(n), KeyModifiers::CONTROL | KeyModifiers::ALT)
+        };
+        let bindings = || {
+            crate::keybindings::RuntimeBindings::new(
+                |action| match action {
+                    Action::OpenEntry => vec![ctrl_alt(6)],
+                    Action::CloseOverlay => vec![ctrl_alt(7)],
+                    Action::Confirm => vec![ctrl_alt(8)],
+                    _ => crate::keybindings::BINDING_DEFS
+                        .iter()
+                        .find(|d| d.action == action)
+                        .map(|d| d.default_keys.to_vec())
+                        .unwrap_or_default(),
+                },
+                true,
+            )
+        };
+        let press = |app: &mut App, n: u8| {
+            app.handle_key(KeyEvent::new(
+                KeyCode::F(n),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ))
+            .expect("handle key");
+        };
+        let screen = |app: &mut App| {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 50))
+                .expect("terminal");
+            terminal.draw(|frame| app.render(frame)).expect("render");
+            let buf = terminal.backend().buffer().clone();
+            buf.content()
+                .iter()
+                .map(|cell| cell.symbol().to_string())
+                .collect::<Vec<_>>()
+                .chunks(160)
+                .map(|row| row.concat())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut app = browse_projects_app();
+        app.bindings = bindings();
+        begin_search(&mut app);
+        type_text(&mut app, "beta");
+        let shown = screen(&mut app);
+        let open = app.bindings.label_for(Action::OpenEntry);
+        let close = app.bindings.label_for(Action::CloseOverlay);
+        let confirm = app.bindings.label_for(Action::Confirm);
+        assert!(shown.contains(&format!("<{open}> open")), "{shown}");
+        assert!(shown.contains(&format!("<{close}> clear")), "{shown}");
+        assert!(
+            !shown.contains(&format!("<{confirm}>")),
+            "the confirm key does nothing in the browser's search row:\n{shown}"
+        );
+
+        // The close key clears the search and leaves the browser open.
+        press(&mut app, 7);
+        let (searching, filter, _, _) = browse_state(&app);
+        assert!(!searching && filter.is_empty());
+
+        // The open key opens the highlighted entry.
+        let mut app = browse_projects_app();
+        app.bindings = bindings();
+        begin_search(&mut app);
+        type_text(&mut app, "beta");
+        let PromptState::BrowseProjects { entries, .. } = &app.prompt else {
+            panic!("expected the browser");
+        };
+        let target = entries[1].path.clone();
+        press(&mut app, 6);
+        let PromptState::BrowseProjects { current_dir, .. } = &app.prompt else {
+            panic!("expected the browser to stay open on a directory");
+        };
+        assert_eq!(*current_dir, target);
+    }
+
     fn kill_running_state(app: &App) -> (bool, String, usize, usize) {
         let PromptState::KillRunning(prompt) = &app.prompt else {
             panic!("expected the kill-running picker, got {:?}", app.prompt);

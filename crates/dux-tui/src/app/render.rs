@@ -5757,7 +5757,6 @@ impl App {
             .block(input_block)
             .render(filter_area, frame.buffer_mut());
             let footer_keys = BrowseProjectsFooterKeys {
-                confirm: self.bindings.label_for(Action::Confirm),
                 close: self.bindings.label_for(Action::CloseOverlay),
                 search: self.bindings.label_for(Action::SearchToggle),
                 open: self.bindings.label_for(Action::OpenEntry),
@@ -5837,8 +5836,11 @@ impl App {
                 Hint::key(keys.exit_path.clone(), "browse"),
             ]
         } else if searching {
+            // Nothing merely ends the search here: the open key opens the
+            // highlighted entry (`handle_project_browser_prompt_key`), and the
+            // close key clears the search.
             vec![
-                Hint::key(keys.confirm.clone(), "done"),
+                Hint::key(keys.open.clone(), "open"),
                 Hint::key(keys.close.clone(), "clear"),
             ]
         } else {
