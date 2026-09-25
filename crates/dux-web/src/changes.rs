@@ -840,10 +840,10 @@ mod tests {
     fn boot() -> (
         EngineHandle,
         Arc<EventBus>,
-        tempfile::TempDir,
+        dux_core::test_scratch::ScratchDir,
         std::path::PathBuf,
     ) {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = dux_core::test_scratch::ScratchDir::new();
         let root = tmp.path().to_path_buf();
         // The git repo lives in its OWN subdir, separate from the dux runtime files
         // (sessions.sqlite3 + WAL, config.toml, dux.lock) at `root`, so those never

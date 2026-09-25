@@ -250,7 +250,7 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
         let exited = returned_engine
             .companion_terminals
             .get(&terminal_id_for_thread)
-            .map(|t| t.client.is_exited())
+            .map(|t| child_is_shut_down(&t.client))
             .unwrap_or(true);
         result_tx.send((exit, exited)).unwrap();
     });
@@ -270,6 +270,69 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
         "expected QuitProcess exit"
     );
     assert!(exited, "QuitProcess should have shut down the PTY child");
+
+    serve_thread.join().expect("serve thread joined");
+}
+
+/// Whether the quit teardown has ended this terminal's child.
+///
+/// The teardown stops waiting at whichever end-of-run fact arrives first, the
+/// reap or the reader's end of input, and the two land in either order. So the
+/// question is "is a child still running here", not "has the reader seen EOF":
+/// the reader can still be draining when the serve thread looks.
+fn child_is_shut_down(client: &dux_core::pty::PtyClient) -> bool {
+    !client.is_live()
+}
+
+/// The quit teardown ends the child, and the check above must say so even when
+/// the PTY's read side is still open at that moment. A grandchild that ignores
+/// the shutdown signals holds the PTY open past the reap, which pins the
+/// ordering the suite otherwise hits only by chance: the child reaped, the
+/// reader not yet at end of input.
+#[tokio::test]
+async fn quit_process_counts_a_reaped_child_whose_pty_is_still_open_as_shut_down() {
+    let (mut engine, _tmp) = build_engine();
+    engine.config.terminal.command = "sh".to_string();
+    engine.config.terminal.args = vec![
+        "-c".to_string(),
+        "(trap '' TERM HUP; exec sleep 5) & exec cat".to_string(),
+    ];
+    let (terminal_id, _label) = engine
+        .create_companion_terminal("s1", 24, 80)
+        .expect("create terminal");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool, bool)>();
+    let serve_thread = std::thread::spawn(move || {
+        let (returned_engine, exit) = serve_with_engine(
+            engine,
+            vec![listener],
+            dux_core::activity::ActivityRing::new(),
+            || ServerTick::QuitProcess,
+            |_message| {},
+        )
+        .expect("serve_with_engine");
+        let client = &returned_engine.companion_terminals[&terminal_id].client;
+        result_tx
+            .send((exit, client.is_exited(), child_is_shut_down(client)))
+            .unwrap();
+    });
+
+    let (exit, reader_at_eof, shut_down) = result_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("serve thread reported a result");
+    assert!(
+        matches!(exit, ServerExit::QuitProcess),
+        "expected QuitProcess exit"
+    );
+    assert!(
+        !reader_at_eof,
+        "the grandchild must still hold the PTY open, or this test proves nothing"
+    );
+    assert!(
+        shut_down,
+        "a reaped child is shut down even while its PTY's read side is open"
+    );
 
     serve_thread.join().expect("serve thread joined");
 }

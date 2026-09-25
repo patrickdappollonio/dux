@@ -725,8 +725,9 @@ mod tests {
     /// live [`AppState`]. The state is captured through a probe route (the
     /// `extra_gated` hook `build_app` exposes for exactly this), which is the only
     /// way to reach the changes cache and the engine handle a real request sees.
-    async fn router_with_session_and_state() -> (tempfile::TempDir, Router, AppState) {
-        let tmp = tempfile::tempdir().unwrap();
+    async fn router_with_session_and_state()
+    -> (dux_core::test_scratch::ScratchDir, Router, AppState) {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
         let root = tmp.path().to_path_buf();
         // The git repo lives in its own subdir so the dux runtime files at `root`
         // never show up as untracked changes.
@@ -1011,15 +1012,25 @@ mod tests {
     /// that call left the whole `dux-web` suite green, which is why this test
     /// exists.
     ///
-    /// The failure is built by deleting the worktree out from under the route:
-    /// `git status -C <gone>` names the missing directory by absolute path on
+    /// The failure is built by pointing the worktree's `.git` at a gitdir that
+    /// does not exist: `git status` then names that gitdir by absolute path on
     /// stderr, and `changed_files` passes that text through, so the server's
     /// layout would reach a browser that may be on another machine entirely.
+    ///
+    /// The directory itself stays: a worktree that is gone is its own verdict,
+    /// refused with a 409 before classify runs, and the engine's background
+    /// pollers reach that verdict on their own schedule, so deleting it made
+    /// the status this test reads depend on which got there first.
     #[tokio::test]
     async fn discard_strips_the_server_path_from_a_classify_refusal() {
         let (tmp, app, _state) = router_with_session_and_state().await;
         let worktree = tmp.path().join("wt");
-        std::fs::remove_dir_all(&worktree).unwrap();
+        std::fs::remove_dir_all(worktree.join(".git")).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", worktree.join("no-such-gitdir").display()),
+        )
+        .unwrap();
 
         let resp = app
             .oneshot(json_req(
