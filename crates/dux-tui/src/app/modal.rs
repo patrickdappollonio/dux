@@ -516,7 +516,7 @@ fn focus_move_is_reverse(key: KeyEvent) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use ratatui::crossterm::event::KeyModifiers;
 
@@ -720,7 +720,7 @@ mod tests {
         }
     }
 
-    fn every_prompt(app: &App) -> Vec<(&'static str, PromptState)> {
+    pub(in crate::app) fn every_prompt(app: &App) -> Vec<(&'static str, PromptState)> {
         let project = app.engine.projects[0].clone();
         vec![
             (

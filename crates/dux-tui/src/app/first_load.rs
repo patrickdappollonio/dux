@@ -24,7 +24,7 @@
 
 use super::*;
 
-use crate::app::components::render_scroll_marker;
+use crate::app::components::render_scroll_view;
 use crate::app::render::centered_rect_exact;
 use dux_core::release_notes::ReleaseNotes;
 use dux_core::welcome_screen::WelcomeScreen;
@@ -647,7 +647,17 @@ pub(crate) fn render_modal(
 
     let lines = content_lines(prompt, content.width, &colors);
     let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-    render_scrollable(frame, area, content, lines, prompt.scroll, &colors);
+    // The shared scroll view: the content pane plus the one-cell indicator in
+    // the modal's border column. These two screens are what it was taken from,
+    // and the pickers wear the same one.
+    render_scroll_view(
+        frame,
+        area,
+        content,
+        lines,
+        usize::from(prompt.scroll),
+        theme,
+    );
 
     Paragraph::new(Line::from(Span::styled(
         "─".repeat(sep.width as usize),
@@ -673,30 +683,6 @@ pub(crate) fn render_modal(
         content_height: content.height,
         content_lines: total,
     }
-}
-
-/// The scrollable content pane, plus the shared one-cell direction marker in the
-/// modal's border column (see [`crate::app::components::scroll_marker`], which
-/// owns the geometry and the glyph table for every scrollable surface) when
-/// there is more to see.
-///
-/// `outer` is the modal, `area` the content pane inside its border ring.
-fn render_scrollable(
-    frame: &mut Frame,
-    outer: Rect,
-    area: Rect,
-    lines: Vec<Line<'static>>,
-    scroll: u16,
-    colors: &FirstLoadColors,
-) {
-    let total = lines.len();
-    let visible = area.height as usize;
-    let max_scroll = total.saturating_sub(visible);
-    let offset = (scroll as usize).min(max_scroll);
-    let slice: Vec<Line> = lines.into_iter().skip(offset).take(visible).collect();
-    Paragraph::new(slice).render(area, frame.buffer_mut());
-
-    render_scroll_marker(frame, outer, area, offset, visible, total, colors.accent);
 }
 
 // ---------------------------------------------------------------------------

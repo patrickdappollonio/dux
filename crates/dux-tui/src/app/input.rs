@@ -6167,12 +6167,14 @@ impl App {
         column: u16,
         row: u16,
     ) -> Option<usize> {
-        if !contains_point(rect, column, row) {
-            return None;
+        // The picker list's own hit test, so the rows a click resolves against
+        // are exactly the rows the list drew.
+        super::components::PickerListLayout {
+            list: rect,
+            items,
+            offset,
         }
-        let relative_row = usize::from(row.saturating_sub(rect.y));
-        let index = offset.saturating_add(relative_row / usize::from(rows_per_item.max(1)));
-        (index < items).then_some(index)
+        .item_at(rows_per_item, column, row)
     }
 
     #[allow(clippy::too_many_arguments)]

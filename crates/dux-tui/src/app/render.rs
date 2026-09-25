@@ -6,6 +6,7 @@ use super::components::{
     name_chip, plan_pane_card, prose_lines, prose_spans, render_centered_lines,
     render_scroll_marker, shared_button_width, wrap_styled_lines,
 };
+use super::components::{PickerList, render_scroll_indicator};
 use super::pty_ownership::PtyTakeoverCard;
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
@@ -13,6 +14,10 @@ use dux_core::prose::Prose;
 use dux_core::text::{count_of, count_of_with};
 use ratatui::buffer::{CellDiffOption, CellWidth};
 use std::path::Path;
+
+/// The empty state of the three provider pickers. Unreachable while the config
+/// defines a provider, which it always does, but a list is never a silent blank.
+const NO_PROVIDERS: &str = "No providers are configured.";
 
 /// The width a pane card's button paints at. One rule, read by the planner (to
 /// refuse a layout too narrow for it) and by the painter (to place it), so the
@@ -5462,9 +5467,7 @@ impl App {
         let popup = centered_rect(72, 40, frame.area());
         self.clear_overlay_area(frame, popup);
         let commands = self.filtered_palette_commands(&input.text);
-        let items = if commands.is_empty() {
-            vec![ListItem::new("No matching commands.")]
-        } else {
+        let items = {
             let name_col = commands
                 .iter()
                 .map(|binding| binding.palette_name.unwrap().len())
@@ -5502,9 +5505,8 @@ impl App {
                 .collect::<Vec<_>>()
         };
         // `selected` is stored state and the match list is recomputed on
-        // every draw, so availability can shrink it out from under the cursor.
-        let selected_command = (*selected).min(commands.len().saturating_sub(1));
-        let mut state = ListState::default().with_selected(Some(selected_command));
+        // every draw, so availability can shrink it out from under the cursor;
+        // the picker list clamps it to the rows it has.
         let [input_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(3)])
@@ -5546,29 +5548,14 @@ impl App {
             .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg));
-        let list_inner = list_block.inner(list_area);
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(self.theme.selection_style()),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
-        render_scroll_marker(
-            frame,
-            list_area,
-            list_inner,
-            state.offset(),
-            list_inner.height as usize,
-            commands.len(),
-            self.theme.hint_key_fg,
-        );
+        let list = PickerList::new(items, Some(*selected), "No matching commands.")
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::Command {
             input: input_inner,
-            list: list_inner,
-            items: commands.len(),
-            offset: state.offset(),
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
         };
     }
 
@@ -5679,28 +5666,19 @@ impl App {
                 ]))
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(Some(
-            prompt.selected.min(prompt.options.len().saturating_sub(1)),
-        ));
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg))
             .title_bottom(Line::from(bottom_spans));
-        let list_inner = list_block.inner(list_area);
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(self.theme.selection_style()),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        let list = PickerList::new(items, Some(prompt.selected), "No modes to choose from.")
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
 
         self.overlay_layout.active = OverlayMouseLayout::SetTailscaleMode {
-            list: list_inner,
-            items: prompt.options.len(),
-            offset: state.offset(),
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
         };
     }
 
@@ -5798,35 +5776,17 @@ impl App {
                 ]))
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(Some(
-            prompt.selected.min(prompt.options.len().saturating_sub(1)),
-        ));
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg));
-        let list_inner = list_block.inner(list_area);
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(self.theme.selection_style()),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
-        render_scroll_marker(
-            frame,
-            list_area,
-            list_inner,
-            state.offset(),
-            list_inner.height as usize,
-            prompt.options.len(),
-            self.theme.hint_key_fg,
-        );
+        let list = PickerList::new(items, Some(prompt.selected), "No themes found.")
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::ChangeTheme {
-            list: list_inner,
-            items: prompt.options.len(),
-            offset: state.offset(),
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
         };
     }
 
@@ -5868,30 +5828,32 @@ impl App {
                 )]))
             })
             .collect::<Vec<_>>();
-        let items = if *editing_path {
-            if completion_items.is_empty() {
-                vec![ListItem::new("No matching directories.")]
-            } else {
-                completion_items
-            }
+        // The loading line and every "nothing here" sentence are the list's
+        // EMPTY state, not rows: nothing on them can be picked, so nothing
+        // highlights them and a click on them selects nothing.
+        let empty: Line = if *editing_path {
+            Line::from("No matching directories.")
         } else if *loading {
             let idx = self.spinner_frame_index();
             let spinner = crate::theme::SPINNER_FRAMES[idx];
-            vec![ListItem::new(Line::from(vec![
+            Line::from(vec![
                 Span::styled(
                     format!("{spinner} "),
                     Style::default().fg(self.theme.hint_desc_fg),
                 ),
                 Span::styled("Loading…", Style::default().fg(self.theme.text_fg)),
-            ]))]
-        } else if visible.is_empty() {
-            vec![ListItem::new(if filter.is_empty() {
-                "No child directories here."
-            } else {
-                "No matching entries."
-            })]
+            ])
+        } else if filter.is_empty() {
+            Line::from("No child directories here.")
         } else {
-            let last = visible.len() - 1;
+            Line::from("No matching entries.")
+        };
+        let items = if *editing_path {
+            completion_items
+        } else if *loading {
+            Vec::new()
+        } else {
+            let last = visible.len().saturating_sub(1);
             visible
                 .iter()
                 .enumerate()
@@ -5913,14 +5875,8 @@ impl App {
                 })
                 .collect::<Vec<_>>()
         };
-        let item_count = if *editing_path {
-            tab_completions.len()
-        } else {
-            visible.len()
-        };
         let selected_index = if *editing_path { *tab_index } else { *selected };
-        let mut state = ListState::default()
-            .with_selected(Some(selected_index.min(item_count.saturating_sub(1))));
+        let picker = PickerList::new(items, Some(selected_index), empty);
         let has_filter = !filter.is_empty();
         let show_top_input = *searching || has_filter || *editing_path;
         let (top_areas, list_render_area) = if show_top_input {
@@ -5966,31 +5922,14 @@ impl App {
                 .border_style(Style::default().fg(self.theme.overlay_border))
                 .style(Style::default().bg(self.theme.overlay_bg))
                 .title_bottom(Line::from(bottom_spans));
-            let list_inner = list_block.inner(list_render_area);
-            StatefulWidget::render(
-                List::new(items)
-                    .block(list_block)
-                    .highlight_style(self.theme.selection_style()),
-                list_render_area,
-                frame.buffer_mut(),
-                &mut state,
-            );
-            // The marker uses item units in the right border. Placeholder rows
-            // report zero items and therefore remain unscrollable.
-            render_scroll_marker(
-                frame,
-                list_render_area,
-                list_inner,
-                state.offset(),
-                list_inner.height as usize,
-                item_count,
-                self.theme.hint_key_fg,
-            );
+            let list = picker
+                .block(list_block)
+                .render(frame, list_render_area, &self.theme);
             self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                 input: Some(input_inner),
-                list: list_inner,
-                items: item_count,
-                offset: state.offset(),
+                list: list.list,
+                items: list.items,
+                offset: list.offset,
             };
         } else {
             let search_key = self.bindings.label_for(Action::SearchToggle);
@@ -6028,31 +5967,14 @@ impl App {
             let list_block = self
                 .themed_overlay_block_prose(&title)
                 .title_bottom(Line::from(bottom_spans));
-            let list_inner = list_block.inner(list_render_area);
-            StatefulWidget::render(
-                List::new(items)
-                    .block(list_block)
-                    .highlight_style(self.theme.selection_style()),
-                list_render_area,
-                frame.buffer_mut(),
-                &mut state,
-            );
-            // Same marker on the no-filter layout, where the list fills
-            // the whole modal. ITEM units (see the sibling branch).
-            render_scroll_marker(
-                frame,
-                list_render_area,
-                list_inner,
-                state.offset(),
-                list_inner.height as usize,
-                item_count,
-                self.theme.hint_key_fg,
-            );
+            let list = picker
+                .block(list_block)
+                .render(frame, list_render_area, &self.theme);
             self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                 input: None,
-                list: list_inner,
-                items: item_count,
-                offset: state.offset(),
+                list: list.list,
+                items: list.items,
+                offset: list.offset,
             };
         }
     }
@@ -6212,30 +6134,20 @@ impl App {
                 ]))
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(Some(
-            prompt.selected.min(prompt.options.len().saturating_sub(1)),
-        ));
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg));
-        let list_inner = list_block.inner(list_area);
         // The rows are the only thing in here, so the selection is
         // always live: there is no button for focus to move to.
-        let highlight_style = self.theme.selection_style();
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(highlight_style),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        let list = PickerList::new(items, Some(prompt.selected), NO_PROVIDERS)
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
 
         self.overlay_layout.active = OverlayMouseLayout::ChangeAgentProvider {
-            list: list_inner,
-            items: prompt.options.len(),
-            offset: state.offset(),
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
         };
     }
 
@@ -6305,28 +6217,18 @@ impl App {
                 ]))
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(Some(
-            prompt.selected.min(prompt.options.len().saturating_sub(1)),
-        ));
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg));
-        let list_inner = list_block.inner(list_area);
-        let highlight_style = self.theme.selection_style();
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(highlight_style),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        let list = PickerList::new(items, Some(prompt.selected), NO_PROVIDERS)
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
 
         self.overlay_layout.active = OverlayMouseLayout::ChangeDefaultProvider {
-            list: list_inner,
-            items: prompt.options.len(),
-            offset: state.offset(),
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
         };
     }
 
@@ -6431,28 +6333,18 @@ impl App {
                 ]))
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(Some(
-            prompt.selected.min(prompt.options.len().saturating_sub(1)),
-        ));
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg));
-        let list_inner = list_block.inner(list_area);
-        let highlight_style = self.theme.selection_style();
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(highlight_style),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        let list = PickerList::new(items, Some(prompt.selected), NO_PROVIDERS)
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
 
         self.overlay_layout.active = OverlayMouseLayout::ChangeProjectDefaultProvider {
-            list: list_inner,
-            items: prompt.options.len(),
-            offset: state.offset(),
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
         };
     }
 
@@ -6545,25 +6437,17 @@ impl App {
                 ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default()
-            .with_selected(Some((*selected).min(editors.len().saturating_sub(1))));
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg));
-        let list_inner = list_block.inner(list_area);
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(self.theme.selection_style()),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        let list = PickerList::new(items, Some(*selected), "No editors found on this machine.")
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::PickEditor {
-            list: list_inner,
-            items: editors.len(),
-            offset: state.offset(),
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
         };
     }
 
@@ -6715,24 +6599,19 @@ impl App {
                 |row| matches!(row, ManageWorktreeVisualRow::Entry(index) if *index == selected),
             )
         });
-        let mut state = ListState::default().with_selected(selected_visual);
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg));
-        let list_inner = list_block.inner(list_area);
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(self.theme.selection_style()),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        // The visual rows always carry their own loading, error and empty
+        // lines, so the list itself is never empty and names no empty state.
+        let list = PickerList::new(items, selected_visual, "")
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::ManageWorktrees {
-            list: list_inner,
-            items: rows.len(),
-            offset: state.offset(),
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
         };
     }
 
@@ -7041,24 +6920,19 @@ impl App {
                 |row| matches!(row, ProjectWorktreeVisualRow::Entry(index) if *index == selected),
             )
         });
-        let mut state = ListState::default().with_selected(selected_visual);
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg));
-        let list_inner = list_block.inner(list_area);
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(self.theme.selection_style()),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        // The visual rows always carry their own loading, error and empty
+        // lines, so the list itself is never empty and names no empty state.
+        let list = PickerList::new(items, selected_visual, "")
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::PickProjectWorktree {
-            list: list_inner,
-            items: rows.len(),
-            offset: state.offset(),
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
         };
     }
 
@@ -7181,20 +7055,19 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        let mut state = ListState::default().with_selected(Some(list.selected));
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(self.theme.selection_style()),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        let empty = if entries.is_empty() {
+            "No projects yet."
+        } else {
+            "No matching projects."
+        };
+        let rendered = PickerList::new(items, Some(list.selected), empty)
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::PickProject {
             input: filter_input_rect,
-            list: list_inner,
-            items: visible.len(),
-            offset: state.offset(),
+            list: rendered.list,
+            items: rendered.items,
+            offset: rendered.offset,
         };
     }
 
@@ -9740,11 +9613,12 @@ impl App {
             (None, left_area)
         };
         let visible_indices = Self::startup_command_log_filtered_indices(prompt);
-        let items = if prompt.entries.is_empty() {
-            vec![ListItem::new("No logs")]
-        } else if visible_indices.is_empty() {
-            vec![ListItem::new("No matching logs")]
+        let empty = if prompt.entries.is_empty() {
+            "No logs"
         } else {
+            "No matching logs"
+        };
+        let items = {
             visible_indices
                 .iter()
                 .filter_map(|index| prompt.entries.get(*index))
@@ -9778,7 +9652,6 @@ impl App {
         };
         let selected_visual =
             Self::startup_command_log_selected_visual_index(prompt, &visible_indices);
-        let mut state = ListState::default().with_selected(selected_visual);
         let mut filter_input_rect: Option<Rect> = None;
         if let Some(filter_area) = filter_area {
             let filter_block = Block::default()
@@ -9842,15 +9715,9 @@ impl App {
             // selection is a value and stays visible either way.
             .border_style(self.theme.overlay_field_border_style(list_focused))
             .style(Style::default().bg(self.theme.overlay_bg));
-        let list_inner = list_block.inner(list_area);
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(self.theme.selection_style()),
-            list_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        let list = PickerList::new(items, selected_visual, empty)
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
         let body_block = Block::default()
             .title(" Output ")
             .borders(Borders::ALL)
@@ -9891,16 +9758,16 @@ impl App {
             }
         }
 
-        // Put the output marker in its right border and measure wrapped visual
-        // rows, matching the units used by `max_scroll`.
-        render_scroll_marker(
+        // Put the output indicator in its right border and measure wrapped
+        // visual rows, matching the units used by `max_scroll`.
+        render_scroll_indicator(
             frame,
             body_area,
             body_inner,
             scroll_offset as usize,
             body_inner.height as usize,
             content_lines.len(),
-            self.theme.hint_key_fg,
+            &self.theme,
         );
 
         let close_width = 16;
@@ -9921,10 +9788,10 @@ impl App {
             .render(frame, close_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
             input: filter_input_rect,
-            list: list_inner,
+            list: list.list,
             body: body_inner,
-            items: visible_indices.len(),
-            offset: state.offset(),
+            items: list.items,
+            offset: list.offset,
             close_button: close_area,
         };
     }
@@ -9939,12 +9806,11 @@ impl App {
 
         let visible_indices = Self::visible_kill_running_indices(prompt);
         let items = self.kill_running_items(prompt, &visible_indices);
-        let mut state = ListState::default().with_selected(Some(
-            prompt
-                .list
-                .selected
-                .min(visible_indices.len().saturating_sub(1)),
-        ));
+        let picker = PickerList::new(
+            items,
+            Some(prompt.list.selected),
+            "No matching running agents or terminals.",
+        );
         let show_top_input = prompt.list.is_filtering();
         let (top_area, body_area) = if show_top_input {
             let [input_area, rest] = Layout::default()
@@ -10034,20 +9900,14 @@ impl App {
                 .border_style(Style::default().fg(self.theme.overlay_border))
                 .style(Style::default().bg(self.theme.overlay_bg))
                 .title_bottom(Line::from(hint_spans));
-            let list_inner = list_block.inner(list_area);
-            StatefulWidget::render(
-                List::new(items)
-                    .block(list_block)
-                    .highlight_style(self.theme.selection_style()),
-                list_area,
-                frame.buffer_mut(),
-                &mut state,
-            );
+            let list = picker
+                .block(list_block)
+                .render(frame, list_area, &self.theme);
             self.overlay_layout.active = OverlayMouseLayout::KillRunning {
                 input: Some(input_inner),
-                list: list_inner,
-                items: visible_indices.len(),
-                offset: state.offset(),
+                list: list.list,
+                items: list.items,
+                offset: list.offset,
                 cancel_button: Rect::default(),
                 hovered_button: Rect::default(),
                 selected_button: Rect::default(),
@@ -10057,20 +9917,14 @@ impl App {
             let list_block = self
                 .themed_overlay_block(title)
                 .title_bottom(Line::from(hint_spans));
-            let list_inner = list_block.inner(list_area);
-            StatefulWidget::render(
-                List::new(items)
-                    .block(list_block)
-                    .highlight_style(self.theme.selection_style()),
-                list_area,
-                frame.buffer_mut(),
-                &mut state,
-            );
+            let list = picker
+                .block(list_block)
+                .render(frame, list_area, &self.theme);
             self.overlay_layout.active = OverlayMouseLayout::KillRunning {
                 input: None,
-                list: list_inner,
-                items: visible_indices.len(),
-                offset: state.offset(),
+                list: list.list,
+                items: list.items,
+                offset: list.offset,
                 cancel_button: Rect::default(),
                 hovered_button: Rect::default(),
                 selected_button: Rect::default(),
@@ -10167,7 +10021,10 @@ impl App {
                 _ => Rect::default(),
             },
             items: visible_indices.len(),
-            offset: state.offset(),
+            offset: match self.overlay_layout.active {
+                OverlayMouseLayout::KillRunning { offset, .. } => offset,
+                _ => 0,
+            },
             cancel_button: button_rects[0],
             hovered_button: button_rects[1],
             selected_button: button_rects[2],
@@ -10180,9 +10037,6 @@ impl App {
         prompt: &KillRunningPrompt,
         visible_indices: &[usize],
     ) -> Vec<ListItem<'static>> {
-        if visible_indices.is_empty() {
-            return vec![ListItem::new("No matching running agents or terminals.")];
-        }
         let label_col = visible_indices
             .iter()
             .filter_map(|index| prompt.runtimes.get(*index))
@@ -10943,94 +10797,70 @@ impl App {
             let inner = outer.inner(popup);
             outer.render(popup, frame.buffer_mut());
 
-            if entries.is_empty() {
-                let [msg_area, _, hint_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(2),
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                    ])
-                    .areas(inner);
+            let [list_area, hint_area] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .areas(inner);
 
-                let new_key = self.bindings.label_for(Action::NewMacro);
-                Paragraph::new(vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        format!(" No macros defined. Press {new_key} to create one."),
+            let items: Vec<ListItem> = entries
+                .iter()
+                .map(|(name, text, surface)| {
+                    let surface_label = format!(" ({})", surface.label());
+                    let mut spans = vec![
+                        Span::styled(
+                            format!(" {name}"),
+                            Style::default().fg(self.theme.input_label_fg),
+                        ),
+                        Span::styled(
+                            surface_label.clone(),
+                            Style::default().fg(self.theme.hint_dim_desc_fg),
+                        ),
+                        // Three characters, matching `prefix_len` below.
+                        Span::styled(" - ", Style::default().fg(self.theme.input_label_fg)),
+                    ];
+                    let text_preview = text.replace('\n', "↵");
+                    // " " + name + " (label)" + " - ", counted in CHARACTERS:
+                    // a macro name or surface label can hold multi-byte text
+                    // just as the preview can.
+                    let prefix_len = 1 + name.chars().count() + surface_label.chars().count() + 3;
+                    let max_len = (list_area.width as usize).saturating_sub(prefix_len + 2);
+                    spans.push(Span::styled(
+                        truncate_macro_preview(&text_preview, max_len),
                         Style::default().fg(self.theme.hint_desc_fg),
-                    )),
-                ])
-                .render(msg_area, frame.buffer_mut());
+                    ));
+                    ListItem::new(Line::from(spans))
+                })
+                .collect();
 
-                if !delete_confirm_open {
-                    Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
-                        .render(hint_area, frame.buffer_mut());
-                }
-            } else {
-                let [list_area, hint_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(1), Constraint::Length(1)])
-                    .areas(inner);
+            // The empty state keeps the blank line above it that it has
+            // always had, so it reads as a sentence and not as a row.
+            let new_key = self.bindings.label_for(Action::NewMacro);
+            let empty = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!(" No macros defined. Press {new_key} to create one."),
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )),
+            ];
+            // No block of its own: the rows sit inside the modal's ring,
+            // so the scroll indicator goes in the modal's border column.
+            let list = PickerList::new(items, Some(*selected), empty)
+                .indicator_frame(popup)
+                .render(frame, list_area, &self.theme);
+            // A picker's rows are clickable everywhere else in dux; this
+            // one published nothing, so it was the one list a mouse could
+            // not reach.
+            let list_layout = OverlayMouseLayout::EditMacroList {
+                list: list.list,
+                items: list.items,
+                offset: list.offset,
+            };
 
-                let items: Vec<ListItem> = entries
-                    .iter()
-                    .map(|(name, text, surface)| {
-                        let surface_label = format!(" ({})", surface.label());
-                        let mut spans = vec![
-                            Span::styled(
-                                format!(" {name}"),
-                                Style::default().fg(self.theme.input_label_fg),
-                            ),
-                            Span::styled(
-                                surface_label.clone(),
-                                Style::default().fg(self.theme.hint_dim_desc_fg),
-                            ),
-                            // Three characters, matching `prefix_len` below.
-                            Span::styled(" - ", Style::default().fg(self.theme.input_label_fg)),
-                        ];
-                        let text_preview = text.replace('\n', "↵");
-                        // " " + name + " (label)" + " - ", counted in CHARACTERS:
-                        // a macro name or surface label can hold multi-byte text
-                        // just as the preview can.
-                        let prefix_len =
-                            1 + name.chars().count() + surface_label.chars().count() + 3;
-                        let max_len = (list_area.width as usize).saturating_sub(prefix_len + 2);
-                        spans.push(Span::styled(
-                            truncate_macro_preview(&text_preview, max_len),
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        ListItem::new(Line::from(spans))
-                    })
-                    .collect();
-
-                let item_count = items.len();
-                let list = List::new(items)
-                    .highlight_style(self.theme.selection_style())
-                    .highlight_symbol("");
-                let mut state = ratatui::widgets::ListState::default();
-                state.select(Some(*selected));
-                ratatui::prelude::StatefulWidget::render(
-                    list,
-                    list_area,
-                    frame.buffer_mut(),
-                    &mut state,
-                );
-                // A picker's rows are clickable everywhere else in dux; this
-                // one published nothing, so it was the one list a mouse could
-                // not reach.
-                let list_layout = OverlayMouseLayout::EditMacroList {
-                    list: list_area,
-                    items: item_count,
-                    offset: state.offset(),
-                };
-
-                if !delete_confirm_open {
-                    Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
-                        .render(hint_area, frame.buffer_mut());
-                }
-                self.overlay_layout.active = list_layout;
+            if !delete_confirm_open {
+                Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
+                    .render(hint_area, frame.buffer_mut());
             }
+            self.overlay_layout.active = list_layout;
         }
 
         let pending_delete_snapshot = match &self.prompt {
@@ -12282,6 +12112,25 @@ impl App {
             inner.y.saturating_add(1),
             inner.width,
             inner.height.saturating_sub(1),
+        );
+        // A table rather than a `PickerList`, because it has a header row and
+        // columns, but it scrolls, marks its scroll and says when it is empty
+        // the way every other picker does.
+        if visual.is_empty() {
+            Paragraph::new(Line::from(Span::styled(
+                "Waiting for the first sample…",
+                Style::default().fg(self.theme.hint_dim_desc_fg),
+            )))
+            .render(row_area, frame.buffer_mut());
+        }
+        render_scroll_indicator(
+            frame,
+            content_area,
+            row_area,
+            table_state.offset(),
+            usize::from(row_area.height),
+            visual.len(),
+            &self.theme,
         );
         self.overlay_layout.active = OverlayMouseLayout::ResourceMonitor {
             list: row_area,
