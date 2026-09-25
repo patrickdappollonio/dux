@@ -2326,12 +2326,21 @@ impl App {
         // confirm key to pick. Confirm therefore commits the query and leaves
         // search mode, the way a find bar does; the close key still leaves
         // search AND clears the query in one press.
+        //
+        // While the row is up the dialog meaning of confirm and close comes
+        // first: the row's hint names those two bindings, and Enter is also a
+        // center-pane binding (focus the agent) that would otherwise shadow it
+        // and leave the key doing nothing.
         if self
             .startup_log_viewer
             .as_ref()
             .is_some_and(|viewer| viewer.searching)
         {
-            match action {
+            let search_action = match dialog_action {
+                Some(Action::Confirm | Action::CloseOverlay) => dialog_action,
+                _ => action,
+            };
+            match search_action {
                 Some(Action::CloseOverlay) => {
                     if let Some(viewer) = &mut self.startup_log_viewer {
                         exit_search_clearing_filter(&mut viewer.searching, &mut viewer.search);
@@ -35613,6 +35622,48 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
         app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
         app
+    }
+
+    /// The search row's hint names the confirm key as the way to finish, so the
+    /// confirm key must finish it, keeping the query. Enter is also a
+    /// center-pane binding (focus the agent), which must not shadow the dialog
+    /// meaning while the row is up.
+    #[test]
+    fn startup_log_viewer_search_ends_on_the_confirm_key_it_names() {
+        let mut app = startup_log_viewer_app();
+        begin_search(&mut app);
+        type_text(&mut app, "line 40");
+        tap(&mut app, KeyCode::Enter);
+        let (searching, query, _) = viewer_state(&app);
+        assert!(!searching, "Enter must end the search");
+        assert_eq!(query, "line 40", "and keep the query");
+
+        let rebound = crate::keybindings::RuntimeBindings::new(
+            |action| match action {
+                Action::Confirm => vec![crokey::KeyCombination::new(
+                    KeyCode::F(5),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                )],
+                _ => crate::keybindings::BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default(),
+            },
+            true,
+        );
+        let mut app = startup_log_viewer_app();
+        app.bindings = rebound;
+        begin_search(&mut app);
+        type_text(&mut app, "line 40");
+        app.handle_key(KeyEvent::new(
+            KeyCode::F(5),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ))
+        .expect("handle key");
+        let (searching, query, _) = viewer_state(&app);
+        assert!(!searching, "the rebound confirm key must end the search");
+        assert_eq!(query, "line 40");
     }
 
     #[test]
