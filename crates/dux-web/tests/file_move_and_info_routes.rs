@@ -15,6 +15,7 @@
 //! repository on disk, following `file_tree_routes.rs`'s shape.
 
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use axum::Router;
@@ -257,7 +258,12 @@ async fn moving_into_the_git_directory_is_refused() {
 #[tokio::test]
 async fn info_reports_path_size_modified_permissions_and_git_status() {
     let (addr, _tmp, wt) = boot().await;
-    std::fs::write(wt.join("src/moveme.txt"), "changed contents\n").unwrap();
+    let target = wt.join("src/moveme.txt");
+    std::fs::write(&target, "changed contents\n").unwrap();
+    // The process umask (022 vs. the increasingly common 002) decides what
+    // mode a freshly written file ends up with, so pin it explicitly rather
+    // than assuming the test runner's umask.
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
     let resp = get_info(addr, "s1", "src/moveme.txt").await;
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
