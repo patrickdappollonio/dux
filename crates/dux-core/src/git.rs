@@ -3972,53 +3972,6 @@ pub(crate) fn resolves_into_git_dir(worktree: &Path, candidate: &Path) -> bool {
     }
 }
 
-pub fn ellipsize_middle(input: &str, max_width: usize) -> String {
-    if input.chars().count() <= max_width {
-        return input.to_string();
-    }
-    if max_width <= 3 {
-        return ".".repeat(max_width);
-    }
-    let left = (max_width - 3) / 2;
-    let right = max_width - 3 - left;
-    let start: String = input.chars().take(left).collect();
-    let end: String = input
-        .chars()
-        .rev()
-        .take(right)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("{start}...{end}")
-}
-
-/// Truncate `input` to at most `max_width` chars, keeping the END and prefixing
-/// a single `…` when characters are dropped from the front. Used for paths,
-/// where the leaf (the tail) is the informative part and the leading directories
-/// can be elided. Measured in chars, matching [`ellipsize_middle`].
-pub fn ellipsize_start(input: &str, max_width: usize) -> String {
-    let len = input.chars().count();
-    if len <= max_width {
-        return input.to_string();
-    }
-    match max_width {
-        0 => String::new(),
-        1 => "…".to_string(),
-        _ => {
-            let tail: String = input
-                .chars()
-                .rev()
-                .take(max_width - 1)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            format!("…{tail}")
-        }
-    }
-}
-
 /// Shorten `path` for display by stripping a leading `base` directory when
 /// `path` sits under it, returning the remainder relative to `base` (no leading
 /// slash). Matching is boundary-safe: `base = /home/pat` does NOT strip
@@ -5000,28 +4953,6 @@ fn remove_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ellipsizes_in_the_middle() {
-        assert_eq!(
-            ellipsize_middle("src/components/app.rs", 12),
-            "src/...pp.rs"
-        );
-    }
-
-    #[test]
-    fn ellipsize_start_keeps_the_tail() {
-        // Fits: unchanged.
-        assert_eq!(ellipsize_start("proj/app", 12), "proj/app");
-        // Too long: keep the tail, prefix a single ellipsis (result width == max).
-        let out = ellipsize_start("/home/patrick/code/proj", 10);
-        assert_eq!(out.chars().count(), 10);
-        assert!(out.starts_with('…'));
-        assert!(out.ends_with("proj"));
-        // Degenerate widths.
-        assert_eq!(ellipsize_start("abc", 0), "");
-        assert_eq!(ellipsize_start("abc", 1), "…");
-    }
 
     #[test]
     fn display_path_relative_strips_the_base_dir() {

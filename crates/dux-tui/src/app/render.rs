@@ -1,3 +1,7 @@
+use super::components::ellipsis::{
+    ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width, mark_cut_row,
+    pad_to_width, truncate_to_width,
+};
 use super::components::pane_card::CardPlan;
 use super::components::wrap_lines::{char_display_width, display_width};
 use super::components::{
@@ -64,19 +68,7 @@ fn cut_card_lines(
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
-        // One column of the budget belongs to the mark itself.
-        let budget = usize::from(width).saturating_sub(1);
-        let mut kept = String::new();
-        let mut used = 0usize;
-        for c in text.chars() {
-            let cell = super::components::wrap_lines::char_display_width(c);
-            if used + cell > budget {
-                break;
-            }
-            kept.push(c);
-            used += cell;
-        }
-        *last = Line::from(Span::styled(format!("{kept}\u{2026}"), style));
+        *last = Line::from(mark_cut_row(vec![Span::styled(text, style)], width));
     }
     cut
 }
@@ -475,71 +467,6 @@ const LEFT_PANE_GUTTER: u16 = 1;
 /// letters "PR" to save a column. U+2387 (ALTERNATIVE KEY SYMBOL) renders as a
 /// branch fork in most terminals and is width-1; the `#<number>` follows it.
 const PR_BADGE_GLYPH: &str = "⎇";
-
-/// Truncate `s` to at most `max_w` display columns, measured by real
-/// terminal cell width (unicode-width via `CellWidth`), not byte or char
-/// count. Stops before any character that would push the running width over
-/// `max_w`, so multi-byte/double-width glyphs (CJK, emoji) are never split
-/// mid-character and the result never overflows its budget.
-fn truncate_to_width(s: &str, max_w: u16) -> String {
-    if s.cell_width() <= max_w {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    let mut w = 0u16;
-    for ch in s.chars() {
-        let mut buf = [0u8; 4];
-        let cw = ch.encode_utf8(&mut buf).cell_width();
-        if w + cw > max_w {
-            break;
-        }
-        out.push(ch);
-        w += cw;
-    }
-    out
-}
-
-/// Truncate a line of styled spans to `max_w` terminal cells, appending a
-/// single-cell ellipsis (`…`) when any content is dropped. Width is measured in
-/// display columns (unicode-width via `CellWidth`), so CJK/emoji count as two.
-/// Each surviving span keeps its own style, and the ellipsis inherits the style
-/// of the span it cut into so it matches the color of the text it replaced.
-/// Returns the spans unchanged when they already fit.
-fn ellipsize_spans(spans: Vec<Span<'static>>, max_w: u16) -> Vec<Span<'static>> {
-    let total = spans
-        .iter()
-        .map(|s| s.content.as_ref().cell_width())
-        .fold(0u16, |a, b| a.saturating_add(b));
-    if total <= max_w {
-        return spans;
-    }
-    if max_w == 0 {
-        return Vec::new();
-    }
-    let budget = max_w - 1; // reserve one cell for the ellipsis
-    let mut out: Vec<Span<'static>> = Vec::new();
-    let mut used = 0u16;
-    let mut ellipsis_style = Style::default();
-    for span in spans {
-        ellipsis_style = span.style;
-        let w = span.content.as_ref().cell_width();
-        if used + w <= budget {
-            used += w;
-            out.push(span);
-        } else {
-            let remaining = budget - used;
-            if remaining > 0 {
-                let head = truncate_to_width(span.content.as_ref(), remaining);
-                if !head.is_empty() {
-                    out.push(Span::styled(head, span.style));
-                }
-            }
-            break;
-        }
-    }
-    out.push(Span::styled("…", ellipsis_style));
-    out
-}
 
 /// Lay a line out with `left` packed to the left and `right` flush to the right
 /// edge of `total_w`, separated by at least `min_gap` blank cells. The left
@@ -3439,7 +3366,8 @@ impl App {
             // the inter-box gap; fit the rest of the content (activity slot +
             // label + padding) into what remains.
             let budget = avail.saturating_sub(seg_ord_w[focused_idx] + 4);
-            seg_content[focused_idx] = truncate_to_width(&seg_content[focused_idx], budget);
+            seg_content[focused_idx] =
+                truncate_to_width(&seg_content[focused_idx], usize::from(budget));
             seg_w[focused_idx] =
                 seg_content[focused_idx].as_str().cell_width() + seg_ord_w[focused_idx] + 4;
         }
@@ -3849,10 +3777,7 @@ impl App {
                 let title = match device.as_deref() {
                     Some(device) if inner_w > NAMED_TITLE_CHROME + 3 => format!(
                         " Active on {} ",
-                        dux_core::device_label::truncate_chars(
-                            device,
-                            (inner_w - NAMED_TITLE_CHROME) as usize
-                        )
+                        ellipsize_end(device, usize::from(inner_w - NAMED_TITLE_CHROME))
                     ),
                     _ => " Active on another device ".to_string(),
                 };
@@ -4063,7 +3988,7 @@ impl App {
         (true, scrollback_offset)
     }
 
-    fn render_terminal_loading(
+    pub(super) fn render_terminal_loading(
         &self,
         frame: &mut Frame,
         term_area: Rect,
@@ -4077,13 +4002,22 @@ impl App {
                     SessionSurface::Agent => "Starting ",
                     SessionSurface::Terminal => "Launching ",
                 };
+                // The card is ten columns wider than its label, up to the pane;
+                // a name that cannot fit gives up its end rather than running
+                // under the card's border.
+                let chrome = display_width(prefix) + 3;
+                let room = usize::from(term_area.width)
+                    .saturating_sub(10)
+                    .saturating_sub(chrome);
+                let name = ellipsize_end(name, room);
+                let label_len = chrome + display_width(&name);
                 (
                     vec![
                         Span::styled(prefix, Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::styled(name.to_owned(), Style::default().fg(self.theme.branch_fg)),
+                        Span::styled(name, Style::default().fg(self.theme.branch_fg)),
                         Span::styled("...", Style::default().fg(self.theme.hint_desc_fg)),
                     ],
-                    prefix.len() + name.len() + 3,
+                    label_len,
                 )
             }
             None => {
@@ -4096,11 +4030,13 @@ impl App {
                         text,
                         Style::default().fg(self.theme.hint_desc_fg),
                     )],
-                    text.len(),
+                    display_width(text),
                 )
             }
         };
-        let card_width = (label_len as u16 + 10).min(term_area.width);
+        let card_width = u16::try_from(label_len + 10)
+            .unwrap_or(u16::MAX)
+            .min(term_area.width);
         let card_height = 5;
         if term_area.width < card_width || term_area.height < card_height {
             return;
@@ -4796,10 +4732,10 @@ impl App {
                 let path = if is_selected {
                     file.path.clone()
                 } else {
-                    git::ellipsize_middle(&file.path, path_budget.max(10))
+                    ellipsize_middle(&file.path, path_budget.max(10))
                 };
 
-                let path_display_width = path.chars().count();
+                let path_display_width = display_width(&path);
                 let padding = content_width
                     .saturating_sub(prefix_width)
                     .saturating_sub(path_display_width)
@@ -4976,11 +4912,10 @@ impl App {
             .style(Style::default().bg(self.theme.hint_bar_bg))
             .render(hints_area, frame.buffer_mut());
 
-        let (status_line, status_bg) = self.footer_status_line(status_area);
-        Paragraph::new(status_line)
+        let (status_rows, status_bg) = self.footer_status_rows(status_area);
+        // chip-free: the status line is outside the chip rule, names and all.
+        Paragraph::new(status_rows)
             .style(Style::default().bg(status_bg))
-            // chip-free: the status line is outside the chip rule, names and all.
-            .wrap(Wrap { trim: false })
             .render(status_area, frame.buffer_mut());
     }
 
@@ -5000,7 +4935,7 @@ impl App {
         }
     }
 
-    fn footer_hint_spans<'a>(
+    pub(super) fn footer_hint_spans<'a>(
         &self,
         hints: &'a [(String, &'static str)],
         max_w: usize,
@@ -5010,7 +4945,7 @@ impl App {
         let mut used = 0usize;
         for (i, (key, desc)) in hints.iter().enumerate() {
             let separator_width = usize::from(i > 0);
-            let hint_width = separator_width + key.len() + 3 + desc.len();
+            let hint_width = separator_width + display_width(key) + 3 + display_width(desc);
             if used + hint_width > max_w {
                 if used < max_w {
                     hint_spans.push(Span::styled(
@@ -5033,7 +4968,14 @@ impl App {
         hint_spans
     }
 
-    fn footer_status_line(&self, status_area: Rect) -> (Line<'static>, Color) {
+    /// The status line wrapped to the rows the footer gave it, and when it needs
+    /// more than that, cut on its last row with the mark.
+    ///
+    /// Wrapped here rather than by the `Paragraph` so the cut is made on what is
+    /// actually shown: a budget of "width times rows" misses every column a
+    /// wide glyph or a word break leaves unused at the end of a row, and the
+    /// mark then lands on a row that is not drawn.
+    fn footer_status_rows(&self, status_area: Rect) -> (Vec<Line<'static>>, Color) {
         let (tone, status_text) = self
             .status
             .most_recent_tui()
@@ -5046,15 +4988,21 @@ impl App {
             StatusTone::Error => (self.theme.status_error_fg, self.theme.status_error_bg),
         };
         let prefix = format!(" {dot} ");
-        let prefix_w = prefix.chars().count();
-        let max_status_chars = (status_area.width as usize) * (status_area.height as usize);
-        let available = max_status_chars.saturating_sub(prefix_w);
-        let truncated = truncate_status_text(&status_text, available);
         let status_line = Line::from(vec![
             Span::styled(prefix, Style::default().fg(dot_color).bg(status_bg)),
-            Span::styled(truncated, Style::default().fg(msg_color).bg(status_bg)),
+            Span::styled(status_text, Style::default().fg(msg_color).bg(status_bg)),
         ]);
-        (status_line, status_bg)
+        let rows = usize::from(status_area.height);
+        let mut wrapped = wrap_styled_lines(&[status_line], usize::from(status_area.width));
+        if wrapped.len() > rows {
+            wrapped.truncate(rows);
+            if let Some(last) = wrapped.pop() {
+                let style = last.style;
+                let marked = mark_cut_row(last.spans, status_area.width);
+                wrapped.push(Line::from(marked).style(style));
+            }
+        }
+        (wrapped, status_bg)
     }
 
     pub(crate) fn footer_hints_for(&self, ctx: HintContext) -> Vec<(String, &'static str)> {
@@ -5470,7 +5418,7 @@ impl App {
         let items = {
             let name_col = commands
                 .iter()
-                .map(|binding| binding.palette_name.unwrap().len())
+                .map(|binding| display_width(binding.palette_name.unwrap()))
                 .max()
                 .unwrap_or(0);
             let inner_width = popup.width as usize - 3;
@@ -5479,7 +5427,7 @@ impl App {
                 .iter()
                 .map(|binding| {
                     let name = binding.palette_name.unwrap();
-                    let name_padded = format!("{name:name_col$}");
+                    let name_padded = pad_to_width(name, name_col);
                     let mut spans = vec![Span::styled(
                         name_padded,
                         Style::default()
@@ -5488,14 +5436,8 @@ impl App {
                     )];
                     let description_width = inner_width.saturating_sub(name_col + gap);
                     let description = binding.palette_description.unwrap_or("");
-                    let description_display = if description.chars().count() > description_width
-                        && description_width > 1
-                    {
-                        let end: String = description.chars().take(description_width - 1).collect();
-                        format!("  {end}\u{2026}")
-                    } else {
-                        format!("  {description:description_width$}")
-                    };
+                    let description_display =
+                        format!("  {}", fit_to_width(description, description_width));
                     spans.push(Span::styled(
                         description_display,
                         Style::default().fg(self.theme.hint_desc_fg),
@@ -6520,7 +6462,7 @@ impl App {
                 entry
                     .path
                     .file_name()
-                    .map_or(0, |name| name.to_string_lossy().chars().count())
+                    .map_or(0, |name| display_width(&name.to_string_lossy()))
             })
             .max()
             .unwrap_or(8)
@@ -6572,7 +6514,7 @@ impl App {
                             Style::default().fg(self.theme.hint_dim_desc_fg),
                         ));
                     }
-                    let name = git::ellipsize_middle(
+                    let name = ellipsize_middle(
                         entry
                             .path
                             .file_name()
@@ -6583,7 +6525,7 @@ impl App {
                     );
                     let mut spans = vec![
                         Span::styled(
-                            format!("  {:path_col$}", name),
+                            format!("  {}", pad_to_width(&name, path_col)),
                             name_style.add_modifier(Modifier::BOLD),
                         ),
                         Span::styled("  branch: ", branch_label_style),
@@ -6843,7 +6785,7 @@ impl App {
         let path_col = prompt
             .entries
             .iter()
-            .map(|entry| entry.display_name().chars().count())
+            .map(|entry| display_width(&entry.display_name()))
             .max()
             .unwrap_or(8)
             .clamp(8, 24);
@@ -6898,10 +6840,10 @@ impl App {
                     } else {
                         self.theme.hint_dim_desc_fg
                     });
-                    let name = git::ellipsize_middle(&entry.display_name(), path_col);
+                    let name = ellipsize_middle(&entry.display_name(), path_col);
                     ListItem::new(Line::from(vec![
                         Span::styled(
-                            format!("  {:path_col$}", name),
+                            format!("  {}", pad_to_width(&name, path_col)),
                             style.add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(format!("  {:<8}", kind), kind_style),
@@ -7005,7 +6947,7 @@ impl App {
         let name_col = visible
             .iter()
             .filter_map(|i| entries.get(*i))
-            .map(|entry| entry.name.chars().count())
+            .map(|entry| display_width(&entry.name))
             .max()
             .unwrap_or(8)
             .clamp(8, 28);
@@ -7016,7 +6958,7 @@ impl App {
         let count_col = visible
             .iter()
             .filter_map(|i| entries.get(*i))
-            .map(|entry| count_label(entry.agent_count).chars().count())
+            .map(|entry| display_width(&count_label(entry.agent_count)))
             .max()
             .unwrap_or(8);
         // margin(1) warn(1) sp(1) name sp(2) count sp(2) path margin(1)
@@ -7032,21 +6974,21 @@ impl App {
                 } else {
                     Span::raw(" ")
                 };
-                let name = git::ellipsize_middle(&entry.name, name_col);
-                let path = git::ellipsize_start(&display_path(entry), path_col);
+                let name = ellipsize_middle(&entry.name, name_col);
+                let path = ellipsize_start(&display_path(entry), path_col);
                 ListItem::new(Line::from(vec![
                     Span::raw(" "),
                     warn,
                     Span::raw(" "),
                     Span::styled(
-                        format!("{name:name_col$}"),
+                        pad_to_width(&name, name_col),
                         Style::default()
                             .fg(self.theme.text_fg)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw("  "),
                     Span::styled(
-                        format!("{:count_col$}", count_label(entry.agent_count)),
+                        pad_to_width(&count_label(entry.agent_count), count_col),
                         Style::default().fg(self.theme.hint_desc_fg),
                     ),
                     Span::raw("  "),
@@ -10015,7 +9957,7 @@ impl App {
         let label_col = visible_indices
             .iter()
             .filter_map(|index| prompt.runtimes.get(*index))
-            .map(|runtime| runtime.label.chars().count())
+            .map(|runtime| display_width(&runtime.label))
             .max()
             .unwrap_or(0)
             .min(28);
@@ -10026,12 +9968,7 @@ impl App {
                 let checkbox = Checkbox::new("")
                     .checked(prompt.selected_ids.contains(&runtime.id))
                     .state(CheckboxState::Normal);
-                let label = if runtime.label.chars().count() > label_col {
-                    runtime.label.chars().take(label_col).collect::<String>()
-                } else {
-                    runtime.label.clone()
-                };
-                let label_padded = format!("{label:label_col$}");
+                let label_padded = fit_to_width(&runtime.label, label_col);
                 let kind_color = match runtime.kind {
                     KillableRuntimeKind::Agent => self.theme.session_active,
                     KillableRuntimeKind::Terminal => self.theme.session_detached,
@@ -10442,7 +10379,7 @@ impl App {
             let hint = Style::default().fg(self.theme.hint_desc_fg);
             Paragraph::new(Line::from(vec![
                 Span::styled(lead, hint),
-                name_chip(&git::ellipsize_middle(&path, room), &self.theme),
+                name_chip(&ellipsize_middle(&path, room), &self.theme),
                 Span::styled(".", hint),
             ]))
             .render(context_area, frame.buffer_mut());
@@ -10794,13 +10731,13 @@ impl App {
                         Span::styled(" - ", Style::default().fg(self.theme.input_label_fg)),
                     ];
                     let text_preview = text.replace('\n', "↵");
-                    // " " + name + " (label)" + " - ", counted in CHARACTERS:
-                    // a macro name or surface label can hold multi-byte text
-                    // just as the preview can.
-                    let prefix_len = 1 + name.chars().count() + surface_label.chars().count() + 3;
+                    // " " + name + " (label)" + " - ", counted in COLUMNS:
+                    // a macro name can hold wide glyphs just as the preview
+                    // can.
+                    let prefix_len = 1 + display_width(name) + display_width(&surface_label) + 3;
                     let max_len = (list_area.width as usize).saturating_sub(prefix_len + 2);
                     spans.push(Span::styled(
-                        truncate_macro_preview(&text_preview, max_len),
+                        ellipsize_end(&text_preview, max_len),
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
                     ListItem::new(Line::from(spans))
@@ -11621,7 +11558,7 @@ impl App {
         // ── List block (bottom, connected borders) ──
         let name_col = filtered
             .iter()
-            .map(|&(name, _)| name.chars().count())
+            .map(|&(name, _)| display_width(name))
             .max()
             .unwrap_or(0);
         let inner_w = list_area.width.saturating_sub(3) as usize; // borders + padding
@@ -11637,7 +11574,7 @@ impl App {
             filtered
                 .iter()
                 .map(|&(name, text)| {
-                    let name_padded = format!("{name:name_col$}");
+                    let name_padded = pad_to_width(name, name_col);
                     let mut spans = vec![Span::styled(
                         name_padded,
                         Style::default()
@@ -11646,17 +11583,7 @@ impl App {
                     )];
                     let text_preview = text.replace('\n', "↵");
                     let desc_avail = inner_w.saturating_sub(name_col + gap);
-                    let desc_display =
-                        if text_preview.chars().count() > desc_avail && desc_avail > 1 {
-                            let end = text_preview
-                                .char_indices()
-                                .nth(desc_avail - 1)
-                                .map(|(i, _)| i)
-                                .unwrap_or(text_preview.len());
-                            format!("  {}\u{2026}", &text_preview[..end])
-                        } else {
-                            format!("  {text_preview:desc_avail$}")
-                        };
+                    let desc_display = format!("  {}", fit_to_width(&text_preview, desc_avail));
                     spans.push(Span::styled(
                         desc_display,
                         Style::default().fg(self.theme.hint_desc_fg),
@@ -12013,7 +11940,7 @@ impl App {
                     };
 
                     let indicator = resource_row_expand_indicator(stat, expanded);
-                    let label = truncate_status_text(&format!("{indicator}{}", stat.label), name_w);
+                    let label = ellipsize_end(&format!("{indicator}{}", stat.label), name_w);
 
                     let mut cells = vec![Cell::from(label)];
                     if columns.show_pid {
@@ -12039,7 +11966,7 @@ impl App {
                     } else {
                         child.name.clone()
                     };
-                    let label = truncate_status_text(&format!("    {connector} {name}"), name_w);
+                    let label = ellipsize_end(&format!("    {connector} {name}"), name_w);
                     let cpu_str = if short_window_sample {
                         format!("~{:.1}%", child.cpu_percent)
                     } else {
@@ -12628,21 +12555,6 @@ pub(crate) fn centered_rect_exact(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
-/// Trim a macro-list preview to `max_len` COLUMNS, appending an ellipsis when
-/// it had to cut.
-///
-/// Counts and cuts by character, never by byte: the previous byte slice
-/// panicked whenever the cut landed inside a multi-byte character, which any
-/// macro body holding an accent or an emoji could arrange.
-fn truncate_macro_preview(text: &str, max_len: usize) -> String {
-    if text.chars().count() <= max_len {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(max_len.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
-
 /// Column offset, in DISPLAY CELLS, of a single-line field's caret.
 ///
 /// `cursor` is a byte offset into `text`, which is what `TextInput` stores, and
@@ -12844,82 +12756,57 @@ impl App {
         // vertical neighbour and the caps as its horizontal padding.
         self.mouse_layout.pr_banner = Some(Rect::new(area.x, area.y, area.width, 1));
 
-        let prefix_w = prefix.chars().count();
+        let prefix_w = display_width(&prefix);
         let buf = frame.buffer_mut();
         let y = area.y;
-        let sx = area.x;
-        let mut x = sx;
+        // The pill's content runs from just after the left cap to just before
+        // the right one; every write is measured in columns and clipped there,
+        // so a wide glyph takes the two cells it occupies.
+        let content_end = area.x + 1 + u16::try_from(inner_w).unwrap_or(u16::MAX);
+        let put = |buf: &mut ratatui::buffer::Buffer, x: u16, text: &str, style: Style| -> u16 {
+            let room = usize::from(content_end.saturating_sub(x));
+            buf.set_stringn(x, y, text, room, style).0
+        };
 
         // Left cap.
-        set_cell(buf, x, y, left_cap, cap_style);
-        x += 1;
+        set_cell(buf, area.x, y, left_cap, cap_style);
+        let mut x = area.x + 1;
 
         if !has_title || inner_w <= prefix_w + 4 {
             // No title or not enough room: render just the prefix, padded.
             // " ⎇ owner/repo#1234 "
-            let content = format!("{prefix} ");
-            for ch in content.chars() {
-                if (x - sx) as usize > inner_w {
-                    break;
-                }
-                set_cell(buf, x, y, &ch.to_string(), text_style);
-                x += 1;
-            }
-            // Fill remaining space.
-            while (x - sx) as usize <= inner_w {
-                set_cell(buf, x, y, " ", fill_style);
-                x += 1;
-            }
+            x = put(
+                buf,
+                x,
+                &ellipsize_end(&format!("{prefix} "), inner_w),
+                text_style,
+            );
         } else {
             // Render prefix + arrow + title.
             // " ⎇ owner/repo#1234 ▸ PR title here "
             let arrow = " \u{2192} "; // " ▸ "
-            let arrow_w = arrow.chars().count();
+            x = put(buf, x, &prefix, text_style);
+            x = put(buf, x, arrow, fill_style);
 
-            // Write prefix.
-            for ch in prefix.chars() {
-                set_cell(buf, x, y, &ch.to_string(), text_style);
-                x += 1;
-            }
+            // Remaining space for the title, less its trailing space.
+            let used = prefix_w + display_width(arrow);
+            let title_budget = inner_w.saturating_sub(used + 1);
+            x = put(
+                buf,
+                x,
+                &ellipsize_end(title_trimmed, title_budget),
+                title_style,
+            );
+        }
 
-            // Write arrow separator.
-            for ch in arrow.chars() {
-                set_cell(buf, x, y, &ch.to_string(), fill_style);
-                x += 1;
-            }
-
-            // Remaining space for the title + trailing space.
-            let used = prefix_w + arrow_w;
-            let title_budget = inner_w.saturating_sub(used + 1); // +1 for trailing space
-
-            // Write title, ellipsized if needed.
-            let title_w = title_trimmed.chars().count();
-            if title_w > title_budget {
-                for (i, ch) in title_trimmed.chars().enumerate() {
-                    if i + 1 >= title_budget {
-                        set_cell(buf, x, y, "…", title_style);
-                        x += 1;
-                        break;
-                    }
-                    set_cell(buf, x, y, &ch.to_string(), title_style);
-                    x += 1;
-                }
-            } else {
-                for ch in title_trimmed.chars() {
-                    set_cell(buf, x, y, &ch.to_string(), title_style);
-                    x += 1;
-                }
-            }
-
-            // Fill remaining space to the right cap.
-            while (x - sx) as usize <= inner_w {
-                set_cell(buf, x, y, " ", fill_style);
-                x += 1;
-            }
+        // Fill remaining space to the right cap.
+        while x < content_end {
+            set_cell(buf, x, y, " ", fill_style);
+            x += 1;
         }
 
         // Right cap.
-        set_cell(buf, x, y, right_cap, cap_style);
+        set_cell(buf, content_end, y, right_cap, cap_style);
     }
 }
 
@@ -12960,31 +12847,11 @@ fn set_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, symbol: &str, sty
     buf[(x, y)].set_symbol(symbol).set_style(style);
 }
 
-/// Truncate `text` to at most `available` **characters**, appending `…` when
-/// trimmed. Using char-based counting avoids panics when the text contains
-/// multi-byte UTF-8 (e.g. box-drawing or block characters).
-fn truncate_status_text(text: &str, available: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= available {
-        return text.to_owned();
-    }
-
-    match available {
-        0 => String::new(),
-        1 => "…".to_string(),
-        _ => {
-            let mut truncated: String = text.chars().take(available - 1).collect();
-            truncated.push('…');
-            truncated
-        }
-    }
-}
-
 fn status_footer_lines(status_text: &str, width: u16) -> u16 {
     if width == 0 {
         return 1;
     }
-    let status_text_len = status_text.chars().count() + 3; // " ● " prefix
+    let status_text_len = display_width(status_text) + 3; // " ● " prefix
     if status_text_len > width as usize {
         2
     } else {
@@ -19386,24 +19253,24 @@ mod tests {
 
     #[test]
     fn truncate_status_text_ascii_short_enough() {
-        assert_eq!(truncate_status_text("hello", 10), "hello");
+        assert_eq!(ellipsize_end("hello", 10), "hello");
     }
 
     #[test]
     fn truncate_status_text_ascii_exact_fit() {
-        assert_eq!(truncate_status_text("hello", 5), "hello");
+        assert_eq!(ellipsize_end("hello", 5), "hello");
     }
 
     #[test]
     fn truncate_status_text_ascii_truncated() {
-        assert_eq!(truncate_status_text("hello world", 6), "hello…");
+        assert_eq!(ellipsize_end("hello world", 6), "hello…");
     }
 
     #[test]
     fn truncate_status_text_multibyte_no_panic() {
         // Box-drawing char ─ is 3 bytes but 1 char.
         let text = "Copied: ─────end";
-        let result = truncate_status_text(text, 10);
+        let result = ellipsize_end(text, 10);
         assert_eq!(result.chars().count(), 10);
         assert!(result.ends_with('…'));
     }
@@ -19412,24 +19279,24 @@ mod tests {
     fn truncate_status_text_block_characters() {
         // Block characters like ██▛▘ are multi-byte; slicing by byte would panic.
         let text = "██▛▘ Opus 4.6 (1M context) · Claude Max";
-        let result = truncate_status_text(text, 12);
+        let result = ellipsize_end(text, 12);
         assert_eq!(result.chars().count(), 12);
         assert!(result.ends_with('…'));
     }
 
     #[test]
     fn truncate_status_text_available_zero() {
-        assert_eq!(truncate_status_text("hello", 0), "");
+        assert_eq!(ellipsize_end("hello", 0), "");
     }
 
     #[test]
     fn truncate_status_text_available_one() {
-        assert_eq!(truncate_status_text("hello", 1), "…");
+        assert_eq!(ellipsize_end("hello", 1), "…");
     }
 
     #[test]
     fn truncate_status_text_empty_input() {
-        assert_eq!(truncate_status_text("", 10), "");
+        assert_eq!(ellipsize_end("", 10), "");
     }
 
     #[test]
@@ -23146,17 +23013,17 @@ mod tests {
     }
 
     #[test]
-    fn truncate_macro_preview_never_splits_a_character() {
+    fn a_macro_preview_never_splits_a_character() {
         let text = "áéíóú 🙂🙃🙁 ñ";
         for max_len in 0..=text.chars().count() + 4 {
-            let out = truncate_macro_preview(text, max_len);
+            let out = ellipsize_end(text, max_len);
             assert!(
                 out.chars().count() <= max_len.max(1),
                 "max_len={max_len} produced {out:?}"
             );
         }
-        assert_eq!(truncate_macro_preview("áé🙂", 10), "áé🙂");
-        assert_eq!(truncate_macro_preview("áé🙂ñ", 3), "áé…");
+        assert_eq!(ellipsize_end("áé🙂", 10), "áé🙂");
+        assert_eq!(ellipsize_end("áé🙂ñ", 3), "áé…");
     }
 
     #[test]

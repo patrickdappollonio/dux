@@ -1141,6 +1141,30 @@ mod tests {
         assert!(flat.contains("Take over"));
     }
 
+    /// A device name of wide glyphs is cut by the columns the card's title has,
+    /// and the cut is marked inside the card rather than lost under its border.
+    #[test]
+    fn a_wide_device_name_is_cut_by_columns_inside_the_cards_title() {
+        // Twenty glyphs, forty columns: within the label's character cap, wider
+        // than the thirty-four columns the title leaves for a name.
+        let device = "日本語の端末の名前がとても長い機械ですよね";
+        let (_app, rows) = render_with_a_browser_driving(Some(device));
+        let title = rows
+            .iter()
+            .find(|row| row.contains("Active on"))
+            .unwrap_or_else(|| panic!("the card is titled with the device: {rows:#?}"));
+        let after = &title[title.find("Active on").unwrap()..];
+        assert!(
+            after.contains("日") && after.contains('\u{2026}'),
+            "the name is cut and marked inside the title: {title}"
+        );
+        let mark = after.find('\u{2026}').unwrap();
+        assert!(
+            after[mark..].contains('\u{256e}'),
+            "the card's corner closes the title after the mark: {title}"
+        );
+    }
+
     /// A driver that already calls itself something short is named verbatim.
     /// Kept alongside the real-UA test because the shortener must not mangle a
     /// name that already fits.

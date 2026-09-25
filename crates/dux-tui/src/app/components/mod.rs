@@ -7,6 +7,7 @@
 pub(crate) mod button;
 pub(crate) mod centered;
 pub(crate) mod checkbox;
+pub(crate) mod ellipsis;
 pub(crate) mod focus_ring;
 pub(crate) mod hint_bar;
 pub(crate) mod modal;
