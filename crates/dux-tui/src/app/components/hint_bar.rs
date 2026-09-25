@@ -33,13 +33,14 @@ use std::borrow::Cow;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
+// The mark of a cut and the column measure are the shared ones every other cut
+// in the terminal UI uses.
+use crate::app::components::ellipsis::ELLIPSIS;
 use crate::app::components::wrap_lines::display_width;
 use crate::theme::Theme;
 
 /// The separator between two segments.
 const SEPARATOR: &str = "  ";
-/// What a fitted line ends with when it had to leave segments out.
-const ELLIPSIS: &str = "\u{2026}";
 
 /// Which colors a hint line speaks in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
