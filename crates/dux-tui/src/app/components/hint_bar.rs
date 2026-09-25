@@ -51,18 +51,17 @@ pub(crate) enum HintTone {
     Pane,
 }
 
-/// One segment.
+/// What a segment shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Hint {
-    /// A key badge followed by what the key does. `key` must already be
-    /// resolved through the bindings; an empty one drops the whole segment.
+enum Segment {
+    /// A key badge followed by what the key does. An empty key drops the
+    /// whole segment.
     Key {
         key: String,
         desc: Cow<'static, str>,
     },
-    /// Two or more keys that do the same thing, `<a>/<b> desc`. Each key must
-    /// already be resolved; empty ones are left out, and the segment drops when
-    /// none is left.
+    /// Two or more keys that do the same thing, `<a>/<b> desc`. Empty keys are
+    /// left out, and the segment drops when none is left.
     Keys {
         keys: Vec<String>,
         desc: Cow<'static, str>,
@@ -71,15 +70,32 @@ pub(crate) enum Hint {
     Plain(Cow<'static, str>),
 }
 
+/// One segment of a hint line, and whether it survives a cut.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Hint {
+    segment: Segment,
+    /// A pinned segment is the last to go when the line is too long for its
+    /// space: the way out of the surface (close, cancel, minimize) is pinned,
+    /// so a narrow window loses the conveniences and keeps the exit.
+    pinned: bool,
+}
+
 impl Hint {
+    fn new(segment: Segment) -> Self {
+        Self {
+            segment,
+            pinned: false,
+        }
+    }
+
     /// A bound key and its description. `key` is whatever the bindings
     /// returned; pass the empty string (or use [`Hint::maybe_key`]) when there
     /// is none and the segment should vanish.
     pub(crate) fn key(key: impl Into<String>, desc: impl Into<Cow<'static, str>>) -> Self {
-        Self::Key {
+        Self::new(Segment::Key {
             key: key.into(),
             desc: desc.into(),
-        }
+        })
     }
 
     /// The `Option`-shaped form, for lookups that already return `None` when no
@@ -88,10 +104,7 @@ impl Hint {
         key: Option<impl Into<String>>,
         desc: impl Into<Cow<'static, str>>,
     ) -> Self {
-        Self::Key {
-            key: key.map(Into::into).unwrap_or_default(),
-            desc: desc.into(),
-        }
+        Self::key(key.map(Into::into).unwrap_or_default(), desc)
     }
 
     /// Several bound keys that do the same thing.
@@ -99,10 +112,10 @@ impl Hint {
         keys: impl IntoIterator<Item = K>,
         desc: impl Into<Cow<'static, str>>,
     ) -> Self {
-        Self::Keys {
+        Self::new(Segment::Keys {
             keys: keys.into_iter().map(Into::into).collect(),
             desc: desc.into(),
-        }
+        })
     }
 
     /// A key the surface handles without a binding (a text-input context's
@@ -114,47 +127,53 @@ impl Hint {
 
     /// Prose with no key badge.
     pub(crate) fn plain(text: impl Into<Cow<'static, str>>) -> Self {
-        Self::Plain(text.into())
+        Self::new(Segment::Plain(text.into()))
+    }
+
+    /// Keep this segment when the line has to be cut: for the way out.
+    pub(crate) fn pinned(mut self) -> Self {
+        self.pinned = true;
+        self
     }
 
     fn keys_shown(&self) -> Vec<&str> {
-        match self {
-            Self::Key { key, .. } if key.is_empty() => Vec::new(),
-            Self::Key { key, .. } => vec![key.as_str()],
-            Self::Keys { keys, .. } => keys
+        match &self.segment {
+            Segment::Key { key, .. } if key.is_empty() => Vec::new(),
+            Segment::Key { key, .. } => vec![key.as_str()],
+            Segment::Keys { keys, .. } => keys
                 .iter()
                 .map(String::as_str)
                 .filter(|k| !k.is_empty())
                 .collect(),
-            Self::Plain(_) => Vec::new(),
+            Segment::Plain(_) => Vec::new(),
         }
     }
 
     fn is_renderable(&self) -> bool {
-        match self {
-            Self::Key { .. } | Self::Keys { .. } => !self.keys_shown().is_empty(),
-            Self::Plain(text) => !text.is_empty(),
+        match &self.segment {
+            Segment::Key { .. } | Segment::Keys { .. } => !self.keys_shown().is_empty(),
+            Segment::Plain(text) => !text.is_empty(),
         }
     }
 
     /// Display columns the segment takes, separator excluded.
     fn width(&self) -> usize {
-        match self {
-            Self::Key { desc, .. } | Self::Keys { desc, .. } => {
+        match &self.segment {
+            Segment::Key { desc, .. } | Segment::Keys { desc, .. } => {
                 let keys = self.keys_shown();
                 // `<` and `>` around each key, a `/` between two, the space
                 // before the description.
                 let badges: usize = keys.iter().map(|k| display_width(k) + 2).sum();
                 badges + keys.len().saturating_sub(1) + 1 + display_width(desc)
             }
-            Self::Plain(text) => display_width(text),
+            Segment::Plain(text) => display_width(text),
         }
     }
 
     fn push_spans(&self, theme: &Theme, tone: HintTone, spans: &mut Vec<Span<'static>>) {
         let desc_style = desc_style(theme, tone);
-        match self {
-            Self::Key { desc, .. } | Self::Keys { desc, .. } => {
+        match &self.segment {
+            Segment::Key { desc, .. } | Segment::Keys { desc, .. } => {
                 for (index, key) in self.keys_shown().into_iter().enumerate() {
                     if index > 0 {
                         spans.push(Span::styled("/", desc_style));
@@ -171,7 +190,7 @@ impl Hint {
                 }
                 spans.push(Span::styled(format!(" {desc}"), desc_style));
             }
-            Self::Plain(text) => spans.push(Span::styled(text.to_string(), desc_style)),
+            Segment::Plain(text) => spans.push(Span::styled(text.to_string(), desc_style)),
         }
     }
 }
@@ -183,77 +202,109 @@ fn desc_style(theme: &Theme, tone: HintTone) -> Style {
     })
 }
 
-/// Every renderable segment, joined by the two-space separator, with no
-/// leading space. The building block the line shapes below share.
-pub(crate) fn hint_spans(theme: &Theme, tone: HintTone, hints: &[Hint]) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    for (index, hint) in hints.iter().filter(|hint| hint.is_renderable()).enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(SEPARATOR, desc_style(theme, tone)));
-        }
-        hint.push_spans(theme, tone, &mut spans);
-    }
-    spans
-}
-
 /// A line cut to a width: its spans, and how many segments made it in.
 pub(crate) struct FittedHints {
     pub(crate) spans: Vec<Span<'static>>,
     pub(crate) shown: usize,
 }
 
-/// As many whole segments as fit in `width` display columns, in order. When a
-/// segment had to be left out the line ends in `…`, room permitting, so a
-/// clipped line says so rather than reading as complete.
+/// The segments that fit in `width` display columns, in their order.
+///
+/// When the whole line does not fit, segments leave from the right, unpinned
+/// ones first, so what goes is the conveniences in the middle and what stays is
+/// the first segments and the way out. Where segments were left out the line
+/// carries a `…` of its own, joined like any other segment, so a cut line says
+/// so rather than reading as complete. Nothing is ever cut through the middle.
 pub(crate) fn fitted_hint_spans(
     theme: &Theme,
     tone: HintTone,
     hints: &[Hint],
     width: usize,
 ) -> FittedHints {
-    let mut spans = Vec::new();
-    let mut used = 0usize;
-    let mut shown = 0usize;
-    for hint in hints.iter().filter(|hint| hint.is_renderable()) {
-        let separator = if shown > 0 { SEPARATOR.len() } else { 0 };
-        let cost = separator + hint.width();
-        if used + cost > width {
-            if used < width {
-                spans.push(Span::styled(ELLIPSIS, desc_style(theme, tone)));
-            }
+    let hints: Vec<&Hint> = hints.iter().filter(|hint| hint.is_renderable()).collect();
+    let mut kept = vec![true; hints.len()];
+    let cost = |kept: &[bool]| {
+        let dropped = kept.iter().any(|keep| !keep);
+        let widths = hints
+            .iter()
+            .zip(kept)
+            .filter(|(_, keep)| **keep)
+            .map(|(hint, _)| hint.width())
+            .chain(dropped.then(|| display_width(ELLIPSIS)));
+        let (count, total) = widths.fold((0usize, 0usize), |(n, sum), w| (n + 1, sum + w));
+        total + count.saturating_sub(1) * SEPARATOR.len()
+    };
+    while cost(&kept) > width {
+        let victim = (0..hints.len())
+            .rev()
+            .find(|&index| kept[index] && !hints[index].pinned)
+            .or_else(|| (0..hints.len()).rev().find(|&index| kept[index]));
+        let Some(victim) = victim else {
             break;
+        };
+        kept[victim] = false;
+    }
+
+    let mut spans = Vec::new();
+    let mut shown = 0usize;
+    let mut items = 0usize;
+    let mut marked = false;
+    let fits = cost(&kept) <= width;
+    for (hint, keep) in hints.iter().zip(&kept) {
+        if !keep && (marked || !fits) {
+            continue;
         }
-        if separator > 0 {
+        if items > 0 {
             spans.push(Span::styled(SEPARATOR, desc_style(theme, tone)));
         }
-        hint.push_spans(theme, tone, &mut spans);
-        used += cost;
-        shown += 1;
+        items += 1;
+        if *keep {
+            hint.push_spans(theme, tone, &mut spans);
+            shown += 1;
+        } else {
+            spans.push(Span::styled(ELLIPSIS, desc_style(theme, tone)));
+            marked = true;
+        }
     }
     FittedHints { spans, shown }
 }
 
-/// A dialog's hint line: one leading space, then the segments.
-pub(crate) fn modal_hint_line(theme: &Theme, hints: &[Hint]) -> Line<'static> {
+/// A dialog's hint line in `width` columns: one leading space, then the
+/// segments that fit.
+pub(crate) fn modal_hint_line(theme: &Theme, hints: &[Hint], width: u16) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
-    spans.extend(hint_spans(theme, HintTone::Modal, hints));
+    spans.extend(
+        fitted_hint_spans(
+            theme,
+            HintTone::Modal,
+            hints,
+            usize::from(width).saturating_sub(1),
+        )
+        .spans,
+    );
     Line::from(spans)
 }
 
-/// A pane's hint line: the segments flush left, in the pane tone.
-pub(crate) fn pane_hint_line(theme: &Theme, hints: &[Hint]) -> Line<'static> {
-    Line::from(hint_spans(theme, HintTone::Pane, hints))
+/// A pane's hint line in `width` columns: the segments that fit, flush left,
+/// in the pane tone.
+pub(crate) fn pane_hint_line(theme: &Theme, hints: &[Hint], width: u16) -> Line<'static> {
+    Line::from(fitted_hint_spans(theme, HintTone::Pane, hints, usize::from(width)).spans)
 }
 
 /// A pane's hint line that opens with a sentence of its own (how far the view
 /// is scrolled back, why keys are not reaching the child), set off from the
-/// segments by the same separator that joins them.
+/// segments by the same separator that joins them. The sentence is kept whole;
+/// the segments fit in what is left of `width`.
 pub(crate) fn pane_hint_line_after(
     theme: &Theme,
     lead: Span<'static>,
     hints: &[Hint],
+    width: u16,
 ) -> Line<'static> {
-    let rest = hint_spans(theme, HintTone::Pane, hints);
+    let room = usize::from(width)
+        .saturating_sub(display_width(&lead.content))
+        .saturating_sub(SEPARATOR.len());
+    let rest = fitted_hint_spans(theme, HintTone::Pane, hints, room).spans;
     let mut spans = vec![lead];
     if !rest.is_empty() {
         spans.push(Span::styled(SEPARATOR, desc_style(theme, HintTone::Pane)));
@@ -287,6 +338,7 @@ mod tests {
                 Hint::key("Tab", "focus"),
                 Hint::key("Esc", "cancel"),
             ],
+            200,
         );
         let without = modal_hint_line(
             &theme,
@@ -295,6 +347,7 @@ mod tests {
                 Hint::maybe_key(None::<String>, "focus"),
                 Hint::key("Esc", "cancel"),
             ],
+            200,
         );
         assert!(text_of(&with).contains("focus"));
         // Not blanked into a stray gap: the separator goes with the segment.
@@ -304,7 +357,11 @@ mod tests {
 
     #[test]
     fn segments_are_separated_by_two_spaces_after_one_leading_space() {
-        let line = modal_hint_line(&theme(), &[Hint::key("a", "one"), Hint::key("b", "two")]);
+        let line = modal_hint_line(
+            &theme(),
+            &[Hint::key("a", "one"), Hint::key("b", "two")],
+            200,
+        );
         let text = text_of(&line);
         // The badge wraps the key, so assert on the joins rather than the glyphs.
         assert!(text.starts_with(' '), "leading space, got {text:?}");
@@ -314,8 +371,8 @@ mod tests {
 
     #[test]
     fn a_plain_segment_carries_no_badge() {
-        let badged = modal_hint_line(&theme(), &[Hint::key("Space", "toggle")]);
-        let plain = modal_hint_line(&theme(), &[Hint::plain("Space toggle")]);
+        let badged = modal_hint_line(&theme(), &[Hint::key("Space", "toggle")], 200);
+        let plain = modal_hint_line(&theme(), &[Hint::plain("Space toggle")], 200);
         assert_eq!(text_of(&plain), " Space toggle");
         assert_ne!(text_of(&badged), text_of(&plain));
     }
@@ -334,6 +391,7 @@ mod tests {
                 Hint::plain("Space toggle"),
                 Hint::key("Esc", "cancel"),
             ],
+            200,
         );
         assert_eq!(
             text_of(&with_focus),
@@ -347,6 +405,7 @@ mod tests {
                 Hint::plain("Space toggle"),
                 Hint::key("Esc", "cancel"),
             ],
+            200,
         );
         assert_eq!(
             text_of(&without_focus),
@@ -365,7 +424,7 @@ mod tests {
             Hint::plain("Space toggle"),
         ];
         for tone in [HintTone::Modal, HintTone::Pane] {
-            for span in hint_spans(&theme, tone, &hints) {
+            for span in fitted_hint_spans(&theme, tone, &hints, 200).spans {
                 assert_eq!(span.style.bg, None, "{tone:?}: {span:?}");
             }
         }
@@ -376,8 +435,8 @@ mod tests {
     fn the_tone_picks_the_badge_and_description_colors() {
         let theme = theme();
         let hints = [Hint::key("Esc", "close")];
-        let modal = hint_spans(&theme, HintTone::Modal, &hints);
-        let pane = hint_spans(&theme, HintTone::Pane, &hints);
+        let modal = fitted_hint_spans(&theme, HintTone::Modal, &hints, 200).spans;
+        let pane = fitted_hint_spans(&theme, HintTone::Pane, &hints, 200).spans;
         assert_eq!(modal[0].style.fg, Some(theme.hint_bracket_fg));
         assert_eq!(modal[1].style.fg, Some(theme.hint_key_fg));
         assert_eq!(modal[3].style.fg, Some(theme.hint_desc_fg));
@@ -391,13 +450,14 @@ mod tests {
     #[test]
     fn keys_that_do_one_thing_share_a_description() {
         let theme = theme();
-        let both = modal_hint_line(&theme, &[Hint::keys(["Tab", "S-Tab"], "actions")]);
+        let both = modal_hint_line(&theme, &[Hint::keys(["Tab", "S-Tab"], "actions")], 200);
         assert_eq!(text_of(&both), " <Tab>/<S-Tab> actions");
-        let one = modal_hint_line(&theme, &[Hint::keys(["", "S-Tab"], "actions")]);
+        let one = modal_hint_line(&theme, &[Hint::keys(["", "S-Tab"], "actions")], 200);
         assert_eq!(text_of(&one), " <S-Tab> actions");
         let none = modal_hint_line(
             &theme,
             &[Hint::keys(["", ""], "actions"), Hint::key("Esc", "close")],
+            200,
         );
         assert_eq!(text_of(&none), " <Esc> close");
     }
@@ -411,9 +471,10 @@ mod tests {
             &theme,
             Span::raw("Scrolled back 3 lines."),
             &[Hint::key("PgDn", "down")],
+            200,
         );
         assert_eq!(text_of(&line), "Scrolled back 3 lines.  <PgDn> down");
-        let alone = pane_hint_line_after(&theme, Span::raw("Exited."), &[Hint::key("", "x")]);
+        let alone = pane_hint_line_after(&theme, Span::raw("Exited."), &[Hint::key("", "x")], 200);
         assert_eq!(text_of(&alone), "Exited.");
     }
 
@@ -432,19 +493,42 @@ mod tests {
         assert_eq!(full_text, "<a> one  <b> \u{5e45}\u{5e45}  <c> three");
         assert_eq!(full.shown, 3);
 
-        // `<a> one` is 7 columns, `  <b> 幅幅` another 10: 17 fit exactly, 16 do
-        // not, even though the wide segment is only 8 characters.
-        let cut = fitted_hint_spans(&theme, HintTone::Modal, &hints, 17);
+        // `<a> one` is 7 columns, `  <b> 幅幅` another 10 and the mark of the
+        // cut another 3: 20 fit exactly, 19 do not, even though the wide
+        // segment is only 8 characters.
+        let cut = fitted_hint_spans(&theme, HintTone::Modal, &hints, 20);
         let cut_text: String = cut.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(cut_text, "<a> one  <b> \u{5e45}\u{5e45}");
+        assert_eq!(cut_text, "<a> one  <b> \u{5e45}\u{5e45}  \u{2026}");
         assert_eq!(cut.shown, 2);
-        let cut = fitted_hint_spans(&theme, HintTone::Modal, &hints, 16);
+        let cut = fitted_hint_spans(&theme, HintTone::Modal, &hints, 19);
         let cut_text: String = cut.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(cut_text, "<a> one\u{2026}");
+        assert_eq!(cut_text, "<a> one  \u{2026}");
         assert_eq!(cut.shown, 1);
 
         let nothing = fitted_hint_spans(&theme, HintTone::Modal, &hints, 0);
         assert!(nothing.spans.is_empty());
         assert_eq!(nothing.shown, 0);
+    }
+
+    /// A pinned segment outlives the segments before it: the unpinned ones go
+    /// from the right first, and the mark of the cut sits where they were.
+    #[test]
+    fn a_pinned_segment_is_the_last_to_go() {
+        let theme = theme();
+        let hints = [
+            Hint::key("a", "one"),
+            Hint::key("b", "two"),
+            Hint::key("c", "three"),
+            Hint::key("Esc", "close").pinned(),
+        ];
+        let line = modal_hint_line(&theme, &hints, 33);
+        assert_eq!(text_of(&line), " <a> one  <b> two  \u{2026}  <Esc> close");
+        let line = modal_hint_line(&theme, &hints, 32);
+        assert_eq!(text_of(&line), " <a> one  \u{2026}  <Esc> close");
+        let line = modal_hint_line(&theme, &hints, 16);
+        assert_eq!(text_of(&line), " \u{2026}  <Esc> close");
+        // Only when even the pinned segment cannot fit does it go too.
+        let line = modal_hint_line(&theme, &hints, 8);
+        assert_eq!(text_of(&line), " \u{2026}");
     }
 }

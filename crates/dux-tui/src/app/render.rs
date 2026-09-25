@@ -11,9 +11,7 @@ use super::components::{
     name_chip, plan_pane_card, prose_lines, prose_spans, render_centered_lines,
     render_scroll_marker, shared_button_width, wrap_styled_lines,
 };
-use super::components::{
-    HintTone, fitted_hint_spans, hint_spans, pane_hint_line, pane_hint_line_after,
-};
+use super::components::{HintTone, fitted_hint_spans, pane_hint_line, pane_hint_line_after};
 use super::components::{PickerList, render_scroll_indicator};
 use super::confirm_dialog::{
     ConfirmButton, ConfirmDialog, clip_to, confirm_inner_width, stack_rows,
@@ -2770,8 +2768,9 @@ impl App {
                         Hint::key(scroll_down, "down"),
                         Hint::key(scroll_up, "up"),
                         Hint::key(scroll_line, "one line"),
-                        Hint::key(close, "close diff"),
+                        Hint::key(close, "close diff").pinned(),
                     ],
+                    hint_area.width,
                 )
             } else {
                 pane_hint_line(
@@ -2779,8 +2778,9 @@ impl App {
                     &[
                         Hint::keys([scroll_up, scroll_down], "scroll"),
                         Hint::key(scroll_line, "one line"),
-                        Hint::key(close, "close diff"),
+                        Hint::key(close, "close diff").pinned(),
                     ],
+                    hint_area.width,
                 )
             };
 
@@ -3507,7 +3507,7 @@ impl App {
     /// would not be. The wording never hardcodes a key: the labels come from
     /// `RuntimeBindings` so they stay right after a rebind. The colors come from
     /// `Theme`, reusing `nudge_border`.
-    pub(crate) fn scroll_mode_cue_line(&self) -> Line<'static> {
+    pub(crate) fn scroll_mode_cue_line(&self, width: u16) -> Line<'static> {
         let warn_style = Style::default().fg(self.theme.nudge_border);
         let target = match self.session_surface {
             SessionSurface::Agent => "agent",
@@ -3525,15 +3525,16 @@ impl App {
                 warn_style,
             ),
             &[
-                Hint::key(live_edge, "resume at the live edge"),
+                Hint::key(live_edge, "resume at the live edge").pinned(),
                 Hint::key(scroll_up, "up"),
                 Hint::key(scroll_down, "down"),
                 // This line REPLACES the whole hint bar, so the exit key has to
                 // come along: while the mode is on, every other key is being
                 // swallowed and this is the only place left on screen that says
                 // how to leave fullscreen.
-                Hint::key(exit_key, "minimize"),
+                Hint::key(exit_key, "minimize").pinned(),
             ],
+            width,
         )
     }
 
@@ -3569,11 +3570,11 @@ impl App {
         // Every item here is conditional; the shared line drops an unlabelled
         // one together with its separator, so nothing ever trails the last.
         let mut hints = vec![
-            Hint::key(exit_key, "fullscreen"),
-            Hint::key(next_pane, "next pane"),
+            Hint::key(exit_key, "fullscreen").pinned(),
+            Hint::key(next_pane, "next pane").pinned(),
         ];
         if tab_reaches_agent {
-            hints.push(Hint::key(prev_pane, "previous pane"));
+            hints.push(Hint::key(prev_pane, "previous pane").pinned());
         }
         // The surviving tab-switch chords are loud in HINTS, not only docs: with
         // plain arrows typing into the agent, the chords are the only tab keys
@@ -3589,7 +3590,8 @@ impl App {
         if !self.filtered_macros("").is_empty() {
             hints.push(Hint::key(macro_key, "macros"));
         }
-        let mut spans = hint_spans(&self.theme, HintTone::Pane, &hints);
+        let mut spans =
+            fitted_hint_spans(&self.theme, HintTone::Pane, &hints, width as usize).spans;
 
         if tab_reaches_agent {
             const CUE: &str = "tabs are sent to the agent";
@@ -3639,7 +3641,11 @@ impl App {
 
         let hints: Vec<Hint> = items
             .into_iter()
-            .map(|(key, desc)| Hint::key(key, desc))
+            .enumerate()
+            .map(|(index, (key, desc))| {
+                let hint = Hint::key(key, desc);
+                if index == 0 { hint.pinned() } else { hint }
+            })
             .collect();
         let fitted = fitted_hint_spans(&self.theme, HintTone::Pane, &hints, width as usize);
         let mut spans = fitted.spans;
@@ -4228,28 +4234,32 @@ impl App {
         scrollback_offset: usize,
     ) -> Line<'static> {
         if context.is_input && self.scroll_mode_active() {
-            self.scroll_mode_cue_line()
+            self.scroll_mode_cue_line(width)
         } else if card_up {
             self.takeover_hint_line(width)
         } else if context.is_input {
-            self.interactive_terminal_hint_line(scrollback_offset)
+            self.interactive_terminal_hint_line(scrollback_offset, width)
         } else if scrollback_offset > 0 {
-            self.scrolled_terminal_hint_line(scrollback_offset)
+            self.scrolled_terminal_hint_line(scrollback_offset, width)
         } else if self.center_typeable() {
             self.typeable_hint_line(context.active_surface, width)
         } else {
-            self.inactive_terminal_hint_line(context)
+            self.inactive_terminal_hint_line(context, width)
         }
     }
 
-    pub(super) fn interactive_terminal_hint_line(&self, scrollback_offset: usize) -> Line<'static> {
+    pub(super) fn interactive_terminal_hint_line(
+        &self,
+        scrollback_offset: usize,
+        width: u16,
+    ) -> Line<'static> {
         let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
         let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
         let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
         let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
         let macro_key = self.bindings.label_for(Action::OpenMacroBar);
         let mut hints = vec![
-            Hint::key(exit_key, "minimize"),
+            Hint::key(exit_key, "minimize").pinned(),
             Hint::key(scroll_up, "up"),
             Hint::key(scroll_down, "down"),
         ];
@@ -4259,10 +4269,14 @@ impl App {
         if !self.filtered_macros("").is_empty() {
             hints.push(Hint::key(macro_key, "macros"));
         }
-        pane_hint_line(&self.theme, &hints)
+        pane_hint_line(&self.theme, &hints, width)
     }
 
-    pub(super) fn scrolled_terminal_hint_line(&self, scrollback_offset: usize) -> Line<'static> {
+    pub(super) fn scrolled_terminal_hint_line(
+        &self,
+        scrollback_offset: usize,
+        width: u16,
+    ) -> Line<'static> {
         let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
         let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
         let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
@@ -4280,14 +4294,16 @@ impl App {
                 Hint::key(scroll_down, "down"),
                 Hint::key(scroll_up, "up"),
                 Hint::key(scroll_line, "one line"),
-                Hint::key(live_edge, "live edge"),
+                Hint::key(live_edge, "live edge").pinned(),
             ],
+            width,
         )
     }
 
     pub(super) fn inactive_terminal_hint_line(
         &self,
         context: &AgentTerminalContext,
+        width: u16,
     ) -> Line<'static> {
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
         if matches!(context.active_surface, SessionSurface::Terminal) {
@@ -4312,10 +4328,11 @@ impl App {
             return pane_hint_line(
                 &self.theme,
                 &[
-                    Hint::key(focus_agent, "focus and type"),
+                    Hint::key(focus_agent, "focus and type").pinned(),
                     Hint::keys([scroll_up, scroll_down], "scroll"),
                     Hint::key(scroll_line, "one line"),
                 ],
+                width,
             );
         }
         if context.session_id.is_some() {
@@ -4324,6 +4341,7 @@ impl App {
                 &self.theme,
                 Span::styled("Agent CLI exited.", desc_style),
                 &[Hint::keys([reconnect, focus_agent], "launch it again")],
+                width,
             );
         }
         Line::from(Span::styled("No agent selected.", desc_style))
@@ -4736,7 +4754,7 @@ impl App {
 
         // Hint bar inside the block (same style as agent terminal / diff view).
         if let Some(ha) = hint_area {
-            Paragraph::new(self.files_hint_line())
+            Paragraph::new(self.files_hint_line(ha.width))
                 .block(
                     Block::default()
                         .borders(Borders::TOP)
@@ -4750,7 +4768,7 @@ impl App {
 
     /// Render the commit input as its own bordered block.
     /// The hint row under the changes pane's file list.
-    pub(super) fn files_hint_line(&self) -> Line<'static> {
+    pub(super) fn files_hint_line(&self, width: u16) -> Line<'static> {
         let stage_key = self.bindings.label_for(Action::StageUnstage);
         let search_key = self.bindings.label_for(Action::SearchFiles);
         let next_key = self.bindings.label_for(Action::SearchNext);
@@ -4760,31 +4778,28 @@ impl App {
             // literal Enter and Escape (`handle_files_search_key`), not a
             // binding, so those keys are named as they are.
             hints.push(Hint::fixed("Enter", "done"));
-            hints.push(Hint::fixed("Esc", "clear"));
+            hints.push(Hint::fixed("Esc", "clear").pinned());
         } else {
             hints.push(Hint::key(search_key, "search"));
             if self.has_files_search() {
                 hints.push(Hint::key(next_key, "next match"));
             }
         }
-        pane_hint_line(&self.theme, &hints)
+        pane_hint_line(&self.theme, &hints, width)
     }
 
     /// The hint row under the commit message box. `focused` is whether the box
     /// is taking typing.
-    pub(super) fn commit_hint_line(&self, focused: bool) -> Line<'static> {
+    pub(super) fn commit_hint_line(&self, focused: bool, width: u16) -> Line<'static> {
         let hints = if focused {
-            vec![Hint::key(
-                self.bindings.labels_for(Action::ExitCommitInput),
-                "Exit",
-            )]
+            vec![Hint::key(self.bindings.labels_for(Action::ExitCommitInput), "Exit").pinned()]
         } else {
             vec![
                 Hint::key(self.bindings.labels_for(Action::EngageCommitInput), "Edit"),
                 Hint::key(self.bindings.label_for(Action::CommitChanges), "Commit"),
             ]
         };
-        pane_hint_line(&self.theme, &hints)
+        pane_hint_line(&self.theme, &hints, width)
     }
 
     fn render_commit_input_inner(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
@@ -4849,7 +4864,8 @@ impl App {
 
         // Hint bar.
         if hint_area.height > 0 {
-            Paragraph::new(self.commit_hint_line(focused)).render(hint_area, frame.buffer_mut());
+            Paragraph::new(self.commit_hint_line(focused, hint_area.width))
+                .render(hint_area, frame.buffer_mut());
         }
     }
 
@@ -5315,7 +5331,7 @@ impl App {
                 // (`handle_help_key`), so it is named as it is.
                 Hint::fixed("Space", "scroll down"),
                 Hint::keys([scroll_down, scroll_up], "page"),
-                Hint::key(close, "close"),
+                Hint::key(close, "close").pinned(),
             ];
             let line = if scroll > 0 {
                 pane_hint_line_after(
@@ -5325,9 +5341,10 @@ impl App {
                         Style::default().fg(self.theme.hint_key_fg),
                     ),
                     &hints,
+                    hint_area.width,
                 )
             } else {
-                pane_hint_line(&self.theme, &hints)
+                pane_hint_line(&self.theme, &hints, hint_area.width)
             };
 
             Paragraph::new(line)
@@ -5395,8 +5412,9 @@ impl App {
                 // Completion is the literal Tab key in the palette's filter
                 // (`selected_command_palette_completion`), not a binding.
                 Hint::fixed("Tab", "complete"),
-                Hint::key(close_key, "cancel"),
+                Hint::key(close_key, "cancel").pinned(),
             ],
+            popup.width.saturating_sub(2),
         );
         let input_block = self
             .themed_overlay_block("Command Palette")
@@ -5451,8 +5469,9 @@ impl App {
                 Hint::key(move_down, "down"),
                 Hint::key(move_up, "up"),
                 Hint::key(confirm_key, picks),
-                Hint::key(close_key, "cancel"),
+                Hint::key(close_key, "cancel").pinned(),
             ],
+            area.width.saturating_sub(2),
         );
 
         let [details_area, list_area] = Layout::default()
@@ -5561,8 +5580,9 @@ impl App {
                 Hint::key(move_down, "down"),
                 Hint::key(move_up, "up"),
                 Hint::key(confirm_key, "apply"),
-                Hint::key(close_key, "cancel"),
+                Hint::key(close_key, "cancel").pinned(),
             ],
+            area.width.saturating_sub(2),
         );
 
         let [details_area, list_area] = Layout::default()
@@ -5763,8 +5783,12 @@ impl App {
                 goto: self.bindings.label_for(Action::GoToPath),
                 exit_path: self.bindings.label_for(Action::ExitPathEditorOnProjectAdd),
             };
-            let bottom_spans =
-                self.browse_projects_input_footer(*editing_path, *searching, &footer_keys);
+            let bottom_spans = self.browse_projects_input_footer(
+                *editing_path,
+                *searching,
+                &footer_keys,
+                area.width.saturating_sub(2),
+            );
             let list_block = Block::default()
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                 .border_style(Style::default().fg(self.theme.overlay_border))
@@ -5792,8 +5816,9 @@ impl App {
                     Hint::key(open_key, "open"),
                     Hint::key(add_key, "add current"),
                     Hint::key(goto_key, "go to"),
-                    Hint::key(close_key, "cancel"),
+                    Hint::key(close_key, "cancel").pinned(),
                 ],
+                area.width.saturating_sub(2),
             );
             let title = Self::browse_projects_title(*purpose, current_dir);
             let list_block = self
@@ -5826,6 +5851,7 @@ impl App {
         editing_path: bool,
         searching: bool,
         keys: &BrowseProjectsFooterKeys,
+        width: u16,
     ) -> Line<'static> {
         let hints = if editing_path {
             // The path editor completes and adds on the literal Tab and Enter
@@ -5833,7 +5859,7 @@ impl App {
             vec![
                 Hint::fixed("Tab", "complete"),
                 Hint::fixed("Enter", "add"),
-                Hint::key(keys.exit_path.clone(), "browse"),
+                Hint::key(keys.exit_path.clone(), "browse").pinned(),
             ]
         } else if searching {
             // Nothing merely ends the search here: the open key opens the
@@ -5841,17 +5867,17 @@ impl App {
             // close key clears the search.
             vec![
                 Hint::key(keys.open.clone(), "open"),
-                Hint::key(keys.close.clone(), "clear"),
+                Hint::key(keys.close.clone(), "clear").pinned(),
             ]
         } else {
             vec![
                 Hint::key(keys.search.clone(), "search"),
                 Hint::key(keys.open.clone(), "open"),
                 Hint::key(keys.goto.clone(), "go to"),
-                Hint::key(keys.close.clone(), "cancel"),
+                Hint::key(keys.close.clone(), "cancel").pinned(),
             ]
         };
-        modal_hint_line(&self.theme, &hints)
+        modal_hint_line(&self.theme, &hints, width)
     }
 
     fn render_change_agent_provider_prompt(&mut self, frame: &mut Frame) {
@@ -5862,7 +5888,7 @@ impl App {
         let area = centered_rect(72, 42, frame.area());
         self.clear_overlay_area(frame, area);
 
-        let bottom_spans = self.provider_picker_footer();
+        let bottom_spans = self.provider_picker_footer(area.width.saturating_sub(2));
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -5965,7 +5991,7 @@ impl App {
         let area = centered_rect(72, 42, frame.area());
         self.clear_overlay_area(frame, area);
 
-        let bottom_spans = self.provider_picker_footer();
+        let bottom_spans = self.provider_picker_footer(area.width.saturating_sub(2));
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -6046,7 +6072,7 @@ impl App {
         let area = centered_rect(64, 60, frame.area());
         self.clear_overlay_area(frame, area);
 
-        let bottom_spans = self.provider_picker_footer();
+        let bottom_spans = self.provider_picker_footer(area.width.saturating_sub(2));
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -6178,8 +6204,9 @@ impl App {
                 Hint::key(move_down, "down"),
                 Hint::key(move_up, "up"),
                 Hint::key(confirm_key, "open"),
-                Hint::key(close_key, "cancel"),
+                Hint::key(close_key, "cancel").pinned(),
             ],
+            area.width.saturating_sub(2),
         );
 
         let [details_area, list_area] = Layout::default()
@@ -6263,8 +6290,9 @@ impl App {
                 Hint::key(move_down, "down"),
                 Hint::key(move_up, "up"),
                 Hint::key(confirm_key, "remove"),
-                Hint::key(close_key, "cancel"),
+                Hint::key(close_key, "cancel").pinned(),
             ],
+            area.width.saturating_sub(2),
         );
 
         let [details_area, list_area] = Layout::default()
@@ -6537,8 +6565,9 @@ impl App {
                 Hint::key(move_down, "down"),
                 Hint::key(move_up, "up"),
                 Hint::key(confirm_key, "use"),
-                Hint::key(close_key, "cancel"),
+                Hint::key(close_key, "cancel").pinned(),
             ],
+            area.width.saturating_sub(2),
         );
 
         let [details_area, list_area] = Layout::default()
@@ -6681,7 +6710,8 @@ impl App {
         // Which entries survive the `/` filter (indices into `entries`).
         let visible: Vec<usize> = list.visible_indices(entries, pick_project_matches);
 
-        let bottom_line = self.project_chooser_hint_line(list.searching, *intent);
+        let bottom_line =
+            self.project_chooser_hint_line(list.searching, *intent, area.width.saturating_sub(2));
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -7093,7 +7123,8 @@ impl App {
             .themed_overlay_block("Agent Info")
             .title_bottom(modal_hint_line(
                 &self.theme,
-                &[Hint::key(close_key, "close")],
+                &[Hint::key(close_key, "close").pinned()],
+                area.width.saturating_sub(2),
             ));
         let inner = outer.inner(area);
         outer.render(area, frame.buffer_mut());
@@ -8116,8 +8147,9 @@ impl App {
                 } else {
                     "Space toggle"
                 }),
-                Hint::key(close_key, "cancel"),
+                Hint::key(close_key, "cancel").pinned(),
             ],
+            hint_area.width,
         );
         Paragraph::new(hints).render(hint_area, frame.buffer_mut());
         self.overlay_layout.active = OverlayMouseLayout::RenameSession {
@@ -8210,9 +8242,10 @@ impl App {
         let hint = modal_hint_line(
             &self.theme,
             &[
-                Hint::fixed("Esc", "close"),
+                Hint::fixed("Esc", "close").pinned(),
                 Hint::fixed("Scroll", "navigate"),
             ],
+            hint_area.width,
         );
         render_centered_lines(frame.buffer_mut(), hint_area, &[hint], Style::default());
     }
@@ -8338,8 +8371,9 @@ impl App {
                 "move focus",
             ));
         }
-        hints.push(Hint::key(close_key, "cancel"));
-        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
+        hints.push(Hint::key(close_key, "cancel").pinned());
+        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
         self.overlay_layout.active = OverlayMouseLayout::PullRequestInput {
             input: input_inner,
             choose_project: choose_button,
@@ -8415,9 +8449,10 @@ impl App {
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let hints = vec![
             Hint::key(confirm_key, "attach"),
-            Hint::key(close_key, "cancel"),
+            Hint::key(close_key, "cancel").pinned(),
         ];
-        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
+        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
         self.overlay_layout.active =
             OverlayMouseLayout::AttachPullRequestInput { input: input_inner };
     }
@@ -8498,9 +8533,10 @@ impl App {
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let hints = vec![
             Hint::key(confirm_key, "create agent"),
-            Hint::key(close_key, "cancel"),
+            Hint::key(close_key, "cancel").pinned(),
         ];
-        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
+        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
         self.overlay_layout.active = OverlayMouseLayout::NameStandaloneAgent { input: input_inner };
     }
 
@@ -8723,10 +8759,11 @@ impl App {
                     "clear",
                 ));
             }
-            hints.push(Hint::key(close_key, "cancel"));
+            hints.push(Hint::key(close_key, "cancel").pinned());
             hints
         };
-        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
+        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
         self.overlay_layout.active = OverlayMouseLayout::ConfigureStartupCommand {
             input: text_area,
             cancel_button,
@@ -8770,8 +8807,9 @@ impl App {
                         .label_for_text_field_dialog(Action::ToggleSelection),
                     "focus",
                 ),
-                Hint::key(close_key, "close"),
+                Hint::key(close_key, "close").pinned(),
             ],
+            area.width.saturating_sub(2),
         );
 
         let title = format!("Startup Command Logs - {}", prompt.scope_label);
@@ -9033,7 +9071,7 @@ impl App {
             &if prompt.list.searching {
                 vec![
                     Hint::key(confirm_key, "done"),
-                    Hint::key(close_key, "clear"),
+                    Hint::key(close_key, "clear").pinned(),
                 ]
             } else {
                 vec![
@@ -9043,6 +9081,7 @@ impl App {
                     Hint::key(confirm_key, "use"),
                 ]
             },
+            popup.width.saturating_sub(2),
         );
 
         let title = if prompt.list.searching {
@@ -9624,8 +9663,9 @@ impl App {
         if *focus != NameNewAgentFocus::Input {
             hints.push(Hint::plain("Space toggle"));
         }
-        hints.push(Hint::key(close_key, "cancel"));
-        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
+        hints.push(Hint::key(close_key, "cancel").pinned());
+        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
         self.overlay_layout.active = OverlayMouseLayout::NameNewAgent {
             input: input_inner,
             checkbox: Some(OverlayCheckbox {
@@ -9909,8 +9949,12 @@ impl App {
             };
 
             if !delete_confirm_open {
-                Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
-                    .render(hint_area, frame.buffer_mut());
+                Paragraph::new(modal_hint_line(
+                    &self.theme,
+                    &self.macro_list_hints(),
+                    hint_area.width,
+                ))
+                .render(hint_area, frame.buffer_mut());
             }
             self.overlay_layout.active = list_layout;
         }
@@ -10060,7 +10104,8 @@ impl App {
 
         // ── Hints. Every key is resolved through the bindings. ────────────
         let hints = self.macro_editor_hints(focus, engaged);
-        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
+        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
 
         self.overlay_layout.active = OverlayMouseLayout::EditMacros {
             name_input: name_inner,
@@ -10185,10 +10230,7 @@ impl App {
             // selector and buttons.
             hints.push(Hint::plain("Space act on focus"));
         }
-        hints.push(Hint::key(
-            self.bindings.label_for(Action::CloseOverlay),
-            "cancel",
-        ));
+        hints.push(Hint::key(self.bindings.label_for(Action::CloseOverlay), "cancel").pinned());
         hints
     }
 
@@ -10284,6 +10326,7 @@ impl App {
         &self,
         searching: bool,
         intent: ProjectChooserIntent,
+        width: u16,
     ) -> Line<'static> {
         let standalone = if intent != ProjectChooserIntent::NewAgent {
             Hint::maybe_key(None::<String>, "standalone")
@@ -10302,18 +10345,18 @@ impl App {
         let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "choose");
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let hints = if searching {
-            vec![confirm, Hint::key(close_key, "clear"), standalone]
+            vec![confirm, Hint::key(close_key, "clear").pinned(), standalone]
         } else {
             vec![
                 Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
                 Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
                 Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
                 confirm,
-                Hint::key(close_key, "cancel"),
+                Hint::key(close_key, "cancel").pinned(),
                 standalone,
             ]
         };
-        modal_hint_line(&self.theme, &hints)
+        modal_hint_line(&self.theme, &hints, width)
     }
 
     /// The macro list's footer. Every key is resolved through the bindings, so a
@@ -10323,7 +10366,7 @@ impl App {
             Hint::key(self.bindings.label_for(Action::Confirm), "edit"),
             Hint::key(self.bindings.label_for(Action::NewMacro), "new"),
             Hint::key(self.bindings.label_for(Action::DeleteMacro), "delete"),
-            Hint::key(self.bindings.label_for(Action::CloseOverlay), "close"),
+            Hint::key(self.bindings.label_for(Action::CloseOverlay), "close").pinned(),
         ]
     }
 
@@ -10495,17 +10538,17 @@ impl App {
         let open_file = self.bindings.label_for(Action::OpenStartupCommandLogFile);
         let open_folder = self.bindings.label_for(Action::OpenStartupCommandLogFolder);
         let hints = if viewer.searching {
-            vec![Hint::key(close_key, "close search")]
+            vec![Hint::key(close_key, "close search").pinned()]
         } else {
             vec![
-                Hint::key(close_key, "close"),
+                Hint::key(close_key, "close").pinned(),
                 Hint::keys([scroll_up, scroll_down], "scroll"),
                 Hint::key(search_key, "search"),
                 Hint::key(open_file, "Open file"),
                 Hint::key(open_folder, "Open folder"),
             ]
         };
-        Paragraph::new(pane_hint_line(&self.theme, &hints))
+        Paragraph::new(pane_hint_line(&self.theme, &hints, hint_area.width))
             .block(
                 Block::default()
                     .borders(Borders::TOP)
@@ -10546,8 +10589,9 @@ impl App {
             &self.theme,
             &[
                 Hint::key(self.bindings.label_for(Action::Confirm), "done"),
-                Hint::key(self.bindings.label_for(Action::CloseOverlay), "cancel"),
+                Hint::key(self.bindings.label_for(Action::CloseOverlay), "cancel").pinned(),
             ],
+            bar_area.width.saturating_sub(2),
         );
 
         let input_block = self
@@ -10625,8 +10669,9 @@ impl App {
             &[
                 Hint::fixed("Enter", "send"),
                 Hint::fixed("Tab", "complete"),
-                Hint::fixed("Esc", "cancel"),
+                Hint::fixed("Esc", "cancel").pinned(),
             ],
+            bar_area.width.saturating_sub(2),
         );
 
         let input_block = self
@@ -10868,6 +10913,7 @@ impl App {
             block = block.title_bottom(modal_hint_line(
                 &self.theme,
                 &[Hint::keys([scroll_up, scroll_down], "scroll the message")],
+                area.width.saturating_sub(2),
             ));
         }
         let inner = block.inner(area);
@@ -11118,7 +11164,7 @@ impl App {
 
         // Footer hint.
         let hints = [
-            Hint::key(self.bindings.label_for(Action::CloseOverlay), "close"),
+            Hint::key(self.bindings.label_for(Action::CloseOverlay), "close").pinned(),
             // Resolved, not hardcoded: the handler answers to `Action::Confirm`,
             // so the badge has to follow a rebind. "Scroll" is a mouse gesture
             // and has no binding to look up.
@@ -11129,7 +11175,7 @@ impl App {
         render_centered_lines(
             frame.buffer_mut(),
             hint_area,
-            &[modal_hint_line(&self.theme, &hints)],
+            &[modal_hint_line(&self.theme, &hints, hint_area.width)],
             Style::default(),
         );
     }
@@ -11544,15 +11590,16 @@ pub(crate) fn top_bar_branch_suffix(current: &str, initial: &str) -> String {
 /// key must not be able to make this hint lie. The list of stops is short
 /// because a picker HAS no other controls, only rows.
 impl App {
-    fn provider_picker_footer(&self) -> Line<'static> {
+    fn provider_picker_footer(&self, width: u16) -> Line<'static> {
         modal_hint_line(
             &self.theme,
             &[
                 Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
                 Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
                 Hint::key(self.bindings.label_for(Action::Confirm), "choose"),
-                Hint::key(self.bindings.label_for(Action::CloseOverlay), "cancel"),
+                Hint::key(self.bindings.label_for(Action::CloseOverlay), "cancel").pinned(),
             ],
+            width,
         )
     }
 }
@@ -12046,17 +12093,21 @@ mod tests {
     fn the_project_chooser_footer_names_the_reachable_standalone_key() {
         let app = test_app(default_bindings());
 
-        let idle = line_text(
-            &app.project_chooser_hint_line(false, crate::app::ProjectChooserIntent::NewAgent),
-        );
+        let idle = line_text(&app.project_chooser_hint_line(
+            false,
+            crate::app::ProjectChooserIntent::NewAgent,
+            200,
+        ));
         assert_eq!(
             idle,
             " <j> down  <k> up  </> search  <Enter> choose  <Esc> cancel  <s> standalone"
         );
 
-        let searching = line_text(
-            &app.project_chooser_hint_line(true, crate::app::ProjectChooserIntent::NewAgent),
-        );
+        let searching = line_text(&app.project_chooser_hint_line(
+            true,
+            crate::app::ProjectChooserIntent::NewAgent,
+            200,
+        ));
         assert_eq!(
             searching,
             " <Enter> choose  <Esc> clear  <Ctrl-s> standalone"
@@ -12069,11 +12120,11 @@ mod tests {
     fn the_standalone_segment_is_the_last_thing_the_chooser_footer_names() {
         let app = test_app(default_bindings());
         for searching in [false, true] {
-            let line =
-                line_text(&app.project_chooser_hint_line(
-                    searching,
-                    crate::app::ProjectChooserIntent::NewAgent,
-                ));
+            let line = line_text(&app.project_chooser_hint_line(
+                searching,
+                crate::app::ProjectChooserIntent::NewAgent,
+                200,
+            ));
             assert!(
                 line.ends_with("standalone"),
                 "searching={searching}: got {line:?}"
@@ -12107,19 +12158,22 @@ mod tests {
             crokey::key!(s),
             crokey::key!(ctrl - x),
         ]));
-        let searching = line_text(
-            &app.project_chooser_hint_line(true, crate::app::ProjectChooserIntent::NewAgent),
-        );
+        let searching = line_text(&app.project_chooser_hint_line(
+            true,
+            crate::app::ProjectChooserIntent::NewAgent,
+            200,
+        ));
         assert!(
             searching.ends_with("<Ctrl-x> standalone"),
             "the user's own chord must be named, got {searching:?}"
         );
 
         let letters_only = test_app(bindings_with_standalone_keys(vec![crokey::key!(s)]));
-        let searching = line_text(
-            &letters_only
-                .project_chooser_hint_line(true, crate::app::ProjectChooserIntent::NewAgent),
-        );
+        let searching = line_text(&letters_only.project_chooser_hint_line(
+            true,
+            crate::app::ProjectChooserIntent::NewAgent,
+            200,
+        ));
         assert!(
             !searching.contains("standalone"),
             "the segment must vanish, got {searching:?}"
@@ -12138,17 +12192,21 @@ mod tests {
     fn a_non_new_agent_chooser_footer_keeps_the_bytes_it_always_had() {
         let app = test_app(default_bindings());
 
-        let idle = line_text(
-            &app.project_chooser_hint_line(false, crate::app::ProjectChooserIntent::Manage),
-        );
+        let idle = line_text(&app.project_chooser_hint_line(
+            false,
+            crate::app::ProjectChooserIntent::Manage,
+            200,
+        ));
         assert_eq!(
             idle,
             " <j> down  <k> up  </> search  <Enter> choose  <Esc> cancel"
         );
 
-        let searching = line_text(
-            &app.project_chooser_hint_line(true, crate::app::ProjectChooserIntent::Manage),
-        );
+        let searching = line_text(&app.project_chooser_hint_line(
+            true,
+            crate::app::ProjectChooserIntent::Manage,
+            200,
+        ));
         assert_eq!(searching, " <Enter> choose  <Esc> clear");
     }
 
@@ -12166,7 +12224,7 @@ mod tests {
             crate::app::ProjectChooserIntent::ProjectTerminal,
         ] {
             for searching in [false, true] {
-                let line = line_text(&app.project_chooser_hint_line(searching, intent));
+                let line = line_text(&app.project_chooser_hint_line(searching, intent, 200));
                 assert!(
                     !line.contains("standalone"),
                     "{intent:?} (searching={searching}) must not name it, got {line:?}"
@@ -15052,7 +15110,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.engine.config.ui.tab_reaches_agent = true;
 
-        let rendered = rendered_line(&app.typeable_hint_line(SessionSurface::Agent, 60));
+        // Room for the chords (63 columns) and not for the cue beside them.
+        let rendered = rendered_line(&app.typeable_hint_line(SessionSurface::Agent, 70));
 
         assert!(rendered.contains("<Ctrl-o> next pane"), "got {rendered:?}");
         assert!(
@@ -22264,7 +22323,7 @@ mod tests {
         let mut app = macro_list_app(default_bindings());
         let buf = render_to_buffer(&mut app);
         let expected = {
-            let line = modal_hint_line(&app.theme, &app.macro_list_hints());
+            let line = modal_hint_line(&app.theme, &app.macro_list_hints(), 200);
             line.spans
                 .iter()
                 .map(|span| span.content.as_ref())

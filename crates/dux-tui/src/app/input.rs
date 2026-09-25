@@ -29027,7 +29027,7 @@ cyan = "#00ffff"
             "a keystroke in scroll mode must not reach the PTY"
         );
 
-        let cue = line_text(&app.scroll_mode_cue_line());
+        let cue = line_text(&app.scroll_mode_cue_line(200));
         assert!(
             cue.contains("keys are not reaching the agent"),
             "the cue must say the keys are going nowhere; got {cue:?}"
@@ -29049,7 +29049,7 @@ cyan = "#00ffff"
             &["ctrl-alt-b"],
         )]));
 
-        let cue = line_text(&app.scroll_mode_cue_line());
+        let cue = line_text(&app.scroll_mode_cue_line(200));
         let rebound = app.bindings.labels_for(Action::ScrollToBottom);
         assert_eq!(
             rebound, "Ctrl-Alt-b",
@@ -29074,7 +29074,7 @@ cyan = "#00ffff"
     fn the_scroll_mode_cue_still_names_the_way_out_of_interactive_mode() {
         let app = test_app(default_bindings());
 
-        let cue = line_text(&app.scroll_mode_cue_line());
+        let cue = line_text(&app.scroll_mode_cue_line(200));
         let exit = app.bindings.label_for(Action::ToggleFullscreen);
         assert!(
             !exit.is_empty(),

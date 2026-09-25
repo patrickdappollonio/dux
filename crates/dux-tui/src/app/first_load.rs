@@ -582,7 +582,11 @@ pub(crate) fn render_modal(
     //
     // The bottom title is the house Report-modal hint (Agent Info's idiom): both
     // screens say how to leave, on the border row, so the frame costs no rows.
-    let hint = modal_hint_line(theme, &[Hint::key(close_key, "close")]);
+    let hint = modal_hint_line(
+        theme,
+        &[Hint::key(close_key, "close").pinned()],
+        area.width.saturating_sub(2),
+    );
     let block = Block::default()
         .title(Line::from(Span::styled(
             prompt.title(),

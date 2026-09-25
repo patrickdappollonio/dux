@@ -397,43 +397,43 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
             session_active,
         };
     let pane_lines: Vec<(&str, Line<'static>, &'static [&'static str])> = vec![
-        ("scroll mode cue", app.scroll_mode_cue_line(), &[]),
+        ("scroll mode cue", app.scroll_mode_cue_line(200), &[]),
         (
             "typeable",
             app.typeable_hint_line(SessionSurface::Agent, 200),
             &[],
         ),
         ("take-over", app.takeover_hint_line(200), &[]),
-        ("interactive", app.interactive_terminal_hint_line(0), &[]),
         (
-            "interactive scrolled",
-            app.interactive_terminal_hint_line(3),
+            "interactive",
+            app.interactive_terminal_hint_line(0, 200),
             &[],
         ),
-        ("scrolled", app.scrolled_terminal_hint_line(3), &[]),
+        (
+            "interactive scrolled",
+            app.interactive_terminal_hint_line(3, 200),
+            &[],
+        ),
+        ("scrolled", app.scrolled_terminal_hint_line(3, 200), &[]),
         (
             "inactive live agent",
-            app.inactive_terminal_hint_line(&context(
-                SessionSurface::Agent,
-                false,
-                true,
-                Some("session-1"),
-            )),
+            app.inactive_terminal_hint_line(
+                &context(SessionSurface::Agent, false, true, Some("session-1")),
+                200,
+            ),
             &[],
         ),
         (
             "inactive exited agent",
-            app.inactive_terminal_hint_line(&context(
-                SessionSurface::Agent,
-                false,
-                false,
-                Some("session-1"),
-            )),
+            app.inactive_terminal_hint_line(
+                &context(SessionSurface::Agent, false, false, Some("session-1")),
+                200,
+            ),
             &[],
         ),
-        ("files", app.files_hint_line(), &[]),
-        ("commit (unfocused)", app.commit_hint_line(false), &[]),
-        ("commit (focused)", app.commit_hint_line(true), &[]),
+        ("files", app.files_hint_line(200), &[]),
+        ("commit (unfocused)", app.commit_hint_line(false, 200), &[]),
+        ("commit (focused)", app.commit_hint_line(true, 200), &[]),
     ];
     for (name, line, fixed) in pane_lines {
         out.push(Painted {
@@ -447,7 +447,7 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
     app.files_search_active = true;
     out.push(Painted {
         name: "pane line: files (searching)".to_string(),
-        buf: paint_line(app.files_hint_line(), APP_BG),
+        buf: paint_line(app.files_hint_line(200), APP_BG),
         must_hint: true,
         fixed: fixed_keys("FilesSearching"),
     });
@@ -603,4 +603,98 @@ fn rebinding_every_action_leaves_no_default_key_in_any_hint() {
     }
     offenders.dedup();
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+/// Every badge-opening bracket on screen that is never closed: a badge the
+/// edge of its line cut through.
+fn clipped_badges(buf: &Buffer) -> Vec<(u16, u16)> {
+    let whole: Vec<(u16, u16)> = badges(buf).iter().map(|b| (b.x, b.y)).collect();
+    let mut cut = Vec::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width.saturating_sub(1) {
+            let cell = &buf[(x, y)];
+            if cell.symbol() == "<"
+                && matches!(cell.fg, BRACKET | DIM_BRACKET)
+                && buf[(x + 1, y)].modifier.contains(Modifier::BOLD)
+                && !whole.contains(&(x, y))
+            {
+                cut.push((x, y));
+            }
+        }
+    }
+    cut
+}
+
+/// A hint line too long for its space leaves whole segments out and says so;
+/// it never runs off the edge through the middle of a badge.
+#[test]
+fn no_hint_line_runs_off_its_edge_through_a_badge() {
+    let mut offenders = Vec::new();
+    for (width, height) in [(160, 60), (120, 40), (80, 24)] {
+        for surface in every_surface(default_bindings, width, height) {
+            for (x, y) in clipped_badges(&surface.buf) {
+                // The fullscreen startup log paints its frame over the main
+                // footer's row, which cuts that line's badges without the line
+                // itself running long.
+                if surface.name.starts_with("StartupLog") && y == height - 2 {
+                    continue;
+                }
+                offenders.push(format!(
+                    "{} at {width}x{height}: a badge at ({x},{y}) is cut off:\n{}",
+                    surface.name,
+                    screen(&surface.buf)
+                ));
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+/// The row of `buf` holding `needle`, if any.
+fn row_with(buf: &Buffer, needle: &str) -> Option<String> {
+    screen(buf)
+        .lines()
+        .find(|row| row.contains(needle))
+        .map(str::to_string)
+}
+
+/// Where a hint line is cut, the way out survives and the cut is marked: the
+/// help overlay scrolled back at 120 columns, the startup-log list at 80, and
+/// the diff view's line in an 80-column window.
+#[test]
+fn a_cut_hint_line_keeps_its_way_out_and_marks_the_cut() {
+    let close = default_bindings().label_for(Action::CloseOverlay);
+
+    let mut app = test_app(default_bindings());
+    app.help_scroll = Some(4);
+    let buf = render_at(&mut app, 120, 40);
+    let row = row_with(&buf, "Scrolled back")
+        .unwrap_or_else(|| panic!("no scrolled help hint:\n{}", screen(&buf)));
+    assert!(row.contains(&format!("<{close}> close")), "{row}");
+    assert!(row.contains('\u{2026}'), "the cut must be marked: {row}");
+
+    let mut app = test_app(default_bindings());
+    for (name, prompt) in every_prompt(&app) {
+        if name == "StartupCommandLogs" {
+            app.prompt = prompt;
+        }
+    }
+    let buf = render_at(&mut app, 80, 24);
+    let row = row_with(&buf, &format!("<{close}> close"))
+        .unwrap_or_else(|| panic!("the logs dialog lost its close hint:\n{}", screen(&buf)));
+    assert!(row.contains('\u{2026}'), "the cut must be marked: {row}");
+
+    let mut app = test_app(default_bindings());
+    app.focus = FocusPane::Center;
+    app.center_mode = CenterMode::Diff {
+        lines: Arc::new((0..200).map(|i| Line::from(format!("line {i}"))).collect()),
+        scroll: 0,
+        gutter_width: 0,
+        worktree_path: "/tmp/does-not-matter".to_string(),
+        rel_path: "src/main.rs".to_string(),
+    };
+    let buf = render_at(&mut app, 80, 24);
+    let row = row_with(&buf, &format!("<{close}> close diff"))
+        .unwrap_or_else(|| panic!("the diff lost its close hint:\n{}", screen(&buf)));
+    assert!(row.contains('\u{2026}'), "the cut must be marked: {row}");
 }
