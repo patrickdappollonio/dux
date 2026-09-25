@@ -125,6 +125,14 @@ impl Hint {
         Self::key(key, desc)
     }
 
+    /// [`Hint::fixed`] for several keys that do the same thing.
+    pub(crate) fn fixed_keys<const N: usize>(
+        keys: [&'static str; N],
+        desc: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::keys(keys, desc)
+    }
+
     /// Prose with no key badge.
     pub(crate) fn plain(text: impl Into<Cow<'static, str>>) -> Self {
         Self::new(Segment::Plain(text.into()))

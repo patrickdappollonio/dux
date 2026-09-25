@@ -33,6 +33,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::ASCII_LOGO;
+use crate::app::components::wrap_lines::display_width;
+use crate::app::components::{Hint, HintTone, fitted_hint_spans};
 use crate::theme::Theme;
 use dux_core::activity::{ActivityEvent, ActivityRing, ActivitySnapshot, ActivityTone};
 use dux_core::config::DuxPaths;
@@ -64,11 +66,6 @@ enum Role {
     Muted,
     /// The non-loopback security warning, warning-styled and bold.
     Warning,
-    /// An exit hint's key, rendered as a `<…>` keycap badge matching the TUI
-    /// footer (e.g. `<q>`, `<Esc>`, `<Ctrl-c>`).
-    Key,
-    /// An exit hint's description portion.
-    HintDesc,
     /// One activity-log row's message, styled by its captured tone.
     Log(ActivityTone),
     /// Vertical spacer (empty line).
@@ -76,7 +73,7 @@ enum Role {
 }
 
 /// A single rendered line: a sequence of `(text, role)` segments. Most lines
-/// are a single segment; the exit hints pair a `HintKey` with a `HintDesc`.
+/// are a single segment; an activity row pairs its timestamp with its message.
 type ScreenLine = Vec<(String, Role)>;
 
 /// The interactive server status screen. Owns the terminal raw/alt-screen
@@ -214,7 +211,7 @@ impl ServerStatusScreen {
     fn draw(&mut self, uptime_secs: u64, snapshot: &ActivitySnapshot) -> Result<()> {
         let theme = &self.theme;
         let header = header_lines(&self.urls, self.safety_note.as_deref(), uptime_secs);
-        let footer = footer_hint_lines(self.shutdown_message.as_deref());
+        let shutdown_message = self.shutdown_message.as_deref();
         self.terminal.draw(|frame| {
             let area = frame.area();
             // Pre-fill the whole frame with the theme background so the alt
@@ -234,6 +231,7 @@ impl ServerStatusScreen {
             // one-row gap above for breathing room). Wrapping is measured against
             // the inset width so the (wrapping) security warning isn't miscounted.
             let inner_width = area.width.saturating_sub(2 * H_MARGIN).max(1);
+            let footer = footer_lines(theme, shutdown_message, inner_width);
             let header_rows: u16 = header
                 .iter()
                 .map(|segs| wrapped_row_count(segs, inner_width))
@@ -291,8 +289,7 @@ impl ServerStatusScreen {
             frame.render_widget(log_para, chunks[1]);
 
             // ── Footer hints (centered) ─────────────────────────────────────
-            let footer_text: Vec<Line> = footer.iter().map(|s| line_for(s, theme)).collect();
-            let footer_para = Paragraph::new(footer_text)
+            let footer_para = Paragraph::new(footer)
                 .alignment(Alignment::Center)
                 .style(Style::default().bg(theme.app_bg));
             frame.render_widget(footer_para, chunks[2]);
@@ -333,27 +330,10 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     }
 }
 
-/// Rendered display width of a content line in columns. Key segments render as
-/// `<…>` badges (their text plus the two bracket columns), and adjacent badges
-/// are separated by a space, so the width is more than a raw character sum.
-/// Uses character count (not bytes) so multi-byte text measures correctly.
+/// Rendered display width of a content line in columns, measured in display
+/// columns so wide and multi-byte text measures correctly.
 fn line_render_width(segments: &ScreenLine) -> usize {
-    let mut width = 0usize;
-    let mut prev_was_key = false;
-    for (text, role) in segments {
-        let chars = text.chars().count();
-        if *role == Role::Key {
-            if prev_was_key {
-                width += 1; // separating space between adjacent badges
-            }
-            width += chars + 2; // the surrounding `<` and `>`
-            prev_was_key = true;
-        } else {
-            width += chars;
-            prev_was_key = false;
-        }
-    }
-    width
+    segments.iter().map(|(text, _)| display_width(text)).sum()
 }
 
 /// Estimate how many rows a content line occupies once wrapped to `inner_width`,
@@ -414,7 +394,7 @@ fn format_uptime(secs: u64) -> String {
 
 /// Build the header content (logo, heading, URLs, uptime, security line) as a
 /// pure, terminal-free, theme-free description: each line is a list of
-/// `(text, Role)` segments. The exit hints live in [`footer_hint_lines`]; the
+/// `(text, Role)` segments. The exit hints live in [`footer_lines`]; the
 /// activity log in [`activity_lines`].
 ///
 /// When `safety_note` is Some, the server is reachable beyond loopback and the
@@ -445,27 +425,26 @@ fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) ->
     lines
 }
 
-/// The two exit-hint rows shown in the footer (`<q>`/`<Esc>` return, `<Ctrl-c>`
-/// quit), plus an optional trailing shutdown status line once teardown has
-/// started. These keys are not configurable bindings: the TUI keybinding system
-/// is not running in server mode, so naming them literally is correct.
-fn footer_hint_lines(shutdown_message: Option<&str>) -> Vec<ScreenLine> {
+/// The footer's rows, each fitted to `width` columns: the two exit hints
+/// (`<q>/<Esc>` return, `<Ctrl-c>` quit) through the app's one hint line, plus
+/// a muted shutdown status row once teardown has started.
+///
+/// None of these keys is a binding: the TUI keybinding system is not running
+/// while the server screen is up, and [`action_for_key`] answers them itself,
+/// so they are named as they are.
+fn footer_lines(theme: &Theme, shutdown_message: Option<&str>, width: u16) -> Vec<Line<'static>> {
+    let row = |hints: &[Hint]| {
+        Line::from(fitted_hint_spans(theme, HintTone::Modal, hints, usize::from(width)).spans)
+    };
     let mut lines = vec![
-        vec![
-            ("q".to_string(), Role::Key),
-            ("Esc".to_string(), Role::Key),
-            (
-                " stop the server and return to dux".to_string(),
-                Role::HintDesc,
-            ),
-        ],
-        vec![
-            ("Ctrl-c".to_string(), Role::Key),
-            (" quit dux entirely".to_string(), Role::HintDesc),
-        ],
+        row(&[Hint::fixed_keys(["q", "Esc"], "stop the server and return to dux").pinned()]),
+        row(&[Hint::fixed("Ctrl-c", "quit dux entirely").pinned()]),
     ];
     if let Some(message) = shutdown_message {
-        lines.push(vec![(message.to_string(), Role::Muted)]);
+        lines.push(Line::from(Span::styled(
+            message.to_string(),
+            Style::default().fg(theme.provider_label_fg),
+        )));
     }
     lines
 }
@@ -490,19 +469,7 @@ fn activity_lines(events: &[ActivityEvent], max_rows: usize) -> Vec<ScreenLine> 
 /// stays theme-free for testing.
 fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
     let mut spans: Vec<Span<'a>> = Vec::new();
-    let mut prev_was_key = false;
     for (text, role) in segments {
-        // Exit-hint keys render as `<…>` keycap badges via the shared TUI helper,
-        // so `<q> <Esc>` matches the footer exactly. Adjacent badges are spaced.
-        if *role == Role::Key {
-            if prev_was_key {
-                spans.push(Span::styled(" ", Style::default().bg(theme.app_bg)));
-            }
-            spans.extend(theme.key_badge(text.as_str(), theme.app_bg));
-            prev_was_key = true;
-            continue;
-        }
-        prev_was_key = false;
         let style = match role {
             // Wordmark: accent (the focused-title color), bold.
             Role::Logo => Style::default()
@@ -522,8 +489,6 @@ fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
             Role::Warning => Style::default()
                 .fg(theme.warning_fg)
                 .add_modifier(Modifier::BOLD),
-            // Exit-hint description: muted hint text.
-            Role::HintDesc => Style::default().fg(theme.hint_desc_fg),
             // Activity-log message, colored by its captured tone through the
             // semantic theme fields. `status_info_fg` is deliberately not used
             // for Ok: it equals `provider_label_fg` in the default theme, which
@@ -537,8 +502,7 @@ fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
                 };
                 Style::default().fg(fg)
             }
-            // `Key` is handled above; `Spacer` is empty.
-            Role::Key | Role::Spacer => Style::default(),
+            Role::Spacer => Style::default(),
         };
         spans.push(Span::styled(text.as_str(), style));
     }
@@ -650,13 +614,12 @@ mod tests {
             wrapped_row_count(&vec![("01234567890".to_string(), Role::Muted)], 10),
             2
         );
-        // A keycap segment renders as `<key>`, so its width includes the two
-        // bracket columns: `<aaaaa>` (7) + `bbbbbb` (6) = 13 → two rows at width 10.
+        // Segments add up: `aaaaa` (5) + `bbbbbb` (6) = 11 → two rows at width 10.
         assert_eq!(
             wrapped_row_count(
                 &vec![
-                    ("aaaaa".to_string(), Role::Key),
-                    ("bbbbbb".to_string(), Role::HintDesc),
+                    ("aaaaa".to_string(), Role::Muted),
+                    ("bbbbbb".to_string(), Role::Muted),
                 ],
                 10
             ),
@@ -665,14 +628,13 @@ mod tests {
     }
 
     #[test]
-    fn line_render_width_counts_keycap_badges_and_separators() {
-        // `<q>` (3) + separating space (1) + `<Esc>` (5) + ` hi` (3) = 12.
+    fn line_render_width_counts_display_columns() {
+        // `12:00:00  ` (10) + a wide glyph (2) + `ok` (2) = 14.
         let line = vec![
-            ("q".to_string(), Role::Key),
-            ("Esc".to_string(), Role::Key),
-            (" hi".to_string(), Role::HintDesc),
+            ("12:00:00  ".to_string(), Role::Muted),
+            ("\u{5e45}ok".to_string(), Role::Log(ActivityTone::Info)),
         ];
-        assert_eq!(line_render_width(&line), 12);
+        assert_eq!(line_render_width(&line), 14);
     }
 
     /// Wrap one URL in the `&[String]` shape `header_lines` expects.
@@ -755,44 +717,73 @@ mod tests {
         );
     }
 
-    #[test]
-    fn footer_hint_lines_carry_both_exit_keys() {
-        let lines = footer_hint_lines(None);
-        let text = plain_text(&lines);
-        assert!(text.contains("return to dux"));
-        assert!(text.contains("quit dux entirely"));
-        // The exit keys are rendered as `<…>` keycap badges, so they live in
-        // their own `Role::Key` segments rather than as inline "q or Esc" text.
-        let keys: Vec<&str> = lines
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
             .iter()
-            .flatten()
-            .filter(|(_, role)| *role == Role::Key)
-            .map(|(text, _)| text.as_str())
-            .collect();
-        assert!(keys.contains(&"q"));
-        assert!(keys.contains(&"Esc"));
-        assert!(keys.contains(&"Ctrl-c"));
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// The footer is the app's one hint line: its keys are named the way every
+    /// other hint names two keys that do one thing, its badges take the
+    /// screen's background, and every key it names does what it says in
+    /// `action_for_key` (none is a binding: the screen answers them itself).
+    #[test]
+    fn the_footer_is_the_shared_hint_line_and_its_keys_do_what_it_says() {
+        let theme = Theme::default_dark();
+        let lines = footer_lines(&theme, None, 80);
+        let text: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(
+            text,
+            vec![
+                "<q>/<Esc> stop the server and return to dux".to_string(),
+                "<Ctrl-c> quit dux entirely".to_string(),
+            ]
+        );
+        for span in lines.iter().flat_map(|line| &line.spans) {
+            assert_eq!(span.style.bg, None, "{span:?} names a background");
+        }
+        let press = |label: &str| match label {
+            "q" => key(KeyCode::Char('q'), KeyModifiers::NONE),
+            "Esc" => key(KeyCode::Esc, KeyModifiers::NONE),
+            "Ctrl-c" => key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            other => panic!("the footer names {other:?}, which the screen does not answer"),
+        };
+        for label in ["q", "Esc"] {
+            assert!(matches!(
+                action_for_key(press(label)),
+                Some(ServerScreenTick::ReturnToTui)
+            ));
+        }
+        assert!(matches!(
+            action_for_key(press("Ctrl-c")),
+            Some(ServerScreenTick::QuitProcess)
+        ));
+
+        // A narrow screen fits each row to its width, marking what it left out.
+        let narrow = footer_lines(&theme, None, 30);
+        assert_eq!(line_text(&narrow[0]), "\u{2026}");
+        assert_eq!(line_text(&narrow[1]), "<Ctrl-c> quit dux entirely");
     }
 
     #[test]
-    fn footer_hint_lines_without_shutdown_message_has_no_extra_line() {
-        // No shutdown in progress: exactly the two exit-hint rows, nothing
-        // muted tacked on.
-        let lines = footer_hint_lines(None);
+    fn the_footer_without_a_shutdown_message_has_no_extra_line() {
+        // No shutdown in progress: exactly the two exit-hint rows.
+        let lines = footer_lines(&Theme::default_dark(), None, 80);
         assert_eq!(lines.len(), 2);
-        assert!(!lines.iter().flatten().any(|(_, role)| *role == Role::Muted));
     }
 
     #[test]
-    fn footer_hint_lines_appends_shutdown_message_as_its_own_muted_line() {
+    fn the_footer_appends_the_shutdown_message_as_its_own_muted_line() {
         // Owner-approved placement: the shutdown status renders on its own
         // dedicated line, directly under the "Ctrl-c quit dux entirely" row,
-        // styled with the same muted role as the uptime line.
-        let lines = footer_hint_lines(Some("Stopping 2 agents..."));
+        // styled with the same muted color as the uptime line.
+        let theme = Theme::default_dark();
+        let lines = footer_lines(&theme, Some("Stopping 2 agents..."), 80);
         assert_eq!(lines.len(), 3, "the exit hints plus the shutdown line");
         let last = lines.last().expect("shutdown line present");
-        assert_eq!(last.len(), 1, "the shutdown line is a single segment");
-        assert_eq!(last[0], ("Stopping 2 agents...".to_string(), Role::Muted));
+        assert_eq!(line_text(last), "Stopping 2 agents...");
+        assert_eq!(last.spans[0].style.fg, Some(theme.provider_label_fg));
     }
 
     #[test]
@@ -808,7 +799,6 @@ mod tests {
         );
         assert!(!text.contains("return to dux"));
         assert!(!text.contains("quit dux entirely"));
-        assert!(!lines.iter().flatten().any(|(_, role)| *role == Role::Key));
     }
 
     fn ev(hms: &str, msg: &str, tone: ActivityTone) -> ActivityEvent {

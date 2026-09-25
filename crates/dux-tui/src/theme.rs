@@ -784,25 +784,6 @@ impl Theme {
         }
     }
 
-    /// Render a key badge as `<key>` with the angle brackets in an accent color
-    /// and the key name in bold, on an explicit background `bg`. Returns 3
-    /// spans. Everything inside the app goes through the shared hint line
-    /// (`app::components::hint_bar`), whose badges take the surface's
-    /// background instead.
-    pub fn key_badge<'a>(&self, key: &'a str, bg: Color) -> Vec<Span<'a>> {
-        vec![
-            Span::styled("<", Style::default().fg(self.hint_bracket_fg).bg(bg)),
-            Span::styled(
-                key,
-                Style::default()
-                    .fg(self.hint_key_fg)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(">", Style::default().fg(self.hint_bracket_fg).bg(bg)),
-        ]
-    }
-
     /// A key badge with no background of its own: it takes the background of
     /// whatever it is painted over (a dialog, a pane, the footer bar), exactly
     /// as the description beside it does. Naming a background here would be
