@@ -785,21 +785,10 @@ impl Theme {
     }
 
     /// Render a key badge as `<key>` with the angle brackets in an accent color
-    /// and the key name in bold. Returns 3 spans.
-    pub fn dim_key_badge<'a>(&self, key: &'a str, bg: Color) -> Vec<Span<'a>> {
-        vec![
-            Span::styled("<", Style::default().fg(self.hint_dim_bracket_fg).bg(bg)),
-            Span::styled(
-                key,
-                Style::default()
-                    .fg(self.hint_dim_key_fg)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(">", Style::default().fg(self.hint_dim_bracket_fg).bg(bg)),
-        ]
-    }
-
+    /// and the key name in bold, on an explicit background `bg`. Returns 3
+    /// spans. Everything inside the app goes through the shared hint line
+    /// (`app::components::hint_bar`), whose badges take the surface's
+    /// background instead.
     pub fn key_badge<'a>(&self, key: &'a str, bg: Color) -> Vec<Span<'a>> {
         vec![
             Span::styled("<", Style::default().fg(self.hint_bracket_fg).bg(bg)),
@@ -814,17 +803,35 @@ impl Theme {
         ]
     }
 
+    /// A key badge with no background of its own: it takes the background of
+    /// whatever it is painted over (a dialog, a pane, the footer bar), exactly
+    /// as the description beside it does. Naming a background here would be
+    /// wrong on every surface but that one; `Color::Reset` would be wrong on
+    /// all of them, since it falls through to the terminal default.
     pub fn key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
-        // Pass `app_bg` rather than `Color::Reset` so the badge background
-        // tracks the active theme: `Color::Reset` emits an SGR that overrides
-        // the surrounding pre-fill and falls through to the terminal default.
-        self.key_badge(key, self.app_bg)
+        badge_spans(key, self.hint_bracket_fg, self.hint_key_fg)
     }
 
+    /// [`Self::key_badge_default`] in the dimmed hint colors a pane's hint row
+    /// uses.
     pub fn dim_key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
-        self.dim_key_badge(key, self.app_bg)
+        badge_spans(key, self.hint_dim_bracket_fg, self.hint_dim_key_fg)
     }
 }
+
+/// `<key>`: the brackets in `bracket`, the key bold in `key_fg`, no background.
+fn badge_spans(key: &str, bracket: Color, key_fg: Color) -> Vec<Span<'_>> {
+    vec![
+        Span::styled("<", Style::default().fg(bracket)),
+        Span::styled(
+            key,
+            Style::default().fg(key_fg).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(">", Style::default().fg(bracket)),
+    ]
+}
+
+impl Theme {}
 
 /// What makes a style a name chip's: this modifier in the style's REMOVE set.
 ///

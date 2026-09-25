@@ -24,7 +24,7 @@
 
 use super::*;
 
-use crate::app::components::render_scroll_view;
+use crate::app::components::{Hint, modal_hint_line, render_scroll_view};
 use crate::app::render::centered_rect_exact;
 use dux_core::release_notes::ReleaseNotes;
 use dux_core::welcome_screen::WelcomeScreen;
@@ -582,12 +582,7 @@ pub(crate) fn render_modal(
     //
     // The bottom title is the house Report-modal hint (Agent Info's idiom): both
     // screens say how to leave, on the border row, so the frame costs no rows.
-    let mut hint = vec![Span::raw(" ")];
-    hint.extend(theme.key_badge_default(close_key));
-    hint.push(Span::styled(
-        " close",
-        Style::default().fg(theme.hint_desc_fg),
-    ));
+    let hint = modal_hint_line(theme, &[Hint::key(close_key, "close")]);
     let block = Block::default()
         .title(Line::from(Span::styled(
             prompt.title(),
@@ -595,7 +590,7 @@ pub(crate) fn render_modal(
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
         )))
-        .title_bottom(Line::from(hint))
+        .title_bottom(hint)
         .borders(Borders::ALL)
         .border_set(border::ROUNDED)
         .border_style(Style::default().fg(theme.overlay_border))

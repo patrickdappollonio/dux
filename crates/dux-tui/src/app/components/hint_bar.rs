@@ -1,99 +1,263 @@
-//! The one-line hint footer a modal paints along its bottom edge.
+//! The one key-hint line: the `<key> what it does` row a dialog paints along
+//! its bottom edge, a pane paints under its content, and the footer paints
+//! above the status line.
 //!
-//! The shape is a leading space, then `key badge` + ` ` + `description`
-//! segments separated by two spaces. Two rules are structural here:
+//! The shape is `key badge` + ` ` + `description` segments separated by two
+//! spaces, with `<a>/<b> description` for two keys that do the same thing. A
+//! dialog's line starts with one space so it clears the corner of the frame it
+//! sits on. Three rules are structural here:
 //!
 //! * **A segment whose key has no honest label is dropped, not blanked.** Every
 //!   binding is user-configurable, so a lookup can legitimately come back
-//!   empty, and the rename-agent footer additionally has to skip any key its
-//!   text field swallows (see `keybindings::text_field_owns_key` and
+//!   empty, and a dialog with a text field additionally has to skip any key the
+//!   field swallows (see `keybindings::text_field_owns_key` and
 //!   `RuntimeBindings::label_for_text_field_dialog`). Naming a key that types a
 //!   character is worse than naming none.
-//! * **A label is never hardcoded.** [`Hint::key`] takes a label the caller
-//!   resolved through the bindings. [`Hint::plain`] exists for the one thing
-//!   that is genuinely not a binding, Space acting on the focused control,
-//!   which is hardcoded on purpose (the accessibility tenet) and so has no
-//!   binding to look up.
+//! * **A label is never hardcoded.** [`Hint::key`] and [`Hint::keys`] take
+//!   labels the caller resolved through the bindings. [`Hint::fixed`] is for a
+//!   key the surface handles WITHOUT a binding (a text-input context's literal
+//!   Enter, Tab or Escape, a mouse gesture), which is therefore named as it is;
+//!   [`Hint::plain`] is prose with no badge, for Space acting on the focused
+//!   control (the accessibility tenet).
+//! * **A badge sits on the surface it is painted over.** It carries no
+//!   background of its own, so the same line reads right on a dialog, a pane
+//!   and the footer bar in every theme.
 //!
-//! Pure: takes a [`Theme`], returns a [`Line`], touches no `App` state.
+//! [`HintTone`] picks the colors: a dialog or bar speaks in the full hint
+//! colors, a pane's hint row under live content in the dimmed ones.
+//!
+//! Pure: takes a [`Theme`], returns spans, touches no `App` state.
+
+use std::borrow::Cow;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
+use crate::app::components::wrap_lines::display_width;
 use crate::theme::Theme;
 
-/// One footer segment.
+/// The separator between two segments.
+const SEPARATOR: &str = "  ";
+/// What a fitted line ends with when it had to leave segments out.
+const ELLIPSIS: &str = "\u{2026}";
+
+/// Which colors a hint line speaks in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HintTone {
+    /// A dialog's edge, a bar, the footer: the full hint colors.
+    Modal,
+    /// A pane's hint row under content that is not the hint's (a terminal, a
+    /// diff, a file list): the dimmed hint colors, so it does not compete.
+    Pane,
+}
+
+/// One segment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Hint {
     /// A key badge followed by what the key does. `key` must already be
     /// resolved through the bindings; an empty one drops the whole segment.
-    Key { key: String, desc: &'static str },
-    /// Prose with no badge, for a key that has no binding to resolve.
-    Plain(&'static str),
+    Key {
+        key: String,
+        desc: Cow<'static, str>,
+    },
+    /// Two or more keys that do the same thing, `<a>/<b> desc`. Each key must
+    /// already be resolved; empty ones are left out, and the segment drops when
+    /// none is left.
+    Keys {
+        keys: Vec<String>,
+        desc: Cow<'static, str>,
+    },
+    /// Prose with no badge.
+    Plain(Cow<'static, str>),
 }
 
 impl Hint {
     /// A bound key and its description. `key` is whatever the bindings
     /// returned; pass the empty string (or use [`Hint::maybe_key`]) when there
     /// is none and the segment should vanish.
-    pub(crate) fn key(key: impl Into<String>, desc: &'static str) -> Self {
+    pub(crate) fn key(key: impl Into<String>, desc: impl Into<Cow<'static, str>>) -> Self {
         Self::Key {
             key: key.into(),
-            desc,
+            desc: desc.into(),
         }
     }
 
     /// The `Option`-shaped form, for lookups that already return `None` when no
     /// honest label exists (`label_for_text_field_dialog`).
-    pub(crate) fn maybe_key(key: Option<impl Into<String>>, desc: &'static str) -> Self {
+    pub(crate) fn maybe_key(
+        key: Option<impl Into<String>>,
+        desc: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::Key {
             key: key.map(Into::into).unwrap_or_default(),
-            desc,
+            desc: desc.into(),
         }
     }
 
+    /// Several bound keys that do the same thing.
+    pub(crate) fn keys<K: Into<String>>(
+        keys: impl IntoIterator<Item = K>,
+        desc: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self::Keys {
+            keys: keys.into_iter().map(Into::into).collect(),
+            desc: desc.into(),
+        }
+    }
+
+    /// A key the surface handles without a binding (a text-input context's
+    /// literal key, a mouse gesture), named as it is because no rebind can
+    /// change it. Never for a key that has a binding.
+    pub(crate) fn fixed(key: &'static str, desc: impl Into<Cow<'static, str>>) -> Self {
+        Self::key(key, desc)
+    }
+
     /// Prose with no key badge.
-    pub(crate) fn plain(text: &'static str) -> Self {
-        Self::Plain(text)
+    pub(crate) fn plain(text: impl Into<Cow<'static, str>>) -> Self {
+        Self::Plain(text.into())
+    }
+
+    fn keys_shown(&self) -> Vec<&str> {
+        match self {
+            Self::Key { key, .. } if key.is_empty() => Vec::new(),
+            Self::Key { key, .. } => vec![key.as_str()],
+            Self::Keys { keys, .. } => keys
+                .iter()
+                .map(String::as_str)
+                .filter(|k| !k.is_empty())
+                .collect(),
+            Self::Plain(_) => Vec::new(),
+        }
     }
 
     fn is_renderable(&self) -> bool {
         match self {
-            Self::Key { key, .. } => !key.is_empty(),
+            Self::Key { .. } | Self::Keys { .. } => !self.keys_shown().is_empty(),
             Self::Plain(text) => !text.is_empty(),
+        }
+    }
+
+    /// Display columns the segment takes, separator excluded.
+    fn width(&self) -> usize {
+        match self {
+            Self::Key { desc, .. } | Self::Keys { desc, .. } => {
+                let keys = self.keys_shown();
+                // `<` and `>` around each key, a `/` between two, the space
+                // before the description.
+                let badges: usize = keys.iter().map(|k| display_width(k) + 2).sum();
+                badges + keys.len().saturating_sub(1) + 1 + display_width(desc)
+            }
+            Self::Plain(text) => display_width(text),
+        }
+    }
+
+    fn push_spans(&self, theme: &Theme, tone: HintTone, spans: &mut Vec<Span<'static>>) {
+        let desc_style = desc_style(theme, tone);
+        match self {
+            Self::Key { desc, .. } | Self::Keys { desc, .. } => {
+                for (index, key) in self.keys_shown().into_iter().enumerate() {
+                    if index > 0 {
+                        spans.push(Span::styled("/", desc_style));
+                    }
+                    let badge = match tone {
+                        HintTone::Modal => theme.key_badge_default(key),
+                        HintTone::Pane => theme.dim_key_badge_default(key),
+                    };
+                    spans.extend(
+                        badge
+                            .into_iter()
+                            .map(|span| Span::styled(span.content.into_owned(), span.style)),
+                    );
+                }
+                spans.push(Span::styled(format!(" {desc}"), desc_style));
+            }
+            Self::Plain(text) => spans.push(Span::styled(text.to_string(), desc_style)),
         }
     }
 }
 
-/// Build the footer line: a leading space, then every renderable segment
-/// separated by two spaces.
-///
-/// Byte-for-byte the shape the hand-written footers already produce, which is
-/// what lets a migrated modal be proved unchanged rather than merely reviewed.
-pub(crate) fn modal_hint_line(theme: &Theme, hints: &[Hint]) -> Line<'static> {
-    let desc_style = Style::default().fg(theme.hint_desc_fg);
-    let mut spans = vec![Span::raw(" ")];
-    let mut first = true;
-    for hint in hints.iter().filter(|hint| hint.is_renderable()) {
-        let separator = if first { "" } else { "  " };
-        first = false;
-        match hint {
-            Hint::Key { key, desc } => {
-                if !separator.is_empty() {
-                    spans.push(Span::styled(separator.to_string(), desc_style));
-                }
-                spans.extend(
-                    theme
-                        .key_badge_default(key)
-                        .into_iter()
-                        .map(|span| Span::styled(span.content.into_owned(), span.style)),
-                );
-                spans.push(Span::styled(format!(" {desc}"), desc_style));
-            }
-            Hint::Plain(text) => {
-                spans.push(Span::styled(format!("{separator}{text}"), desc_style));
-            }
+fn desc_style(theme: &Theme, tone: HintTone) -> Style {
+    Style::default().fg(match tone {
+        HintTone::Modal => theme.hint_desc_fg,
+        HintTone::Pane => theme.hint_dim_desc_fg,
+    })
+}
+
+/// Every renderable segment, joined by the two-space separator, with no
+/// leading space. The building block the line shapes below share.
+pub(crate) fn hint_spans(theme: &Theme, tone: HintTone, hints: &[Hint]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, hint) in hints.iter().filter(|hint| hint.is_renderable()).enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(SEPARATOR, desc_style(theme, tone)));
         }
+        hint.push_spans(theme, tone, &mut spans);
+    }
+    spans
+}
+
+/// A line cut to a width: its spans, and how many segments made it in.
+pub(crate) struct FittedHints {
+    pub(crate) spans: Vec<Span<'static>>,
+    pub(crate) shown: usize,
+}
+
+/// As many whole segments as fit in `width` display columns, in order. When a
+/// segment had to be left out the line ends in `…`, room permitting, so a
+/// clipped line says so rather than reading as complete.
+pub(crate) fn fitted_hint_spans(
+    theme: &Theme,
+    tone: HintTone,
+    hints: &[Hint],
+    width: usize,
+) -> FittedHints {
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    let mut shown = 0usize;
+    for hint in hints.iter().filter(|hint| hint.is_renderable()) {
+        let separator = if shown > 0 { SEPARATOR.len() } else { 0 };
+        let cost = separator + hint.width();
+        if used + cost > width {
+            if used < width {
+                spans.push(Span::styled(ELLIPSIS, desc_style(theme, tone)));
+            }
+            break;
+        }
+        if separator > 0 {
+            spans.push(Span::styled(SEPARATOR, desc_style(theme, tone)));
+        }
+        hint.push_spans(theme, tone, &mut spans);
+        used += cost;
+        shown += 1;
+    }
+    FittedHints { spans, shown }
+}
+
+/// A dialog's hint line: one leading space, then the segments.
+pub(crate) fn modal_hint_line(theme: &Theme, hints: &[Hint]) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(hint_spans(theme, HintTone::Modal, hints));
+    Line::from(spans)
+}
+
+/// A pane's hint line: the segments flush left, in the pane tone.
+pub(crate) fn pane_hint_line(theme: &Theme, hints: &[Hint]) -> Line<'static> {
+    Line::from(hint_spans(theme, HintTone::Pane, hints))
+}
+
+/// A pane's hint line that opens with a sentence of its own (how far the view
+/// is scrolled back, why keys are not reaching the child), set off from the
+/// segments by the same separator that joins them.
+pub(crate) fn pane_hint_line_after(
+    theme: &Theme,
+    lead: Span<'static>,
+    hints: &[Hint],
+) -> Line<'static> {
+    let rest = hint_spans(theme, HintTone::Pane, hints);
+    let mut spans = vec![lead];
+    if !rest.is_empty() {
+        spans.push(Span::styled(SEPARATOR, desc_style(theme, HintTone::Pane)));
+        spans.extend(rest);
     }
     Line::from(spans)
 }
@@ -188,5 +352,99 @@ mod tests {
             text_of(&without_focus),
             " <Enter> confirm  Space toggle  <Esc> cancel"
         );
+    }
+
+    /// No span of a hint line names a background, so every cell takes the
+    /// background of the surface under it, in either tone.
+    #[test]
+    fn no_span_carries_a_background_of_its_own() {
+        let theme = theme();
+        let hints = [
+            Hint::key("Enter", "confirm"),
+            Hint::keys(["PgUp", "PgDn"], "scroll"),
+            Hint::plain("Space toggle"),
+        ];
+        for tone in [HintTone::Modal, HintTone::Pane] {
+            for span in hint_spans(&theme, tone, &hints) {
+                assert_eq!(span.style.bg, None, "{tone:?}: {span:?}");
+            }
+        }
+    }
+
+    /// The pane tone is the dimmed hint colors, the modal tone the full ones.
+    #[test]
+    fn the_tone_picks_the_badge_and_description_colors() {
+        let theme = theme();
+        let hints = [Hint::key("Esc", "close")];
+        let modal = hint_spans(&theme, HintTone::Modal, &hints);
+        let pane = hint_spans(&theme, HintTone::Pane, &hints);
+        assert_eq!(modal[0].style.fg, Some(theme.hint_bracket_fg));
+        assert_eq!(modal[1].style.fg, Some(theme.hint_key_fg));
+        assert_eq!(modal[3].style.fg, Some(theme.hint_desc_fg));
+        assert_eq!(pane[0].style.fg, Some(theme.hint_dim_bracket_fg));
+        assert_eq!(pane[1].style.fg, Some(theme.hint_dim_key_fg));
+        assert_eq!(pane[3].style.fg, Some(theme.hint_dim_desc_fg));
+    }
+
+    /// Two keys that do one thing share one description, joined by a slash, and
+    /// an unbound one of them leaves no stray slash behind.
+    #[test]
+    fn keys_that_do_one_thing_share_a_description() {
+        let theme = theme();
+        let both = modal_hint_line(&theme, &[Hint::keys(["Tab", "S-Tab"], "actions")]);
+        assert_eq!(text_of(&both), " <Tab>/<S-Tab> actions");
+        let one = modal_hint_line(&theme, &[Hint::keys(["", "S-Tab"], "actions")]);
+        assert_eq!(text_of(&one), " <S-Tab> actions");
+        let none = modal_hint_line(
+            &theme,
+            &[Hint::keys(["", ""], "actions"), Hint::key("Esc", "close")],
+        );
+        assert_eq!(text_of(&none), " <Esc> close");
+    }
+
+    /// A pane line with a sentence of its own sets it off with the separator,
+    /// and a sentence with no segments after it trails nothing.
+    #[test]
+    fn a_lead_sentence_is_set_off_by_the_separator() {
+        let theme = theme();
+        let line = pane_hint_line_after(
+            &theme,
+            Span::raw("Scrolled back 3 lines."),
+            &[Hint::key("PgDn", "down")],
+        );
+        assert_eq!(text_of(&line), "Scrolled back 3 lines.  <PgDn> down");
+        let alone = pane_hint_line_after(&theme, Span::raw("Exited."), &[Hint::key("", "x")]);
+        assert_eq!(text_of(&alone), "Exited.");
+    }
+
+    /// Fitting keeps whole segments only, marks the cut with an ellipsis, and
+    /// measures display columns, so a wide description cannot overflow.
+    #[test]
+    fn fitting_keeps_whole_segments_and_marks_the_cut() {
+        let theme = theme();
+        let hints = [
+            Hint::key("a", "one"),
+            Hint::key("b", "\u{5e45}\u{5e45}"),
+            Hint::key("c", "three"),
+        ];
+        let full = fitted_hint_spans(&theme, HintTone::Modal, &hints, 80);
+        let full_text: String = full.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(full_text, "<a> one  <b> \u{5e45}\u{5e45}  <c> three");
+        assert_eq!(full.shown, 3);
+
+        // `<a> one` is 7 columns, `  <b> 幅幅` another 10: 17 fit exactly, 16 do
+        // not, even though the wide segment is only 8 characters.
+        let cut = fitted_hint_spans(&theme, HintTone::Modal, &hints, 17);
+        let cut_text: String = cut.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(cut_text, "<a> one  <b> \u{5e45}\u{5e45}");
+        assert_eq!(cut.shown, 2);
+        let cut = fitted_hint_spans(&theme, HintTone::Modal, &hints, 16);
+        let cut_text: String = cut.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(cut_text, "<a> one\u{2026}");
+        assert_eq!(cut.shown, 1);
+
+        let nothing = fitted_hint_spans(&theme, HintTone::Modal, &hints, 0);
+        assert!(nothing.spans.is_empty());
+        assert_eq!(nothing.shown, 0);
     }
 }

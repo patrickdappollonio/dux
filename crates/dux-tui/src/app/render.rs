@@ -11,6 +11,9 @@ use super::components::{
     name_chip, plan_pane_card, prose_lines, prose_spans, render_centered_lines,
     render_scroll_marker, shared_button_width, wrap_styled_lines,
 };
+use super::components::{
+    HintTone, fitted_hint_spans, hint_spans, pane_hint_line, pane_hint_line_after,
+};
 use super::components::{PickerList, render_scroll_indicator};
 use super::confirm_dialog::{
     ConfirmButton, ConfirmDialog, clip_to, confirm_inner_width, stack_rows,
@@ -397,13 +400,6 @@ fn search_highlight_spans(
 /// geometry that `paint_framed_row_selection` relies on) can never drift apart.
 fn framed_row_item(line1: Line<'static>, line2: Line<'static>) -> ListItem<'static> {
     ListItem::new(vec![line1, line2, Line::from("")])
-}
-
-fn owned_spans(spans: Vec<Span<'_>>) -> Vec<Span<'static>> {
-    spans
-        .into_iter()
-        .map(|span| Span::styled(span.content.into_owned(), span.style))
-        .collect()
 }
 
 /// ASCII art logo displayed in the agent pane when no content is active.
@@ -2750,44 +2746,45 @@ impl App {
 
         // Hint bar with top border (same style as agent terminal).
         if hint_area.height > 0 {
-            let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
             let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
             let close = self.bindings.label_for(Action::CloseOverlay);
-            let mut spans: Vec<Span> = Vec::new();
 
             // Report the offset actually DRAWN, not the raw one held in
             // `center_mode`. The two differ whenever the content shrank under a
             // stale offset (a shorter file, a diff refresh): the view clamps to
             // what exists, and an unclamped number here would overstate where the
             // reader is until the next key press.
-            if drawn_scroll > 0 {
-                spans.push(Span::styled(
-                    format!(
-                        "Scrolled back {}. ",
-                        count_of(usize::from(drawn_scroll), "line")
+            let line = if drawn_scroll > 0 {
+                pane_hint_line_after(
+                    &self.theme,
+                    Span::styled(
+                        format!(
+                            "Scrolled back {}.",
+                            count_of(usize::from(drawn_scroll), "line")
+                        ),
+                        Style::default().fg(self.theme.hint_key_fg),
                     ),
-                    Style::default().fg(self.theme.hint_key_fg),
-                ));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-                spans.push(Span::styled(" down, ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                spans.push(Span::styled(" up, ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                spans.push(Span::styled(" one line. ", desc_style));
+                    &[
+                        Hint::key(scroll_down, "down"),
+                        Hint::key(scroll_up, "up"),
+                        Hint::key(scroll_line, "one line"),
+                        Hint::key(close, "close diff"),
+                    ],
+                )
             } else {
-                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                spans.push(Span::styled(" ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-                spans.push(Span::styled(" to scroll. ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                spans.push(Span::styled(" one line. ", desc_style));
-            }
-            spans.extend(self.theme.dim_key_badge_default(&close));
-            spans.push(Span::styled(" close diff.", desc_style));
+                pane_hint_line(
+                    &self.theme,
+                    &[
+                        Hint::keys([scroll_up, scroll_down], "scroll"),
+                        Hint::key(scroll_line, "one line"),
+                        Hint::key(close, "close diff"),
+                    ],
+                )
+            };
 
-            Paragraph::new(Line::from(spans))
+            Paragraph::new(line)
                 .block(
                     Block::default()
                         .borders(Borders::TOP)
@@ -3512,7 +3509,6 @@ impl App {
     /// `Theme`, reusing `nudge_border`.
     pub(crate) fn scroll_mode_cue_line(&self) -> Line<'static> {
         let warn_style = Style::default().fg(self.theme.nudge_border);
-        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
         let target = match self.session_surface {
             SessionSurface::Agent => "agent",
             SessionSurface::Terminal => "terminal",
@@ -3522,29 +3518,22 @@ impl App {
         let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
         let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
 
-        let mut spans: Vec<Span> = vec![Span::styled(
-            format!("Scroll mode: keys are not reaching the {target}. "),
-            warn_style,
-        )];
-        spans.extend(self.theme.dim_key_badge_default(&live_edge));
-        spans.push(Span::styled(" resume at the live edge  ", desc_style));
-        spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-        spans.push(Span::styled(" up  ", desc_style));
-        spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-        spans.push(Span::styled(" down  ", desc_style));
-        // This line REPLACES the whole hint bar, so the exit key has to come
-        // along: while the mode is on, every other key is being swallowed and
-        // this is the only place left on screen that says how to leave
-        // fullscreen.
-        spans.extend(self.theme.dim_key_badge_default(&exit_key));
-        spans.push(Span::styled(" minimize", desc_style));
-        // The key badges borrow the label strings, which are locals here, so
-        // hand back owned spans (same pattern as `hint_bar::modal_hint_line`).
-        Line::from(
-            spans
-                .into_iter()
-                .map(|span| Span::styled(span.content.into_owned(), span.style))
-                .collect::<Vec<_>>(),
+        pane_hint_line_after(
+            &self.theme,
+            Span::styled(
+                format!("Scroll mode: keys are not reaching the {target}."),
+                warn_style,
+            ),
+            &[
+                Hint::key(live_edge, "resume at the live edge"),
+                Hint::key(scroll_up, "up"),
+                Hint::key(scroll_down, "down"),
+                // This line REPLACES the whole hint bar, so the exit key has to
+                // come along: while the mode is on, every other key is being
+                // swallowed and this is the only place left on screen that says
+                // how to leave fullscreen.
+                Hint::key(exit_key, "minimize"),
+            ],
         )
     }
 
@@ -3577,22 +3566,14 @@ impl App {
         let next_pane = pane_key(Action::FocusNext);
         let prev_pane = pane_key(Action::FocusPrev);
 
-        let mut spans: Vec<Span> = Vec::new();
-        spans.extend(self.theme.dim_key_badge_default(&exit_key));
-        // The gap between items belongs to the item that FOLLOWS it, never to
-        // the one before: every item here is conditional, and a trailing
-        // separator on the last one shows up as a gap before the period (or,
-        // with the cue on, as a widening of the flush-right padding).
-        spans.push(Span::styled(" fullscreen", desc_style));
-        if !next_pane.is_empty() {
-            spans.push(Span::styled("  ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&next_pane));
-            spans.push(Span::styled(" next pane", desc_style));
-        }
-        if tab_reaches_agent && !prev_pane.is_empty() {
-            spans.push(Span::styled("  ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&prev_pane));
-            spans.push(Span::styled(" previous pane", desc_style));
+        // Every item here is conditional; the shared line drops an unlabelled
+        // one together with its separator, so nothing ever trails the last.
+        let mut hints = vec![
+            Hint::key(exit_key, "fullscreen"),
+            Hint::key(next_pane, "next pane"),
+        ];
+        if tab_reaches_agent {
+            hints.push(Hint::key(prev_pane, "previous pane"));
         }
         // The surviving tab-switch chords are loud in HINTS, not only docs: with
         // plain arrows typing into the agent, the chords are the only tab keys
@@ -3602,37 +3583,24 @@ impl App {
             .selected_session()
             .map(|s| self.session_tab_ids(&s.id).len())
             .unwrap_or(0);
-        if matches!(active_surface, SessionSurface::Agent) && tab_count >= 2 && !next_tab.is_empty()
-        {
-            spans.push(Span::styled("  ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&next_tab));
-            spans.push(Span::styled(" next tab", desc_style));
+        if matches!(active_surface, SessionSurface::Agent) && tab_count >= 2 {
+            hints.push(Hint::key(next_tab, "next tab"));
         }
-        if !self.filtered_macros("").is_empty() && !macro_key.is_empty() {
-            spans.push(Span::styled("  ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&macro_key));
-            spans.push(Span::styled(" macros", desc_style));
+        if !self.filtered_macros("").is_empty() {
+            hints.push(Hint::key(macro_key, "macros"));
         }
-        spans.push(Span::styled(".", desc_style));
+        let mut spans = hint_spans(&self.theme, HintTone::Pane, &hints);
 
         if tab_reaches_agent {
             const CUE: &str = "tabs are sent to the agent";
             const GAP: usize = 2;
-            let chords: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+            let chords: usize = spans.iter().map(|span| display_width(&span.content)).sum();
             if let Some(pad) = (width as usize).checked_sub(chords + GAP + CUE.chars().count()) {
                 spans.push(Span::styled(" ".repeat(pad + GAP), desc_style));
                 spans.push(Span::styled(CUE, desc_style));
             }
         }
-
-        // The key badges borrow locals, so hand back owned spans (the same
-        // pattern `takeover_hint_line` uses).
-        Line::from(
-            spans
-                .into_iter()
-                .map(|span| Span::styled(span.content.into_owned(), span.style))
-                .collect::<Vec<Span<'static>>>(),
-        )
+        Line::from(spans)
     }
 
     /// The hint line shown under the take-over card, replacing the usual hints
@@ -3669,33 +3637,17 @@ impl App {
         .filter(|(key, _)| !key.is_empty())
         .collect();
 
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let mut used = 0usize;
-        for (key, desc) in items {
-            // The gap belongs to the item that FOLLOWS it, so a dropped tail
-            // never leaves a trailing run of padding behind.
-            let gap = if spans.is_empty() { 0 } else { 2 };
-            // `<key> desc`: two brackets and the space before the description.
-            let cost = gap + key.chars().count() + desc.chars().count() + 3;
-            if used + cost > width as usize {
-                break;
-            }
-            if gap > 0 {
-                spans.push(Span::styled("  ", desc_style));
-            }
-            spans.extend(
-                self.theme
-                    .dim_key_badge_default(&key)
-                    .into_iter()
-                    .map(|span| Span::styled(span.content.into_owned(), span.style)),
-            );
-            spans.push(Span::styled(format!(" {desc}"), desc_style));
-            used += cost;
-        }
-        if spans.is_empty() {
+        let hints: Vec<Hint> = items
+            .into_iter()
+            .map(|(key, desc)| Hint::key(key, desc))
+            .collect();
+        let fitted = fitted_hint_spans(&self.theme, HintTone::Pane, &hints, width as usize);
+        let mut spans = fitted.spans;
+        if fitted.shown == 0 {
             // Every key that could press the button has been unbound, or the
             // pane is narrower than the shortest item. The button is still
             // there to click, so the line says that instead of nothing.
+            spans.clear();
             let fallback = "Press Take over to type here";
             if fallback.chars().count() <= width as usize {
                 spans.push(Span::styled(fallback, desc_style));
@@ -4290,62 +4242,53 @@ impl App {
         }
     }
 
-    fn interactive_terminal_hint_line(&self, scrollback_offset: usize) -> Line<'static> {
+    pub(super) fn interactive_terminal_hint_line(&self, scrollback_offset: usize) -> Line<'static> {
         let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
         let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
         let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
         let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
         let macro_key = self.bindings.label_for(Action::OpenMacroBar);
-        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-        let mut spans = Vec::new();
-        spans.extend(owned_spans(self.theme.dim_key_badge_default(&exit_key)));
-        spans.push(Span::styled(" minimize  ", desc_style));
-        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_up)));
-        spans.push(Span::styled(" up  ", desc_style));
-        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_down)));
+        let mut hints = vec![
+            Hint::key(exit_key, "minimize"),
+            Hint::key(scroll_up, "up"),
+            Hint::key(scroll_down, "down"),
+        ];
         if scrollback_offset > 0 {
-            spans.push(Span::styled(" down  ", desc_style));
-            spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_line)));
-            spans.push(Span::styled(" down one line", desc_style));
-        } else {
-            spans.push(Span::styled(" down", desc_style));
+            hints.push(Hint::key(scroll_line, "down one line"));
         }
-        if !self.filtered_macros("").is_empty() && !macro_key.is_empty() {
-            spans.push(Span::styled(" ", desc_style));
-            spans.extend(owned_spans(self.theme.dim_key_badge_default(&macro_key)));
-            spans.push(Span::styled(" macros.", desc_style));
+        if !self.filtered_macros("").is_empty() {
+            hints.push(Hint::key(macro_key, "macros"));
         }
-        Line::from(spans)
+        pane_hint_line(&self.theme, &hints)
     }
 
-    fn scrolled_terminal_hint_line(&self, scrollback_offset: usize) -> Line<'static> {
+    pub(super) fn scrolled_terminal_hint_line(&self, scrollback_offset: usize) -> Line<'static> {
         let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
         let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
         let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
         let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
-        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
         let scrolled = count_of(scrollback_offset, "line");
         let prefix = if self.center_typeable() {
-            format!("Scrolled back {scrolled}. Typing is paused. ")
+            format!("Scrolled back {scrolled}. Typing is paused.")
         } else {
-            format!("Scrolled back {scrolled}. ")
+            format!("Scrolled back {scrolled}.")
         };
-        let mut spans = vec![Span::styled(
-            prefix,
-            Style::default().fg(self.theme.hint_key_fg),
-        )];
-        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_down)));
-        spans.push(Span::styled(" down, ", desc_style));
-        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_up)));
-        spans.push(Span::styled(" up, ", desc_style));
-        spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_line)));
-        spans.push(Span::styled(" one line, ", desc_style));
-        spans.extend(owned_spans(self.theme.dim_key_badge_default(&live_edge)));
-        spans.push(Span::styled(" live edge.", desc_style));
-        Line::from(spans)
+        pane_hint_line_after(
+            &self.theme,
+            Span::styled(prefix, Style::default().fg(self.theme.hint_key_fg)),
+            &[
+                Hint::key(scroll_down, "down"),
+                Hint::key(scroll_up, "up"),
+                Hint::key(scroll_line, "one line"),
+                Hint::key(live_edge, "live edge"),
+            ],
+        )
     }
 
-    fn inactive_terminal_hint_line(&self, context: &AgentTerminalContext) -> Line<'static> {
+    pub(super) fn inactive_terminal_hint_line(
+        &self,
+        context: &AgentTerminalContext,
+    ) -> Line<'static> {
         let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
         if matches!(context.active_surface, SessionSurface::Terminal) {
             let text = match context.terminal_status {
@@ -4366,24 +4309,22 @@ impl App {
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
             let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
-            let mut spans = owned_spans(self.theme.dim_key_badge_default(&focus_agent));
-            spans.push(Span::styled(" focus and type. ", desc_style));
-            spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_up)));
-            spans.push(Span::styled(" ", desc_style));
-            spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_down)));
-            spans.push(Span::styled(" to scroll. ", desc_style));
-            spans.extend(owned_spans(self.theme.dim_key_badge_default(&scroll_line)));
-            spans.push(Span::styled(" one line.", desc_style));
-            return Line::from(spans);
+            return pane_hint_line(
+                &self.theme,
+                &[
+                    Hint::key(focus_agent, "focus and type"),
+                    Hint::keys([scroll_up, scroll_down], "scroll"),
+                    Hint::key(scroll_line, "one line"),
+                ],
+            );
         }
         if context.session_id.is_some() {
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
-            let mut spans = vec![Span::styled("Agent CLI exited. Press ", desc_style)];
-            spans.extend(owned_spans(self.theme.dim_key_badge_default(&reconnect)));
-            spans.push(Span::styled(" or ", desc_style));
-            spans.extend(owned_spans(self.theme.dim_key_badge_default(&focus_agent)));
-            spans.push(Span::styled(" to launch it again.", desc_style));
-            return Line::from(spans);
+            return pane_hint_line_after(
+                &self.theme,
+                Span::styled("Agent CLI exited.", desc_style),
+                &[Hint::keys([reconnect, focus_agent], "launch it again")],
+            );
         }
         Line::from(Span::styled("No agent selected.", desc_style))
     }
@@ -4795,29 +4736,7 @@ impl App {
 
         // Hint bar inside the block (same style as agent terminal / diff view).
         if let Some(ha) = hint_area {
-            let stage_key = self.bindings.label_for(Action::StageUnstage);
-            let search_key = self.bindings.label_for(Action::SearchFiles);
-            let next_key = self.bindings.label_for(Action::SearchNext);
-            let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-            let mut spans: Vec<Span> = Vec::new();
-            spans.extend(self.theme.dim_key_badge_default(&stage_key));
-            spans.push(Span::styled(" stage/unstage.", desc_style));
-            spans.push(Span::raw("  "));
-            if self.files_search_active {
-                spans.extend(self.theme.dim_key_badge_default("Enter"));
-                spans.push(Span::styled(" done  ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default("Esc"));
-                spans.push(Span::styled(" clear", desc_style));
-            } else {
-                spans.extend(self.theme.dim_key_badge_default(&search_key));
-                spans.push(Span::styled(" search", desc_style));
-                if self.has_files_search() {
-                    spans.push(Span::raw("  "));
-                    spans.extend(self.theme.dim_key_badge_default(&next_key));
-                    spans.push(Span::styled(" next match", desc_style));
-                }
-            }
-            Paragraph::new(Line::from(spans))
+            Paragraph::new(self.files_hint_line())
                 .block(
                     Block::default()
                         .borders(Borders::TOP)
@@ -4830,6 +4749,44 @@ impl App {
     }
 
     /// Render the commit input as its own bordered block.
+    /// The hint row under the changes pane's file list.
+    pub(super) fn files_hint_line(&self) -> Line<'static> {
+        let stage_key = self.bindings.label_for(Action::StageUnstage);
+        let search_key = self.bindings.label_for(Action::SearchFiles);
+        let next_key = self.bindings.label_for(Action::SearchNext);
+        let mut hints = vec![Hint::key(stage_key, "stage/unstage")];
+        if self.files_search_active {
+            // The search row is a type-immediately filter whose way out is the
+            // literal Enter and Escape (`handle_files_search_key`), not a
+            // binding, so those keys are named as they are.
+            hints.push(Hint::fixed("Enter", "done"));
+            hints.push(Hint::fixed("Esc", "clear"));
+        } else {
+            hints.push(Hint::key(search_key, "search"));
+            if self.has_files_search() {
+                hints.push(Hint::key(next_key, "next match"));
+            }
+        }
+        pane_hint_line(&self.theme, &hints)
+    }
+
+    /// The hint row under the commit message box. `focused` is whether the box
+    /// is taking typing.
+    pub(super) fn commit_hint_line(&self, focused: bool) -> Line<'static> {
+        let hints = if focused {
+            vec![Hint::key(
+                self.bindings.labels_for(Action::ExitCommitInput),
+                "Exit",
+            )]
+        } else {
+            vec![
+                Hint::key(self.bindings.labels_for(Action::EngageCommitInput), "Edit"),
+                Hint::key(self.bindings.label_for(Action::CommitChanges), "Commit"),
+            ]
+        };
+        pane_hint_line(&self.theme, &hints)
+    }
+
     fn render_commit_input_inner(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
         self.mouse_layout.commit_area = Some(area);
         let is_active_section = pane_focused && self.right_section == RightSection::CommitInput;
@@ -4892,21 +4849,7 @@ impl App {
 
         // Hint bar.
         if hint_area.height > 0 {
-            let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-            let exit = self.bindings.labels_for(Action::ExitCommitInput);
-            let engage = self.bindings.labels_for(Action::EngageCommitInput);
-            let commit = self.bindings.label_for(Action::CommitChanges);
-            let mut spans: Vec<Span> = Vec::new();
-            if focused {
-                spans.extend(self.theme.dim_key_badge_default(&exit));
-                spans.push(Span::styled(" Exit", desc_style));
-            } else {
-                spans.extend(self.theme.dim_key_badge_default(&engage));
-                spans.push(Span::styled(" Edit  ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&commit));
-                spans.push(Span::styled(" Commit", desc_style));
-            }
-            Paragraph::new(Line::from(spans)).render(hint_area, frame.buffer_mut());
+            Paragraph::new(self.commit_hint_line(focused)).render(hint_area, frame.buffer_mut());
         }
     }
 
@@ -4945,37 +4888,18 @@ impl App {
         }
     }
 
-    pub(super) fn footer_hint_spans<'a>(
+    /// The footer's hints, cut to `max_w` columns. The footer's area is filled
+    /// with the bar's background, which the badges and descriptions take.
+    pub(super) fn footer_hint_spans(
         &self,
-        hints: &'a [(String, &'static str)],
+        hints: &[(String, &'static str)],
         max_w: usize,
-    ) -> Vec<Span<'a>> {
-        let mut hint_spans = Vec::new();
-        let bar_bg = self.theme.hint_bar_bg;
-        let mut used = 0usize;
-        for (i, (key, desc)) in hints.iter().enumerate() {
-            let separator_width = usize::from(i > 0);
-            let hint_width = separator_width + display_width(key) + 3 + display_width(desc);
-            if used + hint_width > max_w {
-                if used < max_w {
-                    hint_spans.push(Span::styled(
-                        "…",
-                        Style::default().fg(self.theme.hint_desc_fg).bg(bar_bg),
-                    ));
-                }
-                break;
-            }
-            if i > 0 {
-                hint_spans.push(Span::styled(" ", Style::default().bg(bar_bg)));
-            }
-            hint_spans.extend(self.theme.key_badge(key, bar_bg));
-            hint_spans.push(Span::styled(
-                format!(" {desc}"),
-                Style::default().fg(self.theme.hint_desc_fg).bg(bar_bg),
-            ));
-            used += hint_width;
-        }
-        hint_spans
+    ) -> Vec<Span<'static>> {
+        let hints: Vec<Hint> = hints
+            .iter()
+            .map(|(key, desc)| Hint::key(key.clone(), *desc))
+            .collect();
+        fitted_hint_spans(&self.theme, HintTone::Modal, &hints, max_w).spans
     }
 
     /// The status line wrapped to the rows the footer gave it, and when it needs
@@ -5380,34 +5304,33 @@ impl App {
 
         // Hint bar with top border (same pattern as diff view).
         if hint_area.height > 0 {
-            let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
             let move_down = self.bindings.label_for(Action::MoveDown);
             let move_up = self.bindings.label_for(Action::MoveUp);
             let close = self.bindings.label_for(Action::CloseOverlay);
-            let mut spans: Vec<Span> = Vec::new();
+            let hints = [
+                Hint::keys([move_down, move_up], "scroll"),
+                // Space scrolls the help page on its own, outside the bindings
+                // (`handle_help_key`), so it is named as it is.
+                Hint::fixed("Space", "scroll down"),
+                Hint::keys([scroll_down, scroll_up], "page"),
+                Hint::key(close, "close"),
+            ];
+            let line = if scroll > 0 {
+                pane_hint_line_after(
+                    &self.theme,
+                    Span::styled(
+                        format!("Scrolled back {}.", count_of(usize::from(scroll), "line")),
+                        Style::default().fg(self.theme.hint_key_fg),
+                    ),
+                    &hints,
+                )
+            } else {
+                pane_hint_line(&self.theme, &hints)
+            };
 
-            if scroll > 0 {
-                spans.push(Span::styled(
-                    format!("Scrolled back {}. ", count_of(usize::from(scroll), "line")),
-                    Style::default().fg(self.theme.hint_key_fg),
-                ));
-            }
-            spans.extend(self.theme.dim_key_badge_default(&move_down));
-            spans.push(Span::styled(" ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&move_up));
-            spans.push(Span::styled(" or ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default("Space"));
-            spans.push(Span::styled(" scroll, ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-            spans.push(Span::styled(" ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-            spans.push(Span::styled(" page. ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&close));
-            spans.push(Span::styled(" close.", desc_style));
-
-            Paragraph::new(Line::from(spans))
+            Paragraph::new(line)
                 .block(
                     Block::default()
                         .borders(Borders::TOP)
@@ -5465,25 +5388,19 @@ impl App {
             .areas(popup);
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let mut bottom_spans = vec![Span::raw(" ")];
-        bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-        bottom_spans.push(Span::styled(
-            " run  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default("Tab"));
-        bottom_spans.push(Span::styled(
-            " complete  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&close_key));
-        bottom_spans.push(Span::styled(
-            " cancel",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
+        let hints = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(confirm_key, "run"),
+                // Completion is the literal Tab key in the palette's filter
+                // (`selected_command_palette_completion`), not a binding.
+                Hint::fixed("Tab", "complete"),
+                Hint::key(close_key, "cancel"),
+            ],
+        );
         let input_block = self
             .themed_overlay_block("Command Palette")
-            .title_bottom(Line::from(bottom_spans));
+            .title_bottom(hints);
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_cursor_input(
             "> ",
@@ -5528,23 +5445,15 @@ impl App {
         } else {
             "save for next time"
         };
-        let bottom_spans = vec![
-            Span::styled(
-                format!(" {move_up}/{move_down} "),
-                Style::default().fg(self.theme.hint_key_fg),
-            ),
-            Span::styled("move  ", Style::default().fg(self.theme.hint_desc_fg)),
-            Span::styled(
-                format!("{confirm_key} "),
-                Style::default().fg(self.theme.hint_key_fg),
-            ),
-            Span::styled(picks, Style::default().fg(self.theme.hint_desc_fg)),
-            Span::styled(
-                format!("  {close_key} "),
-                Style::default().fg(self.theme.hint_key_fg),
-            ),
-            Span::styled("cancel ", Style::default().fg(self.theme.hint_desc_fg)),
-        ];
+        let bottom_spans = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(move_down, "down"),
+                Hint::key(move_up, "up"),
+                Hint::key(confirm_key, picks),
+                Hint::key(close_key, "cancel"),
+            ],
+        );
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -5622,7 +5531,7 @@ impl App {
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg))
-            .title_bottom(Line::from(bottom_spans));
+            .title_bottom(bottom_spans);
         let list = PickerList::new(items, Some(prompt.selected), "No modes to choose from.")
             .block(list_block)
             .render(frame, list_area, &self.theme);
@@ -5646,27 +5555,15 @@ impl App {
         let move_up = self.bindings.label_for(Action::MoveUp);
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let mut bottom_spans = vec![Span::raw(" ")];
-        bottom_spans.extend(self.theme.key_badge_default(&move_down));
-        bottom_spans.push(Span::styled(
-            " down  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&move_up));
-        bottom_spans.push(Span::styled(
-            " up  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-        bottom_spans.push(Span::styled(
-            " apply  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&close_key));
-        bottom_spans.push(Span::styled(
-            " cancel",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
+        let bottom_spans = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(move_down, "down"),
+                Hint::key(move_up, "up"),
+                Hint::key(confirm_key, "apply"),
+                Hint::key(close_key, "cancel"),
+            ],
+        );
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -5687,7 +5584,7 @@ impl App {
         Paragraph::new(detail_lines)
             .block(
                 self.themed_overlay_block("Change Theme")
-                    .title_bottom(Line::from(bottom_spans)),
+                    .title_bottom(bottom_spans),
             )
             .render(details_area, frame.buffer_mut());
 
@@ -5873,7 +5770,7 @@ impl App {
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                 .border_style(Style::default().fg(self.theme.overlay_border))
                 .style(Style::default().bg(self.theme.overlay_bg))
-                .title_bottom(Line::from(bottom_spans));
+                .title_bottom(bottom_spans);
             let list = picker
                 .block(list_block)
                 .render(frame, list_render_area, &self.theme);
@@ -5889,36 +5786,20 @@ impl App {
             let add_key = self.bindings.label_for(Action::AddCurrentDir);
             let goto_key = self.bindings.label_for(Action::GoToPath);
             let close_key = self.bindings.label_for(Action::CloseOverlay);
-            let mut bottom_spans = vec![Span::raw(" ")];
-            bottom_spans.extend(self.theme.key_badge_default(&search_key));
-            bottom_spans.push(Span::styled(
-                " search  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            bottom_spans.extend(self.theme.key_badge_default(&open_key));
-            bottom_spans.push(Span::styled(
-                " open  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            bottom_spans.extend(self.theme.key_badge_default(&add_key));
-            bottom_spans.push(Span::styled(
-                " add current  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            bottom_spans.extend(self.theme.key_badge_default(&goto_key));
-            bottom_spans.push(Span::styled(
-                " go to  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            bottom_spans.extend(self.theme.key_badge_default(&close_key));
-            bottom_spans.push(Span::styled(
-                " cancel",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
+            let bottom_spans = modal_hint_line(
+                &self.theme,
+                &[
+                    Hint::key(search_key, "search"),
+                    Hint::key(open_key, "open"),
+                    Hint::key(add_key, "add current"),
+                    Hint::key(goto_key, "go to"),
+                    Hint::key(close_key, "cancel"),
+                ],
+            );
             let title = Self::browse_projects_title(*purpose, current_dir);
             let list_block = self
                 .themed_overlay_block_prose(&title)
-                .title_bottom(Line::from(bottom_spans));
+                .title_bottom(bottom_spans);
             let list = picker
                 .block(list_block)
                 .render(frame, list_render_area, &self.theme);
@@ -5941,63 +5822,34 @@ impl App {
             .name(current_dir.display().to_string())
     }
 
-    fn browse_projects_input_footer<'a>(
-        &'a self,
+    fn browse_projects_input_footer(
+        &self,
         editing_path: bool,
         searching: bool,
-        keys: &'a BrowseProjectsFooterKeys,
-    ) -> Vec<Span<'a>> {
-        let mut spans = vec![Span::raw(" ")];
-        if editing_path {
-            spans.extend(self.theme.key_badge_default("Tab"));
-            spans.push(Span::styled(
-                " complete  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            spans.extend(self.theme.key_badge_default("Enter"));
-            spans.push(Span::styled(
-                " add  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            spans.extend(self.theme.key_badge_default(&keys.exit_path));
-            spans.push(Span::styled(
-                " browse",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
+        keys: &BrowseProjectsFooterKeys,
+    ) -> Line<'static> {
+        let hints = if editing_path {
+            // The path editor completes and adds on the literal Tab and Enter
+            // (`handle_project_browser_path_editor_key`), not through a binding.
+            vec![
+                Hint::fixed("Tab", "complete"),
+                Hint::fixed("Enter", "add"),
+                Hint::key(keys.exit_path.clone(), "browse"),
+            ]
         } else if searching {
-            spans.extend(self.theme.key_badge_default(&keys.confirm));
-            spans.push(Span::styled(
-                " done  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            spans.extend(self.theme.key_badge_default(&keys.close));
-            spans.push(Span::styled(
-                " clear",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
+            vec![
+                Hint::key(keys.confirm.clone(), "done"),
+                Hint::key(keys.close.clone(), "clear"),
+            ]
         } else {
-            spans.extend(self.theme.key_badge_default(&keys.search));
-            spans.push(Span::styled(
-                " search  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            spans.extend(self.theme.key_badge_default(&keys.open));
-            spans.push(Span::styled(
-                " open  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            spans.extend(self.theme.key_badge_default(&keys.goto));
-            spans.push(Span::styled(
-                " go to  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            spans.extend(self.theme.key_badge_default(&keys.close));
-            spans.push(Span::styled(
-                " cancel",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-        }
-        spans
+            vec![
+                Hint::key(keys.search.clone(), "search"),
+                Hint::key(keys.open.clone(), "open"),
+                Hint::key(keys.goto.clone(), "go to"),
+                Hint::key(keys.close.clone(), "cancel"),
+            ]
+        };
+        modal_hint_line(&self.theme, &hints)
     }
 
     fn render_change_agent_provider_prompt(&mut self, frame: &mut Frame) {
@@ -6036,7 +5888,7 @@ impl App {
         Paragraph::new(detail_lines)
             .block(
                 self.themed_overlay_block(overlay_title)
-                    .title_bottom(Line::from(bottom_spans)),
+                    .title_bottom(bottom_spans),
             )
             .render(details_area, frame.buffer_mut());
 
@@ -6133,7 +5985,7 @@ impl App {
         Paragraph::new(detail_lines)
             .block(
                 self.themed_overlay_block("Change Default Provider")
-                    .title_bottom(Line::from(bottom_spans)),
+                    .title_bottom(bottom_spans),
             )
             .render(details_area, frame.buffer_mut());
 
@@ -6236,7 +6088,7 @@ impl App {
         Paragraph::new(detail_lines)
             .block(
                 self.themed_overlay_block("Change Project Provider")
-                    .title_bottom(Line::from(bottom_spans)),
+                    .title_bottom(bottom_spans),
             )
             .render(details_area, frame.buffer_mut());
 
@@ -6318,27 +6170,15 @@ impl App {
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let move_down = self.bindings.label_for(Action::MoveDown);
         let move_up = self.bindings.label_for(Action::MoveUp);
-        let mut bottom_spans = vec![Span::raw(" ")];
-        bottom_spans.extend(self.theme.key_badge_default(&move_down));
-        bottom_spans.push(Span::styled(
-            " down  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&move_up));
-        bottom_spans.push(Span::styled(
-            " up  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-        bottom_spans.push(Span::styled(
-            " open  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&close_key));
-        bottom_spans.push(Span::styled(
-            " cancel",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
+        let bottom_spans = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(move_down, "down"),
+                Hint::key(move_up, "up"),
+                Hint::key(confirm_key, "open"),
+                Hint::key(close_key, "cancel"),
+            ],
+        );
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -6362,7 +6202,7 @@ impl App {
         Paragraph::new(detail_lines)
             .block(
                 self.themed_overlay_block("Open Worktree In")
-                    .title_bottom(Line::from(bottom_spans)),
+                    .title_bottom(bottom_spans),
             )
             .render(details_area, frame.buffer_mut());
 
@@ -6415,27 +6255,15 @@ impl App {
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let move_down = self.bindings.label_for(Action::MoveDown);
         let move_up = self.bindings.label_for(Action::MoveUp);
-        let mut bottom_spans = vec![Span::raw(" ")];
-        bottom_spans.extend(self.theme.key_badge_default(&move_down));
-        bottom_spans.push(Span::styled(
-            " down  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&move_up));
-        bottom_spans.push(Span::styled(
-            " up  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-        bottom_spans.push(Span::styled(
-            " remove  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&close_key));
-        bottom_spans.push(Span::styled(
-            " cancel",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
+        let bottom_spans = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(move_down, "down"),
+                Hint::key(move_up, "up"),
+                Hint::key(confirm_key, "remove"),
+                Hint::key(close_key, "cancel"),
+            ],
+        );
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -6459,7 +6287,7 @@ impl App {
         Paragraph::new(detail_lines)
             .block(
                 self.themed_overlay_block("Manage Worktrees")
-                    .title_bottom(Line::from(bottom_spans)),
+                    .title_bottom(bottom_spans),
             )
             .render(details_area, frame.buffer_mut());
 
@@ -6701,27 +6529,15 @@ impl App {
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let move_down = self.bindings.label_for(Action::MoveDown);
         let move_up = self.bindings.label_for(Action::MoveUp);
-        let mut bottom_spans = vec![Span::raw(" ")];
-        bottom_spans.extend(self.theme.key_badge_default(&move_down));
-        bottom_spans.push(Span::styled(
-            " down  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&move_up));
-        bottom_spans.push(Span::styled(
-            " up  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-        bottom_spans.push(Span::styled(
-            " use  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&close_key));
-        bottom_spans.push(Span::styled(
-            " cancel",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
+        let bottom_spans = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(move_down, "down"),
+                Hint::key(move_up, "up"),
+                Hint::key(confirm_key, "use"),
+                Hint::key(close_key, "cancel"),
+            ],
+        );
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -6745,7 +6561,7 @@ impl App {
         Paragraph::new(detail_lines)
             .block(
                 self.themed_overlay_block("New Agent From Worktree")
-                    .title_bottom(Line::from(bottom_spans)),
+                    .title_bottom(bottom_spans),
             )
             .render(details_area, frame.buffer_mut());
 
@@ -7271,15 +7087,12 @@ impl App {
         self.clear_overlay_area(frame, area);
 
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let mut bottom = vec![Span::raw(" ")];
-        bottom.extend(self.theme.key_badge_default(&close_key));
-        bottom.push(Span::styled(
-            " close",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
         let outer = self
             .themed_overlay_block("Agent Info")
-            .title_bottom(Line::from(bottom));
+            .title_bottom(modal_hint_line(
+                &self.theme,
+                &[Hint::key(close_key, "close")],
+            ));
         let inner = outer.inner(area);
         outer.render(area, frame.buffer_mut());
 
@@ -8389,20 +8202,17 @@ impl App {
         paragraph.render(inner, frame.buffer_mut());
 
         // Footer hint.
-        let hint = Line::from(vec![
-            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" close  "),
-            Span::styled("Scroll", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" navigate"),
-        ]);
-        render_centered_lines(
-            frame.buffer_mut(),
-            hint_area,
-            &[hint],
-            Style::default()
-                .fg(self.theme.hint_desc_fg)
-                .add_modifier(Modifier::DIM),
+        // Escape closes the input debugger unconditionally, outside the
+        // bindings (`handle_debug_input_prompt_key`), so that no binding can
+        // trap the user in it; "Scroll" is a mouse gesture.
+        let hint = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::fixed("Esc", "close"),
+                Hint::fixed("Scroll", "navigate"),
+            ],
         );
+        render_centered_lines(frame.buffer_mut(), hint_area, &[hint], Style::default());
     }
 
     fn render_pull_request_input_prompt(&mut self, frame: &mut Frame) {
@@ -8930,64 +8740,42 @@ impl App {
         let area = centered_rect(92, 82, frame.area());
         self.clear_overlay_area(frame, area);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let mut bottom_spans = vec![Span::raw(" ")];
-        let move_keys = self.bindings.labels_for(Action::MoveDown);
-        let search_key = self.bindings.label_for(Action::SearchToggle);
-        let open_file_key = self.bindings.label_for(Action::OpenStartupCommandLogFile);
-        let open_folder_key = self.bindings.label_for(Action::OpenStartupCommandLogFolder);
-        let focus_key = self
-            .bindings
-            .label_for_text_field_dialog(Action::ToggleSelection);
-        bottom_spans.extend(self.theme.key_badge_default(&move_keys));
-        bottom_spans.push(Span::styled(
-            " logs  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&search_key));
-        bottom_spans.push(Span::styled(
-            " search  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        let page_keys = format!(
-            "{}/{}",
-            self.bindings.label_for(Action::ScrollPageUp),
-            self.bindings.label_for(Action::ScrollPageDown)
+        let bottom_spans = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(self.bindings.labels_for(Action::MoveDown), "logs"),
+                Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
+                Hint::keys(
+                    [
+                        self.bindings.label_for(Action::ScrollPageUp),
+                        self.bindings.label_for(Action::ScrollPageDown),
+                    ],
+                    "scroll",
+                ),
+                Hint::key(
+                    self.bindings.label_for(Action::OpenStartupCommandLogFile),
+                    "Open file",
+                ),
+                Hint::key(
+                    self.bindings.label_for(Action::OpenStartupCommandLogFolder),
+                    "Open folder",
+                ),
+                // The focus key, named through the bindings and skipping any
+                // key the filter would type instead. Without it the Close
+                // button is reachable but undiscoverable.
+                Hint::maybe_key(
+                    self.bindings
+                        .label_for_text_field_dialog(Action::ToggleSelection),
+                    "focus",
+                ),
+                Hint::key(close_key, "close"),
+            ],
         );
-        bottom_spans.extend(self.theme.key_badge_default(&page_keys));
-        bottom_spans.push(Span::styled(
-            " scroll  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&open_file_key));
-        bottom_spans.push(Span::styled(
-            " Open file  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        bottom_spans.extend(self.theme.key_badge_default(&open_folder_key));
-        bottom_spans.push(Span::styled(
-            " Open folder  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        // The focus key, named through the bindings and skipping any
-        // key the filter would type instead. Without it the Close
-        // button is reachable but undiscoverable.
-        if let Some(focus_key) = &focus_key {
-            bottom_spans.extend(self.theme.key_badge_default(focus_key));
-            bottom_spans.push(Span::styled(
-                " focus  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-        }
-        bottom_spans.extend(self.theme.key_badge_default(&close_key));
-        bottom_spans.push(Span::styled(
-            " close",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
 
         let title = format!("Startup Command Logs - {}", prompt.scope_label);
         let block = self
             .themed_overlay_block(&title)
-            .title_bottom(Line::from(bottom_spans))
+            .title_bottom(bottom_spans)
             .border_style(Style::default().fg(self.theme.overlay_border));
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
@@ -9238,45 +9026,22 @@ impl App {
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let next_key = self.bindings.label_for(Action::FocusNext);
         let prev_key = self.bindings.label_for(Action::FocusPrev);
-        let mut hint_spans = vec![Span::raw(" ")];
-        if prompt.list.searching {
-            hint_spans.extend(self.theme.key_badge_default(&confirm_key));
-            hint_spans.push(Span::styled(
-                " done  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            hint_spans.extend(self.theme.key_badge_default(&close_key));
-            hint_spans.push(Span::styled(
-                " clear",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-        } else {
-            hint_spans.extend(self.theme.key_badge_default(&toggle_key));
-            hint_spans.push(Span::styled(
-                " select  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            hint_spans.extend(self.theme.key_badge_default(&search_key));
-            hint_spans.push(Span::styled(
-                " search  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            hint_spans.extend(self.theme.key_badge_default(&next_key));
-            hint_spans.push(Span::styled(
-                "/",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            hint_spans.extend(self.theme.key_badge_default(&prev_key));
-            hint_spans.push(Span::styled(
-                " actions  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            hint_spans.extend(self.theme.key_badge_default(&confirm_key));
-            hint_spans.push(Span::styled(
-                " use",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-        }
+        let hint_line = modal_hint_line(
+            &self.theme,
+            &if prompt.list.searching {
+                vec![
+                    Hint::key(confirm_key, "done"),
+                    Hint::key(close_key, "clear"),
+                ]
+            } else {
+                vec![
+                    Hint::key(toggle_key, "select"),
+                    Hint::key(search_key, "search"),
+                    Hint::keys([next_key, prev_key], "actions"),
+                    Hint::key(confirm_key, "use"),
+                ]
+            },
+        );
 
         let title = if prompt.list.searching {
             "Kill Running (searching)"
@@ -9303,15 +9068,13 @@ impl App {
                 .border_type(ratatui::widgets::BorderType::Rounded)
                 .border_style(Style::default().fg(self.theme.overlay_border))
                 .style(Style::default().bg(self.theme.overlay_bg))
-                .title_bottom(Line::from(hint_spans));
+                .title_bottom(hint_line);
             let list = picker
                 .block(list_block)
                 .render(frame, list_area, &self.theme);
             (Some(input_inner), list)
         } else {
-            let list_block = self
-                .themed_overlay_block(title)
-                .title_bottom(Line::from(hint_spans));
+            let list_block = self.themed_overlay_block(title).title_bottom(hint_line);
             let list = picker
                 .block(list_block)
                 .render(frame, list_area, &self.theme);
@@ -9850,33 +9613,17 @@ impl App {
         let toggle_key = self
             .bindings
             .label_for_text_field_dialog(Action::ToggleSelection);
-        let mut hints = vec![Span::raw(" ")];
-        hints.extend(self.theme.key_badge_default(&confirm_key));
-        hints.push(Span::styled(
-            " confirm  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        if let Some(toggle_key) = &toggle_key {
-            hints.extend(self.theme.key_badge_default(toggle_key));
-            hints.push(Span::styled(
-                " focus  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-        }
+        let mut hints = vec![
+            Hint::key(confirm_key, "confirm"),
+            Hint::maybe_key(toggle_key, "focus"),
+        ];
         // Dropped while the name field has focus: Space is a typed
         // character there and toggles nothing.
         if *focus != NameNewAgentFocus::Input {
-            hints.push(Span::styled(
-                "Space toggle  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
+            hints.push(Hint::plain("Space toggle"));
         }
-        hints.extend(self.theme.key_badge_default(&close_key));
-        hints.push(Span::styled(
-            " cancel",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+        hints.push(Hint::key(close_key, "cancel"));
+        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
         self.overlay_layout.active = OverlayMouseLayout::NameNewAgent {
             input: input_inner,
             checkbox: Some(OverlayCheckbox {
@@ -10745,26 +10492,18 @@ impl App {
         let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
         let open_file = self.bindings.label_for(Action::OpenStartupCommandLogFile);
         let open_folder = self.bindings.label_for(Action::OpenStartupCommandLogFolder);
-        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-        let mut spans = Vec::new();
-        if viewer.searching {
-            spans.extend(self.theme.dim_key_badge_default(&close_key));
-            spans.push(Span::styled(" close search", desc_style));
+        let hints = if viewer.searching {
+            vec![Hint::key(close_key, "close search")]
         } else {
-            spans.extend(self.theme.dim_key_badge_default(&close_key));
-            spans.push(Span::styled(" close  ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-            spans.push(Span::styled("/", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-            spans.push(Span::styled(" scroll  ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&search_key));
-            spans.push(Span::styled(" search  ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&open_file));
-            spans.push(Span::styled(" Open file  ", desc_style));
-            spans.extend(self.theme.dim_key_badge_default(&open_folder));
-            spans.push(Span::styled(" Open folder", desc_style));
-        }
-        Paragraph::new(Line::from(spans))
+            vec![
+                Hint::key(close_key, "close"),
+                Hint::keys([scroll_up, scroll_down], "scroll"),
+                Hint::key(search_key, "search"),
+                Hint::key(open_file, "Open file"),
+                Hint::key(open_folder, "Open folder"),
+            ]
+        };
+        Paragraph::new(pane_hint_line(&self.theme, &hints))
             .block(
                 Block::default()
                     .borders(Borders::TOP)
@@ -10799,23 +10538,19 @@ impl App {
         );
         self.clear_overlay_bar_area(frame, bar_area);
 
-        let mut bottom_spans = vec![Span::raw(" ")];
-        for (key, desc) in &[("Enter", "done"), ("Esc", "cancel")] {
-            let badge = self.theme.key_badge_default(key);
-            bottom_spans.extend(
-                badge
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.to_string(), s.style)),
-            );
-            bottom_spans.push(Span::styled(
-                format!(" {desc}  "),
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-        }
+        // The search row answers to the confirm and close bindings
+        // (`handle_startup_log_viewer_key`), so both are named through them.
+        let bottom_spans = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(self.bindings.label_for(Action::Confirm), "done"),
+                Hint::key(self.bindings.label_for(Action::CloseOverlay), "cancel"),
+            ],
+        );
 
         let input_block = self
             .themed_overlay_block("Search log")
-            .title_bottom(Line::from(bottom_spans));
+            .title_bottom(bottom_spans);
         let input_inner = input_block.inner(bar_area);
         Paragraph::new(render_single_line_cursor_input(
             "/ ",
@@ -10880,23 +10615,21 @@ impl App {
             .areas(bar_area);
 
         // ── Input block (top, with title and hint badges) ──
-        let mut bottom_spans = vec![Span::raw(" ")];
-        for (key, desc) in &[("Enter", "send"), ("Tab", "complete"), ("Esc", "cancel")] {
-            let badge = self.theme.key_badge_default(key);
-            bottom_spans.extend(
-                badge
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.to_string(), s.style)),
-            );
-            bottom_spans.push(Span::styled(
-                format!(" {desc}  "),
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-        }
+        // The bar sends, completes and closes on the literal Enter, Tab and
+        // Escape (`handle_macro_bar_key`), not through bindings, so those keys
+        // are named as they are.
+        let bottom_spans = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::fixed("Enter", "send"),
+                Hint::fixed("Tab", "complete"),
+                Hint::fixed("Esc", "cancel"),
+            ],
+        );
 
         let input_block = self
             .themed_overlay_block("Macros")
-            .title_bottom(Line::from(bottom_spans));
+            .title_bottom(bottom_spans);
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_cursor_input(
             "", &query, cursor, cursor_fg, cursor_bg, true,
@@ -11130,26 +10863,10 @@ impl App {
         if scrollable {
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
-            // Owned spans: `key_badge_default` borrows its label, and the block
-            // outlives these locals.
-            let owned = |spans: Vec<Span<'_>>| -> Vec<Span<'static>> {
-                spans
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.to_string(), s.style))
-                    .collect()
-            };
-            let mut hint: Vec<Span<'static>> = vec![Span::raw(" ")];
-            hint.extend(owned(self.theme.key_badge_default(&scroll_up)));
-            hint.push(Span::styled(
-                "/",
-                Style::default().fg(self.theme.hint_desc_fg),
+            block = block.title_bottom(modal_hint_line(
+                &self.theme,
+                &[Hint::keys([scroll_up, scroll_down], "scroll the message")],
             ));
-            hint.extend(owned(self.theme.key_badge_default(&scroll_down)));
-            hint.push(Span::styled(
-                " scroll the message",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-            block = block.title_bottom(Line::from(hint));
         }
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
@@ -11398,27 +11115,19 @@ impl App {
         };
 
         // Footer hint.
-        let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let desc_style = Style::default().fg(self.theme.hint_desc_fg);
-        let mut spans = vec![Span::raw(" ")];
-        spans.extend(self.theme.key_badge_default(&close_key));
-        spans.push(Span::styled(" close  ", desc_style));
-        // Resolved, not hardcoded: the handler answers to `Action::Confirm`,
-        // so the badge has to follow a rebind. "Scroll" below is a mouse
-        // gesture and has no binding to look up.
-        let expand_key = self.bindings.label_for(Action::Confirm);
-        spans.extend(self.theme.key_badge_default(&expand_key));
-        spans.push(Span::styled(" expand/collapse  ", desc_style));
-        spans.extend(self.theme.key_badge_default("Scroll"));
-        spans.push(Span::styled(" navigate  ", desc_style));
-        spans.push(Span::styled(
-            "refreshes every ~2s",
-            Style::default().fg(self.theme.hint_dim_desc_fg),
-        ));
+        let hints = [
+            Hint::key(self.bindings.label_for(Action::CloseOverlay), "close"),
+            // Resolved, not hardcoded: the handler answers to `Action::Confirm`,
+            // so the badge has to follow a rebind. "Scroll" is a mouse gesture
+            // and has no binding to look up.
+            Hint::key(self.bindings.label_for(Action::Confirm), "expand/collapse"),
+            Hint::fixed("Scroll", "navigate"),
+            Hint::plain("refreshes every ~2s"),
+        ];
         render_centered_lines(
             frame.buffer_mut(),
             hint_area,
-            &[Line::from(spans)],
+            &[modal_hint_line(&self.theme, &hints)],
             Style::default(),
         );
     }
@@ -11833,33 +11542,16 @@ pub(crate) fn top_bar_branch_suffix(current: &str, initial: &str) -> String {
 /// key must not be able to make this hint lie. The list of stops is short
 /// because a picker HAS no other controls, only rows.
 impl App {
-    fn provider_picker_footer(&self) -> Vec<Span<'static>> {
-        let move_down = self.bindings.label_for(Action::MoveDown);
-        let move_up = self.bindings.label_for(Action::MoveUp);
-        let confirm = self.bindings.label_for(Action::Confirm);
-        let close = self.bindings.label_for(Action::CloseOverlay);
-        let desc = Style::default().fg(self.theme.hint_desc_fg);
-
-        // The badges borrow their key string, so take ownership before the
-        // locals go out of scope.
-        let badge = |key: &str| -> Vec<Span<'static>> {
-            self.theme
-                .key_badge_default(key)
-                .into_iter()
-                .map(|span| Span::styled(span.content.into_owned(), span.style))
-                .collect()
-        };
-
-        let mut spans = vec![Span::raw(" ")];
-        spans.extend(badge(&move_down));
-        spans.push(Span::styled("/", desc));
-        spans.extend(badge(&move_up));
-        spans.push(Span::styled(" move  ", desc));
-        spans.extend(badge(&confirm));
-        spans.push(Span::styled(" choose  ", desc));
-        spans.extend(badge(&close));
-        spans.push(Span::styled(" cancel", desc));
-        spans
+    fn provider_picker_footer(&self) -> Line<'static> {
+        modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
+                Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
+                Hint::key(self.bindings.label_for(Action::Confirm), "choose"),
+                Hint::key(self.bindings.label_for(Action::CloseOverlay), "cancel"),
+            ],
+        )
     }
 }
 
@@ -15394,14 +15086,14 @@ mod tests {
         // Narrow enough that the cue drops: the whole row is the one item.
         assert_eq!(
             rendered_line(&app.typeable_hint_line(SessionSurface::Agent, 20)),
-            "<Ctrl-g> fullscreen.",
+            "<Ctrl-g> fullscreen",
             "the chord-less line is the fullscreen key and nothing else"
         );
 
         // Wide enough for the cue: only the flush-right padding may follow.
         let rendered = rendered_line(&app.typeable_hint_line(SessionSurface::Agent, 60));
         assert!(
-            rendered.starts_with("<Ctrl-g> fullscreen."),
+            rendered.starts_with("<Ctrl-g> fullscreen"),
             "no separator may trail the last item: {rendered:?}"
         );
         assert!(
@@ -17258,7 +16950,7 @@ mod tests {
                 )
             });
         assert!(
-            hint.contains("to launch it again"),
+            hint.contains("launch it again"),
             "the exited hint must say the keys LAUNCH; row was {hint:?}"
         );
     }
@@ -21913,7 +21605,8 @@ mod tests {
                 "{name}: there are no buttons left to advertise:\n{screen}"
             );
             for (action, word) in [
-                (Action::MoveDown, "move"),
+                (Action::MoveDown, "down"),
+                (Action::MoveUp, "up"),
                 (Action::Confirm, "choose"),
                 (Action::CloseOverlay, "cancel"),
             ] {

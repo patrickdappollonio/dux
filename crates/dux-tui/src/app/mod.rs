@@ -3623,6 +3623,8 @@ pub(crate) use redraw::RedrawGate;
 #[cfg(test)]
 mod ellipsis_rows;
 #[cfg(test)]
+mod hint_lines;
+#[cfg(test)]
 mod name_chip_dialogs;
 #[cfg(test)]
 mod picker_lists;
