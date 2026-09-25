@@ -606,16 +606,17 @@ fn the_loading_card_is_sized_by_columns() {
 #[test]
 fn footer_hints_are_measured_in_columns() {
     let app = test_app(default_bindings());
-    // Two hints of `<é> ab` (six columns, seven bytes) with the separating
-    // space: thirteen columns. A byte count calls it fifteen.
+    // Two hints of `<é> ab` (six columns, seven bytes) and the mark of the
+    // third, each after the two-column separator: seventeen columns. A byte
+    // count calls it nineteen and drops the second hint too.
     let hints = vec![
         ("é".to_string(), "ab"),
         ("é".to_string(), "cd"),
         ("é".to_string(), "ef"),
     ];
-    let spans = app.footer_hint_spans(&hints, 14);
+    let spans = app.footer_hint_spans(&hints, 17);
     let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(text, "<é> ab <é> cd…");
+    assert_eq!(text, "<é> ab  <é> cd  …");
 }
 
 // ── Picker columns sized by an id or a provider name ──
