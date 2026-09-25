@@ -26,7 +26,8 @@ pub(crate) use centered::render_centered_lines;
 pub(crate) use checkbox::{Checkbox, CheckboxState};
 pub(crate) use focus_ring::next_focus;
 pub(crate) use hint_bar::{
-    Hint, HintTone, fitted_hint_spans, modal_hint_line, pane_hint_line, pane_hint_line_after,
+    Hint, HintTone, fitted_hint_spans, hint_line, hint_line_after, modal_hint_line, pane_hint_line,
+    pane_hint_line_after,
 };
 pub(crate) use modal::Modal;
 pub(crate) use name_chip::{labelled_name, name_chip, prose_lines, prose_spans};

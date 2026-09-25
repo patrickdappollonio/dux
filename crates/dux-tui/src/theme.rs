@@ -161,7 +161,6 @@ pub struct Theme {
     pub file_status_fg: Color,
     pub hint_key_fg: Color,
     pub hint_bracket_fg: Color,
-    pub hint_key_bg: Color,
     pub hint_desc_fg: Color,
     pub hint_dim_key_fg: Color,
     pub hint_dim_bracket_fg: Color,
@@ -468,7 +467,6 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     // Hint / footer bar
     theme.register_default_token("dux.hint_key_fg", accent_primary);
     theme.register_default_token("dux.hint_bracket_fg", text_dim);
-    theme.register_default_token("dux.hint_key_bg", bg_panel);
     theme.register_default_token("dux.hint_desc_fg", text_muted);
     theme.register_default_token("dux.hint_dim_key_fg", text_dim);
     theme.register_default_token("dux.hint_dim_bracket_fg", border_unfocused);
@@ -610,7 +608,6 @@ impl Theme {
             file_status_fg: pick("dux.file_status_fg"),
             hint_key_fg: pick("dux.hint_key_fg"),
             hint_bracket_fg: pick("dux.hint_bracket_fg"),
-            hint_key_bg: pick("dux.hint_key_bg"),
             hint_desc_fg: pick("dux.hint_desc_fg"),
             hint_dim_key_fg: pick("dux.hint_dim_key_fg"),
             hint_dim_bracket_fg: pick("dux.hint_dim_bracket_fg"),
@@ -811,8 +808,6 @@ fn badge_spans(key: &str, bracket: Color, key_fg: Color) -> Vec<Span<'_>> {
         Span::styled(">", Style::default().fg(bracket)),
     ]
 }
-
-impl Theme {}
 
 /// What makes a style a name chip's: this modifier in the style's REMOVE set.
 ///
@@ -1054,7 +1049,6 @@ mod tests {
             file_status_fg: Color::Yellow,
             hint_key_fg: Color::Cyan,
             hint_bracket_fg: Color::DarkGray,
-            hint_key_bg: Color::Rgb(35, 35, 35),
             hint_desc_fg: Color::Rgb(160, 160, 160),
             hint_dim_key_fg: Color::Rgb(80, 140, 160),
             hint_dim_bracket_fg: Color::Rgb(60, 60, 60),
@@ -1163,7 +1157,6 @@ mod tests {
         assert_field!(file_status_fg);
         assert_field!(hint_key_fg);
         assert_field!(hint_bracket_fg);
-        assert_field!(hint_key_bg);
         assert_field!(hint_desc_fg);
         assert_field!(hint_dim_key_fg);
         assert_field!(hint_dim_bracket_fg);

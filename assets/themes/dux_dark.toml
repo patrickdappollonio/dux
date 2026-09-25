@@ -108,7 +108,6 @@ ansi_darkgray = "#808080"
 # ── Hint / footer bar ────────────────────────────────────────────────
 "dux.hint_key_fg"          = "ansi_cyan"
 "dux.hint_bracket_fg"      = "ansi_darkgray"
-"dux.hint_key_bg"          = "#232323"
 "dux.hint_desc_fg"         = "#a0a0a0"
 "dux.hint_dim_key_fg"      = "#508ca0"
 "dux.hint_dim_bracket_fg"  = "#3c3c3c"

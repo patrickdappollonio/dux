@@ -931,3 +931,50 @@ fn a_cut_hint_line_keeps_its_way_out_and_marks_the_cut() {
         .unwrap_or_else(|| panic!("the diff lost its close hint:\n{}", screen(&buf)));
     assert!(row.contains('\u{2026}'), "the cut must be marked: {row}");
 }
+
+/// The help overlay is a dialog, so its hint line speaks in the dialog tone,
+/// not the dimmed one a pane uses under live content.
+#[test]
+fn the_help_overlay_hints_in_the_dialog_tone() {
+    for scroll in [0u16, 4] {
+        let mut app = test_app(default_bindings());
+        distinct_colors(&mut app);
+        app.help_scroll = Some(scroll);
+        let buf = render_at(&mut app, 160, 60);
+        let close = app.bindings.label_for(Action::CloseOverlay);
+        let badge = badges(&buf)
+            .into_iter()
+            .find(|badge| {
+                badge.label == close
+                    && row_with(&buf, "page").is_some_and(|row| {
+                        row == screen(&buf).lines().nth(usize::from(badge.y)).unwrap_or("")
+                    })
+            })
+            .unwrap_or_else(|| panic!("no help close hint:\n{}", screen(&buf)));
+        assert!(
+            !badge.dim,
+            "scrolled {scroll}: the help hint is in the pane tone"
+        );
+    }
+}
+
+/// The startup-log list names each key of its move action as its own badge,
+/// the way every other pair of keys in a hint line is named.
+#[test]
+fn the_startup_log_list_names_each_move_key_as_its_own_badge() {
+    let mut app = test_app(default_bindings());
+    for (name, prompt) in every_prompt(&app) {
+        if name == "StartupCommandLogs" {
+            app.prompt = prompt;
+        }
+    }
+    let buf = render_at(&mut app, 200, 60);
+    let keys = app.bindings.labels_for(Action::MoveDown);
+    let split = keys
+        .split('/')
+        .map(|key| format!("<{key}>"))
+        .collect::<Vec<_>>()
+        .join("/");
+    let row = row_with(&buf, "> logs").unwrap_or_else(|| panic!("no logs hint:\n{}", screen(&buf)));
+    assert!(row.contains(&format!("{split} logs")), "{row}");
+}

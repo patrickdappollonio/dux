@@ -1751,6 +1751,16 @@ impl RuntimeBindings {
             .unwrap_or_default()
     }
 
+    /// Display labels for all key combos of an action, one per key, for a
+    /// hint that names each key as its own badge.
+    pub fn labels_list_for(&self, action: Action) -> Vec<String> {
+        self.bindings
+            .iter()
+            .find(|b| b.action == action)
+            .map(|b| b.keys.iter().map(|k| self.format.to_string(*k)).collect())
+            .unwrap_or_default()
+    }
+
     /// Display labels for all key combos of an action, joined with `/`.
     /// Uses natural casing (e.g. "ctrl-f/PgDn") suitable for UI display.
     pub fn labels_for(&self, action: Action) -> String {

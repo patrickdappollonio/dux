@@ -11,7 +11,9 @@ use super::components::{
     name_chip, plan_pane_card, prose_lines, prose_spans, render_centered_lines,
     render_scroll_marker, shared_button_width, wrap_styled_lines,
 };
-use super::components::{HintTone, fitted_hint_spans, pane_hint_line, pane_hint_line_after};
+use super::components::{
+    HintTone, fitted_hint_spans, hint_line, hint_line_after, pane_hint_line, pane_hint_line_after,
+};
 use super::components::{PickerList, render_scroll_indicator};
 use super::confirm_dialog::{
     ConfirmButton, ConfirmDialog, clip_to, confirm_inner_width, stack_rows,
@@ -5333,9 +5335,11 @@ impl App {
                 Hint::keys([scroll_down, scroll_up], "page"),
                 Hint::key(close, "close").pinned(),
             ];
+            // The help overlay is a dialog, so it hints in the dialog tone.
             let line = if scroll > 0 {
-                pane_hint_line_after(
+                hint_line_after(
                     &self.theme,
+                    HintTone::Modal,
                     Span::styled(
                         format!("Scrolled back {}.", count_of(usize::from(scroll), "line")),
                         Style::default().fg(self.theme.hint_key_fg),
@@ -5344,7 +5348,7 @@ impl App {
                     hint_area.width,
                 )
             } else {
-                pane_hint_line(&self.theme, &hints, hint_area.width)
+                hint_line(&self.theme, HintTone::Modal, &hints, hint_area.width)
             };
 
             Paragraph::new(line)
@@ -8782,7 +8786,7 @@ impl App {
         let bottom_spans = modal_hint_line(
             &self.theme,
             &[
-                Hint::key(self.bindings.labels_for(Action::MoveDown), "logs"),
+                Hint::keys(self.bindings.labels_list_for(Action::MoveDown), "logs"),
                 Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
                 Hint::keys(
                     [

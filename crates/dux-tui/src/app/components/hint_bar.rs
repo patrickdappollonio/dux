@@ -293,18 +293,30 @@ pub(crate) fn modal_hint_line(theme: &Theme, hints: &[Hint], width: u16) -> Line
     Line::from(spans)
 }
 
-/// A pane's hint line in `width` columns: the segments that fit, flush left,
-/// in the pane tone.
-pub(crate) fn pane_hint_line(theme: &Theme, hints: &[Hint], width: u16) -> Line<'static> {
-    Line::from(fitted_hint_spans(theme, HintTone::Pane, hints, usize::from(width)).spans)
+/// A hint row of its own in `width` columns (under a pane's content, or on
+/// a dialog's own hint row rather than its frame): the segments that fit,
+/// flush left, in `tone`.
+pub(crate) fn hint_line(
+    theme: &Theme,
+    tone: HintTone,
+    hints: &[Hint],
+    width: u16,
+) -> Line<'static> {
+    Line::from(fitted_hint_spans(theme, tone, hints, usize::from(width)).spans)
 }
 
-/// A pane's hint line that opens with a sentence of its own (how far the view
-/// is scrolled back, why keys are not reaching the child), set off from the
+/// [`hint_line`] in the pane tone.
+pub(crate) fn pane_hint_line(theme: &Theme, hints: &[Hint], width: u16) -> Line<'static> {
+    hint_line(theme, HintTone::Pane, hints, width)
+}
+
+/// A hint row that opens with a sentence of its own (how far the view is
+/// scrolled back, why keys are not reaching the child), set off from the
 /// segments by the same separator that joins them. The sentence is kept whole;
 /// the segments fit in what is left of `width`.
-pub(crate) fn pane_hint_line_after(
+pub(crate) fn hint_line_after(
     theme: &Theme,
+    tone: HintTone,
     lead: Span<'static>,
     hints: &[Hint],
     width: u16,
@@ -312,13 +324,23 @@ pub(crate) fn pane_hint_line_after(
     let room = usize::from(width)
         .saturating_sub(display_width(&lead.content))
         .saturating_sub(SEPARATOR.len());
-    let rest = fitted_hint_spans(theme, HintTone::Pane, hints, room).spans;
+    let rest = fitted_hint_spans(theme, tone, hints, room).spans;
     let mut spans = vec![lead];
     if !rest.is_empty() {
-        spans.push(Span::styled(SEPARATOR, desc_style(theme, HintTone::Pane)));
+        spans.push(Span::styled(SEPARATOR, desc_style(theme, tone)));
         spans.extend(rest);
     }
     Line::from(spans)
+}
+
+/// [`hint_line_after`] in the pane tone.
+pub(crate) fn pane_hint_line_after(
+    theme: &Theme,
+    lead: Span<'static>,
+    hints: &[Hint],
+    width: u16,
+) -> Line<'static> {
+    hint_line_after(theme, HintTone::Pane, lead, hints, width)
 }
 
 #[cfg(test)]
