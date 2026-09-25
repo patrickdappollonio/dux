@@ -38,6 +38,38 @@ pub(crate) fn shared_button_width(labels: &[&str]) -> u16 {
         .unwrap_or(MIN_BUTTON_WIDTH)
 }
 
+/// Every modal button is three rows: the rounded ring and the label between.
+pub(crate) const BUTTON_HEIGHT: u16 = 3;
+
+/// The one gap between two buttons that share a row: two columns, the spacing
+/// most dialogs already used, so an imprecise click lands on the gap rather
+/// than on the other button.
+pub(crate) const BUTTON_GAP: u16 = 2;
+
+/// Lay out `N` buttons of one `width` side by side, [`BUTTON_GAP`] apart and
+/// centred as a group in `area` with any odd column of slack on the right,
+/// [`BUTTON_HEIGHT`] rows tall from the top of `area`. Size `width` with
+/// [`shared_button_width`] so every button in the row is the same width.
+///
+/// A row wider than `area` starts at its left edge; the caller sizes its
+/// dialog so that does not happen.
+pub(crate) fn button_row<const N: usize>(area: Rect, width: u16) -> [Rect; N] {
+    let count = u16::try_from(N).unwrap_or(u16::MAX);
+    let total = width
+        .saturating_mul(count)
+        .saturating_add(BUTTON_GAP.saturating_mul(count.saturating_sub(1)));
+    let start = centered_x(area, total);
+    std::array::from_fn(|index| {
+        let index = u16::try_from(index).unwrap_or(u16::MAX);
+        Rect {
+            x: start.saturating_add(index.saturating_mul(width.saturating_add(BUTTON_GAP))),
+            y: area.y,
+            width,
+            height: BUTTON_HEIGHT,
+        }
+    })
+}
+
 /// Visual focus state of a button, mapped at render time to a border and label
 /// color pair. `Disabled` overrides any focus state: set it when the underlying
 /// action cannot be taken right now.
@@ -312,6 +344,18 @@ mod tests {
     fn shared_button_width_picks_largest() {
         let labels = ["Cancel", "Add Anyway", "Check Out & Add"];
         assert_eq!(shared_button_width(&labels), 19);
+    }
+
+    /// Two buttons of one width, the one gap apart, centred as a pair with the
+    /// odd column of slack on the right, as every centred thing in the app is.
+    #[test]
+    fn a_button_row_is_centred_with_one_gap() {
+        let [left, right] = button_row::<2>(Rect::new(10, 5, 41, 3), 16);
+        assert_eq!(left, Rect::new(13, 5, 16, BUTTON_HEIGHT));
+        assert_eq!(right, Rect::new(13 + 16 + BUTTON_GAP, 5, 16, BUTTON_HEIGHT));
+        let slack_left = left.x - 10;
+        let slack_right = 51 - right.right();
+        assert_eq!((slack_left, slack_right), (3, 4));
     }
 
     #[test]

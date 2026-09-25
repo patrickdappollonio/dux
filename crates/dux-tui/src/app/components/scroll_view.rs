@@ -56,7 +56,7 @@ pub(crate) fn render_scroll_indicator(
 }
 
 /// What a scroll view drew, in rows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ScrollViewRender {
     /// The offset actually used, after clamping to the last page.
     pub(crate) offset: usize,
@@ -64,6 +64,18 @@ pub(crate) struct ScrollViewRender {
     pub(crate) viewport: usize,
     /// Rows the content has in all.
     pub(crate) total: usize,
+}
+
+impl ScrollViewRender {
+    /// Whether any row is out of view, which is when the view scrolls at all.
+    pub(crate) fn scrollable(self) -> bool {
+        self.total > self.viewport
+    }
+
+    /// The largest offset that still fills the view.
+    pub(crate) fn max_offset(self) -> usize {
+        self.total.saturating_sub(self.viewport)
+    }
 }
 
 /// Show `lines` from `scroll` in `content`, clamped so the last page is the
@@ -142,6 +154,33 @@ mod tests {
         let marker = &buf[(19, 6)];
         assert_eq!(marker.symbol(), MARKER_GLYPHS[1], "only up is left");
         assert_eq!(marker.fg, scroll_indicator_color(&theme));
+    }
+
+    /// From the top: the rows that fit, the more-below marker on the view's last
+    /// row, and an extent that says the view scrolls and how far.
+    #[test]
+    fn the_view_from_the_top_marks_more_below_and_reports_its_extent() {
+        let theme = Theme::default_dark();
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).expect("terminal");
+        let mut drawn = ScrollViewRender::default();
+        terminal
+            .draw(|frame| {
+                drawn = render_scroll_view(
+                    frame,
+                    Rect::new(0, 0, 20, 8),
+                    Rect::new(1, 1, 18, 6),
+                    lines(10),
+                    0,
+                    &theme,
+                );
+            })
+            .expect("draw");
+        assert!(drawn.scrollable());
+        assert_eq!(drawn.max_offset(), 4);
+        let buf = terminal.backend().buffer();
+        let first: String = (1..7).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        assert_eq!(first, "line 0");
+        assert_eq!(buf[(19, 6)].symbol(), MARKER_GLYPHS[0], "more below");
     }
 
     #[test]

@@ -3080,12 +3080,18 @@ pub(crate) struct OverlayMouseLayoutState {
     /// permits that recording through the renderer's shared reference, and the
     /// rect left behind is the modal actually on top.
     pub(crate) frame: Cell<Option<Rect>>,
+    /// The open Confirm dialog's body scroll. Not cleared by [`Self::reset`]:
+    /// it outlives a frame while the same dialog stays on screen, and forgets
+    /// itself once a frame paints no Confirm body (see
+    /// [`confirm_dialog::ConfirmBodyScroll`]).
+    pub(crate) confirm_scroll: Cell<confirm_dialog::ConfirmBodyScroll>,
 }
 
 impl OverlayMouseLayoutState {
     pub(crate) fn reset(&mut self) {
         self.active = OverlayMouseLayout::None;
         self.frame.set(None);
+        confirm_dialog::ConfirmBodyScroll::new_frame(&self.confirm_scroll);
     }
 }
 
@@ -3606,6 +3612,7 @@ pub(crate) use background_server::{BackgroundServerStart, CompanionRouting};
 // CJK glyph exactly as the pane's own wrapper does, and two functions that
 // disagree about that produce rows too wide for the box they were measured for.
 pub(crate) mod components;
+mod confirm_dialog;
 mod first_load;
 mod input;
 pub(crate) mod modal;

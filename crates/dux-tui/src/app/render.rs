@@ -1,3 +1,4 @@
+use super::components::BUTTON_HEIGHT;
 use super::components::ellipsis::{
     ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width, mark_cut_row,
     pad_to_width, truncate_to_width,
@@ -11,6 +12,7 @@ use super::components::{
     render_scroll_marker, shared_button_width, wrap_styled_lines,
 };
 use super::components::{PickerList, render_scroll_indicator};
+use super::confirm_dialog::{ConfirmButton, ConfirmDialog, confirm_inner_width};
 use super::pty_ownership::PtyTakeoverCard;
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
@@ -297,7 +299,7 @@ const CHECKOUT_DEFAULT_BRANCH_LABEL: &str = "Check out default branch";
 /// What differs between the delete-project and remove-project confirmations;
 /// the frame, the body wrap and the Cancel / Danger pair are shared.
 struct ProjectConfirmDialog<'a> {
-    title: &'a str,
+    title: &'static str,
     body: &'a dux_core::prose::Prose,
     confirm_label: &'a str,
     confirm_focused: bool,
@@ -1141,6 +1143,47 @@ fn sync_macro_text_input_layout(input: &mut TextInput, popup: Rect) {
     input.ensure_cursor_visible();
 }
 
+/// The Delete Agent dialog's Cancel button, shared by its managed and
+/// standalone layouts.
+fn delete_agent_cancel_button(focus: DeleteAgentFocus) -> ConfirmButton<'static> {
+    ConfirmButton::new(
+        "Cancel",
+        ButtonKind::Confirm,
+        ButtonPressedTarget::ConfirmDeleteCancel,
+        focus == DeleteAgentFocus::Cancel,
+    )
+}
+
+/// The Delete Agent dialog's Delete button, shared by its managed and
+/// standalone layouts.
+fn delete_agent_delete_button(focus: DeleteAgentFocus) -> ConfirmButton<'static> {
+    ConfirmButton::new(
+        "Delete",
+        ButtonKind::Danger,
+        ButtonPressedTarget::ConfirmDeleteConfirm,
+        focus == DeleteAgentFocus::Delete,
+    )
+}
+
+/// The Cancel / act pair most Confirm dialogs carry: a `ConfirmFocus` decides
+/// which of the two has focus.
+fn confirm_focus_buttons<'a>(
+    focus: ConfirmFocus,
+    cancel_target: ButtonPressedTarget,
+    act: (&'a str, ButtonKind, ButtonPressedTarget),
+) -> (ConfirmButton<'static>, ConfirmButton<'a>) {
+    let (label, kind, target) = act;
+    (
+        ConfirmButton::new(
+            "Cancel",
+            ButtonKind::Confirm,
+            cancel_target,
+            !focus.is_confirm(),
+        ),
+        ConfirmButton::new(label, kind, target, focus.is_confirm()),
+    )
+}
+
 impl App {
     /// Render the Delete Agent modal's chrome and its Cancel/Delete pair for a
     /// dialog with NO checkbox: the standalone case, where there is no removal
@@ -1152,69 +1195,23 @@ impl App {
     fn render_delete_agent_frame(
         &mut self,
         frame: &mut Frame,
-        dialog_width: u16,
-        inner_width: u16,
         body_lines: Vec<Line<'static>>,
         focus: DeleteAgentFocus,
     ) {
-        let body_height = wrapped_rows(&body_lines, inner_width);
-        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Delete Agent");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
-        render_wrapped_body(&body_lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let delete_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDeleteCancel,
-                self.pressed_button,
-                focus == DeleteAgentFocus::Cancel,
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Delete")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDeleteConfirm,
-                self.pressed_button,
-                focus == DeleteAgentFocus::Delete,
-                true,
-            ))
-            .render(frame, delete_area, &self.theme);
-
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Delete Agent",
+                body: body_lines,
+                controls_height: 0,
+                cancel: delete_agent_cancel_button(focus),
+                act: delete_agent_delete_button(focus),
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
-            cancel_button: cancel_area,
-            delete_button: delete_area,
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
             // No checkbox exists, so none can be clicked.
             checkbox: None,
             branch_checkbox: None,
@@ -1234,12 +1231,12 @@ impl App {
     }
 
     /// A prose dialog's body: a blank row, then `prose` with the one-cell body
-    /// margin and every name as a chip, pre-wrapped to `inner_width` so the
-    /// returned height is the rendered one by construction.
-    fn prose_body(&self, prose: &Prose, inner_width: u16) -> (Vec<Line<'static>>, u16) {
+    /// margin and every name as a chip. Unwrapped: the Confirm frame wraps it
+    /// to its own width.
+    fn prose_body(&self, prose: &Prose) -> Vec<Line<'static>> {
         let mut lines = vec![Line::from("")];
         lines.extend(prose_lines(prose, " ", Style::default(), &self.theme));
-        exact_body(&lines, inner_width)
+        lines
     }
 
     /// [`indented_body_lines`] for a sentence that names something: every row
@@ -6564,9 +6561,7 @@ impl App {
         let PromptState::ConfirmDeleteWorktree(prompt) = &self.prompt else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let dialog_width = 60.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
+        let inner_width = confirm_inner_width(frame.area());
         let has_checkbox = prompt.has_branch_checkbox();
         let checkbox_label = delete_worktree_checkbox_prose(prompt.branch.as_deref());
         let checkbox_height = if has_checkbox {
@@ -6630,32 +6625,30 @@ impl App {
                 &self.theme,
             )),
         }
-        let (body_lines, body_height) = exact_body(&body_lines, inner_width);
-        let checkbox_spacing = u16::from(has_checkbox);
-        let area = centered_rect_exact(
-            dialog_width,
-            2 + body_height + checkbox_spacing + checkbox_height + 1 + 3,
-            frame.area(),
+        // The frame keeps a blank row between the checkbox and the buttons, so
+        // the checkbox never sits flush against the destructive button.
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Delete Worktree",
+                body: body_lines,
+                controls_height: checkbox_height,
+                cancel: ConfirmButton::new(
+                    "Cancel",
+                    ButtonKind::Confirm,
+                    ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
+                    prompt.focus == DeleteWorktreeFocus::Cancel,
+                ),
+                act: ConfirmButton::new(
+                    "Delete worktree",
+                    ButtonKind::Danger,
+                    ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
+                    prompt.focus == DeleteWorktreeFocus::Delete,
+                ),
+                reserve_labels: &[],
+            },
         );
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Delete Worktree");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, checkbox_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(checkbox_spacing),
-                Constraint::Length(checkbox_height),
-                // Misclick-safe spacing: the checkbox never sits flush
-                // against the destructive button.
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
-        render_wrapped_body(&body_lines, body_area, frame.buffer_mut());
+        let checkbox_area = layout.controls;
 
         let checkbox_rect = if has_checkbox {
             let checkbox_state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
@@ -6679,46 +6672,9 @@ impl App {
             None
         };
 
-        let btn_width = 18u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let delete_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
-                self.pressed_button,
-                prompt.focus == DeleteWorktreeFocus::Cancel,
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Delete worktree")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
-                self.pressed_button,
-                prompt.focus == DeleteWorktreeFocus::Delete,
-                true,
-            ))
-            .render(frame, delete_area, &self.theme);
-
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteWorktree {
-            cancel_button: cancel_area,
-            delete_button: delete_area,
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
             checkbox: checkbox_rect,
         };
     }
@@ -7020,22 +6976,6 @@ impl App {
         let PromptState::ConfirmKillRunning(confirm_prompt) = &self.prompt else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let area = centered_rect(56, 32, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Confirm Kill");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
         let targets = confirm_prompt.target_ids.len();
         let (agent_count, terminal_count) = confirm_prompt.target_ids.iter().fold(
             (0usize, 0usize),
@@ -7075,49 +7015,29 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             )),
         ];
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let kill_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmKillCancel,
-                self.pressed_button,
-                !confirm_prompt.focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Kill")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
+        let (cancel, act) = confirm_focus_buttons(
+            confirm_prompt.focus,
+            ButtonPressedTarget::ConfirmKillCancel,
+            (
+                "Kill",
+                ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmKillConfirm,
-                self.pressed_button,
-                confirm_prompt.focus.is_confirm(),
-                true,
-            ))
-            .render(frame, kill_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Confirm Kill",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
-            cancel_button: cancel_area,
-            kill_button: kill_area,
+            cancel_button: layout.cancel,
+            kill_button: layout.act,
         };
     }
 
@@ -7177,18 +7097,21 @@ impl App {
             "Reload Config Failed",
             dialog_width,
             body_lines,
-            1 + checkbox_height + 3,
+            1 + checkbox_height + 1 + BUTTON_HEIGHT,
             *scroll,
         );
         self.last_error_dialog_height = dialog.body.height;
         self.last_error_dialog_lines = dialog.total_rows;
 
-        let [_, checkbox_area, buttons_area] = Layout::default()
+        // The Confirm frame's spacing: a blank row above the checkbox and one
+        // below it, so it never sits flush against a button.
+        let [_, checkbox_area, _, buttons_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(checkbox_height),
-                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Length(BUTTON_HEIGHT),
             ])
             .areas(dialog.rest);
 
@@ -7205,43 +7128,24 @@ impl App {
             rect: checkbox_rect,
         };
 
-        let btn_width = shared_button_width(&["Close", "Recover"]);
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let close_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let apply_area = Rect {
-            x: close_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Close")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
+        let [close_area, apply_area] = self.render_confirm_buttons(
+            frame,
+            buttons_area,
+            ConfirmButton::new(
+                "Close",
+                ButtonKind::Confirm,
                 ButtonPressedTarget::ConfigReloadFailedClose,
-                self.pressed_button,
                 *focus == ConfigReloadFailedFocus::Close,
-                true,
-            ))
-            .render(frame, close_area, &self.theme);
-
-        Button::new("Recover")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
+            ),
+            ConfirmButton::new(
+                "Recover",
+                ButtonKind::Confirm,
                 ButtonPressedTarget::ConfigReloadFailedApply,
-                self.pressed_button,
                 *focus == ConfigReloadFailedFocus::Apply,
-                *recover_old_config,
-            ))
-            .render(frame, apply_area, &self.theme);
+            )
+            .enabled(*recover_old_config),
+            &[],
+        );
 
         self.overlay_layout.active = OverlayMouseLayout::ConfigReloadFailed {
             close_button: close_area,
@@ -7418,22 +7322,6 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let area = centered_rect(56, 30, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Delete Terminal");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
         let mut lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -7452,49 +7340,29 @@ impl App {
                 Style::default().fg(self.theme.warning_fg),
             )));
         }
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let delete_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDeleteTerminalCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Delete")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmDeleteTerminalCancel,
+            (
+                "Delete",
+                ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmDeleteTerminalConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, delete_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Delete Terminal",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
-            cancel_button: cancel_area,
-            delete_button: delete_area,
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
         };
     }
 
@@ -7509,7 +7377,6 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
         // Closing the agent's last LIVE tab detaches the agent instead of ending
         // a single tab; word the copy accordingly. Counted by LIVENESS, not by
         // how many tabs exist: an agent reopened after a restart can have
@@ -7551,71 +7418,32 @@ impl App {
             Style::default().fg(self.theme.warning_fg),
             &self.theme,
         ));
-        // Size to the WRAPPED prose, the way the other prose modals here do (see
-        // `render_delete_agent_frame`): the body does not scroll, and a fixed
-        // percentage clipped the whole tail on an 80x24 terminal, which is
-        // exactly where the promotion sentence has to be readable.
-        let dialog_width = 60u16.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
-        let (lines, body_height) = exact_body(&lines, inner_width);
-        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Close Tab");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let confirm_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmCloseTabCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Close")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
+        // Sized to the wrapped prose by the shared frame: a fixed percentage
+        // clipped the whole tail on an 80x24 terminal, which is exactly where
+        // the promotion sentence has to be readable.
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmCloseTabCancel,
+            (
+                "Close",
+                ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmCloseTabConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, confirm_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Close Tab",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmCloseTab {
-            cancel_button: cancel_area,
-            confirm_button: confirm_area,
+            cancel_button: layout.cancel,
+            confirm_button: layout.act,
         };
     }
 
@@ -7636,73 +7464,34 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
         let body = dux_core::engine::detach_confirm_prose(label, *grace_seconds, *live_tabs);
-        // Sized to the WRAPPED prose, like the other prose modals here: the body
-        // does not scroll, and a fixed percentage clips the tail on an 80x24
-        // terminal, which is exactly where the "you can resume it later" half
-        // has to be readable.
-        let dialog_width = 60u16.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
-        let (lines, body_height) = self.prose_body(&body, inner_width);
-        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Detach Agent");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let confirm_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDetachAgentCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Detach")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
+        // Sized to the wrapped prose by the shared frame: a fixed percentage
+        // clips the tail on an 80x24 terminal, which is exactly where the "you
+        // can resume it later" half has to be readable.
+        let lines = self.prose_body(&body);
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmDetachAgentCancel,
+            (
+                "Detach",
+                ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmDetachAgentConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, confirm_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Detach Agent",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDetachAgent {
-            cancel_button: cancel_area,
-            confirm_button: confirm_area,
+            cancel_button: layout.cancel,
+            confirm_button: layout.act,
         };
     }
 
@@ -7724,7 +7513,6 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
         let body = dux_core::working_copy::recreate_confirm_prose(
             worktree_path,
             branch_name,
@@ -7732,70 +7520,32 @@ impl App {
             *conversation_resumes,
             running_providers,
         );
-        // Sized to the WRAPPED prose, like the other prose modals here: the body
-        // does not scroll, and the sentence about what is lost has to be
-        // readable on an 80x24 terminal.
-        let dialog_width = 60u16.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
-        let (lines, body_height) = self.prose_body(&body, inner_width);
-        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Recreate Working Copy");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let confirm_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmRecreateWorkingCopyCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Recreate")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
+        // Sized to the wrapped prose by the shared frame: the sentence about
+        // what is lost has to be readable on an 80x24 terminal.
+        let lines = self.prose_body(&body);
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmRecreateWorkingCopyCancel,
+            (
+                "Recreate",
+                ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmRecreateWorkingCopyConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, confirm_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Recreate Working Copy",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmRecreateWorkingCopy {
-            cancel_button: cancel_area,
-            confirm_button: confirm_area,
+            cancel_button: layout.cancel,
+            confirm_button: layout.act,
         };
     }
 
@@ -7813,74 +7563,36 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
         let body = dux_core::engine::checkout_default_branch_confirm_prose(
             project_name,
             stored_base.as_deref(),
         );
-        // Sized to the wrapped prose: the body does not scroll.
-        let dialog_width = 60u16.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
-        let (lines, body_height) = self.prose_body(&body, inner_width);
-        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Check Out Default Branch");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = shared_button_width(&["Cancel", CHECKOUT_DEFAULT_BRANCH_LABEL]);
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let confirm_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmCheckoutDefaultBranchCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
+        let lines = self.prose_body(&body);
         // The safe kind, like the browser's primary (not destructive) button:
         // the checkout moves HEAD but loses nothing.
-        Button::new(CHECKOUT_DEFAULT_BRANCH_LABEL)
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmCheckoutDefaultBranchCancel,
+            (
+                CHECKOUT_DEFAULT_BRANCH_LABEL,
+                ButtonKind::Confirm,
                 ButtonPressedTarget::ConfirmCheckoutDefaultBranchConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, confirm_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Check Out Default Branch",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmCheckoutDefaultBranch {
-            cancel_button: cancel_area,
-            confirm_button: confirm_area,
+            cancel_button: layout.cancel,
+            confirm_button: layout.act,
         };
     }
 
@@ -7979,72 +7691,36 @@ impl App {
         }
     }
 
-    /// The shared body of the two project confirmations: prose sized to its
-    /// wrapped rows, and a Cancel / Danger pair. Returns the two button rects
+    /// The shared body of the two project confirmations: prose in the shared
+    /// Confirm frame, and a Cancel / Danger pair. Returns the two button rects
     /// for the caller to publish under its own layout variant.
     fn render_project_confirm(
         &mut self,
         frame: &mut Frame,
         dialog: ProjectConfirmDialog<'_>,
     ) -> (Rect, Rect) {
-        self.render_dim_overlay(frame);
-        // Sized to the wrapped prose: the body does not scroll.
-        let dialog_width = 60u16.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
-        let (lines, body_height) = self.prose_body(dialog.body, inner_width);
-        let area = centered_rect_exact(dialog_width, 2 + body_height + 1 + 3, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block(dialog.title);
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = shared_button_width(&["Cancel", dialog.confirm_label]);
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let confirm_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                dialog.cancel_target,
-                self.pressed_button,
-                !dialog.confirm_focused,
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-        Button::new(dialog.confirm_label)
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
-                dialog.confirm_target,
-                self.pressed_button,
-                dialog.confirm_focused,
-                true,
-            ))
-            .render(frame, confirm_area, &self.theme);
-        (cancel_area, confirm_area)
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: dialog.title,
+                body: self.prose_body(dialog.body),
+                controls_height: 0,
+                cancel: ConfirmButton::new(
+                    "Cancel",
+                    ButtonKind::Confirm,
+                    dialog.cancel_target,
+                    !dialog.confirm_focused,
+                ),
+                act: ConfirmButton::new(
+                    dialog.confirm_label,
+                    ButtonKind::Danger,
+                    dialog.confirm_target,
+                    dialog.confirm_focused,
+                ),
+                reserve_labels: &[],
+            },
+        );
+        (layout.cancel, layout.act)
     }
 
     fn render_confirm_quit_prompt(&mut self, frame: &mut Frame) {
@@ -8056,22 +7732,6 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let area = centered_rect(56, 30, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Quit dux");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
         let process_desc = quit_process_description(*agent_count, *terminal_count);
         let lines = vec![
             Line::from(""),
@@ -8095,49 +7755,29 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             )),
         ];
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let quit_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmQuitCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Quit")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmQuitCancel,
+            (
+                "Quit",
+                ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmQuitConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, quit_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Quit dux",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
-            cancel_button: cancel_area,
-            quit_button: quit_area,
+            cancel_button: layout.cancel,
+            quit_button: layout.act,
         };
     }
 
@@ -8148,22 +7788,6 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let area = centered_rect(56, 30, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Discard Changes");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
         let lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -8177,49 +7801,29 @@ impl App {
                 Style::default().fg(self.theme.warning_fg),
             )),
         ];
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let discard_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDiscardCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Discard")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmDiscardCancel,
+            (
+                "Discard",
+                ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmDiscardConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, discard_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Discard Changes",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
-            cancel_button: cancel_area,
-            discard_button: discard_area,
+            cancel_button: layout.cancel,
+            discard_button: layout.act,
         };
     }
 
@@ -8227,22 +7831,6 @@ impl App {
         let PromptState::ConfirmCreateInitialCommit { path, focus, .. } = &self.prompt else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let area = centered_rect(60, 36, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Repository Has No Commits");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
         let lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -8261,49 +7849,29 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             )),
         ];
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 22u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let create_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmCreateInitialCommitCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Create Commit & Add")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmCreateInitialCommitCancel,
+            (
+                "Create Commit & Add",
+                ButtonKind::Confirm,
                 ButtonPressedTarget::ConfirmCreateInitialCommitConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, create_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Repository Has No Commits",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmCreateInitialCommit {
-            cancel_button: cancel_area,
-            create_button: create_area,
+            cancel_button: layout.cancel,
+            create_button: layout.act,
         };
     }
 
@@ -8317,22 +7885,6 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let area = centered_rect(60, 40, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Not a Git Repository");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
         let mut lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -8366,49 +7918,29 @@ impl App {
             " Your existing files are left untouched (untracked).",
             Style::default().fg(self.theme.hint_desc_fg),
         )));
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 22u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let init_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmInitRepoCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Initialize & Add")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmInitRepoCancel,
+            (
+                "Initialize & Add",
+                ButtonKind::Confirm,
                 ButtonPressedTarget::ConfirmInitRepoConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, init_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Not a Git Repository",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmInitRepo {
-            cancel_button: cancel_area,
-            init_button: init_area,
+            cancel_button: layout.cancel,
+            init_button: layout.act,
         };
     }
 
@@ -8423,9 +7955,7 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let dialog_width = 60u16.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
+        let inner_width = confirm_inner_width(frame.area());
         let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
 
         // Body: warning text + the "new worktrees branch from …" note,
@@ -8488,8 +8018,6 @@ impl App {
                 &self.theme,
             ));
         }
-        let body_height = wrapped_rows(&body_lines, inner_width);
-
         // Checkbox height is measured up-front so the outer rect can
         // be sized exactly, mirroring the Delete Agent modal.
         let checkbox_height = if has_checkbox {
@@ -8515,29 +8043,39 @@ impl App {
         } else {
             0
         };
-        let checkbox_spacing = u16::from(has_checkbox);
-
-        let area = centered_rect_exact(
-            dialog_width,
-            2 + body_height + checkbox_spacing + checkbox_height + 3,
-            frame.area(),
+        // Swap the confirm button label so the user sees exactly what
+        // pressing it will do. When the checkbox is on and we know the
+        // default branch, the action is a two-step (switch + add),
+        // otherwise it's the original "Add Anyway" add-as-is.
+        let add_label = if has_checkbox && *checkout_default {
+            "Check Out & Add"
+        } else {
+            "Add Anyway"
+        };
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Non-Default Branch",
+                body: body_lines,
+                controls_height: checkbox_height,
+                cancel: ConfirmButton::new(
+                    "Cancel",
+                    ButtonKind::Confirm,
+                    ButtonPressedTarget::ConfirmNonDefaultBranchCancel,
+                    *focus == ConfirmNonDefaultBranchFocus::Cancel,
+                ),
+                act: ConfirmButton::new(
+                    add_label,
+                    ButtonKind::Danger,
+                    ButtonPressedTarget::ConfirmNonDefaultBranchAdd,
+                    *focus == ConfirmNonDefaultBranchFocus::Add,
+                ),
+                // Sized for every label the act button can show, so toggling
+                // the checkbox never resizes the buttons.
+                reserve_labels: &["Add Anyway", "Check Out & Add"],
+            },
         );
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Non-Default Branch");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, checkbox_area, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(checkbox_spacing),
-                Constraint::Length(checkbox_height),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
-        render_wrapped_body(&body_lines, body_area, frame.buffer_mut());
+        let checkbox_area = layout.controls;
 
         let checkbox_rect = if has_checkbox {
             let BranchWarningKind::Known { default_branch } = kind else {
@@ -8565,59 +8103,9 @@ impl App {
             None
         };
 
-        // Size both buttons from every possible label so checkbox changes never
-        // resize the modal controls.
-        let btn_width = shared_button_width(&["Cancel", "Add Anyway", "Check Out & Add"]);
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let add_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        // Swap the confirm button label so the user sees exactly what
-        // pressing it will do. When the checkbox is on and we know the
-        // default branch, the action is a two-step (switch + add),
-        // otherwise it's the original "Add Anyway" add-as-is.
-        let add_label = if has_checkbox && *checkout_default {
-            "Check Out & Add"
-        } else {
-            "Add Anyway"
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmNonDefaultBranchCancel,
-                self.pressed_button,
-                *focus == ConfirmNonDefaultBranchFocus::Cancel,
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new(add_label)
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmNonDefaultBranchAdd,
-                self.pressed_button,
-                *focus == ConfirmNonDefaultBranchFocus::Add,
-                true,
-            ))
-            .render(frame, add_area, &self.theme);
-
         self.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
-            cancel_button: cancel_area,
-            add_button: add_area,
+            cancel_button: layout.cancel,
+            add_button: layout.act,
             checkbox: checkbox_rect,
         };
     }
@@ -8632,22 +8120,6 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let area = centered_rect(60, 30, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Branch Already Exists");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
         let location_label = match location {
             crate::git::BranchLocation::Local => "local",
             crate::git::BranchLocation::Remote => "remote",
@@ -8669,51 +8141,31 @@ impl App {
             " allowing you to continue working on it.",
             Style::default().fg(self.theme.warning_fg),
         )));
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let use_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmUseExistingBranchCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
         // "Use Existing" reuses a branch that already exists and is not
         // destructive, so it shares the Confirm kind with Cancel.
-        Button::new("Use Existing")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmUseExistingBranchCancel,
+            (
+                "Use Existing",
+                ButtonKind::Confirm,
                 ButtonPressedTarget::ConfirmUseExistingBranchUse,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, use_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Branch Already Exists",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmUseExistingBranch {
-            cancel_button: cancel_area,
-            use_button: use_area,
+            cancel_button: layout.cancel,
+            use_button: layout.act,
         };
     }
 
@@ -10011,9 +9463,7 @@ impl App {
         else {
             return;
         };
-        self.render_dim_overlay(frame);
-        let dialog_width = 56.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
+        let inner_width = confirm_inner_width(frame.area());
         // The managed identity, when there is one. A STANDALONE agent
         // has none, and every "also remove the worktree" affordance
         // below hangs off this `Some`: there is no removal to offer, so
@@ -10128,44 +9578,24 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             )));
         }
-        let body_height = wrapped_rows(&body_lines, inner_width);
-        let checkbox_spacing = u16::from(!worktree_shared);
-        let button_spacing = u16::from(!worktree_shared);
-        let area = centered_rect_exact(
-            dialog_width,
-            2 + body_height
-                + checkbox_spacing
-                + checkbox_height
-                + branch_checkbox_height
-                + button_spacing
-                + 3,
-            frame.area(),
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Delete Agent",
+                body: body_lines,
+                controls_height: checkbox_height + branch_checkbox_height,
+                cancel: delete_agent_cancel_button(*focus),
+                act: delete_agent_delete_button(*focus),
+                reserve_labels: &[],
+            },
         );
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Delete Agent");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [
-            body_area,
-            _,
-            checkbox_area,
-            branch_checkbox_area,
-            _,
-            buttons_area,
-        ] = Layout::default()
+        let [checkbox_area, branch_checkbox_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(body_height),
-                Constraint::Length(checkbox_spacing),
                 Constraint::Length(checkbox_height),
                 Constraint::Length(branch_checkbox_height),
-                Constraint::Length(button_spacing),
-                Constraint::Length(3),
             ])
-            .areas(inner);
-
-        render_wrapped_body(&body_lines, body_area, frame.buffer_mut());
+            .areas(layout.controls);
 
         let checkbox_rect = if offers_checkbox {
             let checkbox_state = if *focus == DeleteAgentFocus::WorktreeCheckbox {
@@ -10212,48 +9642,9 @@ impl App {
             None
         };
 
-        // Button area: two bordered panels side by side.
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let delete_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDeleteCancel,
-                self.pressed_button,
-                *focus == DeleteAgentFocus::Cancel,
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Delete")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDeleteConfirm,
-                self.pressed_button,
-                *focus == DeleteAgentFocus::Delete,
-                true,
-            ))
-            .render(frame, delete_area, &self.theme);
-
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
-            cancel_button: cancel_area,
-            delete_button: delete_area,
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
             checkbox: checkbox_rect,
             branch_checkbox: branch_checkbox_rect,
         };
@@ -10526,9 +9917,6 @@ impl App {
         };
         let (agent_label, folder_label, focus) =
             (agent_label.clone(), folder_label.clone(), *focus);
-        self.render_dim_overlay(frame);
-        let dialog_width = 56.min(frame.area().width.max(1));
-        let inner_width = dialog_width.saturating_sub(2);
         let body_lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -10550,7 +9938,7 @@ impl App {
                 ),
             ]),
         ];
-        self.render_delete_agent_frame(frame, dialog_width, inner_width, body_lines, focus);
+        self.render_delete_agent_frame(frame, body_lines, focus);
         true
     }
 
@@ -11095,22 +10483,6 @@ impl App {
     }
 
     fn render_confirm_delete_macro(&mut self, frame: &mut Frame, name: &str, focus: ConfirmFocus) {
-        self.render_dim_overlay(frame);
-        let area = centered_rect(56, 30, frame.area());
-        self.clear_overlay_area(frame, area);
-        let outer = self.themed_overlay_block("Delete Macro");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [body_area, _, buttons_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
-            .areas(inner);
-
         let lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -11118,51 +10490,30 @@ impl App {
                 name_chip(name, &self.theme),
                 Span::raw("?"),
             ]),
-            Line::from(""),
         ];
-        render_wrapped_body(&lines, body_area, frame.buffer_mut());
-
-        let btn_width = 16u16;
-        let gap = 2u16;
-        let total = btn_width * 2 + gap;
-        let left_offset = buttons_area.width.saturating_sub(total) / 2;
-
-        let cancel_area = Rect {
-            x: buttons_area.x + left_offset,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-        let delete_area = Rect {
-            x: cancel_area.x + btn_width + gap,
-            y: buttons_area.y,
-            width: btn_width,
-            height: 3,
-        };
-
-        Button::new("Cancel")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::ConfirmDeleteMacroCancel,
-                self.pressed_button,
-                !focus.is_confirm(),
-                true,
-            ))
-            .render(frame, cancel_area, &self.theme);
-
-        Button::new("Delete")
-            .kind(ButtonKind::Danger)
-            .state(button_state_for(
+        let (cancel, act) = confirm_focus_buttons(
+            focus,
+            ButtonPressedTarget::ConfirmDeleteMacroCancel,
+            (
+                "Delete",
+                ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmDeleteMacroConfirm,
-                self.pressed_button,
-                focus.is_confirm(),
-                true,
-            ))
-            .render(frame, delete_area, &self.theme);
-
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Delete Macro",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteMacro {
-            cancel_button: cancel_area,
-            delete_button: delete_area,
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
         };
     }
 

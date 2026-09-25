@@ -19,8 +19,8 @@ pub(crate) mod scroll_view;
 pub(crate) mod wrap_lines;
 
 pub(crate) use button::{
-    Button, ButtonKind, ButtonPressedTarget, PressedButton, button_state_for, button_width_for,
-    shared_button_width,
+    BUTTON_HEIGHT, Button, ButtonKind, ButtonPressedTarget, PressedButton, button_row,
+    button_state_for, button_width_for, shared_button_width,
 };
 pub(crate) use centered::render_centered_lines;
 pub(crate) use checkbox::{Checkbox, CheckboxState};
@@ -40,5 +40,5 @@ pub(crate) use scroll_marker::{MARKER_GLYPHS, scroll_marker_rect};
 /// the renderers reach it through [`render_scroll_indicator`].
 #[cfg(test)]
 pub(crate) use scroll_view::scroll_indicator_color;
-pub(crate) use scroll_view::{render_scroll_indicator, render_scroll_view};
+pub(crate) use scroll_view::{ScrollViewRender, render_scroll_indicator, render_scroll_view};
 pub(crate) use wrap_lines::wrap_styled_lines;

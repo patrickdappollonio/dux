@@ -5473,6 +5473,12 @@ impl App {
         // firing an action after the user has switched to the keyboard.
         self.pressed_button = None;
 
+        // A Confirm dialog whose body is taller than the screen scrolls it
+        // first; one that fits keeps every key it had.
+        if self.scroll_confirm_body_for(&key) {
+            return Ok(false);
+        }
+
         if let Some(should_exit) = self.handle_monitoring_prompt_key(key) {
             return Ok(should_exit);
         }
@@ -8909,6 +8915,9 @@ impl App {
 
     fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
         if let Some(result) = self.handle_first_load_prompt_mouse(&mouse) {
+            return result;
+        }
+        if let Some(result) = self.handle_confirm_body_wheel(&mouse) {
             return result;
         }
         let outside_press =
