@@ -4792,11 +4792,11 @@ impl App {
     /// is taking typing.
     pub(super) fn commit_hint_line(&self, focused: bool, width: u16) -> Line<'static> {
         let hints = if focused {
-            vec![Hint::key(self.bindings.labels_for(Action::ExitCommitInput), "Exit").pinned()]
+            vec![Hint::key(self.bindings.labels_for(Action::ExitCommitInput), "exit").pinned()]
         } else {
             vec![
-                Hint::key(self.bindings.labels_for(Action::EngageCommitInput), "Edit"),
-                Hint::key(self.bindings.label_for(Action::CommitChanges), "Commit"),
+                Hint::key(self.bindings.labels_for(Action::EngageCommitInput), "edit"),
+                Hint::key(self.bindings.label_for(Action::CommitChanges), "commit"),
             ]
         };
         pane_hint_line(&self.theme, &hints, width)
@@ -8793,11 +8793,11 @@ impl App {
                 ),
                 Hint::key(
                     self.bindings.label_for(Action::OpenStartupCommandLogFile),
-                    "Open file",
+                    "open file",
                 ),
                 Hint::key(
                     self.bindings.label_for(Action::OpenStartupCommandLogFolder),
-                    "Open folder",
+                    "open folder",
                 ),
                 // The focus key, named through the bindings and skipping any
                 // key the filter would type instead. Without it the Close
@@ -10544,8 +10544,8 @@ impl App {
                 Hint::key(close_key, "close").pinned(),
                 Hint::keys([scroll_up, scroll_down], "scroll"),
                 Hint::key(search_key, "search"),
-                Hint::key(open_file, "Open file"),
-                Hint::key(open_folder, "Open folder"),
+                Hint::key(open_file, "open file"),
+                Hint::key(open_folder, "open folder"),
             ]
         };
         Paragraph::new(pane_hint_line(&self.theme, &hints, hint_area.width))

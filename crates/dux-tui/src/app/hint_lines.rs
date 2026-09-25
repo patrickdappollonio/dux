@@ -451,6 +451,84 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
         must_hint: true,
         fixed: fixed_keys("FilesSearching"),
     });
+
+    // The branches the plain fixture never reaches: a search that has matches
+    // to step through, macros to open, a second tab to switch to, and Tab
+    // handed to the agent so the pane chords are named instead.
+    let mut app = fresh();
+    app.files_search.set_text("src".to_string());
+    out.push(Painted {
+        name: "pane line: files (with a search)".to_string(),
+        buf: paint_line(app.files_hint_line(200), APP_BG),
+        must_hint: true,
+        fixed: &[],
+    });
+    let mut app = fresh();
+    app.engine.config.macros.entries.insert(
+        "greet".to_string(),
+        crate::config::MacroEntry {
+            text: "hello".to_string(),
+            surface: crate::config::MacroSurface::Both,
+        },
+    );
+    let session_id = app.engine.sessions[0].id.clone();
+    app.engine.agent_tabs.insert(
+        TabId::new("second-tab"),
+        crate::model::AgentTab {
+            id: "second-tab".to_string(),
+            session_id,
+            provider: crate::model::ProviderKind::from_str("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        },
+    );
+    app.engine.config.ui.tab_reaches_agent = true;
+    for (name, line) in [
+        (
+            "typeable (macros, tabs, Tab to the agent)",
+            app.typeable_hint_line(SessionSurface::Agent, 200),
+        ),
+        (
+            "interactive (macros)",
+            app.interactive_terminal_hint_line(3, 200),
+        ),
+    ] {
+        out.push(Painted {
+            name: format!("pane line: {name}"),
+            buf: paint_line(line, APP_BG),
+            must_hint: true,
+            fixed: &[],
+        });
+    }
+
+    // The footer in each focus context it has hints for.
+    type Setup = fn(&mut App);
+    let footer_contexts: [(&str, Setup); 5] = [
+        ("footer: project row", |app| {
+            app.focus = FocusPane::Left;
+            app.selected_left = 0;
+        }),
+        ("footer: agent row", |app| {
+            app.focus = FocusPane::Left;
+            app.selected_left = app.left_items().len().saturating_sub(1);
+        }),
+        ("footer: terminals", |app| {
+            app.focus = FocusPane::Left;
+            app.left_section = LeftSection::Terminals;
+        }),
+        ("footer: center", |app| app.focus = FocusPane::Center),
+        ("footer: changes", |app| app.focus = FocusPane::Files),
+    ];
+    for (name, setup) in footer_contexts {
+        let mut app = fresh();
+        setup(&mut app);
+        out.push(Painted {
+            name: name.to_string(),
+            buf: render_at(&mut app, width, height),
+            must_hint: false,
+            fixed: &[],
+        });
+    }
     out
 }
 
@@ -585,25 +663,180 @@ fn rebinding_every_action_leaves_no_default_key_in_any_hint() {
         labels.iter().all(|label| label.contains("F")),
         "the rebound labels are {labels:?}"
     );
+    let bindings = unusual_bindings();
+    let action_of = |label: &str| {
+        BINDING_DEFS
+            .iter()
+            .map(|def| def.action)
+            .find(|action| bindings.label_for(*action) == label)
+    };
     let mut offenders = Vec::new();
     for (width, height) in [(160, 60), (80, 24)] {
         for surface in every_surface(unusual_bindings, width, height) {
-            for badge in badges(&surface.buf) {
-                let named_right = badge.label.split('/').all(|part| {
-                    labels.iter().any(|label| label == part) || surface.fixed.contains(&part)
-                });
-                if !named_right {
+            let found = badges(&surface.buf);
+            for (index, badge) in found.iter().enumerate() {
+                if surface.fixed.contains(&badge.label.as_str()) {
+                    continue;
+                }
+                // One badge can carry two actions' keys (the footer's
+                // `<j/k> move`): every key must be a rebound one, and the
+                // description must be one of theirs.
+                let actions: Option<Vec<Action>> = badge.label.split('/').map(&action_of).collect();
+                let Some(actions) = actions else {
                     offenders.push(format!(
                         "{} at {width}x{height}: <{}> is not a rebound key",
+                        surface.name, badge.label
+                    ));
+                    continue;
+                };
+                let desc = description_after(&surface.buf, &found, index);
+                // A dialog painted over a line can hide a badge's description;
+                // there is nothing left to hold that badge to.
+                if desc.is_empty() {
+                    continue;
+                }
+                if !actions.iter().any(|action| describes(&desc, *action)) {
+                    offenders.push(format!(
+                        "{} at {width}x{height}: <{}> is {actions:?}, which is not what {desc:?} \
+                         describes",
                         surface.name, badge.label
                     ));
                 }
             }
         }
     }
+    offenders.sort();
     offenders.dedup();
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
+
+/// The words a badge's hint says it does: past any `/<key>` that shares the
+/// description, one space, then up to the next separator or frame edge.
+fn description_after(buf: &Buffer, found: &[Badge], index: usize) -> String {
+    let badge = &found[index];
+    // `<a>/<b> desc`: the description belongs to the last key of the run.
+    let joined = found.get(index + 1).is_some_and(|next| {
+        next.y == badge.y
+            && next.x == badge.end + 2
+            && buf[(badge.end + 1, badge.y)].symbol() == "/"
+    });
+    if joined {
+        return description_after(buf, found, index + 1);
+    }
+    let row: String = (badge.end + 1..buf.area.width)
+        .map(|x| buf[(x, badge.y)].symbol().to_string())
+        .collect();
+    let row = row.trim_start();
+    let end = row
+        .char_indices()
+        .find(|(i, c)| row[*i..].starts_with("  ") || ('\u{2500}'..='\u{257f}').contains(c))
+        .map_or(row.len(), |(i, _)| i);
+    row[..end].trim().to_string()
+}
+
+/// Whether `desc` is a description the bindings give `action`: a footer hint
+/// or help entry of its own, or one of the words a dialog or pane uses for it.
+fn describes(desc: &str, action: Action) -> bool {
+    let def = BINDING_DEFS
+        .iter()
+        .find(|def| def.action == action)
+        .expect("every action has a definition");
+    if def.hint_contexts.iter().any(|(_, text)| *text == desc)
+        || def
+            .help
+            .as_ref()
+            .is_some_and(|help| help.description == desc)
+    {
+        return true;
+    }
+    DIALOG_WORDS
+        .iter()
+        .any(|(word, actions)| *word == desc && actions.contains(&action))
+}
+
+/// The words dialogs and pane hint lines use for an action. Each word lists
+/// every action a hint may name with it; a key under a word that is not its
+/// action's is a hint that names the wrong key.
+const DIALOG_WORDS: &[(&str, &[Action])] = &[
+    ("cancel", &[Action::CloseOverlay]),
+    ("close", &[Action::CloseOverlay]),
+    ("clear", &[Action::CloseOverlay, Action::ClearTextField]),
+    ("close diff", &[Action::CloseOverlay]),
+    ("close search", &[Action::CloseOverlay]),
+    (
+        "down",
+        &[
+            Action::MoveDown,
+            Action::ScrollPageDown,
+            Action::ScrollLineDown,
+        ],
+    ),
+    ("up", &[Action::MoveUp, Action::ScrollPageUp]),
+    (
+        "scroll",
+        &[
+            Action::MoveDown,
+            Action::MoveUp,
+            Action::ScrollPageDown,
+            Action::ScrollPageUp,
+        ],
+    ),
+    ("page", &[Action::ScrollPageDown, Action::ScrollPageUp]),
+    (
+        "scroll the message",
+        &[Action::ScrollPageDown, Action::ScrollPageUp],
+    ),
+    ("one line", &[Action::ScrollLineDown]),
+    ("down one line", &[Action::ScrollLineDown]),
+    ("live edge", &[Action::ScrollToBottom]),
+    ("resume at the live edge", &[Action::ScrollToBottom]),
+    ("logs", &[Action::MoveDown, Action::MoveUp]),
+    ("focus", &[Action::ToggleSelection]),
+    ("move focus", &[Action::ToggleSelection]),
+    ("minimize", &[Action::ToggleFullscreen]),
+    ("fullscreen", &[Action::ToggleFullscreen]),
+    ("search", &[Action::SearchToggle, Action::SearchFiles]),
+    ("next match", &[Action::SearchNext]),
+    ("stage/unstage", &[Action::StageUnstage]),
+    (
+        "launch it again",
+        &[Action::ReconnectAgent, Action::FocusAgent],
+    ),
+    ("focus and type", &[Action::FocusAgent]),
+    ("take over", &[Action::FocusAgent]),
+    ("next pane", &[Action::FocusNext]),
+    ("previous pane", &[Action::FocusPrev]),
+    ("actions", &[Action::FocusNext, Action::FocusPrev]),
+    ("next tab", &[Action::NextTab]),
+    ("macros", &[Action::OpenMacroBar]),
+    ("edit text", &[Action::EngageCommitInput]),
+    ("edit", &[Action::EngageCommitInput, Action::Confirm]),
+    ("commit", &[Action::CommitChanges]),
+    ("exit", &[Action::ExitCommitInput]),
+    ("browse", &[Action::ExitPathEditorOnProjectAdd]),
+    ("open", &[Action::OpenEntry, Action::Confirm]),
+    ("go to", &[Action::GoToPath]),
+    ("add current", &[Action::AddCurrentDir]),
+    ("select", &[Action::ToggleMarked]),
+    ("open file", &[Action::OpenStartupCommandLogFile]),
+    ("open folder", &[Action::OpenStartupCommandLogFolder]),
+    ("new", &[Action::NewMacro]),
+    ("delete", &[Action::DeleteMacro]),
+    ("standalone", &[Action::NewStandaloneAgent]),
+    ("done", &[Action::Confirm]),
+    ("confirm", &[Action::Confirm]),
+    ("choose", &[Action::Confirm]),
+    ("apply", &[Action::Confirm]),
+    ("apply now", &[Action::Confirm]),
+    ("save for next time", &[Action::Confirm]),
+    ("use", &[Action::Confirm]),
+    ("run", &[Action::Confirm]),
+    ("remove", &[Action::Confirm]),
+    ("resolve", &[Action::Confirm]),
+    ("attach", &[Action::Confirm]),
+    ("create agent", &[Action::Confirm]),
+    ("expand/collapse", &[Action::Confirm]),
+];
 
 /// Every badge-opening bracket on screen that is never closed: a badge the
 /// edge of its line cut through.
