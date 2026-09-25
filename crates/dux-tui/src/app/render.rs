@@ -9881,7 +9881,9 @@ impl App {
         } else {
             "Kill Running"
         };
-        if let Some(input_area) = top_area {
+        // The list's layout is published ONCE, below, together with the footer
+        // buttons, from exactly what this render call returned.
+        let (input, list) = if let Some(input_area) = top_area {
             let input_block = self.themed_overlay_block(title);
             let input_inner = input_block.inner(input_area);
             Paragraph::new(render_single_line_cursor_input(
@@ -9903,16 +9905,7 @@ impl App {
             let list = picker
                 .block(list_block)
                 .render(frame, list_area, &self.theme);
-            self.overlay_layout.active = OverlayMouseLayout::KillRunning {
-                input: Some(input_inner),
-                list: list.list,
-                items: list.items,
-                offset: list.offset,
-                cancel_button: Rect::default(),
-                hovered_button: Rect::default(),
-                selected_button: Rect::default(),
-                visible_button: Rect::default(),
-            };
+            (Some(input_inner), list)
         } else {
             let list_block = self
                 .themed_overlay_block(title)
@@ -9920,17 +9913,8 @@ impl App {
             let list = picker
                 .block(list_block)
                 .render(frame, list_area, &self.theme);
-            self.overlay_layout.active = OverlayMouseLayout::KillRunning {
-                input: None,
-                list: list.list,
-                items: list.items,
-                offset: list.offset,
-                cancel_button: Rect::default(),
-                hovered_button: Rect::default(),
-                selected_button: Rect::default(),
-                visible_button: Rect::default(),
-            };
-        }
+            (None, list)
+        };
 
         let legend = Line::from(vec![
             Span::raw("  "),
@@ -10012,19 +9996,10 @@ impl App {
             cursor_x += button_widths[index] + gap;
         }
         self.overlay_layout.active = OverlayMouseLayout::KillRunning {
-            input: match self.overlay_layout.active {
-                OverlayMouseLayout::KillRunning { input, .. } => input,
-                _ => None,
-            },
-            list: match self.overlay_layout.active {
-                OverlayMouseLayout::KillRunning { list, .. } => list,
-                _ => Rect::default(),
-            },
-            items: visible_indices.len(),
-            offset: match self.overlay_layout.active {
-                OverlayMouseLayout::KillRunning { offset, .. } => offset,
-                _ => 0,
-            },
+            input,
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
             cancel_button: button_rects[0],
             hovered_button: button_rects[1],
             selected_button: button_rects[2],

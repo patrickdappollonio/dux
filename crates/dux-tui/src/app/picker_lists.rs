@@ -820,6 +820,44 @@ fn the_empty_state_renders_without_a_highlight() {
     });
 }
 
+/// The kill-running list publishes its layout once, after its footer buttons,
+/// so the scroll offset a click resolves against must be the one the list just
+/// drew. Scroll well past the first page, click a visible row, and the runtime
+/// named on that row is the one the cursor lands on.
+#[test]
+fn a_click_on_a_scrolled_kill_running_list_selects_the_clicked_row() {
+    let mut app = test_app(default_bindings());
+    let fixture = fixture(&app, "KillRunning");
+    app.prompt = fixture.tall;
+    render(&mut app);
+    for _ in 0..TALL {
+        press(&mut app, KeyCode::Down);
+    }
+    let buf = render(&mut app);
+    let (list, items, offset) = published_list(app.overlay_layout.active);
+    assert_eq!(items, TALL, "every runtime is published");
+    assert!(
+        offset > 0,
+        "the list must be scrolled for this to mean anything"
+    );
+    // Two rows above the highlight: visible, and a runtime the cursor is not on.
+    let y = highlighted_rows(&app, &buf)[0] - 2;
+    let clicked = row_text(&buf, y);
+    let expected = (0..TALL)
+        .find(|n| clicked.contains(&format!("runtime-{n:02}")))
+        .expect("the clicked row names a runtime");
+    click(&mut app, list.x + 2, y);
+    let PromptState::KillRunning(prompt) = &app.prompt else {
+        panic!("the click closed the picker");
+    };
+    assert_eq!(
+        prompt.list.selected,
+        expected,
+        "clicked the row naming runtime-{expected:02}:\n{}",
+        screen(&buf)
+    );
+}
+
 /// The other half of "the same indicator": the welcome and What's new screens
 /// draw theirs through the same shared scroll view, in the same color, so the
 /// pickers and those two screens cannot drift apart.
