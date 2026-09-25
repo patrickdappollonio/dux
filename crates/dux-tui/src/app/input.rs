@@ -1,3 +1,4 @@
+use super::components::wrap_lines::cluster_width;
 use super::components::{ButtonPressedTarget, PressedButton, next_focus};
 use super::modal::{ModalKeyStep, binding_lookup_is_suppressed, click_target, modal_key_step};
 use super::*;
@@ -794,22 +795,55 @@ fn sgr_button_code(button: MouseButton) -> u16 {
 }
 
 pub(crate) fn startup_command_log_visual_lines(content: &str, width: u16) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+
     if width == 0 {
         return Vec::new();
     }
     let width = usize::from(width);
     let mut lines = Vec::new();
     for line in content.split('\n') {
-        let chars = line.chars().collect::<Vec<_>>();
-        if chars.is_empty() {
+        if line.is_empty() {
             lines.push(String::new());
             continue;
         }
-        for chunk in chars.chunks(width) {
-            lines.push(chunk.iter().collect());
+        // Rows are filled by the columns each glyph is drawn in, so a row of
+        // wide glyphs is as wide as the pane rather than twice as wide. A glyph
+        // wider than the whole pane still gets a row of its own.
+        let mut row = String::new();
+        let mut used = 0usize;
+        for glyph in line.graphemes(true) {
+            let glyph_width = cluster_width(glyph);
+            if used + glyph_width > width && !row.is_empty() {
+                lines.push(std::mem::take(&mut row));
+                used = 0;
+            }
+            row.push_str(glyph);
+            used += glyph_width;
         }
+        lines.push(row);
     }
     lines
+}
+
+/// The glyphs of one wrapped startup-log row with the column each starts at.
+///
+/// The one place the log's columns are decided: both log surfaces draw from
+/// it and the copy of a selection reads it, so a selected column is the column
+/// a glyph was drawn at, and a wide glyph takes the two columns it covers
+/// instead of the next glyph drawing over its second half.
+pub(crate) fn startup_log_row_glyphs(row: &str) -> Vec<(u16, &str)> {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let mut col = 0u16;
+    row.graphemes(true)
+        .map(|glyph| {
+            let at = col;
+            let width = u16::try_from(cluster_width(glyph)).unwrap_or(u16::MAX);
+            col = col.saturating_add(width);
+            (at, glyph)
+        })
+        .collect()
 }
 
 fn startup_command_log_max_scroll(content: &str, body: Option<Rect>) -> u16 {
@@ -11173,20 +11207,20 @@ impl App {
             let Some(line) = lines.get(row as usize) else {
                 continue;
             };
-            let start_col = if row == start.row {
-                start.col as usize
-            } else {
-                0
-            };
+            let start_col = if row == start.row { start.col } else { 0 };
             let end_col = if row == end.row {
-                end.col as usize + 1
+                end.col.saturating_add(1)
             } else {
-                line.chars().count()
+                u16::MAX
             };
-            let text = line
-                .chars()
-                .skip(start_col)
-                .take(end_col.saturating_sub(start_col))
+            // A glyph is selected when any column it covers is.
+            let text = startup_log_row_glyphs(line)
+                .into_iter()
+                .filter(|(col, glyph)| {
+                    let width = u16::try_from(cluster_width(glyph)).unwrap_or(1).max(1);
+                    *col < end_col && col.saturating_add(width) > start_col
+                })
+                .map(|(_, glyph)| glyph)
                 .collect::<String>();
             selected.push(text.trim_end().to_string());
         }

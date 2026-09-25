@@ -74,14 +74,16 @@ fn detect_browser(ua: &str) -> Option<&'static str> {
     None
 }
 
-/// Cut `text` to at most `max` DISPLAY characters, marking the cut.
+/// Cut `text` to at most `max` characters, marking the cut.
+///
+/// A data cap on what dux-core stores and sends, not a display cut: it counts
+/// characters, not the columns a glyph is drawn in, so no surface should fit
+/// text to a row with it. The terminal UI cuts to columns with its own ellipsis
+/// helper; this bounds a device label and a tab verdict's excerpt before either
+/// reaches a surface.
 ///
 /// Char based, never byte based: a `User-Agent` is attacker-supplied and can
 /// carry multi-byte UTF-8, and byte slicing inside a character panics.
-///
-/// Public because the surface that renders a label has a second, narrower budget
-/// the parser cannot know: the width actually left on the line after the rest of
-/// the sentence. Cutting twice with one function keeps the ellipsis consistent.
 pub fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();

@@ -1,16 +1,18 @@
 //! Cutting user-visible text to a column budget, and marking the cut.
 //!
-//! Every function here measures in DISPLAY COLUMNS through the wrapper's own
-//! [`char_display_width`], so a CJK glyph or an emoji counts as the two cells it
-//! occupies and the result never overflows the budget it was cut for. A byte
-//! count or a character count against a column budget is exactly the bug these
-//! exist to prevent: a byte slice panics inside a multi-byte character, and a
-//! character count lets a row of wide glyphs come back twice as wide as its
-//! column.
+//! Every function here walks the text in extended grapheme clusters, the unit
+//! ratatui draws in, and measures each with the wrapper's own
+//! [`cluster_width`], so a CJK glyph or an emoji sequence counts as the columns
+//! it is drawn in and the result never overflows the budget it was cut for. A
+//! byte count or a character count against a column budget is exactly the bug
+//! these exist to prevent: a byte slice panics inside a multi-byte character,
+//! and a character count lets a row of wide glyphs come back twice as wide as
+//! its column, or an emoji presentation selector one column wider than
+//! measured.
 //!
-//! The text is walked in clusters, a character plus the zero-width characters
-//! after it, so a combining mark is never separated from the letter it sits on
-//! and never left dangling at the start of a kept tail.
+//! Walking clusters also means a combining mark stays on its letter and an
+//! emoji sequence (a ZWJ family, a flag, a keycap, a skin tone) is kept or
+//! dropped whole, never cut into a dangling joiner.
 //!
 //! The cut mark is always the single-cell `…`. When a wide glyph does not fit the
 //! last cell before the mark, the mark follows the kept text directly and the
@@ -19,31 +21,18 @@
 
 use ratatui::style::Style;
 use ratatui::text::Span;
+use unicode_segmentation::UnicodeSegmentation;
 
-use super::wrap_lines::{char_display_width, display_width};
+use super::wrap_lines::{cluster_width, display_width};
 
 /// The mark every cut shows, one cell wide.
 pub(crate) const ELLIPSIS: &str = "\u{2026}";
 
-/// `text` split into clusters (a character plus any zero-width characters that
-/// follow it), each paired with its display width.
+/// `text` split into extended grapheme clusters, each paired with its width.
 fn clusters(text: &str) -> Vec<(&str, usize)> {
-    let mut out: Vec<(&str, usize)> = Vec::new();
-    let mut start = 0usize;
-    let mut width = 0usize;
-    for (index, ch) in text.char_indices() {
-        let w = char_display_width(ch);
-        if index > start && w > 0 {
-            out.push((&text[start..index], width));
-            start = index;
-            width = 0;
-        }
-        width += w;
-    }
-    if start < text.len() {
-        out.push((&text[start..], width));
-    }
-    out
+    text.graphemes(true)
+        .map(|cluster| (cluster, cluster_width(cluster)))
+        .collect()
 }
 
 /// The longest prefix of `text` at most `max` columns wide, with no mark.
@@ -184,7 +173,76 @@ pub(crate) fn mark_cut_row(spans: Vec<Span<'static>>, width: u16) -> Vec<Span<'s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use ratatui::style::Color;
+
+    /// The columns `text` takes when ratatui draws it, which is the truth every
+    /// cut here must stay within.
+    fn drawn_width(text: &str) -> usize {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
+        usize::from(buf.set_stringn(0, 0, text, 200, Style::default()).0)
+    }
+
+    /// Emoji sequences that are one glyph two columns wide as drawn, though
+    /// they are several characters: a presentation selector, a keycap, a ZWJ
+    /// family, a regional-indicator flag and a skin tone.
+    const SEQUENCES: [&str; 5] = [
+        "\u{26a0}\u{fe0f}",
+        "1\u{fe0f}\u{20e3}",
+        "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+        "\u{1f1ef}\u{1f1f5}",
+        "\u{1f44d}\u{1f3fd}",
+    ];
+
+    #[test]
+    fn a_presentation_selector_is_measured_as_drawn() {
+        let text = "\u{26a0}\u{fe0f} Fix the build \u{26a0}\u{fe0f}";
+        let cut = ellipsize_end(text, 8);
+        assert_eq!(cut, "\u{26a0}\u{fe0f} Fix …");
+        assert!(
+            drawn_width(&cut) <= 8,
+            "{cut:?} draws {}",
+            drawn_width(&cut)
+        );
+    }
+
+    #[test]
+    fn emoji_sequences_are_one_glyph_and_never_split() {
+        for glyph in SEQUENCES {
+            assert_eq!(display_width(glyph), 2, "{glyph:?}");
+            let text = glyph.repeat(5);
+            assert_eq!(
+                ellipsize_end(&text, 5),
+                format!("{glyph}{glyph}…"),
+                "{glyph:?}"
+            );
+            assert_eq!(
+                ellipsize_start(&text, 5),
+                format!("…{glyph}{glyph}"),
+                "{glyph:?}"
+            );
+            assert_eq!(
+                ellipsize_middle(&text, 5),
+                format!("{glyph}…{glyph}"),
+                "{glyph:?}"
+            );
+            for max in 0..=12 {
+                for cut in [
+                    ellipsize_end(&text, max),
+                    ellipsize_start(&text, max),
+                    ellipsize_middle(&text, max),
+                    fit_to_width(&text, max),
+                ] {
+                    assert!(
+                        drawn_width(&cut) <= max,
+                        "{glyph:?} at {max}: {cut:?} draws {}",
+                        drawn_width(&cut)
+                    );
+                }
+            }
+        }
+    }
 
     /// A combining acute accent, zero columns wide.
     const ACUTE: char = '\u{0301}';
@@ -194,6 +252,17 @@ mod tests {
         assert_eq!(ellipsize_end("hello", 5), "hello");
         assert_eq!(ellipsize_end("hello world", 6), "hello…");
         assert_eq!(display_width(&ellipsize_end("hello world", 6)), 6);
+    }
+
+    /// Box-drawing and block glyphs are several bytes but one column each, as a
+    /// provider's banner copied into a status often is.
+    #[test]
+    fn multi_byte_single_column_glyphs_are_cut_by_columns() {
+        let cut = ellipsize_end("Copied: \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}end", 10);
+        assert_eq!(cut, "Copied: \u{2500}…");
+        let cut = ellipsize_end("\u{2588}\u{2588}\u{259b}\u{2598} Opus 4.6 (1M context)", 12);
+        assert_eq!(display_width(&cut), 12);
+        assert!(cut.ends_with('…'));
     }
 
     #[test]

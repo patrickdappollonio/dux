@@ -26,19 +26,36 @@
 //! Not [`crate::diff::wrap_diff_lines`], which is diff-specific: it re-emits
 //! the line-number gutter on every continuation row and indents past it.
 
+use ratatui::buffer::CellWidth;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::is_name_chip;
 
-/// Display width of `s`, via ratatui's own unicode-width measurement, so the
-/// wrapper agrees with the renderer about how wide a CJK glyph or an emoji is.
-/// `Span::raw` borrows, so there is no allocation.
+/// Display width of `s`: the sum of its extended grapheme clusters, each
+/// measured by [`cluster_width`], which is how ratatui's buffer draws text. So
+/// the wrapper and every cut agree with the renderer about how wide a CJK glyph
+/// or an emoji sequence is.
 ///
 /// Shared with the dialog bodies' own indenter, which must decide "does this
 /// line fit" by the measure the widget will render it at.
 pub(crate) fn display_width(s: &str) -> usize {
-    Span::raw(s).width()
+    s.graphemes(true).map(cluster_width).sum()
+}
+
+/// Display width of one extended grapheme cluster, the unit ratatui draws in.
+///
+/// Measured whole rather than character by character: an emoji presentation
+/// selector turns a one-column `⚠` into a two-column glyph, and a ZWJ family is
+/// three emoji drawn as one, so a per-character sum is wrong in both
+/// directions. A lone control character is measured as before, because the
+/// buffer's own measure refuses one.
+pub(crate) fn cluster_width(cluster: &str) -> usize {
+    if cluster.len() == 1 && cluster.as_bytes()[0].is_ascii_control() {
+        return Span::raw(cluster).width();
+    }
+    usize::from(cluster.cell_width())
 }
 
 /// Display width of one character, in terminal cells.
@@ -84,28 +101,34 @@ pub(crate) const NO_BREAK_SPACE: char = '\u{a0}';
 fn wrap_one(line: &Line<'_>, width: usize, out: &mut Vec<Line<'static>>) {
     // Already fits: emit it verbatim, spans and all, so the common case stays
     // byte-identical to the un-wrapped paragraph, styled trailing padding included.
-    if line.width() <= width {
+    let line_width: usize = line.spans.iter().map(|s| display_width(&s.content)).sum();
+    if line_width <= width {
         out.push(owned_line(line));
         return;
     }
 
     let mut wrapper = LineWrapper::new(width);
-    let mut word: Vec<(char, Style)> = Vec::new();
+    let mut word: Vec<Cell> = Vec::new();
     let mut word_width = 0usize;
     for span in &line.spans {
         // A chip joins the word it touches, pads and inner spaces alike, so
         // the only break points around it are the whitespace outside it.
         let whole = is_name_chip(span.style);
-        for ch in span.content.chars() {
-            if !whole && breaks_a_row(ch) {
+        for cluster in span.content.graphemes(true) {
+            let cell = Cell {
+                text: cluster.to_string(),
+                width: cluster_width(cluster),
+                style: span.style,
+            };
+            if !whole && cluster.chars().count() == 1 && cluster.chars().all(breaks_a_row) {
                 if !word.is_empty() {
                     wrapper.push_word(std::mem::take(&mut word), word_width);
                     word_width = 0;
                 }
-                wrapper.push_whitespace(ch, span.style);
+                wrapper.push_whitespace(cell);
             } else {
-                word_width += char_display_width(ch);
-                word.push((ch, span.style));
+                word_width += cell.width;
+                word.push(cell);
             }
         }
     }
@@ -120,16 +143,23 @@ fn wrap_one(line: &Line<'_>, width: usize, out: &mut Vec<Line<'static>>) {
     }));
 }
 
+/// One drawn glyph: an extended grapheme cluster, its width and its style.
+struct Cell {
+    text: String,
+    width: usize,
+    style: Style,
+}
+
 /// Greedy word-wrap state machine for one input line.
 struct LineWrapper {
     width: usize,
-    rows: Vec<Vec<(char, Style)>>,
+    rows: Vec<Vec<Cell>>,
     /// The row being filled.
-    row: Vec<(char, Style)>,
+    row: Vec<Cell>,
     row_width: usize,
     /// Whitespace seen since the last word, held back until we know whether it
     /// lands inside a row or at a break.
-    space: Vec<(char, Style)>,
+    space: Vec<Cell>,
     space_width: usize,
 }
 
@@ -145,9 +175,9 @@ impl LineWrapper {
         }
     }
 
-    fn push_whitespace(&mut self, ch: char, style: Style) {
-        self.space_width += char_display_width(ch);
-        self.space.push((ch, style));
+    fn push_whitespace(&mut self, cell: Cell) {
+        self.space_width += cell.width;
+        self.space.push(cell);
     }
 
     /// Move the held-back whitespace into the current row.
@@ -167,7 +197,7 @@ impl LineWrapper {
         self.space_width = 0;
     }
 
-    fn push_word(&mut self, word: Vec<(char, Style)>, word_width: usize) {
+    fn push_word(&mut self, word: Vec<Cell>, word_width: usize) {
         // It fits after the pending whitespace: keep filling this row.
         if self.row_width + self.space_width + word_width <= self.width {
             self.take_space();
@@ -196,20 +226,19 @@ impl LineWrapper {
             self.space.clear();
             self.space_width = 0;
         }
-        for (ch, style) in word {
-            let cw = char_display_width(ch);
-            // `row_width > 0` keeps a single character wider than the whole row
+        for cell in word {
+            // `row_width > 0` keeps a single glyph wider than the whole row
             // from looping forever; it overflows one row instead, as ratatui's
             // renderer would clip it.
-            if self.row_width + cw > self.width && self.row_width > 0 {
+            if self.row_width + cell.width > self.width && self.row_width > 0 {
                 self.break_row();
             }
-            self.row_width += cw;
-            self.row.push((ch, style));
+            self.row_width += cell.width;
+            self.row.push(cell);
         }
     }
 
-    fn finish(mut self) -> Vec<Vec<(char, Style)>> {
+    fn finish(mut self) -> Vec<Vec<Cell>> {
         // Trailing whitespace only survives if it fits: past the row edge it is
         // invisible, and keeping it would make the row wider than `width` and
         // break the one-line-per-row guarantee the caller clamps with.
@@ -238,22 +267,22 @@ fn owned_line(line: &Line<'_>) -> Line<'static> {
     out
 }
 
-/// Rebuild a row of styled characters into spans, merging runs that share a
+/// Rebuild a row of styled glyphs into spans, merging runs that share a
 /// style so the output is no more fragmented than it has to be.
-fn cells_to_line(cells: Vec<(char, Style)>) -> Line<'static> {
+fn cells_to_line(cells: Vec<Cell>) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut current = String::new();
     let mut current_style: Option<Style> = None;
-    for (ch, style) in cells {
+    for Cell { text, style, .. } in cells {
         match current_style {
-            Some(prev) if prev == style => current.push(ch),
+            Some(prev) if prev == style => current.push_str(&text),
             Some(prev) => {
                 spans.push(Span::styled(std::mem::take(&mut current), prev));
-                current.push(ch);
+                current.push_str(&text);
                 current_style = Some(style);
             }
             None => {
-                current.push(ch);
+                current.push_str(&text);
                 current_style = Some(style);
             }
         }
@@ -274,6 +303,33 @@ mod tests {
 
     fn texts(lines: &[Line<'static>]) -> Vec<String> {
         lines.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    /// The columns a row takes when ratatui draws it.
+    fn drawn_width(line: &Line<'_>) -> usize {
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 200, 1));
+        let text = line.to_string();
+        usize::from(buf.set_stringn(0, 0, &text, 200, Style::default()).0)
+    }
+
+    /// A presentation selector makes `⚠` two columns as drawn, so a row holding
+    /// one is one column wider than its characters say; the wrapper measures
+    /// what is drawn, so nothing is pushed past the edge and clipped.
+    #[test]
+    fn an_emoji_sequence_is_measured_as_drawn_and_kept_whole() {
+        let line = Line::from(" \u{25cf} \u{26a0}\u{fe0f} aaaaaaaaaaaaaaa");
+        let rows = wrap_styled_lines(&[line], 20);
+        assert_eq!(
+            texts(&rows),
+            vec![" \u{25cf} \u{26a0}\u{fe0f}", "aaaaaaaaaaaaaaa"]
+        );
+        for row in &rows {
+            assert!(drawn_width(row) <= 20, "{row:?}");
+        }
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let rows = wrap_styled_lines(&[Line::from(family.repeat(3))], 5);
+        assert_eq!(texts(&rows), vec![family.repeat(2), family.to_string()]);
+        assert_eq!(display_width(family), 2);
     }
 
     #[test]

@@ -4009,13 +4009,16 @@ impl App {
                 let room = usize::from(term_area.width)
                     .saturating_sub(10)
                     .saturating_sub(chrome);
-                let name = ellipsize_end(name, room);
-                let label_len = chrome + display_width(&name);
+                let cut = ellipsize_end(name, room);
+                // A cut name already ends in the mark; the loading dots after
+                // it would be a second one.
+                let dots = if cut == name { "..." } else { "" };
+                let label_len = display_width(prefix) + display_width(&cut) + dots.len();
                 (
                     vec![
                         Span::styled(prefix, Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::styled(name, Style::default().fg(self.theme.branch_fg)),
-                        Span::styled("...", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(cut, Style::default().fg(self.theme.branch_fg)),
+                        Span::styled(dots, Style::default().fg(self.theme.hint_desc_fg)),
                     ],
                     label_len,
                 )
@@ -5052,7 +5055,7 @@ impl App {
 
         // Helper: push a full-width banner line.
         let push_banner = |lines: &mut Vec<Line<'static>>, title: &str, width: usize| {
-            let padding = width.saturating_sub(title.chars().count() + 3);
+            let padding = width.saturating_sub(display_width(title) + 3);
             let text = format!(" {title}{}", " ".repeat(padding));
             if !lines.is_empty() {
                 lines.push(Line::from(""));
@@ -5684,7 +5687,7 @@ impl App {
         let id_col = prompt
             .options
             .iter()
-            .map(|option| option.id.chars().count())
+            .map(|option| display_width(&option.id))
             .max()
             .unwrap_or(0)
             .max(8);
@@ -5702,7 +5705,7 @@ impl App {
                 } else {
                     format!("  {source_label}")
                 };
-                let id_padded = format!("{:width$}", option.id, width = id_col);
+                let id_padded = pad_to_width(&option.id, id_col);
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         id_padded,
@@ -6033,7 +6036,7 @@ impl App {
         let provider_col = prompt
             .options
             .iter()
-            .map(|option| option.provider.as_str().chars().count())
+            .map(|option| display_width(option.provider.as_str()))
             .max()
             .unwrap_or(0)
             .max(8);
@@ -6060,7 +6063,7 @@ impl App {
                 // creates something, whatever provider it names.
                 let is_no_op =
                     prompt.mode == ChangeAgentProviderMode::Retarget && option.is_current;
-                let name = format!("{:width$}", option.provider.as_str(), width = provider_col);
+                let name = pad_to_width(option.provider.as_str(), provider_col);
                 ListItem::new(Line::from(vec![
                     active_provider_marker_span(is_no_op, &self.theme),
                     Span::styled(
@@ -6130,7 +6133,7 @@ impl App {
         let provider_col = prompt
             .options
             .iter()
-            .map(|option| option.provider.as_str().chars().count())
+            .map(|option| display_width(option.provider.as_str()))
             .max()
             .unwrap_or(0)
             .max(8);
@@ -6143,7 +6146,7 @@ impl App {
                 } else {
                     "available"
                 };
-                let name = format!("{:width$}", option.provider.as_str(), width = provider_col);
+                let name = pad_to_width(option.provider.as_str(), provider_col);
                 ListItem::new(Line::from(vec![
                     active_provider_marker_span(option.is_current, &self.theme),
                     Span::styled(
@@ -6234,8 +6237,8 @@ impl App {
             .options
             .iter()
             .map(|option| match &option.provider {
-                Some(provider) => provider.as_str().chars().count(),
-                None => "inherit global default".chars().count(),
+                Some(provider) => display_width(provider.as_str()),
+                None => display_width("inherit global default"),
             })
             .max()
             .unwrap_or(0)
@@ -6259,7 +6262,7 @@ impl App {
                     }
                     _ => "available",
                 };
-                let name = format!("{name:width$}", width = provider_col);
+                let name = pad_to_width(&name, provider_col);
                 ListItem::new(Line::from(vec![
                     active_provider_marker_span(option.is_current, &self.theme),
                     Span::styled(
@@ -9681,22 +9684,24 @@ impl App {
             .enumerate()
         {
             let y = body_inner.y + display_row as u16;
-            for (display_col, ch) in line.chars().take(body_inner.width as usize).enumerate() {
-                let x = body_inner.x + display_col as u16;
+            for (display_col, glyph) in crate::app::input::startup_log_row_glyphs(line) {
+                if display_col >= body_inner.width {
+                    break;
+                }
+                let x = body_inner.x + display_col;
                 let selected = self
                     .startup_log_selection
                     .as_ref()
                     .is_some_and(|selection| {
                         selection.anchor != selection.end
-                            && selection
-                                .contains(scroll_offset + display_row as u16, display_col as u16)
+                            && selection.contains(scroll_offset + display_row as u16, display_col)
                     });
                 let style = if selected {
                     self.theme.selection_style()
                 } else {
                     Style::default().fg(self.theme.text_fg)
                 };
-                frame.buffer_mut().set_string(x, y, ch.to_string(), style);
+                frame.buffer_mut().set_string(x, y, glyph, style);
             }
         }
 
@@ -11347,10 +11352,13 @@ impl App {
                 Style::default().fg(self.theme.text_fg)
             };
             let y = term_area.y + row as u16;
-            for (col, ch) in line.chars().take(term_area.width as usize).enumerate() {
+            for (col, glyph) in crate::app::input::startup_log_row_glyphs(line) {
+                if col >= term_area.width {
+                    break;
+                }
                 let selected = self.terminal_selection.as_ref().is_some_and(|selection| {
                     selection.anchor != selection.end
-                        && selection.contains(viewer.scroll_offset + row as u16, col as u16)
+                        && selection.contains(viewer.scroll_offset + row as u16, col)
                 });
                 let style = if selected {
                     self.theme.selection_style()
@@ -11359,7 +11367,7 @@ impl App {
                 };
                 frame
                     .buffer_mut()
-                    .set_string(term_area.x + col as u16, y, ch.to_string(), style);
+                    .set_string(term_area.x + col, y, glyph, style);
             }
         }
 
@@ -19249,54 +19257,6 @@ mod tests {
             path_completion_display_label("/Users/patrick/project/"),
             ".../project/"
         );
-    }
-
-    #[test]
-    fn truncate_status_text_ascii_short_enough() {
-        assert_eq!(ellipsize_end("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_status_text_ascii_exact_fit() {
-        assert_eq!(ellipsize_end("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_status_text_ascii_truncated() {
-        assert_eq!(ellipsize_end("hello world", 6), "hello…");
-    }
-
-    #[test]
-    fn truncate_status_text_multibyte_no_panic() {
-        // Box-drawing char ─ is 3 bytes but 1 char.
-        let text = "Copied: ─────end";
-        let result = ellipsize_end(text, 10);
-        assert_eq!(result.chars().count(), 10);
-        assert!(result.ends_with('…'));
-    }
-
-    #[test]
-    fn truncate_status_text_block_characters() {
-        // Block characters like ██▛▘ are multi-byte; slicing by byte would panic.
-        let text = "██▛▘ Opus 4.6 (1M context) · Claude Max";
-        let result = ellipsize_end(text, 12);
-        assert_eq!(result.chars().count(), 12);
-        assert!(result.ends_with('…'));
-    }
-
-    #[test]
-    fn truncate_status_text_available_zero() {
-        assert_eq!(ellipsize_end("hello", 0), "");
-    }
-
-    #[test]
-    fn truncate_status_text_available_one() {
-        assert_eq!(ellipsize_end("hello", 1), "…");
-    }
-
-    #[test]
-    fn truncate_status_text_empty_input() {
-        assert_eq!(ellipsize_end("", 10), "");
     }
 
     #[test]

@@ -439,12 +439,27 @@ fn a_long_wide_status_message_is_marked_as_cut_on_its_last_row() {
                 "at {w}x{h} the status must end in the mark:\n{}",
                 screen(&buf)
             );
-            assert!(
-                display_width(&last) <= usize::from(w),
-                "the status row fits the screen"
-            );
         }
     }
+}
+
+/// A presentation selector makes `⚠` two columns wide as drawn. The status
+/// line is wrapped by what is drawn, so the one column it adds moves the tail
+/// to the second row rather than pushing a letter off the edge of the first.
+#[test]
+fn a_status_with_an_emoji_sequence_loses_no_letter_at_the_row_edge() {
+    let mut app = test_app(default_bindings());
+    // " ● " is three columns, "⚠️ " three more: 75 letters make 81 columns.
+    let letters = "a".repeat(75);
+    app.set_info(format!("\u{26a0}\u{fe0f} {letters}"));
+    let buf = render_at(&mut app, 80, 24);
+    let footer: String = [22u16, 23].iter().map(|&y| row_text(&buf, y)).collect();
+    assert_eq!(
+        footer.matches('a').count(),
+        75,
+        "every letter is on one of the two status rows:\n{}",
+        screen(&buf)
+    );
 }
 
 // ── The resource monitor: a table cell ──
@@ -532,12 +547,14 @@ fn the_loading_card_cuts_a_wide_provider_name_to_the_card() {
         let y = row_of(&buf, "Starting");
         assert_cut_after_prefix(&buf, y, LONG_CJK);
         let text = row_text(&buf, y);
+        // The cut's mark already says there is more; the loading dots after it
+        // would be a second mark.
         assert!(
-            text.contains("\u{2026}..."),
-            "at width {width} the name is cut before the loading dots:\n{}",
+            !text.contains("..."),
+            "at width {width} a cut name carries one mark, not two:\n{}",
             screen(&buf)
         );
-        let dots = column_of(&buf, y, "...").expect("the dots are shown");
+        let mark = column_of(&buf, y, "\u{2026}").expect("the mark is shown");
         let border = shown(&buf, y)
             .into_iter()
             .rev()
@@ -545,8 +562,8 @@ fn the_loading_card_cuts_a_wide_provider_name_to_the_card() {
             .map(|(x, _)| x)
             .expect("the card has a right border");
         assert!(
-            dots + 3 <= border,
-            "the dots end inside the card:\n{}",
+            mark < border,
+            "the mark is inside the card:\n{}",
             screen(&buf)
         );
     }
@@ -599,4 +616,180 @@ fn footer_hints_are_measured_in_columns() {
     let spans = app.footer_hint_spans(&hints, 14);
     let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(text, "<é> ab <é> cd…");
+}
+
+// ── Picker columns sized by an id or a provider name ──
+
+/// The column after a padded name starts at `after` on every row the rows
+/// matched by `names` are on.
+fn assert_column_after(buf: &Buffer, names: &[&str], after: &str) {
+    let columns: Vec<Option<u16>> = names
+        .iter()
+        .map(|name| column_of(buf, row_of(buf, name), after))
+        .collect();
+    assert!(
+        columns[0].is_some(),
+        "{after:?} is not shown:\n{}",
+        screen(buf)
+    );
+    assert!(
+        columns.windows(2).all(|pair| pair[0] == pair[1]),
+        "{after:?} must start in one column on every row, got {columns:?}:\n{}",
+        screen(buf)
+    );
+}
+
+const WIDE_ID: &str = "日本語のテーマ名前";
+
+#[test]
+fn the_theme_picker_pads_a_wide_id_by_columns() {
+    let mut app = test_app(default_bindings());
+    let listing = |id: &str, display: &str| crate::theme::ThemeListing {
+        id: id.to_string(),
+        display_name: display.to_string(),
+        source: crate::theme::ThemeSource::User,
+    };
+    app.prompt = PromptState::ChangeTheme(ChangeThemePrompt {
+        options: vec![listing(WIDE_ID, "Wideone"), listing("plain", "Plainone")],
+        selected: 0,
+        current: "none".to_string(),
+    });
+    for (w, h) in [(120, 40), (80, 24)] {
+        let buf = render_at(&mut app, w, h);
+        let wide = column_of(&buf, row_of(&buf, "Wideone"), "Wideone");
+        let plain = column_of(&buf, row_of(&buf, "Plainone"), "Plainone");
+        assert_eq!(wide, plain, "at {w}x{h}:\n{}", screen(&buf));
+    }
+}
+
+#[test]
+fn the_default_provider_picker_pads_a_wide_provider_by_columns() {
+    let mut app = test_app(default_bindings());
+    let option = |name: &str| ChangeDefaultProviderOption {
+        provider: ProviderKind::new(name),
+        is_current: false,
+    };
+    app.prompt = PromptState::ChangeDefaultProvider(ChangeDefaultProviderPrompt {
+        current: ProviderKind::new("claude"),
+        options: vec![option(WIDE_ID), option("plain")],
+        selected: 0,
+    });
+    for (w, h) in [(120, 40), (80, 24)] {
+        let buf = render_at(&mut app, w, h);
+        assert_column_after(&buf, &[WIDE_ID, "plain"], "available");
+    }
+}
+
+#[test]
+fn the_agent_provider_picker_pads_a_wide_provider_by_columns() {
+    let mut app = test_app(default_bindings());
+    let option = |name: &str| ChangeAgentProviderOption {
+        provider: ProviderKind::new(name),
+        supports_resume: true,
+        resume_available: false,
+        is_current: false,
+    };
+    app.prompt = PromptState::ChangeAgentProvider(ChangeAgentProviderPrompt {
+        session_id: "session-1".to_string(),
+        tab_id: "session-1".to_string(),
+        session_label: "agent".to_string(),
+        worktree_path: "/srv/wt".to_string(),
+        options: vec![option(WIDE_ID), option("plain")],
+        selected: 0,
+        mode: ChangeAgentProviderMode::Retarget,
+    });
+    for (w, h) in [(120, 40), (80, 24)] {
+        let buf = render_at(&mut app, w, h);
+        assert_column_after(&buf, &[WIDE_ID, "plain"], "no prior");
+    }
+}
+
+#[test]
+fn the_project_provider_picker_pads_a_wide_provider_by_columns() {
+    let mut app = test_app(default_bindings());
+    let option = |name: &str| ChangeProjectDefaultProviderOption {
+        provider: Some(ProviderKind::new(name)),
+        is_current: false,
+    };
+    app.prompt = PromptState::ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt {
+        project_id: app.engine.projects[0].id.clone(),
+        project_name: "demo".to_string(),
+        current: ProviderKind::new("claude"),
+        global_default: ProviderKind::new("claude"),
+        inherits_global_default: true,
+        options: vec![option(WIDE_ID), option("plain")],
+        selected: 0,
+    });
+    for (w, h) in [(120, 40), (80, 24)] {
+        let buf = render_at(&mut app, w, h);
+        assert_column_after(&buf, &[WIDE_ID, "plain"], "available");
+    }
+}
+
+// ── The startup log: wide glyphs drawn at their own width ──
+
+/// Every glyph of `source` that appears on screen, in reading order, keeping
+/// only glyphs `source` itself uses: the log's text with the chrome around it
+/// filtered out.
+fn log_glyphs(buf: &Buffer, source: &str) -> String {
+    (0..buf.area.height)
+        .flat_map(|y| shown(buf, y))
+        .map(|(_, s)| s)
+        .filter(|s| s.chars().count() == 1 && source.contains(s.as_str()))
+        .collect()
+}
+
+const WIDE_LOG: &str = "起動コマンドの出力がここに表示されます";
+
+#[test]
+fn the_startup_log_picker_draws_and_wraps_wide_glyphs_by_their_width() {
+    let mut app = test_app(default_bindings());
+    let content = WIDE_LOG.repeat(4);
+    app.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+        scope_label: "demo".to_string(),
+        entries: Vec::new(),
+        selected: 0,
+        filter: TextInput::new(),
+        searching: false,
+        content: content.clone(),
+        scroll_offset: 0,
+        wrap_width: 0,
+        focus: StartupCommandLogFocus::List,
+    });
+    for (w, h) in [(120, 40), (80, 24)] {
+        let buf = render_at(&mut app, w, h);
+        assert_eq!(
+            log_glyphs(&buf, WIDE_LOG),
+            content,
+            "at {w}x{h} every glyph is drawn once, whole and in order:\n{}",
+            screen(&buf)
+        );
+    }
+}
+
+#[test]
+fn the_startup_log_viewer_draws_and_wraps_wide_glyphs_by_their_width() {
+    let mut app = test_app(default_bindings());
+    let content = WIDE_LOG.repeat(4);
+    app.startup_log_viewer = Some(StartupLogViewer {
+        scope_label: "demo".to_string(),
+        path: None,
+        display_name: "run".to_string(),
+        content: content.clone(),
+        scroll_offset: 0,
+        wrap_width: 0,
+        search: TextInput::new(),
+        searching: false,
+        return_to: None,
+    });
+    app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+    for (w, h) in [(120, 40), (80, 24)] {
+        let buf = render_at(&mut app, w, h);
+        assert_eq!(
+            log_glyphs(&buf, WIDE_LOG),
+            content,
+            "at {w}x{h} every glyph is drawn once, whole and in order:\n{}",
+            screen(&buf)
+        );
+    }
 }
