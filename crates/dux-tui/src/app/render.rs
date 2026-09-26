@@ -6892,9 +6892,9 @@ impl App {
                     Some(project) => {
                         let mut folder = vec![
                             Span::styled(" Folder: ", label_style),
-                            Span::styled(
-                                git::display_path_relative_to(&project.path, start_dir),
-                                text_style,
+                            name_chip(
+                                &git::display_path_relative_to(&project.path, start_dir),
+                                &self.theme,
                             ),
                         ];
                         if project.path_missing {
@@ -6991,9 +6991,10 @@ impl App {
             .border_style(Style::default().fg(self.theme.overlay_border))
             .style(Style::default().bg(self.theme.overlay_bg))
             .title_bottom(hints);
+        let cursor = Self::project_actions_cursor(&prompt, &rows);
         let rendered = PickerList::new(
             items,
-            Some(prompt.selected),
+            Some(cursor),
             "No actions: this project is no longer available.",
         )
         .block(list_block)
@@ -7119,30 +7120,50 @@ impl App {
                 } else {
                     text_style.add_modifier(Modifier::BOLD)
                 };
-                let note = match (held, branch.location) {
-                    (Some(holder), _) => {
-                        format!(
-                            "unavailable: checked out by {}",
-                            self.branch_holder_label(holder)
-                        )
-                    }
-                    (None, dux_core::git::BranchLocation::Remote) => {
-                        "on origin only; a local branch is created from it".to_string()
-                    }
+                // The holder's agent and folder are names, so they are chips;
+                // both come from the listing worker, never from a lookup here.
+                let note: Vec<Span<'static>> = match (held, branch.location) {
+                    (Some(holder), _) => match prompt.holders.get(&branch.name) {
+                        Some(BranchHolder {
+                            agent: Some(agent),
+                            path,
+                        }) => vec![
+                            Span::styled("unavailable: checked out by agent ", dim),
+                            name_chip(agent, &self.theme),
+                            Span::styled(" at ", dim),
+                            name_chip(path, &self.theme),
+                        ],
+                        Some(BranchHolder { agent: None, path }) => vec![
+                            Span::styled("unavailable: checked out at ", dim),
+                            name_chip(path, &self.theme),
+                        ],
+                        None => vec![
+                            Span::styled("unavailable: checked out at ", dim),
+                            name_chip(&holder.display().to_string(), &self.theme),
+                        ],
+                    },
+                    (None, dux_core::git::BranchLocation::Remote) => vec![Span::styled(
+                        "on origin only; a local branch is created from it",
+                        dim,
+                    )],
                     (None, dux_core::git::BranchLocation::Local) if is_base => {
-                        "current base".to_string()
+                        vec![Span::styled("current base", dim)]
                     }
-                    (None, dux_core::git::BranchLocation::Local) => String::new(),
+                    (None, dux_core::git::BranchLocation::Local) => Vec::new(),
                 };
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     active_provider_marker_span(is_base, &self.theme),
                     Span::styled(
                         pad_to_width(&ellipsize_middle(&branch.name, name_col), name_col),
                         name_style,
                     ),
                     Span::raw("  "),
-                    Span::styled(ellipsize_end(&note, note_col), dim),
-                ]))
+                ];
+                spans.extend(ellipsize_spans(
+                    note,
+                    u16::try_from(note_col).unwrap_or(u16::MAX),
+                ));
+                ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
         let empty = if prompt.loading {
@@ -21108,6 +21129,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         app.prompt = PromptState::StartupCommandLogs(crate::app::StartupCommandLogPrompt {
+            return_to: None,
             scope_label: "my-proj".to_string(),
             entries: vec![dux_core::startup::StartupCommandLogEntry {
                 path: std::path::PathBuf::from("/tmp/startup.log"),
@@ -21580,12 +21602,14 @@ mod tests {
         };
         match which {
             "ConfigureStartupCommand" => PromptState::ConfigureStartupCommand {
+                return_to: None,
                 project_id: "p1".to_string(),
                 project_name: "demo".to_string(),
                 input: field(),
                 focus,
             },
             "ConfigureProjectEnv" => PromptState::ConfigureProjectEnv {
+                return_to: None,
                 project_id: "p1".to_string(),
                 project_name: "demo".to_string(),
                 input: field(),
@@ -21816,6 +21840,7 @@ mod tests {
     fn startup_log_filter_box_renders_as_focused_while_searching() {
         let log_prompt = |searching: bool| {
             PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+                return_to: None,
                 scope_label: "demo".to_string(),
                 entries: Vec::new(),
                 selected: 0,
@@ -23039,6 +23064,7 @@ mod tests {
             let project = app.engine.projects[0].clone();
             PromptState::ConfirmDeleteWorktree(Box::new(super::ConfirmDeleteWorktreePrompt {
                 previous: super::ManageWorktreesPrompt {
+                    return_to: None,
                     project: project.clone(),
                     entries: Vec::new(),
                     loading: false,
@@ -23748,6 +23774,7 @@ mod tests {
         // body, where Space does nothing whatsoever.
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "p1".to_string(),
             project_name: "p1".to_string(),
             input: TextInput::with_text("make dev".to_string()).with_multiline(8),
@@ -23761,6 +23788,7 @@ mod tests {
 
         // On a button, Space really does act, so the segment comes back.
         app.prompt = PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "p1".to_string(),
             project_name: "p1".to_string(),
             input: TextInput::with_text("make dev".to_string()).with_multiline(8),

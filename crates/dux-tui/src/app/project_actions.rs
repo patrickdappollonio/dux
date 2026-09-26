@@ -9,9 +9,10 @@
 //! with no agent selected, opens the project list and runs on the pick
 //! ([`App::run_project_command`]).
 //!
-//! A confirmation raised from the action list carries it in its `return_to`, so
-//! cancelling steps back to the list, the way the browser's dialogs close back
-//! onto its Projects list.
+//! Anything opened from the action list (a confirmation, Project info, a
+//! settings editor, the worktree manager, the startup logs) carries it in its
+//! `return_to`, so closing it by any way out steps back to the list, the way the
+//! browser's dialogs close back onto its Projects list.
 
 use std::sync::mpsc::TryRecvError;
 
@@ -19,6 +20,49 @@ use super::modal::{ModalKeyStep, binding_lookup_is_suppressed, modal_key_step};
 use super::*;
 use crate::keybindings::BindingScope;
 use dux_core::git::BranchChoice;
+
+/// Name who holds each held branch: the agent whose folder is the holder, when
+/// one is, compared on canonical paths so a symlinked spelling still matches.
+/// Runs in the listing worker, never on the UI thread, because it reads the
+/// filesystem.
+pub(crate) fn resolve_branch_holders(
+    branches: &[BranchChoice],
+    agents: &[(String, String)],
+) -> HashMap<String, BranchHolder> {
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let agents: Vec<(&str, PathBuf)> = agents
+        .iter()
+        .map(|(label, dir)| (label.as_str(), canonical(Path::new(dir))))
+        .collect();
+    branches
+        .iter()
+        .filter_map(|branch| {
+            let holder = branch.held_by.as_ref()?;
+            let holder_canonical = canonical(holder);
+            let agent = agents
+                .iter()
+                .find(|(_, dir)| *dir == holder_canonical)
+                .map(|(label, _)| (*label).to_string());
+            Some((
+                branch.name.clone(),
+                BranchHolder {
+                    agent,
+                    path: holder.display().to_string(),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Take the action list a project configure editor was opened from.
+pub(crate) fn configure_return_to(prompt: &mut PromptState) -> Option<Box<ProjectActionsPrompt>> {
+    match prompt {
+        PromptState::ConfigureStartupCommand { return_to, .. }
+        | PromptState::ConfigureProjectEnv { return_to, .. } => return_to.take(),
+        _ => None,
+    }
+}
 
 /// The Change base branch picker's `/`-search predicate: a case-insensitive
 /// substring of the branch name. `needle` is expected pre-lowercased.
@@ -59,7 +103,9 @@ impl App {
                 }
                 self.begin_pr_agent_for_project(project.clone())
             }
-            ProjectAction::Worktrees => self.begin_manage_worktrees_for_project(project.clone()),
+            ProjectAction::Worktrees => {
+                self.begin_manage_worktrees_for_project(project.clone(), return_to)
+            }
             ProjectAction::NewTerminal => {
                 self.prompt = PromptState::None;
                 self.show_project_terminal(project)
@@ -78,14 +124,18 @@ impl App {
                 Ok(())
             }
             ProjectAction::DefaultProvider => {
-                self.open_change_project_default_provider_for(project)
+                self.open_change_project_default_provider_for(project, return_to)
             }
             ProjectAction::AutoReopen => self.toggle_project_auto_reopen_agents_for(project),
-            ProjectAction::StartupCommand => self.open_configure_startup_command_for(project),
-            ProjectAction::Environment => self.open_configure_project_env_for(project),
+            ProjectAction::StartupCommand => {
+                self.open_configure_startup_command_for(project, return_to)
+            }
+            ProjectAction::Environment => self.open_configure_project_env_for(project, return_to),
             ProjectAction::StartupLogs => {
-                // The logs open in their own modal once they are read.
-                self.prompt = PromptState::None;
+                // The logs open in their own modal once they are read, over
+                // whatever is open then: the action list stays up meanwhile
+                // (a project with no runs yet answers on the status line), and
+                // the arriving logs take it as the place to step back to.
                 self.open_project_startup_command_logs(project);
                 Ok(())
             }
@@ -114,6 +164,7 @@ impl App {
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ProjectActions(ProjectActionsPrompt {
+            action: None,
             target,
             selected: 0,
             return_to,
@@ -240,17 +291,43 @@ impl App {
         };
     }
 
+    /// Where the action list's cursor is among `rows`: on the action it was
+    /// on when that action is still a row, else at its last index, clamped.
+    pub(crate) fn project_actions_cursor(
+        prompt: &ProjectActionsPrompt,
+        rows: &[ProjectActionRow],
+    ) -> usize {
+        prompt
+            .action
+            .and_then(|action| rows.iter().position(|row| row.action == action))
+            .unwrap_or(prompt.selected)
+            .min(rows.len().saturating_sub(1))
+    }
+
+    /// Put the action list's cursor on row `index` of `rows`.
+    fn place_project_actions_cursor(&mut self, index: usize, rows: &[ProjectActionRow]) {
+        if let PromptState::ProjectActions(prompt) = &mut self.prompt
+            && let Some(row) = rows.get(index)
+        {
+            prompt.selected = index;
+            prompt.action = Some(row.action);
+        }
+    }
+
     /// Run the action list's selected row. An unavailable row says why and runs
     /// nothing.
     pub(crate) fn activate_project_action_row(&mut self) -> Result<()> {
         let PromptState::ProjectActions(prompt) = &self.prompt else {
             return Ok(());
         };
-        let prompt = prompt.clone();
+        let mut prompt = prompt.clone();
         let rows = self.project_action_rows(&prompt.target);
-        let Some(row) = rows.get(prompt.selected).cloned() else {
+        let cursor = Self::project_actions_cursor(&prompt, &rows);
+        let Some(row) = rows.get(cursor).cloned() else {
             return Ok(());
         };
+        prompt.selected = cursor;
+        prompt.action = Some(row.action);
         if let Some(reason) = row.unavailable {
             self.set_warning(reason);
             return Ok(());
@@ -280,24 +357,19 @@ impl App {
         let PromptState::ProjectActions(prompt) = &self.prompt else {
             return Ok(None);
         };
-        let rows = self.project_action_rows(&prompt.target).len();
+        let rows = self.project_action_rows(&prompt.target);
+        let cursor = Self::project_actions_cursor(prompt, &rows);
         let action = self
             .bindings
             .lookup(&key, BindingScope::Palette)
             .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
         match action {
             Some(Action::CloseOverlay) => self.leave_project_actions(),
-            Some(Action::MoveDown) => {
-                if let PromptState::ProjectActions(prompt) = &mut self.prompt
-                    && prompt.selected + 1 < rows
-                {
-                    prompt.selected += 1;
-                }
+            Some(Action::MoveDown) if cursor + 1 < rows.len() => {
+                self.place_project_actions_cursor(cursor + 1, &rows);
             }
-            Some(Action::MoveUp) => {
-                if let PromptState::ProjectActions(prompt) = &mut self.prompt {
-                    prompt.selected = prompt.selected.saturating_sub(1);
-                }
+            Some(Action::MoveUp) if cursor > 0 => {
+                self.place_project_actions_cursor(cursor - 1, &rows);
             }
             Some(Action::Confirm) => self.activate_project_action_row()?,
             _ => {}
@@ -309,14 +381,10 @@ impl App {
     /// runs it, like every other picker.
     pub(super) fn click_project_action_row(&mut self, index: usize, double_click: bool) {
         let rows = match &self.prompt {
-            PromptState::ProjectActions(prompt) => self.project_action_rows(&prompt.target).len(),
+            PromptState::ProjectActions(prompt) => self.project_action_rows(&prompt.target),
             _ => return,
         };
-        if let PromptState::ProjectActions(prompt) = &mut self.prompt
-            && index < rows
-        {
-            prompt.selected = index;
-        }
+        self.place_project_actions_cursor(index, &rows);
         if double_click && let Err(err) = self.activate_project_action_row() {
             self.set_error(format!("{err:#}"));
         }
@@ -485,6 +553,7 @@ impl App {
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ChangeBaseBranch(Box::new(ChangeBaseBranchPrompt {
+            holders: std::collections::HashMap::new(),
             project_id: project.id.clone(),
             project_name: project.name.clone(),
             current_base: project.leading_branch.clone(),
@@ -515,16 +584,39 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let project_id = project.id.clone();
         let path = PathBuf::from(&project.path);
+        // The agents as they are now, labels and folders, so the worker can say
+        // which agent holds a branch without the UI thread touching disk.
+        let agents: Vec<(String, String)> = self
+            .engine
+            .sessions
+            .iter()
+            .map(|session| (session.display_label(), session.directory().to_string()))
+            .collect();
         thread::spawn(move || {
-            let result = std::panic::catch_unwind(|| {
-                dux_core::base_branch::load_branch_listing(
+            let answer = std::panic::catch_unwind(|| {
+                let result = dux_core::base_branch::load_branch_listing(
                     &path,
                     dux_core::base_branch::BASE_BRANCH_FETCH_TIMEOUT,
                 )
-                .map_err(|error| format!("{error:#}"))
+                .map_err(|error| format!("{error:#}"));
+                let holders = match &result {
+                    Ok(listing) => resolve_branch_holders(&listing.branches, &agents),
+                    Err(_) => HashMap::new(),
+                };
+                (result, holders)
             })
-            .unwrap_or_else(|_| Err("the branch listing worker panicked".to_string()));
-            let _ = tx.send(BranchListingAnswer { project_id, result });
+            .unwrap_or_else(|_| {
+                (
+                    Err("the branch listing worker panicked".to_string()),
+                    HashMap::new(),
+                )
+            });
+            let (result, holders) = answer;
+            let _ = tx.send(BranchListingAnswer {
+                project_id,
+                result,
+                holders,
+            });
         });
         self.pending_branch_listing = Some(PendingBranchListing { rx, op });
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
@@ -546,11 +638,12 @@ impl App {
             return;
         };
         self.mark_frame_dirty();
-        let (project_id, result) = match answer {
-            Some(answer) => (Some(answer.project_id), answer.result),
+        let (project_id, result, holders) = match answer {
+            Some(answer) => (Some(answer.project_id), answer.result, answer.holders),
             None => (
                 None,
                 Err("the branch listing worker stopped without answering".to_string()),
+                HashMap::new(),
             ),
         };
         let outcome = match &mut self.prompt {
@@ -565,14 +658,19 @@ impl App {
                     Ok(listing) => {
                         prompt.fetch_note = listing.fetch_error();
                         prompt.branches = listing.branches;
+                        prompt.holders = holders;
+                        // `selected` indexes the VISIBLE rows: a search typed
+                        // while the list was loading already narrows them.
+                        let visible = prompt
+                            .list
+                            .visible_indices(&prompt.branches, branch_choice_matches);
                         prompt.list.selected = prompt
                             .current_base
                             .as_deref()
                             .and_then(|base| {
-                                prompt
-                                    .branches
+                                visible
                                     .iter()
-                                    .position(|branch| branch.name == base)
+                                    .position(|index| prompt.branches[*index].name == base)
                             })
                             .unwrap_or(0);
                         BranchListingOutcome::Loaded
@@ -586,24 +684,6 @@ impl App {
             _ => BranchListingOutcome::Dismissed,
         };
         self.apply_reaction(pending.op.resolve(&outcome).into_reaction());
-    }
-
-    /// Who holds a branch another worktree has checked out: the agent working
-    /// there when dux knows one, else the folder.
-    pub(crate) fn branch_holder_label(&self, holder: &Path) -> String {
-        let agent = self.engine.sessions.iter().find(|session| {
-            Path::new(session.directory()) == holder
-                || std::fs::canonicalize(session.directory())
-                    .is_ok_and(|canonical| canonical == holder)
-        });
-        match agent {
-            Some(session) => format!(
-                "agent \"{}\" at {}",
-                session.display_label(),
-                holder.display()
-            ),
-            None => holder.display().to_string(),
-        }
     }
 
     /// Pick the highlighted branch: a free one raises the confirmation, a held
@@ -626,13 +706,19 @@ impl App {
             return;
         };
         if let Some(holder) = &branch.held_by {
+            let by = match prompt.holders.get(&branch.name) {
+                Some(BranchHolder {
+                    agent: Some(agent),
+                    path,
+                }) => format!("agent \"{agent}\" at {path}"),
+                Some(BranchHolder { agent: None, path }) => path.clone(),
+                None => holder.display().to_string(),
+            };
             let message = format!(
                 "Can't change the base branch of project \"{}\" to \"{}\": it is checked out \
-                 by {}, and git checks a branch out in one place at a time. Pick another \
+                 by {by}, and git checks a branch out in one place at a time. Pick another \
                  branch, or remove that worktree first.",
-                prompt.project_name,
-                branch.name,
-                self.branch_holder_label(holder)
+                prompt.project_name, branch.name,
             );
             self.set_warning(message);
             return;
@@ -686,16 +772,9 @@ impl App {
         };
         match action {
             Some(Action::CloseOverlay) => self.leave_change_base_branch(),
-            Some(Action::Confirm) => {
-                if let PromptState::ChangeBaseBranch(prompt) = &mut self.prompt
-                    && prompt.list.searching
-                {
-                    // Enter in the search row commits the query first.
-                    prompt.list.searching = false;
-                } else {
-                    self.pick_change_base_branch_row();
-                }
-            }
+            // Enter picks the highlighted visible row, mid-search too, as the
+            // project list does.
+            Some(Action::Confirm) => self.pick_change_base_branch_row(),
             _ => {
                 let PromptState::ChangeBaseBranch(prompt) = &mut self.prompt else {
                     return Some(false);
@@ -749,13 +828,20 @@ impl App {
         };
         let prompt = (**prompt).clone();
         if !confirm {
-            let base = self
+            let name = prompt.previous.project_name.clone();
+            let Some(project) = self
                 .engine
                 .projects
                 .iter()
                 .find(|p| p.id == prompt.previous.project_id)
-                .and_then(|p| p.leading_branch.clone());
-            let name = prompt.previous.project_name.clone();
+            else {
+                self.prompt = PromptState::None;
+                self.set_info(format!(
+                    "Project \"{name}\" is gone, so there is no base branch to change."
+                ));
+                return false;
+            };
+            let base = project.leading_branch.clone();
             self.prompt = PromptState::ChangeBaseBranch(Box::new(prompt.previous));
             self.set_info(match base {
                 Some(base) => format!(
@@ -877,5 +963,203 @@ mod tests {
         assert!(text.contains("Base branch: no base recorded yet"), "{text}");
         assert!(text.contains("Folder is on:  topic "), "{text}");
         assert!(text.contains("Folder: "), "{text}");
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    fn branch(name: &str) -> BranchChoice {
+        BranchChoice {
+            name: name.to_string(),
+            location: dux_core::git::BranchLocation::Local,
+            held_by: None,
+        }
+    }
+
+    fn picker(app: &App, loading: bool, branches: Vec<BranchChoice>) -> PromptState {
+        let project = &app.engine.projects[0];
+        PromptState::ChangeBaseBranch(Box::new(ChangeBaseBranchPrompt {
+            holders: std::collections::HashMap::new(),
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            current_base: Some("develop".to_string()),
+            loading,
+            branches,
+            fetch_note: None,
+            error: None,
+            list: SearchableList::new(),
+            return_to: None,
+        }))
+    }
+
+    fn type_search(app: &mut App, query: &str) {
+        press(app, KeyCode::Char('/'));
+        for c in query.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    /// Enter in the picker's search row picks the highlighted visible branch,
+    /// as the project list does, so the footer's "choose" is true.
+    #[test]
+    fn enter_while_searching_the_branches_picks_the_highlighted_one() {
+        let mut app = test_app(default_bindings());
+        app.prompt = picker(
+            &app,
+            false,
+            vec![branch("develop"), branch("main"), branch("release")],
+        );
+        type_search(&mut app, "rel");
+        press(&mut app, KeyCode::Enter);
+        match &app.prompt {
+            PromptState::ConfirmChangeBaseBranch(confirm) => assert_eq!(confirm.branch, "release"),
+            other => panic!("one Enter picks the match, got {other:?}"),
+        }
+    }
+
+    /// A listing that lands while a search is narrowing the rows selects
+    /// within the visible rows, so Enter picks what is highlighted.
+    #[test]
+    fn a_listing_that_lands_mid_search_selects_among_the_visible_rows() {
+        let mut app = test_app(default_bindings());
+        app.prompt = picker(&app, true, Vec::new());
+        type_search(&mut app, "rel");
+        press(&mut app, KeyCode::Enter);
+        let project_id = app.engine.projects[0].id.clone();
+        let (tx, rx) = mpsc::channel();
+        let op = dux_core::engine::status_op("Listing...")
+            .resolve_in_handler(|_: &BranchListingOutcome| dux_core::engine::Final::clear());
+        app.pending_branch_listing = Some(PendingBranchListing { rx, op });
+        tx.send(BranchListingAnswer {
+            holders: std::collections::HashMap::new(),
+            project_id,
+            result: Ok(dux_core::base_branch::BranchListing {
+                branches: vec![
+                    branch("alpha"),
+                    branch("beta"),
+                    branch("develop"),
+                    branch("release"),
+                ],
+                fetch: dux_core::base_branch::OriginFetch::Fetched,
+            }),
+        })
+        .unwrap();
+        app.drain_branch_listing();
+
+        press(&mut app, KeyCode::Enter);
+        match &app.prompt {
+            PromptState::ConfirmChangeBaseBranch(confirm) => assert_eq!(confirm.branch, "release"),
+            other => panic!("Enter picks the one visible row, got {other:?}"),
+        }
+    }
+
+    /// The header's folder is a name, so it is the chip.
+    #[test]
+    fn the_action_list_header_chips_the_folder() {
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.open_project_actions(
+            ProjectActionsTarget::Project {
+                id: project.id.clone(),
+            },
+            None,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        let buffer = terminal.backend().buffer().clone();
+        let chip_bg = app.theme.name_style().bg;
+        let row = (0..buffer.area.height)
+            .find(|&y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("Folder: ")
+            })
+            .expect("the folder row");
+        let line: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, row)].symbol())
+            .collect();
+        let start = line.find("Folder: ").unwrap() + "Folder: ".len();
+        let x = line[..start].chars().count() as u16 + 1;
+        assert_eq!(
+            buffer[(x, row)].bg,
+            chip_bg.expect("chip bg"),
+            "the folder path is chipped: {line}"
+        );
+    }
+
+    /// When the rows change under the cursor (GitHub becomes unavailable and
+    /// its row leaves), the cursor stays on the action it was on and Enter
+    /// runs that action, not whatever now sits at the old index.
+    #[test]
+    fn the_action_list_follows_its_action_when_the_rows_change() {
+        let mut app = test_app(default_bindings());
+        app.engine.github_integration_enabled = true;
+        app.engine.gh_status = crate::model::GhStatus::Available;
+        let project = app.engine.projects[0].clone();
+        app.open_project_actions(
+            ProjectActionsTarget::Project {
+                id: project.id.clone(),
+            },
+            None,
+        );
+        let rows = app
+            .project_action_rows(&ProjectActionsTarget::Project {
+                id: project.id.clone(),
+            })
+            .len();
+        for _ in 0..rows {
+            press(&mut app, KeyCode::Down);
+        }
+        // The last row is Remove project…; GitHub goes away under it.
+        app.engine.gh_status = crate::model::GhStatus::NotInstalled;
+        press(&mut app, KeyCode::Enter);
+        match &app.prompt {
+            PromptState::ConfirmRemoveProject { .. } => {}
+            // The seeded project has an agent, so removal is refused out loud,
+            // which is still the Remove action running.
+            PromptState::ProjectActions(_) => assert_eq!(
+                app.status.text(),
+                "Delete all agents in this project first."
+            ),
+            other => panic!("Enter runs Remove project…, got {other:?}"),
+        }
+    }
+
+    /// A held row's holder, agent and folder, are names, so both are chips.
+    #[test]
+    fn a_held_branch_row_chips_its_agent_and_folder() {
+        let mut app = test_app(default_bindings());
+        let mut held = branch("agent-one");
+        held.held_by = Some(PathBuf::from("/srv/wt/agent-one"));
+        app.prompt = picker(&app, false, vec![branch("develop"), held]);
+        if let PromptState::ChangeBaseBranch(prompt) = &mut app.prompt {
+            prompt.holders.insert(
+                "agent-one".to_string(),
+                BranchHolder {
+                    agent: Some("Alpha".to_string()),
+                    path: "/srv/wt/agent-one".to_string(),
+                },
+            );
+        }
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        let buffer = terminal.backend().buffer().clone();
+        let chip_bg = app.theme.name_style().bg.expect("chip bg");
+        let chipped = |needle: &str| {
+            (0..buffer.area.height).any(|y| {
+                let line: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                line.find(needle).is_some_and(|at| {
+                    let x = line[..at].chars().count() as u16;
+                    buffer[(x, y)].bg == chip_bg
+                })
+            })
+        };
+        assert!(chipped("Alpha"), "the agent is a chip");
+        assert!(chipped("/srv/wt/agent-one"), "the folder is a chip");
     }
 }

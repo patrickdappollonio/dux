@@ -4335,9 +4335,38 @@ impl App {
         }
     }
 
-    fn close_startup_command_logs(&mut self) {
+    pub(super) fn close_startup_command_logs(&mut self) {
+        let return_to = match &mut self.prompt {
+            PromptState::StartupCommandLogs(prompt) => prompt.return_to.take(),
+            _ => None,
+        };
         self.prompt = PromptState::None;
         self.startup_log_selection = None;
+        self.return_to_project_actions(return_to);
+    }
+
+    /// Close whichever provider picker is open. The project one steps back to
+    /// the action list it was opened from.
+    pub(super) fn close_provider_picker(&mut self) {
+        let return_to = match &mut self.prompt {
+            PromptState::ChangeProjectDefaultProvider(prompt) => prompt.return_to.take(),
+            _ => None,
+        };
+        self.prompt = PromptState::None;
+        // The picker's instruction goes with the picker.
+        self.clear_prompt_hint();
+        self.return_to_project_actions(return_to);
+    }
+
+    /// Close the worktree manager, back onto the action list it was opened
+    /// from.
+    pub(super) fn close_worktree_manager(&mut self) {
+        let return_to = match &mut self.prompt {
+            PromptState::ManageWorktrees(prompt) => prompt.return_to.take(),
+            _ => None,
+        };
+        self.prompt = PromptState::None;
+        self.return_to_project_actions(return_to);
     }
 
     fn apply_startup_logs_action(
@@ -4451,7 +4480,7 @@ impl App {
         };
         // Selection skips rows that cannot be removed.
         match self.bindings.lookup(&key, BindingScope::Palette) {
-            Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+            Some(Action::CloseOverlay) => self.close_worktree_manager(),
             Some(Action::MoveDown) => {
                 let removable = removable_worktree_indices(&prompt.entries);
                 if let Some(current) = prompt.selected
@@ -5595,11 +5624,7 @@ impl App {
             .lookup(&key, BindingScope::Palette)
             .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
         match action {
-            Some(Action::CloseOverlay) => {
-                self.prompt = PromptState::None;
-                // The picker's instruction goes with the picker.
-                self.clear_prompt_hint();
-            }
+            Some(Action::CloseOverlay) => self.close_provider_picker(),
             Some(Action::MoveDown) => self.move_provider_picker_selection(true),
             Some(Action::MoveUp) => self.move_provider_picker_selection(false),
             Some(Action::Confirm) => match which {
@@ -5982,10 +6007,13 @@ impl App {
         set_configure_focus(&mut self.prompt, focus);
     }
 
-    /// Abandon the configure modal. Writes nothing: Escape never saves.
+    /// Abandon the configure modal. Writes nothing: Escape never saves. One
+    /// opened from a project's action list steps back to it.
     pub(super) fn cancel_configure_modal(&mut self) {
+        let return_to = super::project_actions::configure_return_to(&mut self.prompt);
         self.prompt = PromptState::None;
         self.input_target = InputTarget::None;
+        self.return_to_project_actions(return_to);
     }
 
     /// Commit whichever configure modal is open.
@@ -9599,8 +9627,7 @@ impl App {
                 if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
                     prompt.focus = StartupCommandLogFocus::Close;
                 }
-                self.prompt = PromptState::None;
-                self.startup_log_selection = None;
+                self.close_startup_command_logs();
                 false
             }
             // The clicked pill takes focus first, so the shared activation path
@@ -13079,6 +13106,7 @@ not_a_real_action = ["x"]
 
     fn startup_command_logs_prompt() -> StartupCommandLogPrompt {
         StartupCommandLogPrompt {
+            return_to: None,
             scope_label: "demo".to_string(),
             entries: vec![
                 crate::startup::StartupCommandLogEntry {
@@ -13835,6 +13863,7 @@ not_a_real_action = ["x"]
     fn configure_startup_command_edit_mode_keeps_enter_in_input() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::with_text("npm install".to_string()).with_multiline(6),
@@ -13860,6 +13889,7 @@ not_a_real_action = ["x"]
     fn configure_startup_command_escape_exits_edit_mode_only() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::with_text("npm install".to_string()).with_multiline(6),
@@ -13881,6 +13911,7 @@ not_a_real_action = ["x"]
     fn configure_startup_command_ctrl_d_clears_input() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::with_text("npm install".to_string()).with_multiline(6),
@@ -13903,6 +13934,7 @@ not_a_real_action = ["x"]
     fn configure_startup_command_double_click_enters_edit_mode() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::with_text("npm install\nnpm test".to_string()).with_multiline(6),
@@ -13931,6 +13963,7 @@ not_a_real_action = ["x"]
 
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::new()
@@ -13979,12 +14012,14 @@ not_a_real_action = ["x"]
         let field = |lines: usize| TextInput::with_text(text.to_string()).with_multiline(lines);
         match which {
             "ConfigureStartupCommand" => PromptState::ConfigureStartupCommand {
+                return_to: None,
                 project_id: project_id.to_string(),
                 project_name: "demo".to_string(),
                 input: field(6),
                 focus: ConfigureFieldFocus::Input,
             },
             "ConfigureProjectEnv" => PromptState::ConfigureProjectEnv {
+                return_to: None,
                 project_id: project_id.to_string(),
                 project_name: "demo".to_string(),
                 input: field(8),
@@ -24031,6 +24066,7 @@ cyan = "#00ffff"
             .position(|r| matches!(r, crate::app::ManageWorktreeVisualRow::Entry(1)))
             .expect("a held worktree is listed, not hidden");
         app.prompt = PromptState::ManageWorktrees(crate::app::ManageWorktreesPrompt {
+            return_to: None,
             project,
             entries,
             loading: false,
@@ -28141,6 +28177,7 @@ cyan = "#00ffff"
             .join("\n");
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            return_to: None,
             scope_label: "project \"demo\"".to_string(),
             entries: Vec::new(),
             selected: 0,
@@ -33464,6 +33501,7 @@ cyan = "#00ffff"
     fn paste_into_a_configure_modal_requires_engagement() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::new().with_multiline(4),
@@ -36005,6 +36043,7 @@ cyan = "#00ffff"
     fn the_startup_log_picker_search_row_keeps_its_caret_and_word_erase_keys() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            return_to: None,
             scope_label: "demo".to_string(),
             entries: Vec::new(),
             selected: 0,
@@ -36089,6 +36128,7 @@ cyan = "#00ffff"
         let bindings = bindings_with_overrides(&[(Action::ClearTextField, &["ctrl-u"])]);
         let mut app = test_app(bindings);
         app.prompt = PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::with_text("npm install".to_string()).with_multiline(6),
@@ -36836,6 +36876,7 @@ cyan = "#00ffff"
     fn the_startup_log_picker_filter_takes_a_click() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            return_to: None,
             scope_label: "demo".to_string(),
             entries: Vec::new(),
             selected: 0,

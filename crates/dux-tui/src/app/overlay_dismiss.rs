@@ -242,11 +242,9 @@ impl App {
             | PromptState::DebugInput { .. }
             | PromptState::PickEditor { .. }
             | PromptState::PickProjectWorktree(_)
-            | PromptState::ManageWorktrees(_)
             | PromptState::PickProject { .. }
             | PromptState::ChangeAgentProvider(_)
             | PromptState::ChangeDefaultProvider(_)
-            | PromptState::ChangeProjectDefaultProvider(_)
             | PromptState::SetTailscaleMode(_)
             | PromptState::Command { .. }
             | PromptState::ConfirmNonDefaultBranch { .. } => {
@@ -269,10 +267,11 @@ impl App {
 
             // Closing the log viewer must also drop the drag-selection state,
             // or a stale selection outlives the modal that owned it.
-            PromptState::StartupCommandLogs(_) => {
-                self.prompt = PromptState::None;
-                self.startup_log_selection = None;
-            }
+            PromptState::StartupCommandLogs(_) => self.close_startup_command_logs(),
+            // Both step back to the action list they were opened from, as
+            // their Escape does.
+            PromptState::ChangeProjectDefaultProvider(_) => self.close_provider_picker(),
+            PromptState::ManageWorktrees(_) => self.close_worktree_manager(),
 
             // Dismissal is what records the running version as seen, so this
             // must go through the stamping helper.
@@ -570,6 +569,7 @@ mod tests {
             (
                 "ConfigureStartupCommand",
                 PromptState::ConfigureStartupCommand {
+                    return_to: None,
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     input: TextInput::with_text("half-typed-name".to_string()),
@@ -579,6 +579,7 @@ mod tests {
             (
                 "ConfigureProjectEnv",
                 PromptState::ConfigureProjectEnv {
+                    return_to: None,
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     input: TextInput::with_text("half-typed-name".to_string()),
@@ -1314,6 +1315,7 @@ mod tests {
     fn outside_click_dismisses_the_startup_command_log_viewer() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            return_to: None,
             scope_label: "demo".to_string(),
             entries: Vec::new(),
             selected: 0,

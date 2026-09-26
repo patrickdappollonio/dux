@@ -19,7 +19,11 @@ impl App {
 
     /// Per-project body for `ManageWorktrees`: opens the manager and spawns the
     /// listing worker.
-    pub(crate) fn begin_manage_worktrees_for_project(&mut self, project: Project) -> Result<()> {
+    pub(crate) fn begin_manage_worktrees_for_project(
+        &mut self,
+        project: Project,
+        return_to: Option<Box<ProjectActionsPrompt>>,
+    ) -> Result<()> {
         if project.path_missing {
             self.prompt = PromptState::None;
             self.set_warning(format!("Project path not found: {}", project.path));
@@ -29,6 +33,7 @@ impl App {
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ManageWorktrees(ManageWorktreesPrompt {
+            return_to,
             project: project.clone(),
             entries: Vec::new(),
             loading: true,
@@ -119,6 +124,8 @@ impl App {
         }
         self.prompt = PromptState::None;
         self.dispatch_worktree_removal(&prompt);
+        // A manager opened from a project's action list closes back onto it.
+        self.return_to_project_actions(prompt.previous.return_to.clone());
         false
     }
 
@@ -200,7 +207,7 @@ mod tests {
         // rather than one per layer.
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
-        app.begin_manage_worktrees_for_project(project)
+        app.begin_manage_worktrees_for_project(project, None)
             .expect("opening the manager succeeds");
 
         let op_id = app
@@ -250,6 +257,7 @@ mod tests {
         let project = app.engine.projects[0].clone();
         app.prompt = PromptState::None;
         ManageWorktreesPrompt {
+            return_to: None,
             project,
             selected: removable_worktree_indices(&entries).into_iter().next(),
             entries,
@@ -449,7 +457,8 @@ mod tests {
 
         // Load the manager the way the palette command does, then wait for the
         // listing worker (a real dependency, bounded).
-        app.begin_manage_worktrees_for_project(project).unwrap();
+        app.begin_manage_worktrees_for_project(project, None)
+            .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             app.drain_events();

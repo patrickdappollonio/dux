@@ -214,6 +214,7 @@ fn the_worktree_manager_cuts_a_wide_folder_name_in_the_middle_by_columns() {
     let mut app = test_app(default_bindings());
     let project = app.engine.projects[0].clone();
     app.prompt = PromptState::ManageWorktrees(ManageWorktreesPrompt {
+        return_to: None,
         project,
         entries: vec![managed(LONG_CJK, "brone"), managed("plain", "brtwo")],
         loading: false,
@@ -715,6 +716,7 @@ fn the_project_provider_picker_pads_a_wide_provider_by_columns() {
         is_current: false,
     };
     app.prompt = PromptState::ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt {
+        return_to: None,
         project_id: app.engine.projects[0].id.clone(),
         project_name: "demo".to_string(),
         current: ProviderKind::new("claude"),
@@ -749,6 +751,7 @@ fn the_startup_log_picker_draws_and_wraps_wide_glyphs_by_their_width() {
     let mut app = test_app(default_bindings());
     let content = WIDE_LOG.repeat(4);
     app.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+        return_to: None,
         scope_label: "demo".to_string(),
         entries: Vec::new(),
         selected: 0,

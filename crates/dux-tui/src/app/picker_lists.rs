@@ -367,6 +367,7 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
             // more than an 80x24 screen shows under its header.
             let actions = |id: &str| {
                 PromptState::ProjectActions(ProjectActionsPrompt {
+                    action: None,
                     target: ProjectActionsTarget::Project { id: id.to_string() },
                     selected: 0,
                     return_to: None,
@@ -384,6 +385,7 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
             let labels = names("branch-");
             let change = |labels: &[String]| {
                 PromptState::ChangeBaseBranch(Box::new(ChangeBaseBranchPrompt {
+                    holders: std::collections::HashMap::new(),
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     current_base: Some("main".to_string()),
@@ -433,6 +435,7 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
             let labels = names("tree-");
             let manage = |labels: &[String], selected| {
                 PromptState::ManageWorktrees(ManageWorktreesPrompt {
+                    return_to: None,
                     project: project.clone(),
                     entries: labels.iter().map(|l| managed_worktree(l)).collect(),
                     loading: false,
@@ -530,6 +533,7 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
             let labels = names("provider-");
             let change = |labels: &[String]| {
                 PromptState::ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt {
+                    return_to: None,
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     current: ProviderKind::new("claude"),
@@ -610,6 +614,7 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
             let labels = names("run-");
             let logs = |labels: &[String]| {
                 PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+                    return_to: None,
                     scope_label: "project".to_string(),
                     entries: labels
                         .iter()

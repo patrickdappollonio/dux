@@ -513,6 +513,7 @@ pub(crate) fn project_default_provider_prompt(
     project_name: String,
 ) -> ChangeProjectDefaultProviderPrompt {
     ChangeProjectDefaultProviderPrompt {
+        return_to: None,
         project_id,
         project_name,
         current: ProviderKind::new("claude"),

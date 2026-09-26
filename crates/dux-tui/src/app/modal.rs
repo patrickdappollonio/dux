@@ -200,7 +200,7 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // A project's actions: rows with a selection cursor, and picking one
         // runs it. No buttons.
         | PromptState::ProjectActions(_)
-        // Branches with a selection cursor and a type-immediately filter;
+        // Branches with a selection cursor and a `/`-toggled search row;
         // picking a free one raises the confirmation. No buttons.
         | PromptState::ChangeBaseBranch(_)
         | PromptState::PickProjectWorktree(_)
@@ -592,6 +592,7 @@ pub(super) mod tests {
     #[test]
     fn the_startup_log_modal_is_a_picker() {
         let logs = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            return_to: None,
             scope_label: "demo".to_string(),
             entries: Vec::new(),
             selected: 0,
@@ -731,6 +732,7 @@ pub(super) mod tests {
     /// variant serving three modals - see the note on `modal_spec`.
     fn manage_worktrees_prompt(project: &crate::model::Project) -> ManageWorktreesPrompt {
         ManageWorktreesPrompt {
+            return_to: None,
             project: project.clone(),
             entries: Vec::new(),
             loading: false,
@@ -743,6 +745,7 @@ pub(super) mod tests {
         project: &crate::model::Project,
     ) -> crate::app::ChangeBaseBranchPrompt {
         crate::app::ChangeBaseBranchPrompt {
+            holders: std::collections::HashMap::new(),
             project_id: project.id.clone(),
             project_name: project.name.clone(),
             current_base: Some("main".to_string()),
@@ -854,6 +857,7 @@ pub(super) mod tests {
             (
                 "ChangeProjectDefaultProvider",
                 PromptState::ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt {
+                    return_to: None,
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     current: ProviderKind::new("claude"),
@@ -889,6 +893,7 @@ pub(super) mod tests {
             (
                 "ConfigureStartupCommand",
                 PromptState::ConfigureStartupCommand {
+                    return_to: None,
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     input: TextInput::with_text("npm install".to_string()).with_multiline(6),
@@ -898,6 +903,7 @@ pub(super) mod tests {
             (
                 "ConfigureProjectEnv",
                 PromptState::ConfigureProjectEnv {
+                    return_to: None,
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     input: TextInput::with_text("K=V".to_string()).with_multiline(8),
@@ -915,6 +921,7 @@ pub(super) mod tests {
             (
                 "StartupCommandLogs",
                 PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+                    return_to: None,
                     scope_label: "my cool project".to_string(),
                     entries: Vec::new(),
                     selected: 0,
@@ -937,6 +944,7 @@ pub(super) mod tests {
             (
                 "ProjectActions",
                 PromptState::ProjectActions(crate::app::ProjectActionsPrompt {
+                    action: None,
                     target: crate::app::ProjectActionsTarget::Project {
                         id: project.id.clone(),
                     },

@@ -667,6 +667,7 @@ mod tests {
                 "ConfirmDeleteWorktree(dirty)",
                 PromptState::ConfirmDeleteWorktree(Box::new(ConfirmDeleteWorktreePrompt {
                     previous: ManageWorktreesPrompt {
+                        return_to: None,
                         project: project.clone(),
                         entries: Vec::new(),
                         loading: false,

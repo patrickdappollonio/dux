@@ -1046,7 +1046,14 @@ impl App {
         self.startup_log_selection = None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.startup_log_viewer = None;
+        // Logs asked for from a project's action list land over it, and
+        // closing them steps back to it.
+        let return_to = match std::mem::replace(&mut self.prompt, PromptState::None) {
+            PromptState::ProjectActions(list) => Some(Box::new(list)),
+            _ => None,
+        };
         self.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            return_to,
             scope_label,
             entries: listing.entries,
             selected: 0,

@@ -709,6 +709,7 @@ fn the_delete_worktree_dialog_chips_the_worktree_its_path_and_its_branch() {
         &mut app,
         PromptState::ConfirmDeleteWorktree(Box::new(ConfirmDeleteWorktreePrompt {
             previous: ManageWorktreesPrompt {
+                return_to: None,
                 project: project.clone(),
                 entries: Vec::new(),
                 loading: false,
@@ -810,6 +811,7 @@ fn the_worktree_manager_chips_the_project_and_its_repository() {
     let buf = open(
         &mut app,
         PromptState::ManageWorktrees(ManageWorktreesPrompt {
+            return_to: None,
             project,
             entries: Vec::new(),
             loading: false,
@@ -888,6 +890,7 @@ fn the_configure_dialog_chips_the_project() {
     let buf = open(
         &mut app,
         PromptState::ConfigureStartupCommand {
+            return_to: None,
             project_id: "p1".to_string(),
             project_name: "proj-cfg".to_string(),
             input: TextInput::with_text("npm install".to_string()).with_multiline(6),

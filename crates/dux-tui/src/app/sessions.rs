@@ -277,6 +277,10 @@ impl App {
         // prompt is opened later by the branch-inspection completion handler.
         self.prompt = PromptState::None;
         if project.path_missing {
+            self.set_warning(format!(
+                "Cannot create an agent in project \"{}\": its folder is missing at {}.",
+                project.name, project.path
+            ));
             return Ok(());
         }
         self.dispatch_create_agent_branch_inspection(project);
@@ -425,7 +429,7 @@ impl App {
             }
             ProjectChooserIntent::FromWorktree => self.begin_worktree_agent_for_project(project),
             ProjectChooserIntent::ManageWorktrees => {
-                self.begin_manage_worktrees_for_project(project)
+                self.begin_manage_worktrees_for_project(project, None)
             }
             ProjectChooserIntent::Manage => {
                 self.open_project_actions(
@@ -2472,6 +2476,7 @@ impl App {
     pub(crate) fn open_change_project_default_provider_for(
         &mut self,
         project: &Project,
+        return_to: Option<Box<ProjectActionsPrompt>>,
     ) -> Result<()> {
         if self.engine.config.providers.commands.is_empty() {
             self.set_error("No providers are configured.");
@@ -2491,6 +2496,7 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt =
             PromptState::ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt {
+                return_to,
                 project_id: project.id,
                 project_name: project.name,
                 current: project.default_provider,
@@ -2546,7 +2552,21 @@ impl App {
         Ok(())
     }
 
+    /// Apply the project default-provider picker, then step back to the action
+    /// list it was opened from once it has closed (after its own status).
     pub(crate) fn apply_change_project_default_provider(&mut self) -> Result<()> {
+        let return_to = match &mut self.prompt {
+            PromptState::ChangeProjectDefaultProvider(prompt) => prompt.return_to.take(),
+            _ => None,
+        };
+        let result = self.apply_change_project_default_provider_now();
+        if matches!(self.prompt, PromptState::None) {
+            self.return_to_project_actions(return_to);
+        }
+        result
+    }
+
+    fn apply_change_project_default_provider_now(&mut self) -> Result<()> {
         let prompt = match &self.prompt {
             PromptState::ChangeProjectDefaultProvider(prompt) => prompt.clone(),
             _ => return Ok(()),
@@ -2713,11 +2733,16 @@ impl App {
     }
 
     /// Open the startup-command editor for `project`.
-    pub(crate) fn open_configure_startup_command_for(&mut self, project: &Project) -> Result<()> {
+    pub(crate) fn open_configure_startup_command_for(
+        &mut self,
+        project: &Project,
+        return_to: Option<Box<ProjectActionsPrompt>>,
+    ) -> Result<()> {
         let project = project.clone();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ConfigureStartupCommand {
+            return_to,
             project_id: project.id,
             project_name: project.name.clone(),
             input: TextInput::with_text(project.startup_command.unwrap_or_default())
@@ -2730,7 +2755,26 @@ impl App {
         Ok(())
     }
 
+    /// Save, then step back to the action list the editor was opened from
+    /// once it has closed (after its own status). An invalid entry keeps the
+    /// editor open, so nothing steps back.
     pub(crate) fn apply_configure_startup_command(&mut self) -> Result<()> {
+        let return_to = super::project_actions::configure_return_to(&mut self.prompt);
+        let result = self.apply_configure_startup_command_now();
+        match &mut self.prompt {
+            PromptState::None => self.return_to_project_actions(return_to),
+            PromptState::ConfigureStartupCommand {
+                return_to: slot, ..
+            }
+            | PromptState::ConfigureProjectEnv {
+                return_to: slot, ..
+            } => *slot = return_to,
+            _ => {}
+        }
+        result
+    }
+
+    fn apply_configure_startup_command_now(&mut self) -> Result<()> {
         let (project_id, project_name, command) = match &self.prompt {
             PromptState::ConfigureStartupCommand {
                 project_id,
@@ -2802,11 +2846,16 @@ impl App {
     }
 
     /// Open the environment editor for `project`.
-    pub(crate) fn open_configure_project_env_for(&mut self, project: &Project) -> Result<()> {
+    pub(crate) fn open_configure_project_env_for(
+        &mut self,
+        project: &Project,
+        return_to: Option<Box<ProjectActionsPrompt>>,
+    ) -> Result<()> {
         let project = project.clone();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ConfigureProjectEnv {
+            return_to,
             project_id: project.id,
             project_name: project.name.clone(),
             input: TextInput::with_text(crate::config::project_env_to_lines(&project.env))
@@ -2859,7 +2908,26 @@ impl App {
         Ok(())
     }
 
+    /// Save, then step back to the action list the editor was opened from
+    /// once it has closed (after its own status). An invalid entry keeps the
+    /// editor open, so nothing steps back.
     pub(crate) fn apply_configure_project_env(&mut self) -> Result<()> {
+        let return_to = super::project_actions::configure_return_to(&mut self.prompt);
+        let result = self.apply_configure_project_env_now();
+        match &mut self.prompt {
+            PromptState::None => self.return_to_project_actions(return_to),
+            PromptState::ConfigureStartupCommand {
+                return_to: slot, ..
+            }
+            | PromptState::ConfigureProjectEnv {
+                return_to: slot, ..
+            } => *slot = return_to,
+            _ => {}
+        }
+        result
+    }
+
+    fn apply_configure_project_env_now(&mut self) -> Result<()> {
         let (project_id, project_name, env) = match &self.prompt {
             PromptState::ConfigureProjectEnv {
                 project_id,
@@ -9545,8 +9613,8 @@ mod tests {
                 },
                 ProjectAction::StartupLogs => {
                     assert!(
-                        matches!(prompt, PromptState::None),
-                        "{action:?}: {prompt:?}"
+                        matches!(prompt, PromptState::ProjectActions(_)),
+                        "{action:?}: the list stays while the logs are read: {prompt:?}"
                     );
                     drain_until(&mut app, "the startup logs answer", |app| {
                         app.status.text().contains("project \"repo\"")
@@ -9662,13 +9730,17 @@ mod tests {
             .collect();
         assert_eq!(
             unavailable,
-            vec![ProjectAction::NewTerminal, ProjectAction::ChangeBaseBranch],
+            vec![
+                ProjectAction::NewAgent,
+                ProjectAction::NewTerminal,
+                ProjectAction::ChangeBaseBranch
+            ],
             "exactly where the browser disables a row"
         );
         let text = rendered_text(&mut app);
         assert_eq!(
             text.matches("unavailable: the folder is missing").count(),
-            2,
+            3,
             "{text}"
         );
         assert!(text.contains("⚠ missing"), "{text}");
@@ -9794,8 +9866,6 @@ mod tests {
         }
         app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
         assert!(
             matches!(app.prompt, PromptState::ChangeBaseBranch(_)),
             "a held branch cannot be picked: {:?}",
@@ -9817,8 +9887,6 @@ mod tests {
             app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
                 .unwrap();
         }
-        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
         app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         match &app.prompt {
@@ -9931,5 +9999,189 @@ mod tests {
         app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
         assert!(matches!(app.prompt, PromptState::ProjectActions(_)));
+    }
+
+    // ── manage-projects: review round two ───────────────────────────────────
+
+    /// The holder of a held branch is named from what the listing worker
+    /// resolved, not from a lookup on every paint: the label survives the
+    /// agent's record changing after the list landed.
+    #[test]
+    fn a_held_branch_names_its_agent_from_the_listing_not_from_a_lookup_at_paint() {
+        let (_root, mut app, _worktree) = project_with_a_real_agent();
+        let id = app.engine.projects[0].id.clone();
+        manage_project(&mut app, &id);
+        pick_project_action(&mut app, ProjectAction::ChangeBaseBranch);
+        drain_until(&mut app, "the branch listing", |app| {
+            app.pending_branch_listing.is_none()
+        });
+        // A paint-time lookup would no longer find the agent at the holder.
+        app.engine.sessions[0]
+            .workspace
+            .as_managed_mut()
+            .expect("managed agent")
+            .worktree_path = "/nonexistent/elsewhere".to_string();
+        let text = rendered_text(&mut app);
+        assert!(
+            text.contains("checked out by agent  agent-one "),
+            "the holder is named from the listing: {text}"
+        );
+    }
+
+    /// A project whose folder is missing offers New agent… as unavailable too,
+    /// and the new-agent flow itself says why instead of closing silently.
+    #[test]
+    fn new_agent_on_a_project_whose_folder_is_missing_says_why() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        app.engine.projects[0].path_missing = true;
+        let path = app.engine.projects[0].path.clone();
+        run_via_project_list(&mut app, "new-agent").expect("pick the project");
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert_eq!(
+            app.status.text(),
+            format!("Cannot create an agent in project \"repo\": its folder is missing at {path}.")
+        );
+    }
+
+    /// Cancelling the change-base confirmation after the project was removed
+    /// behind it closes the stack and says why, instead of restoring a picker
+    /// for a project that no longer exists.
+    #[test]
+    fn cancelling_the_change_base_confirmation_after_the_project_is_gone_closes_and_says_so() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        let id = app.engine.projects[0].id.clone();
+        manage_project(&mut app, &id);
+        pick_project_action(&mut app, ProjectAction::ChangeBaseBranch);
+        drain_until(&mut app, "the branch listing", |app| {
+            app.pending_branch_listing.is_none()
+        });
+        app.pick_change_base_branch_row();
+        assert!(matches!(
+            app.prompt,
+            PromptState::ConfirmChangeBaseBranch(_)
+        ));
+        app.engine.projects.clear();
+
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "nothing to step back to: {:?}",
+            app.prompt
+        );
+        assert_eq!(
+            app.status.text(),
+            "Project \"repo\" is gone, so there is no base branch to change."
+        );
+    }
+
+    /// Open `action` from `id`'s action list and return the prompt it opened.
+    fn open_from_actions(app: &mut App, id: &str, action: ProjectAction) {
+        manage_project(app, id);
+        pick_project_action(app, action);
+    }
+
+    fn assert_back_on_the_action_list(app: &App, what: &str) {
+        assert!(
+            matches!(app.prompt, PromptState::ProjectActions(_)),
+            "{what} returns to the action list, got {:?}",
+            app.prompt
+        );
+    }
+
+    #[test]
+    fn the_default_provider_picker_opened_from_the_list_returns_to_it() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        let id = app.engine.projects[0].id.clone();
+        open_from_actions(&mut app, &id, ProjectAction::DefaultProvider);
+        assert!(matches!(
+            app.prompt,
+            PromptState::ChangeProjectDefaultProvider(_)
+        ));
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_back_on_the_action_list(&app, "Escape on the provider picker");
+
+        pick_project_action(&mut app, ProjectAction::DefaultProvider);
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_back_on_the_action_list(&app, "picking a provider");
+    }
+
+    #[test]
+    fn the_startup_command_editor_opened_from_the_list_returns_to_it() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        let id = app.engine.projects[0].id.clone();
+        open_from_actions(&mut app, &id, ProjectAction::StartupCommand);
+        assert!(matches!(
+            app.prompt,
+            PromptState::ConfigureStartupCommand { .. }
+        ));
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_back_on_the_action_list(&app, "Escape on the startup-command editor");
+
+        pick_project_action(&mut app, ProjectAction::StartupCommand);
+        app.apply_configure_startup_command().expect("save");
+        assert_back_on_the_action_list(&app, "saving the startup command");
+    }
+
+    #[test]
+    fn the_environment_editor_opened_from_the_list_returns_to_it() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        let id = app.engine.projects[0].id.clone();
+        open_from_actions(&mut app, &id, ProjectAction::Environment);
+        assert!(matches!(
+            app.prompt,
+            PromptState::ConfigureProjectEnv { .. }
+        ));
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_back_on_the_action_list(&app, "Escape on the environment editor");
+
+        pick_project_action(&mut app, ProjectAction::Environment);
+        app.apply_configure_project_env().expect("save");
+        assert_back_on_the_action_list(&app, "saving the environment");
+    }
+
+    #[test]
+    fn the_worktree_manager_opened_from_the_list_returns_to_it() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        let id = app.engine.projects[0].id.clone();
+        open_from_actions(&mut app, &id, ProjectAction::Worktrees);
+        assert!(matches!(app.prompt, PromptState::ManageWorktrees(_)));
+        drain_until(
+            &mut app,
+            "the worktree listing",
+            |app| matches!(&app.prompt, PromptState::ManageWorktrees(m) if !m.loading),
+        );
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_back_on_the_action_list(&app, "Escape on the worktree manager");
+    }
+
+    #[test]
+    fn the_startup_logs_opened_from_the_list_return_to_it() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        let id = app.engine.projects[0].id.clone();
+        open_from_actions(&mut app, &id, ProjectAction::StartupLogs);
+        assert_back_on_the_action_list(&app, "the list while the logs are read");
+        // The logs land the way the reader's worker delivers them.
+        app.apply_reaction(dux_core::engine::EventReaction::StartupLogsArrived {
+            scope_label: "project \"repo\"".to_string(),
+            listing: crate::startup::StartupCommandLogListing {
+                entries: vec![crate::startup::StartupCommandLogEntry {
+                    path: PathBuf::from("/nonexistent/run.log"),
+                    display_name: "run.log".to_string(),
+                    modified_at: None,
+                }],
+                content: "ran\n".to_string(),
+            },
+        });
+        assert!(matches!(app.prompt, PromptState::StartupCommandLogs(_)));
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_back_on_the_action_list(&app, "Escape on the startup logs");
     }
 }

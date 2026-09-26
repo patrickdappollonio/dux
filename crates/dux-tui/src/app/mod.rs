@@ -1383,6 +1383,10 @@ pub(crate) struct ChangeProjectDefaultProviderPrompt {
     pub(crate) inherits_global_default: bool,
     pub(crate) options: Vec<ChangeProjectDefaultProviderOption>,
     pub(crate) selected: usize,
+    /// The project action list this was opened from, which closing it (by
+    /// any way out, a save included) steps back to. `None` when nothing is
+    /// behind it.
+    pub(crate) return_to: Option<Box<ProjectActionsPrompt>>,
 }
 
 /// Semantic tone of an Agent Info body line, computed once at build time so the
@@ -1653,6 +1657,10 @@ pub(crate) struct StartupCommandLogPrompt {
     /// them all.
     pub(crate) wrap_width: u16,
     pub(crate) focus: StartupCommandLogFocus,
+    /// The project action list this was opened from, which closing it (by
+    /// any way out, a save included) steps back to. `None` when nothing is
+    /// behind it.
+    pub(crate) return_to: Option<Box<ProjectActionsPrompt>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1876,14 +1884,15 @@ impl ProjectAction {
     }
 
     /// Whether the action is shown unavailable while the project's folder is
-    /// missing. Exactly where the browser's menu disables a row: there is no
-    /// root to open a shell at, and no folder to list or switch branches in.
+    /// missing: there is no folder to branch a new agent from, no root to open
+    /// a shell at, and no folder to list or switch branches in.
     /// The other rows stay available and answer for themselves when run.
     pub(crate) fn needs_folder(self) -> bool {
         match self {
-            ProjectAction::NewTerminal | ProjectAction::ChangeBaseBranch => true,
             ProjectAction::NewAgent
-            | ProjectAction::NewAgentFromPr
+            | ProjectAction::NewTerminal
+            | ProjectAction::ChangeBaseBranch => true,
+            ProjectAction::NewAgentFromPr
             | ProjectAction::Worktrees
             | ProjectAction::Pull
             | ProjectAction::CheckoutDefaultBranch
@@ -1923,8 +1932,14 @@ pub(crate) struct ProjectActionRow {
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectActionsPrompt {
     pub(crate) target: ProjectActionsTarget,
-    /// Index into the rows [`App::project_action_rows`] returns.
+    /// Index into the rows [`App::project_action_rows`] returns, as last
+    /// placed. The rows can change under it (GitHub integration going away
+    /// drops a row), so the cursor is resolved through `action` first; see
+    /// [`App::project_actions_cursor`].
     pub(crate) selected: usize,
+    /// The action the cursor is on, so a row set that changes keeps the cursor
+    /// on the same action and Enter runs what is highlighted.
+    pub(crate) action: Option<ProjectAction>,
     /// The project list this was opened from, as the user left it, so Escape
     /// steps back to it. `None` when nothing is behind it.
     pub(crate) return_to: Option<SearchableList>,
@@ -1961,6 +1976,9 @@ pub(crate) struct ChangeBaseBranchPrompt {
     /// The listing worker has not answered yet.
     pub(crate) loading: bool,
     pub(crate) branches: Vec<dux_core::git::BranchChoice>,
+    /// Who holds each held branch, by branch name, resolved by the listing
+    /// worker so no paint touches the filesystem.
+    pub(crate) holders: HashMap<String, BranchHolder>,
     /// Why origin's branches are shown as last fetched, when they are.
     pub(crate) fetch_note: Option<String>,
     /// Why there is no listing at all, when the listing itself failed.
@@ -1984,6 +2002,16 @@ pub(crate) struct ConfirmChangeBaseBranchPrompt {
 pub(crate) struct BranchListingAnswer {
     pub(crate) project_id: String,
     pub(crate) result: Result<dux_core::base_branch::BranchListing, String>,
+    /// Who holds each held branch, by branch name.
+    pub(crate) holders: HashMap<String, BranchHolder>,
+}
+
+/// The worktree holding a branch: its folder, and the agent working there when
+/// dux knows one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BranchHolder {
+    pub(crate) agent: Option<String>,
+    pub(crate) path: String,
 }
 
 /// How the branch listing's keyed busy ends, decided when the answer lands.
@@ -2133,6 +2161,10 @@ pub(crate) struct ManageWorktreesPrompt {
     /// loading, on failure, or when every listed worktree is held by an agent.
     pub(crate) selected: Option<usize>,
     pub(crate) error: Option<String>,
+    /// The project action list this was opened from, which closing it (by
+    /// any way out, a save included) steps back to. `None` when nothing is
+    /// behind it.
+    pub(crate) return_to: Option<Box<ProjectActionsPrompt>>,
 }
 
 /// The manager's removal confirmation.
@@ -2454,12 +2486,18 @@ pub(crate) enum PromptState {
         project_name: String,
         input: TextInput,
         focus: ConfigureFieldFocus,
+        /// The project action list this was opened from; closing or saving
+        /// steps back to it.
+        return_to: Option<Box<ProjectActionsPrompt>>,
     },
     ConfigureProjectEnv {
         project_id: String,
         project_name: String,
         input: TextInput,
         focus: ConfigureFieldFocus,
+        /// The project action list this was opened from; closing or saving
+        /// steps back to it.
+        return_to: Option<Box<ProjectActionsPrompt>>,
     },
     ConfigureGlobalEnv {
         project_name: String,
