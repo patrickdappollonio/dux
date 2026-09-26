@@ -126,15 +126,17 @@ action. The TUI's project browser makes the same offer.
 ## Managing projects
 
 **Projects…** in the app menu (the cog), right under **Add project**, lists every project
-dux knows about, most recently used first, with a search box on top. Each row shows the
-project's folder, how many agents it has, and its base branch (the branch new agents start
-from), plus a warning when the folder is missing. It is the place to manage a project that
-has no agents yet.
+dux knows about, with a search box on top. Projects are ordered by whichever happened last,
+adding the project or creating its newest agent, latest first. Each row shows the project's
+folder, how many agents it has, and its base branch (the branch new agents start from),
+plus a warning when the folder is missing. It is the place to manage a project that has no
+agents yet.
 
 Click a row, or its `⋯`, for that project's menu. Dialogs you open from it (delete,
 remove, project info, project settings, worktrees, checking out the default branch,
 changing the base branch) open on top of the list, and closing them takes you back to it.
-Starting an agent or opening a terminal closes the list and takes you there.
+Anything that ends with a new agent or a new terminal (including adopting a worktree from
+**Worktrees…**) closes the list and takes you there.
 
 If agents are left over from a project whose record is gone, they show up in the list
 under their group's name, and the only thing on offer is **Remove project…**, which clears
