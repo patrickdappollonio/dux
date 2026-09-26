@@ -71,8 +71,9 @@ current branch, then opens the naming prompt.
 
 On both surfaces the project list is ordered by what you touched most recently, so a
 project you just added, or one that just received an agent, sits at the top, and in the
-terminal UI every project chooser shares that order, the ones for managing projects,
-browsing worktrees and opening a project terminal included.
+terminal UI every project chooser shares that order, the ones for
+[managing projects](#managing-a-project), browsing worktrees and opening a project
+terminal included.
 
 The terminal UI's chooser lists every project, how many agents each one has, and where it
 lives, and its footer carries the way out to a standalone agent:
@@ -87,6 +88,31 @@ Checking out the project's default branch later makes the default lead from then
 dux cannot save that change, the checkout still happens but the old leading branch stays
 in charge, and dux tells you so in an error that stays up until you close it; run the
 checkout again once the problem is fixed.
+
+### Changing the base branch
+
+Cloned on the wrong branch, or want new agents to start from `develop`? Change the
+project's base branch, the one new agents branch from. In the browser it is **Change base
+branch…** in the project's `⋯` menu; in the terminal UI it is the
+`change-project-base-branch` palette command, or the same row in a project's action list
+(see [Managing a project](#managing-a-project)).
+
+dux fetches `origin` first (giving up after 15 seconds, in which case the list shows
+origin's branches as last fetched and says so), then lists every local branch and every
+branch that only exists on `origin`. The current base is marked, and the list is
+searchable. A branch another worktree has checked out, usually an agent's own branch, is
+listed but cannot be picked, and the row names who holds it: git will not check out one
+branch in two places.
+
+Pick a branch and dux asks first, because the project folder switches to that branch.
+Confirm and dux checks it out in the project folder (creating the local branch from
+`origin`'s first when only `origin` has it), then makes it the base. If git refuses the
+switch, for example because uncommitted changes in the folder would be overwritten, dux
+says so in an error that stays up, and the base stays where it was.
+
+> [!NOTE]
+> Uncommitted changes that do not conflict with the new branch travel with the switch and
+> stay in the project folder, the same as with a checkout in your own terminal.
 
 If the name matches an existing local branch, dux asks whether to attach to that branch
 instead, which is what you want when continuing work that already started.
@@ -372,6 +398,37 @@ Either manager is how you remove a branch belonging to a worktree that has no ag
 worktree that does have one, the agent's own delete dialog is the place: it names the
 branch, says whether it predates the agent, and offers to remove it there and then. Once
 the worktree is gone neither surface can reach the branch, and `git branch -D` is the way.
+
+## Managing a project
+
+Everything you can do to a project lives in one list per project. In the terminal UI, run
+`manage-projects`: it lists every project with its agent count, its base branch and its
+folder (a missing folder gets a warning sign), plus any **orphaned group**, agents whose
+project record is gone, shown by a short id. Pick one and its actions open, headed by the
+project's name, its folder, its base branch and the branch the folder is on right now:
+
+- **New agent…**, **New agent from PR…** (only with GitHub integration on),
+  **Worktrees…** and **New terminal at the project root**
+- **Pull project**, **Check out default branch…** and **Change base branch…**
+- **Project info…**, a read-only page of the project's settings and counts
+- **Default provider…**, the auto-reopen toggle, **Startup command…** and
+  **Environment…**
+- **Startup command logs for all agents…**
+- **Delete project…** and **Remove project…**
+
+Cancelling a question you opened from the list, or closing Project info, lands you back on
+the list; Escape on the list goes back to the project list, and a second Escape closes it.
+An orphaned group offers **Remove project…** and nothing else, which clears those agents'
+records and leaves their worktrees on disk. When a project's folder is missing, the rows
+that need it (the project terminal and changing the base branch) are shown as unavailable
+and say why.
+
+The browser has the same actions in each project's `⋯` menu.
+
+Every project palette command still works on its own. With an agent selected it acts on
+that agent's project; with no agent selected it opens the project list first and acts on
+the one you pick. `copy-path` does the same: the selected agent's folder, or the picked
+project's.
 
 ## Forking an existing agent
 
