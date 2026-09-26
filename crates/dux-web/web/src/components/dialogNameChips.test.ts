@@ -87,9 +87,19 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     reason: "A release number in the heading's badge: a version, not a name in a sentence.",
   },
   {
-    file: "components/NewAgentPickerDialog.tsx",
+    file: "components/ProjectList.tsx",
     line: '<span className="shrink-0 font-mono text-xs text-muted-foreground">',
-    reason: "The trailing label of a picker row, and a row is out of the chip rule's scope.",
+    reason: "The trailing count of a project row (New agent picker, Projects list), and a row is out of the chip rule's scope.",
+  },
+  {
+    file: "components/ProjectsDialog.tsx",
+    line: '<span className="min-w-0 truncate font-mono">{project.path}</span>',
+    reason: "A project row's folder on its second line: part of the row, not a name in a sentence.",
+  },
+  {
+    file: "components/ChangeBaseBranchDialog.tsx",
+    line: '<span className="min-w-0 flex-1 truncate font-mono text-sm">',
+    reason: "A branch row that is only its branch: a list row, out of the chip rule's scope.",
   },
   {
     file: "components/TaskManagerDialog.tsx",

@@ -9,6 +9,7 @@ const sortAgents = vi.fn()
 const openWelcomeScreen = vi.fn()
 const openReleaseNotes = vi.fn()
 const openAddProject = vi.fn()
+const openProjects = vi.fn()
 const openAddProjectForInit = vi.fn()
 const openCreateAgentFromPr = vi.fn()
 const openNewAgentPicker = vi.fn()
@@ -26,6 +27,7 @@ vi.mock("@/lib/store", () => ({
   openWelcomeScreen: () => openWelcomeScreen(),
   openReleaseNotes: () => openReleaseNotes(),
   openAddProject: () => openAddProject(),
+  openProjects: () => openProjects(),
   openAddProjectForInit: () => openAddProjectForInit(),
   openCreateAgentFromPr: (projectId: string | null) =>
     openCreateAgentFromPr(projectId),
@@ -36,7 +38,7 @@ vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => reload(), recheckGithub: () => recheckGithub() },
 }))
 
-import { SquarePen } from "lucide-react"
+import { FolderKanban, SquarePen } from "lucide-react"
 
 import {
   appMenuModel,
@@ -64,6 +66,9 @@ describe("appMenuModel", () => {
       // reason to reach for the cog.
       ["submenu", "new-agent"],
       ["submenu", "add-project"],
+      // Every project and orphaned group with its whole menu, beside the way
+      // to add one: the home for managing a project that has no agents.
+      ["item", "projects"],
       ["separator", "sep-create"],
       ["item", "preferences"],
       ["separator", "sep-preferences"],
@@ -83,6 +88,13 @@ describe("appMenuModel", () => {
   // shared lists the launcher corner's ⋯ menu renders (creationMenus.ts), so
   // the cog menu and the sidebar cannot disagree about labels, icons, order, or
   // gating.
+  it("titles the Projects entry as a dialog and gives it the board icon", () => {
+    const entry = appMenuModel(ctx).find((e) => e.id === "projects")
+    if (entry?.kind !== "item") throw new Error("projects is not an item")
+    expect(entry.title).toBe("Projects…")
+    expect(entry.icon).toBe(FolderKanban)
+  })
+
   it("builds the creation submenus from the shared sidebar lists", () => {
     // `run` is a fresh closure per construction, so compare everything else;
     // the run behavior itself is pinned by the store-routing test below.
@@ -181,6 +193,7 @@ describe("appMenuModel", () => {
       "edit-macros",
       "global-env",
       "task-manager",
+      "projects",
       // Every creation variant opens a dialog (picker or from-PR dialog).
       "new-agent-plain",
       "new-agent-from-pr",
@@ -280,6 +293,8 @@ describe("appMenuModel", () => {
     expect(openGlobalEnv).toHaveBeenCalledOnce()
     run("task-manager")
     expect(openTaskManager).toHaveBeenCalledOnce()
+    run("projects")
+    expect(openProjects).toHaveBeenCalledOnce()
     run("reload-config")
     expect(reload).toHaveBeenCalledOnce()
     run("welcome-screen")

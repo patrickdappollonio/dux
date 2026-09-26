@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 
-import { applyFrozenOrder, orderProjectsByRecency } from "@/lib/projectOrder"
+import {
+  applyFrozenOrder,
+  orderProjectsByRecency,
+  projectAgentCounts,
+} from "@/lib/projectOrder"
 import type { ProjectView, SessionView } from "@/lib/types"
 
 function at(day: number): string {
@@ -152,6 +156,31 @@ describe("applyFrozenOrder", () => {
       "a",
       "x",
       "y",
+    ])
+  })
+})
+
+describe("projectAgentCounts", () => {
+  it("counts agents per project, orphaned ones under their gone project, and standalone ones nowhere", () => {
+    const standalone = {
+      ...agent("s1", "unused", at(1)),
+      workspace: {
+        kind: "folder",
+        folder_path: "/home/me/notes",
+        folder_label: "~/notes",
+        repo_status: "no_repo",
+        quiet_reason: "",
+      },
+    } as SessionView
+    const counts = projectAgentCounts([
+      agent("a1", "p1", at(1)),
+      agent("a2", "p1", at(2)),
+      agent("g1", "gone", at(3)),
+      standalone,
+    ])
+    expect([...counts.entries()]).toEqual([
+      ["p1", 2],
+      ["gone", 1],
     ])
   })
 })

@@ -40,6 +40,19 @@ export interface ProjectView {
   created_at: string
 }
 
+/** One branch "Change base branch" could move a project to
+ * (`GET /api/v1/projects/{id}/branches`). */
+export interface BranchChoiceView {
+  name: string
+  /** `"remote"` is a branch only origin has: choosing it creates the local
+   * branch, tracking origin's, before the switch. */
+  location: "local" | "remote"
+  /** The folder of another worktree (an agent's, typically) that has the
+   * branch checked out. Git refuses to check a branch out twice, so it cannot
+   * be chosen. Null for a free branch. */
+  held_by: string | null
+}
+
 export interface PrView {
   number: number
   state: "open" | "merged" | "closed"

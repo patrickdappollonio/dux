@@ -134,6 +134,7 @@ import {
   writeTheaterMemory,
 } from "./theater"
 import type {
+  BranchChoiceView,
   BranchWarningView,
   InspectKind,
   ChangedFileView,
@@ -278,6 +279,19 @@ export interface ChangesSlice {
   unstaged: ChangedFileView[]
   error: string | null
 }
+
+// The branch listing behind the "Change base branch" picker: loading while the
+// server fetches origin, the branches once it answers (with whether origin was
+// fetched just now, and why not), or the reason it could not list them.
+export type ChangeBaseBranchListing =
+  | { kind: "loading" }
+  | {
+      kind: "loaded"
+      branches: BranchChoiceView[]
+      fetched: boolean
+      fetchError: string | null
+    }
+  | { kind: "failed"; message: string }
 
 // A tiny external store backed by `useSyncExternalStore`. A single module-level
 // `EventsSocket` (`/ws/events`) feeds it: resource-change events plus the
@@ -474,6 +488,14 @@ export interface DuxState {
   // checkout moves the source checkout's HEAD, so the web confirms first (the
   // TUI runs it straight from a deliberate palette/keybinding action).
   checkoutDefaultBranchTarget: string | null
+  // The project whose base branch is being changed, or null (closed). Opening
+  // it requests the branch listing, which fetches origin first, so
+  // `changeBaseBranchListing` starts loading and fills when the reply lands.
+  changeBaseBranchTarget: string | null
+  changeBaseBranchListing: ChangeBaseBranchListing
+  // Whether the Projects list (app menu → "Projects…") is open. Every project
+  // dialog opens over it, and closing one lands back on it.
+  projectsDialogOpen: boolean
   // The project whose managed worktrees are being browsed for adoption, or null
   // (closed). The dialog requests the listing on open; `attachWorktreeEntries`
   // holds the server's classification and `attachWorktreeLoading` drives the
@@ -955,6 +977,9 @@ let state: DuxState = {
   removeProjectTarget: null,
   deleteProjectTarget: null,
   checkoutDefaultBranchTarget: null,
+  changeBaseBranchTarget: null,
+  changeBaseBranchListing: { kind: "loading" },
+  projectsDialogOpen: false,
   attachWorktreeTarget: null,
   attachWorktreeEntries: [],
   attachWorktreeLoading: false,
@@ -4770,6 +4795,74 @@ export function checkoutDefaultBranch(projectId: string): void {
     .catch((e) =>
       notifyError(e instanceof Error ? e.message : "checkout failed")
     )
+}
+
+// Open the "Change base branch" picker for a project and request its branch
+// listing at once, from the click handler that opens it (never an effect), the
+// way `openAttachWorktree` requests its listing. The server fetches origin
+// first, bounded, so the reply can take a few seconds; the dialog shows that
+// it is loading until then.
+export function openChangeBaseBranch(projectId: string): void {
+  setState({
+    changeBaseBranchTarget: projectId,
+    changeBaseBranchListing: { kind: "loading" },
+  })
+  projectsApi
+    .branches(projectId)
+    .then((reply) => {
+      // A reply for a dialog that closed, or moved to another project, is
+      // somebody else's answer.
+      if (state.changeBaseBranchTarget !== projectId) return
+      setState({
+        changeBaseBranchListing: {
+          kind: "loaded",
+          branches: reply.branches,
+          fetched: reply.fetched,
+          fetchError: reply.fetch_error ?? null,
+        },
+      })
+    })
+    .catch((e) => {
+      if (state.changeBaseBranchTarget !== projectId) return
+      // Said inside the dialog, which is where the user is looking, rather
+      // than in a toast behind it.
+      setState({
+        changeBaseBranchListing: {
+          kind: "failed",
+          message:
+            e instanceof Error ? e.message : "Could not list the branches.",
+        },
+      })
+    })
+}
+
+export function closeChangeBaseBranch(): void {
+  setState({
+    changeBaseBranchTarget: null,
+    changeBaseBranchListing: { kind: "loading" },
+  })
+}
+
+// Switch the project folder to `branch` and make it the base new agents start
+// from. The server answers at once and reports the outcome (busy, then the
+// checkout's success or a sticky failure) on the status stream, so only a
+// refusal needs a toast of dux's own.
+export function changeBaseBranch(projectId: string, branch: string): void {
+  projectsApi
+    .changeBaseBranch(projectId, branch)
+    .catch((e) =>
+      notifyError(
+        e instanceof Error ? e.message : "Could not change the base branch.",
+      ),
+    )
+}
+
+export function openProjects(): void {
+  setState({ projectsDialogOpen: true })
+}
+
+export function closeProjects(): void {
+  setState({ projectsDialogOpen: false })
 }
 
 // Open the attach-worktree dialog for a project and immediately request its

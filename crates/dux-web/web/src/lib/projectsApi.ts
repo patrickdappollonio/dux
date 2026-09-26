@@ -5,6 +5,7 @@ import { createJsonRequest } from "./jsonRequest"
 import type { DeleteWorktreeReply } from "./worktreeDelete"
 import type {
   AcceptedOperation,
+  BranchChoiceView,
   BranchWarningView,
   InspectKind,
   ProjectView,
@@ -69,6 +70,23 @@ export const projectsApi = {
     request<void>("POST", `/api/v1/projects/${encodeURIComponent(id)}/pull`),
   checkoutDefault: (id: string) =>
     request<void>("POST", `/api/v1/projects/${encodeURIComponent(id)}/checkout-default`),
+  // Every branch the project folder could switch to for "Change base branch",
+  // after one bounded fetch of origin. `fetched: false` means the origin-only
+  // branches are as last fetched, and `fetch_error` says why.
+  branches: (id: string) =>
+    request<{
+      branches: BranchChoiceView[]
+      fetched: boolean
+      fetch_error?: string
+    }>("GET", `/api/v1/projects/${encodeURIComponent(id)}/branches`),
+  // Switch the project folder to `branch` and save it as the base. Accepted at
+  // once; the outcome arrives on the status stream. A 400 carries the reason.
+  changeBaseBranch: (id: string, branch: string) =>
+    request<void>(
+      "POST",
+      `/api/v1/projects/${encodeURIComponent(id)}/base-branch`,
+      { branch },
+    ),
   // List a project's managed worktrees for the "Attach worktree" picker.
   worktrees: (id: string) =>
     request<{ entries: ProjectWorktreeEntryView[] }>(

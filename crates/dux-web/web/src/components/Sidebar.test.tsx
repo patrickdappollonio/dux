@@ -469,7 +469,9 @@ describe("AppSidebar project terminals", () => {
 
   it("offers a project-root terminal in the project ⋯ menu and calls createProjectTerminal", () => {
     // An agent-less project (only a project terminal) has no agent row, so its
-    // project actions live in the New-agent picker's per-project ⋯ menu.
+    // project actions live in the per-project ⋯ menu of the app menu's Projects
+    // list and of the New-agent picker, which share one row component
+    // (ProjectList); the picker stands in for both here.
     mockState = makeState({
       spine: projectTerminalSpine(),
       bootstrap: { title: "dux", dux_version: "v1" },

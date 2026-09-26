@@ -1,35 +1,21 @@
-import { Ellipsis, Folder, FolderPlus, Search } from "lucide-react"
 import { useMemo, useState } from "react"
 
+import { ProjectList, type ProjectListRow } from "@/components/ProjectList"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import { InlineCode } from "@/components/ui/inline-code"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { ScrollArea } from "@/components/ui/scroll-area"
+import { Dialog, DialogContent } from "@/components/ui/dialog"
 import {
   closeNewAgentPicker,
   dismissNewAgentPicker,
-  openAddProject,
   openAttachWorktree,
   openCreateAgent,
   openCreateAgentFromPr,
   useDux,
 } from "@/lib/store"
-import { cn } from "@/lib/utils"
-import type { ProjectView } from "@/lib/types"
-import { workspaceProjectId } from "@/lib/agentWorkspace"
-import { applyFrozenOrder, orderProjectsByRecency } from "@/lib/projectOrder"
+import {
+  applyFrozenOrder,
+  orderProjectsByRecency,
+  projectAgentCounts,
+} from "@/lib/projectOrder"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 
 // The New-agent picker: the home for agent creation and every project action,
@@ -118,37 +104,18 @@ function PickerBody() {
     [frozenIds, candidates],
   )
 
-  const [query, setQuery] = useState("")
-
   // Agent counts per project, derived by cross-referencing sessions (the project
   // record carries no count of its own).
-  const agentCounts = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const session of sessions) {
-      // A standalone agent belongs to no project, so it is counted against
-      // none: adding it to some bucket would inflate a project's agent count
-      // with an agent that has nothing to do with it.
-      const projectId = workspaceProjectId(session.workspace)
-      if (!projectId) continue
-      counts.set(projectId, (counts.get(projectId) ?? 0) + 1)
-    }
-    return counts
-  }, [sessions])
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (q === "") return projects
-    return projects.filter((project) => project.name.toLowerCase().includes(q))
-  }, [projects, query])
+  const agentCounts = useMemo(() => projectAgentCounts(sessions), [sessions])
 
   // What clicking a project row does, by intent. Every intent closes this picker
   // and hands off to that project's dedicated dialog: "new" opens the shared
   // create-agent name dialog (honoring the pet-name/copy-changes config), and the
   // from-PR / from-worktree intents open their own dialogs.
-  function onProjectRow(project: ProjectView) {
+  function onProjectRow(projectId: string) {
     if (intent === "from_pr") {
       closeNewAgentPicker()
-      openCreateAgentFromPr(project.id)
+      openCreateAgentFromPr(projectId)
       return
     }
     if (intent === "from_worktree") {
@@ -156,122 +123,39 @@ function PickerBody() {
       // `true` marks the drill-down: the Worktrees dialog then offers a Back
       // control that returns to this list, instead of Cancel being the only
       // way out of a project that turned out to have nothing in it.
-      openAttachWorktree(project.id, true)
+      openAttachWorktree(projectId, true)
       return
     }
     closeNewAgentPicker()
-    openCreateAgent(project.id)
+    openCreateAgent(projectId)
   }
 
+  const rows: ProjectListRow[] = projects.map((project) => {
+    const count = agentCounts.get(project.id) ?? 0
+    // In the worktree intent the row is a doorway into that project's worktree
+    // list, so it is labelled with what is behind the door. An empty project
+    // reads "none" and stays clickable, because disabling it would give no
+    // reason and read as broken; a count that has not arrived shows no label at
+    // all rather than a misleading zero.
+    const worktreeCount = projectWorktreeCounts?.[project.id]
+    const label =
+      intent === "from_worktree"
+        ? projectWorktreeCounts === undefined || projectWorktreeCounts === null
+          ? null
+          : (worktreeCount ?? 0) === 0
+            ? "none"
+            : formatRegularCount(worktreeCount ?? 0, "worktree")
+        : formatRegularCount(count, "agent")
+    return { id: project.id, name: project.name, label }
+  })
+
   return (
-    <>
-      <DialogHeader className="shrink-0 p-4 pb-3">
-          <DialogTitle>{INTENT_COPY[intent].title}</DialogTitle>
-          <DialogDescription>{INTENT_COPY[intent].description}</DialogDescription>
-          <div className="mt-2 flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 max-md:min-h-10">
-            <Search className="size-4 shrink-0 text-muted-foreground" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search projects"
-              aria-label="Search projects"
-              className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
-              autoFocus
-            />
-          </div>
-        </DialogHeader>
-
-        {/* Height h-72 (not max-h) so the modal never grows or shrinks with the
-            result count as the user types; the list scrolls internally and the
-            empty state fills the same space instead of collapsing. It is a flex
-            child that may SHRINK (min-h-0, never grow) so that when the soft
-            keyboard shrinks the popup's dvh cap, this list gives up the space
-            and the header and Add-project footer stay on screen and tappable. */}
-        <ScrollArea className="h-72 min-h-0 shrink border-t">
-          <div className="p-2">
-            <p className="px-2 pt-1 pb-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-              Choose a project
-            </p>
-            {filtered.length === 0 ? (
-              <p className="px-2 py-4 text-sm text-muted-foreground">
-                No projects match <InlineCode>{query}</InlineCode>.
-              </p>
-            ) : (
-              filtered.map((project) => {
-                const count = agentCounts.get(project.id) ?? 0
-                // In the worktree intent the row is a doorway into that
-                // project's worktree list, so it is labelled with what is
-                // behind the door. An empty project reads "none" and stays
-                // clickable, because disabling it would give no reason and read
-                // as broken; a count that has not arrived shows no label at all
-                // rather than a misleading zero.
-                const worktreeCount = projectWorktreeCounts?.[project.id]
-                const rowLabel =
-                  intent === "from_worktree"
-                    ? projectWorktreeCounts === undefined ||
-                      projectWorktreeCounts === null
-                      ? null
-                      : (worktreeCount ?? 0) === 0
-                        ? "none"
-                        : formatRegularCount(worktreeCount ?? 0, "worktree")
-                    : formatRegularCount(count, "agent")
-                return (
-                  <div
-                    key={project.id}
-                    className={cn(
-                      "flex items-center gap-2 rounded-md px-2 transition-colors max-md:min-h-10",
-                      "hover:bg-accent/60",
-                    )}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => onProjectRow(project)}
-                      className="flex min-w-0 flex-1 items-center gap-2.5 py-2 text-left"
-                    >
-                      <Folder className="size-4 shrink-0 text-muted-foreground" />
-                      <span className="min-w-0 flex-1 truncate text-sm">
-                        {project.name}
-                      </span>
-                      {rowLabel ? (
-                        <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                          {rowLabel}
-                        </span>
-                      ) : null}
-                    </button>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger
-                        render={
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="size-8 shrink-0 max-md:size-10"
-                            aria-label="Project actions"
-                          />
-                        }
-                      >
-                        <Ellipsis />
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <ProjectMenuItems id={project.id} />
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
-                )
-              })
-            )}
-          </div>
-        </ScrollArea>
-
-        <div className="shrink-0 border-t p-2">
-          <button
-            type="button"
-            onClick={openAddProject}
-            className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground max-md:min-h-10"
-          >
-            <FolderPlus className="size-4 shrink-0" />
-            Add a new project…
-          </button>
-        </div>
-    </>
+    <ProjectList
+      title={INTENT_COPY[intent].title}
+      description={INTENT_COPY[intent].description}
+      rows={rows}
+      onPick={onProjectRow}
+      menu={(id) => <ProjectMenuItems id={id} />}
+    />
   )
 }

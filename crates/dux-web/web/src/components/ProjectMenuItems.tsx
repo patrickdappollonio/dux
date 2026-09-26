@@ -5,6 +5,7 @@ import {
 import {
   createProjectTerminal,
   openAttachWorktree,
+  openChangeBaseBranch,
   openCheckoutDefaultBranch,
   openCreateAgent,
   openCreateAgentFromPr,
@@ -22,6 +23,7 @@ import {
   FolderGit2,
   FolderX,
   GitBranch,
+  GitBranchPlus,
   GitPullRequest,
   Info,
   ScrollText,
@@ -35,8 +37,20 @@ import {
  * its own wrapper, since desktop and mobile anchor it differently. An orphaned
  * group shows only "Remove project…", which clears its ghost sessions, and
  * "New agent from PR…" is hidden where `gh` is unavailable.
+ *
+ * `onLeave` is for a host that stays on screen behind the menu (the Projects
+ * list): it runs before an item that takes the user somewhere else (a new
+ * agent, a new terminal), so the host can close first. Items that open a
+ * project dialog do not call it, because those dialogs open over the host and
+ * closing them lands back on it.
  */
-export function ProjectMenuItems({ id }: { id: string }) {
+export function ProjectMenuItems({
+  id,
+  onLeave,
+}: {
+  id: string
+  onLeave?: () => void
+}) {
   const { spine, bootstrap } = useDux()
   const ghAvailable = bootstrap?.gh_available ?? false
   const project = spine?.projects.find((p) => p.id === id)
@@ -46,12 +60,22 @@ export function ProjectMenuItems({ id }: { id: string }) {
     <>
       {!orphaned && (
         <>
-          <DropdownMenuItem onClick={() => openCreateAgent(id)}>
+          <DropdownMenuItem
+            onClick={() => {
+              onLeave?.()
+              openCreateAgent(id)
+            }}
+          >
             <Bot />
             New agent…
           </DropdownMenuItem>
           {ghAvailable && (
-            <DropdownMenuItem onClick={() => openCreateAgentFromPr(id)}>
+            <DropdownMenuItem
+              onClick={() => {
+                onLeave?.()
+                openCreateAgentFromPr(id)
+              }}
+            >
               <GitPullRequest />
               New agent from PR…
             </DropdownMenuItem>
@@ -74,18 +98,33 @@ export function ProjectMenuItems({ id }: { id: string }) {
               the shell lands is what the reader cannot otherwise guess. */}
           <DropdownMenuItem
             disabled={project.path_missing}
-            onClick={() => createProjectTerminal(id)}
+            onClick={() => {
+              onLeave?.()
+              createProjectTerminal(id)
+            }}
           >
             <SquareTerminal />
             New terminal at the project root
           </DropdownMenuItem>
+          {/* Runs at once and opens nothing, so no trailing "…"; its busy and
+              final statuses say what happened. */}
           <DropdownMenuItem onClick={() => pullProject(id)}>
             <Download />
-            Pull project…
+            Pull project
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => openCheckoutDefaultBranch(id)}>
             <GitBranch />
             Check out default branch…
+          </DropdownMenuItem>
+          {/* Any branch, local or only on origin, as the one new agents start
+              from. It switches the project folder, so like the terminal it
+              needs the folder to be there. */}
+          <DropdownMenuItem
+            disabled={project.path_missing}
+            onClick={() => openChangeBaseBranch(id)}
+          >
+            <GitBranchPlus />
+            Change base branch…
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => openProjectInfo(id)}>

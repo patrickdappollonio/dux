@@ -29,6 +29,7 @@ import { ConfirmVanishedEditorDialog } from "@/components/ConfirmVanishedEditorD
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { NewAgentPickerDialog } from "@/components/NewAgentPickerDialog"
 import { RenameSessionDialog } from "@/components/RenameSessionDialog"
+import { ChangeBaseBranchDialog } from "@/components/ChangeBaseBranchDialog"
 import { CheckoutDefaultBranchDialog } from "@/components/CheckoutDefaultBranchDialog"
 import { DeleteProjectDialog } from "@/components/DeleteProjectDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
@@ -39,6 +40,7 @@ import { OfflineOverlay } from "@/components/OfflineOverlay"
 import { StandaloneEditorShell } from "@/components/StandaloneEditor"
 import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
+import { ProjectsDialog } from "@/components/ProjectsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { CustomizeWebappDialog } from "@/components/CustomizeWebappDialog"
 import { InsetHeader } from "@/components/InsetHeader"
@@ -85,6 +87,9 @@ function GlobalOverlays() {
       <EditorOverlay />
       <CreateAgentDialog />
       <NewAgentPickerDialog />
+      {/* Before every project dialog, so one opened from a row's menu stacks
+          over the list and closing it lands back on the list. */}
+      <ProjectsDialog />
       <RenameSessionDialog />
       <AttachPullRequestDialog />
       <ChangeProviderDialog />
@@ -119,6 +124,7 @@ function GlobalOverlays() {
       <RemoveProjectDialog />
       <DeleteProjectDialog />
       <CheckoutDefaultBranchDialog />
+      <ChangeBaseBranchDialog />
       <Toaster />
       {/* Portals to the body and sits above every other surface, so DOM order
           here is irrelevant. */}

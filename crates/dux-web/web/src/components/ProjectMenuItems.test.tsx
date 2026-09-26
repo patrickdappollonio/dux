@@ -8,9 +8,13 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 // one row-menu apart and must not read alike.
 
 const openProjectStartupLogs = vi.fn()
+const openChangeBaseBranch = vi.fn()
+const createProjectTerminal = vi.fn()
+let pathMissing = false
 vi.mock("@/lib/store", () => ({
-  createProjectTerminal: vi.fn(),
+  createProjectTerminal: (id: string) => createProjectTerminal(id),
   openAttachWorktree: vi.fn(),
+  openChangeBaseBranch: (id: string) => openChangeBaseBranch(id),
   openCheckoutDefaultBranch: vi.fn(),
   openCreateAgent: vi.fn(),
   openCreateAgentFromPr: vi.fn(),
@@ -22,7 +26,9 @@ vi.mock("@/lib/store", () => ({
   pullProject: vi.fn(),
   useDux: () => ({
     bootstrap: { gh_available: false },
-    spine: { projects: [{ id: "p1", name: "Repo", path_missing: false }] },
+    spine: {
+      projects: [{ id: "p1", name: "Repo", path_missing: pathMissing }],
+    },
   }),
 }))
 
@@ -33,12 +39,12 @@ const {
   DropdownMenuTrigger,
 } = await import("@/components/ui/dropdown-menu")
 
-function openMenu() {
+function openMenu(onLeave?: () => void) {
   render(
     <DropdownMenu>
       <DropdownMenuTrigger>open</DropdownMenuTrigger>
       <DropdownMenuContent>
-        <ProjectMenuItems id="p1" />
+        <ProjectMenuItems id="p1" onLeave={onLeave} />
       </DropdownMenuContent>
     </DropdownMenu>,
   )
@@ -49,6 +55,88 @@ function openMenu() {
 afterEach(() => {
   cleanup()
   openProjectStartupLogs.mockClear()
+  openChangeBaseBranch.mockClear()
+  createProjectTerminal.mockClear()
+  pathMissing = false
+})
+
+function items(): HTMLElement[] {
+  return screen.getAllByRole("menuitem")
+}
+
+describe("ProjectMenuItems as a whole", () => {
+  it("lists the project actions in the order both surfaces share", async () => {
+    await openMenu()
+    expect(items().map((item) => item.textContent)).toEqual([
+      "New agent…",
+      "Worktrees…",
+      "New terminal at the project root",
+      "Pull project",
+      "Check out default branch…",
+      "Change base branch…",
+      "Project info…",
+      "Project settings…",
+      "Startup command logs for all agents…",
+      "Delete project…",
+      "Remove project…",
+    ])
+  })
+
+  // Pull project runs at once and opens nothing, so it carries no "…".
+  it("reads Pull project with no trailing ellipsis", async () => {
+    await openMenu()
+    expect(screen.getByText("Pull project")).toBeTruthy()
+    expect(screen.queryByText("Pull project…")).toBeNull()
+  })
+
+  it("gives every item a leading icon", async () => {
+    await openMenu()
+    for (const item of items()) {
+      expect(
+        item.firstElementChild?.tagName.toLowerCase(),
+        `${item.textContent} needs a leading icon`,
+      ).toBe("svg")
+    }
+  })
+
+  it("opens Change base branch for the project", async () => {
+    await openMenu()
+    fireEvent.click(screen.getByText("Change base branch…"))
+    expect(openChangeBaseBranch).toHaveBeenCalledWith("p1")
+  })
+
+  // Both need the folder: there is no root to open a shell at and no checkout
+  // to switch.
+  it("disables the folder-bound items when the folder is missing", async () => {
+    pathMissing = true
+    await openMenu()
+    for (const label of [
+      "New terminal at the project root",
+      "Change base branch…",
+    ]) {
+      expect(
+        screen
+          .getByText(label)
+          .closest('[role="menuitem"]')
+          ?.getAttribute("aria-disabled"),
+      ).toBe("true")
+    }
+  })
+
+  // A surface that stays behind (the Projects list) is told first, so it can
+  // get out of the way of an item that takes the user somewhere else.
+  it("tells the host before an item that leaves it, and not before one that opens over it", async () => {
+    const onLeave = vi.fn()
+    await openMenu(onLeave)
+    fireEvent.click(screen.getByText("New terminal at the project root"))
+    expect(onLeave).toHaveBeenCalledTimes(1)
+    expect(createProjectTerminal).toHaveBeenCalledWith("p1")
+    cleanup()
+    onLeave.mockClear()
+    await openMenu(onLeave)
+    fireEvent.click(screen.getByText("Change base branch…"))
+    expect(onLeave).not.toHaveBeenCalled()
+  })
 })
 
 describe("ProjectMenuItems startup-command logs entry", () => {

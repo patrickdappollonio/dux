@@ -21,6 +21,7 @@ import {
   Clock,
   FileCode,
   FolderGit2,
+  FolderKanban,
   GitPullRequestArrow,
   Globe,
   Plus,
@@ -43,6 +44,7 @@ import {
   openGlobalEnv,
   openTaskManager,
   openMacrosDialog,
+  openProjects,
   sortAgents,
 } from "@/lib/store"
 
@@ -116,6 +118,16 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
       title: "Add project",
       icon: FolderGit2,
       entries: asEntries(addProjectMenuItems()),
+    },
+    // Every project and orphaned group, each with its whole menu. Beside the
+    // way to add one because it is the way to manage one: without it, a
+    // project with no agents is reachable only through the New agent picker.
+    {
+      kind: "item",
+      id: "projects",
+      title: "Projects…",
+      icon: FolderKanban,
+      run: () => openProjects(),
     },
     { kind: "separator", id: "sep-create" },
     {

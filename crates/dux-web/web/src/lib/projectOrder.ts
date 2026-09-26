@@ -57,16 +57,17 @@ export function orderProjectsByRecency(
   })
 }
 
-/** A frozen order applied to a live list: the projects named by `frozenIds`, in
- * that order, skipping ids that are gone, then every other project at the end in
- * incoming order. */
-export function applyFrozenOrder(
+/** A frozen order applied to a live list: the rows named by `frozenIds`, in
+ * that order, skipping ids that are gone, then every other row at the end in
+ * incoming order. Generic over the row so a list of projects and orphaned
+ * groups freezes the same way a list of projects does. */
+export function applyFrozenOrder<T extends { id: string }>(
   frozenIds: string[],
-  projects: ProjectView[],
-): ProjectView[] {
+  projects: T[],
+): T[] {
   const byId = new Map(projects.map((project) => [project.id, project]))
   const frozen = new Set(frozenIds)
-  const ordered: ProjectView[] = []
+  const ordered: T[] = []
   for (const id of frozenIds) {
     const project = byId.get(id)
     if (project) ordered.push(project)
@@ -75,4 +76,19 @@ export function applyFrozenOrder(
     if (!frozen.has(project.id)) ordered.push(project)
   }
   return ordered
+}
+
+/** How many agents each project has, keyed by project id. A standalone agent
+ * belongs to no project, so it is counted against none: adding it to some
+ * bucket would inflate a project's count with an agent that has nothing to do
+ * with it. An orphaned group's agents still carry their gone project's id, so
+ * they are counted under it. */
+export function projectAgentCounts(sessions: SessionView[]): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const session of sessions) {
+    const projectId = workspaceProjectId(session.workspace)
+    if (!projectId) continue
+    counts.set(projectId, (counts.get(projectId) ?? 0) + 1)
+  }
+  return counts
 }
