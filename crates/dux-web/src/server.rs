@@ -4151,6 +4151,12 @@ mod tests {
             ),
             ("POST", "/api/v1/projects/nope/pull", None),
             ("POST", "/api/v1/projects/nope/checkout-default", None),
+            (
+                "POST",
+                "/api/v1/projects/nope/base-branch",
+                Some(r#"{"branch":"main"}"#),
+            ),
+            ("GET", "/api/v1/projects/nope/branches", None),
         ];
         for (method, uri, body) in cases {
             assert_eq!(
