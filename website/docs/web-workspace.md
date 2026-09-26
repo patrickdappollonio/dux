@@ -51,7 +51,8 @@ the browser decides was a scroll, leaves both splits exactly where they were.
 
 A slim header shows breadcrumbs (agent, provider, project, branch) and a **cog** button
 that opens the app menu. The cog menu holds your preferences, the configuration dialogs,
-and the actions that apply to the whole workspace. Anything that acts on a *specific*
+the actions that apply to the whole workspace, and **Projects…**, the list of every
+project (see [Managing projects](#managing-projects)). Anything that acts on a *specific*
 agent, project, or file lives in the `⋯` menu on that row instead. The cog menu has no
 keyboard shortcut: Tab reaches it, Enter opens it, the arrow keys move through it, and
 Escape closes it.
@@ -121,6 +122,47 @@ browses the server's filesystem. Pick a git repository and it joins the workspac
 The launcher's `⋯` holds both flavors under **Projects** ("Add project…" and "Initialize
 a repository…"); either way the picker inspects your selection and offers the right
 action. The TUI's project browser makes the same offer.
+
+## Managing projects
+
+**Projects…** in the app menu (the cog), right under **Add project**, lists every project
+dux knows about, most recently used first, with a search box on top. Each row shows the
+project's folder, how many agents it has, and its base branch (the branch new agents start
+from), plus a warning when the folder is missing. It is the place to manage a project that
+has no agents yet.
+
+Click a row, or its `⋯`, for that project's menu. Dialogs you open from it (delete,
+remove, project info, project settings, worktrees, checking out the default branch,
+changing the base branch) open on top of the list, and closing them takes you back to it.
+Starting an agent or opening a terminal closes the list and takes you there.
+
+If agents are left over from a project whose record is gone, they show up in the list
+under their group's name, and the only thing on offer is **Remove project…**, which clears
+them out.
+
+### Changing the base branch
+
+**Change base branch…** in a project's menu lets you pick any branch as the one new agents
+start from: a local branch, or one that so far exists only on `origin` (dux creates the
+local branch, tracking origin's, when you pick it). Handy when a project was added from a
+clone that sat on the wrong branch.
+
+- Opening it fetches `origin` first. If that fails or times out, the list shows the
+  branches as they were last fetched and says why.
+- The current base is marked. A branch that another worktree has checked out (usually an
+  agent's) is shown but cannot be picked, because git will not check a branch out twice;
+  the row names the agent, or the folder when no agent owns it.
+- After you confirm, dux switches the project folder to that branch and then saves it as
+  the base. If git refuses the switch (say, uncommitted changes in the folder would be
+  overwritten), you get an error and the base stays where it was.
+
+> [!IMPORTANT]
+> This moves the project folder itself onto the branch. Uncommitted changes that do not
+> conflict come along with it, the same as with **Check out default branch…**.
+
+Only one of **Pull project**, **Check out default branch…** and **Change base branch…**
+runs on a project at a time; starting another while one is running is refused and names
+the one in progress.
 
 ## The browser terminals
 

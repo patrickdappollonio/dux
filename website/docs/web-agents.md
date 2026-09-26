@@ -30,8 +30,11 @@ show a pre-flight step first:
   [the workspace page](/docs/web-workspace) for what it keeps and what it fills in.
 
 The confirm button's label adapts to whichever applies. A project's `⋯` menu carries
-project settings, project info, and remove project, alongside the agent-creation actions
-below.
+everything you can do with it: start an agent (plain or from a pull request), manage its
+worktrees, open a terminal at its root, pull it, check out its default branch, change its
+base branch, see its info, change its settings, read the startup-command logs of all its
+agents, and delete or remove it. Every project, including one with no agents yet, is in
+**Projects…** in the app menu; see [the workspace page](/docs/web-workspace#managing-projects).
 
 ## Creating an agent
 
