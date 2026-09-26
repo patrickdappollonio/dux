@@ -1,5 +1,11 @@
 import { GitBranch, Search, TriangleAlert } from "lucide-react"
-import { useCallback, useMemo, useState } from "react"
+import {
+  Fragment,
+  useCallback,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react"
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { Button } from "@/components/ui/button"
@@ -129,10 +135,19 @@ function PickerBody({
   }, [listing, query])
 
   // A held branch is named by what holds it: the agent whose worktree it is,
-  // or, for a worktree no agent owns, its folder.
-  function holder(path: string): string {
+  // or, for a worktree no agent owns, its folder. Either is a name in a
+  // sentence, so it is the shared chip.
+  function holder(path: string): ReactNode {
     const session = sessions.find((s) => workspaceDirectory(s.workspace) === path)
-    return session ? `in use by ${sessionLabel(session)}` : `checked out at ${path}`
+    return session ? (
+      <>
+        in use by <InlineCode>{sessionLabel(session)}</InlineCode>
+      </>
+    ) : (
+      <>
+        checked out at <InlineCode>{path}</InlineCode>
+      </>
+    )
   }
 
   return (
@@ -215,7 +230,7 @@ function BranchRow({
 }: {
   branch: BranchChoiceView
   isBase: boolean
-  heldBy: string | null
+  heldBy: ReactNode | null
   onPick: (branch: string) => void
 }) {
   // What sits after the name, quietest last: why it cannot be picked, then
@@ -224,7 +239,7 @@ function BranchRow({
     heldBy,
     isBase ? "current base" : null,
     branch.location === "remote" ? "only on origin" : null,
-  ].filter((note): note is string => note !== null)
+  ].filter((note) => note !== null)
   return (
     <button
       type="button"
@@ -240,7 +255,12 @@ function BranchRow({
       </span>
       {notes.length > 0 ? (
         <span className="min-w-0 shrink truncate text-xs text-muted-foreground">
-          {notes.join(" · ")}
+          {notes.map((note, i) => (
+            <Fragment key={i}>
+              {i > 0 ? " · " : null}
+              {note}
+            </Fragment>
+          ))}
         </span>
       ) : null}
     </button>

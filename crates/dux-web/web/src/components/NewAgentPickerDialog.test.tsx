@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -29,8 +29,14 @@ vi.mock("@/lib/store", async (importOriginal) => {
 
 // ProjectMenuItems only mounts inside the (closed) row ⋯ menu, but it reads the
 // store on import; keep the tests focused by rendering nothing for it.
+// The props it was last rendered with are kept, so a test can check what the
+// picker hands its row menus.
+let menuItemsProps: { id: string; onLeave?: () => void } | null = null
 vi.mock("@/components/ProjectMenuItems", () => ({
-  ProjectMenuItems: () => null,
+  ProjectMenuItems: (props: { id: string; onLeave?: () => void }) => {
+    menuItemsProps = props
+    return null
+  },
 }))
 
 // The real store boots on import (localStorage + bootstrap fetch). jsdom doesn't
@@ -91,6 +97,19 @@ describe("NewAgentPickerDialog", () => {
     const empty = screen.getByText(/No projects match/)
     expect(empty.textContent).toBe("No projects match zzz.")
     expect(screen.getByText("zzz", { selector: "code" })).toBeTruthy()
+  })
+
+  // New agent… and New terminal from a row's menu take the user somewhere
+  // else, so the picker must not stay open over where they land.
+  it("closes the picker before a row menu item that leaves it", async () => {
+    seed("new")
+    menuItemsProps = null
+    render(<NewAgentPickerDialog />)
+    fireEvent.click(screen.getAllByLabelText("Project actions")[0])
+    await waitFor(() => expect(menuItemsProps).not.toBeNull())
+    expect(menuItemsProps!.onLeave).toBeTypeOf("function")
+    menuItemsProps!.onLeave!()
+    expect(closeNewAgentPicker).toHaveBeenCalledTimes(1)
   })
 
   it("opens the create-agent name dialog for the clicked project in the new intent", () => {

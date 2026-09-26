@@ -155,7 +155,9 @@ function PickerBody() {
       description={INTENT_COPY[intent].description}
       rows={rows}
       onPick={onProjectRow}
-      menu={(id) => <ProjectMenuItems id={id} />}
+      // New agent… and New terminal take the user somewhere else, so the
+      // picker closes first rather than staying open over where they land.
+      menu={(id) => <ProjectMenuItems id={id} onLeave={closeNewAgentPicker} />}
     />
   )
 }

@@ -1899,6 +1899,11 @@ function armCreateFocus(scope: CreateFocusScope): void {
   const knownIds = (state.spine?.sessions ?? []).map((s) => s.id)
   setState({
     pendingCreateFocus: { knownIds, scope, armedAt: Date.now() },
+    // Every way to create an agent arms this token, and the new agent is where
+    // the user is going, so the Projects list must not be left covering it
+    // (it may have been opened from there several dialogs deep, through
+    // Worktrees… for instance).
+    projectsDialogOpen: false,
   })
 }
 
@@ -4802,7 +4807,17 @@ export function checkoutDefaultBranch(projectId: string): void {
 // way `openAttachWorktree` requests its listing. The server fetches origin
 // first, bounded, so the reply can take a few seconds; the dialog shows that
 // it is loading until then.
+// Bumped on every open, so a reply is kept only by the open that asked for it:
+// the target id alone cannot tell a second open of the same project from the
+// first.
+let changeBaseBranchOpenToken = 0
+
 export function openChangeBaseBranch(projectId: string): void {
+  const token = ++changeBaseBranchOpenToken
+  // Only this open's own reply, and only while it is still the open one.
+  const current = () =>
+    token === changeBaseBranchOpenToken &&
+    state.changeBaseBranchTarget === projectId
   setState({
     changeBaseBranchTarget: projectId,
     changeBaseBranchListing: { kind: "loading" },
@@ -4810,9 +4825,9 @@ export function openChangeBaseBranch(projectId: string): void {
   projectsApi
     .branches(projectId)
     .then((reply) => {
-      // A reply for a dialog that closed, or moved to another project, is
-      // somebody else's answer.
-      if (state.changeBaseBranchTarget !== projectId) return
+      // A reply for a dialog that closed, was reopened, or moved to another
+      // project is somebody else's answer.
+      if (!current()) return
       setState({
         changeBaseBranchListing: {
           kind: "loaded",
@@ -4823,7 +4838,7 @@ export function openChangeBaseBranch(projectId: string): void {
       })
     })
     .catch((e) => {
-      if (state.changeBaseBranchTarget !== projectId) return
+      if (!current()) return
       // Said inside the dialog, which is where the user is looking, rather
       // than in a toast behind it.
       setState({
@@ -4837,6 +4852,8 @@ export function openChangeBaseBranch(projectId: string): void {
 }
 
 export function closeChangeBaseBranch(): void {
+  // A reply still in flight belongs to the open that just ended.
+  changeBaseBranchOpenToken++
   setState({
     changeBaseBranchTarget: null,
     changeBaseBranchListing: { kind: "loading" },

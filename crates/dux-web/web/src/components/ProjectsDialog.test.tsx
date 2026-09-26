@@ -6,6 +6,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react"
 
@@ -23,6 +24,16 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: (): DuxState => ({ ...actual.useDux(), spine }),
   }
 })
+
+const WORKTREE = {
+  worktree_path: "/wt/beta/spare",
+  branch_name: "spare",
+  branch: "spare",
+  adoptable: true,
+  reason: null,
+  dirty: false,
+  agent_id: null,
+}
 
 type FetchCall = { url: string; method: string }
 let fetchCalls: FetchCall[] = []
@@ -42,6 +53,23 @@ function installBootStubs() {
     "fetch",
     vi.fn((url: string, init?: RequestInit) => {
       fetchCalls.push({ url: String(url), method: init?.method ?? "GET" })
+      // The Worktrees dialog's listing: one unused worktree it can adopt.
+      if (String(url).endsWith("/worktrees")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ entries: [WORKTREE] }), { status: 200 }),
+        )
+      }
+      if (String(url).endsWith("/branches")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              branches: [{ name: "main", location: "local", held_by: null }],
+              fetched: true,
+            }),
+            { status: 200 },
+          ),
+        )
+      }
       return Promise.resolve(new Response(null, { status: 204 }))
     }),
   )
@@ -53,6 +81,9 @@ const { ProjectsDialog } = await import("./ProjectsDialog")
 const { DeleteProjectDialog } = await import("./DeleteProjectDialog")
 const { ProjectSettingsDialog } = await import("./ProjectSettingsDialog")
 const { RemoveProjectDialog } = await import("./RemoveProjectDialog")
+const { ProjectInfoDialog } = await import("./ProjectInfoDialog")
+const { WorktreesDialog } = await import("./WorktreesDialog")
+const { ChangeBaseBranchDialog } = await import("./ChangeBaseBranchDialog")
 
 function project(id: string, name: string, extra: object = {}) {
   return {
@@ -119,6 +150,9 @@ function App() {
       <DeleteProjectDialog />
       <RemoveProjectDialog />
       <ProjectSettingsDialog />
+      <ProjectInfoDialog />
+      <WorktreesDialog />
+      <ChangeBaseBranchDialog />
     </>
   )
 }
@@ -159,6 +193,9 @@ afterEach(() => {
     store.closeDeleteProject()
     store.closeRemoveProject()
     store.closeProjectSettings()
+    store.closeProjectInfo()
+    store.closeAttachWorktree()
+    store.closeChangeBaseBranch()
   })
   cleanup()
   vi.unstubAllGlobals()
@@ -256,6 +293,120 @@ describe("ProjectsDialog", () => {
     seedSpine([project("p2", "beta")], [agent("g1", "gone", "")])
     rerender(<App />)
     expect(rowNames()).toEqual(["beta", "ghost"])
+  })
+
+  it("closes the list when adopting a worktree from it starts an agent", async () => {
+    openList()
+    fireEvent.click(
+      within(row("beta")).getByRole("button", { name: "Project actions" }),
+    )
+    fireEvent.click(await screen.findByText("Worktrees…"))
+    fireEvent.click(await screen.findByText("spare", { selector: "span" }))
+    fireEvent.click(screen.getByRole("button", { name: "Create agent" }))
+
+    await waitFor(() =>
+      expect(
+        fetchCalls.some(
+          (call) => call.method === "POST" && call.url === "/api/v1/sessions",
+        ),
+      ).toBe(true),
+    )
+    // The new agent is where the user is going: nothing may be left over it.
+    expect(listIsOpen()).toBe(false)
+  })
+
+  // The row is a button that opens a menu, and says so.
+  it("names the row by its project and toggles its menu", async () => {
+    openList()
+    const button = screen.getByRole("button", { name: "beta" })
+    expect(button.getAttribute("aria-haspopup")).toBe("menu")
+    expect(button.getAttribute("aria-expanded")).toBe("false")
+    // The rest of the row is its description, not its name.
+    expect(button.getAttribute("aria-describedby")).toBeTruthy()
+    const describedBy = button
+      .getAttribute("aria-describedby")!
+      .split(" ")
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ")
+    expect(describedBy).toContain("0 agents")
+    expect(describedBy).toContain("/code/beta")
+
+    fireEvent.click(button)
+    await screen.findByRole("menu")
+    expect(button.getAttribute("aria-expanded")).toBe("true")
+
+    fireEvent.click(button)
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+    expect(button.getAttribute("aria-expanded")).toBe("false")
+  })
+
+  // The touch-target tenet: on a coarse pointer the trigger is 40px, so no
+  // revealed state of its wrapper may cap it narrower, or a focused or open
+  // trigger is clipped to 32px on a tablet at desktop width.
+  it("never caps the revealed trigger narrower than its touch size", () => {
+    openList()
+    const trigger = within(row("beta")).getByRole("button", {
+      name: "Project actions",
+    })
+    expect(trigger.className).toContain("pointer-coarse:size-10")
+    const wrapper = trigger.parentElement!
+    const caps = [...wrapper.className.matchAll(/max-w-(\d+)\b/g)]
+      .map((m) => Number(m[1]))
+      .filter((n) => n > 0)
+    expect(caps.length).toBeGreaterThan(0)
+    for (const cap of caps) expect(cap).toBeGreaterThanOrEqual(10)
+  })
+
+  describe("a dialog opened from a row's menu takes focus", () => {
+    const cases: [string, string][] = [
+      ["Delete project…", "Delete project?"],
+      ["Remove project…", "Remove project?"],
+      ["Project settings…", "Project settings:"],
+      ["Project info…", "beta"],
+      ["Worktrees…", "Worktrees in"],
+      ["Change base branch…", "Change base branch"],
+    ]
+    for (const [item, title] of cases) {
+      it(`moves focus into the dialog for ${item} and Escape closes only it`, async () => {
+        openList()
+        fireEvent.click(
+          within(row("beta")).getByRole("button", { name: "Project actions" }),
+        )
+        fireEvent.click(await screen.findByText(item))
+        const dialogs = await screen.findAllByRole("dialog")
+        const top = await waitFor(() => {
+          const found = dialogs.find(
+            (d) =>
+              d.querySelector("h2")?.textContent?.startsWith(title) &&
+              !d.querySelector('[aria-label="Search projects"]'),
+          )
+          if (!found) throw new Error(`no dialog titled ${title}`)
+          return found
+        })
+        await waitFor(() =>
+          expect(
+            top.contains(document.activeElement),
+            `focus is on ${document.activeElement?.tagName}`,
+          ).toBe(true),
+        )
+        fireEvent.keyDown(document.activeElement!, { key: "Escape" })
+        await waitFor(() => expect(top.isConnected).toBe(false))
+        expect(listIsOpen()).toBe(true)
+      })
+    }
+  })
+
+  // An item that opens nothing leaves no dialog to take focus, so it goes back
+  // to the row's trigger rather than being dropped on the page.
+  it("hands focus back to the trigger after an item that opens nothing", async () => {
+    openList()
+    const trigger = within(row("beta")).getByRole("button", {
+      name: "Project actions",
+    })
+    fireEvent.click(trigger)
+    fireEvent.click(await screen.findByText("Pull project"))
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+    expect(listIsOpen()).toBe(true)
   })
 
   it("says a project's folder is missing", () => {

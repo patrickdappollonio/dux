@@ -1,5 +1,5 @@
 import { Ellipsis, Folder, FolderPlus, Search } from "lucide-react"
-import { useMemo, useState, type ReactNode } from "react"
+import { useId, useMemo, useRef, useState, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -106,73 +106,14 @@ export function ProjectList({
             </p>
           ) : (
             filtered.map((row) => (
-              <div
+              <ProjectRow
                 key={row.id}
-                data-testid="project-row"
-                data-name={row.name}
-                className={cn(
-                  "group/project-row flex items-center gap-2 rounded-md px-2 transition-colors max-md:min-h-10",
-                  "hover:bg-accent/60 has-[[data-popup-open]]:bg-accent/60",
-                )}
-              >
-                <button
-                  type="button"
-                  onClick={() =>
-                    onPick ? onPick(row.id) : setMenuOpenId(row.id)
-                  }
-                  className="flex min-w-0 flex-1 items-center gap-2.5 py-2 text-left"
-                >
-                  <Folder className="size-4 shrink-0 self-start text-muted-foreground mt-0.5" />
-                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate text-sm">
-                        {row.name}
-                      </span>
-                      {row.label ? (
-                        <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                          {row.label}
-                        </span>
-                      ) : null}
-                    </span>
-                    {row.detail}
-                  </span>
-                </button>
-                <DropdownMenu
-                  open={menuOpenId === row.id}
-                  onOpenChange={(open) => setMenuOpenId(open ? row.id : null)}
-                >
-                  {/* The row rule: revealed on hover or focus anywhere in the
-                      row, kept while its menu is open, always shown on a
-                      coarse pointer, and taking no width while idle. */}
-                  <div
-                    className={cn(
-                      "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/project-row:max-w-8 md:group-hover/project-row:opacity-100 md:group-focus-within/project-row:max-w-8 md:group-focus-within/project-row:opacity-100 md:has-[[data-popup-open]]:max-w-8 md:has-[[data-popup-open]]:opacity-100",
-                      ALWAYS_REVEALED_ON_TOUCH,
-                    )}
-                  >
-                    <DropdownMenuTrigger
-                      render={
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          // 32px under a fine pointer, where the only neighbour
-                          // on either axis is this row's own button, whose
-                          // click opens a dialog at worst (the picker) or this
-                          // same menu (the Projects list); the 40px floor
-                          // returns on a phone and on any coarse pointer.
-                          className="size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
-                          aria-label="Project actions"
-                        />
-                      }
-                    >
-                      <Ellipsis />
-                    </DropdownMenuTrigger>
-                  </div>
-                  <DropdownMenuContent align="end">
-                    {menu(row.id)}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
+                row={row}
+                onPick={onPick}
+                menuOpen={menuOpenId === row.id}
+                setMenuOpen={(open) => setMenuOpenId(open ? row.id : null)}
+                menu={menu}
+              />
             ))
           )}
         </div>
@@ -189,5 +130,143 @@ export function ProjectList({
         </button>
       </div>
     </>
+  )
+}
+
+// One row: the project's own button and its `⋯`. Where the list has no `onPick`,
+// the button opens the same menu the `⋯` does, and says so to assistive tech.
+function ProjectRow({
+  row,
+  onPick,
+  menuOpen,
+  setMenuOpen,
+  menu,
+}: {
+  row: ProjectListRow
+  onPick?: (id: string) => void
+  menuOpen: boolean
+  setMenuOpen: (open: boolean) => void
+  menu: (id: string) => ReactNode
+}) {
+  const nameId = useId()
+  const labelId = useId()
+  const detailId = useId()
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  // Whether the menu's last close came from pressing one of its items.
+  const closedByItem = useRef(false)
+  const opensMenu = onPick === undefined
+  const describedBy = [row.label ? labelId : null, row.detail ? detailId : null]
+    .filter((id): id is string => id !== null)
+    .join(" ")
+
+  return (
+    <div
+      data-testid="project-row"
+      data-name={row.name}
+      className={cn(
+        "group/project-row flex items-center gap-2 rounded-md px-2 transition-colors max-md:min-h-10",
+        "hover:bg-accent/60 has-[[data-popup-open]]:bg-accent/60",
+      )}
+    >
+      <button
+        type="button"
+        // Named by the project alone; the count and the second line describe
+        // it, so a screen reader says the name first and the rest after.
+        aria-labelledby={nameId}
+        aria-describedby={describedBy || undefined}
+        aria-haspopup={opensMenu ? "menu" : undefined}
+        aria-expanded={opensMenu ? menuOpen : undefined}
+        // A second press while the menu is open closes it rather than closing
+        // and reopening it.
+        onClick={() => (onPick ? onPick(row.id) : setMenuOpen(!menuOpen))}
+        className="flex min-w-0 flex-1 items-center gap-2.5 py-2 text-left"
+      >
+        <Folder className="mt-0.5 size-4 shrink-0 self-start text-muted-foreground" />
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="flex min-w-0 items-center gap-2">
+            <span id={nameId} className="min-w-0 flex-1 truncate text-sm">
+              {row.name}
+            </span>
+            {row.label ? (
+              <span
+                id={labelId}
+                className="shrink-0 font-mono text-xs text-muted-foreground"
+              >
+                {row.label}
+              </span>
+            ) : null}
+          </span>
+          {row.detail ? <span id={detailId}>{row.detail}</span> : null}
+        </span>
+      </button>
+      <DropdownMenu
+        open={menuOpen}
+        onOpenChange={(open, details) => {
+          closedByItem.current = !open && details.reason === "item-press"
+          setMenuOpen(open)
+        }}
+      >
+        {/* The row rule: revealed on hover or focus anywhere in the row, kept
+            while its menu is open, always shown on a coarse pointer, and taking
+            no width while idle. Every revealed cap is max-w-10, the trigger's
+            40px coarse-pointer size: these md: caps outrank the unprefixed
+            pointer-coarse:max-w-none, so a narrower cap would clip a focused or
+            open trigger to 32px on a tablet at desktop width. */}
+        <div
+          className={cn(
+            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/project-row:max-w-10 md:group-hover/project-row:opacity-100 md:group-focus-within/project-row:max-w-10 md:group-focus-within/project-row:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100",
+            ALWAYS_REVEALED_ON_TOUCH,
+          )}
+        >
+          <DropdownMenuTrigger
+            ref={triggerRef}
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                // 32px under a fine pointer, where the only neighbour on
+                // either axis is this row's own button, whose click opens a
+                // dialog at worst (the picker) or this same menu (the Projects
+                // list); the 40px floor returns on a phone and on any coarse
+                // pointer.
+                className="size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
+                aria-label="Project actions"
+              />
+            }
+          >
+            <Ellipsis />
+          </DropdownMenuTrigger>
+        </div>
+        <DropdownMenuContent
+          align="end"
+          // Most items open a project dialog over this list, and the menu's
+          // usual hand-back to its trigger can land AFTER that dialog took
+          // focus, leaving Escape closing the list behind the dialog instead
+          // of the dialog. So an item press hands focus back only if nothing
+          // took it; Escape and an outside press keep the usual behaviour.
+          finalFocus={() => {
+            if (!closedByItem.current) return true
+            refocusTriggerIfUnclaimed(triggerRef.current)
+            return false
+          }}
+        >
+          {menu(row.id)}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  )
+}
+
+// After an item press, hand focus back to the row's trigger only if nothing took
+// it: a project dialog the item opened owns focus the moment it has it, and a
+// dialog that focuses later still wins, because this only acts on an unfocused
+// page. Two frames, so the menu has finished closing first.
+function refocusTriggerIfUnclaimed(trigger: HTMLElement | null): void {
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      if (!trigger?.isConnected) return
+      const active = document.activeElement
+      if (active === null || active === document.body) trigger.focus()
+    }),
   )
 }

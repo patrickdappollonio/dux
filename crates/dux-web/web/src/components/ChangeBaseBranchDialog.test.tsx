@@ -30,6 +30,9 @@ let calls: Call[] = []
 // the loading state holds the reply until it releases it.
 let listing: { status: number; body: unknown }
 let hold: Promise<void> = Promise.resolve()
+// When set, each listing request takes the next of these in turn instead,
+// each answering whenever its own `hold` settles.
+let queued: { hold: Promise<void>; body: unknown }[] = []
 
 function installStubs() {
   const mem = new Map<string, string>()
@@ -45,6 +48,11 @@ function installStubs() {
       const method = init?.method ?? "GET"
       calls.push({ url: String(url), method, body: init?.body as string })
       if (String(url).endsWith("/branches")) {
+        const next = queued.shift()
+        if (next) {
+          await next.hold
+          return new Response(JSON.stringify(next.body), { status: 200 })
+        }
         await hold
         const text =
           typeof listing.body === "string"
@@ -121,6 +129,7 @@ beforeEach(() => {
   installStubs()
   calls = []
   hold = Promise.resolve()
+  queued = []
   listing = { status: 200, body: BRANCHES }
   seedSpine()
 })
@@ -163,6 +172,13 @@ describe("ChangeBaseBranchDialog", () => {
       "checked out at /elsewhere/wt",
     )
     expect(branchRow("release").disabled).toBe(false)
+    // The holder is a name in a sentence, so it is the shared chip.
+    expect(branchRow("develop").querySelector("code")?.textContent).toBe(
+      "fix-login",
+    )
+    expect(branchRow("old-work").querySelector("code")?.textContent).toBe(
+      "/elsewhere/wt",
+    )
     // Nothing to say about the fetch when it worked.
     expect(screen.queryByText(/Not fetched from origin/)).toBeNull()
   })
@@ -241,6 +257,43 @@ describe("ChangeBaseBranchDialog", () => {
     expect(screen.queryByText(/This switches the source checkout for/)).toBeNull()
     expect(screen.getAllByTestId("branch-row")).toHaveLength(4)
     expect(calls.some((c) => c.method === "POST")).toBe(false)
+  })
+
+  // A reply from an earlier open of the same project is somebody else's
+  // answer: only the listing this open asked for may fill the dialog.
+  it("drops a late reply from an earlier open of the same project", async () => {
+    let releaseFirst = () => {}
+    let releaseSecond = () => {}
+    queued = [
+      {
+        hold: new Promise((resolve) => (releaseFirst = resolve)),
+        body: {
+          branches: [{ name: "stale", location: "local", held_by: null }],
+          fetched: true,
+        },
+      },
+      {
+        hold: new Promise((resolve) => (releaseSecond = resolve)),
+        body: {
+          branches: [{ name: "fresh", location: "local", held_by: null }],
+          fetched: true,
+        },
+      },
+    ]
+    render(<ChangeBaseBranchDialog />)
+    act(() => store.openChangeBaseBranch("p1"))
+    act(() => store.closeChangeBaseBranch())
+    act(() => store.openChangeBaseBranch("p1"))
+
+    releaseSecond()
+    await screen.findAllByTestId("branch-row")
+    await act(async () => {
+      releaseFirst()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(
+      screen.getAllByTestId("branch-row").map((r) => r.getAttribute("data-branch")),
+    ).toEqual(["fresh"])
   })
 
   it("closes itself when the project vanishes", async () => {
