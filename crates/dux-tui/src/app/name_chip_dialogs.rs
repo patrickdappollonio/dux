@@ -210,6 +210,7 @@ fn the_checkout_default_branch_dialog_chips_the_project_and_its_base() {
             project_name: "proj-co".to_string(),
             stored_base: Some("base-co".to_string()),
             focus: ConfirmFocus::Cancel,
+            return_to: None,
         },
     );
     assert_chipped(&app, &buf, "proj-co");
@@ -230,6 +231,7 @@ fn the_delete_project_dialog_chips_the_project_and_names_the_cascade() {
             project_name: "proj-del".to_string(),
             agent_count: 2,
             focus: ConfirmFocus::Cancel,
+            return_to: None,
         },
     );
     assert_chipped(&app, &buf, "proj-del");
@@ -276,6 +278,7 @@ fn the_remove_project_dialog_chips_the_project_and_keeps_the_worktrees() {
             agent_count: 1,
             orphaned: true,
             focus: ConfirmFocus::Cancel,
+            return_to: None,
         },
     );
     assert_chipped(&app, &buf, "proj-rm");
@@ -304,6 +307,7 @@ fn a_multi_word_name_is_never_split_across_rows() {
             project_name: "My Cool Project".to_string(),
             stored_base: Some("base-co".to_string()),
             focus: ConfirmFocus::Cancel,
+            return_to: None,
         };
         let buf = render_at(&mut app, width, HEIGHT);
         assert_chipped(&app, &buf, "My Cool Project");
@@ -1276,6 +1280,7 @@ fn dialog_body_text_is_the_themes_text_color_on_a_light_theme() {
             project_name: "proj-light".to_string(),
             agent_count: 2,
             focus: ConfirmFocus::Cancel,
+            return_to: None,
         },
     );
     assert_body_text(&app, &buf, "This is irreversible.");
@@ -1289,6 +1294,7 @@ fn dialog_body_text_is_the_themes_text_color_on_a_light_theme() {
             agent_count: 2,
             orphaned: false,
             focus: ConfirmFocus::Cancel,
+            return_to: None,
         },
     );
     assert_body_text(&app, &buf, "This removes");

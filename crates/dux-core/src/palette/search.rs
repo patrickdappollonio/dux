@@ -467,7 +467,8 @@ mod tests {
                 "open-worktree-with",
                 "recreate-working-copy",
                 "fork-agent",
-                "change-agent-provider"
+                "change-agent-provider",
+                "change-project-base-branch"
             ]
         );
     }

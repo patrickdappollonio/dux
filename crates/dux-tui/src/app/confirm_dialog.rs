@@ -538,6 +538,10 @@ mod tests {
                 cancel_button,
                 confirm_button,
             }
+            | L::ConfirmChangeBaseBranch {
+                cancel_button,
+                confirm_button,
+            }
             | L::ConfirmDeleteProject {
                 cancel_button,
                 confirm_button,

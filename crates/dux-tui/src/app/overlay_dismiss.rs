@@ -100,6 +100,9 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::PickProjectWorktree(_)
         | PromptState::ManageWorktrees(_)
         | PromptState::PickProject { .. }
+        | PromptState::ProjectActions(_)
+        | PromptState::ProjectInfo(_)
+        | PromptState::ChangeBaseBranch(_)
         | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
         | PromptState::ChangeProjectDefaultProvider(_)
@@ -118,6 +121,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ConfirmDetachAgent { .. }
         | PromptState::ConfirmRecreateWorkingCopy { .. }
         | PromptState::ConfirmCheckoutDefaultBranch { .. }
+        | PromptState::ConfirmChangeBaseBranch(_)
         | PromptState::ConfirmDeleteProject { .. }
         | PromptState::ConfirmRemoveProject { .. }
         | PromptState::ConfirmDiscardFile { .. }
@@ -247,6 +251,20 @@ impl App {
             | PromptState::Command { .. }
             | PromptState::ConfirmNonDefaultBranch { .. } => {
                 self.prompt = PromptState::None;
+            }
+
+            // Steps back to the project list (or closes), exactly as Escape.
+            PromptState::ProjectActions(_) => {
+                self.leave_project_actions();
+            }
+            // Back onto the action list it came from, as its Close does.
+            PromptState::ProjectInfo(_) => self.close_project_info(),
+            // Back onto the action list it came from, as Escape with an empty
+            // search row does; an outside click never just clears the filter.
+            PromptState::ChangeBaseBranch(_) => self.dismiss_change_base_branch(),
+            // Steps back to the picker, the kill-running idiom.
+            PromptState::ConfirmChangeBaseBranch(_) => {
+                self.resolve_confirm_change_base_branch(false);
             }
 
             // Closing the log viewer must also drop the drag-selection state,

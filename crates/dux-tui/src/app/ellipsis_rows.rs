@@ -284,6 +284,8 @@ fn the_project_picker_cuts_a_wide_name_and_keeps_the_tail_of_a_wide_path() {
         path: path.to_string(),
         agent_count: 0,
         path_missing: false,
+        base_branch: None,
+        orphaned: false,
     };
     let wide_path = format!("/srv/{}/{}/リーフ", LONG_CJK, LONG_CJK);
     app.prompt = PromptState::PickProject {

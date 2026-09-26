@@ -102,6 +102,7 @@ impl App {
         // `StatusOpCompleted`), so fold it in on the same tick.
         self.drain_notes_fetch();
         self.drain_unpushed_count();
+        self.drain_branch_listing();
         self.drain_pending_diff();
         self.drain_worker_events();
         self.apply_resume_fallback_sweep();
@@ -1472,11 +1473,6 @@ impl App {
                     .iter()
                     .position(|item| matches!(item, LeftItem::Session(index) if self.engine.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(outcome.session.id.as_str())))
                     .unwrap_or(0);
-                // The selection just moved onto the freshly created agent, so a
-                // lingering `manage-projects` target no longer matches what the
-                // cursor points at; clear it so a follow-up project action
-                // resolves the new agent's project, not the stale pick.
-                self.project_chooser_context = None;
                 self.reload_changed_files();
                 self.show_agent_surface();
                 // A launched agent lands focused-but-minimized
@@ -2625,37 +2621,6 @@ mod tests {
         assert!(
             app.status.snapshot().is_empty(),
             "the create View arm must not set any status; the engine emits the keyed final",
-        );
-    }
-
-    /// Creating an agent moves the cursor onto the new agent, so a lingering
-    /// `manage-projects` target must be cleared. Otherwise a follow-up project
-    /// action would resolve the stale pick instead of the new agent's project.
-    #[test]
-    fn create_committed_view_clears_manage_projects_target() {
-        let mut app =
-            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
-        let session = app.engine.sessions[0].clone();
-
-        // A prior manage-projects pick targeted some other project.
-        app.project_chooser_context = Some("some-other-project".to_string());
-
-        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
-            tab_id: session.id.clone(),
-            session,
-            pty_size: (80, 24),
-            detached_session_id: None,
-            wants_fullscreen: false,
-            status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
-            view: AgentLaunchReadyView::CreateCommitted {
-                status_message: "Created agent.".to_string().into(),
-                startup_result_error: None,
-            },
-        });
-
-        assert!(
-            app.project_chooser_context.is_none(),
-            "creating an agent must clear the manage-projects target",
         );
     }
 

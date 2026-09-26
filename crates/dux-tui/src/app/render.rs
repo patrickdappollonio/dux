@@ -301,6 +301,9 @@ pub(crate) const TERMINAL_WORKING_WORD: &str = "Running";
 /// dialog carries the same label; keep them in step.
 const CHECKOUT_DEFAULT_BRANCH_LABEL: &str = "Check out default branch";
 
+/// The act button on the "Change base branch?" confirmation.
+const CHANGE_BASE_BRANCH_LABEL: &str = "Change base branch";
+
 /// What differs between the delete-project and remove-project confirmations;
 /// the frame, the body wrap and the Cancel / Danger pair are shared.
 struct ProjectConfirmDialog<'a> {
@@ -6765,7 +6768,7 @@ impl App {
         let start_dir = self.engine.config.defaults.start_directory.as_deref();
         let display_path =
             |entry: &ProjectChooserEntry| git::display_path_relative_to(&entry.path, start_dir);
-        let name_col = visible
+        let mut name_col = visible
             .iter()
             .filter_map(|i| entries.get(*i))
             .map(|entry| display_width(&entry.name))
@@ -6782,9 +6785,32 @@ impl App {
             .map(|entry| display_width(&count_label(entry.agent_count)))
             .max()
             .unwrap_or(8);
-        // margin(1) warn(1) sp(1) name sp(2) count sp(2) path margin(1)
-        let fixed = 1 + 1 + 1 + name_col + 2 + count_col + 2 + 1;
-        let path_col = (list_inner.width as usize).saturating_sub(fixed);
+        // The base branch new agents start from, or what stands in for one.
+        let base_label = |entry: &ProjectChooserEntry| match (&entry.base_branch, entry.orphaned) {
+            (_, true) => "orphaned".to_string(),
+            (Some(base), false) => base.clone(),
+            (None, false) => "no base yet".to_string(),
+        };
+        let mut base_col = visible
+            .iter()
+            .filter_map(|i| entries.get(*i))
+            .map(|entry| display_width(&base_label(entry)))
+            .max()
+            .unwrap_or(8)
+            .clamp(8, 20);
+        // margin(1) warn(1) sp(1) name sp(2) count sp(2) base sp(2) path margin(1)
+        let gutters = 1 + 1 + 1 + 2 + count_col + 2 + 2 + 1;
+        // The path keeps room for its leaf on a narrow screen: the name gives
+        // up width first, then the base, each down to its floor.
+        const PATH_FLOOR: usize = 14;
+        let room = (list_inner.width as usize).saturating_sub(gutters + PATH_FLOOR);
+        if name_col + base_col > room {
+            name_col = room.saturating_sub(base_col).max(8);
+        }
+        if name_col + base_col > room {
+            base_col = room.saturating_sub(name_col).max(8);
+        }
+        let path_col = (list_inner.width as usize).saturating_sub(gutters + name_col + base_col);
 
         let items = visible
             .iter()
@@ -6796,7 +6822,12 @@ impl App {
                     Span::raw(" ")
                 };
                 let name = ellipsize_middle(&entry.name, name_col);
-                let path = ellipsize_start(&display_path(entry), path_col);
+                let path = if entry.orphaned {
+                    ellipsize_end("its project record is gone", path_col)
+                } else {
+                    ellipsize_start(&display_path(entry), path_col)
+                };
+                let base = ellipsize_middle(&base_label(entry), base_col);
                 ListItem::new(Line::from(vec![
                     Span::raw(" "),
                     warn,
@@ -6811,6 +6842,11 @@ impl App {
                     Span::styled(
                         pad_to_width(&count_label(entry.agent_count), count_col),
                         Style::default().fg(self.theme.hint_desc_fg),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        pad_to_width(&base, base_col),
+                        Style::default().fg(self.theme.branch_fg),
                     ),
                     Span::raw("  "),
                     Span::styled(path, Style::default().fg(self.theme.hint_dim_desc_fg)),
@@ -6831,6 +6867,425 @@ impl App {
             list: rendered.list,
             items: rendered.items,
             offset: rendered.offset,
+        };
+    }
+
+    /// `manage-projects`' second step: the project (or orphaned group) named in
+    /// a header, then its actions as picker rows. An unavailable row is dimmed
+    /// and says why beside its words; picking it says so on the status line.
+    fn render_project_actions_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::ProjectActions(prompt) = &self.prompt else {
+            return;
+        };
+        let prompt = prompt.clone();
+        let rows = self.project_action_rows(&prompt.target);
+        self.render_dim_overlay(frame);
+        let area = centered_rect(72, 70, frame.area());
+        self.clear_overlay_area(frame, area);
+
+        let label_style = Style::default().fg(self.theme.hint_desc_fg);
+        let text_style = Style::default().fg(self.theme.text_fg);
+        let start_dir = self.engine.config.defaults.start_directory.as_deref();
+        let header: Vec<Line<'static>> = match &prompt.target {
+            ProjectActionsTarget::Project { id } => {
+                match self.engine.projects.iter().find(|p| &p.id == id) {
+                    Some(project) => {
+                        let mut folder = vec![
+                            Span::styled(" Folder: ", label_style),
+                            Span::styled(
+                                git::display_path_relative_to(&project.path, start_dir),
+                                text_style,
+                            ),
+                        ];
+                        if project.path_missing {
+                            folder.push(Span::styled(
+                                "  ⚠ missing",
+                                Style::default().fg(self.theme.warning_fg),
+                            ));
+                        }
+                        let mut branches = vec![Span::styled(" Base branch: ", label_style)];
+                        match &project.leading_branch {
+                            Some(base) => branches.push(name_chip(base, &self.theme)),
+                            None => branches.push(Span::styled("no base recorded yet", text_style)),
+                        }
+                        let on = project.current_branch.trim();
+                        let folder_on = if on.is_empty() {
+                            Line::from(vec![
+                                Span::styled(" Folder is on: ", label_style),
+                                Span::styled("an unknown branch", text_style),
+                            ])
+                        } else {
+                            labelled_name(" Folder is on: ", on, label_style, &self.theme)
+                        };
+                        vec![
+                            labelled_name(" Project: ", &project.name, label_style, &self.theme),
+                            Line::from(folder),
+                            Line::from(branches),
+                            folder_on,
+                        ]
+                    }
+                    None => vec![Line::from(Span::styled(
+                        " This project is no longer available.",
+                        Style::default().fg(self.theme.warning_fg),
+                    ))],
+                }
+            }
+            ProjectActionsTarget::Orphaned { project_id, name } => vec![
+                labelled_name(" Orphaned group: ", name, label_style, &self.theme),
+                Line::from(Span::styled(
+                    format!(
+                        " Its project record is gone, and {} still {} to it.",
+                        count_of(self.project_agent_count(project_id), "agent"),
+                        if self.project_agent_count(project_id) == 1 {
+                            "belongs"
+                        } else {
+                            "belong"
+                        }
+                    ),
+                    text_style,
+                )),
+            ],
+        };
+
+        let back = if prompt.return_to.is_some() {
+            "back"
+        } else {
+            "close"
+        };
+        let hints = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
+                Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
+                Hint::key(self.bindings.label_for(Action::Confirm), "run"),
+                Hint::key(self.bindings.label_for(Action::CloseOverlay), back).pinned(),
+            ],
+            area.width.saturating_sub(2),
+        );
+        let header_height = header.len() as u16 + 2;
+        let [details_area, list_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(header_height), Constraint::Min(3)])
+            .areas(area);
+        Paragraph::new(header)
+            .block(self.themed_overlay_block("Manage Project"))
+            .render(details_area, frame.buffer_mut());
+
+        let items = rows
+            .iter()
+            .map(|row| {
+                let mut spans = vec![Span::raw(" ")];
+                match &row.unavailable {
+                    None => spans.push(Span::styled(row.label.clone(), text_style)),
+                    Some(_) => {
+                        let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
+                        spans.push(Span::styled(row.label.clone(), dim));
+                        spans.push(Span::styled("  unavailable: the folder is missing", dim));
+                    }
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect::<Vec<_>>();
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg))
+            .title_bottom(hints);
+        let rendered = PickerList::new(
+            items,
+            Some(prompt.selected),
+            "No actions: this project is no longer available.",
+        )
+        .block(list_block)
+        .render(frame, list_area, &self.theme);
+        self.overlay_layout.active = OverlayMouseLayout::ProjectActions {
+            list: rendered.list,
+            items: rendered.items,
+            offset: rendered.offset,
+        };
+    }
+
+    /// The Change base branch picker: the project and its base in a header,
+    /// the fetch note (or the search row) beneath, and every branch the folder
+    /// can switch to. A branch another worktree holds is dimmed and names its
+    /// holder; the current base carries the picker's marker.
+    fn render_change_base_branch_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::ChangeBaseBranch(prompt) = &self.prompt else {
+            return;
+        };
+        let prompt = (**prompt).clone();
+        self.render_dim_overlay(frame);
+        let area = centered_rect(76, 70, frame.area());
+        self.clear_overlay_area(frame, area);
+
+        let label_style = Style::default().fg(self.theme.hint_desc_fg);
+        let text_style = Style::default().fg(self.theme.text_fg);
+        let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let mut first = vec![Span::styled(" Project: ", label_style)];
+        first.push(name_chip(&prompt.project_name, &self.theme));
+        first.push(Span::styled("  Base: ", label_style));
+        match &prompt.current_base {
+            Some(base) => first.push(name_chip(base, &self.theme)),
+            None => first.push(Span::styled("no base recorded yet", text_style)),
+        }
+        let second = if prompt.list.is_filtering() {
+            render_single_line_cursor_input(
+                "/ ",
+                &prompt.list.filter.text,
+                prompt.list.filter.cursor,
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+                true,
+            )
+        } else if let Some(note) = &prompt.fetch_note {
+            Line::from(Span::styled(
+                format!(
+                    " Could not fetch origin ({note}); its branches are listed as last fetched."
+                ),
+                Style::default().fg(self.theme.warning_fg),
+            ))
+        } else {
+            Line::from(Span::styled(
+                " Pick the branch new agents start from. The folder switches to it.",
+                label_style,
+            ))
+        };
+
+        let searching = prompt.list.searching;
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "choose");
+        let back = if prompt.return_to.is_some() {
+            "back"
+        } else {
+            "cancel"
+        };
+        let hints = if searching {
+            vec![confirm, Hint::key(close_key, "clear").pinned()]
+        } else {
+            vec![
+                Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
+                Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
+                Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
+                confirm,
+                Hint::key(close_key, back).pinned(),
+            ]
+        };
+        let hint_line = modal_hint_line(&self.theme, &hints, area.width.saturating_sub(2));
+
+        let [details_area, list_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4), Constraint::Min(3)])
+            .areas(area);
+        let details_block = self.themed_overlay_block("Change Base Branch");
+        let details_inner = details_block.inner(details_area);
+        Paragraph::new(vec![Line::from(first), second])
+            .block(details_block)
+            .render(details_area, frame.buffer_mut());
+        // A field the user cannot click into is a gap: the search row's rect is
+        // published whenever the search row is what the second line shows.
+        let input = prompt.list.is_filtering().then(|| Rect {
+            y: details_inner.y.saturating_add(1),
+            height: details_inner.height.saturating_sub(1).min(1),
+            ..details_inner
+        });
+
+        let visible = prompt.list.visible_indices(
+            &prompt.branches,
+            super::project_actions::branch_choice_matches,
+        );
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg))
+            .title_bottom(hint_line);
+        let list_inner = list_block.inner(list_area);
+        let name_col = visible
+            .iter()
+            .filter_map(|index| prompt.branches.get(*index))
+            .map(|branch| display_width(&branch.name))
+            .max()
+            .unwrap_or(8)
+            .clamp(8, 32);
+        let marker_width = ACTIVE_PROVIDER_MARKER.chars().count() + 2;
+        let note_col = (list_inner.width as usize).saturating_sub(marker_width + name_col + 3);
+        let items = visible
+            .iter()
+            .filter_map(|index| prompt.branches.get(*index))
+            .map(|branch| {
+                let is_base = prompt.current_base.as_deref() == Some(branch.name.as_str());
+                let held = branch.held_by.as_ref();
+                let name_style = if held.is_some() {
+                    dim
+                } else {
+                    text_style.add_modifier(Modifier::BOLD)
+                };
+                let note = match (held, branch.location) {
+                    (Some(holder), _) => {
+                        format!(
+                            "unavailable: checked out by {}",
+                            self.branch_holder_label(holder)
+                        )
+                    }
+                    (None, dux_core::git::BranchLocation::Remote) => {
+                        "on origin only; a local branch is created from it".to_string()
+                    }
+                    (None, dux_core::git::BranchLocation::Local) if is_base => {
+                        "current base".to_string()
+                    }
+                    (None, dux_core::git::BranchLocation::Local) => String::new(),
+                };
+                ListItem::new(Line::from(vec![
+                    active_provider_marker_span(is_base, &self.theme),
+                    Span::styled(
+                        pad_to_width(&ellipsize_middle(&branch.name, name_col), name_col),
+                        name_style,
+                    ),
+                    Span::raw("  "),
+                    Span::styled(ellipsize_end(&note, note_col), dim),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let empty = if prompt.loading {
+            "Fetching origin and listing branches…".to_string()
+        } else if let Some(error) = &prompt.error {
+            format!("Could not list branches: {error}")
+        } else if prompt.branches.is_empty() {
+            "No branches to switch to.".to_string()
+        } else {
+            "No matching branches.".to_string()
+        };
+        let rendered = PickerList::new(items, Some(prompt.list.selected), empty)
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
+        self.overlay_layout.active = OverlayMouseLayout::ChangeBaseBranch {
+            input,
+            list: rendered.list,
+            items: rendered.items,
+            offset: rendered.offset,
+        };
+    }
+
+    /// "Change base branch?": the shared prose both surfaces print and a
+    /// Cancel / Change base branch pair, Cancel focused. The act is the safe
+    /// kind, like "Check out default branch": the switch loses nothing.
+    fn render_confirm_change_base_branch_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::ConfirmChangeBaseBranch(prompt) = &self.prompt else {
+            return;
+        };
+        let body = dux_core::engine::change_base_branch_confirm_prose(
+            &prompt.previous.project_name,
+            prompt.previous.current_base.as_deref(),
+            &prompt.branch,
+        );
+        let focus = prompt.focus;
+        let lines = self.prose_body(&body);
+        let (cancel, act) = confirm_focus_buttons(
+            focus,
+            ButtonPressedTarget::ConfirmChangeBaseBranchCancel,
+            (
+                CHANGE_BASE_BRANCH_LABEL,
+                ButtonKind::Confirm,
+                ButtonPressedTarget::ConfirmChangeBaseBranchConfirm,
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            ConfirmDialog {
+                title: "Change Base Branch",
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmChangeBaseBranch {
+            cancel_button: layout.cancel,
+            confirm_button: layout.act,
+        };
+    }
+
+    /// The read-only Project info screen: the project's name, then one row per
+    /// fact, a name as a chip, and a Close that steps back to the action list.
+    fn render_project_info_prompt(&mut self, frame: &mut Frame) {
+        let PromptState::ProjectInfo(prompt) = &self.prompt else {
+            return;
+        };
+        self.render_dim_overlay(frame);
+        let dialog_width = 72.min(frame.area().width.max(1));
+        let inner_width = dialog_width.saturating_sub(2);
+        let label_style = Style::default().fg(self.theme.hint_desc_fg);
+        let text_style = Style::default().fg(self.theme.text_fg);
+        let label_col = prompt
+            .rows
+            .iter()
+            .map(|row| display_width(row.label))
+            .max()
+            .unwrap_or(0);
+        let mut body_lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(" {}", prompt.project_name),
+                text_style.add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ];
+        for row in &prompt.rows {
+            let label = Span::styled(
+                format!(
+                    " {}  ",
+                    pad_to_width(&format!("{}:", row.label), label_col + 1)
+                ),
+                label_style,
+            );
+            let value = if row.is_name {
+                name_chip(&row.value, &self.theme)
+            } else {
+                Span::styled(row.value.clone(), text_style)
+            };
+            body_lines.push(Line::from(vec![label, value]));
+        }
+        let body_lines = wrap_styled_lines(&body_lines, usize::from(inner_width));
+        let body_height = body_lines.len() as u16;
+        let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
+        self.clear_overlay_area(frame, area);
+
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let outer = self
+            .themed_overlay_block("Project Info")
+            .title_bottom(modal_hint_line(
+                &self.theme,
+                &[Hint::key(close_key, "close").pinned()],
+                area.width.saturating_sub(2),
+            ));
+        let inner = outer.inner(area);
+        outer.render(area, frame.buffer_mut());
+        let [body_area, buttons_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(body_height), Constraint::Length(3)])
+            .areas(inner);
+        Paragraph::new(body_lines).render(body_area, frame.buffer_mut());
+
+        let btn_width = shared_button_width(&["Close"]);
+        let close_area = Rect {
+            x: buttons_area.x + buttons_area.width.saturating_sub(btn_width) / 2,
+            y: buttons_area.y,
+            width: btn_width,
+            height: 3,
+        };
+        // A read-only modal still gets a focused Close button that Space
+        // activates (universal accessibility convention).
+        Button::new("Close")
+            .kind(ButtonKind::Confirm)
+            .state(button_state_for(
+                ButtonPressedTarget::ProjectInfoClose,
+                self.pressed_button,
+                true,
+                true,
+            ))
+            .render(frame, close_area, &self.theme);
+        self.overlay_layout.active = OverlayMouseLayout::ProjectInfo {
+            close_button: close_area,
         };
     }
 
@@ -9751,6 +10206,8 @@ impl App {
             PromptState::ManageWorktrees(_) => self.render_manage_worktrees_prompt(frame),
             PromptState::PickProjectWorktree(_) => self.render_pick_project_worktree_prompt(frame),
             PromptState::PickProject { .. } => self.render_pick_project_prompt(frame),
+            PromptState::ProjectActions(_) => self.render_project_actions_prompt(frame),
+            PromptState::ChangeBaseBranch(_) => self.render_change_base_branch_prompt(frame),
             PromptState::KillRunning(_) => self.render_kill_running_prompt(frame),
             _ => return false,
         }
@@ -9769,6 +10226,10 @@ impl App {
             PromptState::AddProjectFailed { .. } => self.render_add_project_failed_prompt(frame),
             PromptState::FirstLoad(_) => self.render_first_load_prompt_overlay(frame),
             PromptState::AgentInfo(_) => self.render_agent_info_prompt(frame),
+            PromptState::ProjectInfo(_) => self.render_project_info_prompt(frame),
+            PromptState::ConfirmChangeBaseBranch(_) => {
+                self.render_confirm_change_base_branch_prompt(frame)
+            }
             PromptState::ConfirmDeleteAgent { .. } => {
                 self.render_confirm_delete_agent_prompt(frame)
             }
@@ -23925,6 +24386,7 @@ mod tests {
             project_name: "demo".to_string(),
             stored_base: Some("develop".to_string()),
             focus: ConfirmFocus::Cancel,
+            return_to: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal

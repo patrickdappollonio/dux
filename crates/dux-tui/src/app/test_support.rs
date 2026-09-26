@@ -365,7 +365,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_changed_files_refresh: None,
         pending_server_flip_op: None,
         pending_config_reload_op: None,
-        project_chooser_context: None,
+        pending_branch_listing: None,
         agent_filter: None,
         test_scratch_dirs: tmp.into(),
     };

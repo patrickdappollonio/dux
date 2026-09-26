@@ -145,7 +145,9 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         PromptState::AgentInfo(_)
         | PromptState::AddProjectFailed { .. }
         | PromptState::FirstLoad(_)
-        | PromptState::DebugInput { .. } => ModalSpec::new(Report, false, false),
+        | PromptState::DebugInput { .. }
+        // The Project info screen: facts and a Close, which dismisses.
+        | PromptState::ProjectInfo(_) => ModalSpec::new(Report, false, false),
 
         // A Picker despite reading like a report: a `ListState` cursor over the
         // runs, vertical keys that move that selection (the output pane scrolls
@@ -167,6 +169,8 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::ConfirmDetachAgent { .. }
         | PromptState::ConfirmRecreateWorkingCopy { .. }
         | PromptState::ConfirmCheckoutDefaultBranch { .. }
+        // The shared prose and a Cancel / Change pair, Cancel focused.
+        | PromptState::ConfirmChangeBaseBranch(_)
         // Prose and a Cancel / Danger pair, Cancel focused: the project-scoped
         // deletes, the same questions the browser's dialogs ask.
         | PromptState::ConfirmDeleteProject { .. }
@@ -193,6 +197,12 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::BrowseProjects { .. }
         | PromptState::PickEditor { .. }
         | PromptState::PickProject { .. }
+        // A project's actions: rows with a selection cursor, and picking one
+        // runs it. No buttons.
+        | PromptState::ProjectActions(_)
+        // Branches with a selection cursor and a type-immediately filter;
+        // picking a free one raises the confirmation. No buttons.
+        | PromptState::ChangeBaseBranch(_)
         | PromptState::PickProjectWorktree(_)
         // The worktree manager: rows with a selection cursor over the
         // REMOVABLE worktrees, and a confirm key that acts on the selection by
@@ -287,7 +297,12 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
         | PromptState::ChangeProjectDefaultProvider(_)
-        | PromptState::SetTailscaleMode(_) => Vec::new(),
+        | PromptState::SetTailscaleMode(_)
+        | PromptState::ProjectActions(_)
+        | PromptState::ProjectInfo(_) => Vec::new(),
+
+        PromptState::ChangeBaseBranch(prompt) => vec![&prompt.list.filter],
+        PromptState::ConfirmChangeBaseBranch(prompt) => vec![&prompt.previous.list.filter],
 
         PromptState::Command { input, .. }
         | PromptState::ConfigureStartupCommand { input, .. }
@@ -346,6 +361,9 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::PickProjectWorktree { .. }
         | OverlayMouseLayout::ManageWorktrees { .. }
         | OverlayMouseLayout::PickProject { .. }
+        | OverlayMouseLayout::ProjectActions { .. }
+        | OverlayMouseLayout::ChangeBaseBranch { .. }
+        | OverlayMouseLayout::ProjectInfo { .. }
         | OverlayMouseLayout::ChangeTheme { .. }
         | OverlayMouseLayout::EditMacroList { .. }
         | OverlayMouseLayout::ResourceMonitor { .. }
@@ -372,6 +390,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::ConfirmDetachAgent { .. }
         | OverlayMouseLayout::ConfirmRecreateWorkingCopy { .. }
         | OverlayMouseLayout::ConfirmCheckoutDefaultBranch { .. }
+        | OverlayMouseLayout::ConfirmChangeBaseBranch { .. }
         | OverlayMouseLayout::ConfirmDeleteProject { .. }
         | OverlayMouseLayout::ConfirmRemoveProject { .. }
         | OverlayMouseLayout::ConfirmDeleteMacro { .. }
@@ -720,6 +739,26 @@ pub(super) mod tests {
         }
     }
 
+    fn change_base_branch_prompt(
+        project: &crate::model::Project,
+    ) -> crate::app::ChangeBaseBranchPrompt {
+        crate::app::ChangeBaseBranchPrompt {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            current_base: Some("main".to_string()),
+            loading: false,
+            branches: vec![dux_core::git::BranchChoice {
+                name: "develop".to_string(),
+                location: dux_core::git::BranchLocation::Local,
+                held_by: None,
+            }],
+            fetch_note: None,
+            error: None,
+            list: SearchableList::new(),
+            return_to: None,
+        }
+    }
+
     /// Every modal as the registry's fixtures build it. Shared with the confirm
     /// dialog's own journey tests, so a new Confirm-family modal is covered
     /// there the moment it has a fixture here.
@@ -896,6 +935,38 @@ pub(super) mod tests {
                 },
             ),
             (
+                "ProjectActions",
+                PromptState::ProjectActions(crate::app::ProjectActionsPrompt {
+                    target: crate::app::ProjectActionsTarget::Project {
+                        id: project.id.clone(),
+                    },
+                    selected: 0,
+                    return_to: None,
+                }),
+            ),
+            (
+                "ProjectInfo",
+                PromptState::ProjectInfo(crate::app::ProjectInfoPrompt {
+                    project_name: project.name.clone(),
+                    rows: app.project_info_rows(&project),
+                    return_to: None,
+                }),
+            ),
+            (
+                "ChangeBaseBranch",
+                PromptState::ChangeBaseBranch(Box::new(change_base_branch_prompt(&project))),
+            ),
+            (
+                "ConfirmChangeBaseBranch",
+                PromptState::ConfirmChangeBaseBranch(Box::new(
+                    crate::app::ConfirmChangeBaseBranchPrompt {
+                        previous: change_base_branch_prompt(&project),
+                        branch: "develop".to_string(),
+                        focus: ConfirmFocus::Cancel,
+                    },
+                )),
+            ),
+            (
                 "PickProjectWorktree",
                 PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
                     project: project.clone(),
@@ -1009,6 +1080,7 @@ pub(super) mod tests {
                     project_name: "My Cool Project".to_string(),
                     stored_base: Some("develop".to_string()),
                     focus: ConfirmFocus::Cancel,
+                    return_to: None,
                 },
             ),
             (
@@ -1018,6 +1090,7 @@ pub(super) mod tests {
                     project_name: "My Cool Project".to_string(),
                     agent_count: 2,
                     focus: ConfirmFocus::Cancel,
+                    return_to: None,
                 },
             ),
             (
@@ -1028,6 +1101,7 @@ pub(super) mod tests {
                     agent_count: 0,
                     orphaned: false,
                     focus: ConfirmFocus::Cancel,
+                    return_to: None,
                 },
             ),
             (

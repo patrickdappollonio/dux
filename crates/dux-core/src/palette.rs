@@ -75,11 +75,10 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::ManageProjects,
         name: "manage-projects",
-        description: "Choose a project to target for project actions",
-        // Per-project (chooser): opens the project chooser so project-scoped
-        // palette commands act on the picked project. The web reaches every
-        // project through its Add-project picker and per-project ⋯ menus, so
-        // there is no equivalent app-menu entry.
+        description: "Manage a project: its actions, settings and base branch",
+        // Global (chooser): lists every project, orphaned groups included, and
+        // opens the pick's action list. The web's equivalent is the app menu's
+        // "Projects…" list, which holds the same project `⋯` menu per row.
     },
     PaletteCommand {
         action: Action::ManageWorktrees,
@@ -294,6 +293,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         name: "checkout-project-default-branch",
         description: "Check out the selected project's default branch",
         // Per-project: web exposes "Checkout default branch for <project>…".
+    },
+    PaletteCommand {
+        action: Action::ChangeProjectBaseBranch,
+        name: "change-project-base-branch",
+        description: "Switch the selected project to a branch you pick and branch new worktrees from it",
+        // Per-project: the web's "Change base branch…" in the project `⋯` menu,
+        // so it has no app-menu entry of its own.
     },
     PaletteCommand {
         action: Action::ReconnectAgent,

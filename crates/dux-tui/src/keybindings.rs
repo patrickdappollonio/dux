@@ -220,8 +220,8 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // Palette-only: opens the project chooser to pick a project that
-        // subsequent project-scoped palette commands act on. No default key.
+        // Palette-only: opens the project list, then the picked project's
+        // action list. No default key.
         action: Action::ManageProjects,
         default_keys: &[],
         scopes: &[],
@@ -454,6 +454,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::CheckoutProjectDefaultBranch,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::ChangeProjectBaseBranch,
         default_keys: &[],
         scopes: &[],
         help: None,
@@ -3203,6 +3210,7 @@ mod tests {
             "attach-pull-request",
             "change-agent-provider",
             "change-default-provider",
+            "change-project-base-branch",
             "change-project-default-provider",
             "change-theme",
             "checkout-project-default-branch",

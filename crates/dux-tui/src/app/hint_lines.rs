@@ -185,6 +185,7 @@ struct Painted {
 const HINTLESS_PROMPTS: &[&str] = &[
     "AddProjectFailed",
     "ConfigReloadFailed",
+    "ConfirmChangeBaseBranch",
     "ConfirmCheckoutDefaultBranch",
     "ConfirmCloseTab",
     "ConfirmCreateInitialCommit",

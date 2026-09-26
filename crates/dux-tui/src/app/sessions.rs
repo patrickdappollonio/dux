@@ -295,22 +295,41 @@ impl App {
         order
             .into_iter()
             .filter_map(|index| self.engine.projects.get(index))
-            .map(|project| {
-                let agent_count = self
-                    .engine
-                    .sessions
-                    .iter()
-                    .filter(|session| session.project_id() == Some(project.id.as_str()))
-                    .count();
-                ProjectChooserEntry {
-                    id: project.id.clone(),
-                    name: project.name.clone(),
-                    path: project.path.clone(),
-                    agent_count,
-                    path_missing: project.path_missing,
-                }
+            .map(|project| ProjectChooserEntry {
+                id: project.id.clone(),
+                name: project.name.clone(),
+                path: project.path.clone(),
+                agent_count: self.project_agent_count(&project.id),
+                path_missing: project.path_missing,
+                base_branch: project.leading_branch.clone(),
+                orphaned: false,
             })
             .collect()
+    }
+
+    /// One row per orphaned group (agents whose project record is gone), from
+    /// the same core grouping the sidebar and the browser read, appended after
+    /// the projects. Its name is the short id both surfaces show for one.
+    pub(crate) fn build_orphaned_group_entries(&self) -> Vec<ProjectChooserEntry> {
+        dux_core::sidebar::build_sidebar(
+            &self.engine.projects,
+            &self.engine.sessions,
+            &HashSet::new(),
+            0,
+        )
+        .groups
+        .into_iter()
+        .filter(|group| group.orphaned)
+        .map(|group| ProjectChooserEntry {
+            agent_count: group.session_ids.len(),
+            id: group.project_id,
+            name: group.name,
+            path: String::new(),
+            path_missing: false,
+            base_branch: None,
+            orphaned: true,
+        })
+        .collect()
     }
 
     /// Open the project chooser for the given intent. With zero projects there is
@@ -331,6 +350,9 @@ impl App {
         only: Option<&[String]>,
     ) -> Result<()> {
         let mut entries = self.build_project_chooser_entries();
+        if intent.lists_orphans() {
+            entries.extend(self.build_orphaned_group_entries());
+        }
         if let Some(only) = only {
             entries.retain(|entry| only.iter().any(|id| id == &entry.id));
         }
@@ -350,9 +372,10 @@ impl App {
 
     /// Confirm the highlighted project in the chooser and dispatch by intent. An
     /// empty list is a no-op; a vanished project surfaces an error. `Manage`
-    /// stores the pick as the project-action context and closes the modal.
+    /// opens the pick's action list, and `Action` runs the command the list was
+    /// opened for on the pick.
     pub(crate) fn confirm_project_chooser_selection(&mut self) -> Result<()> {
-        let (intent, project_id) = match &self.prompt {
+        let (intent, entry, list) = match &self.prompt {
             PromptState::PickProject {
                 intent,
                 entries,
@@ -361,17 +384,20 @@ impl App {
                 // `list.selected` indexes the visible list; resolve to an entry.
                 let visible = list.visible_indices(entries, pick_project_matches);
                 match visible.get(list.selected).and_then(|i| entries.get(*i)) {
-                    Some(entry) => (*intent, entry.id.clone()),
+                    Some(entry) => (*intent, entry.clone(), list.clone()),
                     None => return Ok(()),
                 }
             }
             _ => return Ok(()),
         };
+        if entry.orphaned {
+            return self.confirm_orphaned_group_pick(intent, entry, list);
+        }
         let Some(project) = self
             .engine
             .projects
             .iter()
-            .find(|p| p.id == project_id)
+            .find(|p| p.id == entry.id)
             .cloned()
         else {
             self.prompt = PromptState::None;
@@ -402,19 +428,53 @@ impl App {
                 self.begin_manage_worktrees_for_project(project)
             }
             ProjectChooserIntent::Manage => {
-                self.project_chooser_context = Some(project.id.clone());
-                self.prompt = PromptState::None;
-                self.set_info(format!(
-                    "Project \"{}\" is now the target for project actions.",
-                    project.name
-                ));
+                self.open_project_actions(
+                    ProjectActionsTarget::Project { id: project.id },
+                    Some(list),
+                );
                 Ok(())
+            }
+            ProjectChooserIntent::Action(action) => {
+                self.prompt = PromptState::None;
+                self.run_project_action(&project, action, None)
             }
             ProjectChooserIntent::ProjectTerminal => {
                 self.prompt = PromptState::None;
                 self.show_project_terminal(&project)
             }
         }
+    }
+
+    /// An orphaned group was picked. Only the intents that list one can get
+    /// here: managing it opens its action list (Remove project… alone), and
+    /// removing it asks the removal question for the group.
+    fn confirm_orphaned_group_pick(
+        &mut self,
+        intent: ProjectChooserIntent,
+        entry: ProjectChooserEntry,
+        list: SearchableList,
+    ) -> Result<()> {
+        if self.project_agent_count(&entry.id) == 0 {
+            self.prompt = PromptState::None;
+            self.set_error("That project is no longer available.");
+            return Ok(());
+        }
+        match intent {
+            ProjectChooserIntent::Manage => {
+                self.open_project_actions(
+                    ProjectActionsTarget::Orphaned {
+                        project_id: entry.id,
+                        name: entry.name,
+                    },
+                    Some(list),
+                );
+            }
+            _ => {
+                self.prompt = PromptState::None;
+                self.confirm_remove_orphaned_group(entry.id, entry.name, None);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn continue_create_agent_after_branch_inspection(
@@ -511,9 +571,7 @@ impl App {
             return Ok(());
         }
         // Fork is agent-scoped: the new worktree belongs to the SAME project as
-        // the agent being forked. Derive it from the source session, not from
-        // `selected_project()`, which can resolve to a `manage-projects` target
-        // pointing at a different project.
+        // the agent being forked. Derive it from the source session itself.
         let Some(project) = self
             .engine
             .projects
@@ -1148,18 +1206,26 @@ impl App {
         });
     }
 
+    /// `checkout-project-default-branch`: ask about the selected agent's
+    /// project, or pick one from the project list first.
     pub(crate) fn checkout_selected_project_default_branch(&mut self) -> Result<()> {
-        let Some(project) = self.take_selected_project() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
+        self.run_project_command(ProjectAction::CheckoutDefaultBranch)
+    }
 
+    /// Ask the "check out the default branch?" question about `project`.
+    /// `return_to` is the action list it was asked from, which a cancel steps
+    /// back to.
+    pub(crate) fn ask_checkout_project_default_branch(
+        &mut self,
+        project: &Project,
+        return_to: Option<Box<ProjectActionsPrompt>>,
+    ) {
         if project.path_missing {
             self.set_warning(format!(
                 "Cannot check out default branch: path not found for \"{}\"",
                 project.name
             ));
-            return Ok(());
+            return;
         }
 
         // Ask first, the same question the browser asks: the checkout moves
@@ -1169,8 +1235,8 @@ impl App {
             project_name: project.name.clone(),
             stored_base: project.leading_branch.clone(),
             focus: ConfirmFocus::Cancel, // Cancel is the safe default
+            return_to,
         };
-        Ok(())
     }
 
     /// Run the confirmed "check out the default branch": inspect, then check
@@ -1776,11 +1842,16 @@ impl App {
         Ok(())
     }
 
+    /// `pull-project`: pull the selected agent's project, or pick one from the
+    /// project list first.
     pub(crate) fn refresh_selected_project(&mut self) -> Result<()> {
-        let Some(project) = self.take_selected_project() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
+        self.run_project_command(ProjectAction::Pull)
+    }
+
+    /// Pull `project` from its remote (after switching its folder back to its
+    /// base, the engine's rule for a project pull).
+    pub(crate) fn pull_project(&mut self, project: &Project) -> Result<()> {
+        let project = project.clone();
         if project.path_missing {
             self.set_warning(format!(
                 "Cannot refresh: path not found for \"{}\"",
@@ -2391,15 +2462,22 @@ impl App {
         Ok(())
     }
 
+    /// `change-project-default-provider`: for the selected agent's project, or
+    /// for one picked from the project list first.
     pub(crate) fn open_change_project_default_provider_prompt(&mut self) -> Result<()> {
+        self.run_project_command(ProjectAction::DefaultProvider)
+    }
+
+    /// Open the default-provider picker for `project`.
+    pub(crate) fn open_change_project_default_provider_for(
+        &mut self,
+        project: &Project,
+    ) -> Result<()> {
         if self.engine.config.providers.commands.is_empty() {
             self.set_error("No providers are configured.");
             return Ok(());
         }
-        let Some(project) = self.take_selected_project() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
+        let project = project.clone();
         let options = self.change_project_default_provider_options(&project.id);
         let selected = options
             .iter()
@@ -2560,11 +2638,18 @@ impl App {
         Ok(())
     }
 
+    /// `toggle-project-auto-reopen-agents`: for the selected agent's project,
+    /// or for one picked from the project list first.
     pub(crate) fn toggle_project_auto_reopen_agents(&mut self) -> Result<()> {
-        let Some(project) = self.take_selected_project() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
+        self.run_project_command(ProjectAction::AutoReopen)
+    }
+
+    /// Flip whether `project`'s agents reopen at startup.
+    pub(crate) fn toggle_project_auto_reopen_agents_for(
+        &mut self,
+        project: &Project,
+    ) -> Result<()> {
+        let project = project.clone();
         let enabled = self.engine.project_allows_auto_reopen(&project.id);
         let auto_reopen_agents = if enabled { Some(false) } else { None };
         let project_name = project.name.clone();
@@ -2621,11 +2706,15 @@ impl App {
         Ok(())
     }
 
+    /// `configure-startup-command`: for the selected agent's project, or for
+    /// one picked from the project list first.
     pub(crate) fn open_configure_startup_command(&mut self) -> Result<()> {
-        let Some(project) = self.take_selected_project() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
+        self.run_project_command(ProjectAction::StartupCommand)
+    }
+
+    /// Open the startup-command editor for `project`.
+    pub(crate) fn open_configure_startup_command_for(&mut self, project: &Project) -> Result<()> {
+        let project = project.clone();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ConfigureStartupCommand {
@@ -2706,11 +2795,15 @@ impl App {
         Ok(())
     }
 
+    /// `configure-project-env`: for the selected agent's project, or for one
+    /// picked from the project list first.
     pub(crate) fn open_configure_project_env(&mut self) -> Result<()> {
-        let Some(project) = self.take_selected_project() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
+        self.run_project_command(ProjectAction::Environment)
+    }
+
+    /// Open the environment editor for `project`.
+    pub(crate) fn open_configure_project_env_for(&mut self, project: &Project) -> Result<()> {
+        let project = project.clone();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ConfigureProjectEnv {
@@ -2945,20 +3038,24 @@ impl App {
                     session_id: session.id,
                 },
             )
-        } else if let Some(project) = self.selected_project().cloned() {
-            (
-                format!("project \"{}\"", project.name),
-                crate::startup::StartupCommandLogScope::Project {
-                    project_id: project.id,
-                },
-            )
         } else {
-            self.set_error("Select an agent or project first.");
-            return Ok(());
+            // No agent selected: the logs of every agent in a project, picked
+            // from the project list.
+            return self.run_project_command(ProjectAction::StartupLogs);
         };
 
         self.spawn_startup_command_log_load(scope_label, scope);
         Ok(())
+    }
+
+    /// Load the startup-command logs of every agent in `project`.
+    pub(crate) fn open_project_startup_command_logs(&mut self, project: &Project) {
+        self.spawn_startup_command_log_load(
+            format!("project \"{}\"", project.name),
+            crate::startup::StartupCommandLogScope::Project {
+                project_id: project.id.clone(),
+            },
+        );
     }
 
     /// Move the picker's selection onto `selected` and load that run's output.
@@ -3338,40 +3435,64 @@ impl App {
     }
 
     /// `remove-project`: ask first, the same question the browser's Remove
-    /// project dialog asks. A real project that still holds agents is refused
-    /// before anything is asked (removing it would orphan them; `delete-project`
-    /// takes the agents too). With no real project selected, an orphaned
-    /// agent's group (its project record is gone) is the target instead.
+    /// project dialog asks. The selected agent's project is the target; with
+    /// no real project behind the selection, an orphaned agent's group (its
+    /// project record is gone) is the target instead; with no agent selected,
+    /// the project list is opened and the pick is the target.
     pub(crate) fn remove_selected_project(&mut self) -> Result<()> {
-        if let Some(project) = self.take_selected_project() {
-            if self.project_agent_count(&project.id) > 0 {
-                self.set_error("Delete all agents in this project first.");
-                return Ok(());
-            }
-            self.prompt = PromptState::ConfirmRemoveProject {
-                project_id: project.id.clone(),
-                project_name: project.name.clone(),
-                agent_count: 0,
-                orphaned: false,
-                focus: ConfirmFocus::Cancel, // Cancel is the safe default
-            };
+        if let Some(project) = self.selected_project().cloned() {
+            self.confirm_remove_project(&project, None);
             return Ok(());
         }
         // A standalone agent is not an orphan and has no ghost group to clear.
         if let Some(session) = self.selected_session().cloned()
             && let Some(project_id) = session.project_id().map(str::to_string)
         {
-            self.prompt = PromptState::ConfirmRemoveProject {
-                project_name: dux_core::sidebar::short_project_id(&project_id),
-                agent_count: self.project_agent_count(&project_id),
-                project_id,
-                orphaned: true,
-                focus: ConfirmFocus::Cancel, // Cancel is the safe default
-            };
+            let name = dux_core::sidebar::short_project_id(&project_id);
+            self.confirm_remove_orphaned_group(project_id, name, None);
             return Ok(());
         }
-        self.set_error("Select a project first.");
-        Ok(())
+        self.open_project_chooser(ProjectChooserIntent::Action(ProjectAction::Remove))
+    }
+
+    /// Ask the "remove project?" question about a real project. One that still
+    /// holds agents is refused before anything is asked: removing it would
+    /// orphan them, and `delete-project` takes the agents too.
+    pub(crate) fn confirm_remove_project(
+        &mut self,
+        project: &Project,
+        return_to: Option<Box<ProjectActionsPrompt>>,
+    ) {
+        if self.project_agent_count(&project.id) > 0 {
+            self.set_error("Delete all agents in this project first.");
+            return;
+        }
+        self.prompt = PromptState::ConfirmRemoveProject {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            agent_count: 0,
+            orphaned: false,
+            focus: ConfirmFocus::Cancel, // Cancel is the safe default
+            return_to,
+        };
+    }
+
+    /// Ask the "remove project?" question about an orphaned group: confirming
+    /// clears its agents' records and keeps their worktrees on disk.
+    pub(crate) fn confirm_remove_orphaned_group(
+        &mut self,
+        project_id: String,
+        name: String,
+        return_to: Option<Box<ProjectActionsPrompt>>,
+    ) {
+        self.prompt = PromptState::ConfirmRemoveProject {
+            agent_count: self.project_agent_count(&project_id),
+            project_name: name,
+            project_id,
+            orphaned: true,
+            focus: ConfirmFocus::Cancel, // Cancel is the safe default
+            return_to,
+        };
     }
 
     /// `delete-project`: ask first, the same question the browser's Delete
@@ -3379,17 +3500,22 @@ impl App {
     /// project and removes their worktrees from disk. Nothing runs until the
     /// dialog is confirmed (`resolve_confirm_delete_project`).
     pub(crate) fn delete_selected_project(&mut self) -> Result<()> {
-        let Some(project) = self.take_selected_project() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
+        self.run_project_command(ProjectAction::Delete)
+    }
+
+    /// Ask the "delete project?" question about `project`.
+    pub(crate) fn confirm_delete_project(
+        &mut self,
+        project: &Project,
+        return_to: Option<Box<ProjectActionsPrompt>>,
+    ) {
         self.prompt = PromptState::ConfirmDeleteProject {
             agent_count: self.project_agent_count(&project.id),
-            project_id: project.id,
-            project_name: project.name,
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
             focus: ConfirmFocus::Cancel, // Cancel is the safe default
+            return_to,
         };
-        Ok(())
     }
 
     /// How many agents belong to `project_id`, a real project's or an
@@ -3731,30 +3857,28 @@ impl App {
                 .map(|s| s.directory().to_string()),
             _ => None,
         };
-        // Fall back to a chooser-picked project (agent-less projects have no row
-        // to select, so this is how their path is reachable). `take_selected_project`
-        // consumes the one-and-done `manage-projects` target.
-        let (path, label) = match agent_path {
-            Some(p) => (Some(p), "Agent's path copied to clipboard."),
-            None => (
-                self.take_selected_project().map(|p| p.path),
-                "Project's path copied to clipboard.",
-            ),
+        // With no agent selected, the path is a project's: the project list
+        // opens and the pick's path is copied (an agent-less project has no
+        // row of its own to select).
+        let Some(path) = agent_path else {
+            return self.run_project_command(ProjectAction::CopyPath);
         };
-        match path {
-            Some(p) => {
-                match self.clipboard.copy_text(&p, label, &self.engine.worker_tx) {
-                    Ok(pending) => {
-                        self.apply_reaction(dux_core::engine::EventReaction::Status(pending))
-                    }
-                    Err(e) => self.set_error(format!("Copy path failed: {e}")),
-                }
-                Ok(())
-            }
-            None => {
-                self.set_error("No project or agent selected. Select one from the sidebar first.");
-                Ok(())
-            }
+        self.copy_path_to_clipboard(&path, "Agent's path copied to clipboard.");
+        Ok(())
+    }
+
+    /// Copy `project`'s folder path to the clipboard.
+    pub(crate) fn copy_project_path(&mut self, project: &Project) {
+        self.copy_path_to_clipboard(&project.path, "Project's path copied to clipboard.");
+    }
+
+    fn copy_path_to_clipboard(&mut self, path: &str, label: &str) {
+        match self
+            .clipboard
+            .copy_text(path, label, &self.engine.worker_tx)
+        {
+            Ok(pending) => self.apply_reaction(dux_core::engine::EventReaction::Status(pending)),
+            Err(e) => self.set_error(format!("Copy path failed: {e}")),
         }
     }
 
@@ -4664,7 +4788,7 @@ mod tests {
             pending_changed_files_refresh: None,
             pending_server_flip_op: None,
             pending_config_reload_op: None,
-            project_chooser_context: None,
+            pending_branch_listing: None,
             agent_filter: None,
             test_scratch_dirs: tmp.into(),
         };
@@ -6384,10 +6508,12 @@ mod tests {
         );
     }
 
-    /// The `manage-projects` target is one-and-done: a project-scoped action
-    /// consumes it, so a second action falls back to the ordinary selection.
+    /// A project command run with no agent selected opens the project list,
+    /// titled for the command, and picking a project runs the command on it:
+    /// the agent-less project is reachable, and nothing is remembered after.
     #[test]
-    fn project_action_consumes_manage_projects_target() {
+    fn a_project_command_with_no_agent_selected_runs_on_the_project_picked_from_the_list() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let p1 = make_project("project-1", "codex");
         let mut p2 = make_project("project-2", "codex");
         p2.name = "empty".to_string();
@@ -6403,24 +6529,75 @@ mod tests {
         }
         let mut app = test_app_with_sessions(sessions, vec![p1, p2]);
         app.rebuild_left_items();
+        // Nothing agent-shaped under the cursor.
+        app.left_items_cache.clear();
         app.selected_left = 0;
+        assert!(app.selected_session().is_none());
 
-        // Point the chooser at the agent-less project and run one project action.
-        app.project_chooser_context = Some("project-2".to_string());
-        app.open_configure_project_env().expect("configure env");
+        app.execute_command("configure-project-env".to_string())
+            .expect("open the list");
+        let pick_empty = match &app.prompt {
+            PromptState::PickProject {
+                intent, entries, ..
+            } => {
+                assert_eq!(
+                    *intent,
+                    ProjectChooserIntent::Action(ProjectAction::Environment)
+                );
+                assert_eq!(intent.title(), "Configure project environment");
+                entries
+                    .iter()
+                    .position(|entry| entry.id == "project-2")
+                    .expect("the agent-less project is listed")
+            }
+            other => panic!("expected the project list, got {other:?}"),
+        };
+        for _ in 0..pick_empty {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
 
-        // The action captured project-2 (proof it resolved the target)…
         match &app.prompt {
             PromptState::ConfigureProjectEnv { project_id, .. } => {
                 assert_eq!(project_id, "project-2");
             }
             other => panic!("expected ConfigureProjectEnv prompt, got {other:?}"),
         }
-        // …and the target is now consumed so the next action won't reuse it.
-        assert!(
-            app.project_chooser_context.is_none(),
-            "the manage-projects target must be cleared after one project action",
-        );
+    }
+
+    /// With an agent selected, a project command acts on that agent's project
+    /// straight away, with no list in between.
+    #[test]
+    fn a_project_command_acts_on_the_selected_agents_project() {
+        let p1 = make_project("project-1", "codex");
+        let mut p2 = make_project("project-2", "codex");
+        p2.name = "empty".to_string();
+        let mut session = make_session("s1", "codex", "/tmp/worktree-s1");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
+        session.status = SessionStatus::Active;
+        let mut app = test_app_with_sessions(vec![session], vec![p1, p2]);
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("the agent row");
+
+        app.execute_command("configure-project-env".to_string())
+            .expect("open the editor");
+
+        match &app.prompt {
+            PromptState::ConfigureProjectEnv { project_id, .. } => {
+                assert_eq!(project_id, "project-1");
+            }
+            other => panic!("expected ConfigureProjectEnv prompt, got {other:?}"),
+        }
     }
 
     /// Confirming the project chooser after the picked project vanished from
@@ -6437,6 +6614,8 @@ mod tests {
                 path: "/tmp/ghost".to_string(),
                 agent_count: 0,
                 path_missing: false,
+                base_branch: None,
+                orphaned: false,
             }],
             list: SearchableList::new(),
         };
@@ -6476,14 +6655,21 @@ mod tests {
         for c in "beta".chars() {
             press(&mut app, KeyCode::Char(c));
         }
-        // Commit the query (leave search mode), then confirm the sole match.
-        press(&mut app, KeyCode::Enter);
+        // Confirm the sole match.
         press(&mut app, KeyCode::Enter);
 
-        // Manage intent records the picked project as the action target: even
-        // though "beta" is index 1 in `entries`, the visible-index resolution
-        // must land on it, not on `entries[0]`.
-        assert_eq!(app.project_chooser_context.as_deref(), Some("beta"));
+        // Manage opens the picked project's actions: even though "beta" is
+        // index 1 in `entries`, the visible-index resolution must land on it,
+        // not on `entries[0]`.
+        match &app.prompt {
+            PromptState::ProjectActions(prompt) => assert_eq!(
+                prompt.target,
+                ProjectActionsTarget::Project {
+                    id: "beta".to_string()
+                }
+            ),
+            other => panic!("expected beta's action list, got {other:?}"),
+        }
     }
 
     /// The chooser lists projects by what was touched most recently: the project
@@ -7276,14 +7462,19 @@ mod tests {
             .as_managed_mut()
             .expect("managed test session")
             .project_id = "project-1".to_string();
+        s1.status = SessionStatus::Active;
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
         // Simulate an async delete in-flight for this session.
         app.engine.pending_deletions.insert("s1".to_string());
 
-        // The project is the first item in the list, select it.
-        app.selected_left = 0;
+        // Select the agent, so the command acts on its project.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("the agent row");
 
         app.delete_selected_project()
             .expect("open the confirmation");
@@ -7317,6 +7508,7 @@ mod tests {
             .as_managed_mut()
             .expect("managed test session")
             .project_id = "project-1".to_string();
+        s1.status = SessionStatus::Active;
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
@@ -7327,7 +7519,12 @@ mod tests {
             .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(TabId::new(
                 "s1-slot",
             )));
-        app.selected_left = 0;
+        // Select the agent, so the command acts on its project.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("the agent row");
 
         app.delete_selected_project()
             .expect("open the confirmation");
@@ -8219,14 +8416,39 @@ mod tests {
         );
     }
 
+    /// Put the sidebar cursor on the (only) agent row, so a project command acts
+    /// on that agent's project.
+    fn select_the_agent_row(app: &mut App) {
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("an agent row");
+    }
+
+    /// Run a project palette command with no agent selected: the project list
+    /// opens, and the highlighted project (the only one, in these journeys) is
+    /// picked the way a person picks it.
+    fn run_via_project_list(app: &mut App, command: &str) -> Result<()> {
+        app.execute_command(command.to_string())?;
+        assert!(
+            matches!(app.prompt, PromptState::PickProject { .. }),
+            "{command} with no agent selected opens the project list, got {:?}",
+            app.prompt
+        );
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))?;
+        Ok(())
+    }
+
     /// A real project (a clone added through the add-project flow) holding one
-    /// real agent whose worktree exists on disk, targeted by the project-scoped
-    /// palette commands.
+    /// real agent whose worktree exists on disk, the agent selected so the
+    /// project-scoped palette commands act on its project.
     fn project_with_a_real_agent() -> (tempfile::TempDir, App, PathBuf) {
         let (root, _repo, mut app) = project_based_on_develop();
         let worktree = create_agent_worktree(&mut app);
         assert!(worktree.is_dir(), "the agent's worktree is on disk");
-        app.project_chooser_context = Some(app.engine.projects[0].id.clone());
+        select_the_agent_row(&mut app);
         (root, app, worktree)
     }
 
@@ -8381,7 +8603,6 @@ mod tests {
         assert_eq!(app.engine.projects.len(), 1, "Cancel deletes nothing");
         assert!(worktree.is_dir());
 
-        app.project_chooser_context = Some(app.engine.projects[0].id.clone());
         app.execute_command("delete-project".to_string())
             .expect("open the confirmation");
         render_once(&mut app);
@@ -8495,7 +8716,6 @@ mod tests {
     fn confirming_an_orphan_removal_after_the_group_grew_asks_again() {
         let (_root, mut app, _worktree) = project_with_a_real_agent();
         app.engine.projects.clear();
-        app.project_chooser_context = None;
         app.rebuild_left_items();
         app.selected_left = app
             .left_items()
@@ -8529,10 +8749,10 @@ mod tests {
         );
     }
 
-    /// A real project with no agents, targeted by the project-scoped commands.
+    /// A real project with no agents, which the project commands reach through
+    /// the project list.
     fn agentless_project() -> (tempfile::TempDir, App) {
-        let (root, _repo, mut app) = project_based_on_develop();
-        app.project_chooser_context = Some(app.engine.projects[0].id.clone());
+        let (root, _repo, app) = project_based_on_develop();
         (root, app)
     }
 
@@ -8540,8 +8760,7 @@ mod tests {
     fn the_remove_project_command_asks_first_and_removes_nothing() {
         let (_root, mut app) = agentless_project();
 
-        app.execute_command("remove-project".to_string())
-            .expect("open the confirmation");
+        run_via_project_list(&mut app, "remove-project").expect("open the confirmation");
 
         match &app.prompt {
             PromptState::ConfirmRemoveProject {
@@ -8565,8 +8784,7 @@ mod tests {
     #[test]
     fn escape_cancels_the_project_removal() {
         let (_root, mut app) = agentless_project();
-        app.execute_command("remove-project".to_string())
-            .expect("open the confirmation");
+        run_via_project_list(&mut app, "remove-project").expect("open the confirmation");
 
         app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
@@ -8586,8 +8804,7 @@ mod tests {
     fn confirming_the_project_removal_removes_the_record_and_keeps_the_folder() {
         let (_root, mut app) = agentless_project();
         let folder = PathBuf::from(&app.engine.projects[0].path);
-        app.execute_command("remove-project".to_string())
-            .expect("open the confirmation");
+        run_via_project_list(&mut app, "remove-project").expect("open the confirmation");
 
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
@@ -8623,7 +8840,6 @@ mod tests {
         let (_root, mut app, worktree) = project_with_a_real_agent();
         // The project record goes, leaving its agent as an orphan.
         app.engine.projects.clear();
-        app.project_chooser_context = None;
         app.rebuild_left_items();
         app.selected_left = app
             .left_items()
@@ -8863,8 +9079,9 @@ mod tests {
     }
 
     /// A real project whose folder is on `develop` and whose recorded base is
-    /// `develop` (added with the checkout box unticked), selected so the
-    /// project-scoped command acts on it. origin's default is `main`.
+    /// `develop` (added with the checkout box unticked). It has no agent, so a
+    /// project command reaches it through the project list. origin's default
+    /// is `main`.
     fn project_based_on_develop() -> (tempfile::TempDir, PathBuf, App) {
         let (root, repo, _) = clone_on_a_feature_branch();
         crate::app::test_support::run_git_output(&repo, &["switch", "-q", "-c", "develop"]);
@@ -8876,7 +9093,6 @@ mod tests {
             !app.engine.projects.is_empty() && stored_project_base(app).is_some()
         });
         assert_eq!(stored_project_base(&app).as_deref(), Some("develop"));
-        app.project_chooser_context = Some(app.engine.projects[0].id.clone());
         (root, repo, app)
     }
 
@@ -8888,7 +9104,7 @@ mod tests {
     fn checking_out_the_default_branch_asks_before_anything_runs() {
         let (_root, repo, mut app) = project_based_on_develop();
 
-        app.checkout_selected_project_default_branch()
+        run_via_project_list(&mut app, "checkout-project-default-branch")
             .expect("open the confirmation");
 
         match &app.prompt {
@@ -8914,7 +9130,7 @@ mod tests {
     #[test]
     fn escape_cancels_the_default_branch_checkout_and_says_nothing_changed() {
         let (_root, repo, mut app) = project_based_on_develop();
-        app.checkout_selected_project_default_branch()
+        run_via_project_list(&mut app, "checkout-project-default-branch")
             .expect("open the confirmation");
 
         app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
@@ -8941,7 +9157,7 @@ mod tests {
     #[test]
     fn pressing_cancel_runs_nothing_either() {
         let (_root, repo, mut app) = project_based_on_develop();
-        app.checkout_selected_project_default_branch()
+        run_via_project_list(&mut app, "checkout-project-default-branch")
             .expect("open the confirmation");
 
         // Cancel has focus; activating it is the same answer as Escape.
@@ -8959,7 +9175,7 @@ mod tests {
     #[test]
     fn confirming_checks_out_the_default_and_makes_it_the_project_base() {
         let (_root, repo, mut app) = project_based_on_develop();
-        app.checkout_selected_project_default_branch()
+        run_via_project_list(&mut app, "checkout-project-default-branch")
             .expect("open the confirmation");
 
         // Move focus from Cancel to the confirm button, then press it.
@@ -8989,7 +9205,7 @@ mod tests {
     #[test]
     fn cancelling_names_the_base_as_it_is_when_the_dialog_closes() {
         let (_root, _repo, mut app) = project_based_on_develop();
-        app.checkout_selected_project_default_branch()
+        run_via_project_list(&mut app, "checkout-project-default-branch")
             .expect("open the confirmation");
         app.engine.projects[0].leading_branch = Some("main".to_string());
 
@@ -9008,7 +9224,7 @@ mod tests {
     #[test]
     fn cancelling_after_the_project_is_gone_says_so() {
         let (_root, _repo, mut app) = project_based_on_develop();
-        app.checkout_selected_project_default_branch()
+        run_via_project_list(&mut app, "checkout-project-default-branch")
             .expect("open the confirmation");
         app.engine.projects.clear();
 
@@ -9072,5 +9288,648 @@ mod tests {
             None,
             "already being there releases it"
         );
+    }
+
+    // ── manage-projects: a project's action list ───────────────────────────
+
+    /// Open `manage-projects` and pick the project whose id is `id` the way a
+    /// person does: move down to it and press Enter.
+    fn manage_project(app: &mut App, id: &str) {
+        app.execute_command("manage-projects".to_string())
+            .expect("open the project list");
+        let row = match &app.prompt {
+            PromptState::PickProject {
+                intent,
+                entries,
+                list,
+            } => {
+                assert_eq!(*intent, ProjectChooserIntent::Manage);
+                let visible = list.visible_indices(entries, pick_project_matches);
+                visible
+                    .iter()
+                    .position(|index| entries[*index].id == id)
+                    .unwrap_or_else(|| panic!("{id} is listed in {entries:?}"))
+            }
+            other => panic!("expected the project list, got {other:?}"),
+        };
+        for _ in 0..row {
+            app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            matches!(app.prompt, PromptState::ProjectActions(_)),
+            "Enter on a project opens its actions, got {:?}",
+            app.prompt
+        );
+    }
+
+    /// Move the action list's cursor onto `action`'s row and press Enter.
+    fn pick_project_action(app: &mut App, action: ProjectAction) {
+        let (rows, selected) = match &app.prompt {
+            PromptState::ProjectActions(prompt) => {
+                (app.project_action_rows(&prompt.target), prompt.selected)
+            }
+            other => panic!("expected the action list, got {other:?}"),
+        };
+        let row = rows
+            .iter()
+            .position(|row| row.action == action)
+            .unwrap_or_else(|| panic!("{action:?} is a row of {rows:?}"));
+        for _ in 0..row.saturating_sub(selected) {
+            app.handle_key(key(KeyCode::Down, KeyModifiers::NONE))
+                .unwrap();
+        }
+        for _ in 0..selected.saturating_sub(row) {
+            app.handle_key(key(KeyCode::Up, KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    #[test]
+    fn managing_a_project_then_delete_asks_first_and_cancelling_returns_to_its_actions() {
+        let (_root, mut app, worktree) = project_with_a_real_agent();
+        let id = app.engine.projects[0].id.clone();
+
+        manage_project(&mut app, &id);
+        let text = rendered_text(&mut app);
+        assert!(text.contains("Manage Project"), "{text}");
+        assert!(text.contains("Delete project…"), "{text}");
+        pick_project_action(&mut app, ProjectAction::Delete);
+
+        match &app.prompt {
+            PromptState::ConfirmDeleteProject {
+                project_name,
+                agent_count,
+                focus,
+                ..
+            } => {
+                assert_eq!(project_name, "repo");
+                assert_eq!(*agent_count, 1);
+                assert_eq!(*focus, ConfirmFocus::Cancel, "Cancel is the safe default");
+            }
+            other => panic!("expected the delete-project confirmation, got {other:?}"),
+        }
+
+        // Escape cancels, and the list the question came from comes back.
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::ProjectActions(prompt) => {
+                assert_eq!(
+                    prompt.target,
+                    ProjectActionsTarget::Project { id: id.clone() }
+                );
+                let rows = app.project_action_rows(&prompt.target);
+                assert_eq!(
+                    rows[prompt.selected].action,
+                    ProjectAction::Delete,
+                    "the cursor is still on the row that asked"
+                );
+            }
+            other => panic!("cancelling returns to the action list, got {other:?}"),
+        }
+        assert_eq!(
+            app.status.text(),
+            "Cancelled deleting project \"repo\". Nothing was deleted: its agent and its \
+             worktree are still here."
+        );
+        assert_eq!(app.engine.projects.len(), 1, "nothing is deleted");
+        assert!(worktree.is_dir(), "the worktree is untouched");
+
+        // The Cancel button is the same answer as Escape.
+        pick_project_action(&mut app, ProjectAction::Delete);
+        app.handle_key(key(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::ProjectActions(_)));
+
+        // Confirming runs the existing cascade and leaves nothing to go back to.
+        pick_project_action(&mut app, ProjectAction::Delete);
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(app.engine.projects.is_empty(), "the project is gone");
+        assert!(!worktree.exists(), "the worktree was removed from disk");
+    }
+
+    /// Every row of a project's action list runs its own flow, and runs it for
+    /// the project the list was opened on, never for whatever agent happens to
+    /// be selected.
+    #[test]
+    fn every_project_action_row_runs_its_flow_for_the_picked_project() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        // A project terminal is a plain PTY; `cat` stands in for the shell.
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = Vec::new();
+        let id = app.engine.projects[0].id.clone();
+
+        let rows: Vec<ProjectAction> = app
+            .project_action_rows(&ProjectActionsTarget::Project { id: id.clone() })
+            .into_iter()
+            .map(|row| row.action)
+            .collect();
+        let mut expected: Vec<ProjectAction> = ProjectAction::ROWS.to_vec();
+        if !app.github_pr_agent_command_available() {
+            // Where GitHub is unavailable the browser hides the row too.
+            expected.retain(|action| *action != ProjectAction::NewAgentFromPr);
+        }
+        assert_eq!(rows, expected, "the rows follow the browser menu's order");
+
+        for action in rows {
+            manage_project(&mut app, &id);
+            pick_project_action(&mut app, action);
+            let prompt = &app.prompt;
+            match action {
+                ProjectAction::NewAgent => {
+                    drain_until(&mut app, "the new-agent name prompt", |app| {
+                        matches!(app.prompt, PromptState::NameNewAgent { .. })
+                    });
+                    match &app.prompt {
+                        PromptState::NameNewAgent {
+                            request: CreateAgentRequest::NewProject { project, .. },
+                            ..
+                        } => assert_eq!(project.id, id),
+                        other => panic!("{action:?}: expected the name prompt, got {other:?}"),
+                    }
+                }
+                ProjectAction::NewAgentFromPr => match prompt {
+                    PromptState::PullRequestInput {
+                        project: Some(project),
+                        ..
+                    } => assert_eq!(project.id, id),
+                    other => panic!("{action:?}: got {other:?}"),
+                },
+                ProjectAction::Worktrees => match prompt {
+                    PromptState::ManageWorktrees(manager) => assert_eq!(manager.project.id, id),
+                    other => panic!("{action:?}: got {other:?}"),
+                },
+                ProjectAction::NewTerminal => {
+                    assert!(
+                        matches!(prompt, PromptState::None),
+                        "{action:?}: {prompt:?}"
+                    );
+                    assert!(
+                        app.engine
+                            .companion_terminals
+                            .values()
+                            .any(|t| t.owner == TerminalOwner::Project(id.clone())),
+                        "a terminal owned by the project was opened"
+                    );
+                }
+                ProjectAction::Pull => {
+                    assert!(
+                        matches!(prompt, PromptState::ProjectActions(_)),
+                        "{action:?}: the list stays, like the browser's: {prompt:?}"
+                    );
+                    // The pull holds the project folder until it ends.
+                    let path = app.engine.projects[0].path.clone();
+                    assert_eq!(
+                        app.engine.project_folder_action(&path),
+                        Some(dux_core::engine::ProjectFolderAction::Pull),
+                        "{action:?}: the project's pull is running"
+                    );
+                    drain_until(&mut app, "the pull to finish", |app| {
+                        app.engine.project_folder_action(&path).is_none()
+                    });
+                }
+                ProjectAction::CheckoutDefaultBranch => match prompt {
+                    PromptState::ConfirmCheckoutDefaultBranch { project_id, .. } => {
+                        assert_eq!(project_id, &id)
+                    }
+                    other => panic!("{action:?}: got {other:?}"),
+                },
+                ProjectAction::ChangeBaseBranch => {
+                    match prompt {
+                        PromptState::ChangeBaseBranch(picker) => {
+                            assert_eq!(picker.project_id, id)
+                        }
+                        other => panic!("{action:?}: got {other:?}"),
+                    }
+                    drain_until(&mut app, "the branch listing", |app| {
+                        app.pending_branch_listing.is_none()
+                    });
+                }
+                ProjectAction::Info => match prompt {
+                    PromptState::ProjectInfo(info) => assert_eq!(info.project_name, "repo"),
+                    other => panic!("{action:?}: got {other:?}"),
+                },
+                ProjectAction::DefaultProvider => match prompt {
+                    PromptState::ChangeProjectDefaultProvider(picker) => {
+                        assert_eq!(picker.project_id, id)
+                    }
+                    other => panic!("{action:?}: got {other:?}"),
+                },
+                ProjectAction::AutoReopen => {
+                    assert!(app.engine.project_allows_auto_reopen(&id));
+                    drain_until(&mut app, "the auto-reopen change to save", |app| {
+                        !app.engine
+                            .project_allows_auto_reopen(&app.engine.projects[0].id)
+                    });
+                }
+                ProjectAction::StartupCommand => match prompt {
+                    PromptState::ConfigureStartupCommand { project_id, .. } => {
+                        assert_eq!(project_id, &id)
+                    }
+                    other => panic!("{action:?}: got {other:?}"),
+                },
+                ProjectAction::Environment => match prompt {
+                    PromptState::ConfigureProjectEnv { project_id, .. } => {
+                        assert_eq!(project_id, &id)
+                    }
+                    other => panic!("{action:?}: got {other:?}"),
+                },
+                ProjectAction::StartupLogs => {
+                    assert!(
+                        matches!(prompt, PromptState::None),
+                        "{action:?}: {prompt:?}"
+                    );
+                    drain_until(&mut app, "the startup logs answer", |app| {
+                        app.status.text().contains("project \"repo\"")
+                    });
+                }
+                ProjectAction::Delete => match prompt {
+                    PromptState::ConfirmDeleteProject { project_id, .. } => {
+                        assert_eq!(project_id, &id)
+                    }
+                    other => panic!("{action:?}: got {other:?}"),
+                },
+                ProjectAction::Remove => match prompt {
+                    PromptState::ConfirmRemoveProject {
+                        project_id,
+                        orphaned,
+                        ..
+                    } => {
+                        assert_eq!(project_id, &id);
+                        assert!(!orphaned);
+                    }
+                    other => panic!("{action:?}: got {other:?}"),
+                },
+                ProjectAction::CopyPath => unreachable!("never a row"),
+            }
+            app.prompt = PromptState::None;
+        }
+    }
+
+    /// An agent whose project record is gone shows up in `manage-projects` as
+    /// an orphaned group, offers Remove project… and nothing else, and removing
+    /// it clears the ghost records while the worktree stays on disk.
+    #[test]
+    fn an_orphaned_group_is_listed_offers_only_remove_and_removing_it_clears_its_agents() {
+        let (_root, mut app, worktree) = project_with_a_real_agent();
+        let ghost = app.engine.projects[0].id.clone();
+        app.engine.projects.clear();
+        app.rebuild_left_items();
+
+        app.execute_command("manage-projects".to_string())
+            .expect("open the project list");
+        match &app.prompt {
+            PromptState::PickProject { entries, .. } => {
+                assert_eq!(entries.len(), 1);
+                assert!(entries[0].orphaned, "{entries:?}");
+                assert_eq!(entries[0].id, ghost);
+                assert_eq!(entries[0].name, dux_core::sidebar::short_project_id(&ghost));
+                assert_eq!(entries[0].agent_count, 1);
+            }
+            other => panic!("expected the project list, got {other:?}"),
+        }
+        let text = rendered_text(&mut app);
+        assert!(text.contains("orphaned"), "{text}");
+        assert!(text.contains("its project record is gone"), "{text}");
+
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::ProjectActions(prompt) => {
+                let rows = app.project_action_rows(&prompt.target);
+                assert_eq!(
+                    rows.iter().map(|row| row.action).collect::<Vec<_>>(),
+                    vec![ProjectAction::Remove]
+                );
+            }
+            other => panic!("expected the group's actions, got {other:?}"),
+        }
+
+        pick_project_action(&mut app, ProjectAction::Remove);
+        match &app.prompt {
+            PromptState::ConfirmRemoveProject {
+                orphaned,
+                agent_count,
+                ..
+            } => {
+                assert!(orphaned);
+                assert_eq!(*agent_count, 1);
+            }
+            other => panic!("expected the removal question, got {other:?}"),
+        }
+        // Cancelling steps back to the group's actions.
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::ProjectActions(_)));
+
+        pick_project_action(&mut app, ProjectAction::Remove);
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.engine.sessions.is_empty(), "the ghost record is gone");
+        assert!(worktree.is_dir(), "its worktree stays on disk");
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    /// With the project's folder gone, the rows that need it are shown but
+    /// unavailable, say why on screen, and picking one says why again and runs
+    /// nothing.
+    #[test]
+    fn with_the_folder_missing_the_folder_bound_rows_are_unavailable_and_say_why() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = Vec::new();
+        app.engine.projects[0].path_missing = true;
+        let id = app.engine.projects[0].id.clone();
+        let path = app.engine.projects[0].path.clone();
+
+        manage_project(&mut app, &id);
+        let rows = app.project_action_rows(&ProjectActionsTarget::Project { id: id.clone() });
+        let unavailable: Vec<ProjectAction> = rows
+            .iter()
+            .filter(|row| row.unavailable.is_some())
+            .map(|row| row.action)
+            .collect();
+        assert_eq!(
+            unavailable,
+            vec![ProjectAction::NewTerminal, ProjectAction::ChangeBaseBranch],
+            "exactly where the browser disables a row"
+        );
+        let text = rendered_text(&mut app);
+        assert_eq!(
+            text.matches("unavailable: the folder is missing").count(),
+            2,
+            "{text}"
+        );
+        assert!(text.contains("⚠ missing"), "{text}");
+
+        pick_project_action(&mut app, ProjectAction::NewTerminal);
+        assert!(
+            matches!(app.prompt, PromptState::ProjectActions(_)),
+            "an unavailable row runs nothing and keeps the list: {:?}",
+            app.prompt
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert_eq!(
+            app.status.text(),
+            format!(
+                "New terminal at the project root is unavailable: the folder of project \
+                 \"repo\" is missing at {path}."
+            )
+        );
+        assert!(
+            app.engine.companion_terminals.is_empty(),
+            "no terminal opened"
+        );
+
+        pick_project_action(&mut app, ProjectAction::ChangeBaseBranch);
+        assert!(matches!(app.prompt, PromptState::ProjectActions(_)));
+        assert!(
+            app.status
+                .text()
+                .starts_with("Change base branch is unavailable"),
+            "{}",
+            app.status.text()
+        );
+        assert!(app.pending_branch_listing.is_none(), "nothing was listed");
+    }
+
+    /// Change base branch, end to end on a real repository: the listing marks
+    /// the base, names the agent holding its own branch, offers a branch only
+    /// origin has; the held branch cannot be picked, and the origin-only one is
+    /// created locally, checked out in the folder and saved as the base.
+    #[test]
+    fn changing_the_base_branch_runs_end_to_end_including_an_origin_only_branch() {
+        let (root, mut app, _worktree) = project_with_a_real_agent();
+        let id = app.engine.projects[0].id.clone();
+        let repo = PathBuf::from(&app.engine.projects[0].path);
+        let held = app.engine.sessions[0]
+            .workspace
+            .as_managed()
+            .expect("managed agent")
+            .branch_name
+            .clone();
+        // A branch only origin has, pushed from a second clone.
+        let other = root.path().join("other");
+        let origin = root.path().join("origin.git");
+        crate::app::test_support::run_git_output(
+            root.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_string_lossy().as_ref(),
+                other.to_string_lossy().as_ref(),
+            ],
+        );
+        crate::app::test_support::run_git_output(
+            &other,
+            &["config", "user.email", "t@example.com"],
+        );
+        crate::app::test_support::run_git_output(&other, &["config", "user.name", "Test"]);
+        crate::app::test_support::run_git_output(&other, &["switch", "-q", "-c", "release"]);
+        std::fs::write(other.join("release.txt"), "release\n").unwrap();
+        crate::app::test_support::run_git_output(&other, &["add", "release.txt"]);
+        crate::app::test_support::run_git_output(&other, &["commit", "-q", "-m", "release"]);
+        crate::app::test_support::run_git_output(&other, &["push", "-q", "origin", "release"]);
+        let release_commit =
+            crate::app::test_support::run_git_output(&other, &["rev-parse", "HEAD"]);
+
+        manage_project(&mut app, &id);
+        pick_project_action(&mut app, ProjectAction::ChangeBaseBranch);
+        match &app.prompt {
+            PromptState::ChangeBaseBranch(picker) => assert!(picker.loading),
+            other => panic!("expected the branch picker, got {other:?}"),
+        }
+        assert!(
+            rendered_text(&mut app).contains("Fetching origin and listing branches…"),
+            "the picker shows a loading row while the worker runs"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        drain_until(&mut app, "the branch listing", |app| {
+            app.pending_branch_listing.is_none()
+        });
+
+        let branches = match &app.prompt {
+            PromptState::ChangeBaseBranch(picker) => {
+                assert!(!picker.loading);
+                assert_eq!(picker.fetch_note, None, "origin was fetched");
+                assert_eq!(picker.current_base.as_deref(), Some("develop"));
+                picker.branches.clone()
+            }
+            other => panic!("expected the loaded picker, got {other:?}"),
+        };
+        let release = branches
+            .iter()
+            .find(|branch| branch.name == "release")
+            .expect("the origin-only branch is listed");
+        assert_eq!(release.location, dux_core::git::BranchLocation::Remote);
+        assert!(
+            branches
+                .iter()
+                .find(|branch| branch.name == held)
+                .is_some_and(|branch| branch.held_by.is_some()),
+            "the agent's branch is listed as held: {branches:?}"
+        );
+        let text = rendered_text(&mut app);
+        assert!(text.contains("Change Base Branch"), "{text}");
+        assert!(text.contains("unavailable: checked out by agent"), "{text}");
+        assert!(text.contains("on origin only"), "{text}");
+
+        // Search narrows to the held branch; picking it is refused out loud.
+        app.handle_key(key(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for c in held.chars() {
+            app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            matches!(app.prompt, PromptState::ChangeBaseBranch(_)),
+            "a held branch cannot be picked: {:?}",
+            app.prompt
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert!(
+            app.status.text().contains("it is checked out by agent"),
+            "{}",
+            app.status.text()
+        );
+
+        // Escape clears the search, then pick the origin-only branch.
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(key(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for c in "release".chars() {
+            app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::ConfirmChangeBaseBranch(confirm) => {
+                assert_eq!(confirm.branch, "release");
+                assert_eq!(
+                    confirm.focus,
+                    ConfirmFocus::Cancel,
+                    "Cancel is the safe default"
+                );
+            }
+            other => panic!("expected the confirmation, got {other:?}"),
+        }
+        let text = rendered_text(&mut app);
+        assert!(
+            text.contains("This switches the source checkout for")
+                && text.contains("After the switch,"),
+            "the shared prose is the body: {text}"
+        );
+
+        // Cancelling steps back to the picker and says nothing moved.
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::ChangeBaseBranch(_)));
+        assert_eq!(
+            app.status.text(),
+            "Cancelled changing the base branch of project \"repo\". Nothing was checked out, \
+             and new worktrees still branch from \"develop\"."
+        );
+        assert_eq!(folder_branch(&repo), "develop");
+
+        // Confirm for real.
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::None));
+        drain_until(&mut app, "the base to move to release", |app| {
+            stored_project_base(app).as_deref() == Some("release")
+        });
+        assert_eq!(folder_branch(&repo), "release");
+        assert_eq!(
+            crate::app::test_support::run_git_output(&repo, &["rev-parse", "refs/heads/release"]),
+            release_commit,
+            "the local branch was created from origin's"
+        );
+        assert_eq!(
+            app.engine.projects[0].leading_branch.as_deref(),
+            Some("release")
+        );
+        drain_until(&mut app, "the final", |app| {
+            app.status
+                .text()
+                .contains("New worktrees branch from \"release\" now.")
+        });
+    }
+
+    /// A project command with no agent selected reaches Change base branch too.
+    #[test]
+    fn change_project_base_branch_with_no_agent_selected_opens_the_project_list_first() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        run_via_project_list(&mut app, "change-project-base-branch").expect("open the picker");
+        match &app.prompt {
+            PromptState::ChangeBaseBranch(picker) => {
+                assert_eq!(picker.project_name, "repo");
+                assert!(picker.return_to.is_none(), "nothing to step back to");
+            }
+            other => panic!("expected the branch picker, got {other:?}"),
+        }
+        drain_until(&mut app, "the branch listing", |app| {
+            app.pending_branch_listing.is_none()
+        });
+        // Escape with nothing behind it closes the picker.
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    /// Project info shows the browser dialog's facts, and closing it returns to
+    /// the action list it was opened from.
+    #[test]
+    fn project_info_shows_the_projects_facts_and_closes_back_onto_its_actions() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        let id = app.engine.projects[0].id.clone();
+        manage_project(&mut app, &id);
+        pick_project_action(&mut app, ProjectAction::Info);
+        let text = rendered_text(&mut app);
+        for fact in [
+            "Project Info",
+            "Path:",
+            "Current branch:",
+            "Base branch:",
+            "develop",
+            "Added:",
+            "Default provider:",
+            "Auto-reopen:",
+            "Inherit",
+            "Startup command:",
+            "Environment:",
+            "0 variables",
+            "Live agents:",
+            "0 agents",
+            "Companion terminals:",
+            "0 terminals",
+        ] {
+            assert!(text.contains(fact), "{fact} is on screen:\n{text}");
+        }
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::ProjectActions(_)));
     }
 }

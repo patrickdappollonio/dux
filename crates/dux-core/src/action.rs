@@ -30,6 +30,7 @@ pub enum Action {
     ChooseWorktreeEditor,
     RefreshProject,
     CheckoutProjectDefaultBranch,
+    ChangeProjectBaseBranch,
     ReconnectAgent,
     DeleteSession,
     DeleteTerminal,
@@ -234,6 +235,7 @@ impl Action {
             Action::ChooseWorktreeEditor => "choose_worktree_editor",
             Action::RefreshProject => "refresh_project",
             Action::CheckoutProjectDefaultBranch => "checkout_project_default_branch",
+            Action::ChangeProjectBaseBranch => "change_project_base_branch",
             Action::ReconnectAgent => "reconnect_agent",
             Action::DeleteSession => "delete_session",
             Action::DeleteTerminal => "delete_terminal",
@@ -362,9 +364,7 @@ impl Action {
             Action::NewAgent => "Create a new agent session (worktree).",
             Action::NewAgentFromPr => "Create a new agent session from a GitHub pull request.",
             Action::NewAgentFromWorktree => "Create a new agent from an existing git worktree.",
-            Action::ManageProjects => {
-                "Choose a project to target for project-scoped palette actions."
-            }
+            Action::ManageProjects => "Manage a project: its actions, settings and base branch.",
             Action::ManageWorktrees => {
                 "Remove a worktree dux manages for a project, and optionally its branch."
             }
@@ -396,6 +396,9 @@ impl Action {
             Action::RefreshProject => "Git pull the selected project checkout.",
             Action::CheckoutProjectDefaultBranch => {
                 "Check out the default branch for the selected project, and branch new worktrees from it."
+            }
+            Action::ChangeProjectBaseBranch => {
+                "Pick any local or origin branch for the selected project to switch to, and branch new worktrees from it."
             }
             Action::ReconnectAgent => "Restart the CLI for the selected agent.",
             Action::DeleteSession => "Delete the selected session and worktree.",
@@ -631,6 +634,7 @@ impl Action {
             | Action::ChooseWorktreeEditor
             | Action::RefreshProject
             | Action::CheckoutProjectDefaultBranch
+            | Action::ChangeProjectBaseBranch
             | Action::InteractAgent
             | Action::ReconnectAgent
             | Action::DeleteSession

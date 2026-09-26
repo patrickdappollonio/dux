@@ -214,6 +214,12 @@ enum PromptMouseTarget {
     ConfirmDeleteWorktreeCancel,
     ConfirmDeleteWorktreeConfirm,
     PickProjectItem(usize),
+    ProjectActionItem(usize),
+    ChangeBaseBranchInput,
+    ChangeBaseBranchItem(usize),
+    ConfirmChangeBaseBranchCancel,
+    ConfirmChangeBaseBranchConfirm,
+    ProjectInfoClose,
     ChangeThemeItem(usize),
     ChangeAgentProviderItem(usize),
     ChangeDefaultProviderItem(usize),
@@ -408,6 +414,13 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::AddProjectFailedOk => Some(ButtonPressedTarget::AddProjectFailedOk),
             PromptMouseTarget::AgentInfoClose => Some(ButtonPressedTarget::AgentInfoClose),
+            PromptMouseTarget::ProjectInfoClose => Some(ButtonPressedTarget::ProjectInfoClose),
+            PromptMouseTarget::ConfirmChangeBaseBranchCancel => {
+                Some(ButtonPressedTarget::ConfirmChangeBaseBranchCancel)
+            }
+            PromptMouseTarget::ConfirmChangeBaseBranchConfirm => {
+                Some(ButtonPressedTarget::ConfirmChangeBaseBranchConfirm)
+            }
             PromptMouseTarget::FirstLoadPrimary => Some(ButtonPressedTarget::FirstLoadPrimary),
             PromptMouseTarget::FirstLoadSecondary => Some(ButtonPressedTarget::FirstLoadSecondary),
             PromptMouseTarget::StartupCommandLogsClose => {
@@ -423,6 +436,9 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::PickProjectWorktreeItem(_)
             | PromptMouseTarget::ManageWorktreeItem(_)
             | PromptMouseTarget::PickProjectItem(_)
+            | PromptMouseTarget::ProjectActionItem(_)
+            | PromptMouseTarget::ChangeBaseBranchInput
+            | PromptMouseTarget::ChangeBaseBranchItem(_)
             | PromptMouseTarget::StartupCommandLogItem(_)
             | PromptMouseTarget::StartupCommandInput
             | PromptMouseTarget::ChangeThemeItem(_)
@@ -1207,11 +1223,10 @@ impl App {
         Ok(false)
     }
     /// Move the agents-section selection to `index` and run the side effects
-    /// every agent-row move shares: drop any project-chooser context, close the
-    /// diff overlay, and refresh the right pane for the newly selected agent.
+    /// every agent-row move shares: close the diff overlay, and refresh the
+    /// right pane for the newly selected agent.
     pub(crate) fn select_left_agent_item(&mut self, index: usize) {
         self.selected_left = index;
-        self.project_chooser_context = None;
         self.close_diff_view();
         self.reload_changed_files();
         self.update_missing_project_warning();
@@ -1311,6 +1326,7 @@ impl App {
                 Action::CheckoutProjectDefaultBranch => {
                     self.checkout_selected_project_default_branch()?
                 }
+                Action::ChangeProjectBaseBranch => self.change_selected_project_base_branch()?,
                 Action::ShowTerminal => self.show_or_open_first_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
                 Action::RenameSession => self.open_rename_session()?,
@@ -1425,10 +1441,6 @@ impl App {
                 if self.engine.sessions.get(*i).is_some_and(|s| s.id == session_id))
         }) {
             self.selected_left = index;
-            // The cursor moved onto a specific agent by id, so any pending
-            // `manage-projects` target no longer matches the selection; clear
-            // it so a follow-up project action resolves this agent's project.
-            self.project_chooser_context = None;
         }
     }
 
@@ -1943,7 +1955,17 @@ impl App {
             | PromptState::ChangeAgentProvider(_)
             | PromptState::ChangeDefaultProvider(_)
             | PromptState::ChangeProjectDefaultProvider(_)
-            | PromptState::SetTailscaleMode(_) => {}
+            | PromptState::SetTailscaleMode(_)
+            | PromptState::ProjectActions(_)
+            | PromptState::ProjectInfo(_)
+            | PromptState::ConfirmChangeBaseBranch(_) => {}
+
+            PromptState::ChangeBaseBranch(prompt) => {
+                if prompt.list.searching {
+                    prompt.list.filter.insert_str(text);
+                    prompt.list.selected = 0;
+                }
+            }
         }
         if refresh_path_completions {
             self.refresh_path_editor_completions();
@@ -5101,6 +5123,9 @@ impl App {
         if let Some(exit) = self.handle_confirm_delete_worktree_prompt_key(key) {
             return Some(exit);
         }
+        if let Some(exit) = self.handle_confirm_change_base_branch_prompt_key(key) {
+            return Some(exit);
+        }
         if let Some(exit) = self.handle_confirm_kill_running_prompt_key(key) {
             return Some(exit);
         }
@@ -5452,6 +5477,12 @@ impl App {
         if let Some(exit) = self.handle_pick_project_prompt_key(key)? {
             return Ok(Some(exit));
         }
+        if let Some(exit) = self.handle_project_actions_prompt_key(key)? {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_change_base_branch_prompt_key(key) {
+            return Ok(Some(exit));
+        }
         if let Some(which) = provider_picker_kind(&self.prompt) {
             return Ok(Some(self.handle_provider_picker_key(key, which)?));
         }
@@ -5472,6 +5503,9 @@ impl App {
             return Some(exit);
         }
         if let Some(exit) = self.handle_first_load_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_project_info_prompt_key(key) {
             return Some(exit);
         }
         self.handle_agent_info_prompt_key(key)
@@ -6647,6 +6681,49 @@ impl App {
                 column,
                 row,
             ),
+            OverlayMouseLayout::ProjectActions {
+                list,
+                items,
+                offset,
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::ProjectActionItem),
+            OverlayMouseLayout::ChangeBaseBranch {
+                input,
+                list,
+                items,
+                offset,
+            } => Self::searchable_overlay_target(
+                input,
+                list,
+                items,
+                offset,
+                PromptMouseTarget::ChangeBaseBranchInput,
+                PromptMouseTarget::ChangeBaseBranchItem,
+                column,
+                row,
+            ),
+            OverlayMouseLayout::ProjectInfo { close_button } => click_target(
+                &[(close_button, PromptMouseTarget::ProjectInfoClose)],
+                column,
+                row,
+            ),
+            OverlayMouseLayout::ConfirmChangeBaseBranch {
+                cancel_button,
+                confirm_button,
+            } => click_target(
+                &[
+                    (
+                        cancel_button,
+                        PromptMouseTarget::ConfirmChangeBaseBranchCancel,
+                    ),
+                    (
+                        confirm_button,
+                        PromptMouseTarget::ConfirmChangeBaseBranchConfirm,
+                    ),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::ConfirmCheckoutDefaultBranch {
                 cancel_button,
                 confirm_button,
@@ -7034,7 +7111,6 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
         if self.selected_left != index {
             self.selected_left = index;
-            self.project_chooser_context = None;
             self.close_diff_view();
             self.reload_changed_files();
         }
@@ -7205,6 +7281,22 @@ impl App {
             list.filter.cursor =
                 cursor_from_single_line_position(&list.filter.text, input_area, 2, column);
             list.searching = true;
+        }
+    }
+
+    /// Land the caret in the Change base branch picker's `/`-search field. The
+    /// renderer pads it with the two-cell `"/ "` prefix, like the project list.
+    fn set_change_base_branch_filter_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::ChangeBaseBranch {
+                input: Some(input), ..
+            } => input,
+            _ => return,
+        };
+        if let PromptState::ChangeBaseBranch(prompt) = &mut self.prompt {
+            prompt.list.filter.cursor =
+                cursor_from_single_line_position(&prompt.list.filter.text, input_area, 2, column);
+            prompt.list.searching = true;
         }
     }
 
@@ -7854,12 +7946,13 @@ impl App {
     /// because a silent close is indistinguishable from a checkout that quietly
     /// did nothing.
     pub(super) fn resolve_confirm_checkout_default_branch(&mut self, confirm: bool) -> bool {
-        let (project_id, project_name) = match &self.prompt {
+        let (project_id, project_name, return_to) = match &self.prompt {
             PromptState::ConfirmCheckoutDefaultBranch {
                 project_id,
                 project_name,
+                return_to,
                 ..
-            } => (project_id.clone(), project_name.clone()),
+            } => (project_id.clone(), project_name.clone(), return_to.clone()),
             _ => return false,
         };
         self.prompt = PromptState::None;
@@ -7885,6 +7978,7 @@ impl App {
                     ),
                 ),
             }
+            self.return_to_project_actions(return_to);
             return false;
         }
         let Some(project) = project else {
@@ -7903,13 +7997,19 @@ impl App {
     /// nothing and says so, because a silent close is indistinguishable from a
     /// delete that quietly did nothing.
     pub(crate) fn resolve_confirm_delete_project(&mut self, confirm: bool) -> bool {
-        let (project_id, project_name, painted) = match &self.prompt {
+        let (project_id, project_name, painted, return_to) = match &self.prompt {
             PromptState::ConfirmDeleteProject {
                 project_id,
                 project_name,
                 agent_count,
+                return_to,
                 ..
-            } => (project_id.clone(), project_name.clone(), *agent_count),
+            } => (
+                project_id.clone(),
+                project_name.clone(),
+                *agent_count,
+                return_to.clone(),
+            ),
             _ => return false,
         };
         if confirm
@@ -7928,6 +8028,7 @@ impl App {
                 &project_name,
                 self.project_agent_count(&project_id),
             ));
+            self.return_to_project_actions(return_to);
             return false;
         }
         let Some(project) = self
@@ -7983,18 +8084,20 @@ impl App {
     /// an orphaned group must still have agents to clear. Cancelling removes
     /// nothing and says so.
     pub(crate) fn resolve_confirm_remove_project(&mut self, confirm: bool) -> bool {
-        let (project_id, project_name, orphaned, painted) = match &self.prompt {
+        let (project_id, project_name, orphaned, painted, return_to) = match &self.prompt {
             PromptState::ConfirmRemoveProject {
                 project_id,
                 project_name,
                 orphaned,
                 agent_count,
+                return_to,
                 ..
             } => (
                 project_id.clone(),
                 project_name.clone(),
                 *orphaned,
                 *agent_count,
+                return_to.clone(),
             ),
             _ => return false,
         };
@@ -8016,6 +8119,7 @@ impl App {
             self.set_info(dux_core::project_prose::remove_project_cancelled_message(
                 &project_name,
             ));
+            self.return_to_project_actions(return_to);
             return false;
         }
         let gone = dux_core::project_prose::project_gone_message(
@@ -9176,6 +9280,19 @@ impl App {
             PromptMouseTarget::PickProjectItem(index) => {
                 self.click_project_picker_item(index);
             }
+            PromptMouseTarget::ProjectActionItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.click_project_action_row(index, double_click);
+            }
+            PromptMouseTarget::ChangeBaseBranchInput => {
+                self.set_change_base_branch_filter_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::ChangeBaseBranchItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.click_change_base_branch_row(index, double_click);
+            }
             PromptMouseTarget::StartupCommandLogItem(index) => {
                 self.click_startup_command_log_item(index);
             }
@@ -9282,6 +9399,9 @@ impl App {
             | PromptMouseTarget::ConfigReloadFailedApply
             | PromptMouseTarget::AddProjectFailedOk
             | PromptMouseTarget::AgentInfoClose
+            | PromptMouseTarget::ProjectInfoClose
+            | PromptMouseTarget::ConfirmChangeBaseBranchCancel
+            | PromptMouseTarget::ConfirmChangeBaseBranchConfirm
             | PromptMouseTarget::FirstLoadPrimary
             | PromptMouseTarget::FirstLoadSecondary
             | PromptMouseTarget::StartupCommandLogsClose => {
@@ -9377,6 +9497,16 @@ impl App {
             }
             ButtonPressedTarget::ConfirmRecreateWorkingCopyConfirm => {
                 self.resolve_confirm_recreate_working_copy(true)
+            }
+            ButtonPressedTarget::ConfirmChangeBaseBranchCancel => {
+                self.resolve_confirm_change_base_branch(false)
+            }
+            ButtonPressedTarget::ConfirmChangeBaseBranchConfirm => {
+                self.resolve_confirm_change_base_branch(true)
+            }
+            ButtonPressedTarget::ProjectInfoClose => {
+                self.close_project_info();
+                false
             }
             ButtonPressedTarget::ConfirmCheckoutDefaultBranchCancel => {
                 self.resolve_confirm_checkout_default_branch(false)
@@ -16277,89 +16407,104 @@ not_a_real_action = ["x"]
         );
     }
 
+    /// Escape from a project's action list steps back to the project list,
+    /// with the same project under the cursor, and a second Escape closes it.
     #[test]
     fn esc_closes_the_project_chooser() {
         let mut app = test_app(default_bindings());
+        let other = add_agentless_project(&mut app, "project-2", "empty");
         app.execute_command("manage-projects".to_string()).unwrap();
         assert!(matches!(app.prompt, PromptState::PickProject { .. }));
+        let row_of_other = match &app.prompt {
+            PromptState::PickProject { entries, .. } => entries
+                .iter()
+                .position(|entry| entry.id == other)
+                .expect("the agent-less project is listed"),
+            _ => unreachable!(),
+        };
+        for _ in 0..row_of_other {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            matches!(app.prompt, PromptState::ProjectActions(_)),
+            "Enter opens the project's actions, got {:?}",
+            app.prompt
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::PickProject {
+                intent,
+                entries,
+                list,
+            } => {
+                assert_eq!(*intent, ProjectChooserIntent::Manage);
+                let visible = list.visible_indices(entries, pick_project_matches);
+                assert_eq!(
+                    entries[visible[list.selected]].id, other,
+                    "the project list comes back on the project it left from"
+                );
+            }
+            other => panic!("Escape steps back to the project list, got {other:?}"),
+        }
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
         assert!(matches!(app.prompt, PromptState::None));
     }
 
+    /// `manage-projects` remembers nothing: after a project's actions were
+    /// open, the next project command still acts on the selected agent's own
+    /// project, whatever was picked from the list before.
     #[test]
-    fn manage_projects_context_targets_project_until_agent_reselected() {
+    fn manage_projects_leaves_no_hidden_target_behind() {
         let mut app = test_app(default_bindings());
         let other = add_agentless_project(&mut app, "project-2", "empty");
-
-        // Give project-1 two Active agent rows so navigation moves between two
-        // Session rows deterministically (no Inactive tail / toggle).
-        let now = Utc::now();
-        let project_id = app.engine.projects[0].id.clone();
-        let project_path = app.engine.projects[0].path.clone();
-        app.engine.sessions.clear();
-        for name in ["alpha", "bravo"] {
-            app.engine.sessions.push(AgentSession {
-                id: format!("session-{name}"),
-                slot_tab_id: format!("session-{name}-slot"),
-                provider: ProviderKind::from_str("codex"),
-                title: None,
-                started_providers: Vec::new(),
-                desired_running: false,
-                auto_reopen_enabled: true,
-                status: SessionStatus::Active,
-                created_at: now,
-                updated_at: now,
-                last_focused_tab: None,
-                workspace: dux_core::model::AgentWorkspace::Managed(
-                    dux_core::model::ManagedWorkspace {
-                        project_id: project_id.clone(),
-                        project_path: Some(project_path.clone()),
-                        source_branch: "main".to_string(),
-                        branch_name: name.to_string(),
-                        initial_branch: name.to_string(),
-                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
-                        worktree_path: app
-                            .engine
-                            .paths
-                            .worktrees_root
-                            .join(name)
-                            .display()
-                            .to_string(),
-                    },
-                ),
-            });
-        }
-        app.rebuild_left_items();
+        let own = app.engine.sessions[0]
+            .project_id()
+            .expect("the seeded agent has a project")
+            .to_string();
         app.selected_left = app
             .left_items()
             .iter()
             .position(|item| matches!(item, LeftItem::Session(_)))
             .expect("a session row");
 
-        // Pick the agent-less project via the manage-projects chooser.
         app.execute_command("manage-projects".to_string()).unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-            .unwrap();
+        let row_of_other = match &app.prompt {
+            PromptState::PickProject { entries, .. } => entries
+                .iter()
+                .position(|entry| entry.id == other)
+                .expect("listed"),
+            other => panic!("expected the project list, got {other:?}"),
+        };
+        for _ in 0..row_of_other {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .unwrap();
+        }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-
-        assert_eq!(app.project_chooser_context.as_deref(), Some(other.as_str()));
-        assert_eq!(
-            app.selected_project().map(|p| p.id.clone()),
-            Some(other.clone())
-        );
-
-        // Navigating to a different agent row clears the context and reverts to
-        // the selected agent's project.
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .unwrap();
-        assert!(app.project_chooser_context.is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::None));
+
         assert_eq!(
             app.selected_project().map(|p| p.id.clone()),
-            Some("project-1".to_string())
+            Some(own.clone())
         );
+        app.execute_command("configure-project-env".to_string())
+            .unwrap();
+        match &app.prompt {
+            PromptState::ConfigureProjectEnv { project_id, .. } => assert_eq!(project_id, &own),
+            other => panic!("expected the environment editor, got {other:?}"),
+        }
     }
 
     #[test]
@@ -16843,13 +16988,11 @@ not_a_real_action = ["x"]
     #[test]
     fn fork_uses_source_session_project_not_manage_context() {
         let mut app = test_app(default_bindings());
-        // A second project the manage-projects target could point at.
+        // A second project the fork could wrongly pick up.
         let mut other = app.engine.projects[0].clone();
         other.id = "project-2".to_string();
         other.name = "other".to_string();
         app.engine.projects.push(other);
-        // Point the manage-projects target at the OTHER project.
-        app.project_chooser_context = Some("project-2".to_string());
         // Select the seeded session, which belongs to project-1.
         app.selected_left = app
             .left_items()
@@ -16866,7 +17009,7 @@ not_a_real_action = ["x"]
             } => {
                 assert_eq!(
                     project.id, "project-1",
-                    "fork must use the source agent's project, not the manage-projects target"
+                    "fork must use the source agent's project"
                 );
             }
             other => panic!("expected a fork naming prompt, got {other:?}"),
@@ -16908,20 +17051,18 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn copy_path_uses_chooser_picked_project_when_no_agent_selected() {
+    fn copy_path_with_no_agent_selected_copies_the_project_picked_from_the_list() {
         let mut app = test_app(default_bindings());
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
-        // Add an agent-less project and make it the chooser target.
+        // An agent-less project has no row of its own to select.
         let mut agentless = app.engine.projects[0].clone();
         agentless.id = "project-empty".to_string();
         agentless.name = "empty".to_string();
         agentless.path = "/tmp/agentless-project".to_string();
         app.engine.projects.push(agentless);
-        app.project_chooser_context = Some("project-empty".to_string());
 
-        // Select a NON-agent row (the InactiveToggle) so the agent branch is
-        // skipped and the chooser project path is copied instead.
+        // Select a NON-agent row (the InactiveToggle) so there is no agent path.
         app.selected_left = app
             .left_items()
             .iter()
@@ -16929,34 +17070,48 @@ not_a_real_action = ["x"]
             .expect("inactive toggle row");
         assert!(app.selected_session().is_none());
 
-        app.copy_selected_path().unwrap();
+        app.execute_command("copy-path".to_string()).unwrap();
+        let row = match &app.prompt {
+            PromptState::PickProject {
+                intent, entries, ..
+            } => {
+                assert_eq!(
+                    *intent,
+                    ProjectChooserIntent::Action(crate::app::ProjectAction::CopyPath)
+                );
+                entries
+                    .iter()
+                    .position(|entry| entry.id == "project-empty")
+                    .expect("the agent-less project is listed")
+            }
+            other => panic!("copy-path with no agent opens the project list, got {other:?}"),
+        };
+        for _ in 0..row {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
         drain_until(&mut app, |app| {
             app.status.text() == "Project's path copied to clipboard."
         });
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
-        assert_eq!(app.status.text(), "Project's path copied to clipboard.");
-        // One-and-done: the chooser target is consumed after the action.
-        assert!(
-            app.project_chooser_context.is_none(),
-            "the manage-projects target must be cleared after the copy action",
-        );
+        assert!(matches!(app.prompt, PromptState::None));
     }
 
     #[test]
-    fn copy_path_requires_project_or_session_selection() {
+    fn copy_path_with_no_agent_and_no_projects_says_there_is_nothing_to_pick() {
         let mut app = test_app(default_bindings());
+        app.engine.projects.clear();
         app.left_items_cache.clear();
         app.selected_left = 0;
 
         app.copy_selected_path().unwrap();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
-        assert!(
-            app.status
-                .text()
-                .contains("No project or agent selected. Select one from the sidebar first.")
-        );
+        assert_eq!(app.status.text(), "No projects yet. Add one first.");
+        assert!(matches!(app.prompt, PromptState::None));
     }
 
     #[test]
@@ -36642,6 +36797,8 @@ cyan = "#00ffff"
                 path: "/tmp/one".to_string(),
                 agent_count: 0,
                 path_missing: false,
+                base_branch: None,
+                orphaned: false,
             }],
             list: SearchableList::new(),
         };

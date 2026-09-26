@@ -795,12 +795,10 @@ pub struct App {
     /// TUI's view-handler final is routed through the op.
     pub(crate) pending_config_reload_op:
         Option<dux_core::engine::HandlerStatusOp<TuiConfigReloadOutcome>>,
-    /// The project the `manage-projects` chooser picked, if any. When set (and
-    /// the project still exists), `selected_project()` resolves to it instead of
-    /// the selected agent's project, so project-scoped palette commands act on
-    /// the chosen project. Cleared when the user navigates to a different agent
-    /// row, so it never silently hijacks selection.
-    pub(crate) project_chooser_context: Option<String>,
+    /// The Change base branch picker's in-flight branch listing: the channel
+    /// its worker answers on and the keyed busy spinning until then. `None`
+    /// when no listing is running.
+    pub(crate) pending_branch_listing: Option<PendingBranchListing>,
     /// The live agent-list filter, mirroring the web sidebar/hub search box.
     /// `Some` means filter mode is active: a one-line search input renders at the
     /// top of the left pane and printable keys type into this query, live-filtering
@@ -1701,10 +1699,10 @@ pub(crate) enum ProjectWorktreeVisualRow {
 }
 
 /// Why the project chooser modal is open. A flat agent list has no project
-/// header to select, so every project-scoped creation entry point (and the
-/// palette's `manage-projects`) routes through the chooser, which lists ALL
-/// projects (agent-less included). The intent decides what confirming a project
-/// does.
+/// header to select, so every project-scoped creation entry point, the
+/// palette's `manage-projects`, and every project command run with no agent
+/// selected route through the chooser, which lists ALL projects (agent-less
+/// included). The intent decides what confirming a project does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProjectChooserIntent {
     /// Create a new agent in the chosen project.
@@ -1720,8 +1718,12 @@ pub(crate) enum ProjectChooserIntent {
     FromPrReference,
     /// Create a new agent from an existing worktree of the chosen project.
     FromWorktree,
-    /// Make the chosen project the target for project-scoped palette commands.
+    /// `manage-projects`: open the chosen project's action list. The only
+    /// intent that lists orphaned groups too, besides removing a project.
     Manage,
+    /// A project palette command run with no agent selected: the pick is the
+    /// project it acts on.
+    Action(ProjectAction),
     /// Open the worktree manager for the chosen project.
     ManageWorktrees,
     /// Spawn a project-owned terminal at the chosen project's repo root.
@@ -1739,7 +1741,18 @@ impl ProjectChooserIntent {
             ProjectChooserIntent::Manage => "Manage project",
             ProjectChooserIntent::ManageWorktrees => "Manage worktrees in project",
             ProjectChooserIntent::ProjectTerminal => "New terminal at the project root",
+            ProjectChooserIntent::Action(action) => action.chooser_title(),
         }
+    }
+
+    /// Whether the list carries orphaned groups (agents whose project record
+    /// is gone). Only where a pick can do something with one: manage it, whose
+    /// action list offers Remove project…, or remove it outright.
+    pub(crate) fn lists_orphans(self) -> bool {
+        matches!(
+            self,
+            ProjectChooserIntent::Manage | ProjectChooserIntent::Action(ProjectAction::Remove)
+        )
     }
 }
 
@@ -1753,6 +1766,241 @@ pub(crate) struct ProjectChooserEntry {
     pub(crate) path: String,
     pub(crate) agent_count: usize,
     pub(crate) path_missing: bool,
+    /// The branch new agents start from, `None` when the project has no base
+    /// recorded yet. Always `None` for an orphaned group, which has no record.
+    pub(crate) base_branch: Option<String>,
+    /// The row is an orphaned group (agents whose project record is gone), not
+    /// a project: `name` is the short id both surfaces show for one, and the
+    /// only thing it offers is Remove project….
+    pub(crate) orphaned: bool,
+}
+
+/// One action a project's action list offers, and what a pick from the project
+/// list runs when a project palette command was started with no agent selected.
+///
+/// The rows follow the browser's project `⋯` menu in the same order and words,
+/// with two differences where the terminal UI has no such screen: "Project
+/// settings…" is the four settings commands as rows of their own, and "Project
+/// info…" is the read-only [`PromptState::ProjectInfo`] screen. The two lists
+/// are kept in step by hand; each surface's tests pin its own order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectAction {
+    NewAgent,
+    NewAgentFromPr,
+    Worktrees,
+    NewTerminal,
+    Pull,
+    CheckoutDefaultBranch,
+    ChangeBaseBranch,
+    Info,
+    DefaultProvider,
+    AutoReopen,
+    StartupCommand,
+    Environment,
+    StartupLogs,
+    Delete,
+    Remove,
+    /// Never a row: `copy-path` run with no agent selected copies the path of
+    /// the project picked from the list.
+    CopyPath,
+}
+
+impl ProjectAction {
+    /// Every row of a real project's action list, in order. "New agent from
+    /// PR…" is dropped where GitHub is unavailable (see
+    /// [`App::project_action_rows`]).
+    pub(crate) const ROWS: [ProjectAction; 15] = [
+        ProjectAction::NewAgent,
+        ProjectAction::NewAgentFromPr,
+        ProjectAction::Worktrees,
+        ProjectAction::NewTerminal,
+        ProjectAction::Pull,
+        ProjectAction::CheckoutDefaultBranch,
+        ProjectAction::ChangeBaseBranch,
+        ProjectAction::Info,
+        ProjectAction::DefaultProvider,
+        ProjectAction::AutoReopen,
+        ProjectAction::StartupCommand,
+        ProjectAction::Environment,
+        ProjectAction::StartupLogs,
+        ProjectAction::Delete,
+        ProjectAction::Remove,
+    ];
+
+    /// The row's words. A trailing `…` marks a row that opens a dialog or asks
+    /// first, the browser menu's rule. The auto-reopen row is the one whose
+    /// words depend on the project, so its label comes from
+    /// [`App::project_action_rows`] instead.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ProjectAction::NewAgent => "New agent…",
+            ProjectAction::NewAgentFromPr => "New agent from PR…",
+            ProjectAction::Worktrees => "Worktrees…",
+            ProjectAction::NewTerminal => "New terminal at the project root",
+            ProjectAction::Pull => "Pull project",
+            ProjectAction::CheckoutDefaultBranch => "Check out default branch…",
+            ProjectAction::ChangeBaseBranch => "Change base branch…",
+            ProjectAction::Info => "Project info…",
+            ProjectAction::DefaultProvider => "Default provider…",
+            ProjectAction::AutoReopen => "Auto-reopen agents",
+            ProjectAction::StartupCommand => "Startup command…",
+            ProjectAction::Environment => "Environment…",
+            ProjectAction::StartupLogs => "Startup command logs for all agents…",
+            ProjectAction::Delete => "Delete project…",
+            ProjectAction::Remove => "Remove project…",
+            ProjectAction::CopyPath => "Copy project path",
+        }
+    }
+
+    /// The title of the project list when this action was started from the
+    /// palette with no agent selected, so the list says what a pick will do.
+    pub(crate) fn chooser_title(self) -> &'static str {
+        match self {
+            ProjectAction::NewAgent => "New agent in project",
+            ProjectAction::NewAgentFromPr => "New agent from PR",
+            ProjectAction::Worktrees => "Manage worktrees in project",
+            ProjectAction::NewTerminal => "New terminal at the project root",
+            ProjectAction::Pull => "Pull project",
+            ProjectAction::CheckoutDefaultBranch => "Check out default branch",
+            ProjectAction::ChangeBaseBranch => "Change base branch",
+            ProjectAction::Info => "Project info",
+            ProjectAction::DefaultProvider => "Change project default provider",
+            ProjectAction::AutoReopen => "Toggle auto-reopen agents",
+            ProjectAction::StartupCommand => "Configure startup command",
+            ProjectAction::Environment => "Configure project environment",
+            ProjectAction::StartupLogs => "Read startup command logs",
+            ProjectAction::Delete => "Delete project",
+            ProjectAction::Remove => "Remove project",
+            ProjectAction::CopyPath => "Copy project path",
+        }
+    }
+
+    /// Whether the action is shown unavailable while the project's folder is
+    /// missing. Exactly where the browser's menu disables a row: there is no
+    /// root to open a shell at, and no folder to list or switch branches in.
+    /// The other rows stay available and answer for themselves when run.
+    pub(crate) fn needs_folder(self) -> bool {
+        match self {
+            ProjectAction::NewTerminal | ProjectAction::ChangeBaseBranch => true,
+            ProjectAction::NewAgent
+            | ProjectAction::NewAgentFromPr
+            | ProjectAction::Worktrees
+            | ProjectAction::Pull
+            | ProjectAction::CheckoutDefaultBranch
+            | ProjectAction::Info
+            | ProjectAction::DefaultProvider
+            | ProjectAction::AutoReopen
+            | ProjectAction::StartupCommand
+            | ProjectAction::Environment
+            | ProjectAction::StartupLogs
+            | ProjectAction::Delete
+            | ProjectAction::Remove
+            | ProjectAction::CopyPath => false,
+        }
+    }
+}
+
+/// What a project's action list is about: a project, or an orphaned group
+/// (agents whose project record is gone), which offers only Remove project….
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectActionsTarget {
+    Project { id: String },
+    Orphaned { project_id: String, name: String },
+}
+
+/// One row of a project's action list, as painted: the action, its words, and
+/// why it cannot run right now, when it cannot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectActionRow {
+    pub(crate) action: ProjectAction,
+    pub(crate) label: String,
+    pub(crate) unavailable: Option<String>,
+}
+
+/// `manage-projects`' second step: one project's actions. The rows are derived
+/// from the live project on every paint and key (see
+/// [`App::project_action_rows`]), so only the target and the cursor are kept.
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectActionsPrompt {
+    pub(crate) target: ProjectActionsTarget,
+    /// Index into the rows [`App::project_action_rows`] returns.
+    pub(crate) selected: usize,
+    /// The project list this was opened from, as the user left it, so Escape
+    /// steps back to it. `None` when nothing is behind it.
+    pub(crate) return_to: Option<SearchableList>,
+}
+
+/// The read-only Project info screen: the facts the browser's Project info
+/// dialog shows, built once on open, and the action list to go back to.
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectInfoPrompt {
+    pub(crate) project_name: String,
+    /// (label, value) pairs. A value that is a name renders as a chip.
+    pub(crate) rows: Vec<ProjectInfoRow>,
+    pub(crate) return_to: Option<Box<ProjectActionsPrompt>>,
+}
+
+/// One fact on the Project info screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectInfoRow {
+    pub(crate) label: &'static str,
+    pub(crate) value: String,
+    /// The value is a name (a path, a branch, a command, a provider) and
+    /// renders as the name chip; otherwise it is plain words.
+    pub(crate) is_name: bool,
+}
+
+/// The Change base branch picker: every branch the project folder can be
+/// switched to, loaded in a worker after one bounded fetch of origin.
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeBaseBranchPrompt {
+    pub(crate) project_id: String,
+    pub(crate) project_name: String,
+    /// The base recorded when the picker opened; `None` when there is none yet.
+    pub(crate) current_base: Option<String>,
+    /// The listing worker has not answered yet.
+    pub(crate) loading: bool,
+    pub(crate) branches: Vec<dux_core::git::BranchChoice>,
+    /// Why origin's branches are shown as last fetched, when they are.
+    pub(crate) fetch_note: Option<String>,
+    /// Why there is no listing at all, when the listing itself failed.
+    pub(crate) error: Option<String>,
+    /// `/`-search over branch names; `selected` indexes the visible rows.
+    pub(crate) list: SearchableList,
+    pub(crate) return_to: Option<Box<ProjectActionsPrompt>>,
+}
+
+/// "Change base branch?" over the picker it was raised from, which a cancel
+/// steps back to (the kill-running idiom).
+#[derive(Clone, Debug)]
+pub(crate) struct ConfirmChangeBaseBranchPrompt {
+    pub(crate) previous: ChangeBaseBranchPrompt,
+    pub(crate) branch: String,
+    pub(crate) focus: ConfirmFocus,
+}
+
+/// The branch listing worker's answer, tagged with the project it is about so
+/// an answer for a picker the user already closed is dropped.
+pub(crate) struct BranchListingAnswer {
+    pub(crate) project_id: String,
+    pub(crate) result: Result<dux_core::base_branch::BranchListing, String>,
+}
+
+/// How the branch listing's keyed busy ends, decided when the answer lands.
+#[derive(Clone, Debug)]
+pub(crate) enum BranchListingOutcome {
+    /// The picker shows the branches; the list on screen is the confirmation.
+    Loaded,
+    Failed(String),
+    /// The picker was closed before the answer arrived.
+    Dismissed,
+}
+
+/// The in-flight branch listing: the one-shot channel its worker answers on and
+/// the keyed status op whose busy spins until then.
+pub(crate) struct PendingBranchListing {
+    pub(crate) rx: mpsc::Receiver<BranchListingAnswer>,
+    pub(crate) op: dux_core::engine::HandlerStatusOp<BranchListingOutcome>,
 }
 
 /// Leave a search row, discarding whatever was typed into it.
@@ -2245,6 +2493,15 @@ pub(crate) enum PromptState {
         /// list. `/`-search over project name + path (parity with the web).
         list: SearchableList,
     },
+    /// `manage-projects`' second step: one project's (or orphaned group's)
+    /// actions, a Picker. See [`ProjectActionsPrompt`].
+    ProjectActions(ProjectActionsPrompt),
+    /// The read-only Project info screen, a Report.
+    ProjectInfo(ProjectInfoPrompt),
+    /// The Change base branch picker. Boxed: it carries the branch listing.
+    ChangeBaseBranch(Box<ChangeBaseBranchPrompt>),
+    /// The Change base branch confirmation, over the picker it came from.
+    ConfirmChangeBaseBranch(Box<ConfirmChangeBaseBranchPrompt>),
     PickProjectWorktree(PickProjectWorktreePrompt),
     /// The worktree manager: the manual override for removing a worktree, and
     /// the branch with it. See [`super::worktree_manager`].
@@ -2365,6 +2622,9 @@ pub(crate) enum PromptState {
         project_name: String,
         stored_base: Option<String>,
         focus: ConfirmFocus, // Cancel (default) or Check out
+        /// The project action list this was opened from; a cancel steps back
+        /// to it.
+        return_to: Option<Box<ProjectActionsPrompt>>,
     },
     /// Asked before `delete-project` runs anything, the same question the
     /// browser's Delete project dialog asks: the cascade deletes every agent in
@@ -2381,6 +2641,9 @@ pub(crate) enum PromptState {
         /// The count the dialog last painted.
         agent_count: usize,
         focus: ConfirmFocus, // Cancel (default) or Delete
+        /// The project action list this was opened from; a cancel steps back
+        /// to it.
+        return_to: Option<Box<ProjectActionsPrompt>>,
     },
     /// Asked before `remove-project` runs anything, the same question the
     /// browser's Remove project dialog asks: the project leaves dux and every
@@ -2394,6 +2657,9 @@ pub(crate) enum PromptState {
         /// records through the core cascade instead of removing a project.
         orphaned: bool,
         focus: ConfirmFocus, // Cancel (default) or Remove
+        /// The project action list this was opened from; a cancel steps back
+        /// to it.
+        return_to: Option<Box<ProjectActionsPrompt>>,
     },
     ConfirmQuit {
         agent_count: usize,
@@ -3266,6 +3532,24 @@ pub(crate) enum OverlayMouseLayout {
         cancel_button: Rect,
         confirm_button: Rect,
     },
+    ConfirmChangeBaseBranch {
+        cancel_button: Rect,
+        confirm_button: Rect,
+    },
+    ProjectActions {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    ChangeBaseBranch {
+        input: Option<Rect>,
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    ProjectInfo {
+        close_button: Rect,
+    },
     ConfirmRemoveProject {
         cancel_button: Rect,
         confirm_button: Rect,
@@ -3616,6 +3900,7 @@ mod first_load;
 mod input;
 pub(crate) mod modal;
 mod overlay_dismiss;
+mod project_actions;
 mod pty_ownership;
 mod redraw;
 pub(crate) use redraw::RedrawGate;
@@ -4012,7 +4297,7 @@ impl App {
             pending_changed_files_refresh: None,
             pending_server_flip_op: None,
             pending_config_reload_op: None,
-            project_chooser_context: None,
+            pending_branch_listing: None,
             agent_filter: None,
             #[cfg(test)]
             test_scratch_dirs: dux_core::test_scratch::ScratchDirs::new(),
@@ -5040,6 +5325,7 @@ impl App {
             "read-startup-command-logs" => self.open_startup_command_logs(),
             "pull-project" => self.refresh_selected_project(),
             "checkout-project-default-branch" => self.checkout_selected_project_default_branch(),
+            "change-project-base-branch" => self.change_selected_project_base_branch(),
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),
             "delete-agent" => self.confirm_delete_selected_session(),
@@ -5819,15 +6105,6 @@ impl App {
     /// Inactive toggle) or the agent's project record is gone (orphan). Reaching an
     /// agent-less project's actions goes through the project chooser, not selection.
     pub(crate) fn selected_project(&self) -> Option<&Project> {
-        // A `manage-projects` pick wins while it points at a project that still
-        // exists; this is how project-scoped palette commands reach an
-        // agent-less project. A stale id (the project was removed) falls through
-        // to the selected agent's project.
-        if let Some(id) = &self.project_chooser_context
-            && let Some(project) = self.engine.projects.iter().find(|p| &p.id == id)
-        {
-            return Some(project);
-        }
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(index)) => {
                 self.engine.sessions.get(*index).and_then(|session| {
@@ -5847,21 +6124,6 @@ impl App {
             Some(LeftItem::Session(index)) => self.engine.sessions.get(*index),
             _ => None,
         }
-    }
-
-    /// Resolve the target project for a project-scoped ACTION and consume the
-    /// one-and-done `manage-projects` target. This clones the project that
-    /// `selected_project()` resolves (chooser context first, else the selected
-    /// agent's project) and then clears `project_chooser_context` so the picked
-    /// target applies to exactly ONE action: a second project action falls
-    /// back to the selected agent's project. Do NOT use this in display paths;
-    /// use `selected_project()` there so rendering never clears the target.
-    pub(crate) fn take_selected_project(&mut self) -> Option<Project> {
-        let project = self.selected_project().cloned();
-        if project.is_some() {
-            self.project_chooser_context = None;
-        }
-        project
     }
 
     /// Point the changed-files panel at the selected agent and ask for a read.
@@ -7745,6 +8007,8 @@ mod tests {
             path: path.to_string(),
             agent_count: 0,
             path_missing: false,
+            base_branch: None,
+            orphaned: false,
         };
         let entries = vec![
             entry("a", "alpha", "/home/me/alpha"),

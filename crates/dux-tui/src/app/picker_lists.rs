@@ -123,6 +123,17 @@ fn published_list(layout: OverlayMouseLayout) -> (Rect, usize, usize) {
             offset,
             ..
         }
+        | OverlayMouseLayout::ProjectActions {
+            list,
+            items,
+            offset,
+        }
+        | OverlayMouseLayout::ChangeBaseBranch {
+            list,
+            items,
+            offset,
+            ..
+        }
         | OverlayMouseLayout::ChangeTheme {
             list,
             items,
@@ -337,6 +348,8 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
                         path: format!("/code/{label}"),
                         agent_count: 0,
                         path_missing: false,
+                        base_branch: None,
+                        orphaned: false,
                     })
                     .collect(),
                 list: SearchableList::new(),
@@ -346,6 +359,54 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
                 last_label: last(&labels),
                 empty: pick(&[]),
                 empty_text: "No projects",
+                row_height: 1,
+            }
+        }
+        "ProjectActions" => {
+            // A project's action list has a fixed set of rows, which is already
+            // more than an 80x24 screen shows under its header.
+            let actions = |id: &str| {
+                PromptState::ProjectActions(ProjectActionsPrompt {
+                    target: ProjectActionsTarget::Project { id: id.to_string() },
+                    selected: 0,
+                    return_to: None,
+                })
+            };
+            PickerFixture {
+                tall: actions(&project.id),
+                last_label: Some("Remove project…".to_string()),
+                empty: actions("no-such-project"),
+                empty_text: "No actions",
+                row_height: 1,
+            }
+        }
+        "ChangeBaseBranch" => {
+            let labels = names("branch-");
+            let change = |labels: &[String]| {
+                PromptState::ChangeBaseBranch(Box::new(ChangeBaseBranchPrompt {
+                    project_id: project.id.clone(),
+                    project_name: project.name.clone(),
+                    current_base: Some("main".to_string()),
+                    loading: false,
+                    branches: labels
+                        .iter()
+                        .map(|name| dux_core::git::BranchChoice {
+                            name: name.clone(),
+                            location: dux_core::git::BranchLocation::Local,
+                            held_by: None,
+                        })
+                        .collect(),
+                    fetch_note: None,
+                    error: None,
+                    list: SearchableList::new(),
+                    return_to: None,
+                }))
+            };
+            PickerFixture {
+                tall: change(&labels),
+                last_label: last(&labels),
+                empty: change(&[]),
+                empty_text: "No branches to switch to.",
                 row_height: 1,
             }
         }
