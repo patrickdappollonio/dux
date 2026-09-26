@@ -1126,6 +1126,221 @@ pub fn origin_has_branch(repo_path: &Path, name: &str) -> Result<bool> {
     }
 }
 
+/// One branch a project's base could move to, as [`list_branches`] reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchChoice {
+    /// The short branch name (`develop`, `feature/x`), the same for a local
+    /// branch and for one that exists only on origin.
+    pub name: String,
+    /// `Local` when `refs/heads/<name>` exists; `Remote` when only
+    /// `refs/remotes/origin/<name>` does, so choosing it first creates the
+    /// local branch ([`create_tracking_branch`]).
+    pub location: BranchLocation,
+    /// The folder of ANOTHER worktree that has this branch checked out, which
+    /// makes git refuse to check it out in the project folder too. `None` for a
+    /// free branch and for the branch the project folder itself is on.
+    pub held_by: Option<PathBuf>,
+}
+
+/// Every branch the folder at `repo_path` could be switched to: each local
+/// branch, then each branch that exists only on `origin`, in refname order. A
+/// branch present on both sides is listed once, as its local entry.
+/// `origin/HEAD` (a pointer, not a branch) and any name
+/// `git check-ref-format --branch` refuses are left out.
+///
+/// Reads `for-each-ref` (plumbing) with NUL-separated fields, so a worktree
+/// path with any byte in it cannot break the parse. It shells out, so callers
+/// run it in a background worker.
+pub fn list_branches(repo_path: &Path) -> Result<Vec<BranchChoice>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "for-each-ref",
+            "--format=%(refname)%00%(worktreepath)%00",
+            "--",
+            "refs/heads",
+            "refs/remotes/origin",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to list branches for {}", repo_path.display()))?;
+    if !output.status.success() {
+        return Err(git_failure("git for-each-ref", repo_path, &output));
+    }
+    let mut locals: Vec<BranchChoice> = Vec::new();
+    let mut remotes: Vec<BranchChoice> = Vec::new();
+    for (refname, worktree) in parse_ref_worktree_records(&output.stdout) {
+        if let Some(name) = refname.strip_prefix("refs/heads/") {
+            let held_by = (!worktree.is_empty())
+                .then(|| PathBuf::from(&worktree))
+                .filter(|holder| !same_folder(holder, repo_path));
+            locals.push(BranchChoice {
+                name: name.to_string(),
+                location: BranchLocation::Local,
+                held_by,
+            });
+        } else if let Some(name) = refname.strip_prefix("refs/remotes/origin/")
+            && name != "HEAD"
+        {
+            remotes.push(BranchChoice {
+                name: name.to_string(),
+                location: BranchLocation::Remote,
+                held_by: None,
+            });
+        }
+    }
+    let local_names: HashSet<String> = locals.iter().map(|c| c.name.clone()).collect();
+    remotes.retain(|remote| !local_names.contains(&remote.name));
+    let mut choices = locals;
+    choices.extend(remotes);
+    choices.retain(|choice| is_valid_branch_name(repo_path, &choice.name));
+    Ok(choices)
+}
+
+/// Split `for-each-ref --format=%(refname)%00%(worktreepath)%00` output into
+/// `(refname, worktreepath)` pairs. Each record ends in `NUL` plus the newline
+/// `for-each-ref` appends, so the newline leads the NEXT refname and is
+/// stripped there (a refname cannot begin with one).
+fn parse_ref_worktree_records(bytes: &[u8]) -> Vec<(String, String)> {
+    let mut fields = bytes.split(|byte| *byte == 0);
+    let mut records = Vec::new();
+    while let (Some(refname), Some(worktree)) = (fields.next(), fields.next()) {
+        let refname = String::from_utf8_lossy(refname);
+        let refname = refname.trim_start_matches('\n');
+        if refname.is_empty() {
+            continue;
+        }
+        records.push((
+            refname.to_string(),
+            String::from_utf8_lossy(worktree).into_owned(),
+        ));
+    }
+    records
+}
+
+/// Whether git accepts `name` as a branch name (`check-ref-format --branch`).
+///
+/// Every name [`list_branches`] reads already passed git's refname rules
+/// (`for-each-ref` skips a ref with a broken name), so the only names the
+/// branch form can still refuse are the ones its extra rules are about: a
+/// leading dash, the name `HEAD`, and the `@` shorthands. Only those are put
+/// to git, which keeps a repository with thousands of branches from paying one
+/// process per branch; git stays the one that decides. `check-ref-format`
+/// takes no `--`, but a dash-leading argument after `--branch` is read as the
+/// name and refused (measured on git 2.53 with `--normalize`).
+fn is_valid_branch_name(repo_path: &Path, name: &str) -> bool {
+    if !(name.starts_with('-') || name == "HEAD" || name.contains('@')) {
+        return true;
+    }
+    Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "check-ref-format",
+            "--branch",
+            name,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Run one `git fetch origin` in `repo_path`, stopped at `timeout`.
+///
+/// The fetch runs in a process group of its own and the whole group is killed
+/// at the bound, so a transport helper (`ssh`, a credential helper, a stand-in
+/// `upload-pack`) cannot outlive it. It never prompts for credentials. A
+/// failure or a timeout is an `Err` naming what happened; callers report it
+/// and carry on from the refs they already have.
+pub fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> Result<()> {
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+
+    let mut child = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "fetch",
+            "--quiet",
+            "origin",
+        ])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("failed to run git fetch in {}", repo_path.display()))?;
+    // Drained on its own thread so a chatty stderr cannot fill the pipe and
+    // stall the fetch into a false timeout.
+    let mut stderr_pipe = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_string(&mut text);
+        }
+        text
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(anyhow!(
+                "git fetch origin timed out after {}s and was stopped",
+                timeout.as_secs_f32()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stderr = reader.join().unwrap_or_default();
+    if !status.success() {
+        return Err(anyhow!(
+            "git fetch origin failed in {}: {}",
+            repo_path.display(),
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Create local branch `name` tracking `origin/<name>`, without switching to it.
+///
+/// Explicit rather than left to `git switch`'s guessing, which depends on the
+/// user's `checkout.guess` and on how many remotes carry the name (measured on
+/// git 2.53). The start point is fully qualified and the name follows `--`, so
+/// a dash-leading name is refused as a branch name, never obeyed as a flag.
+pub fn create_tracking_branch(repo_path: &Path, name: &str) -> Result<()> {
+    let start = format!("refs/remotes/origin/{name}");
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "branch",
+            "--track",
+            "--",
+            name,
+            &start,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to run git branch in {}", repo_path.display()))?;
+    if !output.status.success() {
+        return Err(git_failure("git branch --track", repo_path, &output));
+    }
+    Ok(())
+}
+
 /// How much of a branch exists only on this machine, and whether there was
 /// anywhere for it to have been pushed to in the first place.
 ///
@@ -6678,6 +6893,188 @@ mod tests {
             current_branch(repo.path()).unwrap(),
             "main",
             "HEAD must not have been detached"
+        );
+    }
+
+    /// A clone of a non-bare `origin` on `main`, both of them scratch
+    /// repositories on this machine, so nothing here reaches a network.
+    fn clone_of_local_origin() -> (tempfile::TempDir, tempfile::TempDir) {
+        let origin = init_test_repo();
+        let repo = tempfile::tempdir().unwrap();
+        run_git(
+            origin.path(),
+            &[
+                "clone",
+                "-q",
+                origin.path().to_string_lossy().as_ref(),
+                repo.path().to_string_lossy().as_ref(),
+            ],
+        );
+        run_git(repo.path(), &["config", "user.name", "t"]);
+        run_git(repo.path(), &["config", "user.email", "t@t"]);
+        (origin, repo)
+    }
+
+    fn choice_names(choices: &[BranchChoice]) -> Vec<&str> {
+        choices.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    /// Every local branch, every branch only origin has, and nothing twice: a
+    /// branch on both sides is the local one. `origin/HEAD` is a pointer, not
+    /// a branch. A branch another worktree has checked out names that
+    /// worktree, because git will not check it out a second time, while the
+    /// branch the project's own folder is on is simply the current one.
+    #[test]
+    fn list_branches_lists_local_and_origin_only_branches_and_names_their_holders() {
+        let (origin, repo) = clone_of_local_origin();
+        run_git(origin.path(), &["branch", "develop"]);
+        run_git(repo.path(), &["fetch", "-q", "origin"]);
+        run_git(repo.path(), &["branch", "feature"]);
+        let held = add_worktree(repo.path(), "agent");
+
+        let choices = list_branches(repo.path()).unwrap();
+
+        assert_eq!(
+            choice_names(&choices),
+            ["agent", "feature", "main", "develop"]
+        );
+        let by_name = |name: &str| choices.iter().find(|c| c.name == name).unwrap();
+        assert_eq!(by_name("main").location, BranchLocation::Local);
+        assert_eq!(
+            by_name("main").held_by,
+            None,
+            "the project folder's own branch is the current one, not a held one"
+        );
+        assert_eq!(by_name("feature").held_by, None);
+        assert_eq!(by_name("develop").location, BranchLocation::Remote);
+        assert_eq!(
+            by_name("agent")
+                .held_by
+                .as_deref()
+                .map(|p| p.canonicalize().unwrap()),
+            Some(held.canonicalize().unwrap())
+        );
+    }
+
+    /// A name `git check-ref-format --branch` refuses is left out rather than
+    /// offered: a dash-leading one (which plumbing can create) would be read as
+    /// an option by the very switch it is offered for. A non-leading dash is a
+    /// real branch name and stays.
+    #[test]
+    fn list_branches_drops_names_git_refuses_as_branch_names() {
+        let (origin, repo) = clone_of_local_origin();
+        run_git(origin.path(), &["update-ref", "refs/heads/-x", "HEAD"]);
+        run_git(
+            origin.path(),
+            &["update-ref", "refs/heads/foo/-bar", "HEAD"],
+        );
+        run_git(repo.path(), &["fetch", "-q", "origin"]);
+        run_git(repo.path(), &["update-ref", "refs/heads/--force", "HEAD"]);
+        run_git(repo.path(), &["update-ref", "refs/heads/HEAD", "HEAD"]);
+
+        let choices = list_branches(repo.path()).unwrap();
+
+        assert_eq!(choice_names(&choices), ["main", "foo/-bar"]);
+    }
+
+    /// The local branch is created with an explicit tracking command, so it
+    /// does not depend on `checkout.guess`, which a user may have turned off.
+    #[test]
+    fn create_tracking_branch_tracks_origin_even_with_checkout_guess_off() {
+        let (origin, repo) = clone_of_local_origin();
+        run_git(origin.path(), &["branch", "develop"]);
+        run_git(repo.path(), &["fetch", "-q", "origin"]);
+        run_git(repo.path(), &["config", "checkout.guess", "false"]);
+
+        create_tracking_branch(repo.path(), "develop").unwrap();
+
+        assert!(local_branch_exists(repo.path(), "develop"));
+        let upstream = run_git_capture(
+            repo.path(),
+            &["rev-parse", "--abbrev-ref", "develop@{upstream}"],
+            "read the upstream",
+        )
+        .unwrap();
+        assert_eq!(upstream, "origin/develop");
+        assert_eq!(
+            current_branch(repo.path()).unwrap(),
+            "main",
+            "creating the branch does not switch to it"
+        );
+    }
+
+    /// Behind `--`, a dash-leading name is a branch name git refuses, never a
+    /// flag it obeys, and a non-leading dash is an ordinary branch.
+    #[test]
+    fn create_tracking_branch_reads_an_option_looking_name_as_a_branch() {
+        let (origin, repo) = clone_of_local_origin();
+        run_git(origin.path(), &["update-ref", "refs/heads/--force", "HEAD"]);
+        run_git(
+            origin.path(),
+            &["update-ref", "refs/heads/foo/-bar", "HEAD"],
+        );
+        run_git(repo.path(), &["fetch", "-q", "origin"]);
+
+        let refused = create_tracking_branch(repo.path(), "--force");
+        assert!(refused.is_err(), "expected a refusal: {refused:?}");
+        assert!(!local_branch_exists(repo.path(), "--force"));
+
+        create_tracking_branch(repo.path(), "foo/-bar").unwrap();
+        assert!(local_branch_exists(repo.path(), "foo/-bar"));
+    }
+
+    /// The fetch brings in what origin has now, option-looking names included,
+    /// each read as the ref it is.
+    #[test]
+    fn fetch_origin_bounded_fetches_origin_and_reads_option_looking_refs_literally() {
+        let (origin, repo) = clone_of_local_origin();
+        run_git(origin.path(), &["branch", "develop"]);
+        run_git(origin.path(), &["update-ref", "refs/heads/--prune", "HEAD"]);
+
+        fetch_origin_bounded(repo.path(), std::time::Duration::from_secs(30)).unwrap();
+
+        assert!(ref_exists(repo.path(), "refs/remotes/origin/develop"));
+        assert!(ref_exists(repo.path(), "refs/remotes/origin/--prune"));
+    }
+
+    /// An origin that cannot be reached is a reported failure, not a hang.
+    #[test]
+    fn fetch_origin_bounded_reports_an_unreachable_origin() {
+        let repo = init_test_repo();
+        let gone = repo.path().join("no-such-origin.git");
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", gone.to_string_lossy().as_ref()],
+        );
+
+        let error = fetch_origin_bounded(repo.path(), std::time::Duration::from_secs(30))
+            .expect_err("a missing origin cannot be fetched");
+        assert!(error.to_string().contains("git fetch origin"), "{error}");
+    }
+
+    /// A fetch that does not answer is stopped at the bound, its whole process
+    /// group with it. The stand-in `upload-pack` sleeps before serving, the way
+    /// a wedged remote does, and it is a local command, so no network is used.
+    #[test]
+    fn fetch_origin_bounded_stops_a_fetch_that_outlives_its_bound() {
+        let (_origin, repo) = clone_of_local_origin();
+        run_git(
+            repo.path(),
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                "sleep 20; git upload-pack",
+            ],
+        );
+
+        let started = std::time::Instant::now();
+        let error = fetch_origin_bounded(repo.path(), std::time::Duration::from_millis(300))
+            .expect_err("the fetch outlives its bound");
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the bound must stop the fetch, took {:?}",
+            started.elapsed()
         );
     }
 
