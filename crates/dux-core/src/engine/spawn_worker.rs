@@ -167,6 +167,7 @@ impl Engine {
         self.retire_status_key(key);
         self.pending_create_ops.remove(key);
         self.pending_web_checkout_ops.remove(key);
+        self.pending_change_base_ops.remove(key);
         self.pending_web_add_project_ops.remove(key);
         self.pending_web_pr_lookup_ops.remove(key);
         self.pending_pr_attach_ops.remove(key);

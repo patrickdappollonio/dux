@@ -117,6 +117,7 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
         agent_viewed: HashMap::new(),
         last_foreground_refresh: None,
         pending_web_checkout_ops: HashMap::new(),
+        pending_change_base_ops: HashMap::new(),
         pending_web_add_project_ops: HashMap::new(),
         pending_web_pr_lookup_ops: HashMap::new(),
         pending_pr_attach_ops: HashMap::new(),

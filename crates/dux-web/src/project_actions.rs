@@ -50,6 +50,10 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/projects/{id}/checkout-default",
             post(checkout_default),
         )
+        .route(
+            "/api/v1/projects/{id}/base-branch",
+            post(change_base_branch),
+        )
 }
 
 // ── Add ──────────────────────────────────────────────────────────────────────
@@ -402,6 +406,56 @@ async fn checkout_default(
         .engine
         .apply_wire_scoped(
             WireCommand::CheckoutProjectDefaultBranch { project_id: id },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// Upper bound on a posted branch name before it reaches the engine. The real
+/// limit is the filesystem's; this only keeps an absurd body out of a toast.
+const MAX_BRANCH_LEN: usize = 1024;
+
+/// `POST /api/v1/projects/{id}/base-branch` body: the branch to switch the
+/// project folder to and make its base, as `GET .../branches` named it.
+#[derive(Deserialize)]
+struct ChangeBaseBranchBody {
+    branch: String,
+}
+
+/// "Change base branch": dispatches [`WireCommand::ChangeProjectBaseBranch`].
+///
+/// Answers `200` once the engine has taken the request (its busy, or a
+/// warning that another folder-switching operation is running, rides the
+/// status stream like every other project action), `400` with the engine's
+/// sentence for what it refuses outright (a folder it already knows is
+/// missing, an empty branch), and `404` for an unknown project. The switch's
+/// outcome is the op's final on the status stream.
+async fn change_base_branch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ChangeBaseBranchBody>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_project();
+    }
+    if body.branch.chars().count() > MAX_BRANCH_LEN {
+        return (StatusCode::BAD_REQUEST, "branch name is too long").into_response();
+    }
+    if !project_exists(&state, &id).await {
+        return unknown_project();
+    }
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::ChangeProjectBaseBranch {
+                project_id: id,
+                branch: body.branch,
+            },
             scope_from_headers(&headers, &state.connections),
         )
         .await

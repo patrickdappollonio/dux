@@ -515,6 +515,22 @@ pub enum WireCommand {
     CheckoutProjectDefaultBranch {
         project_id: String,
     },
+    /// Switch a project's SOURCE checkout to `branch` and make it the base new
+    /// worktrees branch from: "Change base branch", generalising
+    /// [`WireCommand::CheckoutProjectDefaultBranch`] to a branch the user
+    /// picked from `GET /api/v1/projects/{id}/branches`. A branch only origin
+    /// has is created locally, tracking it, before the switch.
+    ///
+    /// Runs through [`Engine::change_project_base_branch`], the one entry
+    /// point both surfaces use. The synchronous status is the op's busy (or an
+    /// ordinary warning when another folder-switching operation holds the
+    /// folder); the outcome is the same op's final. Whether `branch` is still
+    /// listed, a valid branch name, and not checked out in another worktree is
+    /// checked in the worker, never here.
+    ChangeProjectBaseBranch {
+        project_id: String,
+        branch: String,
+    },
     /// Adopt an orphaned managed worktree (created by dux, no live session) as a
     /// new agent, mirroring the TUI's `new-agent-from-worktree`. `worktree_path`
     /// is the canonical path the listing returned; `name` is a DISPLAY name,
@@ -1657,6 +1673,12 @@ impl Engine {
                 let status = self.checkout_project_default_branch(&project_id)?;
                 Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
                     status,
+                )))
+            }
+            WireCommand::ChangeProjectBaseBranch { project_id, branch } => {
+                let update = self.change_project_base_branch(&project_id, &branch)?;
+                Ok(WireDispatch::Handled(WireCommandOutcome::with_status(
+                    WireStatus::from_update(&update),
                 )))
             }
             WireCommand::AddProjectCheckoutDefault { path, name } => {
@@ -4845,6 +4867,7 @@ impl Engine {
             | WireCommand::ReconnectSession { .. }
             | WireCommand::RerunStartupCommand { .. }
             | WireCommand::CheckoutProjectDefaultBranch { .. }
+            | WireCommand::ChangeProjectBaseBranch { .. }
             | WireCommand::AddProjectCheckoutDefault { .. }
             | WireCommand::AddProjectCreateInitialCommit { .. }
             | WireCommand::AddProjectInitRepo { .. }
@@ -6065,6 +6088,10 @@ mod tests {
             },
             WireCommand::CheckoutProjectDefaultBranch {
                 project_id: "p1".to_string(),
+            },
+            WireCommand::ChangeProjectBaseBranch {
+                project_id: "p1".to_string(),
+                branch: "develop".to_string(),
             },
         ] {
             let refused = engine
@@ -8131,20 +8158,350 @@ mod tests {
         );
 
         // The checkout holds the project folder: a pull of the same project,
-        // which would switch the folder back to its base, is refused and told
-        // which operation it is waiting for.
-        let pull = engine
-            .apply_wire(WireCommand::PullProject {
+        // which would switch the folder back to its base, and a change of its
+        // base are refused and told which operation they are waiting for.
+        for command in [
+            WireCommand::PullProject {
                 project_id: "p1".into(),
-            })
-            .expect("a refusal is a status, not an error");
-        let refusal = pull.status.expect("the refusal");
-        assert_eq!(refusal.tone, "warning");
+            },
+            WireCommand::ChangeProjectBaseBranch {
+                project_id: "p1".into(),
+                branch: "develop".into(),
+            },
+        ] {
+            let refused = engine
+                .apply_wire(command.clone())
+                .expect("a refusal is a status, not an error");
+            let refusal = refused.status.expect("the refusal");
+            assert_eq!(refusal.tone, "warning", "{command:?}");
+            assert_eq!(
+                refusal.message,
+                "dux is already checking out the default branch for project \"p1-name\". Wait \
+                 for it to finish; its result will say where the project's worktrees branch from.",
+                "{command:?}"
+            );
+        }
+        assert!(engine.pending_change_base_ops.is_empty());
+    }
+
+    // ── Change base branch ───────────────────────────────────────────────
+
+    #[test]
+    fn wire_change_project_base_branch_deserializes() {
+        let json = r#"{"command":"change_project_base_branch","args":{"project_id":"p1","branch":"develop"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
         assert_eq!(
-            refusal.message,
-            "dux is already checking out the default branch for project \"p1-name\". Wait for \
-             it to finish; its result will say where the project's worktrees branch from."
+            cmd,
+            WireCommand::ChangeProjectBaseBranch {
+                project_id: "p1".to_string(),
+                branch: "develop".to_string(),
+            }
         );
+    }
+
+    /// A project on `feature` in a repository whose other branch is `trunk`,
+    /// stored in SQLite (unless `stored` is false) the way an add leaves it.
+    fn change_base_fixture(
+        stored: bool,
+    ) -> (tempfile::TempDir, Engine, crate::test_scratch::ScratchDir) {
+        let repo = init_repo_on_feature_branch("trunk");
+        let (mut engine, tmp) = test_engine();
+        let mut project = sample_project("p1", repo.path().to_string_lossy().as_ref());
+        project.leading_branch = Some("feature".to_string());
+        project.current_branch = "feature".to_string();
+        project.branch_status = ProjectBranchStatus::Leading;
+        if stored {
+            engine
+                .session_store
+                .upsert_project(&crate::config::ProjectConfig {
+                    id: project.id.clone(),
+                    path: project.path.clone(),
+                    name: Some(project.name.clone()),
+                    default_provider: None,
+                    leading_branch: Some("feature".to_string()),
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: Default::default(),
+                })
+                .expect("seed the project row");
+        }
+        engine.projects.push(project);
+        (repo, engine, tmp)
+    }
+
+    /// Wait for the change worker and hand its answer to the engine, the way
+    /// either surface's drain does; returns the statuses it produced.
+    fn drive_change_base(engine: &mut Engine) -> Vec<WireStatus> {
+        loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the change worker answers");
+            let done = matches!(event, WorkerEvent::ProjectBaseBranchChanged { .. });
+            let reaction = engine.process_worker_event(event);
+            if done {
+                return wire_statuses_from_reaction(&reaction);
+            }
+        }
+    }
+
+    fn change_base(engine: &mut Engine, branch: &str) -> WireStatus {
+        engine
+            .apply_wire(WireCommand::ChangeProjectBaseBranch {
+                project_id: "p1".to_string(),
+                branch: branch.to_string(),
+            })
+            .expect("the change is taken")
+            .status
+            .expect("a synchronous status")
+    }
+
+    /// The change answers with a keyed busy, holds the project folder against
+    /// the other two operations that switch it (each refused with a sentence
+    /// naming the change), and its final replaces the busy, saves the base and
+    /// releases the folder.
+    #[test]
+    fn change_base_branch_busy_is_keyed_and_holds_the_folder_until_it_finishes() {
+        let (repo, mut engine, _tmp) = change_base_fixture(true);
+
+        let busy = change_base(&mut engine, "trunk");
+        assert_eq!(busy.tone, "busy");
+        assert_eq!(
+            busy.message,
+            "Changing the base branch of project \"p1-name\" to \"trunk\"..."
+        );
+        let key = busy.key.clone().expect("the busy is keyed");
+        assert!(key.starts_with("op-"), "{key}");
+        assert!(engine.pending_change_base_ops.contains_key(&key));
+        let path = repo.path().to_string_lossy().into_owned();
+        assert_eq!(
+            engine.project_folder_action(&path),
+            Some(crate::engine::ProjectFolderAction::ChangeBaseBranch)
+        );
+
+        for command in [
+            WireCommand::PullProject {
+                project_id: "p1".to_string(),
+            },
+            WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".to_string(),
+            },
+            WireCommand::ChangeProjectBaseBranch {
+                project_id: "p1".to_string(),
+                branch: "trunk".to_string(),
+            },
+        ] {
+            let refusal = engine
+                .apply_wire(command.clone())
+                .expect("a refusal is a status")
+                .status
+                .expect("the refusal");
+            assert_eq!(refusal.tone, "warning", "{command:?}");
+            assert_eq!(
+                refusal.message,
+                "dux is already changing the base branch for project \"p1-name\". Wait for it \
+                 to finish; its result will say where the project's worktrees branch from.",
+                "{command:?}"
+            );
+        }
+
+        let statuses = drive_change_base(&mut engine);
+        let done = statuses.last().expect("the final");
+        assert_eq!(done.tone, "info");
+        assert_eq!(
+            done.key.as_deref(),
+            Some(key.as_str()),
+            "it replaces the busy"
+        );
+        assert_eq!(
+            done.message,
+            "Checked out \"trunk\" for project \"p1-name\". New worktrees branch from \"trunk\" now."
+        );
+        assert!(engine.pending_change_base_ops.is_empty());
+        assert_eq!(engine.project_folder_action(&path), None);
+        assert_eq!(current_git_branch(repo.path()), "trunk");
+        assert_eq!(
+            engine.projects[0].leading_branch.as_deref(),
+            Some("trunk"),
+            "the base moved in memory"
+        );
+        let stored = engine
+            .session_store
+            .load_projects()
+            .expect("load")
+            .into_iter()
+            .find(|p| p.id == "p1")
+            .and_then(|p| p.leading_branch);
+        assert_eq!(stored.as_deref(), Some("trunk"), "and in SQLite");
+    }
+
+    /// While a checkout or a pull holds the folder, a change is refused and
+    /// told which one it is waiting for, and nothing is registered for it.
+    #[test]
+    fn change_base_branch_is_refused_while_a_checkout_or_a_pull_holds_the_folder() {
+        for (running, phrase) in [
+            (
+                crate::engine::ProjectFolderAction::CheckoutDefaultBranch,
+                "checking out the default branch",
+            ),
+            (crate::engine::ProjectFolderAction::Pull, "pulling"),
+        ] {
+            let (repo, mut engine, _tmp) = change_base_fixture(true);
+            let path = repo.path().to_string_lossy().into_owned();
+            engine
+                .begin_project_folder_action(&path, "p1-name", running)
+                .expect("the folder is free");
+
+            let refusal = change_base(&mut engine, "trunk");
+
+            assert_eq!(refusal.tone, "warning");
+            assert_eq!(
+                refusal.message,
+                format!(
+                    "dux is already {phrase} for project \"p1-name\". Wait for it to finish; its \
+                     result will say where the project's worktrees branch from."
+                )
+            );
+            assert!(engine.pending_change_base_ops.is_empty());
+            assert_eq!(engine.project_folder_action(&path), Some(running));
+            assert_eq!(current_git_branch(repo.path()), "feature");
+        }
+    }
+
+    #[test]
+    fn apply_wire_change_project_base_branch_refuses_what_it_can_answer_without_git() {
+        let (mut engine, _tmp) = test_engine();
+        let mut missing = sample_project("gone", "/nonexistent/dux-project");
+        missing.path_missing = true;
+        engine.projects.push(missing);
+        engine
+            .projects
+            .push(sample_project("p1", "/nonexistent/dux-p1"));
+
+        let unknown = engine
+            .apply_wire(WireCommand::ChangeProjectBaseBranch {
+                project_id: "ghost".to_string(),
+                branch: "main".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(unknown.to_string().contains("unknown project"), "{unknown}");
+
+        let gone = engine
+            .apply_wire(WireCommand::ChangeProjectBaseBranch {
+                project_id: "gone".to_string(),
+                branch: "main".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(
+            gone.to_string(),
+            "Cannot change base branch: path not found for \"gone-name\""
+        );
+
+        let empty = engine
+            .apply_wire(WireCommand::ChangeProjectBaseBranch {
+                project_id: "p1".to_string(),
+                branch: "  ".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(
+            empty.to_string(),
+            "Choose a branch to change the base of project \"p1-name\" to."
+        );
+        assert!(engine.pending_change_base_ops.is_empty());
+        assert_eq!(engine.project_folder_action("/nonexistent/dux-p1"), None);
+    }
+
+    /// The worker checks the branch against the listing, so a name that is no
+    /// longer a branch (or never was one git accepts) is refused there, and
+    /// the folder and the base stay where they were.
+    #[test]
+    fn a_change_to_a_branch_that_is_not_listed_is_refused_and_keeps_the_base() {
+        for branch in ["nope", "--detach"] {
+            let (repo, mut engine, _tmp) = change_base_fixture(true);
+            change_base(&mut engine, branch);
+
+            let statuses = drive_change_base(&mut engine);
+
+            let refusal = statuses.last().expect("the final");
+            assert_eq!(refusal.tone, "error");
+            assert!(
+                !refusal.sticky,
+                "picking again from a fresh list is the fix"
+            );
+            assert_eq!(
+                refusal.message,
+                format!(
+                    "Can't change the base branch of project \"p1-name\" to \"{branch}\": no local \
+                     branch or branch on origin has that name any more. Open the branch list \
+                     again and pick from what is there now."
+                )
+            );
+            assert_eq!(current_git_branch(repo.path()), "feature");
+            assert_eq!(
+                engine.projects[0].leading_branch.as_deref(),
+                Some("feature")
+            );
+            assert_eq!(
+                engine.project_folder_action(&repo.path().to_string_lossy()),
+                None
+            );
+        }
+    }
+
+    /// A change whose new base SQLite will not save ends with the sticky save
+    /// error, advising this action rather than the default-branch checkout, and
+    /// the base stays what it was.
+    #[test]
+    fn a_change_whose_base_cannot_be_saved_resolves_with_the_sticky_error() {
+        let (repo, mut engine, _tmp) = change_base_fixture(false);
+        change_base(&mut engine, "trunk");
+
+        let statuses = drive_change_base(&mut engine);
+
+        let status = statuses.last().expect("the final");
+        assert_eq!(status.tone, "error");
+        assert!(status.sticky);
+        assert!(
+            status.message.starts_with(
+                "The folder of project \"p1-name\" is on \"trunk\", but new worktrees still \
+                 branch from \"feature\" because dux could not save the new base ("
+            ),
+            "{}",
+            status.message
+        );
+        assert!(
+            status
+                .message
+                .ends_with(" Change the base branch again once the problem is fixed."),
+            "{}",
+            status.message
+        );
+        assert_eq!(current_git_branch(repo.path()), "trunk");
+        assert_eq!(
+            engine.projects[0].leading_branch.as_deref(),
+            Some("feature")
+        );
+    }
+
+    /// Picking the branch the folder is already on, which already is the base,
+    /// changes nothing and says so rather than claiming a checkout.
+    #[test]
+    fn a_change_to_the_current_base_and_folder_branch_says_nothing_needed_to_change() {
+        let (repo, mut engine, _tmp) = change_base_fixture(true);
+        change_base(&mut engine, "feature");
+
+        let statuses = drive_change_base(&mut engine);
+
+        let status = statuses.last().expect("the final");
+        assert_eq!(status.tone, "info");
+        assert_eq!(
+            status.message,
+            "Project \"p1-name\" already branches from \"feature\", and its folder is on it."
+        );
+        assert_eq!(current_git_branch(repo.path()), "feature");
     }
 
     #[test]

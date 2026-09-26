@@ -1275,27 +1275,37 @@ pub fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> R
         .spawn()
         .with_context(|| format!("failed to run git fetch in {}", repo_path.display()))?;
     // Drained on its own thread so a chatty stderr cannot fill the pipe and
-    // stall the fetch into a false timeout.
+    // stall the fetch into a false timeout, and handed back over a channel that
+    // is waited on with a bound: a helper that escaped the group (an ssh
+    // ControlPersist master inherits stderr) must not hold the caller.
     let mut stderr_pipe = child.stderr.take();
-    let reader = std::thread::spawn(move || {
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut text = String::new();
         if let Some(pipe) = stderr_pipe.as_mut() {
             let _ = pipe.read_to_string(&mut text);
         }
-        text
+        let _ = stderr_tx.send(text);
     });
+    let drain = || {
+        stderr_rx
+            .recv_timeout(crate::bounded_command::DEFAULT_READER_DRAIN)
+            .unwrap_or_default()
+    };
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if std::time::Instant::now() >= deadline {
+            // The group, not just git: `bounded_command` stops only its child,
+            // and a fetch's transport helper is exactly what hangs.
             if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
                 let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
             }
             let _ = child.kill();
             let _ = child.wait();
-            let _ = reader.join();
+            let _ = drain();
             return Err(anyhow!(
                 "git fetch origin timed out after {}s and was stopped",
                 timeout.as_secs_f32()
@@ -1303,7 +1313,7 @@ pub fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> R
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    let stderr = reader.join().unwrap_or_default();
+    let stderr = drain();
     if !status.success() {
         return Err(anyhow!(
             "git fetch origin failed in {}: {}",

@@ -2394,35 +2394,45 @@ unknown_key = \"untouched\"
     /// field the loader reads (to repair SQLite) and the writer deliberately
     /// omits, so "not a managed key" is not enough to decide it belongs to the
     /// user.
+    ///
+    /// The second case is a base "Change base branch" just moved: the project
+    /// in memory carries a base the file never had, and it stays out too.
     #[test]
     fn patch_still_drops_leading_branch_rather_than_carrying_it_over() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        fs::write(
-            &config_path,
-            "[[projects]]\nid = \"project-1\"\npath = \"/p\"\nleading_branch = \"trunk\"\n",
-        )
-        .expect("write initial");
+        for (initial, base) in [
+            (
+                "[[projects]]\nid = \"project-1\"\npath = \"/p\"\nleading_branch = \"trunk\"\n",
+                "trunk",
+            ),
+            (
+                "[[projects]]\nid = \"project-1\"\npath = \"/p\"\n",
+                "develop",
+            ),
+        ] {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let config_path = dir.path().join("config.toml");
+            fs::write(&config_path, initial).expect("write initial");
 
-        let mut config = Config::default();
-        config.projects.push(ProjectConfig {
-            id: "project-1".to_string(),
-            path: "/p".to_string(),
-            name: None,
-            default_provider: None,
-            leading_branch: Some("trunk".to_string()),
-            auto_reopen_agents: None,
-            startup_command: None,
-            env: BTreeMap::new(),
-        });
+            let mut config = Config::default();
+            config.projects.push(ProjectConfig {
+                id: "project-1".to_string(),
+                path: "/p".to_string(),
+                name: None,
+                default_provider: None,
+                leading_branch: Some(base.to_string()),
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: BTreeMap::new(),
+            });
 
-        patch_config_file(&config_path, &config).expect("patch");
+            patch_config_file(&config_path, &config).expect("patch");
 
-        let saved = fs::read_to_string(&config_path).expect("read back");
-        assert!(
-            !saved.contains("leading_branch"),
-            "derived branch state must never be pinned back into config: {saved}"
-        );
+            let saved = fs::read_to_string(&config_path).expect("read back");
+            assert!(
+                !saved.contains("leading_branch") && !saved.contains(base),
+                "derived branch state must never be pinned back into config: {saved}"
+            );
+        }
     }
 
     /// The carry is keyed by project id, not by position, so removing the first

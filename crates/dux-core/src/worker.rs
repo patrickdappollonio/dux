@@ -660,6 +660,20 @@ pub enum WorkerEvent {
         /// the TUI.
         status_op_id: Option<String>,
     },
+    /// The "Change base branch" worker finished with the project folder
+    /// (`crate::base_branch::switch_to_base_branch`). The handler releases the
+    /// folder, saves the base on success, and resolves the op registered in
+    /// `Engine::pending_change_base_ops` under `status_op_id`, for either
+    /// surface.
+    ProjectBaseBranchChanged {
+        project: Project,
+        branch: String,
+        result: Result<
+            crate::base_branch::BaseBranchSwitched,
+            crate::base_branch::BaseBranchChangeFailure,
+        >,
+        status_op_id: String,
+    },
     ConfigReloadReady(Box<Result<Config, String>>),
     ProjectPersistenceCompleted {
         action: ProjectPersistenceAction,

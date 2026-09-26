@@ -12,6 +12,7 @@ mod followup;
 mod in_flight;
 mod lifecycle;
 mod pr_sync_control;
+mod project_base;
 mod resume_fallback;
 mod spawn_worker;
 pub mod status_op;
@@ -650,6 +651,13 @@ pub struct Engine {
     /// `NonDefaultBranchCheckoutCompleted` handler (both Ok and Err finals are
     /// produced there).
     pub pending_web_checkout_ops: HashMap<String, HandlerStatusOp<WebCheckoutOutcome>>,
+    /// "Change base branch" ops, keyed by the op's opaque id. Unlike the three
+    /// web registries around it this one serves BOTH surfaces: every change,
+    /// whichever surface asked, runs through
+    /// [`Engine::change_project_base_branch`], which registers its op here, and
+    /// `process_worker_event`'s `ProjectBaseBranchChanged` handler consumes it
+    /// once with the final.
+    pub pending_change_base_ops: HashMap<String, HandlerStatusOp<ChangeBaseOutcome>>,
     /// Add-project "Check Out & Add": SUCCESS is resolved in
     /// `drive_add_project_followup` (after the inline add); the switch FAILURE is
     /// resolved in `process_worker_event`'s `NonDefaultBranchCheckoutCompleted`
@@ -939,6 +947,33 @@ impl ProjectBaseAdoption {
     /// The sticky error a failed save ends the checkout with, in place of the
     /// confirmation; `None` when the save did not fail. Both surfaces print this.
     pub fn save_failure_message(&self, project_name: &str, branch: &str) -> Option<StatusText> {
+        self.save_failure_message_advising(
+            project_name,
+            branch,
+            " Check out the default branch again once the problem is fixed.",
+        )
+    }
+
+    /// [`Self::save_failure_message`] for a "Change base branch", whose advice
+    /// is to run that action again.
+    pub fn change_base_save_failure_message(
+        &self,
+        project_name: &str,
+        branch: &str,
+    ) -> Option<StatusText> {
+        self.save_failure_message_advising(
+            project_name,
+            branch,
+            " Change the base branch again once the problem is fixed.",
+        )
+    }
+
+    fn save_failure_message_advising(
+        &self,
+        project_name: &str,
+        branch: &str,
+        advice: &str,
+    ) -> Option<StatusText> {
         let Self::SaveFailed { previous, reason } = self else {
             return None;
         };
@@ -963,11 +998,134 @@ impl ProjectBaseAdoption {
                 ),
             ],
         };
-        Some(status_text![
-            middle,
-            " Check out the default branch again once the problem is fixed."
-        ])
+        Some(status_text![middle, advice.to_string()])
     }
+}
+
+/// What a finished "Change base branch" came to, computed where its worker's
+/// answer lands so the base can be saved first. Resolved into the one final
+/// both surfaces show by [`change_base_final`].
+pub enum ChangeBaseOutcome {
+    /// The folder is on `branch` (switched just now, or already there) and the
+    /// save of the base came to `base`.
+    Changed {
+        branch: String,
+        folder_was_on_it: bool,
+        base: ProjectBaseAdoption,
+    },
+    /// Nothing ran: the folder, or the branch, did not allow it.
+    Refused {
+        branch: String,
+        failure: crate::base_branch::BaseBranchChangeFailure,
+        repo_path: String,
+    },
+}
+
+/// The final for a "Change base branch", for both surfaces.
+///
+/// A failed switch and a failed save are STICKY: the folder or the database
+/// needs fixing outside the toast before the action can run again. The other
+/// refusals are plain errors, because picking again from a fresh list is the
+/// whole fix.
+pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Final {
+    use crate::base_branch::BaseBranchChangeFailure;
+    match outcome {
+        ChangeBaseOutcome::Changed {
+            branch,
+            folder_was_on_it,
+            base,
+        } => match base.change_base_save_failure_message(project_name, branch) {
+            Some(message) => Final::error(message).sticky(),
+            None => Final::info(change_base_branch_message(
+                project_name,
+                branch,
+                *folder_was_on_it,
+                base.moved(),
+            )),
+        },
+        ChangeBaseOutcome::Refused {
+            branch,
+            failure,
+            repo_path,
+        } => match failure {
+            BaseBranchChangeFailure::FolderMissing => {
+                Final::error(change_base_branch_path_missing_message(project_name))
+            }
+            BaseBranchChangeFailure::ListFailed(reason) => Final::error(status_text![
+                "Couldn't list the branches of project ",
+                q(project_name),
+                format!(" to change its base branch: {reason}")
+            ]),
+            BaseBranchChangeFailure::NotListed => Final::error(status_text![
+                "Can't change the base branch of project ",
+                q(project_name),
+                " to ",
+                q(branch),
+                ": no local branch or branch on origin has that name any more. Open the \
+                 branch list again and pick from what is there now."
+            ]),
+            BaseBranchChangeFailure::Held { holder } => Final::error(status_text![
+                "Can't change the base branch of project ",
+                q(project_name),
+                " to ",
+                q(branch),
+                ": it is checked out in the worktree at ",
+                n(holder.display().to_string()),
+                ", and git checks a branch out in one place at a time. Pick another branch, \
+                 or remove that worktree first."
+            ]),
+            BaseBranchChangeFailure::SwitchFailed(_) => Final::error(status_text![
+                "Couldn't check out ",
+                q(branch),
+                " in ",
+                n(repo_path),
+                ". Resolve in your terminal and retry."
+            ])
+            .sticky(),
+        },
+    }
+}
+
+/// The confirmation for a finished "Change base branch". Both surfaces print
+/// exactly this: the checkout sentence, the base's move said out loud when it
+/// moved, and a sentence of its own when nothing needed to change at all.
+pub fn change_base_branch_message(
+    project_name: &str,
+    branch: &str,
+    folder_was_on_it: bool,
+    base_moved: bool,
+) -> StatusText {
+    if folder_was_on_it && !base_moved {
+        return status_text![
+            "Project ",
+            q(project_name),
+            " already branches from ",
+            q(branch),
+            ", and its folder is on it."
+        ];
+    }
+    checkout_default_branch_message(project_name, branch, base_moved)
+}
+
+/// The refusal for a "Change base branch" on a project whose folder is gone,
+/// from the engine and from the web's branch listing alike (which relay its
+/// plain spelling, [`StatusText::message`], as an error body).
+pub fn change_base_branch_path_missing_message(project_name: &str) -> StatusText {
+    status_text![
+        "Cannot change base branch: path not found for ",
+        q(project_name)
+    ]
+}
+
+/// The busy while a "Change base branch" runs.
+pub fn change_base_branch_busy_message(project_name: &str, branch: &str) -> StatusText {
+    status_text![
+        "Changing the base branch of project ",
+        q(project_name),
+        " to ",
+        q(branch),
+        "..."
+    ]
 }
 
 /// The confirmation for a finished "check out the default branch" on an
@@ -9569,6 +9727,139 @@ mod tests {
     /// and the TUI's reconnect ops) maps each variant to its exact final. Before
     /// this, the TUI carried a byte-identical copy (`reconnect_final`); this pins
     /// the one core source so the wording cannot drift.
+    /// Every ending of a "Change base branch", in the words both surfaces
+    /// print, with its tone, its stickiness and the names it chips.
+    #[test]
+    fn every_change_base_final_says_what_happened_and_chips_its_names() {
+        use crate::base_branch::BaseBranchChangeFailure;
+        use crate::prose::ProseSegment;
+        use crate::statusline::StatusTone;
+        let changed = |folder_was_on_it, base| ChangeBaseOutcome::Changed {
+            branch: "develop".to_string(),
+            folder_was_on_it,
+            base,
+        };
+        let refused = |failure| ChangeBaseOutcome::Refused {
+            branch: "develop".to_string(),
+            failure,
+            repo_path: "/work/app".to_string(),
+        };
+        let cases = [
+            (
+                changed(false, ProjectBaseAdoption::Moved),
+                StatusTone::Info,
+                false,
+                "Checked out \"develop\" for project \"app\". New worktrees branch from \
+                 \"develop\" now.",
+                vec!["develop", "app", "develop"],
+            ),
+            (
+                changed(false, ProjectBaseAdoption::Unchanged),
+                StatusTone::Info,
+                false,
+                "Checked out \"develop\" for project \"app\".",
+                vec!["develop", "app"],
+            ),
+            (
+                changed(true, ProjectBaseAdoption::Moved),
+                StatusTone::Info,
+                false,
+                "Checked out \"develop\" for project \"app\". New worktrees branch from \
+                 \"develop\" now.",
+                vec!["develop", "app", "develop"],
+            ),
+            (
+                changed(true, ProjectBaseAdoption::Unchanged),
+                StatusTone::Info,
+                false,
+                "Project \"app\" already branches from \"develop\", and its folder is on it.",
+                vec!["app", "develop"],
+            ),
+            (
+                changed(
+                    false,
+                    ProjectBaseAdoption::SaveFailed {
+                        previous: Some("main".to_string()),
+                        reason: "disk full".to_string(),
+                    },
+                ),
+                StatusTone::Error,
+                true,
+                "The folder of project \"app\" is on \"develop\", but new worktrees still branch \
+                 from \"main\" because dux could not save the new base (disk full). Change the \
+                 base branch again once the problem is fixed.",
+                vec!["app", "develop", "main"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::FolderMissing),
+                StatusTone::Error,
+                false,
+                "Cannot change base branch: path not found for \"app\"",
+                vec!["app"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::ListFailed("broken".to_string())),
+                StatusTone::Error,
+                false,
+                "Couldn't list the branches of project \"app\" to change its base branch: broken",
+                vec!["app"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::NotListed),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": no local branch \
+                 or branch on origin has that name any more. Open the branch list again and \
+                 pick from what is there now.",
+                vec!["app", "develop"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::Held {
+                    holder: PathBuf::from("/work/agent"),
+                }),
+                StatusTone::Error,
+                false,
+                "Can't change the base branch of project \"app\" to \"develop\": it is checked \
+                 out in the worktree at /work/agent, and git checks a branch out in one place at \
+                 a time. Pick another branch, or remove that worktree first.",
+                vec!["app", "develop", "/work/agent"],
+            ),
+            (
+                refused(BaseBranchChangeFailure::SwitchFailed(
+                    "conflict".to_string(),
+                )),
+                StatusTone::Error,
+                true,
+                "Couldn't check out \"develop\" in /work/app. Resolve in your terminal and retry.",
+                vec!["develop", "/work/app"],
+            ),
+        ];
+        for (outcome, want_tone, want_sticky, plain, want_names) in cases {
+            let Final::Message {
+                tone,
+                text,
+                segments,
+                sticky,
+                ..
+            } = change_base_final("app", &outcome)
+            else {
+                panic!("every ending says something: {plain}");
+            };
+            assert_eq!(text, plain);
+            assert_eq!(tone, want_tone, "{plain}");
+            assert_eq!(sticky, want_sticky, "{plain}");
+            let names: Vec<String> = segments
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|segment| match segment {
+                    ProseSegment::Name { name, .. } => Some(name),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(names, want_names, "{plain}");
+        }
+    }
+
     #[test]
     fn the_default_branch_checkout_refusals_carry_the_project_as_a_part() {
         use crate::prose::ProseSegment;

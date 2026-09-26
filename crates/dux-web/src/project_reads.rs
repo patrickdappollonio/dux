@@ -13,6 +13,11 @@
 //! - `GET /api/v1/projects/inspect?path=`: branch pre-flight for the add-project
 //!   flow. 400 for an empty or relative path: the path must be absolute, because it
 //!   is not a registered project yet and is inspected straight off the filesystem.
+//! - `GET /api/v1/projects/:id/branches`: the branches "Change base branch" can
+//!   move the project to, after one bounded fetch of origin:
+//!   `{ branches: [{ name, location: "local" | "remote", held_by }], fetched,
+//!   fetch_error? }`. The change itself is `POST .../base-branch` in
+//!   [`crate::project_actions`].
 //!
 //! These shell to git, so the classification and inspection run off the async
 //! reactor. The static `inspect` and `worktree-counts` segments coexist with the
@@ -50,6 +55,116 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/projects/{id}/worktrees",
             get(list_worktrees).delete(delete_worktree),
         )
+        .route("/api/v1/projects/{id}/branches", get(list_branches))
+}
+
+// ── Branches ───────────────────────────────────────────────────────────────────
+
+/// One branch the project's base could move to (a
+/// [`dux_core::git::BranchChoice`] on the wire).
+#[derive(Serialize)]
+struct BranchChoiceView {
+    name: String,
+    /// `"local"`, or `"remote"` for a branch only origin has; choosing one of
+    /// those creates the local branch, tracking it, before the switch.
+    location: &'static str,
+    /// The folder of ANOTHER worktree that has the branch checked out (an
+    /// agent's, typically), which git refuses to check out a second time, so
+    /// the branch cannot be chosen. `null` for a free branch and for the one
+    /// the project folder is on.
+    held_by: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BranchesReply {
+    branches: Vec<BranchChoiceView>,
+    /// Whether origin was fetched just now. `false` means the origin-only
+    /// branches are as last fetched, and `fetch_error` says why.
+    fetched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fetch_error: Option<String>,
+}
+
+/// `GET /api/v1/projects/{id}/branches`: every branch the project folder could
+/// be switched to for "Change base branch", after one bounded fetch of origin.
+///
+/// Local branches first, then the branches only origin has, each once. `200`
+/// even when the fetch failed or timed out (`fetched: false` plus the reason),
+/// `404` for an unknown project, `409` with the engine's missing-folder
+/// sentence when the folder is gone, and `500` when git could not list the
+/// branches at all. The fetch and the listing shell to git, so both run in
+/// `spawn_blocking`.
+async fn list_branches(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
+    if !id_within_bound(&id) {
+        return (StatusCode::NOT_FOUND, "unknown project").into_response();
+    }
+    let Some(spine) = state.engine.spine().await else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
+    };
+    let Some(project) = spine.projects.into_iter().find(|p| p.id == id) else {
+        return (StatusCode::NOT_FOUND, "unknown project").into_response();
+    };
+    let missing = || {
+        (
+            StatusCode::CONFLICT,
+            dux_core::engine::change_base_branch_path_missing_message(&project.name)
+                .message()
+                .to_string(),
+        )
+            .into_response()
+    };
+    if project.path_missing {
+        return missing();
+    }
+    let path = PathBuf::from(&project.path);
+    let listing = tokio::task::spawn_blocking(move || {
+        // The engine notices a vanished folder on its own schedule; the answer
+        // here must not wait for it, or git would report a folder that is not
+        // there as a failure to list.
+        if !path.is_dir() {
+            return None;
+        }
+        Some(dux_core::base_branch::load_branch_listing(
+            &path,
+            dux_core::base_branch::BASE_BRANCH_FETCH_TIMEOUT,
+        ))
+    })
+    .await;
+    match listing {
+        Ok(None) => missing(),
+        Ok(Some(Ok(listing))) => Json(BranchesReply {
+            fetched: listing.fetched(),
+            fetch_error: listing.fetch_error(),
+            branches: listing
+                .branches
+                .into_iter()
+                .map(|choice| BranchChoiceView {
+                    name: choice.name,
+                    location: match choice.location {
+                        dux_core::git::BranchLocation::Local => "local",
+                        dux_core::git::BranchLocation::Remote => "remote",
+                    },
+                    held_by: choice
+                        .held_by
+                        .map(|holder| holder.to_string_lossy().into_owned()),
+                })
+                .collect(),
+        })
+        .into_response(),
+        Ok(Some(Err(error))) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "Couldn't list the branches of project \"{}\": {error}",
+                project.name
+            ),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("branch listing failed: {error}"),
+        )
+            .into_response(),
+    }
 }
 
 // ── Worktrees ──────────────────────────────────────────────────────────────────

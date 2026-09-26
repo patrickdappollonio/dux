@@ -3332,7 +3332,7 @@ impl Engine {
     /// Make `branch` the base new worktrees of `project` branch from: saved to
     /// SQLite first (never config: the base is derived state), and moved in
     /// memory only once saved, so the two never disagree.
-    fn adopt_project_base(
+    pub(crate) fn adopt_project_base(
         &mut self,
         project: &Project,
         branch: &str,
@@ -3743,6 +3743,12 @@ impl Engine {
                 result,
                 status_op_id,
             ),
+            WorkerEvent::ProjectBaseBranchChanged {
+                project,
+                branch,
+                result,
+                status_op_id,
+            } => self.process_project_base_branch_changed(project, branch, result, status_op_id),
             WorkerEvent::ConfigReloadReady(result) => self.process_config_reload_ready(*result),
             WorkerEvent::ProjectPersistenceCompleted {
                 action,
