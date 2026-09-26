@@ -62,11 +62,11 @@ export function ProjectInfoDialog() {
             <span className="text-muted-foreground">Unknown</span>
           )}
         </InfoRow>
-        <InfoRow label="Default branch">
+        <InfoRow label="Base branch">
           {project.leading_branch ? (
             <InlineCode>{project.leading_branch}</InlineCode>
           ) : (
-            <span className="text-muted-foreground">Not detected</span>
+            <span className="text-muted-foreground">No base recorded yet</span>
           )}
         </InfoRow>
         <InfoRow label="Added">{formatDisplayDate(project.created_at)}</InfoRow>
