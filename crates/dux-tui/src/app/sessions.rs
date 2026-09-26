@@ -1178,7 +1178,11 @@ impl App {
     pub(crate) fn dispatch_checkout_project_default_branch(&mut self, project: Project) {
         // One at a time per repository, whichever surface asked first; the
         // engine releases it at every ending of the chain.
-        if let Err(refusal) = self.engine.begin_default_branch_checkout(&project) {
+        if let Err(refusal) = self.engine.begin_project_folder_action(
+            &project.path,
+            &project.name,
+            dux_core::engine::ProjectFolderAction::CheckoutDefaultBranch,
+        ) {
             self.apply_reaction(dux_core::engine::EventReaction::Status(refusal));
             return;
         }
@@ -9023,7 +9027,7 @@ mod tests {
     fn a_second_checkout_while_one_runs_is_refused_and_the_repository_is_released_after() {
         let (_root, repo, mut app) = project_based_on_develop();
         let project = app.engine.projects[0].clone();
-        let key = dux_core::engine::InFlightKey::CheckoutDefaultBranch(project.path.clone());
+        let folder = project.path.clone();
 
         app.dispatch_checkout_project_default_branch(project.clone());
         assert_eq!(app.pending_checkout_inspect_ops.len(), 1);
@@ -9048,7 +9052,11 @@ mod tests {
         drain_until(&mut app, "the chain to finish", |app| {
             app.pending_checkout_inspect_ops.is_empty()
         });
-        assert!(!app.engine.is_in_flight(&key), "success releases it");
+        assert_eq!(
+            app.engine.project_folder_action(&folder),
+            None,
+            "success releases it"
+        );
         assert_eq!(folder_branch(&repo), "main");
 
         // Ending two: the folder is already on the default branch.
@@ -9057,8 +9065,9 @@ mod tests {
         drain_until(&mut app, "the already-there answer", |app| {
             app.pending_checkout_inspect_ops.is_empty()
         });
-        assert!(
-            !app.engine.is_in_flight(&key),
+        assert_eq!(
+            app.engine.project_folder_action(&folder),
+            None,
             "already being there releases it"
         );
     }

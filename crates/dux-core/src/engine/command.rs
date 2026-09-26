@@ -161,6 +161,11 @@ pub enum Command {
         repo_path: PathBuf,
         target: PullTarget,
         busy_message: crate::status_text::StatusText,
+        /// The refusal while a pull of the same worktree runs. A SESSION pull's
+        /// only: a project pull shares the project folder's lock with "Check
+        /// out default branch" and "Change base branch", and its refusal is
+        /// [`crate::engine::project_folder_busy_message`], naming whichever of
+        /// the three is running.
         already_running_message: crate::status_text::StatusText,
     },
 
@@ -875,6 +880,26 @@ impl Engine {
         already_running_message: crate::status_text::StatusText,
     ) -> EventReaction {
         let repo_key = repo_path.to_string_lossy().into_owned();
+        // A project pull switches the folder to its base first, so it shares
+        // the folder's lock with the other two operations that switch it, and
+        // a refusal names whichever is running (`already_running_message` is a
+        // session pull's). A session pull keeps its own per-worktree key.
+        let in_flight_key = match &target {
+            PullTarget::Project { project_name, .. } => {
+                if let Some(running) = self.project_folder_action(&repo_key) {
+                    return EventReaction::Status(StatusUpdate::warning(
+                        crate::engine::project_folder_busy_message(project_name, running),
+                    ));
+                }
+                // Taken (and released on a failed spawn) by the worker
+                // primitive, which is why this is not `begin_project_folder_action`.
+                InFlightKey::ProjectFolder {
+                    path: repo_key.clone(),
+                    action: crate::engine::ProjectFolderAction::Pull,
+                }
+            }
+            PullTarget::Session => InFlightKey::Pull(repo_key.clone()),
+        };
         let repo_key_for_panic = repo_key.clone();
         let target_for_panic = target.clone();
         let op = match &target {
@@ -898,7 +923,7 @@ impl Engine {
         self.spawn_command_worker(
             CommandWorkerSpec {
                 label: format!("pull:{repo_key}"),
-                in_flight_key: Some(InFlightKey::Pull(repo_key.clone())),
+                in_flight_key: Some(in_flight_key),
                 busy_status: Some(pending),
                 already_running_status: Some(StatusUpdate::warning(already_running_message)),
                 panic_event: Some(Box::new(move |reason| WorkerEvent::PullCompleted {

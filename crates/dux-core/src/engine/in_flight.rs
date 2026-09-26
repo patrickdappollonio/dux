@@ -61,14 +61,47 @@ pub enum InFlightKey {
     /// this key, which also makes init-and-commit and commit-only on one path
     /// mutually exclusive.
     InitialCommit(String),
-    /// A "check out the default branch" is running for the project whose
-    /// checkout is at this path, keyed by the project's path like `Pull`, so a
-    /// second request from either surface cannot race the first one's
-    /// `git switch` and report a false failure. Taken by
-    /// [`super::Engine::begin_default_branch_checkout`] and released at every
-    /// ending of the chain: the inspection's heuristic, failure and
-    /// already-on-default answers, and the switch's success or failure.
-    CheckoutDefaultBranch(String),
+    /// An operation that switches the branch of the project folder at `path`
+    /// is running: "Check out default branch", "Change base branch" or a
+    /// project "Pull project". All three run `git switch` in the same folder,
+    /// so one at a time per folder, whichever surface asked first; a second
+    /// would race the first one's switch (a pull in flight would switch the
+    /// folder straight back) and report a failure that is not one.
+    ///
+    /// `action` names the running operation so a refusal can say which one it
+    /// is waiting for. Mutual exclusion is by `path` alone: only
+    /// [`super::Engine::begin_project_folder_action`] inserts this key, and it
+    /// refuses while ANY action holds the path. Released by
+    /// [`super::Engine::end_project_folder_action`] at every ending of the
+    /// operation.
+    ProjectFolder {
+        path: String,
+        action: ProjectFolderAction,
+    },
+}
+
+/// The operations that switch a project folder's branch and therefore share
+/// its [`InFlightKey::ProjectFolder`] lock.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ProjectFolderAction {
+    /// "Check out default branch".
+    CheckoutDefaultBranch,
+    /// "Change base branch".
+    ChangeBaseBranch,
+    /// "Pull project", which switches the folder to its base before pulling.
+    Pull,
+}
+
+impl ProjectFolderAction {
+    /// What dux is doing, as the refusal sentence names it:
+    /// "dux is already {this} for project ...".
+    pub fn running_phrase(self) -> &'static str {
+        match self {
+            Self::CheckoutDefaultBranch => "checking out the default branch",
+            Self::ChangeBaseBranch => "changing the base branch",
+            Self::Pull => "pulling",
+        }
+    }
 }
 
 /// Convenience alias so call sites can spell the storage shape once.

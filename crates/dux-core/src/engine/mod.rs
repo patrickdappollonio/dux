@@ -31,7 +31,7 @@ pub use events::{
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{
     BranchRenameDispatch, BranchRenamePlan, BranchRenameRejection, InFlightKey, InFlightSet,
-    RenameExpectation,
+    ProjectFolderAction, RenameExpectation,
 };
 pub use lifecycle::{
     ClosedTabExit, DeferredWorktreeRemoval, DetachSessionOutcome, ForceDetachOutcome,
@@ -1036,11 +1036,12 @@ pub fn checkout_default_branch_confirm_prose(
     }
 }
 
-/// The refusal when a "check out the default branch" is already running for
-/// the project: an ordinary warning, because waiting is all it asks.
-pub fn default_branch_checkout_running_message(project_name: &str) -> StatusText {
+/// The refusal when an operation that switches the project folder's branch is
+/// already running there (see [`ProjectFolderAction`]), naming the running one:
+/// an ordinary warning, because waiting is all it asks. Both surfaces print it.
+pub fn project_folder_busy_message(project_name: &str, running: ProjectFolderAction) -> StatusText {
     status_text![
-        "dux is already checking out the default branch for project ",
+        format!("dux is already {} for project ", running.running_phrase()),
         q(project_name),
         ". Wait for it to finish; its result will say where the project's worktrees branch from."
     ]
@@ -9535,9 +9536,19 @@ mod tests {
         use crate::prose::ProseSegment;
         let cases = [
             (
-                default_branch_checkout_running_message("app"),
+                project_folder_busy_message("app", ProjectFolderAction::CheckoutDefaultBranch),
                 "dux is already checking out the default branch for project \"app\". Wait for \
                  it to finish; its result will say where the project's worktrees branch from.",
+            ),
+            (
+                project_folder_busy_message("app", ProjectFolderAction::ChangeBaseBranch),
+                "dux is already changing the base branch for project \"app\". Wait for it to \
+                 finish; its result will say where the project's worktrees branch from.",
+            ),
+            (
+                project_folder_busy_message("app", ProjectFolderAction::Pull),
+                "dux is already pulling for project \"app\". Wait for it to finish; its result \
+                 will say where the project's worktrees branch from.",
             ),
             (
                 checkout_default_branch_cancelled_project_gone_message("app"),

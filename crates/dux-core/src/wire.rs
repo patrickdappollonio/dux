@@ -2927,7 +2927,11 @@ impl Engine {
             );
         }
         // One at a time per repository, whichever surface asked first.
-        if let Err(refusal) = self.begin_default_branch_checkout(&project) {
+        if let Err(refusal) = self.begin_project_folder_action(
+            &project.path,
+            &project.name,
+            crate::engine::ProjectFolderAction::CheckoutDefaultBranch,
+        ) {
             return Ok(WireStatus::from_update(&refusal));
         }
 
@@ -6031,12 +6035,12 @@ mod tests {
         );
     }
 
+    /// A project pull takes the project folder's lock, shared with "Check out
+    /// default branch" and "Change base branch": while it runs, each of the
+    /// three is refused with an ordinary warning naming the pull, and the
+    /// pull's completion hands the folder back.
     #[test]
-    fn apply_wire_pull_project_blocks_repeat_while_running() {
-        // First dispatch spawns the pull worker (busy arrives on the async
-        // status stream, so the synchronous outcome is empty); the second
-        // dispatch hits the in-flight guard and surfaces the TUI's
-        // already-running warning synchronously.
+    fn apply_wire_pull_project_holds_the_folder_against_the_other_folder_switches() {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
 
@@ -6050,19 +6054,52 @@ mod tests {
             "first pull busy is async, not a synchronous outcome: {:?}",
             first.status
         );
-        assert!(engine.is_in_flight(&InFlightKey::Pull("/repo".to_string())));
+        assert_eq!(
+            engine.project_folder_action("/repo"),
+            Some(crate::engine::ProjectFolderAction::Pull)
+        );
 
-        let second = engine
-            .apply_wire(WireCommand::PullProject {
+        for command in [
+            WireCommand::PullProject {
                 project_id: "p1".to_string(),
-            })
-            .expect("repeat project pull should not error");
-        let status = second.status.expect("in-flight warning status");
-        assert_eq!(status.tone, "warning");
+            },
+            WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".to_string(),
+            },
+        ] {
+            let refused = engine
+                .apply_wire(command.clone())
+                .expect("a refusal is a status, not an error");
+            let status = refused.status.expect("the refusal");
+            assert_eq!(status.tone, "warning", "{command:?}");
+            assert_eq!(
+                status.message,
+                "dux is already pulling for project \"p1-name\". Wait for it to finish; its \
+                 result will say where the project's worktrees branch from.",
+                "{command:?}"
+            );
+        }
         assert!(
-            status.message.contains("already in progress"),
-            "unexpected message: {}",
-            status.message
+            engine.pending_web_checkout_ops.is_empty(),
+            "the refused checkout must not start its chain"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("the pull worker answers");
+            let done = matches!(event, WorkerEvent::PullCompleted { .. });
+            engine.process_worker_event(event);
+            if done {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.project_folder_action("/repo"),
+            None,
+            "the pull's completion releases the folder"
         );
     }
 
@@ -7635,8 +7672,9 @@ mod tests {
             .expect("the project")
             .path
             .clone();
-        assert!(
-            !engine.is_in_flight(&InFlightKey::CheckoutDefaultBranch(path)),
+        assert_eq!(
+            engine.project_folder_action(&path),
+            None,
             "the checkout's ending must release the repository"
         );
     }
@@ -7723,7 +7761,10 @@ mod tests {
             .next()
             .cloned()
             .expect("the web op");
-        assert!(engine.is_in_flight(&InFlightKey::CheckoutDefaultBranch(project.path.clone())));
+        assert_eq!(
+            engine.project_folder_action(&project.path),
+            Some(crate::engine::ProjectFolderAction::CheckoutDefaultBranch)
+        );
 
         engine.process_worker_event(WorkerEvent::NonDefaultBranchCheckoutCompleted {
             action: NonDefaultBranchAction::CheckoutProjectDefault { project },
@@ -8087,6 +8128,22 @@ mod tests {
         assert!(
             engine.pending_web_checkout_ops.contains_key(key),
             "the checkout op must be registered under its busy key"
+        );
+
+        // The checkout holds the project folder: a pull of the same project,
+        // which would switch the folder back to its base, is refused and told
+        // which operation it is waiting for.
+        let pull = engine
+            .apply_wire(WireCommand::PullProject {
+                project_id: "p1".into(),
+            })
+            .expect("a refusal is a status, not an error");
+        let refusal = pull.status.expect("the refusal");
+        assert_eq!(refusal.tone, "warning");
+        assert_eq!(
+            refusal.message,
+            "dux is already checking out the default branch for project \"p1-name\". Wait for \
+             it to finish; its result will say where the project's worktrees branch from."
         );
     }
 

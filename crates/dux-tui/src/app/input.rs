@@ -13212,17 +13212,28 @@ not_a_real_action = ["x"]
             .expect("repeat refresh should not error");
 
         let repo_path = app.engine.projects[0].path.clone();
-        assert!(app.engine.is_in_flight(&InFlightKey::Pull(repo_path)));
+        assert_eq!(
+            app.engine.project_folder_action(&repo_path),
+            Some(dux_core::engine::ProjectFolderAction::Pull)
+        );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
-        assert!(app.status.text().contains("already in progress"));
+        assert!(
+            app.status
+                .text()
+                .starts_with("dux is already pulling for project"),
+            "{}",
+            app.status.text()
+        );
     }
 
     #[test]
     fn project_pull_completion_clears_in_flight_guard() {
         let mut app = test_app(default_bindings());
         let repo_path = app.engine.projects[0].path.clone();
-        app.engine
-            .mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+        app.engine.mark_in_flight(InFlightKey::ProjectFolder {
+            path: repo_path.clone(),
+            action: dux_core::engine::ProjectFolderAction::Pull,
+        });
 
         app.engine
             .worker_tx
@@ -13248,7 +13259,7 @@ not_a_real_action = ["x"]
 
         app.drain_events();
 
-        assert!(!app.engine.is_in_flight(&InFlightKey::Pull(repo_path)));
+        assert_eq!(app.engine.project_folder_action(&repo_path), None);
         assert_eq!(app.engine.projects[0].current_branch, "feature/demo");
         assert_eq!(
             app.engine.projects[0].branch_status,

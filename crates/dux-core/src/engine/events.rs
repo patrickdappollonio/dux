@@ -2506,7 +2506,10 @@ impl Engine {
         result: Result<crate::worker::PullOutcome, String>,
         status: ResolvedFinal,
     ) -> EventReaction {
-        self.clear_in_flight(&InFlightKey::Pull(repo_path));
+        match &target {
+            PullTarget::Project { .. } => self.end_project_folder_action(&repo_path),
+            PullTarget::Session => self.clear_in_flight(&InFlightKey::Pull(repo_path)),
+        }
         if let PullTarget::Project { project_id, .. } = &target
             && let Ok(outcome) = &result
             && let Some(branch_name) = outcome.current_branch()
@@ -3095,7 +3098,7 @@ impl Engine {
         // Every answer but a known default ends the chain here; that one hands
         // the repository on to the switch, whose completion releases it.
         if !matches!(result, Ok((_, Some(BranchWarningKind::Known { .. })))) {
-            self.end_default_branch_checkout(&project.path);
+            self.end_project_folder_action(&project.path);
         }
         match result {
             Ok((current_branch, warning_kind)) => match warning_kind {
@@ -3175,7 +3178,7 @@ impl Engine {
         status_op_id: Option<String>,
     ) -> EventReaction {
         if let NonDefaultBranchAction::CheckoutProjectDefault { project } = &action {
-            self.end_default_branch_checkout(&project.path);
+            self.end_project_folder_action(&project.path);
         }
         match result {
             Ok(()) => match action {
@@ -3251,25 +3254,48 @@ impl Engine {
         }
     }
 
-    /// Take the project's repository for a "check out the default branch", or
-    /// answer why not: one already running there would race this one's
-    /// `git switch`, and the loser would report a failure that is not one.
-    /// Both surfaces ask here before starting the chain.
-    pub fn begin_default_branch_checkout(&mut self, project: &Project) -> Result<(), StatusUpdate> {
-        if self.mark_in_flight(InFlightKey::CheckoutDefaultBranch(project.path.clone())) {
-            Ok(())
-        } else {
-            Err(StatusUpdate::warning(
-                crate::engine::default_branch_checkout_running_message(&project.name),
-            ))
+    /// Take the project's folder for `action`, or answer why not: an operation
+    /// already switching that folder (see [`crate::engine::ProjectFolderAction`])
+    /// would race this one's `git switch`, and the loser would report a failure
+    /// that is not one. The refusal is an ordinary warning naming the running
+    /// operation. Every surface asks here before starting any of the three.
+    ///
+    /// `project_path` is the folder (the project's `path`), `project_name` the
+    /// name the refusal chips.
+    pub fn begin_project_folder_action(
+        &mut self,
+        project_path: &str,
+        project_name: &str,
+        action: crate::engine::ProjectFolderAction,
+    ) -> Result<(), StatusUpdate> {
+        if let Some(running) = self.project_folder_action(project_path) {
+            return Err(StatusUpdate::warning(
+                crate::engine::project_folder_busy_message(project_name, running),
+            ));
         }
+        self.mark_in_flight(InFlightKey::ProjectFolder {
+            path: project_path.to_string(),
+            action,
+        });
+        Ok(())
     }
 
-    /// Release the repository at every ending of the chain.
-    fn end_default_branch_checkout(&mut self, project_path: &str) {
-        self.clear_in_flight(&InFlightKey::CheckoutDefaultBranch(
-            project_path.to_string(),
-        ));
+    /// The operation holding the project folder at `project_path`, if any.
+    pub fn project_folder_action(
+        &self,
+        project_path: &str,
+    ) -> Option<crate::engine::ProjectFolderAction> {
+        self.in_flight.iter().find_map(|key| match key {
+            InFlightKey::ProjectFolder { path, action } if path == project_path => Some(*action),
+            _ => None,
+        })
+    }
+
+    /// Release the project folder at every ending of the operation holding it.
+    pub(crate) fn end_project_folder_action(&mut self, project_path: &str) {
+        self.in_flight.retain(
+            |key| !matches!(key, InFlightKey::ProjectFolder { path, .. } if path == project_path),
+        );
     }
 
     /// The end of a "check out the default branch" that left the folder on
@@ -4826,13 +4852,21 @@ mod tests {
 
     // ── PullCompleted (Project) ──────────────────────────────────────────
 
+    /// The key a running project pull holds its folder with.
+    fn project_pull_key(repo_path: &str) -> InFlightKey {
+        InFlightKey::ProjectFolder {
+            path: repo_path.to_string(),
+            action: crate::engine::ProjectFolderAction::Pull,
+        }
+    }
+
     #[test]
     fn pull_completed_project_ok_updates_branch_and_clears_inflight() {
         let (mut engine, _tmp) = test_engine();
         let project = sample_project("p1", "/tmp/p1");
         engine.projects.push(project);
         let repo_path = "/tmp/p1".to_string();
-        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+        engine.mark_in_flight(project_pull_key(&repo_path));
 
         let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
             repo_path: repo_path.clone(),
@@ -4853,7 +4887,7 @@ mod tests {
         });
 
         // In-flight entry is cleared regardless of result.
-        assert!(!engine.is_in_flight(&InFlightKey::Pull(repo_path.clone())));
+        assert_eq!(engine.project_folder_action(&repo_path), None);
 
         // Project's current branch is updated; status is NotLeading because
         // leading_branch is Some("main") and current_branch is "feature-x".
@@ -4877,7 +4911,7 @@ mod tests {
         let project = sample_project("p1", "/tmp/p1");
         engine.projects.push(project);
         let repo_path = "/tmp/p1".to_string();
-        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+        engine.mark_in_flight(project_pull_key(&repo_path));
 
         let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
             repo_path: repo_path.clone(),
@@ -4897,7 +4931,7 @@ mod tests {
             ),
         });
 
-        assert!(!engine.is_in_flight(&InFlightKey::Pull(repo_path.clone())));
+        assert_eq!(engine.project_folder_action(&repo_path), None);
         let p = &engine.projects[0];
         assert_eq!(p.current_branch, "feature-x");
 
@@ -4910,7 +4944,7 @@ mod tests {
     fn pull_completed_project_err_still_clears_inflight() {
         let (mut engine, _tmp) = test_engine();
         let repo_path = "/tmp/p1".to_string();
-        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+        engine.mark_in_flight(project_pull_key(&repo_path));
 
         let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
             repo_path: repo_path.clone(),
@@ -4926,7 +4960,7 @@ mod tests {
             ),
         });
 
-        assert!(!engine.is_in_flight(&InFlightKey::Pull(repo_path.clone())));
+        assert_eq!(engine.project_folder_action(&repo_path), None);
         let status = unwrap_status(reaction);
         assert_eq!(status.tone, StatusTone::Error);
         assert_eq!(
@@ -9125,7 +9159,7 @@ mod tests {
         let project = sample_project("p1", "/tmp/p1");
         engine.projects.push(project);
         let repo_path = "/tmp/p1".to_string();
-        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+        engine.mark_in_flight(project_pull_key(&repo_path));
 
         let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
             repo_path: repo_path.clone(),
@@ -9158,7 +9192,7 @@ mod tests {
     fn pull_completed_project_err_carries_keyed_status() {
         let (mut engine, _tmp) = test_engine();
         let repo_path = "/tmp/p1".to_string();
-        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+        engine.mark_in_flight(project_pull_key(&repo_path));
 
         let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
             repo_path,
