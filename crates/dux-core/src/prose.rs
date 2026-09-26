@@ -311,6 +311,11 @@ mod tests {
                 let base = args["stored_base"].as_str();
                 crate::engine::checkout_default_branch_confirm_prose(&project, base)
             }
+            "change_base_branch_confirm" => crate::engine::change_base_branch_confirm_prose(
+                &s("project_name"),
+                args["from"].as_str(),
+                &s("to"),
+            ),
             "add_project_branch_warning" => crate::add_project_prose::branch_warning_prose(
                 &s("current_branch"),
                 args["default_branch"].as_str(),

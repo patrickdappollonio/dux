@@ -1036,6 +1036,44 @@ pub fn checkout_default_branch_confirm_prose(
     }
 }
 
+/// The body of the "change base branch?" confirmation both surfaces show
+/// before anything runs: the folder switches to `to`, and new worktrees branch
+/// from `to` afterwards instead of `from`, the base recorded today (`None`
+/// when the project has none yet). The project and both branches are chips.
+/// Pinned against the browser's `changeBaseBranchProse`
+/// (`lib/changeBaseBranch.ts`) by `tests/fixtures/prose_cross_language.json`.
+pub fn change_base_branch_confirm_prose(
+    project_name: &str,
+    from: Option<&str>,
+    to: &str,
+) -> crate::prose::Prose {
+    let lead = crate::prose::Prose::new()
+        .text("This switches the source checkout for ")
+        .quoted(project_name)
+        .text(" to ")
+        .quoted(to)
+        .text(", moving HEAD in the shared repository.");
+    match from {
+        Some(from) if from == to => lead
+            .text(" New worktrees already branch from ")
+            .quoted(to)
+            .text(", and still will after the switch."),
+        Some(from) => lead
+            .text(" New worktrees branch from ")
+            .quoted(from)
+            .text(" now. After the switch, they branch from ")
+            .quoted(to)
+            .text("."),
+        None => lead
+            .text(
+                " The project has no base branch recorded yet. After the switch, new worktrees \
+                 branch from ",
+            )
+            .quoted(to)
+            .text("."),
+    }
+}
+
 /// The refusal when an operation that switches the project folder's branch is
 /// already running there (see [`ProjectFolderAction`]), naming the running one:
 /// an ordinary warning, because waiting is all it asks. Both surfaces print it.

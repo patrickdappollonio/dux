@@ -11,6 +11,7 @@ import {
   HEURISTIC_BRANCH_NOTE_PROSE,
   worktreeBaseNoteProse,
 } from "./addProjectWarning"
+import { changeBaseBranchProse } from "./changeBaseBranch"
 import { checkoutDefaultBranchProse } from "./checkoutDefaultBranch"
 import { detachConfirmProse } from "./detachAgent"
 import { deleteProjectProse, removeProjectProse } from "./projectConfirm"
@@ -122,6 +123,12 @@ describe("the sentences both surfaces print", () => {
         return checkoutDefaultBranchProse(
           args.project_name as string,
           args.stored_base as string | null,
+        )
+      case "change_base_branch_confirm":
+        return changeBaseBranchProse(
+          args.project_name as string,
+          args.from as string | null,
+          args.to as string,
         )
       case "add_project_branch_warning":
         return branchWarningProse(

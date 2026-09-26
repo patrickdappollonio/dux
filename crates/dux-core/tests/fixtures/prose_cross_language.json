@@ -168,6 +168,92 @@
       ]
     },
     {
+      "what": "changing the base branch of a project with a recorded base",
+      "sentence": "change_base_branch_confirm",
+      "args": {
+        "project_name": "dux",
+        "from": "main",
+        "to": "develop"
+      },
+      "segments": [
+        "This switches the source checkout for ",
+        {
+          "name": "dux",
+          "quoted": true
+        },
+        " to ",
+        {
+          "name": "develop",
+          "quoted": true
+        },
+        ", moving HEAD in the shared repository. New worktrees branch from ",
+        {
+          "name": "main",
+          "quoted": true
+        },
+        " now. After the switch, they branch from ",
+        {
+          "name": "develop",
+          "quoted": true
+        },
+        "."
+      ]
+    },
+    {
+      "what": "changing the base branch to the one it already is",
+      "sentence": "change_base_branch_confirm",
+      "args": {
+        "project_name": "dux",
+        "from": "develop",
+        "to": "develop"
+      },
+      "segments": [
+        "This switches the source checkout for ",
+        {
+          "name": "dux",
+          "quoted": true
+        },
+        " to ",
+        {
+          "name": "develop",
+          "quoted": true
+        },
+        ", moving HEAD in the shared repository. New worktrees already branch from ",
+        {
+          "name": "develop",
+          "quoted": true
+        },
+        ", and still will after the switch."
+      ]
+    },
+    {
+      "what": "changing the base branch of a project with no recorded base",
+      "sentence": "change_base_branch_confirm",
+      "args": {
+        "project_name": "dux",
+        "from": null,
+        "to": "develop"
+      },
+      "segments": [
+        "This switches the source checkout for ",
+        {
+          "name": "dux",
+          "quoted": true
+        },
+        " to ",
+        {
+          "name": "develop",
+          "quoted": true
+        },
+        ", moving HEAD in the shared repository. The project has no base branch recorded yet. After the switch, new worktrees branch from ",
+        {
+          "name": "develop",
+          "quoted": true
+        },
+        "."
+      ]
+    },
+    {
       "what": "adding a project on a branch other than the remote's default",
       "sentence": "add_project_branch_warning",
       "args": {
