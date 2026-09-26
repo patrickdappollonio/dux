@@ -75,8 +75,9 @@ terminal UI every project chooser shares that order, the ones for
 [managing projects](#managing-a-project), browsing worktrees and opening a project
 terminal included.
 
-The terminal UI's chooser lists every project, how many agents each one has, and where it
-lives, and its footer carries the way out to a standalone agent:
+The terminal UI's chooser lists every project, how many agents each one has, the base
+branch new agents start from, and where it lives, and its footer carries the way out to a
+standalone agent:
 
 ![The terminal UI project chooser for a new agent, listing two projects with their agent counts and paths, and a footer key for creating a standalone agent instead.](/screens/tui-new-agent-chooser.png)
 
@@ -88,6 +89,16 @@ Checking out the project's default branch later makes the default lead from then
 dux cannot save that change, the checkout still happens but the old leading branch stays
 in charge, and dux tells you so in an error that stays up until you close it; run the
 checkout again once the problem is fixed.
+
+If the name matches an existing local branch, dux asks whether to attach to that branch
+instead, which is what you want when continuing work that already started.
+
+> [!IMPORTANT]
+> Attaching matters at the other end of the agent's life. dux remembers that the branch
+> existed first, so the delete dialog's "also delete the branch" box starts **unticked**
+> for it, with a line saying the branch predates the agent and how many of its commits
+> are pushed nowhere. Tick it and the branch goes anyway; leave it and the worktree goes
+> alone.
 
 ### Changing the base branch
 
@@ -113,16 +124,6 @@ says so in an error that stays up, and the base stays where it was.
 > [!NOTE]
 > Uncommitted changes that do not conflict with the new branch travel with the switch and
 > stay in the project folder, the same as with a checkout in your own terminal.
-
-If the name matches an existing local branch, dux asks whether to attach to that branch
-instead, which is what you want when continuing work that already started.
-
-> [!IMPORTANT]
-> Attaching matters at the other end of the agent's life. dux remembers that the branch
-> existed first, so the delete dialog's "also delete the branch" box starts **unticked**
-> for it, with a line saying the branch predates the agent and how many of its commits
-> are pushed nowhere. Tick it and the branch goes anyway; leave it and the worktree goes
-> alone.
 
 ### Pulling before create
 
@@ -416,12 +417,13 @@ project's name, its folder, its base branch and the branch the folder is on righ
 - **Startup command logs for all agents…**
 - **Delete project…** and **Remove project…**
 
-Cancelling a question you opened from the list, or closing Project info, lands you back on
-the list; Escape on the list goes back to the project list, and a second Escape closes it.
-An orphaned group offers **Remove project…** and nothing else, which clears those agents'
-records and leaves their worktrees on disk. When a project's folder is missing, the rows
-that need it (the project terminal and changing the base branch) are shown as unavailable
-and say why.
+Anything you open from the list comes back to it when it closes, whether you cancel it,
+close it or save it: the questions, Project info, the settings editors, the worktree
+manager and the startup command logs. Escape on the list goes back to the project list,
+and a second Escape closes it. An orphaned group offers **Remove project…** and nothing
+else, which clears those agents' records and leaves their worktrees on disk. When a
+project's folder is missing, the rows that need it (a new agent, the project terminal and
+changing the base branch) are shown as unavailable and say why.
 
 The browser has the same actions in each project's `⋯` menu.
 
