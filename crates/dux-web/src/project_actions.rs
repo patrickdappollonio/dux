@@ -444,7 +444,14 @@ async fn change_base_branch(
         return unknown_project();
     }
     if body.branch.chars().count() > MAX_BRANCH_LEN {
-        return (StatusCode::BAD_REQUEST, "branch name is too long").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "A branch name longer than {MAX_BRANCH_LEN} characters can't be a base branch. \
+                 Pick a branch from the list."
+            ),
+        )
+            .into_response();
     }
     if !project_exists(&state, &id).await {
         return unknown_project();
@@ -512,6 +519,36 @@ mod tests {
         run(&["init", "-q", "-b", "main"]);
         run(&["config", "user.email", "t@example.com"]);
         run(&["config", "user.name", "Test"]);
+    }
+
+    /// An over-long branch is refused before anything else is looked at, with
+    /// a sentence naming the limit and what to do instead.
+    #[tokio::test]
+    async fn an_over_long_base_branch_is_refused_with_the_limit_named() {
+        let (_tmp, app) = router_no_auth();
+        let branch = "b".repeat(super::MAX_BRANCH_LEN + 1);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects/p1/base-branch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "branch": branch }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            "A branch name longer than 1024 characters can't be a base branch. Pick a branch \
+             from the list."
+        );
     }
 
     fn post_add(path: &str, create_initial_commit: bool) -> Request<Body> {
