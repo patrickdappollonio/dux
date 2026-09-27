@@ -1,4 +1,10 @@
-import { Ellipsis, Folder, FolderPlus, Search } from "lucide-react"
+import {
+  Ellipsis,
+  Folder,
+  FolderPlus,
+  Search,
+  type LucideIcon,
+} from "lucide-react"
 import { useId, useMemo, useRef, useState, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
@@ -40,6 +46,10 @@ export interface ProjectListRow {
  *
  * `onPick` is what a row click does. Without one, a row click opens that row's
  * menu, which is the same menu its `⋯` opens.
+ *
+ * `footerAction`, when given, sits beside "Add a new project…" as an equal
+ * second door (the New agent picker's standalone agent); without one the footer
+ * is that single action.
  */
 export function ProjectList({
   title,
@@ -47,12 +57,14 @@ export function ProjectList({
   rows,
   onPick,
   menu,
+  footerAction,
 }: {
   title: string
   description: string
   rows: ProjectListRow[]
   onPick?: (id: string) => void
   menu: (id: string) => ReactNode
+  footerAction?: ProjectListFooterAction
 }) {
   const [query, setQuery] = useState("")
   // Which row's menu is open. Controlled so a click on the row can open the
@@ -119,17 +131,61 @@ export function ProjectList({
         </div>
       </ScrollArea>
 
-      <div className="shrink-0 border-t p-2">
-        <button
-          type="button"
-          onClick={openAddProject}
-          className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground max-md:min-h-10"
-        >
-          <FolderPlus className="size-4 shrink-0" />
-          Add a new project…
-        </button>
+      {/* One column on a narrow phone, where two labels side by side would
+          truncate, and two equal columns from sm up with a thin rule in its
+          own column between them. The rule is display:none while stacked, so
+          it draws nothing and adds no row gap there. The gap-3 gutter keeps
+          the two targets misclick-safe apart on either axis, and side by side
+          it sits on both sides of the rule. */}
+      <div
+        className={cn(
+          "grid shrink-0 grid-cols-1 gap-3 border-t p-2",
+          footerAction && "sm:grid-cols-[1fr_auto_1fr]",
+        )}
+      >
+        <FooterButton
+          title="Add a new project…"
+          icon={FolderPlus}
+          onSelect={openAddProject}
+        />
+        {footerAction ? (
+          <>
+            <div
+              data-slot="footer-divider"
+              aria-hidden="true"
+              className="hidden w-px self-stretch bg-border sm:block"
+            />
+            <FooterButton {...footerAction} />
+          </>
+        ) : null}
       </div>
     </>
+  )
+}
+
+/** A second action beside "Add a new project…" in the list's footer. */
+export interface ProjectListFooterAction {
+  /** Trailing "…" when it opens a dialog, as every footer action so far does. */
+  title: string
+  icon: LucideIcon
+  onSelect: () => void
+}
+
+// A footer action. The height is explicit and shared, so the pair is always one
+// height whatever their labels: 36px under a fine pointer, where the only
+// neighbours are the list above (behind a border and padding) and the other
+// footer action across a 12px gutter, and the 40px floor on a phone and on any
+// coarse pointer.
+function FooterButton({ title, icon: Icon, onSelect }: ProjectListFooterAction) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className="flex h-9 min-w-0 items-center gap-2.5 rounded-md px-2 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground max-md:h-10 pointer-coarse:h-10"
+    >
+      <Icon className="size-4 shrink-0" />
+      <span className="min-w-0 truncate">{title}</span>
+    </button>
   )
 }
 

@@ -16,6 +16,7 @@ import {
   orderProjectsByRecency,
   projectAgentCounts,
 } from "@/lib/projectOrder"
+import { STANDALONE_AGENT_CREATION } from "@/lib/creationMenus"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 
 // The New-agent picker: the home for agent creation and every project action,
@@ -158,6 +159,22 @@ function PickerBody() {
       // New agent… and New terminal take the user somewhere else, so the
       // picker closes first rather than staying open over where they land.
       menu={(id) => <ProjectMenuItems id={id} onLeave={closeNewAgentPicker} />}
+      // A standalone agent needs no project, so the plain intent offers it as
+      // the other way out of "which project?". The from-PR and from-worktree
+      // intents are about a project's own branches and do not. It opens a
+      // different dialog, so the picker closes first.
+      footerAction={
+        intent === "new"
+          ? {
+              title: "Add standalone agent…",
+              icon: STANDALONE_AGENT_CREATION.icon,
+              onSelect: () => {
+                closeNewAgentPicker()
+                STANDALONE_AGENT_CREATION.run()
+              },
+            }
+          : undefined
+      }
     />
   )
 }

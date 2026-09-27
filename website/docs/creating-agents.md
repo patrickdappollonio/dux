@@ -461,7 +461,9 @@ agent would name, and the changes panel says why it has nothing to show.
 
 ![The terminal UI with a standalone agent selected: its row carries a star over the folder path, and the changes panel says the folder has no git repository.](/screens/tui-standalone-star.png)
 
-In the browser, the launcher's `⋯` menu and **New standalone agent…**. In the terminal
+In the browser there are two ways in: the launcher's `⋯` menu and **New standalone
+agent…**, and **Add standalone agent…** at the bottom of the New agent project list, for
+when you went looking for a project and none fits. In the terminal
 UI there are three ways in: a key anywhere in the agents pane, a key inside the "New
 agent in project" chooser too (so you can change your mind once you are already there and
 no project fits), and the `new-standalone-agent` palette command. The `?` help overlay

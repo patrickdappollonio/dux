@@ -62,6 +62,15 @@ export type CreationMenuItem = CreationMenuAction | CreationMenuSeparator
  *  menu stays constant so its rows never move under the cursor. */
 export const NEW_AGENT_PLAIN_ID = "new-agent-plain"
 
+/** What starting a standalone agent is: its icon and the store action that
+ *  opens its folder picker. The "New standalone agent…" item and the New agent
+ *  picker's footer both read it, so the second door cannot grow a second flow
+ *  or a different glyph. */
+export const STANDALONE_AGENT_CREATION = {
+  icon: FolderOpen,
+  run: () => openStandaloneAgentPicker(),
+} as const satisfies { icon: LucideIcon; run: () => void }
+
 /**
  * The "New" menu, in the sidebar's order: the agent-creation variants, then a
  * rule, then the standalone terminal.
@@ -111,8 +120,7 @@ export function newMenuItems(ctx: {
       kind: "item",
       id: "new-standalone-agent",
       title: "New standalone agent…",
-      icon: FolderOpen,
-      run: () => openStandaloneAgentPicker(),
+      ...STANDALONE_AGENT_CREATION,
     },
     { kind: "separator", id: "sep-new-terminals" },
     {

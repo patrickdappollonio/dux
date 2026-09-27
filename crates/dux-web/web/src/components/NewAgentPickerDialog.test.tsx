@@ -14,6 +14,7 @@ const openCreateAgentFromPr = vi.fn()
 const openAttachWorktree = vi.fn()
 const openAddProject = vi.fn()
 const closeNewAgentPicker = vi.fn()
+const openStandaloneAgentPicker = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -24,6 +25,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
     openAttachWorktree: (...args: unknown[]) => openAttachWorktree(...args),
     openAddProject: (...args: unknown[]) => openAddProject(...args),
     closeNewAgentPicker: (...args: unknown[]) => closeNewAgentPicker(...args),
+    openStandaloneAgentPicker: (...args: unknown[]) =>
+      openStandaloneAgentPicker(...args),
   }
 })
 
@@ -398,5 +401,118 @@ describe("NewAgentPickerDialog", () => {
       b.textContent!.includes("Add a new project"),
     )
     expect(footerButton!.parentElement!.className).toContain("shrink-0")
+  })
+
+  // The footer's second door: a standalone agent needs no project, so the
+  // plain new-agent picker offers it beside Add a new project. The flows that
+  // are about a project (from a PR, from a worktree) do not.
+  describe("the footer", () => {
+    function footerButtons(): HTMLButtonElement[] {
+      const add = screen.getByRole("button", { name: "Add a new project…" })
+      return [...add.parentElement!.querySelectorAll("button")]
+    }
+
+    it("offers Add a new project and Add standalone agent in the new intent", () => {
+      seed("new")
+      render(<NewAgentPickerDialog />)
+      expect(footerButtons().map((b) => b.textContent)).toEqual([
+        "Add a new project…",
+        "Add standalone agent…",
+      ])
+    })
+
+    it.each(["from_pr", "from_worktree"] as const)(
+      "offers only Add a new project in the %s intent",
+      (intent) => {
+        seed(intent)
+        render(<NewAgentPickerDialog />)
+        expect(
+          screen.queryByRole("button", { name: "Add standalone agent…" }),
+        ).toBeNull()
+        expect(footerButtons().map((b) => b.textContent)).toEqual([
+          "Add a new project…",
+        ])
+      },
+    )
+
+    it("closes the picker before opening the standalone agent flow", () => {
+      seed("new")
+      render(<NewAgentPickerDialog />)
+      fireEvent.click(
+        screen.getByRole("button", { name: "Add standalone agent…" }),
+      )
+      expect(closeNewAgentPicker).toHaveBeenCalledTimes(1)
+      expect(openStandaloneAgentPicker).toHaveBeenCalledTimes(1)
+      expect(closeNewAgentPicker.mock.invocationCallOrder[0]).toBeLessThan(
+        openStandaloneAgentPicker.mock.invocationCallOrder[0],
+      )
+      expect(openAddProject).not.toHaveBeenCalled()
+    })
+
+    it("gives both actions a leading icon", () => {
+      seed("new")
+      render(<NewAgentPickerDialog />)
+      for (const button of footerButtons()) {
+        expect(button.firstElementChild?.tagName.toLowerCase()).toBe("svg")
+      }
+    })
+
+    it("sizes both actions from one explicit height token with the touch floor", () => {
+      seed("new")
+      render(<NewAgentPickerDialog />)
+      const heights = footerButtons().map((b) =>
+        b.className
+          .split(" ")
+          .filter((c) => /(^|:)h-\d+$/.test(c))
+          .sort()
+          .join(" "),
+      )
+      expect(heights[0]).not.toBe("")
+      expect(heights[1]).toBe(heights[0])
+      // 40px on a phone and on any coarse pointer.
+      expect(heights[0]).toContain("max-md:h-10")
+      expect(heights[0]).toContain("pointer-coarse:h-10")
+    })
+
+    it("stacks the actions on a narrow screen and sets them side by side above it", () => {
+      seed("new")
+      render(<NewAgentPickerDialog />)
+      const row = footerButtons()[0].parentElement!
+      expect(row.className).toContain("grid-cols-1")
+      // Side by side: two equal columns with the divider's own column between.
+      expect(row.className).toContain("sm:grid-cols-[1fr_auto_1fr]")
+    })
+
+    // jsdom cannot lay out, so the two layouts are pinned by their responsive
+    // classes: the divider takes no box while stacked and appears from sm up.
+    it("divides the actions with a thin rule side by side and none when stacked", () => {
+      seed("new")
+      render(<NewAgentPickerDialog />)
+      const row = footerButtons()[0].parentElement!
+      const dividers = row.querySelectorAll('[data-slot="footer-divider"]')
+      expect(dividers).toHaveLength(1)
+      const divider = dividers[0] as HTMLElement
+      // Between the two actions, decorative, and never a click target.
+      expect(divider.previousElementSibling).toBe(footerButtons()[0])
+      expect(divider.nextElementSibling).toBe(footerButtons()[1])
+      expect(divider.getAttribute("aria-hidden")).toBe("true")
+      expect(divider.tagName.toLowerCase()).not.toBe("button")
+      // Stacked: display none, so no horizontal rule and no extra row gap.
+      expect(divider.classList.contains("hidden")).toBe(true)
+      // Side by side: a 1px vertical rule in the theme's border token.
+      expect(divider.classList.contains("sm:block")).toBe(true)
+      expect(divider.classList.contains("w-px")).toBe(true)
+      expect(divider.classList.contains("self-stretch")).toBe(true)
+      expect(divider.classList.contains("bg-border")).toBe(true)
+      expect(divider.className).not.toMatch(/(^|\s)(h-px|border-t|border-b)(\s|$)/)
+      // The row's gap sits on both sides of the rule.
+      expect(row.classList.contains("gap-3")).toBe(true)
+    })
+
+    it("draws no divider when the footer has a single action", () => {
+      seed("from_pr")
+      render(<NewAgentPickerDialog />)
+      expect(document.querySelector('[data-slot="footer-divider"]')).toBeNull()
+    })
   })
 })

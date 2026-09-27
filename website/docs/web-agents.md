@@ -48,6 +48,12 @@ a folder you already have), **Terminals** (a standalone shell) and **Projects**.
 door when you have not picked a project yet; it is the only place the reference-first flow
 lives. The Agents header above the list carries a **+** too.
 
+A plain new agent starts by asking which project it belongs to. If the answer is "none",
+the bottom of that project list has two ways out: **Add a new project…**, and **Add
+standalone agent…**, which swaps the list for the folder picker a
+[standalone agent](/docs/creating-agents#running-an-agent-in-a-folder-you-already-have)
+starts from.
+
 ### Starting from a pull request, with no project
 
 Pick **New agent from PR…** from that `⋯` segment and the dialog opens with the reference

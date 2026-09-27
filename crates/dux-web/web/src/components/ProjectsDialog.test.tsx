@@ -202,6 +202,16 @@ afterEach(() => {
 })
 
 describe("ProjectsDialog", () => {
+  // Standalone agents belong to no project, so the Projects list is not where
+  // one is created: only the New agent picker offers that door.
+  it("offers only Add a new project in its footer", () => {
+    openList()
+    expect(screen.getByRole("button", { name: "Add a new project…" })).toBeTruthy()
+    expect(
+      screen.queryByRole("button", { name: "Add standalone agent…" }),
+    ).toBeNull()
+  })
+
   it("lists an agent-less project and an orphaned group beside the rest", () => {
     openList()
     expect(screen.getByRole("heading", { name: "Projects" })).toBeTruthy()
