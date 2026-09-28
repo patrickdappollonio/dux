@@ -21,6 +21,7 @@ import {
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { openAddProject } from "@/lib/store"
+import { FOCUS_RING } from "@/lib/focusRing"
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
 
@@ -176,12 +177,19 @@ export interface ProjectListFooterAction {
 // neighbours are the list above (behind a border and padding) and the other
 // footer action across a 12px gutter, and the 40px floor on a phone and on any
 // coarse pointer.
+// It is not a `Button` (its label is left-aligned, muted and regular weight), so
+// it borrows that Button's keyboard focus ring; the transparent 1px border is
+// what the ring's border half colours, and px-[7px] keeps the content where px-2
+// had it.
 function FooterButton({ title, icon: Icon, onSelect }: ProjectListFooterAction) {
   return (
     <button
       type="button"
       onClick={onSelect}
-      className="flex h-9 min-w-0 items-center gap-2.5 rounded-md px-2 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground max-md:h-10 pointer-coarse:h-10"
+      className={cn(
+        "flex h-9 min-w-0 items-center gap-2.5 rounded-md border border-transparent px-[7px] text-left text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground max-md:h-10 pointer-coarse:h-10",
+        FOCUS_RING,
+      )}
     >
       <Icon className="size-4 shrink-0" />
       <span className="min-w-0 truncate">{title}</span>
@@ -235,7 +243,13 @@ function ProjectRow({
         // A second press while the menu is open closes it rather than closing
         // and reopening it.
         onClick={() => (onPick ? onPick(row.id) : setMenuOpen(!menuOpen))}
-        className="flex min-w-0 flex-1 items-center gap-2.5 py-2 text-left"
+        // The shared Button's focus ring, so a keyboard user can see which
+        // project Enter would pick. The row's own px-2 and the list's p-2 leave
+        // the ring room on every side.
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-2.5 rounded-md border border-transparent py-2 text-left",
+          FOCUS_RING,
+        )}
       >
         <Folder className="mt-0.5 size-4 shrink-0 self-start text-muted-foreground" />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -267,10 +281,12 @@ function ProjectRow({
             no width while idle. Every revealed cap is max-w-10, the trigger's
             40px coarse-pointer size: these md: caps outrank the unprefixed
             pointer-coarse:max-w-none, so a narrower cap would clip a focused or
-            open trigger to 32px on a tablet at desktop width. */}
+            open trigger to 32px on a tablet at desktop width. The clip the
+            width animation needs would also shear the trigger's focus ring,
+            so the wrapper lets it out while the trigger has keyboard focus. */}
         <div
           className={cn(
-            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/project-row:max-w-10 md:group-hover/project-row:opacity-100 md:group-focus-within/project-row:max-w-10 md:group-focus-within/project-row:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100",
+            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/project-row:max-w-10 md:group-hover/project-row:opacity-100 md:group-focus-within/project-row:max-w-10 md:group-focus-within/project-row:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 has-[:focus-visible]:overflow-visible",
             ALWAYS_REVEALED_ON_TOUCH,
           )}
         >

@@ -1473,9 +1473,9 @@ describe("FlatAgentList row actions on a coarse pointer", () => {
       expect(cls).toContain("md:opacity-0")
       // Revealed by hover, by keyboard focus anywhere in the row, and held
       // open while the menu itself is open.
-      expect(cls).toContain(`md:group-hover/${group}:max-w-8`)
-      expect(cls).toContain(`md:group-focus-within/${group}:max-w-8`)
-      expect(cls).toContain("md:has-[[data-popup-open]]:max-w-8")
+      expect(cls).toContain(`md:group-hover/${group}:max-w-10`)
+      expect(cls).toContain(`md:group-focus-within/${group}:max-w-10`)
+      expect(cls).toContain("md:has-[[data-popup-open]]:max-w-10")
     }
   })
 
@@ -1489,6 +1489,71 @@ describe("FlatAgentList row actions on a coarse pointer", () => {
       const cls = wrapperOf(label).className
       expect(cls).toContain("max-md:max-w-none")
       expect(cls).toContain("shrink-0")
+    }
+  })
+})
+
+// The row ⋯ trigger's keyboard focus ring. jsdom cannot lay out or evaluate a
+// media query, so what is pinned is the classes that decide the geometry: the
+// ring is drawn by the square trigger itself (the shared Button's ring), the
+// reveal wrapper that clips for its width animation lets that ring out while
+// the trigger holds keyboard focus instead of shearing its sides off, and no
+// revealed width cap is narrower than the 40px coarse-pointer trigger.
+describe("FlatAgentList row ⋯ focus ring", () => {
+  const labels = ["Session actions", "Terminal actions"] as const
+
+  function parts(label: string) {
+    const trigger = screen.getAllByLabelText(label)[0]
+    const wrapper = trigger.parentElement
+    if (!wrapper) throw new Error(`no wrapper for ${label}`)
+    return { trigger, wrapper }
+  }
+
+  it("draws the ring on the trigger, never on its wrapper", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    for (const label of labels) {
+      const { trigger, wrapper } = parts(label)
+      expect(trigger.className).toContain("focus-visible:ring-3")
+      expect(trigger.className).toContain("focus-visible:ring-ring/50")
+      expect(wrapper.className).not.toMatch(/ring/)
+    }
+  })
+
+  it("keeps the trigger square at every size, the coarse pointer's included", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    for (const label of labels) {
+      const cls = parts(label).trigger.className.split(/\s+/)
+      // Width and height only ever move together.
+      expect(cls.filter((c) => /(^|:)(w|h|min-w|max-w|flex|basis)-/.test(c))).toEqual([])
+      expect(cls).not.toContain("flex-1")
+      expect(cls).not.toContain("grow")
+      expect(cls).toContain("shrink-0")
+      expect(cls).toContain("max-md:size-10")
+      expect(cls).toContain("pointer-coarse:size-10")
+    }
+  })
+
+  it("lets the ring out of the clipping wrapper while the trigger has keyboard focus", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    for (const label of labels) {
+      const cls = parts(label).wrapper.className
+      expect(cls).toContain("overflow-hidden")
+      expect(cls).toContain("has-[:focus-visible]:overflow-visible")
+    }
+  })
+
+  it("caps no revealed width below the 40px coarse-pointer trigger", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    for (const label of labels) {
+      const caps = parts(label)
+        .wrapper.className.split(/\s+/)
+        .map((c) => /(?:^|:)max-w-(\d+)$/.exec(c))
+        .filter((m): m is RegExpExecArray => m !== null)
+        .map((m) => Number(m[1]))
+        // max-w-0 is the idle state, which reveals nothing.
+        .filter((n) => n !== 0)
+      expect(caps.length).toBeGreaterThan(0)
+      for (const cap of caps) expect(cap).toBeGreaterThanOrEqual(10)
     }
   })
 })

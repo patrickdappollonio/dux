@@ -509,10 +509,51 @@ describe("NewAgentPickerDialog", () => {
       expect(row.classList.contains("gap-3")).toBe(true)
     })
 
+    // jsdom cannot paint a focus ring, so the shared Button's ring classes are
+    // what is pinned: a keyboard user tabbing to either action sees where they are.
+    it("rings both actions under keyboard focus the way the shared Button does", () => {
+      seed("new")
+      render(<NewAgentPickerDialog />)
+      for (const button of footerButtons()) {
+        expect(button.className).toContain("outline-none")
+        expect(button.className).toContain("focus-visible:ring-3")
+        expect(button.className).toContain("focus-visible:ring-ring/50")
+        expect(button.className).toContain("focus-visible:border-ring")
+      }
+    })
+
     it("draws no divider when the footer has a single action", () => {
       seed("from_pr")
       render(<NewAgentPickerDialog />)
       expect(document.querySelector('[data-slot="footer-divider"]')).toBeNull()
+    })
+  })
+
+  // The project rows and their ⋯, under keyboard focus. Classes, because jsdom
+  // cannot lay out or paint.
+  describe("the rows' focus rings", () => {
+    it("rings each row's own button the way the shared Button does", () => {
+      seed("new")
+      render(<NewAgentPickerDialog />)
+      const rows = screen.getAllByTestId("project-row")
+      expect(rows.length).toBeGreaterThan(0)
+      for (const row of rows) {
+        const button = row.querySelector(":scope > button")!
+        expect(button.className).toContain("outline-none")
+        expect(button.className).toContain("focus-visible:ring-3")
+        expect(button.className).toContain("focus-visible:ring-ring/50")
+      }
+    })
+
+    it("lets the ⋯ ring out of its clipping reveal wrapper under keyboard focus", () => {
+      seed("new")
+      render(<NewAgentPickerDialog />)
+      for (const trigger of screen.getAllByLabelText("Project actions")) {
+        expect(trigger.className).toContain("focus-visible:ring-3")
+        const wrapper = trigger.parentElement!
+        expect(wrapper.className).not.toMatch(/ring/)
+        expect(wrapper.className).toContain("has-[:focus-visible]:overflow-visible")
+      }
     })
   })
 })
