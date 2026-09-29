@@ -969,6 +969,12 @@ pub(crate) struct ChangesTreeState {
     pub(crate) pending_ops: Vec<PendingFolderOp>,
     /// Stamped into every listing request so a superseded answer is dropped.
     pub(crate) listing_seq: u64,
+    /// The agent whose changed-files lists the engine holds right now, or
+    /// `None` while an agent switch has emptied them and the new read has not
+    /// landed. Expanded folders are only reconciled against lists that are
+    /// really that agent's: empty lists mid-switch would read as "every folder
+    /// is gone" and forget what the user had expanded.
+    pub(crate) lists_for: Option<String>,
 }
 
 /// One agent's expanded folders, per half of the changes pane, keyed by the
@@ -6278,6 +6284,10 @@ impl App {
             self.engine.staged_files = staged;
             self.engine.unstaged_files = unstaged;
         }
+        if focus_change {
+            // The lists are empty until the new agent's read lands.
+            self.changes_tree.lists_for = None;
+        }
         if let Some(path) = worktree {
             if focus_change {
                 // The pane is empty until the answer lands, so say what it is
@@ -6341,6 +6351,7 @@ impl App {
         let name = self.session_label(session);
         // The cheap half: point the watch at the session and empty the lists. No
         // git runs here.
+        self.changes_tree.lists_for = None;
         let Some(worktree) = self.engine.set_watched_session(Some(&session_id)) else {
             // Reachable only for a standalone agent whose folder is not a
             // working repository, so the reason is the FOLDER's, read from the

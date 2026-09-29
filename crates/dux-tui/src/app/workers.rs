@@ -345,6 +345,7 @@ impl App {
             let metadata = DrainedEventMetadata::capture(&event);
             self.disarm_tui_launch_for_failed_event(&event);
             let reaction = self.engine.process_worker_event(event);
+            self.note_changed_files_owner(&metadata);
             let chains_forward = matches!(
                 reaction,
                 EventReaction::DispatchProjectDefaultBranchCheckout { .. }
@@ -353,6 +354,28 @@ impl App {
             self.notify_companion(&reaction);
             self.apply_routed_reaction(reaction, &routing);
             self.apply_drained_event_metadata(metadata, chains_forward);
+        }
+    }
+
+    /// A successful changed-files read for the worktree still watched is what
+    /// the engine just applied, so the lists now belong to the watched agent.
+    /// Recorded before the reaction runs, because that reaction is what
+    /// reconciles the expanded folders against those lists.
+    fn note_changed_files_owner(&mut self, metadata: &DrainedEventMetadata) {
+        let Some(answer) = &metadata.changed_files_answer else {
+            return;
+        };
+        if answer.error.is_some() {
+            return;
+        }
+        let watched = self
+            .engine
+            .watched_worktree
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        if watched.as_deref() == Some(answer.worktree.as_path()) {
+            self.changes_tree.lists_for = self.engine.watched_session_id.clone();
         }
     }
 

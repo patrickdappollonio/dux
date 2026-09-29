@@ -315,6 +315,9 @@ impl App {
     /// Fold every finished folder listing and folder operation into the pane.
     /// Called once per run-loop tick with the other drains.
     pub(crate) fn drain_changes_tree_work(&mut self) {
+        // The row under the cursor, by path: a listing that lands can add or
+        // remove rows above it, and the cursor follows the row, not its index.
+        let anchor = self.selected_changed_file().map(|file| file.path.clone());
         let listed = self.drain_folder_listings();
         let operated = self.drain_folder_ops();
         if listed || operated {
@@ -322,6 +325,14 @@ impl App {
         }
         if listed {
             self.reconcile_changes_tree();
+            if let Some(path) = anchor
+                && let Some(index) = self
+                    .changes_rows(self.right_section)
+                    .iter()
+                    .position(|row| row.file().is_some_and(|file| file.path == path))
+            {
+                self.files_index = index;
+            }
             self.clamp_files_cursor();
         }
     }
@@ -416,6 +427,9 @@ impl App {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             return;
         };
+        if self.changes_tree.lists_for.as_deref() != Some(session_id.as_str()) {
+            return;
+        }
         let Some(tree) = self.changes_tree.by_session.get(&session_id) else {
             return;
         };
@@ -720,6 +734,7 @@ mod tests {
         let (staged, unstaged) = git::changed_files(worktree).expect("changed files");
         app.engine.staged_files = staged;
         app.engine.unstaged_files = unstaged;
+        app.changes_tree.lists_for = app.selected_session().map(|s| s.id.clone());
         app.reconcile_changes_tree();
         app.clamp_files_cursor();
     }
@@ -1194,6 +1209,64 @@ mod tests {
             .find_map(|row| row.file().filter(|f| f.path == "node_modules/top.js"))
             .map(|f| f.additions);
         assert_eq!(top, Some(3), "the edited file's line count is current");
+    }
+
+    /// Switching agents empties the lists until the new agent's read lands. A
+    /// reconcile against those empty lists would take them for "every folder
+    /// is gone" and forget what the user had expanded.
+    #[test]
+    fn an_agent_switch_does_not_forget_expanded_folders() {
+        let (mut app, worktree) = repo_app();
+        app.handle_key(enter()).unwrap();
+        settle(&mut app, idle);
+
+        app.selected_left = 0;
+        app.reload_changed_files();
+        app.selected_left = 1;
+        app.reload_changed_files();
+        assert!(
+            app.engine.unstaged_files.is_empty(),
+            "the switch emptied the lists"
+        );
+        app.reconcile_changes_tree();
+
+        assert!(
+            app.changes_tree.by_session["session-1"].expanded[&ChangesSide::Unstaged]
+                .contains_key("node_modules"),
+            "the expansion survives the empty lists"
+        );
+        load_lists(&mut app, &worktree);
+        assert_eq!(
+            describe(&app, RightSection::Unstaged)[0],
+            "v node_modules/ 13"
+        );
+    }
+
+    /// A quiet re-list can put rows above the cursor; the cursor stays on the
+    /// row it was on rather than on the same row number.
+    #[test]
+    fn a_quiet_re_list_keeps_the_cursor_on_the_same_row() {
+        let (mut app, worktree) = repo_app();
+        app.handle_key(enter()).unwrap();
+        settle(&mut app, idle);
+        app.files_index = app.current_files_len() - 1;
+        assert_eq!(
+            app.selected_changed_file()
+                .map(|f| f.path.clone())
+                .as_deref(),
+            Some("notes.md")
+        );
+
+        std::fs::write(worktree.join("node_modules/aaa.js"), "new\n").unwrap();
+        load_lists(&mut app, &worktree);
+        settle(&mut app, idle);
+
+        assert_eq!(
+            app.selected_changed_file()
+                .map(|f| f.path.clone())
+                .as_deref(),
+            Some("notes.md")
+        );
     }
 
     #[test]
