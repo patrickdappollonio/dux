@@ -46,7 +46,6 @@ export class ChangesFetchAborted extends Error {
   }
 }
 
-
 // `signal` lets the caller abandon the request; it rejects with
 // `ChangesFetchAborted`. The request's own deadline, `[server]
 // changes_request_timeout_seconds` read when the request starts, rejects with a
