@@ -124,6 +124,7 @@ import type { NewEntryTarget } from "@/components/NewEntryDialog"
 import { RenameEntryDialog } from "@/components/RenameEntryDialog"
 import type { RenameEntryTarget } from "@/components/RenameEntryDialog"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { StartTruncatedText } from "@/components/StartTruncatedText"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -1380,11 +1381,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           </Button>
         </SimpleTooltip>
         <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
-        {/* <bdi> LTR isolate: keeps a leading bidi-neutral char in a dotfile
-            path (".github/...") from being reordered to the end by direction:rtl. */}
-        <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
-          <bdi dir="ltr">{openPath ?? "Select a file"}</bdi>
-        </span>
+        <StartTruncatedText
+          text={openPath ?? "Select a file"}
+          className="flex-1 font-mono text-sm"
+        />
         {renderStatusIndicators()}
         {renderDesktopViewActions()}
         {renderLocalEditorAction()}
@@ -1534,12 +1534,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                             {changedMap.has(p) && (
                               <FileStatusIcon status={changedMap.get(p)!} />
                             )}
-                            {/* Full path → start-ellipsize so the filename stays visible.
-                                <bdi> LTR isolate keeps a leading "." (dotfile path) from
-                                being reordered to the end by direction:rtl. */}
-                            <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
-                              <bdi dir="ltr">{p}</bdi>
-                            </span>
+                            {/* The full path, giving way at its start so the
+                                filename stays visible. */}
+                            <StartTruncatedText
+                              text={p}
+                              className="flex-1 font-mono text-sm"
+                            />
                           </button>
                         ))}
                         {searchTruncated && (

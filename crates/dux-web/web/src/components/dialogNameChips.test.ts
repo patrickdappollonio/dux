@@ -87,11 +87,6 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     reason: "A release number in the heading's badge: a version, not a name in a sentence.",
   },
   {
-    file: "components/ProjectsDialog.tsx",
-    line: '<span className="min-w-0 truncate font-mono">{project.path}</span>',
-    reason: "A project row's folder on its second line: part of the row, not a name in a sentence.",
-  },
-  {
     file: "components/ChangeBaseBranchDialog.tsx",
     line: '<span className="min-w-0 flex-1 truncate font-mono text-sm">',
     reason: "A branch row that is only its branch: a list row, out of the chip rule's scope.",
@@ -123,12 +118,6 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
   },
   // The files below are scanned because they build toast prose, not because
   // they are dialogs; each line is something other than a name in a sentence.
-  {
-    file: "components/EditorBody.tsx",
-    line: '<span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">',
-    reason:
-      "The editor header's open path and a search result row: a path that is the whole element, not a name in a sentence.",
-  },
   {
     file: "components/EditorBody.tsx",
     line: '<span className="max-w-full shrink-0 truncate font-mono text-xs text-muted-foreground">',

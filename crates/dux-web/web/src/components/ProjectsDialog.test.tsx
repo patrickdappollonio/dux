@@ -424,4 +424,20 @@ describe("ProjectsDialog", () => {
     openList()
     expect(row("acme").textContent).toContain("Folder missing")
   })
+
+  // A long folder path keeps its end, which is the part that tells two
+  // projects apart: it ellipsizes at the start through the shared component,
+  // and the shared tooltip carries the whole path. jsdom cannot lay out, so
+  // the structure is pinned; the pixel truth is the screenshot pass.
+  it("ellipsizes a project's folder at the start, with the whole path on hover", () => {
+    const long = "/home/patrick/Golang/src/github.com/patrickdappollonio/dux"
+    seedSpine([project("p1", "dux", { path: long })], [])
+    openList()
+    const path = within(row("dux")).getByText(long)
+    expect(path.tagName).toBe("BDI")
+    const box = path.parentElement!
+    expect(box.getAttribute("data-truncate")).toBe("start")
+    expect(box.className).toContain("font-mono")
+    expect(box.getAttribute("data-slot")).toBe("tooltip-trigger")
+  })
 })

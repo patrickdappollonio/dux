@@ -26,6 +26,7 @@ import { git } from "@/lib/git"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -255,13 +256,11 @@ function FileRow({
       {/* Path and counts share one baseline container: their line boxes differ,
         * so under the row's items-center the digits read as superscript. */}
       <div className="flex min-w-0 flex-1 items-baseline gap-2">
-        {/* Long paths ellipsize at the start (direction:rtl) so the filename
-          * stays visible, with text-left keeping short paths left-aligned. The
-          * path is a <bdi> LTR isolate, or the rtl container reorders a dotfile
-          * path's leading "." onto the end of the filename. */}
-        <span className="min-w-0 flex-1 truncate text-left font-mono text-sm text-foreground [direction:rtl]">
-          <bdi dir="ltr">{file.path}</bdi>
-        </span>
+        {/* Long paths ellipsize at the start so the filename stays visible. */}
+        <StartTruncatedText
+          text={file.path}
+          className="flex-1 font-mono text-sm text-foreground"
+        />
 
         {/* A file the repository excludes from diffs has no counts to show,
           * and saying nothing there would read as "changed nothing". It is not

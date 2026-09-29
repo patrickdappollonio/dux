@@ -3,6 +3,7 @@ import { useMemo, useState } from "react"
 
 import { ProjectList, type ProjectListRow } from "@/components/ProjectList"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
+import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import {
@@ -101,7 +102,9 @@ function ProjectsBody() {
       label,
       detail: (
         <DetailLine>
-          <span className="min-w-0 truncate font-mono">{project.path}</span>
+          {/* The folder's tail is what tells two projects apart, so the path
+              gives way at its start and the hover says all of it. */}
+          <StartTruncatedText text={project.path} className="font-mono" tooltip />
           {project.path_missing ? <Warning>Folder missing</Warning> : null}
           <span className="flex shrink-0 items-center gap-1">
             <GitBranch className="size-3 shrink-0" />
