@@ -9,11 +9,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { fileStatusMeta } from "@/lib/changedFiles"
+import { changedFileCount, countWords, fileStatusMeta } from "@/lib/changedFiles"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import type { ChangedFileView } from "@/lib/types"
 
 const NO_TARGETS: ChangedFileView[] = []
+const EMPTY_SUMMARY = {
+  untracked: 0,
+  tracked: 0,
+  repositories: 0,
+  folders: 0,
+  nestedInside: 0,
+}
 
 interface Props {
   open: boolean
@@ -41,37 +48,78 @@ export function ConfirmDiscardFilesDialog({
   // files, so the intersection is recomputed only when the selection or the
   // list moves, never on a render that changed neither. An empty selection,
   // the usual state, never walks the list at all.
-  const { targets, untracked } = useMemo(() => {
-    if (paths.length === 0) return { targets: NO_TARGETS, untracked: 0 }
+  const summary = useMemo(() => {
+    if (paths.length === 0) return { ...EMPTY_SUMMARY, targets: NO_TARGETS }
     const checked = new Set(paths)
     const targets = unstaged.filter((f) => checked.has(f.path))
-    const untracked = targets.filter(
-      (f) => fileStatusMeta(f.status).kind === "untracked",
-    ).length
-    return { targets, untracked }
+    // A folded folder counts the files inside it; a repository of its own is
+    // counted apart, because it goes with its history.
+    let untracked = 0
+    let tracked = 0
+    let repositories = 0
+    let folders = 0
+    let nestedInside = 0
+    for (const f of targets) {
+      if (f.kind === "nested_repository") {
+        repositories += 1
+      } else if (fileStatusMeta(f.status).kind === "untracked") {
+        untracked += changedFileCount(f)
+        if (f.kind === "directory") {
+          folders += 1
+          nestedInside += f.nested_repositories ?? 0
+        }
+      } else {
+        tracked += changedFileCount(f)
+      }
+    }
+    return { targets, untracked, tracked, repositories, folders, nestedInside }
   }, [paths, unstaged])
+  const { targets, untracked, tracked, repositories, folders, nestedInside } = summary
   // Closes itself once every checked path has left the unstaged list, rather
   // than lingering with copy about files that are no longer there.
   const isOpen = useVanishedTargetGuard(open, targets.length > 0, onCancel)
 
-  const tracked = targets.length - untracked
-  const deleted = `${formatRegularCount(untracked, "untracked file")} will be permanently DELETED from disk`
-  const restored = `${formatRegularCount(tracked, "tracked file")} will be restored to ${
+  const deleted = `${countWords(untracked, "untracked file", "untracked files")} will be permanently DELETED from disk`
+  const restored = `${countWords(tracked, "tracked file", "tracked files")} will be restored to ${
     tracked === 1 ? "its" : "their"
   } last committed state`
-  const body =
-    untracked > 0 && tracked > 0
-      ? `${deleted}, and ${restored}. This action cannot be undone.`
-      : untracked > 0
-        ? `${deleted}. This action cannot be undone.`
-        : `${restored}. This action cannot be undone.`
+  const outcomes = [
+    untracked > 0 ? deleted : null,
+    tracked > 0 ? restored : null,
+  ].filter((part): part is string => part !== null)
+  const sentences: string[] = []
+  if (outcomes.length > 0) sentences.push(`${outcomes.join(", and ")}.`)
+  if (repositories > 0) {
+    sentences.push(
+      `${countWords(repositories, "repository of its own", "repositories of their own")} will be deleted whole, including ${
+        repositories === 1 ? "its" : "their"
+      } history and any commits not pushed anywhere else.`,
+    )
+  }
+  if (folders > 0) {
+    sentences.push("Files the repository ignores inside the folders are kept.")
+    if (nestedInside > 0) {
+      sentences.push(
+        `The ${countWords(nestedInside, "nested repository", "nested repositories")} inside them ${
+          nestedInside === 1 ? "is" : "are"
+        } kept.`,
+      )
+    }
+  }
+  sentences.push("This action cannot be undone.")
+  const body = sentences.join(" ")
 
   return (
     <Dialog open={isOpen} onOpenChange={(next) => !next && onCancel()}>
       <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
           <DialogTitle>
-            Discard changes to {formatRegularCount(targets.length, "file")}?
+            Discard changes to{" "}
+            {formatRegularCount(
+              targets.reduce((sum, f) => sum + changedFileCount(f), 0),
+              "file",
+            )}
+            ?
           </DialogTitle>
         </DialogHeader>
         <p className="text-sm text-destructive">{body}</p>

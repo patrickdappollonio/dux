@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { countWords } from "@/lib/changedFiles"
 import { closeDiscard, discardFile, useDux } from "@/lib/store"
 
 // Confirmation before discarding an unstaged file's changes, which cannot be
@@ -30,6 +31,12 @@ export function ConfirmDiscardFileDialog() {
   )
   const path = discardTarget?.path ?? ""
   const untracked = discardTarget?.untracked ?? false
+  // A folded folder is deleted whole and a repository of its own with its
+  // history, so the wording comes from the live row, not from the target.
+  const row = stillUnstaged
+    ? changes.unstaged.find((f) => f.path === discardTarget.path)
+    : undefined
+  const kind = row?.kind
 
   function handleConfirm() {
     if (!discardTarget) return
@@ -46,11 +53,48 @@ export function ConfirmDiscardFileDialog() {
       <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
           <DialogTitle>
-            Discard changes to <InlineCode>{path}</InlineCode>?
+            {kind === "directory" ? (
+              <>
+                Delete the untracked folder <InlineCode>{`${path}/`}</InlineCode>?
+              </>
+            ) : kind === "nested_repository" ? (
+              <>
+                Delete <InlineCode>{`${path}/`}</InlineCode>?
+              </>
+            ) : (
+              <>
+                Discard changes to <InlineCode>{path}</InlineCode>?
+              </>
+            )}
           </DialogTitle>
         </DialogHeader>
         <p className="text-sm text-destructive">
-          {untracked ? (
+          {kind === "directory" ? (
+            <>
+              The {countWords(row?.file_count ?? 0, "file", "files")} inside{" "}
+              <InlineCode>{`${path}/`}</InlineCode> will be permanently DELETED from disk.
+              Files the repository ignores inside it are kept.
+              {(row?.nested_repositories ?? 0) > 0 && (
+                <>
+                  {" "}
+                  The{" "}
+                  {countWords(
+                    row?.nested_repositories ?? 0,
+                    "nested repository",
+                    "nested repositories",
+                  )}{" "}
+                  inside it {row?.nested_repositories === 1 ? "is" : "are"} kept.
+                </>
+              )}{" "}
+              This action cannot be undone.
+            </>
+          ) : kind === "nested_repository" ? (
+            <>
+              <InlineCode>{`${path}/`}</InlineCode> is a repository of its own. Deleting
+              it removes the whole repository, including its history and any commits not
+              pushed anywhere else. This action cannot be undone.
+            </>
+          ) : untracked ? (
             <>
               <InlineCode>{path}</InlineCode> is untracked and will be{" "}
               permanently DELETED from disk. This action cannot be undone.
@@ -71,7 +115,7 @@ export function ConfirmDiscardFileDialog() {
             Cancel
           </Button>
           <Button variant="destructive" onClick={handleConfirm}>
-            Discard
+            {kind ? "Delete" : "Discard"}
           </Button>
         </DialogFooter>
       </DialogContent>
