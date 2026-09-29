@@ -440,4 +440,81 @@ describe("ProjectsDialog", () => {
     expect(box.className).toContain("font-mono")
     expect(box.getAttribute("data-slot")).toBe("tooltip-trigger")
   })
+
+  // The hint repeats the path, so it is worth showing only when the row has
+  // clipped it; it is measured at the gesture (jsdom lays out nothing, so the
+  // widths are stubbed on the element). Keyboard users reach it by focusing the
+  // row's own button, and the path adds no tab stop of its own.
+  describe("the folder path's hint", () => {
+    const long = "/home/patrick/Golang/src/github.com/patrickdappollonio/dux"
+
+    function pathBox(): HTMLElement {
+      return within(row("dux")).getByText(long).parentElement!
+    }
+
+    function rowButton(): HTMLElement {
+      return within(row("dux")).getAllByRole("button")[0]
+    }
+
+    function clip(box: HTMLElement, clipped: boolean) {
+      Object.defineProperty(box, "clientWidth", { configurable: true, value: 200 })
+      Object.defineProperty(box, "scrollWidth", {
+        configurable: true,
+        value: clipped ? 480 : 200,
+      })
+    }
+
+    function hintShown(): boolean {
+      return [...document.querySelectorAll("[data-slot=tooltip-content]")].some(
+        (node) => node.textContent === long,
+      )
+    }
+
+    function hover(el: HTMLElement) {
+      fireEvent.pointerEnter(el, { pointerType: "mouse" })
+      fireEvent.mouseEnter(el)
+      fireEvent.mouseMove(el)
+    }
+
+    beforeEach(() => {
+      seedSpine([project("p1", "dux", { path: long })], [])
+    })
+
+    it("adds no tab stop for the path", () => {
+      openList()
+      expect(pathBox().hasAttribute("tabindex")).toBe(false)
+    })
+
+    it("shows the whole path on hover when the row has clipped it", async () => {
+      openList()
+      clip(pathBox(), true)
+      hover(pathBox())
+      await waitFor(() => expect(hintShown()).toBe(true), { timeout: 2000 })
+    })
+
+    it("shows nothing on hover when the path fits", async () => {
+      openList()
+      clip(pathBox(), false)
+      hover(pathBox())
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      expect(hintShown()).toBe(false)
+    })
+
+    it("shows the clipped path while the row's button has keyboard focus", async () => {
+      openList()
+      clip(pathBox(), true)
+      act(() => rowButton().focus())
+      await waitFor(() => expect(hintShown()).toBe(true))
+      act(() => rowButton().blur())
+      await waitFor(() => expect(hintShown()).toBe(false))
+    })
+
+    it("shows nothing on the row's focus when the path fits", async () => {
+      openList()
+      clip(pathBox(), false)
+      act(() => rowButton().focus())
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(hintShown()).toBe(false)
+    })
+  })
 })

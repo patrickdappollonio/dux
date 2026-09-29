@@ -17,18 +17,24 @@ export function SimpleTooltip({
   children,
   side = "top",
   delay = 300,
+  open,
+  onOpenChange,
 }: {
   content: React.ReactNode
   children: React.ReactElement
   side?: React.ComponentProps<typeof TooltipContent>["side"]
   delay?: number
+  /** Controlled mode, for a caller that must veto or force the popup (a hint
+   * shown only while its text is clipped, or while an ancestor has focus). */
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
 }) {
   if (content === null || content === undefined || content === "") {
     return children
   }
   return (
     <TooltipProvider delay={delay}>
-      <Tooltip>
+      <Tooltip open={open} onOpenChange={onOpenChange}>
         <TooltipTrigger render={children} />
         <TooltipContent side={side}>{content}</TooltipContent>
       </Tooltip>

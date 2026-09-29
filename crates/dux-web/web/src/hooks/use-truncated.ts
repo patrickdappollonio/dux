@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
+/** Is this element's own text clipped right now? A sub-pixel layout can leave
+ * scrollWidth one larger than clientWidth on text that is not actually clipped,
+ * so the comparison has a 1px tolerance rather than being strict. */
+export function isTruncated(el: HTMLElement): boolean {
+  return el.scrollWidth - el.clientWidth > 1
+}
+
 // Is this element's text actually cut off by its own `truncate`? A tooltip repeating text the
 // user can already read is noise, so this is measured (`scrollWidth` against `clientWidth`)
 // and re-measured on the ref attaching, the watched value changing, and a ResizeObserver
@@ -15,9 +22,7 @@ export function useIsTruncated<T extends HTMLElement = HTMLElement>(
 
   const measure = useCallback(() => {
     const el = nodeRef.current
-    // A sub-pixel layout can leave scrollWidth one larger than clientWidth on text that is
-    // not actually clipped, so compare with a 1px tolerance rather than strictly.
-    setTruncated(el ? el.scrollWidth - el.clientWidth > 1 : false)
+    setTruncated(el ? isTruncated(el) : false)
   }, [])
 
   const ref = useCallback(
