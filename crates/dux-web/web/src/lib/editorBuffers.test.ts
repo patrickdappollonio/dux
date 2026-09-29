@@ -258,6 +258,31 @@ describe("changeSignalFor", () => {
     expect(changeSignalFor(slice(), null)).toBe("")
     expect(changeSignalFor(null, "a.ts")).toBe("")
   })
+
+  // A file inside a folded folder has no row of its own; the folder's row
+  // answers for it, so a file added or removed beside it still moves the
+  // signal.
+  it("falls back to the folded folder a file sits inside", () => {
+    const folder = (count: number) =>
+      slice({
+        unstaged: [
+          {
+            path: "node_modules",
+            status: "?",
+            additions: 0,
+            deletions: 0,
+            kind: "directory",
+            file_count: count,
+          },
+        ],
+        staged: [],
+      })
+    const before = changeSignalFor(folder(3), "node_modules/pkg/index.js")
+    const after = changeSignalFor(folder(4), "node_modules/pkg/index.js")
+    expect(before).not.toBe("")
+    expect(before).not.toBe(after)
+    expect(changeSignalFor(folder(3), "node_modules2/x.js")).toBe("")
+  })
 })
 
 // The truth table the plan review demanded, because an empty-string signal is

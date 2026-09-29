@@ -6,22 +6,41 @@
 import type { ChangesSliceView } from "@/lib/editorBuffers"
 import type { DirEntry } from "@/lib/fileTree"
 
+// Separates a folded folder's path from its file count in its key. A NUL can
+// never be part of a path git reports.
+const FOLDER_COUNT_MARK = "\u0000"
+
 // Every path git reports for the worktree, staged and unstaged alike, sorted so
 // two reads of the same slice compare equal as strings. A rename contributes
 // both of its ends: the listing it left is as stale as the one it arrived in.
+//
+// A folded folder is one row however many files are inside it, so a file added
+// inside an already-untracked folder moves no path. Its key therefore carries
+// the folder's file count too, and a moved count reads as the key leaving and
+// arriving, which `dirsToRefetch` charges to the listings inside the folder.
 export function changedPathsFrom(slice: ChangesSliceView | null): string[] {
   if (!slice) return []
   const paths = new Set<string>()
   for (const f of [...slice.unstaged, ...slice.staged]) {
-    paths.add(f.path)
+    if (f.kind) {
+      paths.add(`${f.path}/${FOLDER_COUNT_MARK}${f.file_count ?? 0}`)
+    } else {
+      paths.add(f.path)
+    }
     if (f.renamed_from) paths.add(f.renamed_from)
   }
   return [...paths].sort()
 }
 
-// The directory a changed path lives in, "" for the worktree root. Stripping a
-// trailing slash is defensive: dux reads git status with `--untracked-files=all`,
-// which reports a new folder as its files rather than as "newdir/".
+// The folder a key stands for when it is a folded folder's, else null.
+function folderOfKey(key: string): string | null {
+  const mark = key.indexOf(FOLDER_COUNT_MARK)
+  if (mark === -1) return null
+  return key.slice(0, mark).replace(/\/$/, "")
+}
+
+// The directory a changed path lives in, "" for the worktree root. A trailing
+// slash is stripped, which is how a folded folder's key names the folder.
 function parentDirOf(path: string): string {
   const trimmed = path.endsWith("/") ? path.slice(0, -1) : path
   const cut = trimmed.lastIndexOf("/")
@@ -63,8 +82,16 @@ export function dirsToRefetch(
   const dirs = new Set<string>()
   for (const path of [...previousPaths, ...nextPaths]) {
     if (before.has(path) && after.has(path)) continue
-    const dir = nearestLoadedDir(parentDirOf(path), loadedDirs)
+    const folder = folderOfKey(path)
+    const dir = nearestLoadedDir(parentDirOf(folder ?? path), loadedDirs)
     if (dir !== null) dirs.add(dir)
+    // Anything may have changed inside a folded folder, at any depth, so every
+    // listing loaded inside it is stale.
+    if (folder !== null) {
+      for (const loaded of loadedDirs) {
+        if (loaded === folder || loaded.startsWith(`${folder}/`)) dirs.add(loaded)
+      }
+    }
   }
   return [...dirs].sort()
 }

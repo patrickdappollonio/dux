@@ -112,3 +112,37 @@ describe("changedPathsFrom", () => {
     ])
   })
 })
+
+// A folded folder is one row however many files are inside it, so a file an
+// agent adds inside an already-untracked folder moves no path. Its count moves
+// instead, and that is what has to reach the tree.
+describe("folded folders", () => {
+  function withFolder(count: number): ChangesSliceView {
+    return {
+      phase: "loaded",
+      unstaged: [{ ...row("node_modules"), kind: "directory", file_count: count }],
+      staged: [],
+    }
+  }
+
+  const LOADED_INSIDE = new Set(["", "node_modules", "node_modules/pkg", "src"])
+
+  it("refetches every loaded listing inside a folder whose count moved", () => {
+    const before = changedPathsFrom(withFolder(3))
+    const after = changedPathsFrom(withFolder(4))
+    expect(dirsToRefetch(before, after, LOADED_INSIDE)).toEqual([
+      "",
+      "node_modules",
+      "node_modules/pkg",
+    ])
+  })
+
+  it("leaves the tree alone when the folder did not change", () => {
+    const paths = changedPathsFrom(withFolder(3))
+    expect(dirsToRefetch(paths, paths, LOADED_INSIDE)).toEqual([])
+  })
+
+  it("refetches the parent listing for a folder that appeared", () => {
+    expect(dirsToRefetch([], changedPathsFrom(withFolder(3)), LOADED)).toEqual([""])
+  })
+})

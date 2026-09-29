@@ -35,6 +35,8 @@ export interface ChangedRowView {
   additions: number
   deletions: number
   renamed_from?: string
+  kind?: "directory" | "nested_repository"
+  file_count?: number
 }
 
 // One tab's Monaco buffer and diff cache, keyed by tab id. A preview-replace
@@ -209,7 +211,13 @@ export function changeSignalFor(
   const f =
     slice.unstaged.find((x) => x.path === path) ??
     slice.staged.find((x) => x.path === path)
-  return f ? `${f.status}:${f.additions}:${f.deletions}` : ""
+  if (f) return `${f.status}:${f.additions}:${f.deletions}`
+  // A file inside a folded folder has no row of its own: the folder answers
+  // for it, and its file count is what moves when something inside changes.
+  const folder = [...slice.unstaged, ...slice.staged].find(
+    (x) => x.kind === "directory" && path.startsWith(`${x.path}/`),
+  )
+  return folder ? `${folder.status}:folder:${folder.file_count ?? 0}` : ""
 }
 
 // Whether the open file's change signal has moved since this buffer was read.
