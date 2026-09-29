@@ -1553,6 +1553,13 @@ describe("a folded folder row", () => {
     expect(screen.getByText("nested repository")).toBeTruthy()
   })
 
+  it("counts the files inside the folder in the group's badge", () => {
+    mockState = withFolder()
+    render(<ChangedFiles />)
+    const heading = screen.getByText("Unstaged").closest("button") as HTMLElement
+    expect(within(heading).getByText("28748")).toBeTruthy()
+  })
+
   it("does not open a diff when a folder row is clicked", () => {
     mockState = withFolder()
     render(<ChangedFiles />)

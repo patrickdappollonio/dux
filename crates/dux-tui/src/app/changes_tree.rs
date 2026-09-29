@@ -541,16 +541,22 @@ impl App {
             let (tone, message) = match (pending.op, outcome) {
                 (FolderOp::Stage, Ok(())) => (
                     StatusTone::Info,
-                    format!("Staged \"{label}\": its {count} are in the staged changes now."),
+                    format!(
+                        "Staged \"{label}\" ({count}): the whole folder is in the staged changes \
+                         now."
+                    ),
                 ),
                 (FolderOp::Unstage, Ok(())) => (
                     StatusTone::Info,
-                    format!("Unstaged \"{label}\": its {count} are back in the unstaged changes."),
+                    format!(
+                        "Unstaged \"{label}\" ({count}): the whole folder is back in the unstaged \
+                         changes."
+                    ),
                 ),
                 (FolderOp::Delete, Ok(())) => (
                     StatusTone::Info,
                     format!(
-                        "Deleted \"{label}\" and everything inside it ({count}). This cannot be \
+                        "Deleted \"{label}\" ({count}) and everything inside it. This cannot be \
                          undone."
                     ),
                 ),

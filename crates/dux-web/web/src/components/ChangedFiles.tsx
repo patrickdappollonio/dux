@@ -71,6 +71,7 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
+  changedFileCount,
   fileStatusMeta,
   folderCountLabel,
   formatRecapCount,
@@ -948,8 +949,9 @@ function ChangesList({
       return (
         <GroupHeader
           heading={section === "staged" ? "Staged" : "Unstaged"}
-          shown={files.length}
-          total={changed[section].length}
+          // Files, not rows: a folded folder counts what is inside it.
+          shown={recap[section].count}
+          total={changed[section].reduce((sum, file) => sum + changedFileCount(file), 0)}
           recap={recap[section]}
           filtering={filtering}
           open={open[section]}
