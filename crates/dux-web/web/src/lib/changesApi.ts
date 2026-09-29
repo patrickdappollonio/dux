@@ -56,6 +56,51 @@ export async function fetchChanges(
   sessionId: string,
   signal?: AbortSignal,
 ): Promise<SessionChangesResponse> {
+  return fetchJsonWithDeadline<SessionChangesResponse>(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/changes`,
+    signal,
+    (seconds) =>
+      `The server did not send this session's changed files within ${seconds} seconds. The connection may have stalled; Refresh to try again.`,
+    "Could not read the changed files.",
+  )
+}
+
+// One level of a folded folder, as the server lists it.
+export interface FolderChildrenResponse {
+  dir: string
+  side: "staged" | "unstaged"
+  children: ChangedFileView[]
+}
+
+// The contents of the folded folder `dir` on `side`, one level deep, held to
+// the same deadline and abort rules as `fetchChanges`. A refusal (a folder the
+// listing no longer shows) arrives as a `ChangesFetchError` carrying the
+// server's sentence.
+export async function fetchFolderChildren(
+  sessionId: string,
+  dir: string,
+  side: "staged" | "unstaged",
+  signal?: AbortSignal,
+): Promise<FolderChildrenResponse> {
+  const query = new URLSearchParams({ dir, side })
+  return fetchJsonWithDeadline<FolderChildrenResponse>(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/changes/children?${query}`,
+    signal,
+    (seconds) =>
+      `The server did not list what is inside ${dir}/ within ${seconds} seconds. The connection may have stalled; Retry to try again.`,
+    "Could not read the folder's contents.",
+  )
+}
+
+// A same-origin GET answered as JSON, abandoned on `signal` (rejecting with
+// `ChangesFetchAborted`) or on the changes deadline (rejecting with a
+// `ChangesFetchError` whose words `timeoutMessage` writes).
+async function fetchJsonWithDeadline<T>(
+  url: string,
+  signal: AbortSignal | undefined,
+  timeoutMessage: (seconds: number) => string,
+  unreadable: string,
+): Promise<T> {
   const controller = new AbortController()
   const deadlineMs = changesRequestTimeoutMs()
   let timedOut = false
@@ -69,24 +114,14 @@ export async function fetchChanges(
   // Whatever stopped the request, say which: the caller's abort is silent, the
   // deadline is an error with words for the pane.
   const stopped = (fallback: ChangesFetchError): Error => {
-    if (timedOut) {
-      return new ChangesFetchError(
-        `The server did not send this session's changed files within ${
-          deadlineMs / 1000
-        } seconds. The connection may have stalled; Refresh to try again.`,
-        0,
-      )
-    }
+    if (timedOut) return new ChangesFetchError(timeoutMessage(deadlineMs / 1000), 0)
     if (controller.signal.aborted) return new ChangesFetchAborted()
     return fallback
   }
   try {
     let resp: Response
     try {
-      resp = await fetch(
-        `/api/v1/sessions/${encodeURIComponent(sessionId)}/changes`,
-        { credentials: "same-origin", signal: controller.signal },
-      )
+      resp = await fetch(url, { credentials: "same-origin", signal: controller.signal })
     } catch {
       // The request never reached the server (offline, DNS, CORS). Status 0 so
       // the caller treats it as retryable, not a 404 "session gone".
@@ -103,13 +138,10 @@ export async function fetchChanges(
       )
     }
     try {
-      return (await resp.json()) as SessionChangesResponse
+      return (await resp.json()) as T
     } catch (error) {
       throw stopped(
-        new ChangesFetchError(
-          error instanceof Error ? error.message : "Could not read the changed files.",
-          0,
-        ),
+        new ChangesFetchError(error instanceof Error ? error.message : unreadable, 0),
       )
     }
   } finally {
