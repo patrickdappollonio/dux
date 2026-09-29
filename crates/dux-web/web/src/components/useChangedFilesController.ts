@@ -4,9 +4,11 @@ import {
   mergeChangedFilesRecaps,
   reconcileSelection,
   summarizeChangedFiles,
+  uncoveredPaths,
   type ChangedFileSelection,
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
+import { NO_EXPANSIONS, loadedChildren, type Expansions } from "@/lib/changesTree"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import { git, type BatchResult, type DiscardConfirmation } from "@/lib/git"
 import { notifyError, notifyInfo, notifySuccess, notifyWarning } from "@/lib/notify"
@@ -37,6 +39,9 @@ interface ScopedSelection extends ChangedFileSelection {
 
 interface ChangedFilesModel {
   changed: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
+  // Every row a user can select and act on: the listing's own rows and the
+  // rows loaded under expanded folders.
+  actionable: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
   filtered: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
   recap: {
     staged: ChangedFilesRecap
@@ -70,6 +75,7 @@ function useChangedFilesModel(
   changes: ChangesSlice,
   search: ScopedSearch,
   selection: ScopedSelection,
+  expansions: Expansions,
 ): ChangedFilesModel {
   const query = search.sessionId === selectedSessionId ? search.query : ""
   const slice = changes.sessionId === selectedSessionId ? changes : null
@@ -94,11 +100,24 @@ function useChangedFilesModel(
     const unstaged = summarizeChangedFiles(filtered.unstaged)
     return { staged, unstaged, all: mergeChangedFilesRecaps(staged, unstaged) }
   }, [filtered])
+  // A row loaded under an expanded folder is as real as a row of the listing:
+  // it can be checked, counted and acted on, so the selection survives against
+  // both.
+  const actionable = useMemo(
+    () =>
+      expansions.size === 0
+        ? changed
+        : {
+            staged: [...changed.staged, ...loadedChildren(expansions, "staged")],
+            unstaged: [...changed.unstaged, ...loadedChildren(expansions, "unstaged")],
+          },
+    [changed, expansions],
+  )
   const scopedSelection: ChangedFileSelection =
     selection.sessionId === selectedSessionId ? selection : EMPTY_SELECTION
   const selected = useMemo(
-    () => reconcileSelection(scopedSelection, changed),
-    [scopedSelection, changed],
+    () => reconcileSelection(scopedSelection, actionable),
+    [scopedSelection, actionable],
   )
   const visible = useMemo(() => {
     const visibleStaged = filtered.staged.map((file) => file.path)
@@ -113,6 +132,7 @@ function useChangedFilesModel(
 
   return {
     changed,
+    actionable,
     filtered,
     recap,
     query,
@@ -273,6 +293,7 @@ function leftOutReasons(
 export function useChangedFilesController(
   selectedSessionId: string | null,
   changes: ChangesSlice,
+  expansions: Expansions = NO_EXPANSIONS,
 ) {
   const [search, setSearch] = useState<ScopedSearch>({ sessionId: "", query: "" })
   const [selection, setSelection] = useState<ScopedSelection>({
@@ -282,7 +303,13 @@ export function useChangedFilesController(
   const [busy, setBusy] = useState<ChangesBusyAction>(null)
   const [discarding, setDiscarding] = useState(false)
   const sessionId = selectedSessionId ?? ""
-  const model = useChangedFilesModel(selectedSessionId, changes, search, selection)
+  const model = useChangedFilesModel(
+    selectedSessionId,
+    changes,
+    search,
+    selection,
+    expansions,
+  )
 
   const editSelection = useCallback(
     (mutate: (next: ChangedFileSelection) => void): void => {
@@ -338,15 +365,19 @@ export function useChangedFilesController(
     const section = verb === "stage" ? "unstaged" : "staged"
     // A worktree of this repository is never staged (the server refuses it),
     // so a bulk stage leaves it out rather than failing the whole batch.
+    const { actionable } = model
     const unstageable =
       verb === "stage"
-        ? new Set(changes.unstaged.filter((f) => !stageActsOn(f)).map((f) => f.path))
+        ? new Set(actionable.unstaged.filter((f) => !stageActsOn(f)).map((f) => f.path))
         : new Set<string>()
-    const paths = [...model.selected[section]].filter((path) => !unstageable.has(path))
+    // A checked row inside a checked folder is already part of it.
+    const paths = uncoveredPaths(model.selected[section]).filter(
+      (path) => !unstageable.has(path),
+    )
     if (busy !== null || paths.length === 0) return
     const leftOut =
       verb === "stage"
-        ? leftOutReasons(model.selected.unstaged, changes.unstaged, stageLeftOutReason)
+        ? leftOutReasons(model.selected.unstaged, actionable.unstaged, stageLeftOutReason)
         : []
     setBusy(verb)
     try {
@@ -354,7 +385,7 @@ export function useChangedFilesController(
         verb,
         sessionId,
         paths,
-        rows: verb === "stage" ? changes.unstaged : changes.staged,
+        rows: verb === "stage" ? actionable.unstaged : actionable.staged,
         dropActed,
       })
       const notice = bulkLeftOutNotice(leftOut)
@@ -370,14 +401,18 @@ export function useChangedFilesController(
   ): Promise<void> {
     setDiscarding(false)
     if (busy !== null || paths.length === 0) return
-    const leftOut = leftOutReasons(model.selected.unstaged, changes.unstaged, discardLeftOutReason)
+    const leftOut = leftOutReasons(
+      model.selected.unstaged,
+      model.actionable.unstaged,
+      discardLeftOutReason,
+    )
     setBusy("discard")
     try {
       await runDiscardTransaction({
         sessionId,
         paths,
         confirmations,
-        rows: changes.unstaged,
+        rows: model.actionable.unstaged,
         dropActed,
       })
       const notice = bulkLeftOutNotice(leftOut)
@@ -391,10 +426,22 @@ export function useChangedFilesController(
     ...model,
     // What the bulk bar counts: files, so a checked folder counts what is
     // inside it, the same count its dialog and its toast use.
+    // A checked row inside a checked folder is counted once, in the folder.
     selectedCounts: {
-      staged: selectedFileCount(model.selected.staged, changes.staged),
-      unstaged: selectedFileCount(model.selected.unstaged, changes.unstaged, stageActsOn),
-      discard: selectedFileCount(model.selected.unstaged, changes.unstaged, discardActsOn),
+      staged: selectedFileCount(
+        new Set(uncoveredPaths(model.selected.staged)),
+        model.actionable.staged,
+      ),
+      unstaged: selectedFileCount(
+        new Set(uncoveredPaths(model.selected.unstaged)),
+        model.actionable.unstaged,
+        stageActsOn,
+      ),
+      discard: selectedFileCount(
+        new Set(uncoveredPaths(model.selected.unstaged)),
+        model.actionable.unstaged,
+        discardActsOn,
+      ),
     },
     busy,
     discarding,

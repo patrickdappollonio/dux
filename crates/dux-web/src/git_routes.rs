@@ -1324,9 +1324,8 @@ mod tests {
     /// A folded folder is one path on the wire and the git routes act on the
     /// whole of it: stage it, unstage it, and discard it (which deletes it).
     /// A file inside it is a real change too, and the section validation lets
-    /// it through once git lists it there: the terminal UI names such paths
-    /// today by expanding a folder, and the routes already accept them (the
-    /// browser does not expand folders yet).
+    /// it through once git lists it there: both surfaces name such paths by
+    /// expanding a folder.
     #[tokio::test]
     async fn a_folded_folder_is_staged_unstaged_and_discarded_whole() {
         let (tmp, app, _state) = router_with_session_and_state().await;

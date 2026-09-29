@@ -3,11 +3,26 @@ import { describe, expect, it } from "vitest"
 import {
   buildChangesItems,
   changesListStructure,
+  changesRowTree,
   layoutChangesItems,
   visibleChangesIndices,
   type ChangesItemHeights,
 } from "./changesWindow"
+import { NO_EXPANSIONS, expandFolder, settleFolder } from "./changesTree"
 import type { ChangedFileView } from "./types"
+
+function dir(path: string, count: number): ChangedFileView {
+  return {
+    path,
+    status: "??",
+    additions: 0,
+    deletions: 0,
+    binary: false,
+    diff_excluded: false,
+    kind: "directory",
+    file_count: count,
+  }
+}
 
 function file(path: string): ChangedFileView {
   return {
@@ -91,6 +106,54 @@ describe("changesListStructure", () => {
     expect(
       changesListStructure(items).filter((part) => part.kind === "rows"),
     ).toEqual([{ kind: "rows", section: "unstaged", first: 3, last: 3 }])
+  })
+})
+
+describe("changesRowTree", () => {
+  // Each expanded folder's contents sit in one container of their own, the
+  // element its toggle's aria-controls names, nested the way the folders are.
+  it("groups each expanded folder's contents under it, nested", () => {
+    let exp = expandFolder(NO_EXPANSIONS, "unstaged", dir("a", 3))
+    exp = settleFolder(exp, "unstaged", "a", [dir("a/sub", 1), file("a/x")])
+    exp = expandFolder(exp, "unstaged", dir("a/sub", 1))
+    const items = buildChangesItems({
+      staged: { files: [], open: true },
+      unstaged: { files: [dir("a", 3), file("b")], open: true },
+      expansions: exp,
+    })
+    // header, a, a/sub, loading, a/x, b
+    expect(changesRowTree(items, 1, 5)).toEqual([
+      { kind: "item", index: 1 },
+      {
+        kind: "folder",
+        key: "unstaged:a",
+        first: 2,
+        last: 4,
+        parts: [
+          { kind: "item", index: 2 },
+          {
+            kind: "folder",
+            key: "unstaged:a/sub",
+            first: 3,
+            last: 3,
+            parts: [{ kind: "item", index: 3 }],
+          },
+          { kind: "item", index: 4 },
+        ],
+      },
+      { kind: "item", index: 5 },
+    ])
+  })
+
+  it("is a flat run of items when nothing is expanded", () => {
+    const items = buildChangesItems({
+      staged: { files: [], open: true },
+      unstaged: { files: [file("a"), file("b")], open: true },
+    })
+    expect(changesRowTree(items, 1, 2)).toEqual([
+      { kind: "item", index: 1 },
+      { kind: "item", index: 2 },
+    ])
   })
 })
 

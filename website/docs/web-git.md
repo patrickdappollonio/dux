@@ -46,7 +46,15 @@ count, because dux does not look inside it. A bare repository is different: to g
 folder of ordinary files, so dux counts and stages it as files, the way `git add` would.
 Discarding a folder keeps any bare repository inside it, and the dialog names it.
 
-A folder row has no diff to open. Its `⋯` menu stages or unstages the whole folder at once,
+A folder row has no diff to open. Click its name, or Tab to it and press Enter or Space, to
+expand it and list what is inside, one level at a time; click it again to fold it back up.
+The folders inside are folded the same way and expand the same way, and every file inside is
+a full row: click it for its diff, check it, or stage, unstage or discard it from its own `⋯`.
+A folder whose contents could not be listed says why and offers Retry. What you have expanded
+is remembered for each agent until you reload the page, and it follows the files as they
+change: a folder that gains or loses files lists itself again on its own.
+
+Its `⋯` menu stages or unstages the whole folder at once,
 and discards it after a confirmation, the same one a file gets. Staging a folder stages its
 files and leaves out any repository of its own, or worktree of this repository, inside it, so
 none of them is recorded as a link; dux tells you what it left out, and the folder's staged
@@ -64,7 +72,7 @@ either.
 
 > [!NOTE]
 > In the terminal UI, the diff key expands a folder row a level at a time and collapses it
-> again; folders inside it are folded the same way. The browser does not expand folders yet.
+> again, where the browser uses a click on the folder's name.
 
 Click any row to open its diff in the [code editor](/docs/web-editor), read-only, HEAD
 against the working copy, and syntax-highlighted below the ceiling described next. The

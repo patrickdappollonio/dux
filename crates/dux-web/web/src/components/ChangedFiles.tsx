@@ -13,6 +13,7 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Check,
+  ChevronRight,
   Ellipsis,
   EllipsisVertical,
   FileCode2,
@@ -78,6 +79,7 @@ import {
   fileStatusMeta,
   folderCountLabel,
   formatRecapCount,
+  uncoveredPaths,
   type ChangedFileSelection,
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
@@ -95,13 +97,23 @@ import type { ChangesSlice, DuxState } from "@/lib/store"
 import {
   buildChangesItems,
   changesListStructure,
+  changesRowTree,
   layoutChangesItems,
   visibleChangesIndices,
   type ChangesItemHeights,
   type ChangesItemKind,
   type ChangesListItem,
+  type ChangesRowPart,
   type ChangesSection,
 } from "@/lib/changesWindow"
+import { isExpandable, type Expansions } from "@/lib/changesTree"
+import {
+  reconcileFolders,
+  retryFolderChildren,
+  toggleFolder,
+  useExpansions,
+} from "@/lib/changesExpansion"
+import { FOCUS_RING } from "@/lib/focusRing"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
@@ -214,6 +226,53 @@ function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProp
   )
 }
 
+// The last segment of a path, keeping a folder's trailing slash.
+function leafName(path: string): string {
+  const trimmed = path.endsWith("/") ? path.slice(0, -1) : path
+  const leaf = trimmed.slice(trimmed.lastIndexOf("/") + 1)
+  return path.endsWith("/") ? `${leaf}/` : leaf
+}
+
+// A row's name and counts: on a folder that can expand, a real button that
+// expands and collapses it (the checkbox and the ⋯ still act on the whole
+// folder); on any other row, a plain container. Its click stops at the button,
+// so it never reaches the row. It fills the row's height, so on touch the
+// target is the row's 44px, and it spans the row's free width.
+function ExpandToggle({
+  expandable,
+  expanded,
+  contentsId,
+  onToggle,
+  children,
+}: {
+  expandable: boolean
+  expanded: boolean
+  contentsId?: string
+  onToggle: () => void
+  children: React.ReactNode
+}) {
+  if (!expandable) {
+    return <div className="flex min-w-0 flex-1 items-baseline gap-2">{children}</div>
+  }
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      aria-controls={expanded ? contentsId : undefined}
+      onClick={(event) => {
+        event.stopPropagation()
+        onToggle()
+      }}
+      className={cn(
+        "flex min-w-0 flex-1 items-baseline gap-2 self-stretch rounded border border-transparent text-left max-md:min-h-11 pointer-coarse:min-h-11",
+        FOCUS_RING,
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
 // What the row's "Excl" marker says on hover. It names the cause (the
 // repository's own .gitattributes) and the consequence (no counts), and says
 // the file is still readable here, because "excluded" on its own reads as
@@ -228,6 +287,21 @@ interface FileRowProps {
   selected: boolean
   onToggleSelected: (path: string) => void
   onOpenDiff: (path: string) => void
+  // 0 for a row of the listing itself, one more per expanded folder above it.
+  depth: number
+  // A folded folder whose contents are showing under it.
+  expanded: boolean
+  // Expand or collapse this folder row; absent for a row that cannot expand.
+  onToggleExpand?: (file: ChangedFileView) => void
+  // The id of the container holding this folder's contents, which its toggle
+  // names in aria-controls.
+  contentsId?: string
+}
+
+// How far each level of an expanded folder steps its rows in.
+const DEPTH_INDENT_REM = 1
+function depthIndent(depth: number): React.CSSProperties | undefined {
+  return depth > 0 ? { paddingLeft: `${0.25 + depth * DEPTH_INDENT_REM}rem` } : undefined
 }
 
 // Memoized: the list re-renders on every scroll step and selection change, and
@@ -239,6 +313,10 @@ const FileRow = memo(function FileRow({
   selected,
   onToggleSelected,
   onOpenDiff,
+  depth,
+  expanded,
+  onToggleExpand,
+  contentsId,
 }: FileRowProps) {
   const { kind } = fileStatusMeta(file.status)
   const [busy, setBusy] = useState(false)
@@ -280,9 +358,10 @@ const FileRow = memo(function FileRow({
   }
 
   // A folded folder has no diff: opening one would read a directory as a file.
-  // Its expand control is a separate change; until then the row only says
-  // what it is, with the trailing slash and its count.
+  // Its name and count are its expand toggle instead, which lists what is
+  // inside it under it; a repository of its own is not looked inside.
   const folderCount = folderCountLabel(file)
+  const expandable = onToggleExpand !== undefined && isExpandable(file)
   // The row menu's items, decided before the trigger is: Edit (desktop only,
   // and never for a deleted file or a folder), stage or unstage, and discard.
   const showEdit = kind !== "deleted" && folderCount === null
@@ -296,10 +375,12 @@ const FileRow = memo(function FileRow({
   return (
     <div
       role="row"
+      aria-level={depth + 1}
       className={cn(
         "group flex items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11",
         folderCount === null && "cursor-pointer",
       )}
+      style={depthIndent(depth)}
       onClick={folderCount === null ? () => onOpenDiff(file.path) : undefined}
     >
       {/* Leading slot: the status marker, which becomes the selection checkbox
@@ -312,11 +393,30 @@ const FileRow = memo(function FileRow({
       />
 
       {/* Path and counts share one baseline container: their line boxes differ,
-        * so under the row's items-center the digits read as superscript. */}
-      <div className="flex min-w-0 flex-1 items-baseline gap-2">
-        {/* Long paths ellipsize at the start so the filename stays visible. */}
+        * so under the row's items-center the digits read as superscript. On a
+        * folder that can expand, that container is the toggle: a real button
+        * saying whether its contents show and which container holds them, and
+        * on touch it fills the row's 44px height. */}
+      <ExpandToggle
+        expandable={expandable}
+        expanded={expanded}
+        contentsId={contentsId}
+        onToggle={() => onToggleExpand?.(file)}
+      >
+        {expandable && (
+          <ChevronRight
+            aria-hidden
+            className={cn(
+              "size-3.5 shrink-0 self-center text-muted-foreground transition-transform motion-reduce:transition-none",
+              expanded && "rotate-90",
+            )}
+          />
+        )}
+        {/* Long paths ellipsize at the start so the filename stays visible. A
+          * row inside an expanded folder names only itself: the folder it
+          * hangs from is the row above it. */}
         <StartTruncatedText
-          text={displayPath}
+          text={depth > 0 ? leafName(displayPath) : displayPath}
           className="flex-1 font-mono text-sm text-foreground"
         />
 
@@ -351,7 +451,7 @@ const FileRow = memo(function FileRow({
             )}
           </span>
         )}
-      </div>
+      </ExpandToggle>
 
       {/* The menu's items are computed first, and a row with none gets no
         * trigger at all: a menu that opens empty is a control that does
@@ -844,12 +944,14 @@ const OVERSCAN = 10
 // The list's own inset (`p-3`), which sits between the viewport's scroll
 // position and the first item.
 const LIST_PADDING = 12
-const ITEM_KINDS: ChangesItemKind[] = ["header", "row", "separator"]
+const ITEM_KINDS: ChangesItemKind[] = ["header", "row", "loading", "failed", "separator"]
 // The space after each kind of item. It lives on the positioned holder so the
 // measured height carries it and the stacking needs no gap of its own.
 const ITEM_SPACING: Record<ChangesItemKind, string> = {
   header: "pb-1",
   row: "pb-0.5",
+  loading: "pb-0.5",
+  failed: "pb-0.5",
   separator: "py-1",
 }
 // Desktop heights with a fine pointer, spacing included, standing in until the
@@ -857,10 +959,60 @@ const ITEM_SPACING: Record<ChangesItemKind, string> = {
 const DEFAULT_ITEM_HEIGHTS: ChangesItemHeights = {
   header: 32,
   row: 42,
+  loading: 30,
+  failed: 42,
   separator: 9,
 }
 
+// The row standing in for an expanded folder's contents while they are asked
+// for. It says so in words, and a screen reader hears it once.
+function LoadingRow({ depth }: { depth: number }) {
+  return (
+    <div
+      role="row"
+      aria-level={depth + 1}
+      className="flex items-center gap-2 px-1 py-1 text-sm text-muted-foreground"
+      style={depthIndent(depth)}
+    >
+      <Loader2 aria-hidden className="size-4 shrink-0 motion-safe:animate-spin" />
+      <span role="status">Loading…</span>
+    </div>
+  )
+}
+
+// The row standing in for an expanded folder's contents that could not be
+// listed: why, and a way to ask again.
+function FailedRow({
+  depth,
+  message,
+  onRetry,
+}: {
+  depth: number
+  message: string
+  onRetry: () => void
+}) {
+  return (
+    <div
+      role="row"
+      aria-level={depth + 1}
+      className="flex items-center gap-2 px-1 py-1 text-sm max-md:min-h-11"
+      style={depthIndent(depth)}
+    >
+      <TriangleAlert aria-hidden className="size-4 shrink-0 text-destructive" />
+      <span className="min-w-0 flex-1 text-muted-foreground">
+        Could not list this folder: {message}
+      </span>
+      <Button variant="outline" size="sm" className="h-8 max-md:h-11" onClick={onRetry}>
+        <RefreshCw />
+        Retry
+      </Button>
+    </div>
+  )
+}
+
 interface ChangesListProps {
+  // The agent's expanded folders, whose contents are listed under them.
+  expansions: Expansions
   changed: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
   filtered: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
   recap: { staged: ChangedFilesRecap; unstaged: ChangedFilesRecap }
@@ -873,6 +1025,7 @@ interface ChangesListProps {
 }
 
 function ChangesList({
+  expansions,
   changed,
   filtered,
   recap,
@@ -899,6 +1052,14 @@ function ChangesList({
     (path: string) => onToggle("unstaged", path),
     [onToggle],
   )
+  const expandStaged = useCallback(
+    (file: ChangedFileView) => toggleFolder(sessionId, "staged", file),
+    [sessionId],
+  )
+  const expandUnstaged = useCallback(
+    (file: ChangedFileView) => toggleFolder(sessionId, "unstaged", file),
+    [sessionId],
+  )
   const [open, setOpen] = useState<Record<ChangesSection, boolean>>({
     staged: true,
     unstaged: true,
@@ -911,8 +1072,9 @@ function ChangesList({
       buildChangesItems({
         staged: { files: filtered.staged, open: open.staged },
         unstaged: { files: filtered.unstaged, open: open.unstaged },
+        expansions,
       }),
-    [filtered, open],
+    [filtered, open, expansions],
   )
 
   // Rows are windowed against the pane's own ScrollArea, the approach the
@@ -981,6 +1143,8 @@ function ChangesList({
   const structure = useMemo(() => changesListStructure(items), [items])
   const baseId = useId()
   const rowsId = (section: ChangesSection) => `${baseId}-${section}-rows`
+  // An expanded folder's contents container, named from the folder row's key.
+  const contentsId = (key: string) => `${baseId}-contents-${encodeURIComponent(key)}`
 
   // One positioned holder per mounted item, placed relative to `origin` (the
   // top of the container it sits in).
@@ -1022,6 +1186,16 @@ function ChangesList({
         />
       )
     }
+    if (item.kind === "loading") return <LoadingRow depth={item.depth} />
+    if (item.kind === "failed") {
+      return (
+        <FailedRow
+          depth={item.depth}
+          message={item.message}
+          onRetry={() => retryFolderChildren(sessionId, section, item.dir)}
+        />
+      )
+    }
     return (
       <FileRow
         file={item.file}
@@ -1030,9 +1204,41 @@ function ChangesList({
         selected={selected[section].has(item.file.path)}
         onToggleSelected={section === "staged" ? toggleStaged : toggleUnstaged}
         onOpenDiff={openDiff}
+        depth={item.depth}
+        expanded={item.expanded}
+        onToggleExpand={section === "staged" ? expandStaged : expandUnstaged}
+        contentsId={item.expanded ? contentsId(item.key) : undefined}
       />
     )
   }
+
+  // A section's rows, windowed, with each expanded folder's contents in one
+  // container of its own (the element its toggle's aria-controls names),
+  // nested the way the folders are. A container spans its whole range, so it
+  // exists whatever part of it is mounted.
+  const renderRowParts = (parts: ChangesRowPart[], origin: number): ReactElement[] =>
+    parts.flatMap((part) => {
+      if (part.kind === "item") {
+        return indices.includes(part.index) ? [renderHolder(part.index, origin)] : []
+      }
+      const top = offsets[part.first]!
+      return [
+        <div
+          key={`contents:${part.key}`}
+          id={contentsId(part.key)}
+          role="group"
+          style={{
+            position: "absolute",
+            top: top - origin,
+            left: 0,
+            right: 0,
+            height: offsets[part.last + 1]! - top,
+          }}
+        >
+          {renderRowParts(part.parts, top)}
+        </div>,
+      ]
+    })
 
   return (
     <ScrollArea
@@ -1125,9 +1331,7 @@ function ChangesList({
                     height: offsets[part.last + 1]! - top,
                   }}
                 >
-                  {indices
-                    .filter((index) => index >= part.first && index <= part.last)
-                    .map((index) => renderHolder(index, top))}
+                  {renderRowParts(changesRowTree(items, part.first, part.last), top)}
                 </div>
               )
             })}
@@ -1233,11 +1437,23 @@ export const ChangedFiles = memo(function ChangedFiles() {
   // The hide-pane action is desktop-only: the mobile hub reaches Changes through
   // its own nav, so there's no panel to hide there.
   const isMobile = useIsMobile()
-  const controller = useChangedFilesController(selectedSessionId, changes)
+  // The agent's expanded folders, held outside the store for as long as the
+  // page lives, so an expansion re-renders this pane and nothing else.
+  const expansions = useExpansions(selectedSessionId ?? "")
+  const controller = useChangedFilesController(selectedSessionId, changes, expansions)
+  // A checked row inside a checked folder is already part of the folder.
   const discardPaths = useMemo(
-    () => [...controller.selected.unstaged],
+    () => uncoveredPaths(controller.selected.unstaged),
     [controller.selected.unstaged],
   )
+  // Every new listing reconciles the expanded folders: one that is no longer a
+  // folded row is forgotten, and one whose row moved is asked for again,
+  // quietly, keeping what is on screen until the answer lands.
+  const liveSlice = changes.sessionId === selectedSessionId ? changes : null
+  useEffect(() => {
+    if (!selectedSessionId || !liveSlice || liveSlice.phase !== "loaded") return
+    reconcileFolders(selectedSessionId, liveSlice.staged, liveSlice.unstaged)
+  }, [selectedSessionId, liveSlice])
 
   const unavailable = unavailableChangesScreen(
     selectedSessionId,
@@ -1252,6 +1468,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
     : true
   const {
     changed,
+    actionable,
     filtered,
     recap,
     query,
@@ -1315,6 +1532,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
             />
           ) : null}
           <ChangesList
+            expansions={expansions}
             changed={changed}
             filtered={filtered}
             recap={recap}
@@ -1330,7 +1548,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
       <ConfirmDiscardFilesDialog
         open={discarding}
         paths={discardPaths}
-        unstaged={changed.unstaged}
+        unstaged={actionable.unstaged}
         onCancel={closeDiscardMany}
         onConfirm={(paths, confirmations) => void runDiscardMany(paths, confirmations)}
       />

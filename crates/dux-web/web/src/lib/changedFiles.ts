@@ -371,3 +371,22 @@ export function changedStatusLookup(
     },
   }
 }
+
+// The selected paths with every one inside another selected path left out: a
+// checked folder already stands for everything under it, so acting on (or
+// counting) a checked row inside it as well would do it twice.
+export function uncoveredPaths(paths: Iterable<string>): string[] {
+  const all = new Set(paths)
+  const out: string[] = []
+  for (const path of all) {
+    let covered = false
+    for (let cut = path.lastIndexOf("/"); cut > 0; cut = path.lastIndexOf("/", cut - 1)) {
+      if (all.has(path.slice(0, cut))) {
+        covered = true
+        break
+      }
+    }
+    if (!covered) out.push(path)
+  }
+  return out
+}
