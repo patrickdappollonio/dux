@@ -503,6 +503,41 @@ describe("what is checked under an expanded folder", () => {
     await vi.waitFor(() => expect(stageMany).toHaveBeenCalledWith("s1", ["notes.md"]))
   })
 
+  // A check belongs to a row on screen: a row that leaves (staged elsewhere)
+  // takes its check with it, and does not come back checked when it returns.
+  it("forgets the check of a row that left, even when it comes back", async () => {
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("node_modules/"))
+    await answer(0, [file("node_modules/top.js"), file("node_modules/b.js")])
+    fireEvent.click(screen.getByLabelText("Select node_modules/top.js"))
+
+    // `git add node_modules/top.js` elsewhere: the folder's answer loses it.
+    mockState = {
+      ...mockState,
+      changes: {
+        ...slice([folder("node_modules", 2, "f2"), file("notes.md")], 2),
+        staged: [file("node_modules/top.js", { status: "A" })],
+      },
+    } as unknown as DuxState
+    publishMockState()
+    await answer(1, [file("node_modules/b.js")])
+
+    // `git reset` brings it back.
+    mockState = {
+      ...mockState,
+      changes: slice([folder("node_modules", 3, "f3"), file("notes.md")], 3),
+    } as unknown as DuxState
+    publishMockState()
+    await answer(2, [file("node_modules/top.js"), file("node_modules/b.js")])
+
+    expect(
+      screen.getByLabelText("Select node_modules/top.js").getAttribute("aria-checked"),
+    ).toBe("false")
+    expect(
+      screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
+    ).toBeNull()
+  })
+
   // A sub-folder that grew is asked for again once its parent's answer says so.
   it("asks again for an expanded sub-folder that grew", async () => {
     render(<ChangedFiles />)
