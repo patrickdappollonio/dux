@@ -570,32 +570,125 @@ pub fn untracked_directory_kind(worktree: &Path, rel: &str) -> Result<UntrackedD
     ))
 }
 
-/// The repositories inside `dir` (not `dir` itself), each with what it is, as
-/// worktree-relative paths without a trailing slash. Found live from the same
-/// `ls-files --others` records a folder is counted from, and told apart by
-/// reading files only.
-pub(crate) fn repositories_inside(
-    worktree: &Path,
-    dir: &str,
-) -> Result<Vec<(String, UntrackedDirectoryKind)>> {
+/// What an untracked folder holds, from the records it is counted from.
+#[derive(Debug, Default)]
+pub(crate) struct FolderInside {
+    /// The repositories inside it (not the folder itself), each with what it
+    /// is, as worktree-relative paths in git's own bytes with no trailing
+    /// slash. Bytes, because a name need not be UTF-8 and one that is not
+    /// must still be left out of a stage rather than skipped.
+    pub(crate) repositories: Vec<(Vec<u8>, UntrackedDirectoryKind)>,
+    /// True when at least one untracked, not-ignored file is inside it.
+    pub(crate) has_file: bool,
+}
+
+impl FolderInside {
+    /// How many repositories of their own, and how many worktrees of this
+    /// repository, are inside.
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        let worktrees = self
+            .repositories
+            .iter()
+            .filter(|(_, kind)| *kind == UntrackedDirectoryKind::LinkedWorktree)
+            .count();
+        (self.repositories.len() - worktrees, worktrees)
+    }
+}
+
+/// What is inside `dir`: found live from the same `ls-files --others` records
+/// a folder is counted from, with each repository told apart by reading files
+/// only.
+pub(crate) fn folder_inside(worktree: &Path, dir: &str) -> Result<FolderInside> {
+    use std::os::unix::ffi::OsStrExt;
     let dir = dir.trim_end_matches('/');
     let raw = untracked_records(worktree, Some(dir))?;
     let itself = format!("{dir}/");
     let mut common: Option<Option<PathBuf>> = None;
-    let mut found = Vec::new();
+    let mut inside = FolderInside::default();
     for record in raw.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
-        if !record.ends_with(b"/") || record == itself.as_bytes() {
+        if !record.ends_with(b"/") {
+            inside.has_file = true;
             continue;
         }
-        let Ok(text) = std::str::from_utf8(record) else {
+        if record == itself.as_bytes() {
             continue;
-        };
-        let rel = text.trim_end_matches('/').to_string();
+        }
+        let rel = &record[..record.len() - 1];
         let common = common.get_or_insert_with(|| common_dir_of(worktree));
-        let kind = repository_kind(common.as_deref(), &worktree.join(&rel));
-        found.push((rel, kind));
+        let kind = repository_kind(
+            common.as_deref(),
+            &worktree.join(std::ffi::OsStr::from_bytes(rel)),
+        );
+        inside.repositories.push((rel.to_vec(), kind));
     }
-    Ok(found)
+    Ok(inside)
+}
+
+/// A whole-folder action that leaves the repositories inside the folder alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderAction {
+    Stage,
+    Delete,
+}
+
+/// The sentence for a folder `action` would do nothing to, because all it
+/// holds are `repositories` of their own and `worktrees` of this repository
+/// (which the action leaves alone), besides files the repository ignores.
+/// Worded by what is actually there: a worktree is not a repository of its
+/// own, and a mix names both. One builder, so the refusal a surface raises up
+/// front and the one the core answers with cannot drift apart.
+pub fn nothing_in_folder(
+    path: &str,
+    repositories: usize,
+    worktrees: usize,
+    action: FolderAction,
+) -> String {
+    let holds = match (repositories > 0, worktrees > 0) {
+        (true, false) => "only repositories of their own",
+        (false, true) => "only worktrees of this repository",
+        (true, true) => "only repositories of their own and worktrees of this repository",
+        (false, false) => {
+            return match action {
+                FolderAction::Stage => {
+                    format!("There is nothing in \"{path}/\" to stage: git ignores all it holds.")
+                }
+                FolderAction::Delete => format!(
+                    "There is nothing in \"{path}/\" that a delete would remove: it holds only \
+                     files the repository ignores, which a delete keeps."
+                ),
+            };
+        }
+    };
+    let (opening, verb, worktree_verb) = match action {
+        FolderAction::Stage => (
+            format!(
+                "There is nothing in \"{path}/\" to stage: it holds {holds}, which staging a \
+                 folder leaves out."
+            ),
+            "Stage",
+            "Manage",
+        ),
+        FolderAction::Delete => (
+            format!(
+                "There is nothing in \"{path}/\" that a delete would remove: it holds {holds}, \
+                 which a delete keeps, besides any files the repository ignores."
+            ),
+            "Delete",
+            "Remove",
+        ),
+    };
+    let mut sentence = opening;
+    if repositories > 0 {
+        sentence.push_str(&format!(
+            " {verb} a nested repository from its own row after expanding the folder."
+        ));
+    }
+    if worktrees > 0 {
+        sentence.push_str(&format!(
+            " {worktree_verb} a worktree of this repository from the worktree manager."
+        ));
+    }
+    sentence
 }
 
 /// A directory git reported as a repository of its own: a linked worktree of
@@ -1333,6 +1426,84 @@ mod tests {
         let (staged, _) = changed_files(root).unwrap();
         let row = staged.iter().find(|f| f.path == "big").unwrap();
         assert_eq!(row.additions, 0);
+    }
+
+    /// A folder holding nothing but repositories has nothing a stage would
+    /// add, since those are left out: the stage says so instead of claiming
+    /// it staged the folder. The sentence names what it holds.
+    #[test]
+    fn staging_a_folder_that_holds_only_repositories_is_refused() {
+        let repo = repo();
+        let root = repo.path();
+        let nested = root.join("only-repo/lib");
+        fs::create_dir_all(&nested).unwrap();
+        git_in(&nested)(&["init", "-q"]);
+        write(&nested, "own.txt", "own\n");
+        git_in(root)(&["worktree", "add", "-q", "-b", "a", "only-wt/wt"]);
+        git_in(root)(&["worktree", "add", "-q", "-b", "b", "mixed/wt"]);
+        let mixed = root.join("mixed/lib");
+        fs::create_dir_all(&mixed).unwrap();
+        git_in(&mixed)(&["init", "-q"]);
+        write(&mixed, "own.txt", "own\n");
+
+        for (folder, holds) in [
+            ("only-repo", "only repositories of their own"),
+            ("only-wt", "only worktrees of this repository"),
+            (
+                "mixed",
+                "only repositories of their own and worktrees of this repository",
+            ),
+        ] {
+            let refusal = stage_with_report(root, &[folder.to_string()]).unwrap_err();
+            let text = refusal.to_string();
+            assert!(
+                text.contains(&format!("nothing in \"{folder}/\" to stage")),
+                "{text}"
+            );
+            assert!(text.contains(holds), "{text}");
+            let refusal = discard_file(root, folder, true).unwrap_err().to_string();
+            assert!(refusal.contains(holds), "{refusal}");
+        }
+        let (staged, _) = changed_files(root).unwrap();
+        assert!(staged.is_empty(), "{staged:?}");
+    }
+
+    /// A repository whose name is not UTF-8 is still left out of a folder
+    /// stage: excluded by its bytes, not skipped because it has no `String`.
+    #[test]
+    fn a_repository_with_a_non_utf8_name_is_still_left_out() {
+        use std::os::unix::ffi::OsStrExt;
+        let repo = repo();
+        let root = repo.path();
+        write(root, "vendor/x.js", "x\n");
+        let nested = root
+            .join("vendor")
+            .join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+        fs::create_dir_all(&nested).unwrap();
+        // `git -C` would need the name as text; run inside the folder instead.
+        let git = |args: &[&str]| {
+            let out = test_support::git_command()
+                .current_dir(&nested)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        fs::write(nested.join("own.txt"), "own\n").unwrap();
+        git(&["add", "own.txt"]);
+        git(&["commit", "-q", "-m", "own"]);
+
+        let report = stage_with_report(root, &["vendor".to_string()]).unwrap();
+
+        assert_eq!(report.left_out_repositories, 1);
+        assert!(index_modes(root).iter().all(|(_, mode)| mode != "160000"));
     }
 
     /// Links already staged by hand are counted apart, never as files.

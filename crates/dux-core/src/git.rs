@@ -16,8 +16,8 @@ use crate::worker::BranchWarningKind;
 
 mod folding;
 pub use folding::{
-    ChangesSide, UntrackedDirectoryKind, changed_dir_children, rows_answering,
-    untracked_directory_kind,
+    ChangesSide, FolderAction, UntrackedDirectoryKind, changed_dir_children, nothing_in_folder,
+    rows_answering, untracked_directory_kind,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3735,7 +3735,7 @@ pub fn stage_with_report(worktree_path: &Path, file_paths: &[String]) -> Result<
         ));
     }
     let mut report = StageReport::default();
-    let mut excludes: Vec<String> = Vec::new();
+    let mut excludes: Vec<Vec<u8>> = Vec::new();
     for path in file_paths {
         refuse_unplain_path(path, "stage")?;
         refuse_staging_a_linked_worktree(worktree_path, path)?;
@@ -3743,15 +3743,34 @@ pub fn stage_with_report(worktree_path: &Path, file_paths: &[String]) -> Result<
         if !is_dir {
             continue;
         }
-        for (inside, kind) in folding::repositories_inside(worktree_path, path)? {
-            match kind {
-                UntrackedDirectoryKind::LinkedWorktree => report.left_out_worktrees += 1,
-                UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder => {
-                    report.left_out_repositories += 1
-                }
-            }
-            excludes.push(inside);
+        let inside = folding::folder_inside(worktree_path, path)?;
+        if inside.repositories.is_empty() {
+            continue;
         }
+        let (repositories, worktrees) = inside.counts();
+        let own: Vec<Vec<u8>> = inside
+            .repositories
+            .into_iter()
+            .map(|(rel, _)| exclude_spec(&rel))
+            .collect();
+        // Nothing but repositories: the stage would add nothing, so saying it
+        // staged the folder would be the lie. A folder the index already holds
+        // files of is a stage that has already happened, and a tracked change
+        // inside still counts, which only git can answer with a dry run.
+        if !inside.has_file
+            && !index_holds_anything_in(worktree_path, path)?
+            && !stages_anything(worktree_path, path, &own)?
+        {
+            return Err(anyhow::Error::new(Refusal(nothing_in_folder(
+                path,
+                repositories,
+                worktrees,
+                FolderAction::Stage,
+            ))));
+        }
+        report.left_out_repositories += repositories;
+        report.left_out_worktrees += worktrees;
+        excludes.extend(own);
     }
     if excludes.is_empty() {
         run_pathspecs(worktree_path, &["add"], file_paths, true, "git add")?;
@@ -3759,17 +3778,58 @@ pub fn stage_with_report(worktree_path: &Path, file_paths: &[String]) -> Result<
     }
     // Magic pathspecs, so no global literal flag: each path is `literal` on
     // its own, which keeps a name like a glob to itself all the same.
-    let specs: Vec<String> = file_paths
+    let specs: Vec<Vec<u8>> = file_paths
         .iter()
-        .map(|path| format!(":(literal){path}"))
-        .chain(
-            excludes
-                .iter()
-                .map(|path| format!(":(exclude,literal){path}")),
-        )
+        .map(|path| format!(":(literal){path}").into_bytes())
+        .chain(excludes)
         .collect();
     run_pathspecs(worktree_path, &["add"], &specs, false, "git add")?;
     Ok(report)
+}
+
+/// The pathspec that leaves `rel` out, in its own bytes: the pathspec file is
+/// NUL-delimited, so a name that is not UTF-8 is excluded as it is.
+fn exclude_spec(rel: &[u8]) -> Vec<u8> {
+    let mut spec = b":(exclude,literal)".to_vec();
+    spec.extend_from_slice(rel);
+    spec
+}
+
+/// True when the index holds any entry inside the folder `path`.
+fn index_holds_anything_in(worktree_path: &Path, path: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args([
+            "--literal-pathspecs",
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "ls-files",
+            "-z",
+            "--",
+        ])
+        .arg(format!("{path}/"))
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+/// True when adding `path` without `excludes` would stage anything.
+fn stages_anything(worktree_path: &Path, path: &str, excludes: &[Vec<u8>]) -> Result<bool> {
+    let specs: Vec<Vec<u8>> = std::iter::once(format!(":(literal){path}").into_bytes())
+        .chain(excludes.iter().cloned())
+        .collect();
+    let out = run_pathspecs_output(
+        worktree_path,
+        &["add", "--dry-run"],
+        &specs,
+        false,
+        "git add --dry-run",
+    )?;
+    Ok(out.iter().any(|byte| !byte.is_ascii_whitespace()))
 }
 
 /// Unstage every named path in one git call. See [`stage_files`] for why the
@@ -3839,13 +3899,24 @@ fn run_pathspec_batch(
 
 /// Run one git command over pathspecs fed on stdin. `literal` adds the global
 /// `--literal-pathspecs`; without it each spec must carry its own magic.
-fn run_pathspecs(
+fn run_pathspecs<P: AsRef<[u8]>>(
     worktree_path: &Path,
     subcommand: &[&str],
-    file_paths: &[String],
+    file_paths: &[P],
     literal: bool,
     what: &str,
 ) -> Result<()> {
+    run_pathspecs_output(worktree_path, subcommand, file_paths, literal, what).map(|_| ())
+}
+
+/// [`run_pathspecs`], answering git's standard output.
+fn run_pathspecs_output<P: AsRef<[u8]>>(
+    worktree_path: &Path,
+    subcommand: &[&str],
+    file_paths: &[P],
+    literal: bool,
+    what: &str,
+) -> Result<Vec<u8>> {
     let wt = worktree_path.to_string_lossy();
     let mut args: Vec<&str> = Vec::new();
     if literal {
@@ -3866,7 +3937,7 @@ fn run_pathspecs(
         .ok_or_else(|| anyhow!("{what} failed: could not write the file list to git"))?;
     let mut payload = Vec::new();
     for path in file_paths {
-        payload.extend_from_slice(path.as_bytes());
+        payload.extend_from_slice(path.as_ref());
         payload.push(0);
     }
     std::io::Write::write_all(&mut stdin, &payload)?;
@@ -3878,7 +3949,7 @@ fn run_pathspecs(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(())
+    Ok(output.stdout)
 }
 
 pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
@@ -3913,37 +3984,17 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
 /// files the repository ignores. Reporting a deletion that did not happen is
 /// the lie this stops.
 fn refuse_empty_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args([
-            "--literal-pathspecs",
-            "-C",
-            worktree_path.to_string_lossy().as_ref(),
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            "--",
-        ])
-        .arg(format!("{dir}/"))
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git ls-files failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let has_a_file = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .any(|record| !record.is_empty() && !record.ends_with(b"/"));
-    if has_a_file {
+    let inside = folding::folder_inside(worktree_path, dir)?;
+    if inside.has_file {
         return Ok(());
     }
-    Err(anyhow!(
-        "there is nothing in \"{dir}/\" that a delete would remove: it holds only \
-         repositories of their own, which a delete keeps, and files the repository ignores. \
-         Delete a nested repository from its own row after expanding the folder."
-    ))
+    let (repositories, worktrees) = inside.counts();
+    Err(anyhow::Error::new(Refusal(nothing_in_folder(
+        dir,
+        repositories,
+        worktrees,
+        FolderAction::Delete,
+    ))))
 }
 
 /// Delete exactly what an untracked folder's row counted: its untracked,
@@ -3990,18 +4041,20 @@ pub enum ConfirmedEntry {
     Repository,
 }
 
-/// A discard refused because the entry is not what the user confirmed. A
-/// refusal rather than a failure, so a route can answer it as one.
+/// A git action refused on purpose, with the sentence that says why: a delete
+/// of an entry that is no longer what the user confirmed, or a folder action
+/// that would do nothing. A refusal rather than a failure, so a route can
+/// answer it as one (a 400 carrying the sentence).
 #[derive(Debug)]
-pub struct DiscardRefusal(pub String);
+pub struct Refusal(pub String);
 
-impl std::fmt::Display for DiscardRefusal {
+impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::error::Error for DiscardRefusal {}
+impl std::error::Error for Refusal {}
 
 /// [`discard_confirmed`] with nothing confirmed, which is what a plain file
 /// needs. For a folder it means "an ordinary folder" at most: a repository of
@@ -4081,7 +4134,7 @@ pub fn discard_confirmed(
         // `symlink_metadata`, so a link to a directory is removed as the link.
         let meta = fs::symlink_metadata(&full)?;
         let changed = |now: &str| {
-            anyhow::Error::new(DiscardRefusal(format!(
+            anyhow::Error::new(Refusal(format!(
                 "\"{file_path}/\" changed since you looked: it is now {now}. Nothing was \
                  deleted; refresh the changes and look again before deleting it."
             )))
@@ -4111,7 +4164,7 @@ pub fn discard_confirmed(
                         return Err(changed("a repository of its own, with a history"));
                     }
                     None => {
-                        return Err(anyhow::Error::new(DiscardRefusal(format!(
+                        return Err(anyhow::Error::new(Refusal(format!(
                             "\"{file_path}/\" is a repository of its own; it is deleted, \
                              history included, only when the delete names it as one. Refresh \
                              the changes and delete it from its own row."

@@ -303,6 +303,14 @@ where
     let worktree = worktree.to_path_buf();
     match tokio::task::spawn_blocking(op).await {
         Ok(Ok(value)) => Ok(value),
+        // A refusal is a sentence the user can act on (look again, act on a
+        // row inside), not a git failure.
+        Ok(Err(e)) if e.downcast_ref::<dux_core::git::Refusal>().is_some() => Err((
+            StatusCode::BAD_REQUEST,
+            dux_core::git::redact_worktree_path(&e.to_string(), &worktree),
+        )
+            .into_response()
+            .into()),
         Ok(Err(e)) => {
             dux_core::logger::warn(&format!("[web] could not {action}: {e:#}"));
             let detail = dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree);
@@ -435,38 +443,13 @@ async fn discard(
     let confirmed = op.confirmed();
     let path = op.path;
     // A folder that is no longer what the user confirmed is a refusal they can
-    // act on (look again), not a git failure.
-    let outcome = tokio::task::spawn_blocking(move || {
+    // act on (look again), which `run_git` answers as one.
+    if let Err(r) = run_git("discard the file's changes", &worktree, move || {
         dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed)
     })
-    .await;
-    match outcome {
-        Ok(Err(e)) if e.downcast_ref::<dux_core::git::DiscardRefusal>().is_some() => {
-            return (
-                StatusCode::BAD_REQUEST,
-                dux_core::git::redact_worktree_path(&e.to_string(), &worktree),
-            )
-                .into_response();
-        }
-        Ok(Err(e)) => {
-            dux_core::logger::warn(&format!(
-                "[web] could not discard the file's changes: {e:#}"
-            ));
-            let detail = dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Could not discard the file's changes. {detail}"),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("git task failed: {e}"),
-            )
-                .into_response();
-        }
-        Ok(Ok(())) => {}
+    .await
+    {
+        return r.into_response();
     }
     refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
@@ -1533,6 +1516,37 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(!worktree.join("scratch").exists());
+    }
+
+    /// A folder holding nothing but a repository has nothing to stage, since
+    /// the repository is left out: the route refuses it as a refusal (400,
+    /// with the sentence), not as a git failure, and stages nothing.
+    #[tokio::test]
+    async fn staging_a_folder_that_holds_only_a_repository_is_refused() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("only/lib")).unwrap();
+        std::fs::write(worktree.join("only/lib/own.txt"), "own\n").unwrap();
+        run_git(&worktree.join("only/lib"), &["init", "-q"]);
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage",
+                r#"{"path":"only"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let text = body_text(resp).await;
+        assert!(
+            text.contains("nothing in \"only/\" to stage: it holds only repositories of their own"),
+            "{text}"
+        );
+        let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+        assert!(staged.is_empty(), "{staged:?}");
     }
 
     /// Staging a folder stages its files and leaves the repositories inside it

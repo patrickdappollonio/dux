@@ -120,10 +120,27 @@ export function discardActsOn(file: ChangedFileView): boolean {
 }
 
 // Whether staging this row does what staging says. A worktree of this same
-// repository would be recorded as a link to it, which the server refuses, so
-// it is not offered and a bulk stage leaves it out.
+// repository would be recorded as a link to it, and a folder holding nothing
+// but repositories would stage nothing (a folder stage leaves them out); the
+// server refuses both, so neither is offered and a bulk stage leaves them out.
 export function stageActsOn(file: ChangedFileView): boolean {
-  return file.kind !== "linked_worktree"
+  if (file.kind === "linked_worktree") return false
+  if (file.kind === "directory") return (file.file_count ?? 0) > 0
+  return true
+}
+
+// "only repositories of their own", "only worktrees of this repository", or
+// both, for a folder holding nothing else: a worktree is not a repository of
+// its own, so each is named for what it is. The terminal UI and the server
+// word it the same way.
+export function onlyRepositoriesWords(file: ChangedFileView): string {
+  const repositories = (file.nested_repositories ?? 0) > 0
+  const worktrees = (file.linked_worktrees ?? 0) > 0
+  if (worktrees && !repositories) return "only worktrees of this repository"
+  if (worktrees && repositories) {
+    return "only repositories of their own and worktrees of this repository"
+  }
+  return "only repositories of their own"
 }
 
 // The recap describes exactly the rows visible beneath it, so callers pass the

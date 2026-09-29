@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { discardOutcome, selectedFileCount } from "./discardOutcome"
+import {
+  discardLeftOutReason,
+  discardOutcome,
+  selectedFileCount,
+} from "./discardOutcome"
+import { stageActsOn } from "./changedFiles"
 import { proseText } from "./prose"
 import type { ChangedFileView } from "./types"
 
@@ -63,5 +68,44 @@ describe("selectedFileCount", () => {
     expect(
       selectedFileCount(new Set(["node_modules", "notes.md"]), [folder, untracked, tracked]),
     ).toBe(28748)
+  })
+})
+
+// A folder holding nothing but repositories is named by what it holds: a
+// worktree of this repository is not a repository of its own, and a mix names
+// both. Neither a delete nor a stage acts on it.
+describe("folders holding only repositories", () => {
+  const only = (path: string, nested: number, worktrees: number) =>
+    row(path, "??", {
+      kind: "directory",
+      file_count: 0,
+      nested_repositories: nested || undefined,
+      linked_worktrees: worktrees || undefined,
+    })
+
+  it("words the left-out reason by what the folder holds", () => {
+    const cases: [ChangedFileView, string][] = [
+      [only("a", 2, 0), "a/ holds only repositories of their own, which a delete keeps"],
+      [only("b", 0, 1), "b/ holds only worktrees of this repository, which a delete keeps"],
+      [
+        only("c", 1, 1),
+        "c/ holds only repositories of their own and worktrees of this repository, which a delete keeps",
+      ],
+    ]
+    for (const [file, text] of cases) {
+      expect(proseText(discardLeftOutReason(file)!)).toBe(text)
+    }
+  })
+
+  it("is not offered for a stage", () => {
+    expect(stageActsOn(only("a", 2, 0))).toBe(false)
+    expect(stageActsOn(only("b", 0, 1))).toBe(false)
+    const withFiles = row("n", "??", {
+      kind: "directory",
+      file_count: 3,
+      nested_repositories: 1,
+    })
+    expect(stageActsOn(withFiles)).toBe(true)
+    expect(stageActsOn(nested)).toBe(true)
   })
 })

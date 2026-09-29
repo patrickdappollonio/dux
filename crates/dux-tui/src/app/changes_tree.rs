@@ -1454,6 +1454,90 @@ mod tests {
         );
     }
 
+    /// Rows holding nothing but repositories, of each kind and a mix, for the
+    /// refusal-wording tests below.
+    fn repositories_only_rows(app: &mut App) {
+        let only = |path: &str, nested_repositories, linked_worktrees| ChangedFile {
+            kind: ChangedFileKind::Directory(dux_core::model::FolderContents {
+                file_count: 0,
+                nested_repositories,
+                linked_worktrees,
+                ..Default::default()
+            }),
+            ..file(path, "?")
+        };
+        app.engine.unstaged_files = vec![
+            only("a-repos", 2, 0),
+            only("b-worktrees", 0, 1),
+            only("c-mixed", 1, 1),
+        ];
+        app.selected_left = 1;
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+    }
+
+    /// The refusal names what the folder actually holds: worktrees of this
+    /// repository are not "repositories of their own", and a mix names both.
+    #[test]
+    fn the_discard_refusal_names_worktrees_and_mixes_truthfully() {
+        for (index, holds) in [
+            (0, "only repositories of their own, which a delete keeps"),
+            (1, "only worktrees of this repository, which a delete keeps"),
+            (
+                2,
+                "only repositories of their own and worktrees of this repository, which a \
+                 delete keeps",
+            ),
+        ] {
+            // A fresh app each time: the status line queues infos.
+            let mut app = test_app(default_bindings());
+            repositories_only_rows(&mut app);
+            app.files_index = index;
+            app.confirm_discard_selected_file().unwrap();
+            assert!(matches!(app.prompt, PromptState::None));
+            let text = app.status.text();
+            assert!(text.contains(holds), "{text}");
+            assert_eq!(text.contains("worktree manager"), index > 0, "{text}");
+            assert_eq!(text.contains("nested repository"), index != 1, "{text}");
+        }
+    }
+
+    /// Space on a folder holding nothing but repositories stages nothing, so
+    /// it says so instead of starting a stage that would claim it staged it.
+    #[test]
+    fn space_refuses_a_folder_that_holds_only_repositories() {
+        for (index, holds) in [
+            (
+                0,
+                "only repositories of their own, which staging a folder leaves out",
+            ),
+            (
+                1,
+                "only worktrees of this repository, which staging a folder leaves out",
+            ),
+            (
+                2,
+                "only repositories of their own and worktrees of this repository, which \
+                 staging a folder leaves out",
+            ),
+        ] {
+            let mut app = test_app(default_bindings());
+            repositories_only_rows(&mut app);
+            app.files_index = index;
+            app.handle_key(space()).unwrap();
+            assert!(
+                app.changes_tree.pending_ops.is_empty(),
+                "no stage is started for row {index}"
+            );
+            assert!(
+                app.status.text().contains("to stage: it holds"),
+                "{}",
+                app.status.text()
+            );
+            assert!(app.status.text().contains(holds), "{}", app.status.text());
+        }
+    }
+
     /// The dialog promised an ordinary folder; if it becomes a repository
     /// before the confirm lands, the delete refuses and deletes nothing.
     #[test]

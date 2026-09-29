@@ -13,6 +13,7 @@ import {
   countWords,
   fileStatusMeta,
   joinWords,
+  onlyRepositoriesWords,
 } from "@/lib/changedFiles"
 import type { LeftOut } from "@/lib/git"
 import { chip, prose, type Prose } from "@/lib/prose"
@@ -119,7 +120,7 @@ export function discardLeftOutReason(file: ChangedFileView): Prose | null {
     return prose`${chip(`${file.path}/`)} is a worktree of this repository, which the worktree manager removes`
   }
   if (file.kind === "directory" && (file.file_count ?? 0) === 0) {
-    return prose`${chip(`${file.path}/`)} holds only repositories of their own, which a delete keeps`
+    return prose`${chip(`${file.path}/`)} holds ${onlyRepositoriesWords(file)}, which a delete keeps`
   }
   return null
 }

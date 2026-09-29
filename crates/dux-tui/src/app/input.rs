@@ -2741,6 +2741,21 @@ impl App {
                 RightSection::Staged => FolderOp::Unstage,
                 _ => FolderOp::Stage,
             };
+            // A folder holding nothing but repositories stages nothing, since
+            // a folder stage leaves them out. The core refuses it too; this
+            // only spares a worker that could not keep its word.
+            if let (FolderOp::Stage, dux_core::model::ChangedFileKind::Directory(contents)) =
+                (op, &folder.kind)
+                && contents.file_count == 0
+            {
+                self.set_info(git::nothing_in_folder(
+                    &folder.path,
+                    contents.nested_repositories,
+                    contents.linked_worktrees,
+                    git::FolderAction::Stage,
+                ));
+                return Ok(());
+            }
             self.start_folder_op(op, &folder);
             return Ok(());
         }
@@ -2790,11 +2805,11 @@ impl App {
         // too; this only spares the user a dialog that could not keep its word.
         match &file.kind {
             dux_core::model::ChangedFileKind::Directory(contents) if contents.file_count == 0 => {
-                let path = file.path.clone();
-                self.set_info(format!(
-                    "There is nothing in \"{path}/\" that a delete would remove: it holds only \
-                     repositories of their own, which a delete keeps. Expand it to delete one \
-                     of them from its own row."
+                self.set_info(git::nothing_in_folder(
+                    &file.path,
+                    contents.nested_repositories,
+                    contents.linked_worktrees,
+                    git::FolderAction::Delete,
                 ));
                 return Ok(());
             }

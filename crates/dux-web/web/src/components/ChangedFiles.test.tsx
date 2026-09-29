@@ -1665,10 +1665,10 @@ describe("a folded folder row", () => {
     for (const path of ["vendor", "inner-wt"]) {
       fireEvent.click(screen.getByLabelText(`Actions for ${path}`))
       const menu = within(await screen.findByRole("menu"))
-      // A worktree of this repository is not staged either: the server
-      // refuses it, so the menu does not offer it.
-      if (path === "inner-wt") expect(menu.queryByText("Stage")).toBeNull()
-      else expect(menu.getByText("Stage")).toBeTruthy()
+      // Neither is staged: the server refuses a worktree of this repository,
+      // and a folder holding only repositories has nothing a stage would add
+      // (it leaves them out), so the menu offers neither.
+      expect(menu.queryByText("Stage")).toBeNull()
       expect(menu.queryByText("Discard…")).toBeNull()
       fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
       cleanup()
