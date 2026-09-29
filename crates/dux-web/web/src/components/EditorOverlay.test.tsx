@@ -1295,6 +1295,9 @@ describe("editor header controls share one outline look", () => {
     expect(control.className).toContain("border-border")
     expect(control.className).not.toMatch(/(^|\s)bg-primary(\s|$)/)
     expect(control.className).toMatch(/(^|\s)(h-8|size-8)(\s|$)/)
+    // A finger at desktop width (a tablet) gets the 40px floor too, and the
+    // whole row moves together, so the one-height rule holds there as well.
+    expect(control.className).toMatch(/pointer-coarse:(h-10|size-10)/)
     if (phoneFloor) {
       expect(control.className).toMatch(/max-md:(h-10|size-10)/)
     } else {
@@ -1324,6 +1327,50 @@ describe("editor header controls share one outline look", () => {
     // Its tooltip wrapper is what hides it on a phone, once, not the button too.
     expect(local.className).not.toContain("max-md:hidden")
     expect(local.parentElement!.className).toContain("max-md:hidden")
+  })
+
+  // The header must fit from the md breakpoint up, where its labelled controls
+  // did not: below xl each drops its words to a screen-reader-only label (so its
+  // accessible name is unchanged) and becomes an icon square, named on hover and
+  // focus by the shared tooltip. jsdom cannot lay out, so the responsive classes
+  // are pinned; the pixel truth is the screenshot pass.
+  it("drops the labelled controls to icons below xl, each named by the shared tooltip", async () => {
+    await mountWithTab("README.md")
+    await screen.findByTestId("code-editor")
+    const controls: [HTMLElement, string][] = [
+      [screen.getByRole("button", { name: /^file$/i }), "File"],
+      [screen.getByRole("button", { name: /^diff$/i }), "Diff"],
+      [screen.getByRole("button", { name: /preview/i }), "Preview"],
+      [screen.getByRole("button", { name: /open local editor/i }), "Open local editor"],
+      [screen.getByRole("link", { name: /open in new tab/i }), "Open in new tab"],
+      [screen.getByRole("button", { name: /^close$/i }), "Close"],
+    ]
+    for (const [control, label] of controls) {
+      const words = within(control).getByText(label)
+      expect(words.className, label).toContain("max-xl:sr-only")
+      // Square below xl: the padding shrinks to centre the lone icon.
+      expect(control.className, label).toContain("max-xl:px-2")
+    }
+    for (const [control, label] of controls) {
+      fireEvent.focus(control)
+      await waitFor(() =>
+        expect(
+          [...document.querySelectorAll("[data-slot=tooltip-content]")].some(
+            (node) => node.textContent === label,
+          ),
+          label,
+        ).toBe(true),
+      )
+      fireEvent.blur(control)
+    }
+  })
+
+  it("floors the header row for a finger at desktop width", async () => {
+    await mountWithTab("README.md")
+    const btn = await screen.findByRole("button", { name: /the file explorer/i })
+    const row = btn.closest("div.border-b") as HTMLElement
+    // 40px controls + py-2 + border-b = 57px.
+    expect(row.className).toContain("pointer-coarse:min-h-14.25")
   })
 
   it("joins File and Diff as one outline button group, the current mode pressed", async () => {

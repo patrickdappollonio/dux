@@ -174,10 +174,23 @@ const MarkdownPreview = lazy(() => import("./MarkdownPreview"))
 const MAX_SEARCH_RESULTS = 300
 
 // The header's one height token for its labelled controls, which all wear the
-// outline variant: the icon-only ones take the matching `size="icon"` (size-8).
-// A control painted on a phone adds its own 40px floor (max-md:h-10); the rest
-// are desktop-only and reached through the phone's fold instead.
-const HEADER_CONTROL = "h-8 shrink-0"
+// outline variant: the icon-only ones take the matching `size="icon"` plus
+// HEADER_ICON_CONTROL. A finger at any width gets the 40px floor
+// (pointer-coarse), and a control painted on a phone adds its own
+// (max-md:h-10); the rest are desktop-only and reached through the phone's fold.
+const HEADER_CONTROL = "h-8 shrink-0 pointer-coarse:h-10"
+const HEADER_ICON_CONTROL = "shrink-0 pointer-coarse:size-10"
+
+// Below xl the header's labelled controls do not fit beside the path (at md
+// they measured wider than the row), so each drops its words to a
+// screen-reader-only label, keeping its accessible name, and the padding
+// shrinks to make the lone icon a square: 32px, or 40px for a finger. The
+// shared tooltip names each one, on hover and on keyboard focus.
+const COLLAPSES_BELOW_XL = "max-xl:px-2 pointer-coarse:max-xl:px-3"
+
+function HeaderLabel({ children }: { children: React.ReactNode }) {
+  return <span className="max-xl:sr-only">{children}</span>
+}
 
 // The two lines of I/O around the explorer's persisted width. The decisions
 // (what the value means, what an unrecognised one does) are all in the pure
@@ -1111,74 +1124,88 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   }
 
   function renderDesktopViewActions(): React.ReactNode {
+    const previewLabel =
+      showPreview && activeTab?.mode === "file" ? "Edit" : "Preview"
     return (
       <>
         {activeTab && !isImageTab && hasDiff && (
           // One switch, two outline buttons joined by the shared ButtonGroup;
           // the Button toggle look's primary fill marks the current mode.
           <ButtonGroup className="shrink-0 max-md:hidden" aria-label="View mode">
-            <Button
-              variant="outline"
-              className={HEADER_CONTROL}
-              toggle
-              aria-pressed={activeTab.mode === "file"}
-              onClick={() => editorSetTabMode(root, activeTab.id, "file")}
-            >
-              <FileText />
-              File
-            </Button>
-            <Button
-              variant="outline"
-              className={HEADER_CONTROL}
-              toggle
-              aria-pressed={activeTab.mode === "diff"}
-              onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
-            >
-              <GitCompare />
-              Diff
-            </Button>
+            <SimpleTooltip content="File">
+              <Button
+                variant="outline"
+                className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL)}
+                toggle
+                aria-pressed={activeTab.mode === "file"}
+                onClick={() => editorSetTabMode(root, activeTab.id, "file")}
+              >
+                <FileText />
+                <HeaderLabel>File</HeaderLabel>
+              </Button>
+            </SimpleTooltip>
+            <SimpleTooltip content="Diff">
+              <Button
+                variant="outline"
+                className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL)}
+                toggle
+                aria-pressed={activeTab.mode === "diff"}
+                onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
+              >
+                <GitCompare />
+                <HeaderLabel>Diff</HeaderLabel>
+              </Button>
+            </SimpleTooltip>
           </ButtonGroup>
         )}
         {hasDiff && activeTab?.mode === "diff" && diffStale && (
           <SimpleTooltip content="This file changed on disk: reload the diff">
             <Button
               variant="outline"
-              className={cn(HEADER_CONTROL, "text-amber-500 max-md:hidden")}
+              className={cn(
+                HEADER_CONTROL,
+                COLLAPSES_BELOW_XL,
+                "text-amber-500 max-md:hidden",
+              )}
               aria-label="Reload the diff. The file changed on disk"
               onClick={refreshDiff}
             >
               <CircleAlert />
-              Reload
+              <HeaderLabel>Reload</HeaderLabel>
             </Button>
           </SimpleTooltip>
         )}
         {canPreview && (
-          <Button
-            variant="outline"
-            className={cn(HEADER_CONTROL, "max-md:hidden")}
-            toggle
-            aria-pressed={showPreview}
-            onClick={togglePreview}
-          >
-            {showPreview && activeTab?.mode === "file" ? <Pencil /> : <Eye />}
-            {showPreview && activeTab?.mode === "file" ? "Edit" : "Preview"}
-          </Button>
+          <SimpleTooltip content={previewLabel}>
+            <Button
+              variant="outline"
+              className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL, "max-md:hidden")}
+              toggle
+              aria-pressed={showPreview}
+              onClick={togglePreview}
+            >
+              {showPreview && activeTab?.mode === "file" ? <Pencil /> : <Eye />}
+              <HeaderLabel>{previewLabel}</HeaderLabel>
+            </Button>
+          </SimpleTooltip>
         )}
         {showLanguagePicker && (
           <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="outline"
-                  className={cn(HEADER_CONTROL, "max-md:hidden")}
-                  aria-label={`Syntax language: ${activeLanguageLabel}`}
-                />
-              }
-            >
-              <Code2 />
-              {activeLanguageLabel}
-              <ChevronDown />
-            </DropdownMenuTrigger>
+            <SimpleTooltip content={`Syntax language: ${activeLanguageLabel}`}>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    variant="outline"
+                    className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL, "max-md:hidden")}
+                    aria-label={`Syntax language: ${activeLanguageLabel}`}
+                  />
+                }
+              >
+                <Code2 />
+                <HeaderLabel>{activeLanguageLabel}</HeaderLabel>
+                <ChevronDown />
+              </DropdownMenuTrigger>
+            </SimpleTooltip>
             <DropdownMenuContent align="end">
               {languagePickerItems()}
             </DropdownMenuContent>
@@ -1191,10 +1218,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   function renderLocalEditorAction(): React.ReactNode {
     if (activeTab === null) return null
     return (
+      // On the wrapper rather than the button, so it still answers a hover
+      // while the button is disabled; a keyboard focus on the button inside
+      // opens it too, because focus reaches the wrapper's handler.
       <SimpleTooltip
         content={
           localAccess
-            ? undefined
+            ? "Open local editor"
             : "Only available when dux is opened locally, not over a remote URL."
         }
       >
@@ -1205,7 +1235,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 <Button
                   variant="outline"
                   // The wrapper span, not the button, carries max-md:hidden.
-                  className={HEADER_CONTROL}
+                  className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL)}
                   disabled={!localAccess || openingEditor}
                   aria-busy={openingEditor}
                 />
@@ -1216,7 +1246,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               ) : (
                 <Laptop />
               )}
-              Open local editor
+              <HeaderLabel>Open local editor</HeaderLabel>
               <ChevronDown />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
@@ -1253,7 +1283,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             <Button
               size="icon"
               variant="outline"
-              className="shrink-0 md:hidden max-md:size-10"
+              className={cn(HEADER_ICON_CONTROL, "md:hidden max-md:size-10")}
               aria-label="More editor actions"
             />
           }
@@ -1326,31 +1356,35 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // than as a control, and these are the overlay's only ways out.
     return (
       <>
-        <Button
-          variant="outline"
-          className={cn(HEADER_CONTROL, "max-md:h-10")}
-          render={
-            <a
-              href={standaloneEditorHash(
-                root,
-                activeTab ? { mode: activeTab.mode, path: activeTab.path } : null,
-              )}
-              target="_blank"
-              rel="noopener"
-            />
-          }
-        >
-          <ExternalLink />
-          Open in new tab
-        </Button>
-        <Button
-          variant="outline"
-          className={cn(HEADER_CONTROL, "max-md:h-10")}
-          onClick={() => closeEditor()}
-        >
-          <X />
-          Close
-        </Button>
+        <SimpleTooltip content="Open in new tab">
+          <Button
+            variant="outline"
+            className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL, "max-md:h-10")}
+            render={
+              <a
+                href={standaloneEditorHash(
+                  root,
+                  activeTab ? { mode: activeTab.mode, path: activeTab.path } : null,
+                )}
+                target="_blank"
+                rel="noopener"
+              />
+            }
+          >
+            <ExternalLink />
+            <HeaderLabel>Open in new tab</HeaderLabel>
+          </Button>
+        </SimpleTooltip>
+        <SimpleTooltip content="Close">
+          <Button
+            variant="outline"
+            className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL, "max-md:h-10")}
+            onClick={() => closeEditor()}
+          >
+            <X />
+            <HeaderLabel>Close</HeaderLabel>
+          </Button>
+        </SimpleTooltip>
       </>
     )
   }
@@ -1362,9 +1396,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           Every control is HEADER_CONTROL's h-8 (32px), so min-h-12.25 (49px)
           is that plus the row's py-2 (16px) and its own border-b (1px; min-h
           is border-box): the bar keeps one height as controls come and go.
-          On a phone the painted controls take the 40px floor, and the
-          explorer toggle always renders there, so the row is constant too. */}
-      <div className="flex min-h-12.25 items-center gap-2 border-b px-3 py-2">
+          For a finger every control is 40px, so the floor is 57px
+          (pointer-coarse:min-h-14.25). On a phone the painted controls take
+          the 40px floor, and the explorer toggle always renders there, so
+          the row is constant too. */}
+      <div className="flex min-h-12.25 items-center gap-2 pointer-coarse:min-h-14.25 border-b px-3 py-2">
         {/* Explorer collapse/expand toggle: lives in the header, OUTSIDE the
             panel it hides, so it stays reachable while collapsed. */}
         <SimpleTooltip
@@ -1375,7 +1411,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           <Button
             size="icon"
             variant="outline"
-            className="shrink-0 max-md:size-10"
+            className={cn(HEADER_ICON_CONTROL, "max-md:size-10")}
             aria-label={
               explorerCollapsed
                 ? "Show the file explorer"
