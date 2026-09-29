@@ -31,7 +31,8 @@ import {
   TriangleAlert,
   Undo2,
 } from "lucide-react"
-import { notifyError } from "@/lib/notify"
+import { notifyError, notifyInfo } from "@/lib/notify"
+import { leftOutNotice } from "@/lib/discardOutcome"
 import { git } from "@/lib/git"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
@@ -250,7 +251,11 @@ const FileRow = memo(function FileRow({
     setBusy(true)
     try {
       if (action === "stage") {
-        await git.stage(sessionId, file.path)
+        const report = await git.stage(sessionId, file.path)
+        // A folder is staged without the repositories inside it; the rows
+        // moving cannot say that, so a message does.
+        const notice = leftOutNotice(report)
+        if (notice) notifyInfo(notice)
       } else {
         await git.unstage(sessionId, file.path)
       }

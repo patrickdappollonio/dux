@@ -525,9 +525,12 @@ impl App {
             .name("dux-changes-folder-op".into())
             .spawn(move || {
                 let outcome = match op {
-                    FolderOp::Stage => git::stage_file(&worktree, &path),
-                    FolderOp::Unstage => git::unstage_file(&worktree, &path),
-                    FolderOp::Delete => delete_untracked_folder(&worktree, &path),
+                    FolderOp::Stage => git::stage_with_report(&worktree, &[path]),
+                    FolderOp::Unstage => {
+                        git::unstage_file(&worktree, &path).map(|()| git::StageReport::default())
+                    }
+                    FolderOp::Delete => delete_untracked_folder(&worktree, &path)
+                        .map(|()| git::StageReport::default()),
                 };
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
             });
@@ -564,35 +567,43 @@ impl App {
             let label = &pending.label;
             let count = &pending.count_words;
             let (tone, message) = match (pending.op, outcome) {
-                (FolderOp::Stage, Ok(())) if pending.repository => (
+                (FolderOp::Stage, Ok(_)) if pending.repository => (
                     StatusTone::Info,
                     format!(
                         "Staged \"{label}\" as a link to the repository inside it (a \
                          submodule-style entry recording its current commit), not as its files."
                     ),
                 ),
-                (FolderOp::Stage, Ok(())) => (
+                (FolderOp::Stage, Ok(report)) if report.left_anything_out() => (
+                    StatusTone::Info,
+                    format!(
+                        "Staged \"{label}\" without the repositories inside it: left out {}, \
+                         which staging would record as links to repositories, not as files.",
+                        left_out_words(&report)
+                    ),
+                ),
+                (FolderOp::Stage, Ok(_)) => (
                     StatusTone::Info,
                     format!(
                         "Staged \"{label}\" ({count}): the whole folder is in the staged changes \
                          now."
                     ),
                 ),
-                (FolderOp::Unstage, Ok(())) => (
+                (FolderOp::Unstage, Ok(_)) => (
                     StatusTone::Info,
                     format!(
                         "Unstaged \"{label}\" ({count}): the whole folder is back in the unstaged \
                          changes."
                     ),
                 ),
-                (FolderOp::Delete, Ok(())) if pending.repository => (
+                (FolderOp::Delete, Ok(_)) if pending.repository => (
                     StatusTone::Info,
                     format!(
                         "Deleted \"{label}\", a repository of its own, with its history. This \
                          cannot be undone."
                     ),
                 ),
-                (FolderOp::Delete, Ok(())) => (
+                (FolderOp::Delete, Ok(_)) => (
                     StatusTone::Info,
                     format!(
                         "Deleted the untracked files in \"{label}\" ({count}). Files the \
@@ -664,6 +675,27 @@ fn delete_untracked_folder(worktree: &Path, path: &str) -> anyhow::Result<()> {
         );
     }
     git::discard_file(worktree, path, true)
+}
+
+/// What a stage left out, in words: "1 nested repository and 2 worktrees of
+/// this repository".
+fn left_out_words(report: &git::StageReport) -> String {
+    let mut parts = Vec::new();
+    if report.left_out_repositories > 0 {
+        parts.push(plural(
+            report.left_out_repositories,
+            "nested repository",
+            "nested repositories",
+        ));
+    }
+    if report.left_out_worktrees > 0 {
+        parts.push(plural(
+            report.left_out_worktrees,
+            "worktree of this repository",
+            "worktrees of this repository",
+        ));
+    }
+    dux_core::model::join_words(&parts)
 }
 
 fn plural(count: usize, one: &str, many: &str) -> String {
@@ -995,6 +1027,34 @@ mod tests {
             "{}",
             app.status.text()
         );
+    }
+
+    /// Staging a folder stages its files and leaves the repositories inside it
+    /// out, and the status line says how many it left out.
+    #[test]
+    fn staging_a_folder_says_which_repositories_it_left_out() {
+        let (mut app, worktree) = repo_app();
+        let nested = worktree.join("node_modules/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_git(&nested, &["init", "-q", "-b", "main"]);
+        run_git(&nested, &["config", "user.name", "t"]);
+        run_git(&nested, &["config", "user.email", "t@t"]);
+        std::fs::write(nested.join("a.txt"), "a\n").unwrap();
+        run_git(&nested, &["add", "a.txt"]);
+        run_git(&nested, &["commit", "-q", "-m", "a"]);
+        load_lists(&mut app, &worktree);
+        app.files_index = 0;
+
+        app.handle_key(space()).unwrap();
+        settle(&mut app, idle);
+
+        let text = app.status.text();
+        assert!(text.contains("Staged \"node_modules/\""), "{text}");
+        assert!(text.contains("left out 1 nested repository"), "{text}");
+        // No link to the repository reached the index.
+        let index = crate::app::test_support::run_git_output(&worktree, &["ls-files", "--stage"]);
+        assert!(!index.contains("160000"), "{index}");
+        assert!(index.contains("node_modules/top.js"), "{index}");
     }
 
     #[test]

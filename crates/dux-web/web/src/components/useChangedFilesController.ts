@@ -8,10 +8,10 @@ import {
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
 import { formatRegularCount } from "@/lib/formatRegularCount"
-import { git } from "@/lib/git"
-import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
+import { git, type BatchResult } from "@/lib/git"
+import { notifyError, notifyInfo, notifySuccess, notifyWarning } from "@/lib/notify"
 import { chip, prose } from "@/lib/prose"
-import { discardOutcome, selectedFileCount } from "@/lib/discardOutcome"
+import { discardOutcome, leftOutNotice, selectedFileCount } from "@/lib/discardOutcome"
 import { discardActsOn, stageActsOn } from "@/lib/changedFiles"
 import type { ChangesSlice } from "@/lib/store"
 import type { ChangedFileView } from "@/lib/types"
@@ -118,10 +118,14 @@ function useChangedFilesModel(
 
 function bulkResultToast(
   verb: ChangesBulkVerb,
-  result: { done: string[]; refused: string[] },
+  result: BatchResult,
   rows: readonly ChangedFileView[],
 ): void {
   const past = verb === "stage" ? "staged" : "unstaged"
+  // Repositories inside a staged folder are left out on purpose, which only
+  // a message can say.
+  const notice = verb === "stage" ? leftOutNotice(result) : null
+  if (notice) notifyInfo(notice)
   // A clean stage or unstage says nothing: the rows moving between the pane's
   // sections is the whole feedback. A refusal still speaks, because rows that
   // did not move are the ones there is nothing on screen to explain. The count

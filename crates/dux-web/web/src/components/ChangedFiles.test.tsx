@@ -62,6 +62,10 @@ const unstageMany = vi.fn(async (_id: string, paths: string[]) => ({
   done: paths,
   refused: [] as string[],
 }))
+const stageOne = vi.fn(async (_id: string, _path: string) => ({
+  left_out_repositories: 0,
+  left_out_worktrees: 0,
+}))
 const discardMany = vi.fn(async (_id: string, paths: string[]) => ({
   done: paths,
   failed: [] as { path: string; message: string }[],
@@ -72,6 +76,7 @@ vi.mock("@/lib/git", async (importOriginal) => {
     ...actual,
     git: {
       ...actual.git,
+      stage: (...args: [string, string]) => stageOne(...args),
       stageMany: (...args: [string, string[]]) => stageMany(...args),
       unstageMany: (...args: [string, string[]]) => unstageMany(...args),
       discardMany: (...args: [string, string[]]) => discardMany(...args),
@@ -99,6 +104,7 @@ vi.mock("@/components/SimpleTooltip", () => ({
 }))
 
 const notifySuccess = vi.fn()
+const notifyInfo = vi.fn()
 const notifyWarning = vi.fn()
 const notifyError = vi.fn()
 vi.mock("@/lib/notify", async (importOriginal) => {
@@ -106,6 +112,7 @@ vi.mock("@/lib/notify", async (importOriginal) => {
   return {
     ...actual,
     notifySuccess: (...args: unknown[]) => notifySuccess(...args),
+    notifyInfo: (...args: unknown[]) => notifyInfo(...args),
     notifyWarning: (...args: unknown[]) => notifyWarning(...args),
     notifyError: (...args: unknown[]) => notifyError(...args),
   }
@@ -1651,6 +1658,22 @@ describe("a folded folder row", () => {
       cleanup()
       render(<ChangedFiles />)
     }
+  })
+
+  // Staging a folder stages its files and leaves the repositories inside it
+  // out; the rows moving says the stage happened, but only a message can say
+  // what was left behind.
+  it("says which repositories a folder stage left out", async () => {
+    mockState = withFolder()
+    stageOne.mockResolvedValueOnce({ left_out_repositories: 1, left_out_worktrees: 2 })
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Actions for node_modules"))
+    const menu = within(await screen.findByRole("menu"))
+    fireEvent.click(menu.getByText("Stage"))
+    await vi.waitFor(() => expect(notifyInfo).toHaveBeenCalledTimes(1))
+    expect(String(notifyInfo.mock.calls[0]![0])).toContain(
+      "left out 1 nested repository and 2 worktrees of this repository",
+    )
   })
 
   it("offers staging and discarding the folder but no editor", async () => {

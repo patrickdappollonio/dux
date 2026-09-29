@@ -1031,7 +1031,8 @@ pub(crate) struct PendingFolderOp {
     /// The folder is a repository of its own, deleted whole with its history.
     pub(crate) repository: bool,
     pub(crate) status_key: String,
-    pub(crate) rx: mpsc::Receiver<Result<(), String>>,
+    /// A stage reports what it left out; the other operations report nothing.
+    pub(crate) rx: mpsc::Receiver<Result<git::StageReport, String>>,
 }
 
 /// How long a diff may take before the status line explains the empty pane.

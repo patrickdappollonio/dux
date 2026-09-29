@@ -8,9 +8,35 @@
 // statuses (dux-core `engine::command`), which reach the terminal UI but not
 // the browser's route, built again here with the file count added.
 
-import { changedFileCount, countWords, fileStatusMeta } from "@/lib/changedFiles"
+import {
+  changedFileCount,
+  countWords,
+  fileStatusMeta,
+  joinWords,
+} from "@/lib/changedFiles"
+import type { LeftOut } from "@/lib/git"
 import { chip, prose, type Prose } from "@/lib/prose"
 import type { ChangedFileView } from "@/lib/types"
+
+/**
+ * What a stage left out, as a sentence, or null when it left nothing out. The
+ * terminal UI's folder stage says the same.
+ */
+export function leftOutNotice(report: LeftOut): string | null {
+  const repositories = report.left_out_repositories ?? 0
+  const worktrees = report.left_out_worktrees ?? 0
+  if (repositories + worktrees === 0) return null
+  const parts: string[] = []
+  if (repositories > 0) {
+    parts.push(countWords(repositories, "nested repository", "nested repositories"))
+  }
+  if (worktrees > 0) {
+    parts.push(
+      countWords(worktrees, "worktree of this repository", "worktrees of this repository"),
+    )
+  }
+  return `Staged without the repositories inside: left out ${joinWords(parts)}, which staging would record as links to repositories, not as files.`
+}
 
 /** How many files the checked `paths` of one section stand for. */
 export function selectedFileCount(

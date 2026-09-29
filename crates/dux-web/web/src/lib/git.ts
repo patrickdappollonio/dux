@@ -35,9 +35,16 @@ async function postGit(
   }
 }
 
+// What a stage left out of the index on purpose: the repositories inside a
+// staged folder, which staging would otherwise record as links, not files.
+export interface LeftOut {
+  left_out_repositories?: number
+  left_out_worktrees?: number
+}
+
 // A batch route's answer: what it acted on, and what had already left the
 // section it validates against.
-export interface BatchResult {
+export interface BatchResult extends LeftOut {
   done: string[]
   refused: string[]
 }
@@ -65,7 +72,7 @@ const gitUrl = (sessionId: string, action: string) =>
 
 export const git = {
   stage: (sessionId: string, path: string) =>
-    postGit(gitUrl(sessionId, "stage"), { path }),
+    postGitJson<LeftOut>(gitUrl(sessionId, "stage"), { path }),
   unstage: (sessionId: string, path: string) =>
     postGit(gitUrl(sessionId, "unstage"), { path }),
   // A whole checked selection in one request, so one git call and one broadcast. The

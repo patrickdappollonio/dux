@@ -59,6 +59,9 @@ struct FilesOp {
 struct BatchResult {
     done: Vec<String>,
     refused: Vec<String>,
+    /// What a stage batch left out on purpose (zero for an unstage batch).
+    #[serde(flatten)]
+    left_out: LeftOut,
 }
 
 /// Maximum number of paths one batch may name. `changed_files` folds a wholly
@@ -270,13 +273,14 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteR
 ///
 /// The ordinary refusals do not come through here: `git::commit_preflight` catches
 /// the empty-message and nothing-staged cases and answers 400 in its own wording.
-async fn run_git<F>(action: &'static str, worktree: &Path, op: F) -> Result<(), RouteRejection>
+async fn run_git<F, T>(action: &'static str, worktree: &Path, op: F) -> Result<T, RouteRejection>
 where
-    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
 {
     let worktree = worktree.to_path_buf();
     match tokio::task::spawn_blocking(op).await {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(value)) => Ok(value),
         Ok(Err(e)) => {
             dux_core::logger::warn(&format!("[web] could not {action}: {e:#}"));
             let detail = dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree);
@@ -306,10 +310,48 @@ async fn stage(
     if !id_within_bound(&id) {
         return unknown_session();
     }
-    file_op(state, id, op.path, STAGE_ACTION, |wt, p| {
-        dux_core::git::stage_file(&wt, &p)
+    let session_id = id.clone();
+    let worktree = match resolve_mutation_worktree(&state, id).await {
+        Ok(w) => w,
+        Err(r) => return r.into_response(),
+    };
+    if let Err(r) = validate_changed_path(&worktree, &op.path).await {
+        return r.into_response();
+    }
+    if let Some(sentence) = dux_core::git::stage_refusal(&worktree, &op.path) {
+        return (StatusCode::BAD_REQUEST, sentence).into_response();
+    }
+    // A folder is staged without the repositories inside it, and the answer
+    // says how many it left out, so the browser can say so.
+    let wt = worktree.clone();
+    let paths = vec![op.path];
+    let report = match run_git(STAGE_ACTION, &worktree, move || {
+        dux_core::git::stage_with_report(&wt, &paths)
     })
     .await
+    {
+        Ok(report) => report,
+        Err(r) => return r.into_response(),
+    };
+    refresh_changed_files_now(&state, session_id, &worktree);
+    (StatusCode::OK, Json(LeftOut::from(report))).into_response()
+}
+
+/// What a stage left out of the index on purpose: the repositories inside a
+/// staged folder, which `git add` would otherwise record as links.
+#[derive(serde::Serialize, Default)]
+struct LeftOut {
+    left_out_repositories: usize,
+    left_out_worktrees: usize,
+}
+
+impl From<dux_core::git::StageReport> for LeftOut {
+    fn from(report: dux_core::git::StageReport) -> Self {
+        Self {
+            left_out_repositories: report.left_out_repositories,
+            left_out_worktrees: report.left_out_worktrees,
+        }
+    }
 }
 
 async fn unstage(
@@ -540,16 +582,26 @@ async fn files_op(
 
     let wt = worktree.clone();
     let batch = done.clone();
-    if let Err(r) = run_git(section.action(), &worktree, move || match section {
-        Section::Staged => dux_core::git::unstage_files(&wt, &batch),
-        Section::Unstaged => dux_core::git::stage_files(&wt, &batch),
+    let left_out = match run_git(section.action(), &worktree, move || match section {
+        Section::Staged => dux_core::git::unstage_files(&wt, &batch)
+            .map(|()| dux_core::git::StageReport::default()),
+        Section::Unstaged => dux_core::git::stage_with_report(&wt, &batch),
     })
     .await
     {
-        return r.into_response();
-    }
+        Ok(report) => LeftOut::from(report),
+        Err(r) => return r.into_response(),
+    };
     refresh_changed_files_now(&state, session_id, &worktree);
-    (StatusCode::OK, Json(BatchResult { done, refused })).into_response()
+    (
+        StatusCode::OK,
+        Json(BatchResult {
+            done,
+            refused,
+            left_out,
+        }),
+    )
+        .into_response()
 }
 
 /// What the single-path stage route attempts, which is also how `file_op`
@@ -1106,7 +1158,7 @@ mod tests {
         let stderr = "error: 'trailing-whitespace' hook failed; \
                       see /home/someone/.config/dux/worktrees/proj/agent/out.log";
         let err = super::run_git("commit the staged changes", &worktree, move || {
-            Err(anyhow::anyhow!("git commit failed: {stderr}"))
+            Err::<(), _>(anyhow::anyhow!("git commit failed: {stderr}"))
         })
         .await
         .expect_err("a failing git op must produce a response")
@@ -1384,6 +1436,68 @@ mod tests {
                 .unwrap();
         assert!(staged.is_empty(), "{staged:?}");
         assert_eq!(unstaged.len(), 1, "{unstaged:?}");
+    }
+
+    /// Staging a folder stages its files and leaves the repositories inside it
+    /// out; both stage routes say how many they left out, so the browser can.
+    #[tokio::test]
+    async fn staging_a_folder_leaves_its_repositories_out_and_says_so() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("vendor/lib")).unwrap();
+        std::fs::write(worktree.join("vendor/x.js"), "x\n").unwrap();
+        run_git(&worktree.join("vendor/lib"), &["init", "-q"]);
+        std::fs::write(worktree.join("vendor/lib/own.txt"), "own\n").unwrap();
+        run_git(&worktree.join("vendor/lib"), &["add", "own.txt"]);
+        run_git(
+            &worktree.join("vendor/lib"),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "own",
+            ],
+        );
+        run_git(
+            &worktree,
+            &["worktree", "add", "-q", "-b", "side", "vendor/wt"],
+        );
+
+        for (route, body) in [
+            ("stage", r#"{"path":"vendor"}"#),
+            ("stage-files", r#"{"paths":["vendor"]}"#),
+        ] {
+            run_git(&worktree, &["reset", "-q"]);
+            let resp = app
+                .clone()
+                .oneshot(json_req(
+                    "POST",
+                    &format!("/api/v1/sessions/s1/git/{route}"),
+                    body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{route}");
+            let parsed: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+            assert_eq!(parsed["left_out_repositories"], 1, "{route}: {parsed}");
+            assert_eq!(parsed["left_out_worktrees"], 1, "{route}: {parsed}");
+            let index = std::process::Command::new("git")
+                .args([
+                    "-C",
+                    worktree.to_string_lossy().as_ref(),
+                    "ls-files",
+                    "--stage",
+                ])
+                .output()
+                .unwrap();
+            let index = String::from_utf8_lossy(&index.stdout);
+            assert!(!index.contains("160000"), "{route}: {index}");
+            assert!(index.contains("vendor/x.js"), "{route}: {index}");
+        }
     }
 
     /// A worktree of this same repository placed inside the worktree is the
