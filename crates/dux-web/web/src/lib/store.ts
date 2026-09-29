@@ -247,6 +247,10 @@ export interface DiscardTarget {
   sessionId: string
   path: string
   untracked: boolean
+  // The row as it was when the dialog opened. The dialog is worded from it
+  // and sends its kind, because that is what the user is confirming; a live
+  // row that has since changed kind closes the dialog instead.
+  row: ChangedFileView
 }
 
 // Where the agent this client is creating will land, which is what makes a new

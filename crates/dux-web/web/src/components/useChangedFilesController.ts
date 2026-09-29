@@ -227,6 +227,8 @@ async function runBulkTransaction({
 interface DiscardTransaction {
   sessionId: string
   paths: string[]
+  // What each folder was when the dialog opened, which is what was confirmed.
+  kinds: Readonly<Record<string, string>>
   rows: readonly ChangedFileView[]
   dropActed: (section: "unstaged", paths: string[]) => void
 }
@@ -234,14 +236,11 @@ interface DiscardTransaction {
 async function runDiscardTransaction({
   sessionId,
   paths,
+  kinds,
   rows,
   dropActed,
 }: DiscardTransaction): Promise<void> {
   // What the user confirmed for each folder travels with its request.
-  const kinds: Record<string, string> = {}
-  for (const row of rows) {
-    if (row.kind && paths.includes(row.path)) kinds[row.path] = row.kind
-  }
   const result = await git.discardMany(sessionId, paths, kinds)
   dropActed("unstaged", paths)
   discardResultToast(result, rows)
@@ -335,7 +334,10 @@ export function useChangedFilesController(
     }
   }
 
-  async function runDiscardMany(paths: string[]): Promise<void> {
+  async function runDiscardMany(
+    paths: string[],
+    kinds: Readonly<Record<string, string>>,
+  ): Promise<void> {
     setDiscarding(false)
     if (busy !== null || paths.length === 0) return
     setBusy("discard")
@@ -343,6 +345,7 @@ export function useChangedFilesController(
       await runDiscardTransaction({
         sessionId,
         paths,
+        kinds,
         rows: changes.unstaged,
         dropActed,
       })

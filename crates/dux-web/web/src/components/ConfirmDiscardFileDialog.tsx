@@ -7,8 +7,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
+import { useEffect } from "react"
+
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { countWords } from "@/lib/changedFiles"
+import { changedWhileOpen } from "@/lib/discardOutcome"
+import { notifyWarning } from "@/lib/notify"
 import { closeDiscard, discardFile, useDux } from "@/lib/store"
 
 // Confirmation before discarding an unstaged file's changes, which cannot be
@@ -18,41 +22,35 @@ export function ConfirmDiscardFileDialog() {
   const { discardTarget, changes } = useDux()
 
   // Trust the changes slice only when it belongs to the discard target's session.
-  const stillUnstaged =
-    discardTarget !== null &&
-    changes.sessionId === discardTarget.sessionId &&
-    changes.unstaged.some((f) => f.path === discardTarget.path)
+  const live =
+    discardTarget !== null && changes.sessionId === discardTarget.sessionId
+      ? changes.unstaged.find((f) => f.path === discardTarget.path)
+      : undefined
+  // The dialog says what it opened on and that is what a click confirms, so a
+  // row that has since become something else (a folder turned repository by
+  // `git init`) is not quietly re-worded one click from a different delete.
+  const changedKind =
+    discardTarget !== null && live !== undefined && live.kind !== discardTarget.row.kind
+  useEffect(() => {
+    if (!changedKind || discardTarget === null || live === undefined) return
+    notifyWarning(changedWhileOpen(discardTarget.row, live))
+    closeDiscard()
+  }, [changedKind, discardTarget, live])
   // Closes when the file leaves the unstaged list, rather than lingering on a
   // stale path whose restore-versus-DELETE copy may now be wrong.
-  const isOpen = useVanishedTargetGuard(
-    discardTarget !== null,
-    stillUnstaged,
-    closeDiscard,
-  )
+  const isOpen =
+    useVanishedTargetGuard(discardTarget !== null, live !== undefined, closeDiscard) &&
+    !changedKind
   const path = discardTarget?.path ?? ""
   const untracked = discardTarget?.untracked ?? false
   // A folded folder is deleted whole and a repository of its own with its
-  // history, so the wording comes from the live row, not from the target.
-  const row = stillUnstaged
-    ? changes.unstaged.find((f) => f.path === discardTarget.path)
-    : undefined
+  // history; the wording is the row the dialog opened on.
+  const row = discardTarget?.row
   const kind = row?.kind
 
   function handleConfirm() {
     if (!discardTarget) return
-    // The live row says what went; a target whose row has just left the list
-    // is worded from what the dialog was opened on.
-    discardFile(
-      discardTarget.sessionId,
-      row ?? {
-        path: discardTarget.path,
-        status: discardTarget.untracked ? "??" : "M",
-        additions: 0,
-        deletions: 0,
-        binary: false,
-        diff_excluded: false,
-      },
-    )
+    discardFile(discardTarget.sessionId, discardTarget.row)
     closeDiscard()
   }
 

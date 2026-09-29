@@ -124,3 +124,42 @@ export function discardLeftOutReason(file: ChangedFileView): Prose | null {
   }
   return null
 }
+
+// What a row is, in the words a changed-kind notice uses.
+function whatItIs(file: ChangedFileView): string {
+  switch (file.kind) {
+    case "directory":
+      return "an ordinary folder"
+    case "nested_repository":
+      return "a repository of its own, with a history"
+    case "linked_worktree":
+      return "a worktree of this repository"
+    case undefined:
+      return "a file"
+  }
+}
+
+// The notice for a discard dialog that closed because a row it was opened on
+// changed kind underneath it: what was confirmed is no longer what is there,
+// so nothing is deleted and the user looks again.
+export function changedWhileOpen(before: ChangedFileView, now: ChangedFileView): Prose {
+  const name = before.kind || now.kind ? `${before.path}/` : before.path
+  return prose`${chip(name)} changed while the dialog was open: it is now ${whatItIs(
+    now,
+  )}. Nothing was deleted; look at it again before deleting it.`
+}
+
+// The first row of `openedOn` whose live row in `live` is now a different
+// kind, with that live row; null when none changed.
+export function firstChangedKind(
+  openedOn: readonly ChangedFileView[],
+  live: readonly ChangedFileView[],
+): { before: ChangedFileView; now: ChangedFileView } | null {
+  if (openedOn.length === 0) return null
+  const byPath = new Map(live.map((row) => [row.path, row]))
+  for (const before of openedOn) {
+    const now = byPath.get(before.path)
+    if (now !== undefined && now.kind !== before.kind) return { before, now }
+  }
+  return null
+}

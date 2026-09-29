@@ -1,4 +1,4 @@
-import { useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -15,7 +15,12 @@ import {
   fileStatusMeta,
 } from "@/lib/changedFiles"
 import { formatRegularCount } from "@/lib/formatRegularCount"
-import { discardLeftOutReason } from "@/lib/discardOutcome"
+import {
+  changedWhileOpen,
+  discardLeftOutReason,
+  firstChangedKind,
+} from "@/lib/discardOutcome"
+import { notifyWarning } from "@/lib/notify"
 import { joinProse, prose, renderProse, type Prose } from "@/lib/prose"
 import type { ChangedFileView } from "@/lib/types"
 
@@ -34,17 +39,23 @@ interface Props {
   open: boolean
   // The checked paths, which may name a file that has already left the list.
   paths: string[]
-  // The live unstaged files, which decide both the copy and what is discarded.
+  // The live unstaged files. The rows the dialog opens on are taken from
+  // them at that moment; afterwards they only say which rows are still there
+  // and whether one changed kind.
   unstaged: ChangedFileView[]
   onCancel: () => void
-  onConfirm: (paths: string[]) => void
+  // The paths to discard, and what each folder among them was when the
+  // dialog opened, which is what the user confirmed.
+  onConfirm: (paths: string[], kinds: Record<string, string>) => void
 }
 
-// Confirmation before discarding a whole checked selection. The two outcomes
-// are split per file from the LIVE list rather than from anything the caller
-// supplied: an untracked file is permanently deleted, a tracked one is restored
-// from its last committed state. The dialog acts on that same intersection, so
-// a file that left the list between the click and the confirm is not discarded.
+// Confirmation before discarding a whole checked selection. The rows are
+// taken from the live list when the dialog OPENS, and the copy and the request
+// both come from them: an untracked file is permanently deleted, a tracked one
+// is restored from its last committed state. A row that has since left the
+// list is dropped, and one that has changed kind (a folder turned repository)
+// closes the dialog with a notice, because what the user would be confirming
+// is no longer what is there.
 export function ConfirmDiscardFilesDialog({
   open,
   paths,
@@ -52,16 +63,35 @@ export function ConfirmDiscardFilesDialog({
   onCancel,
   onConfirm,
 }: Props) {
+  // The rows as they were when the dialog opened, captured on the render
+  // that opens it and dropped on the one that closes it.
+  const [openedOn, setOpenedOn] = useState<ChangedFileView[] | null>(null)
+  if (open && openedOn === null) {
+    const checked = new Set(paths)
+    setOpenedOn(paths.length === 0 ? NO_TARGETS : unstaged.filter((f) => checked.has(f.path)))
+  } else if (!open && openedOn !== null) {
+    setOpenedOn(null)
+  }
+  const rows = openedOn ?? NO_TARGETS
+  const changed = useMemo(
+    () => (open ? firstChangedKind(rows, unstaged) : null),
+    [open, rows, unstaged],
+  )
+  useEffect(() => {
+    if (changed === null) return
+    notifyWarning(changedWhileOpen(changed.before, changed.now))
+    onCancel()
+  }, [changed, onCancel])
   // The dialog stays mounted beside a list that can hold tens of thousands of
-  // files, so the intersection is recomputed only when the selection or the
-  // list moves, never on a render that changed neither. An empty selection,
+  // files, so the intersection is recomputed only when the opened-on rows or
+  // the list move, never on a render that changed neither. A closed dialog,
   // the usual state, never walks the list at all.
   const summary = useMemo(() => {
-    if (paths.length === 0) {
+    if (rows.length === 0) {
       return { ...EMPTY_SUMMARY, targets: NO_TARGETS, leftOut: NO_REASONS }
     }
-    const checked = new Set(paths)
-    const selected = unstaged.filter((f) => checked.has(f.path))
+    const present = new Set(unstaged.map((f) => f.path))
+    const selected = rows.filter((f) => present.has(f.path))
     // Rows a delete would not act on are left out of the count and of the
     // request, and named with their reason, rather than sent to be refused.
     const leftOut: Prose[] = []
@@ -103,7 +133,7 @@ export function ConfirmDiscardFilesDialog({
       nestedInside,
       worktreesInside,
     }
-  }, [paths, unstaged])
+  }, [rows, unstaged])
   const {
     targets,
     leftOut,
@@ -116,11 +146,9 @@ export function ConfirmDiscardFilesDialog({
   } = summary
   // Closes itself once every checked path has left the unstaged list, rather
   // than lingering with copy about files that are no longer there.
-  const isOpen = useVanishedTargetGuard(
-    open,
-    targets.length + leftOut.length > 0,
-    onCancel,
-  )
+  const isOpen =
+    useVanishedTargetGuard(open, targets.length + leftOut.length > 0, onCancel) &&
+    changed === null
 
   const deleted = `${countWords(untracked, "untracked file", "untracked files")} will be permanently DELETED from disk`
   const restored = `${countWords(tracked, "tracked file", "tracked files")} will be restored to ${
@@ -195,7 +223,14 @@ export function ConfirmDiscardFilesDialog({
             variant="destructive"
             // Nothing left to delete once every selected row is left out.
             disabled={targets.length === 0}
-            onClick={() => onConfirm(targets.map((f) => f.path))}
+            onClick={() =>
+              onConfirm(
+                targets.map((f) => f.path),
+                Object.fromEntries(
+                  targets.flatMap((f) => (f.kind ? [[f.path, f.kind]] : [])),
+                ),
+              )
+            }
           >
             Discard
           </Button>

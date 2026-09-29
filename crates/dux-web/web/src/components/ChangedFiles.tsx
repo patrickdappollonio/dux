@@ -275,6 +275,7 @@ const FileRow = memo(function FileRow({
       sessionId,
       path: file.path,
       untracked: kind === "untracked",
+      row: file,
     })
   }
 
@@ -1282,7 +1283,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
         paths={discardPaths}
         unstaged={changed.unstaged}
         onCancel={closeDiscardMany}
-        onConfirm={(paths) => void runDiscardMany(paths)}
+        onConfirm={(paths, kinds) => void runDiscardMany(paths, kinds)}
       />
     </>
   )
