@@ -288,6 +288,13 @@ export interface ChangedFileView {
   /** Where a rename came from. Absent for every other status: the source
    * directory's listing lost an entry and nothing else on the wire says so. */
   renamed_from?: string
+  /** Present only on a row standing for a whole folder: `"directory"` for a
+   * folder with nothing tracked inside it (or, staged, one added whole), and
+   * `"nested_repository"` for an untracked repository of its own. The row's
+   * `path` is the folder with no trailing slash. Absent on a file row. */
+  kind?: "directory" | "nested_repository"
+  /** How many files a `"directory"` row stands for, at any depth. */
+  file_count?: number
 }
 
 export interface ChangedFiles {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
-import { buildAgentVitals } from "@/lib/agentVitals"
+import { buildAgentVitals, changesCountFor } from "@/lib/agentVitals"
+import type { ChangesSlice } from "@/lib/store"
 import type { AgentTabView, SessionView } from "@/lib/types"
 
 function tab(overrides: Partial<AgentTabView> = {}): AgentTabView {
@@ -254,5 +255,33 @@ describe("buildAgentVitals", () => {
   it("falls back to the session provider when the tabs list is empty", () => {
     const model = buildAgentVitals(session({ tabs: [] }), "myproject", null)
     expect(model.provider).toBe("claude")
+  })
+})
+
+describe("changesCountFor", () => {
+  it("counts a folded folder by the files inside it", () => {
+    const row = (path: string) => ({
+      path,
+      status: "??",
+      additions: 0,
+      deletions: 0,
+      binary: false,
+      diff_excluded: false,
+    })
+    const count = changesCountFor(
+      {
+        sessionId: "s1",
+        phase: "loaded",
+        rev: 1,
+        staged: [row("a.ts")],
+        unstaged: [
+          { ...row("node_modules"), kind: "directory", file_count: 28747 },
+          row("b.ts"),
+        ],
+        error: null,
+      } as unknown as ChangesSlice,
+      "s1",
+    )
+    expect(count).toBe(28749)
   })
 })

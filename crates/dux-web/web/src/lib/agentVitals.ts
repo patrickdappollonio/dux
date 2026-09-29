@@ -2,6 +2,7 @@
 // and the expanded sidebar agent rows (components/AgentVitalsTooltip.tsx).
 
 import { statusDotColorClass } from "@/lib/agentRow"
+import { changedFileCount } from "@/lib/changedFiles"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import type { ChangesSlice } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
@@ -82,7 +83,11 @@ export function changesCountFor(
   if (changes?.sessionId !== sessionId || changes.phase !== "loaded") {
     return null
   }
-  return changes.staged.length + changes.unstaged.length
+  // A folded folder counts the files inside it, not one.
+  return [...changes.staged, ...changes.unstaged].reduce(
+    (sum, file) => sum + changedFileCount(file),
+    0,
+  )
 }
 
 // Builds the vitals row model for one session. `changesCount` is this session's staged plus

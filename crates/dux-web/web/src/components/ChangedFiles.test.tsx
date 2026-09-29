@@ -1508,3 +1508,65 @@ describe("the Changes pane's windowed list", () => {
     expect(menu.getByText("Discard…")).toBeTruthy()
   })
 })
+
+// Folding: a wholly untracked folder is ONE row on the wire. The browser's
+// expand control is a later change; until then a folder row must still read as
+// a folder (its path with a trailing slash and how many files it stands for)
+// and must never open a diff, which would try to read a directory as a file.
+describe("a folded folder row", () => {
+  function withFolder(): DuxState {
+    return {
+      selectedSessionId: "s1",
+      changes: {
+        ...loadedChanges(),
+        unstaged: [
+          {
+            path: "node_modules",
+            status: "??",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            kind: "directory",
+            file_count: 28747,
+          },
+          {
+            path: "vendor/lib",
+            status: "??",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            kind: "nested_repository",
+          },
+        ],
+      },
+    } as unknown as DuxState
+  }
+
+  it("shows the path with a trailing slash and the file count as text", () => {
+    mockState = withFolder()
+    render(<ChangedFiles />)
+    expect(screen.getByText("node_modules/")).toBeTruthy()
+    expect(screen.getByText("28,747 files")).toBeTruthy()
+    expect(screen.getByText("vendor/lib/")).toBeTruthy()
+    expect(screen.getByText("nested repository")).toBeTruthy()
+  })
+
+  it("does not open a diff when a folder row is clicked", () => {
+    mockState = withFolder()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByText("node_modules/"))
+    expect(openEditor).not.toHaveBeenCalled()
+  })
+
+  it("offers staging and discarding the folder but no editor", async () => {
+    mockState = withFolder()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Actions for node_modules"))
+    const menu = within(await screen.findByRole("menu"))
+    expect(menu.getByText("Stage")).toBeTruthy()
+    expect(menu.getByText("Discard…")).toBeTruthy()
+    expect(menu.queryByText("Edit")).toBeNull()
+  })
+})

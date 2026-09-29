@@ -6,6 +6,7 @@ import {
   formatRecapCount,
   mergeChangedFilesRecaps,
   CHANGED_FILE_FIELDS,
+  changedFileCount,
   reconcileSelection,
   reuseUnchangedFiles,
   summarizeChangedFiles,
@@ -200,6 +201,8 @@ describe("reuseUnchangedFiles", () => {
       binary: false,
       diff_excluded: false,
       renamed_from: "old.ts",
+      kind: "directory",
+      file_count: 3,
     }
     expect(Object.keys(CHANGED_FILE_FIELDS).sort()).toEqual(Object.keys(full).sort())
     const changed: { [K in keyof ChangedFileView]-?: ChangedFileView[K] } = {
@@ -210,6 +213,8 @@ describe("reuseUnchangedFiles", () => {
       binary: true,
       diff_excluded: true,
       renamed_from: "elsewhere.ts",
+      kind: "nested_repository",
+      file_count: 4,
     }
     for (const key of Object.keys(full) as (keyof ChangedFileView)[]) {
       const next = { ...full, [key]: changed[key] }
@@ -368,5 +373,30 @@ describe("mergeChangedFilesRecaps", () => {
       binaryCount: 2,
       diffExcludedCount: 4,
     })
+  })
+})
+
+describe("folded folders in the totals", () => {
+  it("counts a folder by the files inside it", () => {
+    const folder: ChangedFileView = {
+      ...file("node_modules", "??"),
+      kind: "directory",
+      file_count: 28747,
+    }
+    const nested: ChangedFileView = {
+      ...file("vendor/lib", "??"),
+      kind: "nested_repository",
+    }
+    expect(changedFileCount(folder)).toBe(28747)
+    expect(changedFileCount(nested)).toBe(1)
+    expect(changedFileCount(file("a.ts"))).toBe(1)
+    expect(summarizeChangedFiles([folder, nested, file("a.ts")]).count).toBe(28749)
+  })
+
+  it("compares the folder fields like every other field", () => {
+    const before: ChangedFileView = { ...file("dist", "??"), kind: "directory", file_count: 3 }
+    const after: ChangedFileView = { ...before, file_count: 4 }
+    expect(reuseUnchangedFiles([before], [after])).toEqual([after])
+    expect(reuseUnchangedFiles([before], [after])[0]).toBe(after)
   })
 })

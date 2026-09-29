@@ -72,6 +72,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
   fileStatusMeta,
+  folderCountLabel,
   formatRecapCount,
   type ChangedFileSelection,
   type ChangedFilesRecap,
@@ -269,11 +270,20 @@ const FileRow = memo(function FileRow({
     })
   }
 
+  // A folded folder has no diff: opening one would read a directory as a file.
+  // Its expand control is a separate change; until then the row only says
+  // what it is, with the trailing slash and its count.
+  const folderCount = folderCountLabel(file)
+  const displayPath = folderCount === null ? file.path : `${file.path}/`
+
   return (
     <div
       role="row"
-      className="group flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11"
-      onClick={() => onOpenDiff(file.path)}
+      className={cn(
+        "group flex items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11",
+        folderCount === null && "cursor-pointer",
+      )}
+      onClick={folderCount === null ? () => onOpenDiff(file.path) : undefined}
     >
       {/* Leading slot: the status marker, which becomes the selection checkbox
         * on hover, on focus of the checkbox, or while the row is checked. */}
@@ -289,9 +299,15 @@ const FileRow = memo(function FileRow({
       <div className="flex min-w-0 flex-1 items-baseline gap-2">
         {/* Long paths ellipsize at the start so the filename stays visible. */}
         <StartTruncatedText
-          text={file.path}
+          text={displayPath}
           className="flex-1 font-mono text-sm text-foreground"
         />
+
+        {folderCount !== null && (
+          <span className="shrink-0 font-mono text-xs text-muted-foreground">
+            {folderCount}
+          </span>
+        )}
 
         {/* A file the repository excludes from diffs has no counts to show,
           * and saying nothing there would read as "changed nothing". It is not
@@ -355,8 +371,9 @@ const FileRow = memo(function FileRow({
           {menuMounted ? (
             <DropdownMenuContent side="bottom" align="end">
               {/* Open in editor, desktop only (Monaco is poor on touch). Skipped
-                  for deleted files (nothing on disk to edit). */}
-              {kind !== "deleted" && (
+                  for deleted files (nothing on disk to edit) and for a folded
+                  folder (a directory is not a file to edit). */}
+              {kind !== "deleted" && folderCount === null && (
                 <DropdownMenuItem
                   className="hidden md:flex"
                   onClick={() => openEditor(agentRoot(sessionId), file.path)}

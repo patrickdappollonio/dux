@@ -71,13 +71,29 @@ export interface ChangedFilesRecap {
   diffExcludedCount: number
 }
 
+// How many files one row stands for: a folded folder counts the files inside
+// it, so a total never reads one for a folder of thirty thousand. A nested
+// repository is one entry, since nothing looks inside it.
+export function changedFileCount(file: ChangedFileView): number {
+  return file.kind === "directory" ? (file.file_count ?? 0) : 1
+}
+
+// A folded folder's count in words ("28,747 files", "nested repository"), or
+// null for an ordinary file row. The TUI's `folder_count_label` says the same.
+export function folderCountLabel(file: ChangedFileView): string | null {
+  if (file.kind === "nested_repository") return "nested repository"
+  if (file.kind !== "directory") return null
+  const count = file.file_count ?? 0
+  return `${count.toLocaleString("en-US")} ${count === 1 ? "file" : "files"}`
+}
+
 // The recap describes exactly the rows visible beneath it, so callers pass the
 // filtered list, never the source one.
 export function summarizeChangedFiles(
   files: ChangedFileView[],
 ): ChangedFilesRecap {
   const recap: ChangedFilesRecap = {
-    count: files.length,
+    count: files.reduce((sum, file) => sum + changedFileCount(file), 0),
     additions: 0,
     deletions: 0,
     binaryCount: 0,
@@ -136,6 +152,8 @@ export const CHANGED_FILE_FIELDS = {
   binary: true,
   diff_excluded: true,
   renamed_from: true,
+  kind: true,
+  file_count: true,
 } as const satisfies Record<keyof ChangedFileView, true>
 
 const FIELD_KEYS = Object.keys(CHANGED_FILE_FIELDS) as (keyof ChangedFileView)[]
