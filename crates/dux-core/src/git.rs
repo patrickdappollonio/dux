@@ -3926,7 +3926,17 @@ fn refuse_unplain_path(path: &str, what: &str) -> Result<()> {
 /// case, a linked worktree of this same repository; a route asks this first so
 /// the refusal reaches the browser as a refusal rather than as a git failure.
 pub fn stage_refusal(worktree_path: &Path, path: &str) -> Option<String> {
-    folding::is_linked_worktree_dir(worktree_path, &worktree_path.join(path)).then(|| {
+    let dir = worktree_path.join(path);
+    // git reads a bare repository as a folder of files, so adding one would
+    // copy its objects and refs into this repository rather than link it.
+    if fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) && folding::is_git_directory(&dir)
+    {
+        return Some(format!(
+            "\"{path}/\" is a bare repository of its own; staging it would add its internal \
+             files (objects, refs) to this repository, not a link to it. Leave it untracked."
+        ));
+    }
+    folding::is_linked_worktree_dir(worktree_path, &dir).then(|| {
         format!(
             "\"{path}/\" is a worktree of this same repository; staging it would record a link \
              to it, not its files. Manage it from the worktree manager."
@@ -4037,10 +4047,10 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
 /// only contents are repositories of their own (which the delete keeps) or
 /// files the repository ignores. Reporting a deletion that did not happen is
 /// the lie this stops.
-fn refuse_empty_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> {
+fn refuse_empty_untracked_folder(worktree_path: &Path, dir: &str) -> Result<folding::FolderInside> {
     let inside = folding::folder_inside(worktree_path, dir)?;
     if inside.has_file {
-        return Ok(());
+        return Ok(inside);
     }
     let (repositories, worktrees) = inside.counts();
     Err(anyhow::Error::new(Refusal(nothing_in_folder(
@@ -4060,7 +4070,14 @@ fn refuse_empty_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> 
 /// folder: both measured on git 2.53. A directory that still holds an ignored
 /// file stays, with that file in it. `--literal-pathspecs` and `--` keep a
 /// folder named like a glob or an option to itself.
-fn clean_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> {
+fn clean_untracked_folder(
+    worktree_path: &Path,
+    dir: &str,
+    inside: &folding::FolderInside,
+) -> Result<()> {
+    if !inside.bare.is_empty() {
+        return delete_counted_files(worktree_path, dir, inside);
+    }
     let output = Command::new("git")
         .args([
             "--literal-pathspecs",
@@ -4079,6 +4096,52 @@ fn clean_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> {
             "git clean failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
+    }
+    Ok(())
+}
+
+/// Delete exactly the files a folder holding a bare repository counted, and
+/// then the directories that leaves empty, deepest first.
+///
+/// `git clean -d` cannot do this: git lists a bare repository's insides as
+/// untracked files, and it removes an untracked directory whole whatever
+/// exclude pathspec it is given (measured on git 2.53). So the files are the
+/// ones `ls-files --others --exclude-standard` listed (what `git clean -f`
+/// without `-x` would remove), each removed as an entry and never followed
+/// through a symlink, and a directory goes only when nothing is left in it:
+/// an ignored file, a repository of its own or a bare repository keeps it.
+/// An empty directory that held no file to begin with is left alone, which is
+/// the one thing this does more carefully than `git clean -d`.
+fn delete_counted_files(
+    worktree_path: &Path,
+    dir: &str,
+    inside: &folding::FolderInside,
+) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut parents: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+    for record in &inside.files {
+        let path = worktree_path.join(std::ffi::OsStr::from_bytes(record));
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(anyhow!("could not delete {}: {e}", path.display())),
+        }
+        // Every directory between the file and the folder, the folder included.
+        let mut end = record.len();
+        while let Some(slash) = record[..end].iter().rposition(|byte| *byte == b'/') {
+            let parent = &record[..slash];
+            if parent.len() < dir.len() {
+                break;
+            }
+            parents.insert(parent.to_vec());
+            end = slash;
+        }
+    }
+    let mut parents: Vec<Vec<u8>> = parents.into_iter().collect();
+    parents.sort_by_key(|parent| std::cmp::Reverse(parent.len()));
+    for parent in parents {
+        // Fails, harmlessly, on a directory something is still in.
+        let _ = fs::remove_dir(worktree_path.join(std::ffi::OsStr::from_bytes(&parent)));
     }
     Ok(())
 }
@@ -4229,8 +4292,8 @@ pub fn discard_confirmed(
                     if confirmed == Some(ConfirmedEntry::Repository) {
                         return Err(changed("an ordinary folder, not a repository"));
                     }
-                    refuse_empty_untracked_folder(worktree_path, file_path)?;
-                    clean_untracked_folder(worktree_path, file_path)?;
+                    let inside = refuse_empty_untracked_folder(worktree_path, file_path)?;
+                    clean_untracked_folder(worktree_path, file_path, &inside)?;
                 }
             }
         }

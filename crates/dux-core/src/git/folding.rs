@@ -97,7 +97,20 @@ fn finish_tallies(
     let mut common: Option<Option<PathBuf>> = None;
     tallies
         .into_iter()
-        .map(|(folder, tally)| {
+        .map(|(folder, mut tally)| {
+            // git lists a bare repository's insides as files; it is a
+            // repository all the same, the folder itself included.
+            let bares = bare_repositories(worktree, &tally.files);
+            if !bares.is_empty() {
+                let own = format!("{prefix}{folder}");
+                if bares.iter().any(|bare| bare.as_slice() == own.as_bytes()) {
+                    tally.is_repository = true;
+                } else {
+                    tally
+                        .files
+                        .retain(|record| !bares.iter().any(|bare| is_inside(record, bare)));
+                }
+            }
             if tally.is_repository {
                 let common = common.get_or_insert_with(|| common_dir_of(worktree));
                 let dir = worktree.join(format!("{prefix}{folder}"));
@@ -121,7 +134,7 @@ fn finish_tallies(
             };
             // A repository inside is either one of its own or a worktree of
             // this repository, read from its `.git` file alone.
-            let mut nested_repositories = 0;
+            let mut nested_repositories = bares.len();
             let mut linked_worktrees = 0;
             if !tally.repositories.is_empty() {
                 use std::os::unix::ffi::OsStrExt;
@@ -600,7 +613,12 @@ pub fn untracked_directory_kind(worktree: &Path, rel: &str) -> Result<UntrackedD
         .split(|byte| *byte == 0)
         .any(|record| record == itself.as_bytes());
     if !reported_as_repository {
-        return Ok(UntrackedDirectoryKind::Folder);
+        // A bare repository is never reported as one; git's own rule says it is.
+        return Ok(if is_git_directory(&worktree.join(rel)) {
+            UntrackedDirectoryKind::Repository
+        } else {
+            UntrackedDirectoryKind::Folder
+        });
     }
     Ok(repository_kind(
         common_dir_of(worktree).as_deref(),
@@ -611,6 +629,12 @@ pub fn untracked_directory_kind(worktree: &Path, rel: &str) -> Result<UntrackedD
 /// What an untracked folder holds, from the records it is counted from.
 #[derive(Debug, Default)]
 pub(crate) struct FolderInside {
+    /// Its untracked, not-ignored files outside every repository inside it,
+    /// as worktree-relative paths in git's own bytes.
+    pub(crate) files: Vec<Vec<u8>>,
+    /// The bare repositories among `repositories`: git lists their insides
+    /// as files, so a delete has to be told to keep them.
+    pub(crate) bare: Vec<Vec<u8>>,
     /// The repositories inside it (not the folder itself), each with what it
     /// is, as worktree-relative paths in git's own bytes with no trailing
     /// slash. Bytes, because a name need not be UTF-8 and one that is not
@@ -643,9 +667,10 @@ pub(crate) fn folder_inside(worktree: &Path, dir: &str) -> Result<FolderInside> 
     let itself = format!("{dir}/");
     let mut common: Option<Option<PathBuf>> = None;
     let mut inside = FolderInside::default();
+    let mut files: Vec<&[u8]> = Vec::new();
     for record in raw.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
         if !record.ends_with(b"/") {
-            inside.has_file = true;
+            files.push(record);
             continue;
         }
         if record == itself.as_bytes() {
@@ -659,6 +684,19 @@ pub(crate) fn folder_inside(worktree: &Path, dir: &str) -> Result<FolderInside> 
         );
         inside.repositories.push((rel.to_vec(), kind));
     }
+    let bares = bare_repositories(worktree, &files);
+    inside.files = files
+        .into_iter()
+        .filter(|record| !bares.iter().any(|bare| is_inside(record, bare)))
+        .map(<[u8]>::to_vec)
+        .collect();
+    inside.has_file = !inside.files.is_empty();
+    for bare in &bares {
+        inside
+            .repositories
+            .push((bare.clone(), UntrackedDirectoryKind::Repository));
+    }
+    inside.bare = bares;
     Ok(inside)
 }
 
@@ -727,6 +765,77 @@ pub fn nothing_in_folder(
         ));
     }
     sentence
+}
+
+/// git's own test for a git directory (`is_git_directory` in git's `setup.c`),
+/// by reading files only: a `HEAD` that validates as a ref (a symlink into
+/// `refs/`, or `ref: refs/...`) or an object id, and `objects/` and `refs/`
+/// directories, looked for under the directory a `commondir` file names when
+/// there is one. This is what makes a bare repository a repository: git lists
+/// its insides as ordinary untracked files and `git clean` would delete them.
+pub(crate) fn is_git_directory(dir: &Path) -> bool {
+    let common = match fs::read_to_string(dir.join("commondir")) {
+        Ok(text) => {
+            let named = Path::new(text.trim_end_matches(['\n', '\r']));
+            if named.is_absolute() {
+                named.to_path_buf()
+            } else {
+                dir.join(named)
+            }
+        }
+        Err(_) => dir.to_path_buf(),
+    };
+    common.join("objects").is_dir() && common.join("refs").is_dir() && valid_head(&dir.join("HEAD"))
+}
+
+/// git's `validate_headref`: a symlink into `refs/`, a `ref:` line naming
+/// something under `refs/`, or an object id (a detached HEAD).
+fn valid_head(head: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(head) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() {
+        return fs::read_link(head).is_ok_and(|target| target.starts_with("refs/"));
+    }
+    let Ok(bytes) = fs::read(head) else {
+        return false;
+    };
+    if let Some(rest) = bytes.strip_prefix(b"ref:") {
+        let rest = rest.trim_ascii_start();
+        return rest.starts_with(b"refs/");
+    }
+    let id = bytes.trim_ascii_end();
+    matches!(id.len(), 40 | 64) && id.iter().all(u8::is_ascii_hexdigit)
+}
+
+/// The bare repositories among `records` (worktree-relative untracked file
+/// records), as worktree-relative directory paths in git's own bytes with no
+/// trailing slash, none inside another. A bare repository is found from the
+/// `HEAD` record git lists inside it, and confirmed with [`is_git_directory`],
+/// so a folder pays one look per file actually named `HEAD`.
+pub(crate) fn bare_repositories(worktree: &Path, records: &[&[u8]]) -> Vec<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut candidates: Vec<&[u8]> = records
+        .iter()
+        .filter_map(|record| record.strip_suffix(b"/HEAD"))
+        .collect();
+    candidates.sort_by_key(|candidate| candidate.len());
+    candidates.dedup();
+    let mut found: Vec<Vec<u8>> = Vec::new();
+    for candidate in candidates {
+        if found.iter().any(|bare| is_inside(candidate, bare)) {
+            continue;
+        }
+        if is_git_directory(&worktree.join(std::ffi::OsStr::from_bytes(candidate))) {
+            found.push(candidate.to_vec());
+        }
+    }
+    found
+}
+
+/// True when `path` is strictly inside the directory `dir`.
+pub(crate) fn is_inside(path: &[u8], dir: &[u8]) -> bool {
+    path.len() > dir.len() && path.starts_with(dir) && path[dir.len()] == b'/'
 }
 
 /// A directory git reported as a repository of its own: a linked worktree of
@@ -1464,6 +1573,120 @@ mod tests {
             folded.iter().all(|f| !f.is_folder()),
             "the folder is not whole: {folded:?}"
         );
+    }
+
+    /// A folder holding a file, a bare repository and, deeper, another bare
+    /// repository beside an ignored file.
+    fn folder_with_bare_repositories() -> tempfile::TempDir {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "d/a.txt", "a\n");
+        write(root, "d/sub/b.txt", "b\n");
+        write(root, ".gitignore", "*.env\n");
+        write(root, "d/deep/secret.env", "s\n");
+        git_in(root)(&["init", "-q", "--bare", "d/bare.git"]);
+        git_in(root)(&["init", "-q", "--bare", "d/deep/b2.git"]);
+        git_in(root)(&["init", "-q", "--bare", "top.git"]);
+        repo
+    }
+
+    /// git lists a bare repository's insides as untracked files, but it is a
+    /// repository: counted as one, never as its files.
+    #[test]
+    fn a_bare_repository_is_counted_as_a_repository() {
+        let repo = folder_with_bare_repositories();
+        let root = repo.path();
+
+        let (_, unstaged) = changed_files(root).unwrap();
+
+        let d = unstaged
+            .iter()
+            .find(|f| f.path == "d")
+            .expect("the folder row");
+        let contents = d.folder_contents().expect("a folder");
+        assert_eq!(contents.file_count, 2, "{contents:?}");
+        assert_eq!(contents.nested_repositories, 2, "{contents:?}");
+        let top = unstaged
+            .iter()
+            .find(|f| f.path == "top.git")
+            .expect("top.git");
+        assert_eq!(top.kind, ChangedFileKind::NestedRepository);
+        assert_eq!(
+            untracked_directory_kind(root, "top.git").unwrap(),
+            UntrackedDirectoryKind::Repository
+        );
+        assert_eq!(
+            untracked_directory_kind(root, "d").unwrap(),
+            UntrackedDirectoryKind::Folder
+        );
+
+        let children = changed_dir_children(root, "d", ChangesSide::Unstaged).unwrap();
+        let bare = children
+            .iter()
+            .find(|f| f.path == "d/bare.git")
+            .expect("the bare repository row");
+        assert_eq!(bare.kind, ChangedFileKind::NestedRepository);
+        let deep = children.iter().find(|f| f.path == "d/deep").unwrap();
+        assert_eq!(
+            deep.folder_contents()
+                .map(|c| (c.file_count, c.nested_repositories)),
+            Some((0, 1))
+        );
+    }
+
+    /// Deleting the folder deletes the files it counted and keeps the bare
+    /// repositories inside it, and the ignored file, as the dialog promises.
+    #[test]
+    fn deleting_a_folder_keeps_the_bare_repositories_inside_it() {
+        let repo = folder_with_bare_repositories();
+        let root = repo.path();
+
+        discard_confirmed(root, "d", true, Some(ConfirmedEntry::Folder)).unwrap();
+
+        assert!(!root.join("d/a.txt").exists());
+        assert!(!root.join("d/sub").exists(), "a directory left empty goes");
+        assert!(root.join("d/bare.git/HEAD").exists());
+        assert!(root.join("d/deep/b2.git/HEAD").exists());
+        assert!(root.join("d/deep/secret.env").exists());
+    }
+
+    /// Staging the folder stages its files and leaves the bare repositories
+    /// out, as it does any repository; a bare repository row is not staged.
+    #[test]
+    fn staging_a_folder_leaves_its_bare_repositories_out() {
+        let repo = folder_with_bare_repositories();
+        let root = repo.path();
+
+        let report = stage_with_report(root, &["d".to_string()]).unwrap();
+
+        assert_eq!(report.left_out_repositories, 2);
+        let mut staged: Vec<String> = index_modes(root)
+            .into_iter()
+            .map(|(path, _)| path)
+            .filter(|path| path.starts_with("d/"))
+            .collect();
+        staged.sort();
+        assert_eq!(staged, ["d/a.txt", "d/sub/b.txt"]);
+        let refusal = stage_with_report(root, &["top.git".to_string()]).unwrap_err();
+        assert!(refusal.to_string().contains("bare repository"), "{refusal}");
+    }
+
+    /// git's own rule: a HEAD that names a ref or an object, and objects/ and
+    /// refs/ directories. A folder that merely has a file called HEAD is not one.
+    #[test]
+    fn only_a_real_git_directory_counts_as_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fs::write(dir.join("HEAD"), "not a ref\n").unwrap();
+        fs::create_dir_all(dir.join("objects")).unwrap();
+        fs::create_dir_all(dir.join("refs")).unwrap();
+        assert!(!is_git_directory(dir));
+        fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(is_git_directory(dir));
+        fs::write(dir.join("HEAD"), format!("{}\n", "a".repeat(40))).unwrap();
+        assert!(is_git_directory(dir));
+        fs::remove_dir(dir.join("refs")).unwrap();
+        assert!(!is_git_directory(dir));
     }
 
     fn index_modes(root: &Path) -> Vec<(String, String)> {
