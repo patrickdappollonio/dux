@@ -3,7 +3,8 @@
 //! While an agent or a terminal is busy, its state word ("Working", "Running")
 //! pulses between full brightness and a floor, and a cycling ellipsis runs after
 //! it in a slot the width of three dots so nothing behind the word ever shifts.
-//! The web pulses its glyph on the same clock; the terminal UI keeps its spinner.
+//! The web pulses its glyph on the same clock, and its sidebar glyph also
+//! bounces four times per period; the terminal UI keeps its spinner.
 //!
 //! Everything here is a function of wall-clock elapsed milliseconds, per the
 //! animation tenet, so the cadence does not depend on how often either surface

@@ -3,9 +3,9 @@ import type { SessionStatus } from "@/lib/types"
 /** Visual treatment for an agent row, shared by the desktop sidebar and the
  *  mobile shell so the two surfaces never drift.
  *
- *  - `working`: busy, AND nothing outranks it. Drives the glyph pulse and the
- *    state word's own pulse together, so the two halves of the one cue stay in
- *    lockstep. It follows the same priority ladder the state word does, so it
+ *  - `working`: busy, AND nothing outranks it. Drives the glyph cue (the pulse,
+ *    plus the bounce on the sidebar rows) and the state word's own pulse
+ *    together, so the two halves of the one cue stay in lockstep. It follows the same priority ladder the state word does, so it
  *    is on exactly when the word reads "Working"; a test walks the whole input
  *    space to keep the two from parting.
  *  - `dimmed`: not running, so the whole row recedes and running agents stand
