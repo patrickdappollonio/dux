@@ -79,14 +79,19 @@ fn finish_tallies(
     tallies: Vec<(String, Tally<'_>)>,
 ) -> Vec<(String, UntrackedFolder)> {
     let mut budget = UNTRACKED_STATS_MAX_FILES;
+    // Read once per listing, and only if some folder is a repository.
+    let mut common: Option<Option<PathBuf>> = None;
     tallies
         .into_iter()
         .map(|(folder, tally)| {
             if tally.is_repository {
-                let kind = if super::is_linked_worktree_of(worktree, &format!("{prefix}{folder}")) {
-                    UntrackedFolder::LinkedWorktree
-                } else {
-                    UntrackedFolder::NestedRepository
+                let common = common.get_or_insert_with(|| common_dir_of(worktree));
+                let dir = worktree.join(format!("{prefix}{folder}"));
+                let kind = match repository_kind(common.as_deref(), &dir) {
+                    UntrackedDirectoryKind::LinkedWorktree => UntrackedFolder::LinkedWorktree,
+                    UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder => {
+                        UntrackedFolder::NestedRepository
+                    }
                 };
                 return (folder, kind);
             }
@@ -328,7 +333,12 @@ pub(super) fn fold_added_directories(
     for file in staged.iter().filter(|file| file.status != "A") {
         not_whole.extend(ancestors(&file.path));
     }
-    for file in unstaged.iter().filter(|file| file.status == "?") {
+    // An intent-to-add file (`git add -N`, status ` A`) is not staged content
+    // either: its index entry is a placeholder.
+    for file in unstaged
+        .iter()
+        .filter(|file| matches!(file.status.as_str(), "?" | "A"))
+    {
         not_whole.insert(file.path.as_str());
         not_whole.extend(ancestors(&file.path));
     }
@@ -385,6 +395,105 @@ fn folder_row(path: String, status: &str, file_count: usize) -> ChangedFile {
         renamed_from: None,
         kind: ChangedFileKind::directory(file_count),
     }
+}
+
+/// What an untracked directory is. The listing, the delete and the engine's
+/// message all decide it the same way, from git, because deciding it from the
+/// filesystem gets it wrong: an empty `.git` directory or a `.git` file that
+/// points nowhere looks like a repository and is an ordinary folder to git,
+/// and treating such a folder as a repository deleted its ignored files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UntrackedDirectoryKind {
+    /// An ordinary folder: git lists the files inside it.
+    Folder,
+    /// A repository of its own: git reports the directory itself (`dir/`) and
+    /// does not look inside.
+    Repository,
+    /// A repository git reports as its own that is really a linked worktree of
+    /// this same repository.
+    LinkedWorktree,
+}
+
+/// The live answer for one untracked directory: asks `ls-files --others` about
+/// it, the very question the listing's batched call answers for every folded
+/// folder, and then tells a linked worktree apart by reading files only.
+pub fn untracked_directory_kind(worktree: &Path, rel: &str) -> Result<UntrackedDirectoryKind> {
+    let raw = untracked_records(worktree, Some(rel.trim_end_matches('/')))?;
+    let itself = format!("{}/", rel.trim_end_matches('/'));
+    let reported_as_repository = raw
+        .split(|byte| *byte == 0)
+        .any(|record| record == itself.as_bytes());
+    if !reported_as_repository {
+        return Ok(UntrackedDirectoryKind::Folder);
+    }
+    Ok(repository_kind(
+        common_dir_of(worktree).as_deref(),
+        &worktree.join(rel),
+    ))
+}
+
+/// A directory git reported as a repository of its own: a linked worktree of
+/// this repository when its `.git` is a FILE whose `gitdir:` resolves into
+/// `common/worktrees/`, else a repository of its own. Reads files only, so the
+/// listing pays no process per folder. Anything unreadable answers
+/// "repository", the kind a delete already treats most carefully.
+fn repository_kind(common: Option<&Path>, dir: &Path) -> UntrackedDirectoryKind {
+    let linked = common.is_some_and(|common| {
+        gitfile_target(dir).is_some_and(|gitdir| gitdir.starts_with(common.join("worktrees")))
+    });
+    if linked {
+        UntrackedDirectoryKind::LinkedWorktree
+    } else {
+        UntrackedDirectoryKind::Repository
+    }
+}
+
+/// True when `dir` holds a `.git` file pointing into this repository's
+/// `worktrees/`, read from files alone. For a caller with no listing in hand.
+pub(crate) fn is_linked_worktree_dir(worktree: &Path, dir: &Path) -> bool {
+    gitfile_target(dir).is_some()
+        && repository_kind(common_dir_of(worktree).as_deref(), dir)
+            == UntrackedDirectoryKind::LinkedWorktree
+}
+
+/// Where a `.git` FILE in `dir` points, resolved and canonicalized. `None`
+/// for a `.git` directory, a missing one, or a target that does not exist.
+fn gitfile_target(dir: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(dir.join(".git")).ok()?;
+    let target = text
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))?
+        .trim();
+    let target = Path::new(target);
+    let target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        dir.join(target)
+    };
+    target.canonicalize().ok()
+}
+
+/// The git directory every worktree of `worktree`'s repository shares, found
+/// by reading files only: `.git` is either that directory itself (the main
+/// worktree) or a file pointing at this worktree's administration directory,
+/// whose `commondir` file names the shared one.
+pub(crate) fn common_dir_of(worktree: &Path) -> Option<PathBuf> {
+    let gitdir = match gitfile_target(worktree) {
+        Some(gitdir) => gitdir,
+        None => worktree.join(".git").canonicalize().ok()?,
+    };
+    let common = match fs::read_to_string(gitdir.join("commondir")) {
+        Ok(text) => {
+            let named = Path::new(text.trim());
+            if named.is_absolute() {
+                named.to_path_buf()
+            } else {
+                gitdir.join(named)
+            }
+        }
+        Err(_) => gitdir,
+    };
+    common.canonicalize().ok()
 }
 
 /// Which of `paths` are real changes on `side` of this listing (`files` is
@@ -1155,6 +1264,25 @@ mod tests {
         );
     }
 
+    /// A file added with intent-to-add (`git add -N`) is not staged content:
+    /// the folder holding it is staged in part, as with an untracked file.
+    #[test]
+    fn an_intent_to_add_file_inside_a_folder_keeps_it_open() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "app/a.rs", "a\n");
+        write(root, "app/b.rs", "b\n");
+        git_in(root)(&["add", "--", "app/a.rs"]);
+        git_in(root)(&["add", "-N", "--", "app/b.rs"]);
+
+        let (staged, _) = changed_files(root).unwrap();
+
+        assert_eq!(
+            shape(&staged),
+            vec![("app/a.rs".to_string(), "A".to_string(), file())]
+        );
+    }
+
     /// Something untracked appearing inside a folder staged whole makes it a
     /// folder staged in part, so it opens up again.
     #[test]
@@ -1500,7 +1628,10 @@ mod tests {
         let repo = repo();
         let root = repo.path();
         git_in(root)(&["worktree", "add", "-q", "-b", "side", "inner-wt"]);
-        assert!(is_linked_worktree_of(root, "inner-wt"));
+        assert_eq!(
+            untracked_directory_kind(root, "inner-wt").unwrap(),
+            UntrackedDirectoryKind::LinkedWorktree
+        );
         let (_, unstaged) = changed_files(root).unwrap();
         assert_eq!(
             shape(&unstaged),
@@ -1523,7 +1654,90 @@ mod tests {
         let nested = root.join("clone");
         fs::create_dir_all(&nested).unwrap();
         git_in(&nested)(&["init", "-q"]);
-        assert!(!is_linked_worktree_of(root, "clone"));
+        assert_eq!(
+            untracked_directory_kind(root, "clone").unwrap(),
+            UntrackedDirectoryKind::Repository
+        );
+    }
+
+    /// Agents work in linked worktrees, so the common directory has to be
+    /// found from one as well: a worktree of the repository placed inside an
+    /// agent's worktree is recognised there too.
+    #[test]
+    fn a_linked_worktree_inside_an_agents_worktree_is_recognised() {
+        let repo = repo();
+        let root = repo.path();
+        git_in(root)(&["worktree", "add", "-q", "-b", "agent", "agent-wt"]);
+        git_in(root)(&["worktree", "add", "-q", "-b", "other", "agent-wt/inner"]);
+        let agent = root.join("agent-wt");
+
+        let (_, unstaged) = changed_files(&agent).unwrap();
+
+        assert_eq!(
+            shape(&unstaged),
+            vec![(
+                "inner".to_string(),
+                "?".to_string(),
+                ChangedFileKind::LinkedWorktree
+            )]
+        );
+    }
+
+    /// The listing and the delete decide "repository of its own" the same way,
+    /// from git. A folder that only looks like one (an empty `.git` directory,
+    /// a `.git` file pointing nowhere) is an ordinary folder to git, so it is
+    /// listed as one and deleted as one: its ignored files are kept.
+    #[test]
+    fn a_folder_that_only_looks_like_a_repository_keeps_its_ignored_files() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, ".gitignore", "*.env\n");
+        git_in(root)(&["add", ".gitignore"]);
+        git_in(root)(&["commit", "-q", "-m", "ignore"]);
+        write(root, "empty/a.js", "a\n");
+        write(root, "empty/secret.env", "SECRET=1\n");
+        fs::create_dir_all(root.join("empty/.git")).unwrap();
+        write(root, "stale/a.js", "a\n");
+        write(root, "stale/secret.env", "SECRET=1\n");
+        write(root, "stale/.git", "gitdir: /nonexistent/place\n");
+
+        let (_, unstaged) = changed_files(root).unwrap();
+        for folder in ["empty", "stale"] {
+            let row = unstaged.iter().find(|f| f.path == folder).expect(folder);
+            assert!(row.is_expandable(), "{folder} lists as an ordinary folder");
+            assert_eq!(
+                untracked_directory_kind(root, folder).unwrap(),
+                UntrackedDirectoryKind::Folder
+            );
+            discard_file(root, folder, true).unwrap();
+            assert!(
+                !root.join(folder).join("a.js").exists(),
+                "{folder}: its file went"
+            );
+            assert!(
+                root.join(folder).join("secret.env").exists(),
+                "{folder}: the ignored file is kept"
+            );
+        }
+    }
+
+    /// A worktree of this same repository is the worktree manager's: staging it
+    /// would record a link to it in the index, which is never what was meant.
+    #[test]
+    fn staging_a_linked_worktree_is_refused() {
+        let repo = repo();
+        let root = repo.path();
+        git_in(root)(&["worktree", "add", "-q", "-b", "side", "inner-wt"]);
+
+        let refusal = stage_file(root, "inner-wt").unwrap_err();
+        assert!(
+            refusal.to_string().contains("worktree manager"),
+            "{refusal}"
+        );
+        assert!(stage_files(root, &["inner-wt".to_string()]).is_err());
+
+        let (staged, _) = changed_files(root).unwrap();
+        assert!(staged.is_empty(), "{staged:?}");
     }
 
     // ── Paths inside a folder that git does not list ──────────────────────

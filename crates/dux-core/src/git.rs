@@ -15,7 +15,10 @@ use crate::model::{ChangedFile, ProjectBranchStatus};
 use crate::worker::BranchWarningKind;
 
 mod folding;
-pub use folding::{ChangesSide, changed_dir_children, rows_answering};
+pub use folding::{
+    ChangesSide, UntrackedDirectoryKind, changed_dir_children, rows_answering,
+    untracked_directory_kind,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWorktree {
@@ -3654,6 +3657,20 @@ fn refuse_unplain_path(path: &str, what: &str) -> Result<()> {
     }
 }
 
+/// Refuse to stage a linked worktree of this same repository: `git add` would
+/// record a link to it in the index, which is never what staging a folder
+/// meant, and the worktree belongs to the worktree manager. Files are read,
+/// no process is spawned, and only for a directory holding a `.git` entry.
+fn refuse_staging_a_linked_worktree(worktree_path: &Path, path: &str) -> Result<()> {
+    if folding::is_linked_worktree_dir(worktree_path, &worktree_path.join(path)) {
+        return Err(anyhow!(
+            "\"{path}/\" is a worktree of this same repository; staging it would record a link \
+             to it, not its files. Manage it from the worktree manager."
+        ));
+    }
+    Ok(())
+}
+
 fn run_pathspec_batch(
     worktree_path: &Path,
     subcommand: &[&str],
@@ -3667,6 +3684,9 @@ fn run_pathspec_batch(
     }
     for path in file_paths {
         refuse_unplain_path(path, "act on")?;
+        if subcommand == ["add"] {
+            refuse_staging_a_linked_worktree(worktree_path, path)?;
+        }
     }
     let wt = worktree_path.to_string_lossy();
     let mut args: Vec<&str> = vec!["--literal-pathspecs", "-C", wt.as_ref()];
@@ -3701,6 +3721,7 @@ fn run_pathspec_batch(
 
 pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     refuse_unplain_path(file_path, "stage")?;
+    refuse_staging_a_linked_worktree(worktree_path, file_path)?;
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
         .args([
@@ -3744,56 +3765,6 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Delete exactly what an untracked folder's row counted: its untracked,
-/// not-ignored files, and the directories left empty by that.
-///
-/// `git clean -f -d` without `-x` keeps every ignored file (a local `.env`,
-/// a build cache), which the row never counted and the dialog never named, and
-/// without a second `-f` it does not enter a repository of its own inside the
-/// folder: both measured on git 2.53. A directory that still holds an ignored
-/// file stays, with that file in it. `--literal-pathspecs` and `--` keep a
-/// folder named like a glob or an option to itself.
-/// True when `rel` (a directory inside `worktree_path`) is a linked worktree
-/// of the SAME repository: its `.git` is a file whose `gitdir:` points into
-/// this repository's `worktrees/` administration directory.
-///
-/// Such a directory is reported by `git status` exactly like a repository of
-/// its own, but it is not one: deleting the directory leaves the repository
-/// believing the worktree still exists, and none of the history goes with it.
-/// It belongs to the worktree manager, which removes it properly. Any answer
-/// git could not give reads as "no", leaving the ordinary nested-repository
-/// handling in charge.
-pub fn is_linked_worktree_of(worktree_path: &Path, rel: &str) -> bool {
-    let dir = worktree_path.join(rel);
-    let Ok(text) = fs::read_to_string(dir.join(".git")) else {
-        // A directory (an ordinary repository) or nothing at all.
-        return false;
-    };
-    let Some(gitdir) = text.lines().find_map(|line| line.strip_prefix("gitdir:")) else {
-        return false;
-    };
-    let gitdir = Path::new(gitdir.trim());
-    let gitdir = if gitdir.is_absolute() {
-        gitdir.to_path_buf()
-    } else {
-        dir.join(gitdir)
-    };
-    let Ok(gitdir) = gitdir.canonicalize() else {
-        return false;
-    };
-    let Ok(common) = run_git_capture(
-        worktree_path,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        "git rev-parse --git-common-dir",
-    ) else {
-        return false;
-    };
-    let Ok(common) = Path::new(common.trim()).canonicalize() else {
-        return false;
-    };
-    gitdir.starts_with(common.join("worktrees"))
-}
-
 /// Refuse to delete a folder that holds nothing a delete would remove: its
 /// only contents are repositories of their own (which the delete keeps) or
 /// files the repository ignores. Reporting a deletion that did not happen is
@@ -3832,6 +3803,15 @@ fn refuse_empty_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> 
     ))
 }
 
+/// Delete exactly what an untracked folder's row counted: its untracked,
+/// not-ignored files, and the directories left empty by that.
+///
+/// `git clean -f -d` without `-x` keeps every ignored file (a local `.env`,
+/// a build cache), which the row never counted and the dialog never named, and
+/// without a second `-f` it does not enter a repository of its own inside the
+/// folder: both measured on git 2.53. A directory that still holds an ignored
+/// file stays, with that file in it. `--literal-pathspecs` and `--` keep a
+/// folder named like a glob or an option to itself.
 fn clean_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> {
     let output = Command::new("git")
         .args([
@@ -3912,19 +3892,26 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
         let meta = fs::symlink_metadata(&full)?;
         if !meta.is_dir() {
             fs::remove_file(&full)?;
-        } else if full.join(".git").symlink_metadata().is_ok() {
-            if is_linked_worktree_of(worktree_path, file_path) {
-                return Err(anyhow!(
-                    "\"{file_path}/\" is a worktree of this same repository, not a repository \
-                     of its own; remove it from the worktree manager so git forgets it too"
-                ));
-            }
-            // A repository of its own is one row, and deleting it removes it
-            // whole, history included; both surfaces' dialogs say so.
-            fs::remove_dir_all(&full)?;
         } else {
-            refuse_empty_untracked_folder(worktree_path, file_path)?;
-            clean_untracked_folder(worktree_path, file_path)?;
+            // Re-derived now, from git, the way the listing decided it: a
+            // folder that only looks like a repository must be cleaned, not
+            // removed whole, or its ignored files go with it.
+            match untracked_directory_kind(worktree_path, file_path)? {
+                UntrackedDirectoryKind::LinkedWorktree => {
+                    return Err(anyhow!(
+                        "\"{file_path}/\" is a worktree of this same repository, not a \
+                         repository of its own; remove it from the worktree manager so git \
+                         forgets it too"
+                    ));
+                }
+                // A repository of its own is one row, and deleting it removes
+                // it whole, history included; both surfaces' dialogs say so.
+                UntrackedDirectoryKind::Repository => fs::remove_dir_all(&full)?,
+                UntrackedDirectoryKind::Folder => {
+                    refuse_empty_untracked_folder(worktree_path, file_path)?;
+                    clean_untracked_folder(worktree_path, file_path)?;
+                }
+            }
         }
         return Ok(());
     }

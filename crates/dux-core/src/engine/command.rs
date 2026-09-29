@@ -633,7 +633,13 @@ impl Engine {
                 let full = worktree_path.join(&path);
                 let is_folder = is_untracked
                     && std::fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_dir());
-                let is_repository = is_folder && full.join(".git").symlink_metadata().is_ok();
+                // Decided from git, the way the listing and the delete decide
+                // it, never from a `.git` entry being present.
+                let is_repository = is_folder
+                    && matches!(
+                        crate::git::untracked_directory_kind(&worktree_path, &path),
+                        Ok(crate::git::UntrackedDirectoryKind::Repository)
+                    );
                 crate::git::discard_file(&worktree_path, &path, is_untracked)?;
                 let message = if is_repository {
                     crate::status_text![
@@ -2427,6 +2433,37 @@ mod tests {
             _ => panic!("expected Info status reaction"),
         }
         assert!(!repo.path().join("node_modules").exists());
+    }
+
+    /// An empty `.git` directory does not make a folder a repository to git,
+    /// so the message must not claim a history went with it.
+    #[test]
+    fn a_folder_that_only_looks_like_a_repository_is_reported_as_a_folder() {
+        let repo = discard_test_repo();
+        let folder = repo.path().join("lookalike");
+        std::fs::create_dir_all(folder.join(".git")).expect("empty .git");
+        std::fs::write(folder.join("a.js"), "a\n").expect("write");
+        let (mut engine, _tmp) = test_engine();
+
+        let reaction = engine
+            .apply(Command::DiscardFile {
+                worktree_path: repo.path().to_path_buf(),
+                path: "lookalike".to_string(),
+                is_untracked: true,
+            })
+            .expect("apply");
+
+        match reaction {
+            EventReaction::Status(update) => {
+                assert!(
+                    update.message.contains("Deleted the untracked files in"),
+                    "{}",
+                    update.message
+                );
+                assert!(!update.message.contains("history"), "{}", update.message);
+            }
+            _ => panic!("expected Info status reaction"),
+        }
     }
 
     #[test]
