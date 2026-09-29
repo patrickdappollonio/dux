@@ -28,6 +28,9 @@ looking.
   a plain, slower on-off blink, which is what a browser lets a background tab keep
   up. It holds still if you have reduced-motion turned on.
 
+Turning `attention_indicator` off (below) takes the tab-title count and the favicon dot
+away at once, in every open browser tab, even for an agent that was already waiting.
+
 This is the web sidebar.
 
 ![The sidebar with one agent lit cyan and marked Needs you, while the others carry on working.](/screens/attention-sidebar.png)
