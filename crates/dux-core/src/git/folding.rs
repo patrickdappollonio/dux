@@ -2522,6 +2522,31 @@ mod tests {
         );
     }
 
+    /// Before the first commit there is no HEAD to reset to, and the batch
+    /// unstage must still take a folded new folder back out of the index, as
+    /// the single-path unstage does.
+    #[test]
+    fn a_batch_unstage_works_before_the_first_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_in(root)(&["init", "-q", "-b", "main"]);
+        write(root, "app/a.rs", "a\n");
+        write(root, "app/sub/b.rs", "b\n");
+        write(root, "README", "r\n");
+        stage_files(root, &["app".to_string(), "README".to_string()]).unwrap();
+        let (staged, _) = changed_files(root).unwrap();
+        assert!(staged.iter().any(|f| f.path == "app" && f.is_folder()));
+
+        unstage_files(root, &["app".to_string()]).unwrap();
+
+        let (staged, unstaged) = changed_files(root).unwrap();
+        assert_eq!(
+            staged.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            ["README"]
+        );
+        assert!(unstaged.iter().any(|f| f.path == "app" && f.is_folder()));
+    }
+
     #[test]
     fn folder_names_that_look_like_options_or_globs_are_names() {
         let repo = repo();

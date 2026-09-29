@@ -661,8 +661,7 @@ async fn files_op(
         .into_response()
 }
 
-/// What the single-path stage route attempts, which is also how `file_op`
-/// knows to ask whether the path may be staged at all.
+/// What the single-path stage route attempts, the words its failure uses.
 const STAGE_ACTION: &str = "stage the file";
 
 async fn file_op<F>(
@@ -681,14 +680,6 @@ where
     };
     if let Err(r) = validate_changed_path(&worktree, &path).await {
         return r.into_response();
-    }
-    // A path git may not be asked to stage is refused as such, not reported as
-    // a git failure. Only staging has one (a linked worktree), and the check
-    // reads files only.
-    if action == STAGE_ACTION
-        && let Some(sentence) = dux_core::git::stage_refusal(&worktree, &path)
-    {
-        return (StatusCode::BAD_REQUEST, sentence).into_response();
     }
     let wt = worktree.clone();
     if let Err(r) = run_git(action, &worktree, move || op(wt, path)).await {

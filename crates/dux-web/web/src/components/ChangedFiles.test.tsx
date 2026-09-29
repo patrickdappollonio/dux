@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { chip, proseText, type Prose } from "@/lib/prose"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   act,
@@ -698,9 +699,12 @@ describe("the changes pane's multi-select", () => {
     expect(
       screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
     ).toBeNull()
-    expect(notifyWarning).toHaveBeenCalledWith(
+    // The path is a chip, not text spliced into a plain string.
+    const notice = notifyWarning.mock.calls[0]![0] as Prose
+    expect(proseText(notice)).toBe(
       "1 file staged. 1 file had already left the list, starting with b.ts.",
     )
+    expect(notice).toContainEqual(chip("b.ts"))
   })
 
   // A path the server refused for a reason of its own (a folder holding only
@@ -721,7 +725,9 @@ describe("the changes pane's multi-select", () => {
     fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
     await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
 
-    expect(notifyWarning).toHaveBeenCalledWith(`1 file staged. ${reason}`)
+    expect(proseText(notifyWarning.mock.calls[0]![0] as Prose)).toBe(
+      `1 file staged. ${reason}`,
+    )
   })
 
   it("keeps the selection and releases busy state after a bulk request error", async () => {

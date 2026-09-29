@@ -3887,9 +3887,13 @@ fn stages_anything(worktree_path: &Path, path: &str, excludes: &[Vec<u8>]) -> Re
 /// Unstage every named path in one git call. See [`stage_files`] for why the
 /// paths travel on stdin and why an empty slice is refused.
 pub fn unstage_files(worktree_path: &Path, file_paths: &[String]) -> Result<()> {
+    // No explicit `HEAD`: `git reset` defaults to it, and only that default
+    // copes with a repository that has no commit yet. Named, it is an unknown
+    // revision there and the batch fails (measured on git 2.53), although the
+    // single-path `reset HEAD -- <path>` is let through.
     run_pathspec_batch(
         worktree_path,
-        &["reset", "--quiet", "HEAD"],
+        &["reset", "--quiet"],
         file_paths,
         "git reset",
     )

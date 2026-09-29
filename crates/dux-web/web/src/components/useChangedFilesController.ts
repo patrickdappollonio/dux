@@ -10,7 +10,7 @@ import {
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import { git, type BatchResult } from "@/lib/git"
 import { notifyError, notifyInfo, notifySuccess, notifyWarning } from "@/lib/notify"
-import { chip, prose } from "@/lib/prose"
+import { chip, joinProse, prose, type Prose } from "@/lib/prose"
 import { discardOutcome, leftOutNotice, selectedFileCount } from "@/lib/discardOutcome"
 import { discardActsOn, stageActsOn } from "@/lib/changedFiles"
 import type { ChangesSlice } from "@/lib/store"
@@ -135,22 +135,22 @@ function bulkResultToast(
   const reasons = result.reasons ?? {}
   const gone = result.refused.filter((path) => reasons[path] === undefined)
   const explained = result.refused.flatMap((path) => reasons[path] ?? [])
-  const parts = [`${formatRegularCount(done, "file")} ${past}.`]
+  const parts: Prose[] = [prose`${formatRegularCount(done, "file")} ${past}.`]
   if (gone.length > 0) {
     parts.push(
-      `${formatRegularCount(gone.length, "file")} had already left the list, starting with ${gone[0]}.`,
+      prose`${formatRegularCount(gone.length, "file")} had already left the list, starting with ${chip(gone[0]!)}.`,
     )
   }
-  // The server's own sentence says why it refused a path; the first one is
-  // spelled out and the rest are counted.
+  // The server's own sentence says why it refused a path, relayed as it came;
+  // the first one is spelled out and the rest are counted.
   if (explained.length > 0) {
-    parts.push(explained[0]!)
+    parts.push([explained[0]!])
     if (explained.length > 1) {
       const more = explained.length - 1
-      parts.push(`${more} more ${more === 1 ? "row was" : "rows were"} refused too.`)
+      parts.push(prose`${more} more ${more === 1 ? "row was" : "rows were"} refused too.`)
     }
   }
-  notifyWarning(parts.join(" "))
+  notifyWarning(joinProse(parts, " "))
 }
 
 function discardResultToast(
