@@ -977,13 +977,21 @@ pub(crate) fn common_dir_of(worktree: &Path) -> Option<PathBuf> {
 /// that side's listing).
 ///
 /// A path that is a row of its own answers as it is. A path inside a folded
-/// folder is asked of git, in one call for the whole batch, because the folder
-/// row alone would also answer for an ignored file, a file that does not
-/// exist and a file inside a repository of its own, none of which is a change:
-/// on the unstaged side `ls-files --others --exclude-standard` must list the
-/// path (or, for a folder, something inside it, or, for a nested repository,
-/// the repository itself), and on the staged side `ls-files --cached` must.
-/// Anything else is left out, and the caller refuses it.
+/// folder is answered from that folder row when the row can say: on the
+/// unstaged side a repository the row names in `repositories_inside` is a
+/// change (git lists it as `path/`), and a path inside one of those is never
+/// a change of this repository and is not asked about. Every other path
+/// inside a folded folder is asked of git, in one call for the rest of the
+/// batch, because the folder row alone would also answer for an ignored file
+/// or a file that does not exist: on the unstaged side
+/// `ls-files --others --exclude-standard` must list the path (or, for a
+/// folder, something inside it), and on the staged side `ls-files --cached`
+/// must. Anything else is left out, and the caller refuses it.
+///
+/// The repositories are answered from the row rather than asked because git
+/// cannot be asked about both at once: measured on git 2.53,
+/// `ls-files --others -- a/repo/z a/repo` prints nothing at all, though
+/// `-- a/repo` alone prints `a/repo/`.
 pub fn rows_answering(
     worktree: &Path,
     files: &[ChangedFile],
@@ -997,7 +1005,26 @@ pub fn rows_answering(
             Some(row) if row.path == *path => {
                 answered.insert(path.clone());
             }
-            Some(_) => to_confirm.push(path),
+            Some(row) => {
+                let repositories = row
+                    .folder_contents()
+                    .map(|contents| contents.repositories_inside.as_slice())
+                    .unwrap_or_default();
+                if repositories
+                    .iter()
+                    .any(|repository| is_inside(path.as_bytes(), repository.as_bytes()))
+                {
+                    // Inside a repository of its own: not a change here.
+                } else if repositories.iter().any(|repository| repository == path) {
+                    // Untracked, it is a change git lists as `path/`; on the
+                    // staged side it is one the stage left out.
+                    if side == ChangesSide::Unstaged {
+                        answered.insert(path.clone());
+                    }
+                } else {
+                    to_confirm.push(path);
+                }
+            }
             None => {}
         }
     }
@@ -1824,6 +1851,32 @@ mod tests {
         git_in(root)(&["init", "-q", "--bare", "d/b.git"]);
         assert!(discard_classify(root, "d/b.git/HEAD").is_err());
         assert!(discard_classify(root, "d/a.txt").unwrap());
+    }
+
+    /// git 2.53 prints nothing at all for `ls-files --others -- a/repo/z
+    /// a/repo`, though `-- a/repo` alone prints `a/repo/`: asked together, a
+    /// repository and a path inside it both went unanswered. The repository
+    /// is answered from the folder row and the path inside it is never asked.
+    #[test]
+    fn a_repository_asked_beside_a_path_inside_it_still_answers() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "a/x", "x\n");
+        let nested = root.join("a/repo");
+        fs::create_dir_all(&nested).unwrap();
+        git_in(&nested)(&["init", "-q"]);
+        write(&nested, "z", "z\n");
+        let (_, unstaged) = changed_files(root).unwrap();
+        let asked: Vec<String> = ["a/repo/z", "a/repo", "a/x"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let answered = rows_answering(root, &unstaged, ChangesSide::Unstaged, &asked).unwrap();
+
+        let mut answered: Vec<&str> = answered.iter().map(String::as_str).collect();
+        answered.sort_unstable();
+        assert_eq!(answered, ["a/repo", "a/x"]);
     }
 
     /// git's own rule: a HEAD that names a ref or an object, and objects/ and
