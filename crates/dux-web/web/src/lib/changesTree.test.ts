@@ -291,3 +291,24 @@ describe("the flattened list's edge rows", () => {
     expect(row).toMatchObject({ refreshError: "the repository is busy" })
   })
 })
+
+// A folder whose first answer failed is asked again on its own when its row
+// moves; while that request runs it shows it is loading, not the old failure.
+describe("an automatic refetch after a failed first answer", () => {
+  it("clears the failure while it asks again", () => {
+    let exp = expandFolder(EMPTY, "unstaged", folder("d", 1, { fingerprint: "a" }))
+    exp = failFolder(exp, "unstaged", "d", "the repository is busy")
+    const moved = reconcileExpansions(exp, [], [folder("d", 2, { fingerprint: "b" })])
+    expect(moved.refetch).toEqual([{ section: "unstaged", path: "d" }])
+    expect(moved.next.get(folderKey("unstaged", "d"))).toMatchObject({
+      loading: true,
+      error: null,
+    })
+    const items = buildChangesItems({
+      staged: { files: [], open: true },
+      unstaged: { files: [folder("d", 2, { fingerprint: "b" })], open: true },
+      expansions: moved.next,
+    })
+    expect(items.map((item) => item.kind)).toEqual(["header", "row", "loading"])
+  })
+})

@@ -191,7 +191,9 @@ function reconcileAmong(
     reached.add(key)
     const signature = folderSignature(row)
     if (signature !== node.signature) {
-      next.set(key, { ...node, signature, loading: true })
+      // A failure shown in place of the children gives way to the new
+      // request; children on screen stay until its answer lands.
+      next.set(key, { ...node, signature, loading: true, error: null })
       refetch.push({ section, path: row.path })
       // What is expanded inside waits for the new answer, untouched.
       for (const other of next.keys()) {

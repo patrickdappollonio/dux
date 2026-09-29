@@ -275,6 +275,37 @@ describe("expanding a folded folder", () => {
     expect(screen.queryByRole("button", { name: /Couldn.t refresh/ })).toBeNull()
   })
 
+  // A coarse pointer at desktop width gets the 44px floor on every control the
+  // expand adds, like the row's other controls.
+  it("gives every expand control the touch floor under a coarse pointer", async () => {
+    render(<ChangedFiles />)
+    const button = toggle("node_modules/")
+    expect(button.className).toContain("pointer-coarse:min-h-11")
+    fireEvent.click(button)
+    await act(async () => {
+      answers[0]!.reject(new ChangesFetchError("the repository is busy", 409))
+      await Promise.resolve()
+    })
+    expect(screen.getByRole("button", { name: "Retry" }).className).toContain(
+      "pointer-coarse:min-h-11",
+    )
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }))
+    await answer(1, [file("node_modules/top.js")])
+    mockState = {
+      ...mockState,
+      changes: slice([folder("node_modules", 4, "f2"), file("notes.md")], 2),
+    } as unknown as DuxState
+    publishMockState()
+    await act(async () => {
+      answers[2]!.reject(new ChangesFetchError("the repository is busy", 409))
+      await Promise.resolve()
+    })
+    expect(
+      screen.getByRole("button", { name: /Couldn.t refresh/ }).className,
+    ).toContain("pointer-coarse:min-h-11")
+  })
+
   // Every count in the pane is grouped the same way the rows write theirs.
   it("groups the digits of the section badge like the rows do", () => {
     mockState = {

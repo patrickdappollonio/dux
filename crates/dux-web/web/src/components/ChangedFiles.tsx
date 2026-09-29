@@ -1053,7 +1053,12 @@ function FailedRow({
       <TriangleAlert aria-hidden className="size-4 shrink-0 text-destructive" />
       {/* The message is the whole sentence, the server's or the deadline's. */}
       <span className="min-w-0 flex-1 text-muted-foreground">{message}</span>
-      <Button variant="outline" size="sm" className="h-8 max-md:h-11" onClick={onRetry}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-8 max-md:h-11 pointer-coarse:min-h-11"
+        onClick={onRetry}
+      >
         <RefreshCw />
         Retry
       </Button>
