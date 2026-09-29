@@ -628,8 +628,19 @@ impl Engine {
                 path,
                 is_untracked,
             } => {
+                // A folded folder is deleted whole; asked before the delete,
+                // because afterwards there is nothing left to ask about.
+                let is_folder = is_untracked
+                    && std::fs::symlink_metadata(worktree_path.join(&path))
+                        .is_ok_and(|meta| meta.is_dir());
                 crate::git::discard_file(&worktree_path, &path, is_untracked)?;
-                let message = if is_untracked {
+                let message = if is_folder {
+                    crate::status_text![
+                        "Deleted untracked folder ",
+                        q(format!("{path}/")),
+                        " and everything inside it."
+                    ]
+                } else if is_untracked {
                     crate::status_text!["Deleted untracked file ", q(path), "."]
                 } else {
                     crate::status_text![
@@ -2376,6 +2387,38 @@ mod tests {
         }
         // The working copy is back to the committed content.
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original\n");
+    }
+
+    /// A folded folder is discarded whole, and the message says it was a
+    /// folder: "deleted untracked file" about thirty thousand files is a lie
+    /// about how much just went.
+    #[test]
+    fn discarding_an_untracked_folder_says_it_deleted_a_folder() {
+        let repo = discard_test_repo();
+        let folder = repo.path().join("node_modules/pkg");
+        std::fs::create_dir_all(&folder).expect("folder");
+        std::fs::write(folder.join("index.js"), "x\n").expect("write");
+        let (mut engine, _tmp) = test_engine();
+
+        let reaction = engine
+            .apply(Command::DiscardFile {
+                worktree_path: repo.path().to_path_buf(),
+                path: "node_modules".to_string(),
+                is_untracked: true,
+            })
+            .expect("apply");
+
+        match reaction {
+            EventReaction::Status(update) => assert!(
+                update.message.contains(
+                    "Deleted untracked folder \"node_modules/\" and everything inside it"
+                ),
+                "{}",
+                update.message
+            ),
+            _ => panic!("expected Info status reaction"),
+        }
+        assert!(!repo.path().join("node_modules").exists());
     }
 
     #[test]
