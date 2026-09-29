@@ -1,12 +1,18 @@
 // The confirmation behind the worktree manager: what will be removed, what goes
 // with it, and the ticked box that takes the branch too.
-module.exports = async ({ createAgent, palette, seedLooseWorktree, sendKeys, sleep, waitFor }) => {
+module.exports = async ({ createAgent, palette, seedLooseWorktree, sendKeys, sendText, sleep, waitFor }) => {
   await createAgent(0, "retry-budget")
   await createAgent(0, "cache-warmup")
   seedLooseWorktree("demo-api", "docs-pass")
   await palette("manage-worktrees")
-  // The command asks which project first; demo-api is the row it opens on.
+  // The command asks which project first. demo-api is picked by name through
+  // the chooser's search rather than trusted to be the row it opens on, which
+  // is the selected project and therefore the app's call.
   await waitFor("Manage worktrees in project", 15000)
+  sendKeys("/")
+  await sleep(300)
+  sendText("demo-api")
+  await sleep(600)
   sendKeys("Enter")
   await waitFor("Manage Worktrees", 15000)
   await sleep(800)

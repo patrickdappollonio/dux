@@ -1,6 +1,6 @@
 // The worktree manager: one worktree no agent holds, above the two that are
 // held and therefore cannot be removed here.
-module.exports = async ({ createAgent, palette, seedLooseWorktree, sendKeys, sleep, waitFor }) => {
+module.exports = async ({ createAgent, palette, seedLooseWorktree, sendKeys, sendText, sleep, waitFor }) => {
   await createAgent(0, "retry-budget")
   await createAgent(0, "cache-warmup")
   // A worktree with no agent behind it, which is the only kind this dialog can
@@ -8,8 +8,14 @@ module.exports = async ({ createAgent, palette, seedLooseWorktree, sendKeys, sle
   // deleting an agent and keeping its worktree.
   seedLooseWorktree("demo-api", "docs-pass")
   await palette("manage-worktrees")
-  // The command asks which project first; demo-api is the row it opens on.
+  // The command asks which project first. demo-api is picked by name through
+  // the chooser's search rather than trusted to be the row it opens on, which
+  // is the selected project and therefore the app's call.
   await waitFor("Manage worktrees in project", 15000)
+  sendKeys("/")
+  await sleep(300)
+  sendText("demo-api")
+  await sleep(600)
   sendKeys("Enter")
   await waitFor("Manage Worktrees", 15000)
   await sleep(1200)

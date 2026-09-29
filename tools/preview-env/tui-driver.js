@@ -107,7 +107,10 @@ async function setFixture(name) {
   const text = fs.readFileSync(configPath, "utf8").replace(/\n\[env\][\s\S]*?(?=\n\[|$)/, "")
   fs.writeFileSync(configPath, `${text}\n[env]\nDUX_FAKE_FIXTURE = "${name}"\n`)
   await palette("reload-config")
-  await waitFor("Configuration reloaded", 15000)
+  // Status infos are queued and each holds the line for its full window
+  // (six seconds by default), so the confirmation can sit behind several
+  // earlier ones before it is shown.
+  await waitFor("Configuration reloaded", 60000)
 }
 
 /// Seed a worktree no agent holds, with something uncommitted in it, so the
@@ -132,25 +135,35 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
+/// Whether the screen says `needle`, read the way a person reads it: every run
+/// of spaces on either side counts as one. A name in a dialog renders as a chip,
+/// padded by one cell each side, so the title that used to read
+/// `Add Project: /root` now reads `Add Project:  /root ` and an exact match
+/// fails on spacing alone. Only spaces are folded, never line breaks, so a
+/// needle still has to sit on one row of the screen.
+function screenSays(text, needle) {
+  const fold = (value) => value.replace(/ {2,}/g, " ")
+  return fold(text).includes(fold(needle))
+}
+
 async function waitFor(needle, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (captureText().includes(needle)) return
+    if (screenSays(captureText(), needle)) return
     await sleep(100)
   }
   throw new Error(`timed out waiting for ${JSON.stringify(needle)}\n\n${captureText()}`)
 }
 
-/// Wait until any one of several strings is on screen, and say which.
-async function waitForAny(needles, timeoutMs = 10000) {
+/// Wait until a predicate over the whole screen holds. `what` names the
+/// condition for the timeout message.
+async function waitUntil(predicate, what, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const text = captureText()
-    const hit = needles.find((needle) => text.includes(needle))
-    if (hit) return hit
+    if (predicate(captureText())) return
     await sleep(100)
   }
-  throw new Error(`timed out waiting for any of ${JSON.stringify(needles)}\n\n${captureText()}`)
+  throw new Error(`timed out waiting for ${what}\n\n${captureText()}`)
 }
 
 function sendKeys(...keys) {
@@ -164,6 +177,9 @@ function sendText(text) {
 async function addProject(absolutePath, label) {
   await focusSidebar()
   sendKeys("a")
+  // The folder browser's title names the directory it opened on (the home
+  // directory, as a chip), so this proves the browser is up and showing an
+  // absolute path without pinning which one.
   await waitFor("Add Project: /")
   await browseTo(absolutePath)
   await waitFor(`Added project "${label}" to workspace`, 20000)
@@ -252,26 +268,51 @@ async function createStandaloneAgent(absolutePath, label) {
   await sleep(600)
 }
 
+/// The projects the driver adds before every journey, in the order it adds
+/// them. A journey's project index means this list, never the chooser's rows.
+const PROJECTS = ["demo-api", "demo-web"]
+
 async function createAgent(projectIndex, name) {
+  const project = PROJECTS[projectIndex]
+  if (!project) throw new Error(`no project at index ${projectIndex}; the driver adds ${PROJECTS.join(", ")}`)
   // Creating an agent leaves the center pane focused, so a second creation's
   // key would land on a pane that has no binding for it.
   await focusSidebar()
   sendKeys("n")
   await waitFor("New agent in project")
-  if (projectIndex > 0) sendKeys(...Array(projectIndex).fill("Down"))
+  // Picked by NAME through the chooser's own search, not by counting rows: the
+  // chooser lists the selected project first, and which project is selected
+  // after the setup's two adds is the app's call, not something to predict.
+  // Searching the full name leaves exactly one row, and Enter picks it.
+  sendKeys("/")
+  await sleep(300)
+  sendText(project)
+  await sleep(600)
   sendKeys("Enter")
   await waitFor("Name New Agent", 20000)
   sendText(name)
   sendKeys("Enter")
-  // Wait for the creation to REPORT, not merely for the row to appear. The row
+  // Wait for the creation to FINISH, not merely for the row to appear. The row
   // shows up while the worktree is still being made, and dux focuses the new
   // agent's pane when it finishes: a journey that carried on at the row would
   // have its next keystrokes stolen by that focus change.
   //
-  // Either report ends the wait. An agent born on a fixture that exits at once
-  // (which is how a journey stages the Inactive tail) never shows the created
-  // line at all: the error pre-empts it and drops the infos queued behind it.
-  await waitForAny([`"${name}" in project`, 'Press "r" to relaunch'], 60000)
+  // A plain create is deliberately silent on the status line (the new row and
+  // its streaming pane already say it), so the finish is read off the screen
+  // itself: the header's crumb names the new agent AND the focus has moved to
+  // its pane, whose footer is the only one offering Reconnect. The sidebar held
+  // the focus until then (focusSidebar above), so that footer cannot be stale.
+  //
+  // An agent born on a fixture that exits at once (which is how a journey
+  // stages the Inactive tail) may never take the focus, and its exit error is
+  // the other report that ends the wait.
+  await waitUntil(
+    (text) =>
+      (screenSays(text, `agent: ${name}`) && text.includes("Reconnect")) ||
+      screenSays(text, 'Press "r" to relaunch'),
+    `the agent ${name} to finish being created`,
+    60000,
+  )
   await sleep(600)
   // dux focuses the new agent's pane, and it is interactive there: leave every
   // journey on the sidebar so the next key is a dux key, whatever it is.
@@ -287,7 +328,7 @@ async function selectAgent(name, maxRows = 24) {
   sendKeys(...Array(maxRows).fill("Up"))
   await sleep(600)
   for (let i = 0; i < maxRows; i++) {
-    if (captureText().includes(`agent: ${name}`)) return
+    if (screenSays(captureText(), `agent: ${name}`)) return
     sendKeys("Down")
     await sleep(300)
   }

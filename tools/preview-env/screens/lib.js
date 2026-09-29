@@ -807,7 +807,17 @@ async function paneProblem(page, floor) {
       height: Math.round(r.height),
     }
   })
-  if (!rect) return "there is no terminal on this page for the pane guard to read"
+  if (!rect) {
+    // Say what is there instead, so a refusal names the screen it met rather
+    // than only the terminal it did not find.
+    const seen = await page.evaluate(() => {
+      const flat = (value) => (value || "").replace(/\s+/g, " ").trim()
+      const pane = document.querySelector('[data-testid="terminal-pane"]')
+      const text = flat((pane || document.querySelector("main") || document.body).innerText)
+      return `${location.hash || "(no hash)"}; ${pane ? "the pane is mounted and reads" : "no pane is mounted; the page reads"} ${JSON.stringify(text.slice(0, 300))}`
+    })
+    return `there is no terminal on this page for the pane guard to read (${seen})`
+  }
   // Wrapped rather than used as handed over: puppeteer answers with a plain
   // Uint8Array, which has none of Buffer's readers.
   const image = decodePng(Buffer.from(await page.screenshot({ clip: rect })))
