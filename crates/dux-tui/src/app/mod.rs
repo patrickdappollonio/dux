@@ -4176,6 +4176,7 @@ impl App {
             sessions,
             staged_files: Vec::new(),
             unstaged_files: Vec::new(),
+            changed_files_revision: 0,
             terminal_counter: 0,
             github_integration_enabled: gh_integration_val,
             single_instance_lock,
@@ -6290,8 +6291,7 @@ impl App {
         // compute changed files for.
         let worktree = self.engine.set_watched_session(session_id.as_deref());
         if let Some((staged, unstaged)) = carried {
-            self.engine.staged_files = staged;
-            self.engine.unstaged_files = unstaged;
+            self.engine.set_changed_files(staged, unstaged);
         }
         if focus_change {
             // The lists are empty until the new agent's read lands.

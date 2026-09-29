@@ -115,6 +115,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         sessions,
         staged_files: Vec::new(),
         unstaged_files: Vec::new(),
+        changed_files_revision: 0,
         terminal_counter: 0,
         github_integration_enabled,
         single_instance_lock,

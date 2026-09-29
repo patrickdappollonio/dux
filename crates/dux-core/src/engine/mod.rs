@@ -233,6 +233,11 @@ pub struct Engine {
     pub sessions: Vec<AgentSession>,
     pub staged_files: Vec<ChangedFile>,
     pub unstaged_files: Vec<ChangedFile>,
+    /// Moves every time new lists are assigned through
+    /// [`Engine::set_changed_files`], so a surface caching something derived
+    /// from them (the terminal UI's row layout) can tell a new read from the
+    /// one it built from without comparing the lists.
+    pub changed_files_revision: u64,
     pub terminal_counter: usize,
     pub github_integration_enabled: bool,
     pub single_instance_lock: SingleInstanceLock,
@@ -3122,9 +3127,16 @@ impl Engine {
             .map(str::to_string);
         // Always clear so the pane shows "no changes yet" (never the previous
         // watch's stale files) until the off-thread/inline compute lands.
-        self.staged_files = Vec::new();
-        self.unstaged_files = Vec::new();
+        self.set_changed_files(Vec::new(), Vec::new());
         worktree
+    }
+
+    /// Replace both changed-file lists, moving
+    /// [`Engine::changed_files_revision`] with them.
+    pub fn set_changed_files(&mut self, staged: Vec<ChangedFile>, unstaged: Vec<ChangedFile>) {
+        self.staged_files = staged;
+        self.unstaged_files = unstaged;
+        self.changed_files_revision = self.changed_files_revision.wrapping_add(1);
     }
 
     /// The live repository verdict for the directory an agent lives in.

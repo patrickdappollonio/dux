@@ -100,14 +100,15 @@ enum RowSlot {
     Failed { dir: usize, depth: usize },
 }
 
-/// What a cached layout was built from. A list replaced by a new read lives
-/// in a new allocation (the old one is still alive while the new one is
-/// built), so its address and length tell a new list from the old; the
-/// generation covers every change to the expansions.
+/// What a cached layout was built from. The revision moves on every new
+/// assignment of the lists (`Engine::set_changed_files`), whatever allocation
+/// the new list happens to live in; the length also catches a list changed in
+/// place, which only tests do; the generation covers every change to the
+/// expansions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LayoutKey {
     session: Option<String>,
-    list_addr: usize,
+    revision: u64,
     list_len: usize,
     generation: u64,
 }
@@ -173,7 +174,7 @@ impl App {
         let files = self.side_files(side);
         LayoutKey {
             session: self.selected_session().map(|s| s.id.clone()),
-            list_addr: files.as_ptr() as usize,
+            revision: self.engine.changed_files_revision,
             list_len: files.len(),
             generation: self.changes_tree.generation,
         }
@@ -988,8 +989,7 @@ mod tests {
     /// Apply a fresh changed-files read the way the pane does when one lands.
     fn load_lists(app: &mut App, worktree: &Path) {
         let (staged, unstaged) = git::changed_files(worktree).expect("changed files");
-        app.engine.staged_files = staged;
-        app.engine.unstaged_files = unstaged;
+        app.engine.set_changed_files(staged, unstaged);
         app.changes_tree.lists_for = app.selected_session().map(|s| s.id.clone());
         app.reconcile_changes_tree();
         app.clamp_files_cursor();
@@ -1860,6 +1860,34 @@ mod tests {
             app.current_files_len(),
             3,
             "collapsing drops the folder's rows"
+        );
+    }
+
+    /// A new read that lands in the very allocation the old list had, with the
+    /// same length, is still a new read: the cache follows assignments, not
+    /// addresses.
+    #[test]
+    fn the_cached_rows_follow_a_new_list_in_the_same_allocation() {
+        let (mut app, _worktree) = repo_app();
+        app.handle_key(enter()).unwrap();
+        settle(&mut app, idle);
+        assert_eq!(
+            describe(&app, RightSection::Unstaged)
+                .last()
+                .map(String::as_str),
+            Some("notes.md 1")
+        );
+
+        let mut reused = std::mem::take(&mut app.engine.unstaged_files);
+        let folder_row = reused[0].clone();
+        reused.clear();
+        reused.extend([file("other.md", "?"), folder_row]);
+        let staged = std::mem::take(&mut app.engine.staged_files);
+        app.engine.set_changed_files(staged, reused);
+
+        assert_eq!(
+            describe(&app, RightSection::Unstaged)[..2],
+            ["other.md 1", "v node_modules/ 13"]
         );
     }
 

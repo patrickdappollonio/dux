@@ -2488,8 +2488,7 @@ impl Engine {
             }
         };
         let recovery = session_id.and_then(|id| self.note_changed_files_outcome(&id, None));
-        self.staged_files = staged;
-        self.unstaged_files = unstaged;
+        self.set_changed_files(staged, unstaged);
         match recovery {
             Some(status) => EventReaction::Multi(vec![
                 EventReaction::ClampFilesCursor,

@@ -49,6 +49,7 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
         sessions: Vec::new(),
         staged_files: Vec::new(),
         unstaged_files: Vec::new(),
+        changed_files_revision: 0,
         terminal_counter: 0,
         github_integration_enabled: false,
         single_instance_lock,

@@ -144,6 +144,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         sessions: vec![session],
         staged_files: Vec::new(),
         unstaged_files: Vec::new(),
+        changed_files_revision: 0,
         terminal_counter: 0,
         github_integration_enabled: false,
         single_instance_lock,
