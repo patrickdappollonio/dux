@@ -16,15 +16,18 @@ const FOLDER_COUNT_MARK = "\u0000"
 //
 // A folded folder is one row however many files are inside it, so a file added
 // inside an already-untracked folder moves no path. Its key therefore carries
-// the folder's file count too, and a moved count reads as the key leaving and
-// arriving, which `dirsToRefetch` charges to the listings inside the folder.
+// the folder's file count and nested-repository count too, and a moved count
+// reads as the key leaving and arriving, which `dirsToRefetch` charges to the
+// listings inside the folder. The folder's fingerprint is deliberately left
+// out: it moves on a content-only edit, which changes no listing, and it is
+// the open buffer's signal (`changeSignalFor`) that has to follow it.
 export function changedPathsFrom(slice: ChangesSliceView | null): string[] {
   if (!slice) return []
   const paths = new Set<string>()
   for (const f of [...slice.unstaged, ...slice.staged]) {
     if (f.kind) {
       paths.add(
-        `${f.path}/${FOLDER_COUNT_MARK}${f.file_count ?? 0}:${f.fingerprint ?? ""}`,
+        `${f.path}/${FOLDER_COUNT_MARK}${f.file_count ?? 0}:${f.nested_repositories ?? 0}`,
       )
     } else {
       paths.add(f.path)

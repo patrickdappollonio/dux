@@ -37,6 +37,7 @@ export interface ChangedRowView {
   renamed_from?: string
   kind?: "directory" | "nested_repository" | "linked_worktree"
   file_count?: number
+  nested_repositories?: number
   fingerprint?: string
 }
 

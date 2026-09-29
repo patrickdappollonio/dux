@@ -137,7 +137,10 @@ describe("folded folders", () => {
     ])
   })
 
-  it("refetches the listings inside a folder whose fingerprint moved", () => {
+  // A content-only edit inside the folder moves its fingerprint, and that is
+  // the open buffer's business, not the tree's: no listing gained or lost an
+  // entry, so nothing is refetched.
+  it("leaves the tree alone when only the folder's fingerprint moved", () => {
     const withPrint = (fingerprint: string): ChangesSliceView => ({
       phase: "loaded",
       unstaged: [
@@ -149,6 +152,28 @@ describe("folded folders", () => {
       dirsToRefetch(
         changedPathsFrom(withPrint("aa")),
         changedPathsFrom(withPrint("bb")),
+        LOADED_INSIDE,
+      ),
+    ).toEqual([])
+  })
+
+  it("refetches the listings inside a folder whose nested repositories changed", () => {
+    const withNested = (nested: number): ChangesSliceView => ({
+      phase: "loaded",
+      unstaged: [
+        {
+          ...row("node_modules"),
+          kind: "directory",
+          file_count: 3,
+          nested_repositories: nested,
+        },
+      ],
+      staged: [],
+    })
+    expect(
+      dirsToRefetch(
+        changedPathsFrom(withNested(0)),
+        changedPathsFrom(withNested(1)),
         LOADED_INSIDE,
       ),
     ).toEqual(["", "node_modules", "node_modules/pkg"])
