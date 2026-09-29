@@ -270,11 +270,16 @@ pub(super) fn count_untracked_folders(
         .iter()
         .map(|folder| (folder.clone(), Tally::default()))
         .collect();
+    // Which folders any record answered for. A folder with none is one that
+    // was gone (or held nothing git lists) by the time this read ran: it gets
+    // no answer at all rather than an empty one (see `apply_folder_counts`).
+    let mut seen = vec![false; folders.len()];
     let raw = untracked_records(worktree, None)?;
     for record in raw.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
         // The folder itself answering as `folder/` is a repository of its own.
         if let Some(&position) = record.strip_suffix(b"/").and_then(|e| index.get(e)) {
             tallies[position].1.is_repository = true;
+            seen[position] = true;
             continue;
         }
         let owner = record
@@ -284,11 +289,45 @@ pub(super) fn count_untracked_folders(
             .find_map(|(position, _)| index.get(&record[..position]).copied());
         if let Some(position) = owner {
             tallies[position].1.add(record);
+            seen[position] = true;
         }
     }
+    let tallies: Vec<(String, Tally<'_>)> = tallies
+        .into_iter()
+        .zip(seen)
+        .filter_map(|(tally, seen)| seen.then_some(tally))
+        .collect();
     Ok(finish_tallies(worktree, "", tallies, budget)
         .into_iter()
         .collect())
+}
+
+/// Give every folder row in `unstaged` what the count found in it, and drop
+/// the row of a folder the count has no answer for.
+///
+/// `git status` and the `ls-files` the count runs are two reads, and a folder
+/// deleted between them (a build cleaning its output, `rm -rf` in a terminal)
+/// has no record in the second. That is a normal race, not a failure: the
+/// folder is gone, so its row goes, and the next read agrees. It is never
+/// shown as an empty folder, which the staged fold would otherwise have to
+/// guess about.
+pub(super) fn apply_folder_counts(
+    unstaged: &mut Vec<ChangedFile>,
+    mut counts: HashMap<String, UntrackedFolder>,
+) {
+    unstaged.retain_mut(|file| {
+        if !file.is_folder() {
+            return true;
+        }
+        match counts.remove(&file.path) {
+            Some(folder) => {
+                file.additions = folder.additions();
+                file.kind = folder.kind();
+                true
+            }
+            None => false,
+        }
+    });
 }
 
 /// Which of `dirs` HEAD does not have. An empty set when git could not be
@@ -1780,6 +1819,45 @@ mod tests {
         assert!(!root.join("loose.txt").exists());
         assert!(root.join("dir/a.txt").exists());
         assert!(refusal.to_string().contains("\"dir/\""), "{refusal}");
+    }
+
+    /// A folder `git status` listed but that is gone by the time it is
+    /// counted gets no answer from the count, rather than an invented empty
+    /// one; the listing then drops its row, which the next read agrees with.
+    #[test]
+    fn a_folder_gone_before_it_is_counted_gets_no_answer_and_no_row() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "here/a.txt", "a\n");
+        let mut budget = 100;
+
+        let counts =
+            count_untracked_folders(root, &["here".to_string(), "gone".to_string()], &mut budget)
+                .unwrap();
+
+        assert!(counts.contains_key("here"));
+        assert!(
+            !counts.contains_key("gone"),
+            "an unseen folder has no answer"
+        );
+
+        let row = |path: &str| ChangedFile {
+            status: "?".to_string(),
+            path: path.to_string(),
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            renamed_from: None,
+            kind: ChangedFileKind::directory(0),
+        };
+        let mut unstaged = vec![row("here"), row("gone")];
+        apply_folder_counts(&mut unstaged, counts);
+        assert_eq!(
+            unstaged.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            ["here"]
+        );
+        assert_eq!(unstaged[0].file_count(), 1);
     }
 
     fn index_modes(root: &Path) -> Vec<(String, String)> {

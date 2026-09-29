@@ -2908,22 +2908,9 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
         .count();
     let mut read_budget = UNTRACKED_STATS_MAX_FILES.saturating_sub(loose_untracked);
     if !untracked_folders.is_empty() {
-        let mut counts =
+        let counts =
             folding::count_untracked_folders(worktree_path, &untracked_folders, &mut read_budget)?;
-        // Every folder git listed gets its answer from the count; one with no
-        // answer fails the read rather than standing as an empty folder, which
-        // the staged fold would otherwise have to guess about.
-        for file in unstaged.iter_mut().filter(|file| file.is_folder()) {
-            let folder = counts.remove(&file.path).ok_or_else(|| {
-                anyhow!(
-                    "git listed \"{}/\" as untracked, but counting what it holds gave no \
-                     answer for it",
-                    file.path
-                )
-            })?;
-            file.additions = folder.additions();
-            file.kind = folder.kind();
-        }
+        folding::apply_folder_counts(&mut unstaged, counts);
     }
     let mut staged = folding::fold_added_directories(worktree_path, staged, &unstaged);
 
