@@ -515,6 +515,7 @@ impl App {
             op,
             label,
             count_words,
+            repository: folder.kind == ChangedFileKind::NestedRepository,
             status_key,
             rx,
         });
@@ -556,11 +557,19 @@ impl App {
                          changes."
                     ),
                 ),
+                (FolderOp::Delete, Ok(())) if pending.repository => (
+                    StatusTone::Info,
+                    format!(
+                        "Deleted \"{label}\", a repository of its own, with its history. This \
+                         cannot be undone."
+                    ),
+                ),
                 (FolderOp::Delete, Ok(())) => (
                     StatusTone::Info,
                     format!(
-                        "Deleted \"{label}\" ({count}) and everything inside it. This cannot be \
-                         undone."
+                        "Deleted the untracked files in \"{label}\" ({count}). Files the \
+                         repository ignores and repositories of their own inside it are kept. \
+                         This cannot be undone."
                     ),
                 ),
                 (op, Err(err)) => {
@@ -963,10 +972,67 @@ mod tests {
         assert_eq!(app.status.tone(), StatusTone::Busy);
         settle(&mut app, idle);
         assert_eq!(app.status.tone(), StatusTone::Info);
-        assert!(app.status.text().contains("Deleted \"node_modules/\""));
+        assert!(
+            app.status
+                .text()
+                .contains("Deleted the untracked files in \"node_modules/\" (13 files)"),
+            "{}",
+            app.status.text()
+        );
         assert!(!worktree.join("node_modules").exists());
         load_lists(&mut app, &worktree);
         assert_eq!(describe(&app, RightSection::Unstaged), vec!["notes.md 1"]);
+    }
+
+    /// The folder dialog says what the delete keeps as well as what it takes:
+    /// ignored files were never counted, and repositories of their own inside
+    /// are not entered.
+    #[test]
+    fn the_folder_delete_dialog_says_what_it_keeps() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDiscardFile {
+            file_path: "vendor".to_string(),
+            kind: ChangedFileKind::Directory(dux_core::model::FolderContents {
+                file_count: 1_200,
+                nested_repositories: 1,
+                fingerprint: None,
+            }),
+            focus: ConfirmFocus::Cancel,
+        };
+
+        let screen = render_text(&mut app, 160, 50).join(" ");
+        // The body wraps inside the dialog's frame; drop the frame to read it as prose.
+        let screen = screen.replace('\u{2502}', " ");
+        let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(screen.contains("1,200 files"), "{screen}");
+        assert!(
+            screen.contains("The 1 nested repository inside it is kept"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Files the repository ignores inside it are kept"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn the_nested_repository_delete_dialog_warns_about_its_history() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDiscardFile {
+            file_path: "vendor/lib".to_string(),
+            kind: ChangedFileKind::NestedRepository,
+            focus: ConfirmFocus::Cancel,
+        };
+
+        let screen = render_text(&mut app, 160, 50).join(" ");
+        let screen = screen.replace('\u{2502}', " ");
+        let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            screen.contains("including its history and any commits not pushed anywhere else"),
+            "{screen}"
+        );
     }
 
     #[test]

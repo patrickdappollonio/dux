@@ -1193,6 +1193,76 @@ mod tests {
         assert!(!root.join("dist").exists());
     }
 
+    // ── Deleting a folder ──────────────────────────────────────────────────
+    //
+    // Discarding an untracked folder deletes exactly what its row counted:
+    // the untracked files git would list. Files the repository ignores (a
+    // local `.env`, say) were never counted or shown, so they stay, and so do
+    // repositories of their own inside it, which git does not look into.
+
+    #[test]
+    fn discarding_an_untracked_folder_keeps_ignored_files_and_nested_repositories() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, ".gitignore", "*.env\n");
+        git_in(root)(&["add", ".gitignore"]);
+        git_in(root)(&["commit", "-q", "-m", "ignore"]);
+        write(root, "config/app.js", "a\n");
+        write(root, "config/sub/z.js", "z\n");
+        write(root, "config/prod.env", "SECRET=1\n");
+        let nested = root.join("config/nested");
+        fs::create_dir_all(&nested).unwrap();
+        git_in(&nested)(&["init", "-q"]);
+        write(&nested, "own.txt", "own\n");
+
+        assert!(discard_classify(root, "config").unwrap());
+        discard_file(root, "config", true).unwrap();
+
+        assert!(!root.join("config/app.js").exists());
+        assert!(!root.join("config/sub").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("config/prod.env")).unwrap(),
+            "SECRET=1\n",
+            "an ignored file is not part of the folder's changes and is kept"
+        );
+        assert!(nested.join(".git").exists(), "a nested repository is kept");
+        assert!(nested.join("own.txt").exists());
+    }
+
+    #[test]
+    fn deleting_folders_named_like_options_or_globs_touches_nothing_else() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "-rf/a.txt", "a\n");
+        write(root, "a*b/c.txt", "c\n");
+        write(root, "ab/keep.txt", "keep\n");
+        write(root, "axb/keep.txt", "keep\n");
+
+        discard_file(root, "-rf", true).unwrap();
+        discard_file(root, "a*b", true).unwrap();
+
+        assert!(!root.join("-rf").exists());
+        assert!(!root.join("a*b").exists());
+        assert!(root.join("ab/keep.txt").exists());
+        assert!(root.join("axb/keep.txt").exists());
+    }
+
+    /// A repository of its own at the top keeps the delete it always had: the
+    /// row is the repository, and deleting it removes it whole.
+    #[test]
+    fn discarding_a_nested_repository_row_removes_it_whole() {
+        let repo = repo();
+        let root = repo.path();
+        let nested = root.join("clone");
+        fs::create_dir_all(&nested).unwrap();
+        git_in(&nested)(&["init", "-q"]);
+        write(&nested, "a.txt", "a\n");
+
+        discard_file(root, "clone", true).unwrap();
+
+        assert!(!nested.exists());
+    }
+
     // ── Crafted paths ──────────────────────────────────────────────────────
     //
     // A folded folder answers for the files inside it, and "inside" is decided

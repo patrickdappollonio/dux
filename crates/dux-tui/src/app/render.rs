@@ -8196,14 +8196,7 @@ impl App {
                 name_chip(&format!("{file_path}/"), &self.theme),
                 Span::raw(format!(
                     " and the {} inside it?",
-                    if contents.file_count == 1 {
-                        "1 file".to_string()
-                    } else {
-                        format!(
-                            "{} files",
-                            dux_core::model::group_thousands(contents.file_count)
-                        )
-                    }
+                    dux_core::model::count_words(contents.file_count, "file", "files")
                 )),
             ],
             dux_core::model::ChangedFileKind::NestedRepository => vec![
@@ -8212,15 +8205,45 @@ impl App {
                 Span::raw(", a repository of its own, and everything inside it?"),
             ],
         };
-        let lines = vec![
-            Line::from(""),
-            Line::from(question),
-            Line::from(""),
-            Line::from(Span::styled(
-                " This action cannot be undone.",
-                Style::default().fg(self.theme.warning_fg),
-            )),
-        ];
+        // What the delete keeps, said beside what it takes: a folder's ignored
+        // files were never counted, and a repository of its own inside it is
+        // not entered. A repository row is the opposite case and warns that
+        // its whole history goes with it.
+        let mut notes: Vec<String> = Vec::new();
+        let mut warning = " This action cannot be undone.".to_string();
+        match kind {
+            dux_core::model::ChangedFileKind::File => {}
+            dux_core::model::ChangedFileKind::Directory(contents) => {
+                if contents.nested_repositories > 0 {
+                    notes.push(format!(
+                        " The {} inside it {} kept.",
+                        dux_core::model::count_words(
+                            contents.nested_repositories,
+                            "nested repository",
+                            "nested repositories"
+                        ),
+                        if contents.nested_repositories == 1 {
+                            "is"
+                        } else {
+                            "are"
+                        }
+                    ));
+                }
+                notes.push(" Files the repository ignores inside it are kept.".to_string());
+            }
+            dux_core::model::ChangedFileKind::NestedRepository => {
+                warning = " This removes a whole repository, including its history and any \
+                           commits not pushed anywhere else. It cannot be undone."
+                    .to_string();
+            }
+        }
+        let mut lines = vec![Line::from(""), Line::from(question)];
+        lines.extend(notes.into_iter().map(Line::from));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            warning,
+            Style::default().fg(self.theme.warning_fg),
+        )));
         let deletes_folder = *kind != dux_core::model::ChangedFileKind::File;
         let (cancel, act) = confirm_focus_buttons(
             *focus,

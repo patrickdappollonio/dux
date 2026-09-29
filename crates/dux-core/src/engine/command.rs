@@ -630,15 +630,23 @@ impl Engine {
             } => {
                 // A folded folder is deleted whole; asked before the delete,
                 // because afterwards there is nothing left to ask about.
+                let full = worktree_path.join(&path);
                 let is_folder = is_untracked
-                    && std::fs::symlink_metadata(worktree_path.join(&path))
-                        .is_ok_and(|meta| meta.is_dir());
+                    && std::fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_dir());
+                let is_repository = is_folder && full.join(".git").symlink_metadata().is_ok();
                 crate::git::discard_file(&worktree_path, &path, is_untracked)?;
-                let message = if is_folder {
+                let message = if is_repository {
                     crate::status_text![
-                        "Deleted untracked folder ",
+                        "Deleted ",
                         q(format!("{path}/")),
-                        " and everything inside it."
+                        ", a repository of its own, with its history."
+                    ]
+                } else if is_folder {
+                    crate::status_text![
+                        "Deleted the untracked files in ",
+                        q(format!("{path}/")),
+                        "; files the repository ignores and repositories of their own inside it \
+                         are kept."
                     ]
                 } else if is_untracked {
                     crate::status_text!["Deleted untracked file ", q(path), "."]
@@ -2411,7 +2419,7 @@ mod tests {
         match reaction {
             EventReaction::Status(update) => assert!(
                 update.message.contains(
-                    "Deleted untracked folder \"node_modules/\" and everything inside it"
+                    "Deleted the untracked files in \"node_modules/\"; files the repository ignores and repositories of their own inside it are kept."
                 ),
                 "{}",
                 update.message

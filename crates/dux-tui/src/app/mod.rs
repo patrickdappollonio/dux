@@ -1022,6 +1022,8 @@ pub(crate) struct PendingFolderOp {
     pub(crate) label: String,
     /// How many files it stands for, in words, for the status line.
     pub(crate) count_words: String,
+    /// The folder is a repository of its own, deleted whole with its history.
+    pub(crate) repository: bool,
     pub(crate) status_key: String,
     pub(crate) rx: mpsc::Receiver<Result<(), String>>,
 }

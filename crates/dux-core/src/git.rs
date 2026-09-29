@@ -3744,6 +3744,38 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete exactly what an untracked folder's row counted: its untracked,
+/// not-ignored files, and the directories left empty by that.
+///
+/// `git clean -f -d` without `-x` keeps every ignored file (a local `.env`,
+/// a build cache), which the row never counted and the dialog never named, and
+/// without a second `-f` it does not enter a repository of its own inside the
+/// folder: both measured on git 2.53. A directory that still holds an ignored
+/// file stays, with that file in it. `--literal-pathspecs` and `--` keep a
+/// folder named like a glob or an option to itself.
+fn clean_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args([
+            "--literal-pathspecs",
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "clean",
+            "-f",
+            "-d",
+            "-q",
+            "--",
+        ])
+        .arg(format!("{dir}/"))
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git clean failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -> Result<()> {
     refuse_unplain_path(file_path, "discard")?;
     // Whatever the path's text says, a discard never lands on the worktree
@@ -3771,10 +3803,16 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
                 "refusing to delete \"{file_path}\": it resolves outside the worktree"
             ));
         }
-        if full.is_dir() {
+        // `symlink_metadata`, so a link to a directory is removed as the link.
+        let meta = fs::symlink_metadata(&full)?;
+        if !meta.is_dir() {
+            fs::remove_file(&full)?;
+        } else if full.join(".git").symlink_metadata().is_ok() {
+            // A repository of its own is one row, and deleting it removes it
+            // whole, history included; both surfaces' dialogs say so.
             fs::remove_dir_all(&full)?;
         } else {
-            fs::remove_file(&full)?;
+            clean_untracked_folder(worktree_path, file_path)?;
         }
         return Ok(());
     }
