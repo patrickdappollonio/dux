@@ -390,3 +390,9 @@ export function uncoveredPaths(paths: Iterable<string>): string[] {
   }
   return out
 }
+
+// A count as the pane writes every count: digits grouped by thousands, the
+// way the rows write "30,000 files".
+export function groupDigits(count: number): string {
+  return count.toLocaleString("en-US")
+}

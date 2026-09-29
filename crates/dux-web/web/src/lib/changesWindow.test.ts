@@ -145,8 +145,8 @@ describe("changesRowTree", () => {
     ])
   })
 
-  // A run of rows is one range, so a render walks the few ranges and groups
-  // rather than every row of a listing of tens of thousands.
+  // A run of rows is one range, so a listing of tens of thousands of rows with
+  // nothing expanded is one part, not one part per row.
   it("is one range when nothing is expanded", () => {
     const files = Array.from({ length: 20_000 }, (_, index) => file(`f${index}`))
     const items = buildChangesItems({

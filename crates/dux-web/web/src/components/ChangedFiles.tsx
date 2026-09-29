@@ -79,6 +79,7 @@ import {
   fileStatusMeta,
   folderCountLabel,
   formatRecapCount,
+  groupDigits,
   uncoveredPaths,
   type ChangedFileSelection,
   type ChangedFilesRecap,
@@ -297,6 +298,10 @@ interface FileRowProps {
   // The id of the container holding this folder's contents, which its toggle
   // names in aria-controls.
   contentsId?: string
+  // Why the last quiet refresh of this expanded folder failed, or null.
+  refreshError?: string | null
+  // Ask for this folder's contents again.
+  onRetryFolder?: (file: ChangedFileView) => void
 }
 
 // How far each level of an expanded folder steps its rows in.
@@ -318,6 +323,8 @@ const FileRow = memo(function FileRow({
   expanded,
   onToggleExpand,
   contentsId,
+  refreshError = null,
+  onRetryFolder,
 }: FileRowProps) {
   const { kind } = fileStatusMeta(file.status)
   const [busy, setBusy] = useState(false)
@@ -453,6 +460,26 @@ const FileRow = memo(function FileRow({
           </span>
         )}
       </ExpandToggle>
+
+      {/* A quiet refresh of this expanded folder failed: its rows are the ones
+        * from before, which the row says quietly, with the reason on hover and
+        * a way to ask again. A 44px target on touch, like every row control. */}
+      {refreshError !== null && onRetryFolder && (
+        <SimpleTooltip content={refreshError}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 shrink-0 px-2 text-xs text-muted-foreground max-md:min-h-11 pointer-coarse:min-h-11"
+            onClick={(event) => {
+              event.stopPropagation()
+              onRetryFolder(file)
+            }}
+          >
+            <TriangleAlert />
+            Couldn't refresh · Retry
+          </Button>
+        </SimpleTooltip>
+      )}
 
       {/* The menu's items are computed first, and a row with none gets no
         * trigger at all: a menu that opens empty is a control that does
@@ -608,13 +635,13 @@ function ChangesRecap({
       {binaryCount > 0 && (
         <span className="text-muted-foreground">
           {hasLines ? " · " : ""}
-          {binaryCount} bin
+          {groupDigits(binaryCount)} bin
         </span>
       )}
       {diffExcludedCount > 0 && (
         <span className="text-dux-diff-excluded">
           {hasLines || binaryCount > 0 ? " · " : ""}
-          {diffExcludedCount} excl
+          {groupDigits(diffExcludedCount)} excl
         </span>
       )}
     </span>
@@ -647,7 +674,7 @@ function GroupHeader({
       <span className="flex-1 text-left">{heading}</span>
       <ChangesRecap scope={heading} recap={recap} />
       <Badge variant="secondary">
-        {filtering ? `${shown} of ${total}` : shown}
+        {filtering ? `${groupDigits(shown)} of ${groupDigits(total)}` : groupDigits(shown)}
       </Badge>
     </button>
   )
@@ -888,7 +915,7 @@ function BulkToolbar({
           >
             <BusyGlyph busy={busy === "stage"} />
             {busy !== "stage" ? <Plus /> : null}
-            Stage {counts.unstaged}
+            Stage {groupDigits(counts.unstaged)}
           </Button>
         </ExplainedWhenIdle>
       ) : null}
@@ -902,7 +929,7 @@ function BulkToolbar({
         >
           <BusyGlyph busy={busy === "unstage"} />
           {busy !== "unstage" ? <Minus /> : null}
-          Unstage {counts.staged}
+          Unstage {groupDigits(counts.staged)}
         </Button>
       ) : null}
       {selected.unstaged.size > 0 ? (
@@ -918,7 +945,7 @@ function BulkToolbar({
           >
             <BusyGlyph busy={busy === "discard"} />
             {busy !== "discard" ? <Undo2 /> : null}
-            Discard {counts.discard}…
+            Discard {groupDigits(counts.discard)}…
           </Button>
         </ExplainedWhenIdle>
       ) : null}
@@ -945,7 +972,14 @@ const OVERSCAN = 10
 // The list's own inset (`p-3`), which sits between the viewport's scroll
 // position and the first item.
 const LIST_PADDING = 12
-const ITEM_KINDS: ChangesItemKind[] = ["header", "row", "loading", "failed", "separator"]
+const ITEM_KINDS: ChangesItemKind[] = [
+  "header",
+  "row",
+  "loading",
+  "failed",
+  "empty",
+  "separator",
+]
 // The space after each kind of item. It lives on the positioned holder so the
 // measured height carries it and the stacking needs no gap of its own.
 const ITEM_SPACING: Record<ChangesItemKind, string> = {
@@ -953,6 +987,7 @@ const ITEM_SPACING: Record<ChangesItemKind, string> = {
   row: "pb-0.5",
   loading: "pb-0.5",
   failed: "pb-0.5",
+  empty: "pb-0.5",
   separator: "py-1",
 }
 // Desktop heights with a fine pointer, spacing included, standing in until the
@@ -962,7 +997,23 @@ const DEFAULT_ITEM_HEIGHTS: ChangesItemHeights = {
   row: 42,
   loading: 30,
   failed: 42,
+  empty: 30,
   separator: 9,
+}
+
+// The row under an expanded folder that turned out to hold nothing git lists
+// (its files went between the listing and the answer).
+function EmptyRow({ depth }: { depth: number }) {
+  return (
+    <div
+      role="row"
+      aria-level={depth + 1}
+      className="flex items-center gap-2 px-1 py-1 text-sm text-muted-foreground"
+      style={depthIndent(depth)}
+    >
+      Nothing git lists here anymore.
+    </div>
+  )
 }
 
 // The row standing in for an expanded folder's contents while they are asked
@@ -1000,9 +1051,8 @@ function FailedRow({
       style={depthIndent(depth)}
     >
       <TriangleAlert aria-hidden className="size-4 shrink-0 text-destructive" />
-      <span className="min-w-0 flex-1 text-muted-foreground">
-        Could not list this folder: {message}
-      </span>
+      {/* The message is the whole sentence, the server's or the deadline's. */}
+      <span className="min-w-0 flex-1 text-muted-foreground">{message}</span>
       <Button variant="outline" size="sm" className="h-8 max-md:h-11" onClick={onRetry}>
         <RefreshCw />
         Retry
@@ -1055,6 +1105,14 @@ function ChangesList({
   const toggleUnstaged = useCallback(
     (path: string) => onToggle("unstaged", path),
     [onToggle],
+  )
+  const retryStaged = useCallback(
+    (file: ChangedFileView) => retryFolderChildren(sessionId, "staged", file.path),
+    [sessionId],
+  )
+  const retryUnstaged = useCallback(
+    (file: ChangedFileView) => retryFolderChildren(sessionId, "unstaged", file.path),
+    [sessionId],
   )
   const expandStaged = useCallback(
     (file: ChangedFileView) => onToggleFolder("staged", file),
@@ -1145,8 +1203,8 @@ function ChangesList({
   // section's rows (while it is open), and the separator. Walked once per
   // change of the items, never per render.
   const structure = useMemo(() => changesListStructure(items), [items])
-  // Each section's rows as ranges and folder containers, walked once per
-  // change of the items, never per scroll step.
+  // Each section's rows as ranges and folder containers, built once per change
+  // of the items rather than per scroll step.
   const rowTrees = useMemo(() => {
     const trees = new Map<number, ChangesRowPart[]>()
     for (const part of structure) {
@@ -1200,6 +1258,7 @@ function ChangesList({
       )
     }
     if (item.kind === "loading") return <LoadingRow depth={item.depth} />
+    if (item.kind === "empty") return <EmptyRow depth={item.depth} />
     if (item.kind === "failed") {
       return (
         <FailedRow
@@ -1219,6 +1278,8 @@ function ChangesList({
         onOpenDiff={openDiff}
         depth={item.depth}
         expanded={item.expanded}
+        refreshError={item.refreshError}
+        onRetryFolder={section === "staged" ? retryStaged : retryUnstaged}
         onToggleExpand={section === "staged" ? expandStaged : expandUnstaged}
         contentsId={item.expanded ? contentsId(item.key) : undefined}
       />
@@ -1228,7 +1289,10 @@ function ChangesList({
   // A section's rows, windowed, with each expanded folder's contents in one
   // container of its own (the element its toggle's aria-controls names),
   // nested the way the folders are. A container spans its whole range, so it
-  // exists whatever part of it is mounted.
+  // exists whatever part of it is mounted. A render walks every part of the
+  // tree and, for each run of rows, the mounted indices: its cost is the
+  // mounted rows times the parts (the runs of rows and the expanded folders),
+  // never the listing's length.
   const renderRowParts = (parts: ChangesRowPart[], origin: number): ReactElement[] =>
     parts.flatMap((part) => {
       if (part.kind === "items") {

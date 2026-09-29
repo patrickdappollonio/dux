@@ -249,3 +249,45 @@ describe("expanded folders inside a folder whose children settle", () => {
     expect(reconcileExpansions(exp, [], [folder("nm", 1)]).next.size).toBe(0)
   })
 })
+
+describe("the flattened list's edge rows", () => {
+  // A file may be called anything a path allows, colons included, so the
+  // loading and failure rows' keys use a separator no path can hold.
+  it("never gives a loading or failure row the key of a real row", () => {
+    const exp = expandFolder(EMPTY, "unstaged", folder("node_modules", 1))
+    const items = buildChangesItems({
+      staged: { files: [], open: true },
+      unstaged: {
+        files: [folder("node_modules", 1), file("node_modules:loading")],
+        open: true,
+      },
+      expansions: exp,
+    })
+    const keys = items.map((item) => item.key)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  it("says so when an expanded folder turns out to hold nothing", () => {
+    const exp = settleFolder(expandFolder(EMPTY, "unstaged", folder("gone", 1)), "unstaged", "gone", [])
+    const items = buildChangesItems({
+      staged: { files: [], open: true },
+      unstaged: { files: [folder("gone", 1)], open: true },
+      expansions: exp,
+    })
+    expect(items.map((item) => item.kind)).toEqual(["header", "row", "empty"])
+  })
+
+  it("carries a failed quiet refresh on the folder's own row", () => {
+    let exp = settleFolder(expandFolder(EMPTY, "unstaged", folder("d", 1)), "unstaged", "d", [
+      file("d/a"),
+    ])
+    exp = failFolder(exp, "unstaged", "d", "the repository is busy")
+    const items = buildChangesItems({
+      staged: { files: [], open: true },
+      unstaged: { files: [folder("d", 1)], open: true },
+      expansions: exp,
+    })
+    const row = items.find((item) => item.kind === "row" && item.file.path === "d")
+    expect(row).toMatchObject({ refreshError: "the repository is busy" })
+  })
+})

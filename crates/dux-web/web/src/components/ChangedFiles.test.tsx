@@ -1592,7 +1592,7 @@ describe("a folded folder row", () => {
     mockState = withFolder()
     render(<ChangedFiles />)
     const heading = screen.getByText("Unstaged").closest("button") as HTMLElement
-    expect(within(heading).getByText("28748")).toBeTruthy()
+    expect(within(heading).getByText("28,748")).toBeTruthy()
   })
 
   it("counts the files inside a checked folder on the bulk bar", () => {
@@ -1602,8 +1602,8 @@ describe("a folded folder row", () => {
     const toolbar = within(
       screen.getByRole("toolbar", { name: "Actions for the selected files" }),
     )
-    expect(toolbar.getByText("Stage 28747")).toBeTruthy()
-    expect(toolbar.getByText("Discard 28747…")).toBeTruthy()
+    expect(toolbar.getByText("Stage 28,747")).toBeTruthy()
+    expect(toolbar.getByText("Discard 28,747…")).toBeTruthy()
   })
 
   // The bulk discard names what the user confirmed for each folder, so the
@@ -1612,7 +1612,7 @@ describe("a folded folder row", () => {
     mockState = withFolder()
     render(<ChangedFiles />)
     fireEvent.click(screen.getByLabelText("Select node_modules"))
-    fireEvent.click(bar().getByRole("button", { name: "Discard 28747…" }))
+    fireEvent.click(bar().getByRole("button", { name: "Discard 28,747…" }))
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }),
     )
@@ -1677,7 +1677,7 @@ describe("a folded folder row", () => {
     fireEvent.click(screen.getByLabelText("Select node_modules"))
     fireEvent.click(screen.getByLabelText("Select inner-wt"))
 
-    fireEvent.click(bar().getByRole("button", { name: /Stage 28747/ }))
+    fireEvent.click(bar().getByRole("button", { name: /Stage 28,747/ }))
     await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
 
     expect(stageMany).toHaveBeenCalledWith("s1", ["node_modules"])
@@ -1693,7 +1693,7 @@ describe("a folded folder row", () => {
     fireEvent.click(screen.getByLabelText("Select node_modules"))
     fireEvent.click(screen.getByLabelText("Select inner-wt"))
 
-    fireEvent.click(bar().getByRole("button", { name: /Discard 28747/ }))
+    fireEvent.click(bar().getByRole("button", { name: /Discard 28,747/ }))
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }))
     await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
 
@@ -1729,8 +1729,8 @@ describe("a folded folder row", () => {
     const toolbar = within(
       screen.getByRole("toolbar", { name: "Actions for the selected files" }),
     )
-    expect(toolbar.getByText("Stage 28747")).toBeTruthy()
-    expect(toolbar.getByText("Discard 28747…")).toBeTruthy()
+    expect(toolbar.getByText("Stage 28,747")).toBeTruthy()
+    expect(toolbar.getByText("Discard 28,747…")).toBeTruthy()
   })
 
   it("offers no menu for a row nothing acts on, and the row says what it is", async () => {

@@ -52,9 +52,11 @@ The folders inside are folded the same way and expand the same way, and every fi
 a full row: click it for its diff, check it, or stage, unstage or discard it from its own `⋯`.
 A folder whose contents could not be listed says why and offers Retry. What you have expanded
 is remembered for each agent until you reload the page, and it follows the files as they
-change: a folder that gains or loses files lists itself again on its own.
+change: an expanded folder that gains or loses files lists itself again on its own, at any depth, one that is gone
+is folded away, and collapsing a folder unchecks the rows inside it. If a refresh cannot be
+listed, the rows from before stay, and the folder says it couldn't refresh and offers Retry.
 
-Its `⋯` menu stages or unstages the whole folder at once,
+A folder row's own `⋯` menu stages or unstages the whole folder at once,
 and discards it after a confirmation, the same one a file gets. Staging a folder stages its
 files and leaves out any repository of its own, or worktree of this repository, inside it, so
 none of them is recorded as a link; dux tells you what it left out, and the folder's staged

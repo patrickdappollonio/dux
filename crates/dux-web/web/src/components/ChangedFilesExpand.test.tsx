@@ -218,12 +218,76 @@ describe("expanding a folded folder", () => {
       await Promise.resolve()
     })
 
-    expect(screen.getByText(/Could not list this folder: the repository is busy/)).toBeTruthy()
+    expect(screen.getByText(/the repository is busy/)).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Retry" }))
     expect(fetchFolderChildren).toHaveBeenCalledTimes(2)
     expect(screen.getByText("Loading…")).toBeTruthy()
     await answer(1, [file("node_modules/top.js")])
     expect(screen.getByText("top.js")).toBeTruthy()
+  })
+
+  it("says a folder's failure once, in the server's own words", async () => {
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("node_modules/"))
+    await act(async () => {
+      answers[0]!.reject(
+        new ChangesFetchError("Could not list the folder. index.lock exists", 409),
+      )
+      await Promise.resolve()
+    })
+    const text = document.body.textContent ?? ""
+    expect(text.match(/Could not list/g)).toHaveLength(1)
+    expect(text).toContain("Could not list the folder. index.lock exists")
+  })
+
+  // A folder that holds nothing now says so, and its toggle still names a
+  // container that exists.
+  it("says so when an expanded folder turns out to hold nothing", async () => {
+    render(<ChangedFiles />)
+    const button = toggle("node_modules/")
+    fireEvent.click(button)
+    await answer(0, [])
+    expect(screen.getByText("Nothing git lists here anymore.")).toBeTruthy()
+    expect(document.getElementById(button.getAttribute("aria-controls")!)).not.toBeNull()
+  })
+
+  // A quiet refresh that fails keeps the rows, and the folder says so quietly
+  // with a way to try again.
+  it("marks a folder whose quiet refresh failed, and retries from the mark", async () => {
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("node_modules/"))
+    await answer(0, [file("node_modules/top.js")])
+    mockState = {
+      ...mockState,
+      changes: slice([folder("node_modules", 4, "f2"), file("notes.md")], 2),
+    } as unknown as DuxState
+    publishMockState()
+    await act(async () => {
+      answers[1]!.reject(new ChangesFetchError("the repository is busy", 409))
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText("top.js")).toBeTruthy()
+    const retry = screen.getByRole("button", { name: /Couldn.t refresh/ })
+    fireEvent.click(retry)
+    expect(fetchFolderChildren).toHaveBeenCalledTimes(3)
+    await answer(2, [file("node_modules/top.js"), file("node_modules/new.js")])
+    expect(screen.queryByRole("button", { name: /Couldn.t refresh/ })).toBeNull()
+  })
+
+  // Every count in the pane is grouped the same way the rows write theirs.
+  it("groups the digits of the section badge like the rows do", () => {
+    mockState = {
+      ...mockState,
+      changes: slice([folder("node_modules", 30_000), file("notes.md")]),
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    expect(screen.getByText("30,001")).toBeTruthy()
+    fireEvent.click(screen.getByLabelText("Select node_modules"))
+    const bar = within(
+      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
+    )
+    expect(bar.getByRole("button", { name: /Stage 30,000/ })).toBeTruthy()
   })
 
   it("makes every row inside a full row: diff, menu actions and selection", async () => {

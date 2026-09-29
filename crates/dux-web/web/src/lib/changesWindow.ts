@@ -27,7 +27,12 @@ export type ChangesListItem =
       depth: number
       // A folded folder whose contents are showing under it.
       expanded: boolean
+      // Why the last quiet refresh of this expanded folder failed; its rows
+      // under it are the ones from before.
+      refreshError: string | null
     }
+  // An expanded folder that turned out to hold nothing git lists.
+  | { kind: "empty"; key: string; section: ChangesSection; dir: string; depth: number }
   // An expanded folder whose contents are being asked for.
   | { kind: "loading"; key: string; section: ChangesSection; dir: string; depth: number }
   // An expanded folder whose contents could not be listed.
@@ -80,14 +85,25 @@ export function buildChangesItems(sections: {
         file,
         depth,
         expanded: node !== undefined,
+        refreshError: node?.refreshError ?? null,
       })
       if (!node) continue
-      if (node.children !== null) {
+      // The stand-in rows' keys end in a NUL, which no path can hold, so a
+      // file named like one (`dist:loading`) never shares a key with it.
+      if (node.children !== null && node.children.length === 0) {
+        items.push({
+          kind: "empty",
+          key: `${section}:${file.path}\u0000empty`,
+          section,
+          dir: file.path,
+          depth: depth + 1,
+        })
+      } else if (node.children !== null) {
         pushRows(section, node.children, depth + 1)
       } else if (node.error !== null) {
         items.push({
           kind: "failed",
-          key: `${section}:${file.path}:failed`,
+          key: `${section}:${file.path}\u0000failed`,
           section,
           dir: file.path,
           depth: depth + 1,
@@ -96,7 +112,7 @@ export function buildChangesItems(sections: {
       } else {
         items.push({
           kind: "loading",
-          key: `${section}:${file.path}:loading`,
+          key: `${section}:${file.path}\u0000loading`,
           section,
           dir: file.path,
           depth: depth + 1,
@@ -147,8 +163,9 @@ export function changesListStructure(items: ChangesListItem[]): ChangesListPart[
 // its loading or failure row) as one contiguous range right after the folder's
 // own row, nested the way the folders are. The pane gives each range a
 // container of its own, which is what a folder's toggle points at. Rows
-// between containers come as ranges, never one part per row, so walking the
-// tree costs the number of expanded folders, not the number of rows.
+// between containers come as ranges, never one part per row, so the tree has
+// one part per run of rows and one per expanded folder, however many rows the
+// listing holds.
 export type ChangesRowPart =
   | { kind: "items"; first: number; last: number }
   | { kind: "folder"; key: string; first: number; last: number; parts: ChangesRowPart[] }
