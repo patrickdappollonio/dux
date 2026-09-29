@@ -54,6 +54,8 @@ standalone agent…**, which swaps the list for the folder picker a
 [standalone agent](/docs/creating-agents#running-an-agent-in-a-folder-you-already-have)
 starts from.
 
+![The New agent project picker: a search field over the projects, each with its agent count, and Add a new project and Add standalone agent side by side at the bottom.](/screens/new-agent-picker.png)
+
 ### Starting from a pull request, with no project
 
 Pick **New agent from PR…** from that `⋯` segment and the dialog opens with the reference
