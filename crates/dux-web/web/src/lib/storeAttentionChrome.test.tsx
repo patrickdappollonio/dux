@@ -8,8 +8,8 @@ import type { Spine } from "./workspaceApi"
 // "needs attention" chrome: a `(N) ` count prefix on the document title. The pure
 // count/format helpers are unit-tested in attention.test.ts; this proves the store
 // actually wires the live spine → refreshAttentionChrome → document.title. The
-// canvas-composited favicon dot is not asserted (jsdom has no 2D context); the
-// clean-favicon restore path is covered in favicon.dom.test.tsx.
+// canvas-composited favicon dot and its blink are covered in
+// favicon.dom.test.tsx, which fakes the 2D context jsdom lacks.
 
 const BASE_TITLE = "workbench"
 
@@ -165,6 +165,20 @@ describe("store attention chrome (browser-tab count)", () => {
     // Flag cleared → prefix gone.
     await pushSpine(mod, makeSpine({ sessions: [session("s1", false)] }))
     expect(document.title).toBe(BASE_TITLE)
+  })
+
+  it("shows no count and no favicon dot while the attention indicator is off", async () => {
+    // The server stops flagging agents once the setting is off, but a live
+    // toggle can land before the spine that drops the flags; the setting wins.
+    bootstrapBody = makeBootstrap({ attention_indicator: false })
+    spineBody = makeSpine({ sessions: [session("s1", true)] })
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, "getContext")
+    await loadStore()
+    expect(document.title).toBe(BASE_TITLE)
+    const links = Array.from(document.querySelectorAll("link[rel='icon']"))
+    expect(links).toHaveLength(1)
+    expect(links[0].getAttribute("href")).toBe("/favicon.png")
+    expect(getContext).not.toHaveBeenCalled()
   })
 
   it("never counts in the standalone editor tab, however many agents are flagged", async () => {

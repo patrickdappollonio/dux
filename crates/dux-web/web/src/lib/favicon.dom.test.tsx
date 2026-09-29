@@ -5,6 +5,7 @@ vi.mock("sonner", () => ({ toast: { info: vi.fn() } }))
 
 import { toast } from "sonner"
 
+import { ATTENTION_PULSE_PERIOD_MS } from "./attentionPulse"
 import { applyAttentionFavicon, applyFavicon } from "./favicon"
 import { toastText } from "@/test/toastText"
 
@@ -202,5 +203,154 @@ describe("applyAttentionFavicon", () => {
     const links = iconLinks()
     expect(links).toHaveLength(1)
     expect(links[0].getAttribute("href")).toBe("/favicon.png")
+  })
+})
+
+describe("applyAttentionFavicon blink", () => {
+  // A 2D context that records the dot's alpha, and a toDataURL that names the
+  // frame it was asked for from that alpha, so a test can tell the frames apart.
+  let composes = 0
+  let lastAlpha = 1
+  let images: Array<{ onload?: () => void; onerror?: () => void; src?: string }> = []
+
+  function installCanvas() {
+    const ctx = {
+      clearRect: () => {},
+      drawImage: () => {},
+      beginPath: () => {},
+      arc: () => {},
+      fill: () => {
+        lastAlpha = ctx.globalAlpha
+      },
+      fillStyle: "",
+      globalAlpha: 1,
+    }
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      ctx as unknown as CanvasRenderingContext2D,
+    )
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockImplementation(() => {
+      composes += 1
+      return `data:image/png;base64,${lastAlpha === 1 ? "ON" : "DIM"}-${composes}`
+    })
+    vi.stubGlobal(
+      "Image",
+      class {
+        onload?: () => void
+        onerror?: () => void
+        src?: string
+        constructor() {
+          images.push(this)
+        }
+      },
+    )
+  }
+
+  function reducedMotion(on: boolean) {
+    vi.stubGlobal("matchMedia", (q: string) => ({
+      matches: on && q.includes("reduce"),
+      media: q,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+  }
+
+  async function loadImages() {
+    for (const img of images.splice(0)) img.onload?.()
+    await Promise.resolve()
+    await Promise.resolve()
+  }
+
+  function shownHref(): string {
+    return iconLinks()[0]?.getAttribute("href") ?? ""
+  }
+
+  // A fresh module per test: the frame cache is module state, and the earlier
+  // suites leave their own composed icons in it.
+  let applyAttentionFavicon: typeof import("./favicon").applyAttentionFavicon
+
+  beforeEach(async () => {
+    vi.resetModules()
+    ;({ applyAttentionFavicon } = await import("./favicon"))
+    vi.useFakeTimers()
+    composes = 0
+    images = []
+    installCanvas()
+    reducedMotion(false)
+    applyAttentionFavicon("", false)
+  })
+
+  afterEach(() => {
+    applyAttentionFavicon("", false)
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    document.head.innerHTML = ""
+  })
+
+  it("blinks between the dotted and dimmed frames on the shared rhythm while attention holds", async () => {
+    applyAttentionFavicon("", true)
+    await loadImages()
+    expect(shownHref()).toContain("ON")
+
+    const seen = new Set<string>()
+    for (let t = 0; t < ATTENTION_PULSE_PERIOD_MS; t += 10) {
+      vi.advanceTimersByTime(10)
+      seen.add(shownHref().includes("DIM") ? "dim" : "on")
+    }
+    expect(seen).toEqual(new Set(["on", "dim"]))
+  })
+
+  it("stops exactly when attention clears, restoring the configured favicon and leaving no timer", async () => {
+    applyAttentionFavicon("violet", true)
+    await loadImages()
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+    applyAttentionFavicon("violet", false)
+    expect(shownHref().startsWith("data:image/svg+xml,")).toBe(true)
+    expect(iconLinks()[0].getAttribute("type")).toBe("image/svg+xml")
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(ATTENTION_PULSE_PERIOD_MS * 3)
+    expect(shownHref().startsWith("data:image/svg+xml,")).toBe(true)
+  })
+
+  it("holds a steady dot under reduced motion, with no timer running", async () => {
+    reducedMotion(true)
+    applyAttentionFavicon("", true)
+    await loadImages()
+    expect(shownHref()).toContain("ON")
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(ATTENTION_PULSE_PERIOD_MS * 2)
+    expect(shownHref()).toContain("ON")
+  })
+
+  it("pre-renders both frames once per favicon and never re-encodes per tick", async () => {
+    applyAttentionFavicon("", true)
+    await loadImages()
+    expect(composes).toBe(2)
+    vi.advanceTimersByTime(ATTENTION_PULSE_PERIOD_MS * 4)
+    expect(composes).toBe(2)
+
+    // Another favicon composes its own pair; coming back reuses the cache.
+    applyAttentionFavicon("blue", true)
+    await loadImages()
+    expect(composes).toBe(4)
+    applyAttentionFavicon("", false)
+    applyAttentionFavicon("", true)
+    await loadImages()
+    expect(composes).toBe(4)
+    expect(shownHref()).toContain("ON")
+  })
+
+  it("keeps blinking through the store's repeat calls while attention still holds", async () => {
+    applyAttentionFavicon("", true)
+    await loadImages()
+    const frames: string[] = []
+    for (let t = 0; t < ATTENTION_PULSE_PERIOD_MS; t += 10) {
+      vi.advanceTimersByTime(10)
+      // The store re-applies on every spine push.
+      applyAttentionFavicon("", true)
+      frames.push(shownHref().includes("DIM") ? "dim" : "on")
+    }
+    expect(frames).toContain("dim")
   })
 })

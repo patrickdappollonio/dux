@@ -184,7 +184,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        then repeat. Faster and more insistent than Tailwind's stock 2s
        `animate-pulse` (which this replaced), because the whole point of the dot
        is to be noticed from the corner of your eye. Pure opacity so reduced
-       motion can drop it wholesale (`motion-reduce:animate-none` on the dot). */
+       motion can drop it wholesale (`motion-reduce:animate-none` on the dot).
+       The period and the keyframes are `lib/attentionPulse.ts`'s, which the
+       favicon's blink plays too; a test pins them equal. */
     --animate-attention-pulse: attention-pulse 2s ease-in-out infinite;
     /* One-shot fade for the row's state word (Working / Idle / Detached / …) so
        it transitions on change instead of snapping. Replayed by keying the span

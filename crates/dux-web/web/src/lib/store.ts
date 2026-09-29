@@ -1503,10 +1503,13 @@ function applyBootstrap(b: Bootstrap): void {
 // every spine apply. Self-guards on the DOM.
 function refreshAttentionChrome(): void {
   if (typeof document === "undefined") return
-  const count = attentionCountForSurface(
-    state.spine?.sessions ?? [],
-    state.standaloneEditor,
-  )
+  // The server stops flagging agents once `ui.attention_indicator` is off, but
+  // a live toggle can arrive before the spine that drops the flags; the setting
+  // wins, so neither the count nor the favicon dot outlives it.
+  const count =
+    state.bootstrap?.attention_indicator === false
+      ? 0
+      : attentionCountForSurface(state.spine?.sessions ?? [], state.standaloneEditor)
   const base = pageTitle(
     resolveInstanceTitle(state.bootstrap?.title),
     state.standaloneEditor,

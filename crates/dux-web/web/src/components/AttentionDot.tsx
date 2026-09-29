@@ -6,7 +6,8 @@ import type { TooltipContent } from "@/components/ui/tooltip"
 // The single "needs attention" marker for every surface, so the markup and the
 // color live in one place; it holds still under reduced motion. The fill must stay
 // in lockstep with `ATTENTION_DOT_FILL` in `lib/favicon.ts`, which draws the same
-// dot onto a canvas where a Tailwind class is unreadable.
+// dot onto a canvas where a Tailwind class is unreadable, and blinks it on this
+// dot's rhythm (`lib/attentionPulse.ts`).
 export function AttentionDot({
   withTooltip = true,
   side,
