@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest"
 
 import {
+  changesRequestTimeoutMs,
   DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
   DEFAULT_HEARTBEAT_SECONDS,
   DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS,
@@ -92,6 +93,24 @@ describe("a published document", () => {
     expect(reconnectAttemptTimeoutMs()).toBe(10_000)
     publishConnectionTiming({ reconnect_attempt_timeout_seconds: -1 })
     expect(reconnectAttemptTimeoutMs()).toBe(10_000)
+  })
+
+  it("reads the changes request deadline, defaulting to thirty seconds", () => {
+    publishConnectionTiming(undefined)
+    expect(changesRequestTimeoutMs()).toBe(30_000)
+    publishConnectionTiming({ changes_request_timeout_seconds: 12 })
+    expect(changesRequestTimeoutMs()).toBe(12_000)
+  })
+
+  it("bounds the changes request deadline: zero and nonsense fall back, and it caps at ten minutes", () => {
+    publishConnectionTiming({ changes_request_timeout_seconds: 0 })
+    expect(changesRequestTimeoutMs()).toBe(30_000)
+    publishConnectionTiming({ changes_request_timeout_seconds: -4 })
+    expect(changesRequestTimeoutMs()).toBe(30_000)
+    publishConnectionTiming({ changes_request_timeout_seconds: Number.NaN })
+    expect(changesRequestTimeoutMs()).toBe(30_000)
+    publishConnectionTiming({ changes_request_timeout_seconds: 86_400 })
+    expect(changesRequestTimeoutMs()).toBe(600_000)
   })
 
   it("keeps a configured zero for the replay wait, which DISABLES it", () => {

@@ -4,6 +4,7 @@
 //
 // A non-2xx is thrown as a `ChangesFetchError` carrying the HTTP status.
 
+import { changesRequestTimeoutMs } from "./connectionTiming"
 import type { ChangedFileView } from "./types"
 
 // The changed-files payload, and the one source the store trusts.
@@ -45,27 +46,24 @@ export class ChangesFetchAborted extends Error {
   }
 }
 
-// How long a changed-files request may take, body included, before it is given
-// up with an error the pane shows. A half-open connection never settles, and a
-// request that never settles would otherwise leave the pane loading forever.
-// Generous, because the answer for a worktree with tens of thousands of changed
-// files is megabytes. A client-side network deadline rather than a behaviour
-// setting, so it is a constant.
-export const CHANGES_FETCH_TIMEOUT_MS = 30_000
 
 // `signal` lets the caller abandon the request; it rejects with
-// `ChangesFetchAborted`. The request's own deadline rejects with a
-// `ChangesFetchError` (status 0) that says what happened.
+// `ChangesFetchAborted`. The request's own deadline, `[server]
+// changes_request_timeout_seconds` read when the request starts, rejects with a
+// `ChangesFetchError` (status 0) that says what happened. A half-open
+// connection never settles, and without the deadline the pane would sit loading
+// forever.
 export async function fetchChanges(
   sessionId: string,
   signal?: AbortSignal,
 ): Promise<SessionChangesResponse> {
   const controller = new AbortController()
+  const deadlineMs = changesRequestTimeoutMs()
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
     controller.abort()
-  }, CHANGES_FETCH_TIMEOUT_MS)
+  }, deadlineMs)
   const forward = () => controller.abort()
   if (signal?.aborted) controller.abort()
   else signal?.addEventListener("abort", forward)
@@ -75,7 +73,7 @@ export async function fetchChanges(
     if (timedOut) {
       return new ChangesFetchError(
         `The server did not send this session's changed files within ${
-          CHANGES_FETCH_TIMEOUT_MS / 1000
+          deadlineMs / 1000
         } seconds. The connection may have stalled; Refresh to try again.`,
         0,
       )

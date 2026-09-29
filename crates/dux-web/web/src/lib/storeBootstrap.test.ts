@@ -113,6 +113,22 @@ describe("bootstrap slice", () => {
     expect(bootstrapFetches).toBe(1)
   })
 
+  // The Changes pane's request deadline is configured in `[server]` and only
+  // reaches the browser through this document, and a reload retimes it.
+  it("publishes the configured changes request deadline, and a reload retimes it", async () => {
+    bootstrapBody = makeBootstrap({ changes_request_timeout_seconds: 7 })
+    const mod = await loadStore()
+    const timing = await import("./connectionTiming")
+    expect(timing.changesRequestTimeoutMs()).toBe(7_000)
+
+    bootstrapBody = makeBootstrap({ changes_request_timeout_seconds: 11 })
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+    await vi.waitFor(() => {
+      expect(timing.changesRequestTimeoutMs()).toBe(11_000)
+    })
+    timing.publishConnectionTiming(undefined)
+  })
+
   it("a config.changed event triggers a refetch that replaces the slice", async () => {
     const mod = await loadStore()
     expect(mod.getSnapshot().bootstrap?.welcome_tips).toEqual(["tip one"])

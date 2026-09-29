@@ -273,6 +273,13 @@ pub const DEFAULT_RECONNECT_ATTEMPTS: u32 = 8;
 /// budget above would take most of an hour to spend.
 pub const DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS: u32 = 10;
 
+/// Default deadline, in seconds, on one changed-files request from the web UI's
+/// Changes pane, body included. A half-open connection never settles, and a
+/// request that never settles would leave the pane loading forever; past this it
+/// is given up with an error the pane shows. Generous, because the answer for a
+/// worktree with tens of thousands of changed files is megabytes.
+pub const DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS: u32 = 30;
+
 /// Default interval, in seconds, at which a visible page asks its terminal
 /// connection to prove it is really alive. The WebSocket-level ping the server
 /// sends is send-only with no deadline, so it cannot detect the half-open
@@ -1055,6 +1062,11 @@ pub struct ServerConfig {
     /// it hangs, so this is what turns "nothing is happening" into a visible
     /// failed attempt. Browser-side, hot-reloadable.
     pub reconnect_attempt_timeout_seconds: u32,
+    /// How long, in seconds, the Changes pane waits for one changed-files
+    /// request, body included, before giving it up with an error the pane
+    /// shows. Default 30. The browser treats 0 as the default and caps it at
+    /// ten minutes. Browser-side, hot-reloadable.
+    pub changes_request_timeout_seconds: u32,
     /// How often, in seconds, a visible page checks that its terminal
     /// connection is really alive. Default 15.
     ///
@@ -1120,8 +1132,9 @@ pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig)
 ///   moves the Host guard's Tailscale-literal rule with it.
 /// - The browser-side reconnect settings (`replay_wait_seconds`,
 ///   `reconnect_backoff_cap_seconds`, `reconnect_attempts`,
-///   `reconnect_attempt_timeout_seconds`, `heartbeat_seconds`,
-///   `heartbeat_deadline_seconds`): nothing on the server reads them. They ride
+///   `reconnect_attempt_timeout_seconds`, `changes_request_timeout_seconds`,
+///   `heartbeat_seconds`, `heartbeat_deadline_seconds`): nothing on the server
+///   reads them. They ride
 ///   the bootstrap document, which every client refetches on a config reload, so a
 ///   change retimes every open tab live.
 /// - `pty_send_timeout_seconds`: read on the server, but read live at the moment a
@@ -2131,6 +2144,7 @@ impl Default for ServerConfig {
             reconnect_backoff_cap_seconds: DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
             reconnect_attempts: DEFAULT_RECONNECT_ATTEMPTS,
             reconnect_attempt_timeout_seconds: DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS,
+            changes_request_timeout_seconds: DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS,
             heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
             heartbeat_deadline_seconds: DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
             pty_send_timeout_seconds: DEFAULT_PTY_SEND_TIMEOUT_SECONDS,

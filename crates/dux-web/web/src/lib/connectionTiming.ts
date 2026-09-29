@@ -25,6 +25,16 @@ export const DEFAULT_RECONNECT_ATTEMPTS = 8
 /// is what turns waiting into a failed attempt the user can see.
 export const DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS = 10
 
+/// How long the Changes pane waits for one changed-files request, body
+/// included, before giving it up with an error the pane shows. A half-open
+/// connection never settles, and the pane would otherwise sit loading forever.
+export const DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS = 30
+
+/// The longest changes request deadline honoured. Past ten minutes the deadline
+/// no longer answers "is this stuck?" in any useful time, so a larger configured
+/// value is treated as this.
+export const MAX_CHANGES_REQUEST_TIMEOUT_SECONDS = 600
+
 /// How often a visible page sends its one periodic frame while it is NOT the
 /// owner-and-visible pair that owes the engine a faster viewed ping.
 export const DEFAULT_HEARTBEAT_SECONDS = 15
@@ -45,6 +55,7 @@ export type ConnectionTimingDoc = Partial<
     | "heartbeat_deadline_seconds"
     | "reconnect_attempts"
     | "reconnect_attempt_timeout_seconds"
+    | "changes_request_timeout_seconds"
   >
 >
 
@@ -101,6 +112,19 @@ export function reconnectAttemptTimeoutMs(): number {
     published?.reconnect_attempt_timeout_seconds,
     DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS,
     false,
+  )
+}
+
+/// `[server] changes_request_timeout_seconds` in ms. Zero or nonsense means the
+/// default, and it never exceeds the ten-minute cap.
+export function changesRequestTimeoutMs(): number {
+  return Math.min(
+    seconds(
+      published?.changes_request_timeout_seconds,
+      DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS,
+      false,
+    ),
+    MAX_CHANGES_REQUEST_TIMEOUT_SECONDS * 1000,
   )
 }
 

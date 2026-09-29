@@ -324,10 +324,10 @@ Each row shows its documented default and, where `0` means something special lik
 auto-clear", that meaning too. Values are validated and clamped on save, and every
 connected browser refreshes once it is written.
 
-The six reconnect settings that decide how a browser rides out a bad network
+The seven timing settings that decide how a browser rides out a bad network
 (`replay_wait_seconds`, `reconnect_backoff_cap_seconds`, `reconnect_attempts`,
-`reconnect_attempt_timeout_seconds`, `heartbeat_seconds` and
-`heartbeat_deadline_seconds`) are not in this panel either. They live under `[server]` in
+`reconnect_attempt_timeout_seconds`, `changes_request_timeout_seconds`,
+`heartbeat_seconds` and `heartbeat_deadline_seconds`) are not in this panel either. They live under `[server]` in
 the config file, documented inline with everything else, and a config reload applies them
 to every open tab. See
 [the `[server]` config keys](/docs/server-mode#the-server-config-keys) for what each one

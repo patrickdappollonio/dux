@@ -1194,6 +1194,21 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.server.reconnect_attempt_timeout_seconds as usize),
         },
         ConfigEntry::Field {
+            key: "changes_request_timeout_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long the web UI's Changes pane waits for the list of changed files\n\
+                 # before it gives up and shows an error with a Refresh button. A\n\
+                 # connection that silently died never answers, and without this the\n\
+                 # pane would sit on \"Loading changes\" forever. The list for a worktree\n\
+                 # with tens of thousands of changed files can be several megabytes, so\n\
+                 # too small and a slow connection never finishes loading it; too large\n\
+                 # and a stalled one takes longer to notice. 0 means the default; values\n\
+                 # above 600 are treated as 600. Default 30.\n\
+                 # A config reload applies this to every open browser tab right away.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.changes_request_timeout_seconds as usize),
+        },
+        ConfigEntry::Field {
             key: "heartbeat_seconds",
             comment: Some(CommentSource::Static(
                 "# How often a browser tab you are looking at checks that its terminal\n\
@@ -2582,6 +2597,7 @@ mod tests {
         assert!(rendered.contains("pty_send_timeout_seconds = 60"));
         assert!(rendered.contains("reconnect_attempts = 8"));
         assert!(rendered.contains("reconnect_attempt_timeout_seconds = 10"));
+        assert!(rendered.contains("changes_request_timeout_seconds = 30"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that
@@ -3014,6 +3030,7 @@ name = "test"
         config.server.pty_send_timeout_seconds = 45;
         config.server.reconnect_attempts = 46;
         config.server.reconnect_attempt_timeout_seconds = 47;
+        config.server.changes_request_timeout_seconds = 48;
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.server.replay_wait_seconds, 41);
@@ -3023,6 +3040,7 @@ name = "test"
         assert_eq!(parsed.server.pty_send_timeout_seconds, 45);
         assert_eq!(parsed.server.reconnect_attempts, 46);
         assert_eq!(parsed.server.reconnect_attempt_timeout_seconds, 47);
+        assert_eq!(parsed.server.changes_request_timeout_seconds, 48);
     }
 
     #[test]

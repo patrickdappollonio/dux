@@ -316,6 +316,9 @@ pub struct BootstrapView {
     /// Mirrors `config.server.reconnect_attempt_timeout_seconds`: how long one
     /// attempt may sit unopened before it is abandoned and counted as failed.
     pub reconnect_attempt_timeout_seconds: u32,
+    /// Mirrors `config.server.changes_request_timeout_seconds`: how long the
+    /// Changes pane waits for one changed-files request before giving it up.
+    pub changes_request_timeout_seconds: u32,
     /// Mirrors `config.server.heartbeat_seconds`: how often a visible page
     /// checks that its terminal connection is really alive.
     pub heartbeat_seconds: u32,
@@ -1504,6 +1507,7 @@ impl Engine {
             reconnect_backoff_cap_seconds: self.config.server.reconnect_backoff_cap_seconds,
             reconnect_attempts: self.config.server.reconnect_attempts,
             reconnect_attempt_timeout_seconds: self.config.server.reconnect_attempt_timeout_seconds,
+            changes_request_timeout_seconds: self.config.server.changes_request_timeout_seconds,
             heartbeat_seconds: self.config.server.heartbeat_seconds,
             heartbeat_deadline_seconds: self.config.server.heartbeat_deadline_seconds,
         }
@@ -3326,6 +3330,7 @@ mod tests {
             "heartbeat_deadline_seconds",
             "reconnect_attempts",
             "reconnect_attempt_timeout_seconds",
+            "changes_request_timeout_seconds",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),
@@ -3385,6 +3390,19 @@ mod tests {
         let b = engine.bootstrap();
         assert_eq!(b.reconnect_attempts, 7);
         assert_eq!(b.reconnect_attempt_timeout_seconds, 8);
+    }
+
+    /// The changed-files request deadline is the browser's too, and reaches it
+    /// the same way, so a reload retimes the Changes pane with no restart.
+    #[test]
+    fn bootstrap_projects_the_changes_request_deadline_from_server_config() {
+        let (mut engine, _tmp) = test_engine();
+        assert_eq!(
+            engine.bootstrap().changes_request_timeout_seconds,
+            crate::config::DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS
+        );
+        engine.config.server.changes_request_timeout_seconds = 9;
+        assert_eq!(engine.bootstrap().changes_request_timeout_seconds, 9);
     }
 
     #[test]

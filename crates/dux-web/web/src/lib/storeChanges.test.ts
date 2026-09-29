@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { CHANGES_FETCH_TIMEOUT_MS } from "./changesApi"
 import type { ChangedFileView } from "./types"
 
 // Exercises the store's `changes` slice end to end: the subscription wiring on
@@ -563,12 +562,31 @@ describe("changes slice: a stuck fetch", () => {
     vi.useFakeTimers()
     try {
       mod.selectSession("s1")
-      await vi.advanceTimersByTimeAsync(CHANGES_FETCH_TIMEOUT_MS)
+      await vi.advanceTimersByTimeAsync(30_000)
       const changes = mod.getSnapshot().changes
       expect(changes.phase).toBe("error")
       expect(changes.error).toMatch(/did not send/)
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it("times out on the deadline the bootstrap document configured", async () => {
+    const mod = await loadStore()
+    // The same module instance the store reads, since modules were reset.
+    const timing = await import("./connectionTiming")
+    timing.publishConnectionTiming({ changes_request_timeout_seconds: 2 })
+    vi.useFakeTimers()
+    try {
+      mod.selectSession("s1")
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(mod.getSnapshot().changes.phase).toBe("loading")
+      await vi.advanceTimersByTimeAsync(1)
+      expect(mod.getSnapshot().changes.phase).toBe("error")
+      expect(mod.getSnapshot().changes.error).toMatch(/within 2 seconds/)
+    } finally {
+      vi.useRealTimers()
+      timing.publishConnectionTiming(undefined)
     }
   })
 })

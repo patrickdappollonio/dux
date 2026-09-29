@@ -555,6 +555,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_usize(
         doc,
         "server",
+        "changes_request_timeout_seconds",
+        config.server.changes_request_timeout_seconds as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
         "heartbeat_seconds",
         config.server.heartbeat_seconds as usize,
     );
@@ -1837,6 +1843,10 @@ build = { text = \"cargo build\", surface = \"terminal\" }
             parsed.server.reconnect_attempt_timeout_seconds,
             crate::config::DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS
         );
+        assert_eq!(
+            parsed.server.changes_request_timeout_seconds,
+            crate::config::DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS
+        );
 
         let config = Config {
             server: crate::config::ServerConfig {
@@ -1847,6 +1857,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
                 pty_send_timeout_seconds: 25,
                 reconnect_attempts: 26,
                 reconnect_attempt_timeout_seconds: 27,
+                changes_request_timeout_seconds: 28,
                 ..Default::default()
             },
             ..Default::default()
@@ -1860,6 +1871,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         assert_eq!(parsed.server.pty_send_timeout_seconds, 25);
         assert_eq!(parsed.server.reconnect_attempts, 26);
         assert_eq!(parsed.server.reconnect_attempt_timeout_seconds, 27);
+        assert_eq!(parsed.server.changes_request_timeout_seconds, 28);
     }
 
     /// And a patch rewrites each of them in a file that already carries other
@@ -1873,7 +1885,8 @@ build = { text = \"cargo build\", surface = \"terminal\" }
             "[server]\nreplay_wait_seconds = 1\nreconnect_backoff_cap_seconds = 2\n\
              heartbeat_seconds = 3\nheartbeat_deadline_seconds = 4\n\
              pty_send_timeout_seconds = 5\nreconnect_attempts = 6\n\
-             reconnect_attempt_timeout_seconds = 7\n",
+             reconnect_attempt_timeout_seconds = 7\n\
+             changes_request_timeout_seconds = 8\n",
         )
         .expect("seed config");
 
@@ -1886,6 +1899,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
                 pty_send_timeout_seconds: 35,
                 reconnect_attempts: 36,
                 reconnect_attempt_timeout_seconds: 37,
+                changes_request_timeout_seconds: 38,
                 ..Default::default()
             },
             ..Default::default()
@@ -1910,6 +1924,10 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         assert_eq!(parsed.server.reconnect_attempts, 36, "saved:\n{saved}");
         assert_eq!(
             parsed.server.reconnect_attempt_timeout_seconds, 37,
+            "saved:\n{saved}"
+        );
+        assert_eq!(
+            parsed.server.changes_request_timeout_seconds, 38,
             "saved:\n{saved}"
         );
     }

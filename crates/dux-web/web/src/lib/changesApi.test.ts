@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
-  CHANGES_FETCH_TIMEOUT_MS,
   ChangesFetchAborted,
   ChangesFetchError,
   fetchChanges,
 } from "./changesApi"
+import {
+  DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS,
+  publishConnectionTiming,
+} from "./connectionTiming"
+
+const DEFAULT_MS = DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS * 1000
 
 // A fetch that never answers, the way a half-open connection behaves, and that
 // rejects the way a real fetch does once its signal aborts.
@@ -25,6 +30,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  publishConnectionTiming(undefined)
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
@@ -34,14 +40,31 @@ describe("fetchChanges", () => {
     vi.stubGlobal("fetch", hangingFetch())
     const outcome = fetchChanges("s1").catch((error: unknown) => error)
 
-    await vi.advanceTimersByTimeAsync(CHANGES_FETCH_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(DEFAULT_MS)
 
     const error = await outcome
     expect(error).toBeInstanceOf(ChangesFetchError)
     expect((error as ChangesFetchError).status).toBe(0)
     expect((error as Error).message).toMatch(
-      new RegExp(`within ${CHANGES_FETCH_TIMEOUT_MS / 1000} seconds`),
+      new RegExp(`within ${DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS} seconds`),
     )
+  })
+
+  it("gives up on the configured deadline, and names it", async () => {
+    publishConnectionTiming({ changes_request_timeout_seconds: 5 })
+    vi.stubGlobal("fetch", hangingFetch())
+    const outcome = fetchChanges("s1").catch((error: unknown) => error)
+
+    await vi.advanceTimersByTimeAsync(4_999)
+    let settled = false
+    void outcome.then(() => (settled = true))
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+
+    const error = await outcome
+    expect(error).toBeInstanceOf(ChangesFetchError)
+    expect((error as Error).message).toMatch(/within 5 seconds/)
   })
 
   it("reports a caller's abort as an abort, not as a failure to show", async () => {
@@ -66,7 +89,7 @@ describe("fetchChanges", () => {
       })),
     )
     const response = await fetchChanges("s1")
-    await vi.advanceTimersByTimeAsync(CHANGES_FETCH_TIMEOUT_MS * 2)
+    await vi.advanceTimersByTimeAsync(DEFAULT_MS * 2)
     expect(response.rev).toBe(1)
   })
 })

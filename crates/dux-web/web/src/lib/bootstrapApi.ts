@@ -179,6 +179,9 @@ export interface Bootstrap {
   /** Mirrors `config.server.reconnect_attempt_timeout_seconds`: how long one
    * attempt may sit unopened before it is abandoned and counted as failed. */
   reconnect_attempt_timeout_seconds?: number
+  /** Mirrors `config.server.changes_request_timeout_seconds`: how long the
+   * Changes pane waits for one changed-files request before giving it up. */
+  changes_request_timeout_seconds?: number
   /** Mirrors `config.server.heartbeat_seconds`: how often a visible page checks
    * its terminal connection is really alive. */
   heartbeat_seconds?: number

@@ -285,6 +285,7 @@ The rest tune presentation and limits:
 | `reconnect_backoff_cap_seconds` | `10` | The longest gap a browser leaves between automatic reconnect attempts. It starts at half a second and widens up to this. Raise it to be gentler on a struggling server, lower it to come back faster. A config reload applies it. |
 | `reconnect_attempts` | `8` | How many times in a row a browser tries before it stops and says so, with a Reconnect button to start again. Any attempt that connects gives the whole budget back, and coming back to the tab, unlocking the phone or the network returning all start it over, so this only runs out on a page left sitting in front of a server that is not there. `0` keeps trying forever, though each attempt is still abandoned on the deadline below, so restoring dux's older behaviour exactly means setting this to `0` and raising `reconnect_attempt_timeout_seconds` to `30`. A config reload applies it. |
 | `reconnect_attempt_timeout_seconds` | `10` | How long one of those attempts may sit there without connecting before the browser abandons it and counts it as a failure. A server you cannot reach at all does not refuse the connection, it simply never answers, so without this an attempt could hang for most of a minute. It bounds a terminal pane's attach attempt too, not just the page's own connection. Too low and a slow connection never finishes connecting. A config reload applies it. |
+| `changes_request_timeout_seconds` | `30` | How long the Changes pane waits for the list of changed files before it gives up and shows an error with a Refresh button. A connection that silently died never answers, and without this the pane would sit on "Loading changes" forever. The list for a worktree with tens of thousands of changed files can run to several megabytes, so too low and a slow connection never finishes loading it. `0` means the default, and anything above `600` is treated as `600`. A config reload applies it. |
 | `heartbeat_seconds` | `15` | How often a visible browser tab checks its terminal connection is really alive. A Wi-Fi to cellular handoff can leave a connection that looks open and answers nothing, and this is what notices. A config reload applies it. |
 | `heartbeat_deadline_seconds` | `30` | How long the browser waits for the answer to that check before deciding the connection is dead and reconnecting. Counted in time the page is on screen. Must be comfortably larger than `heartbeat_seconds`, or a slow network reconnects you needlessly; a value at or below it would reconnect over and over, so dux quietly uses twice `heartbeat_seconds` instead. A config reload applies it. |
 | `pty_send_timeout_seconds` | `60` | How long dux waits for the first two things it sends a browser terminal, the handshake and the screen redraw, to actually arrive, before it gives up on that connection and lets the browser try again. A send finishes when the bytes get there, so on a slow connection this is really a measure of speed, and the screen redraw can be your whole scrollback. Set it too low and a phone on a bad signal can never finish attaching. A config reload applies it to the next terminal connection. |
@@ -304,11 +305,11 @@ The rest tune presentation and limits:
 > stays quiet, because nothing it can start reads the setting.
 >
 > The exceptions are `access_log`, `search_index_max_files`, `pty_send_timeout_seconds`
-> and the six reconnect settings (`replay_wait_seconds`,
+> and the seven browser timing settings (`replay_wait_seconds`,
 > `reconnect_backoff_cap_seconds`, `reconnect_attempts`,
-> `reconnect_attempt_timeout_seconds`, `heartbeat_seconds` and
-> `heartbeat_deadline_seconds`), which a reload applies to a running server. Those six
-> describe what the BROWSER does, and an open tab picks them up on its own
+> `reconnect_attempt_timeout_seconds`, `changes_request_timeout_seconds`,
+> `heartbeat_seconds` and `heartbeat_deadline_seconds`), which a reload applies to a
+> running server. Those seven describe what the BROWSER does, and an open tab picks them up on its own
 > within a moment of the reload; you do not have to refresh the page.
 > `pty_send_timeout_seconds` applies to the next terminal you open.
 
