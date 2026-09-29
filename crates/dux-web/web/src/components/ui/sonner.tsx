@@ -120,7 +120,9 @@ const Toaster = ({ ...props }: ToasterProps) => {
           // paths once ran to 2,500 characters), so the text caps its own
           // height and scrolls inside the toast rather than covering the
           // screen. `overscroll-contain` keeps a wheel at the end of the text
-          // from scrolling the page underneath.
+          // from scrolling the page underneath. Untested on a touch screen:
+          // sonner reads a drag on the toast as a swipe to dismiss, so a finger
+          // scrolling this text may dismiss the toast instead of scrolling it.
           title: "max-h-[min(12rem,40vh)] overflow-y-auto overscroll-contain",
         },
       }}

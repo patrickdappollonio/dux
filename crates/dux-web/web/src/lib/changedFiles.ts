@@ -125,16 +125,23 @@ export function mergeChangedFilesRecaps(
   }
 }
 
+// Every field of the wire type, typed against its keys: a field added to
+// `ChangedFileView` stops this compiling until it is listed, and every listed
+// field is compared. All of them are primitives, so `===` is the comparison.
+export const CHANGED_FILE_FIELDS = {
+  status: true,
+  path: true,
+  additions: true,
+  deletions: true,
+  binary: true,
+  diff_excluded: true,
+  renamed_from: true,
+} as const satisfies Record<keyof ChangedFileView, true>
+
+const FIELD_KEYS = Object.keys(CHANGED_FILE_FIELDS) as (keyof ChangedFileView)[]
+
 function sameChangedFile(a: ChangedFileView, b: ChangedFileView): boolean {
-  return (
-    a.path === b.path &&
-    a.status === b.status &&
-    a.additions === b.additions &&
-    a.deletions === b.deletions &&
-    a.binary === b.binary &&
-    a.diff_excluded === b.diff_excluded &&
-    a.renamed_from === b.renamed_from
-  )
+  return FIELD_KEYS.every((key) => a[key] === b[key])
 }
 
 // A freshly fetched list with every file that did not change swapped back for

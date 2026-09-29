@@ -5,6 +5,7 @@ import {
   filterChangedFiles,
   formatRecapCount,
   mergeChangedFilesRecaps,
+  CHANGED_FILE_FIELDS,
   reconcileSelection,
   reuseUnchangedFiles,
   summarizeChangedFiles,
@@ -185,6 +186,36 @@ describe("reuseUnchangedFiles", () => {
     const previous = [{ ...file("new.ts", "R"), renamed_from: "old.ts" }]
     const next = [{ ...file("new.ts", "R"), renamed_from: "other.ts" }]
     expect(reuseUnchangedFiles(previous, next)[0]).toBe(next[0])
+  })
+
+  // `Required<ChangedFileView>` stops compiling when the wire grows a field
+  // this sample does not set, and the comparator's field list is typed against
+  // the same keys, so a new field cannot slip past the comparison unseen.
+  it("compares every field of the wire type", () => {
+    const full: Required<ChangedFileView> = {
+      status: "R",
+      path: "new.ts",
+      additions: 3,
+      deletions: 2,
+      binary: false,
+      diff_excluded: false,
+      renamed_from: "old.ts",
+    }
+    expect(Object.keys(CHANGED_FILE_FIELDS).sort()).toEqual(Object.keys(full).sort())
+    const changed: { [K in keyof ChangedFileView]-?: ChangedFileView[K] } = {
+      status: "M",
+      path: "other.ts",
+      additions: 4,
+      deletions: 5,
+      binary: true,
+      diff_excluded: true,
+      renamed_from: "elsewhere.ts",
+    }
+    for (const key of Object.keys(full) as (keyof ChangedFileView)[]) {
+      const next = { ...full, [key]: changed[key] }
+      expect(reuseUnchangedFiles([full], [next])[0], key).toBe(next)
+    }
+    expect(reuseUnchangedFiles([full], [{ ...full }])[0]).toBe(full)
   })
 
   it("follows the fresh order when files only moved position", () => {
