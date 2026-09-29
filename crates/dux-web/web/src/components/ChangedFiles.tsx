@@ -511,9 +511,13 @@ const FileRow = memo(function FileRow({
 
       {/* A quiet refresh of this expanded folder failed: its rows are the ones
         * from before, which the row says quietly, with the reason on hover and
-        * a way to ask again. A 44px target on touch, like every row control. */}
+        * a way to ask again. A 44px target on touch, like every row control.
+        * Its neighbours are both click targets, the folder's name (which folds
+        * it) on the left and the ⋯ on the right, so its cell pads 8px each
+        * side: with the row's 8px gap that is 16px of clear space between it
+        * and either, which an imprecise click does not cross. */}
       {refreshError !== null && onRetryFolder && (
-        <div role="gridcell" className="shrink-0">
+        <div role="gridcell" className="shrink-0 px-2">
           <SimpleTooltip content={refreshError}>
             <Button
               variant="ghost"

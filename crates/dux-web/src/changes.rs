@@ -130,8 +130,9 @@ pub struct ChangesService {
     /// Total git computes run. Test instrumentation for the single-flight test.
     compute_count: AtomicUsize,
     /// Full listings read outside the cache to validate a folder-children
-    /// request (a cold cache). Instrumentation: expanding folders must not
-    /// multiply full statuses.
+    /// request (a cold cache). Test instrumentation: expanding folders must
+    /// not multiply full statuses. Absent outside tests.
+    #[cfg(test)]
     fresh_validation_reads: AtomicUsize,
 }
 
@@ -148,6 +149,7 @@ impl ChangesService {
             uninterested_since: Mutex::new(HashMap::new()),
             invalidation_gen: AtomicU64::new(0),
             compute_count: AtomicUsize::new(0),
+            #[cfg(test)]
             fresh_validation_reads: AtomicUsize::new(0),
         });
         Self::spawn_poller(Arc::downgrade(&svc));
@@ -377,7 +379,9 @@ impl ChangesService {
 
     /// Record a full listing read outside the cache (see
     /// `fresh_validation_reads`).
+    /// Nothing outside tests.
     pub(crate) fn note_fresh_validation_read(&self) {
+        #[cfg(test)]
         self.fresh_validation_reads.fetch_add(1, Ordering::SeqCst);
     }
 

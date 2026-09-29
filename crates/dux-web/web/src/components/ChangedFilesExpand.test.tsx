@@ -334,6 +334,11 @@ describe("expanding a folded folder", () => {
     expect(
       screen.getByRole("button", { name: /Couldn.t refresh/ }).className,
     ).toContain("pointer-coarse:min-h-11")
+    // Clear space on both sides of it, apart from the folder's name and the ⋯.
+    expect(
+      screen.getByRole("button", { name: /Couldn.t refresh/ }).closest('[role="gridcell"]')!
+        .className,
+    ).toContain("px-2")
   })
 
   // Every count in the pane is grouped the same way the rows write theirs.

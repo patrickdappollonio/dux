@@ -191,25 +191,54 @@ fn folder_lines(worktree: &Path, records: &[&[u8]]) -> usize {
 /// `ls-files` order, which is sorted, so the same files hash the same way. A
 /// file that vanished between the listing and the stat hashes as a marker.
 fn fingerprint_files(worktree: &Path, records: &[&[u8]]) -> u64 {
-    use std::hash::{Hash, Hasher};
     use std::os::unix::ffi::OsStrExt;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = Fnv1a::default();
     for record in records {
-        record.hash(&mut hasher);
+        // Each field written as its own bytes, with a separator no path
+        // holds, so the hash depends on nothing but this definition.
+        hasher.write(record);
+        hasher.write(&[0]);
         let path = worktree.join(std::ffi::OsStr::from_bytes(record));
         match fs::symlink_metadata(&path) {
             Ok(meta) => {
-                meta.len().hash(&mut hasher);
-                meta.modified()
+                hasher.write(&meta.len().to_le_bytes());
+                let nanos = meta
+                    .modified()
                     .ok()
                     .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|since| since.as_nanos())
-                    .hash(&mut hasher);
+                    .map_or(0, |since| since.as_nanos());
+                hasher.write(&nanos.to_le_bytes());
             }
-            Err(_) => u64::MAX.hash(&mut hasher),
+            Err(_) => hasher.write(&u64::MAX.to_le_bytes()),
         }
     }
     hasher.finish()
+}
+
+/// FNV-1a, 64-bit: the fingerprints' hash. Chosen for a definition that does
+/// not move, unlike `DefaultHasher`, whose algorithm Rust leaves unspecified
+/// between releases; a fingerprint is compared across polls and processes, so
+/// it must mean the same thing whichever build computed it. Not for security:
+/// it only says whether a folder changed.
+struct Fnv1a(u64);
+
+impl Default for Fnv1a {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Fnv1a {
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 /// Every untracked, not-ignored path git knows of in `worktree`, as the raw
@@ -516,14 +545,14 @@ pub(super) fn fold_added_directories(
     // it is counted apart, as the untracked side counts the repositories it
     // does not enter. The folded roots are asked once, from the index.
     let root_names: Vec<&str> = roots.keys().map(String::as_str).collect();
-    let index = staged_index(worktree, &root_names);
-    let links = &index.links;
-    // Each folded root's fingerprint, from its entries in the same read.
-    let mut root_prints = index.fingerprints(|path| {
+    // Each folded root's fingerprint comes from its entries in the same read.
+    let index = staged_index(worktree, &root_names, |path| {
         ancestors(path)
             .find(|ancestor| roots.contains_key(*ancestor))
             .map(str::to_string)
     });
+    let links = &index.links;
+    let mut root_prints = index.fingerprints.clone();
     let mut contents_of: HashMap<String, crate::model::FolderContents> = roots
         .iter()
         .map(|(root, count)| {
@@ -593,40 +622,28 @@ struct StagedIndex {
     /// repository of its own or a worktree of this repository by reading
     /// files.
     links: HashMap<String, UntrackedDirectoryKind>,
-    /// Every entry's record (`<mode> <object id> <stage>\t<path>`), in the
-    /// index's order: what a staged folder's fingerprint is made of.
-    entries: Vec<Vec<u8>>,
-}
-
-impl StagedIndex {
-    /// A fingerprint per folder, from the entries under it: each entry's path,
-    /// mode and object id, hashed in the index's order. A rename or a re-add
+    /// A fingerprint per folder `owner` named: each entry's record under it
+    /// (`<mode> <object id> <stage>\t<path>`, so its path, mode and object
+    /// id), hashed in the index's order as it is read. A rename or a re-add
     /// inside the folder moves it even when the folder's count does not.
-    /// `owner` names the folder an entry's path is counted under, if any.
-    fn fingerprints(&self, owner: impl Fn(&str) -> Option<String>) -> HashMap<String, u64> {
-        use std::hash::{Hash, Hasher};
-        let mut hashers: HashMap<String, std::collections::hash_map::DefaultHasher> =
-            HashMap::new();
-        for record in &self.entries {
-            let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
-                continue;
-            };
-            let path = String::from_utf8_lossy(&record[tab + 1..]);
-            if let Some(folder) = owner(&path) {
-                record.hash(hashers.entry(folder).or_default());
-            }
-        }
-        hashers
-            .into_iter()
-            .map(|(folder, hasher)| (folder, hasher.finish()))
-            .collect()
-    }
+    fingerprints: HashMap<String, u64>,
 }
 
-/// What the index holds under `dirs`: its links to repositories and its
-/// entries. One `ls-files --stage` over the folded folders; an answer git
-/// could not give is nothing at all.
-fn staged_index(worktree: &Path, dirs: &[&str]) -> StagedIndex {
+/// What the index holds under `dirs`: its links to repositories, and a
+/// fingerprint per folder `owner` names an entry's path as counted under.
+/// One `ls-files --stage` over the folded folders, hashed as it is read.
+///
+/// An answer git could not give is nothing at all: no links and no
+/// fingerprints, logged at debug. The folders then carry no fingerprint for
+/// that one listing, which a surface following an expanded staged folder
+/// reads as a change and lists it once more; that one extra listing is
+/// accepted, because a failure here is transient (a held index lock) and the
+/// next listing carries the fingerprint again.
+fn staged_index(
+    worktree: &Path,
+    dirs: &[&str],
+    owner: impl Fn(&str) -> Option<String>,
+) -> StagedIndex {
     let mut index = StagedIndex::default();
     if dirs.is_empty() {
         return index;
@@ -644,17 +661,29 @@ fn staged_index(worktree: &Path, dirs: &[&str]) -> StagedIndex {
         .args(dirs)
         .output()
     else {
+        logger::debug("staged index: git ls-files --stage could not run");
         return index;
     };
     if !output.status.success() {
+        logger::debug(&format!(
+            "staged index: git ls-files --stage failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
         return index;
     }
+    let mut hashers: HashMap<String, Fnv1a> = HashMap::new();
     let mut common: Option<Option<PathBuf>> = None;
     for record in output.stdout.split(|byte| *byte == 0) {
         if record.is_empty() {
             continue;
         }
-        index.entries.push(record.to_vec());
+        if let Some(tab) = record.iter().position(|byte| *byte == b'\t')
+            && let Some(folder) = owner(&String::from_utf8_lossy(&record[tab + 1..]))
+        {
+            let hasher = hashers.entry(folder).or_default();
+            hasher.write(record);
+            hasher.write(&[0]);
+        }
         if !record.starts_with(b"160000 ") {
             continue;
         }
@@ -668,6 +697,10 @@ fn staged_index(worktree: &Path, dirs: &[&str]) -> StagedIndex {
         let kind = repository_kind(common.as_deref(), &worktree.join(path));
         index.links.insert(path.to_string(), kind);
     }
+    index.fingerprints = hashers
+        .into_iter()
+        .map(|(folder, hasher)| (folder, hasher.finish()))
+        .collect();
     index
 }
 
@@ -1262,14 +1295,14 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
         ));
     }
 
-    let index = staged_index(worktree, &[dir]);
-    let links = &index.links;
-    // Each sub-folder's fingerprint, from its entries in the same read.
-    let mut child_prints = index.fingerprints(|path| {
+    // Each sub-folder's fingerprint comes from its entries in the same read.
+    let index = staged_index(worktree, &[dir], |path| {
         let rest = path.strip_prefix(&pathspec)?;
         let (child, deeper) = split_child(rest.as_bytes());
         deeper.then(|| String::from_utf8_lossy(child).into_owned())
     });
+    let links = &index.links;
+    let mut child_prints = index.fingerprints.clone();
     let mut files: Vec<ChangedFile> = Vec::new();
     // Sub-folder name → what is inside it, in first-seen order.
     let mut folders: Vec<(String, crate::model::FolderContents)> = Vec::new();
@@ -2426,6 +2459,21 @@ mod tests {
 
         assert_eq!(fingerprint_of(&unstaged, "big"), None);
         assert!(fingerprint_of(&unstaged, "small").is_some());
+    }
+
+    /// The fingerprints hash with FNV-1a (64-bit), whose definition does not
+    /// move between Rust releases the way `DefaultHasher`'s may: pinned here
+    /// by the algorithm's published test vectors.
+    #[test]
+    fn fingerprints_hash_with_fnv1a() {
+        let hash = |bytes: &[u8]| {
+            let mut hasher = Fnv1a::default();
+            hasher.write(bytes);
+            hasher.finish()
+        };
+        assert_eq!(hash(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(hash(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(hash(b"foobar"), 0x85944171f73967e8);
     }
 
     /// A staged folder's fingerprint is its index entries (path, mode and
