@@ -35,15 +35,22 @@ an empty file already looks.
 A folder with nothing tracked inside it, like a freshly installed `node_modules`, is one
 row rather than one row per file, the way `git status` shows it: its path with a trailing
 slash and how many files it holds, for example `node_modules/  28,747 files`. Files your
-`.gitignore` hides are not counted. Stage it and it stays one row in **Staged**, for as long
-as everything in it is newly added. Every count of changed files, the group badges included,
-counts the files inside a folder rather than one for the folder. A folder that is a git
-repository of its own says
-"nested repository" instead of a count, because dux does not look inside it.
+`.gitignore` hides are not counted. Stage it whole and it stays one row in **Staged**, for as
+long as everything in it is newly added and nothing inside it is still untracked; stage only
+part of it and the staged files are listed one by one. Every count of changed files, the
+group badges included, counts the files inside a folder rather than one for the folder. A
+git repository of its own inside a folder is counted apart, as in `3 files and 1 nested
+repository`, and a folder that is itself a repository says "nested repository" instead of a
+count, because dux does not look inside it.
 
 A folder row has no diff to open. Its `⋯` menu stages, unstages, or discards the whole
-folder, and discarding an untracked folder deletes it and everything in it, after the same
-confirmation a file gets.
+folder, after the same kind of confirmation a file gets. Discarding an untracked folder
+deletes the untracked files it counted: files your `.gitignore` hides stay, and so does any
+repository of its own inside it, and the dialog says so.
+
+> [!CAUTION]
+> Discarding a row that is a repository of its own deletes that whole repository, including
+> its history and any commits you have not pushed anywhere else. The dialog warns you first.
 
 > [!NOTE]
 > In the terminal UI, the diff key expands a folder row a level at a time and collapses it
