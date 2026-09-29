@@ -1239,6 +1239,35 @@ mod tests {
         );
     }
 
+    /// A link to a worktree staged elsewhere (by git on the command line, and
+    /// listed as such inside an expanded staged folder) is unstaged from its
+    /// own row: the refusal is about staging one, so it applies only there.
+    #[test]
+    fn space_unstages_a_staged_worktree_link() {
+        let mut app = test_app(default_bindings());
+        app.engine.staged_files = vec![ChangedFile {
+            kind: ChangedFileKind::LinkedWorktree,
+            ..file("inner-wt", "A")
+        }];
+        app.selected_left = 1;
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Staged;
+        app.files_index = 0;
+
+        app.handle_key(space()).unwrap();
+
+        assert!(
+            !app.status.text().contains("staging it would record"),
+            "{}",
+            app.status.text()
+        );
+        assert_eq!(
+            app.changes_tree.pending_ops.len(),
+            1,
+            "an unstage is started"
+        );
+    }
+
     /// Staging a repository of its own records a link to it, not its files,
     /// and the status line says exactly that.
     #[test]

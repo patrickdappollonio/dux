@@ -2727,7 +2727,11 @@ impl App {
         };
         // A folder can hold tens of thousands of files, so staging it whole is
         // a worker's job with a busy and a final, never this thread's.
-        if file.kind == dux_core::model::ChangedFileKind::LinkedWorktree {
+        // Staging a worktree of this repository would record a link to it;
+        // unstaging one that git already holds is fine, so only a stage stops.
+        if self.right_section == RightSection::Unstaged
+            && file.kind == dux_core::model::ChangedFileKind::LinkedWorktree
+        {
             let path = file.path.clone();
             self.set_error(format!(
                 "\"{path}/\" is a worktree of this same repository; staging it would record a \
