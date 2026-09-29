@@ -15,7 +15,7 @@ use crate::model::{ChangedFile, ProjectBranchStatus};
 use crate::worker::BranchWarningKind;
 
 mod folding;
-pub use folding::{ChangesSide, changed_dir_children};
+pub use folding::{ChangesSide, changed_dir_children, rows_answering};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWorktree {
@@ -3876,9 +3876,32 @@ pub fn discard_classify(worktree_path: &Path, path: &str) -> Result<bool> {
     let (staged, unstaged) = changed_files(worktree_path)?;
     // A path inside a folded folder is answered for by that folder's row: a
     // file reached by expanding an untracked folder is untracked, and one
-    // inside a folder staged whole is staged.
+    // inside a folder staged whole is staged. But only a path git itself lists
+    // there is a change: an ignored file, a missing one or one inside a
+    // repository of its own must not be reached through the folder, so a child
+    // path is confirmed with git before the folder's row may answer for it.
+    let asked = [path.to_string()];
+    let confirmed = |files: &[crate::model::ChangedFile], side| -> Result<bool> {
+        Ok(rows_answering(worktree_path, files, side, &asked)?.contains(path))
+    };
     let staged_row = crate::model::listing_row_for(&staged, path);
     let unstaged_row = crate::model::listing_row_for(&unstaged, path);
+    let under_a_folder = staged_row.is_some_and(|row| row.path != path)
+        || unstaged_row.is_some_and(|row| row.path != path);
+    let staged_row = match staged_row {
+        Some(row) if row.path != path && !confirmed(&staged, ChangesSide::Staged)? => None,
+        other => other,
+    };
+    let unstaged_row = match unstaged_row {
+        Some(row) if row.path != path && !confirmed(&unstaged, ChangesSide::Unstaged)? => None,
+        other => other,
+    };
+    if under_a_folder && staged_row.is_none() && unstaged_row.is_none() {
+        anyhow::bail!(
+            "\"{path}\" is not a change git lists: it may be ignored, missing, or inside a \
+             repository of its own, so there is nothing to discard."
+        );
+    }
     // Reject when the file is staged (and has no separate unstaged change). The
     // TUI and web both surface "Unstage the file first to discard changes." for
     // this case.

@@ -228,10 +228,15 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteR
     let wt = worktree.to_path_buf();
     let p = path.to_string();
     let ok = tokio::task::spawn_blocking(move || match dux_core::git::changed_files(&wt) {
-        // A path inside a folded folder is answered for by the folder's row.
+        // A path inside a folded folder is answered for by the folder's row,
+        // once git confirms it is a change it lists there.
         Ok((staged, unstaged)) => {
-            dux_core::model::listing_row_for(&staged, &p).is_some()
-                || dux_core::model::listing_row_for(&unstaged, &p).is_some()
+            use dux_core::git::{ChangesSide, rows_answering};
+            let asked = [p.clone()];
+            let on = |files: &[dux_core::model::ChangedFile], side| {
+                rows_answering(&wt, files, side, &asked).is_ok_and(|set| set.contains(&p))
+            };
+            on(&staged, ChangesSide::Staged) || on(&unstaged, ChangesSide::Unstaged)
         }
         Err(_) => false,
     })
@@ -462,11 +467,14 @@ async fn files_op(
     let wt = worktree.clone();
     let requested = paths.clone();
     let partition = tokio::task::spawn_blocking(move || {
-        dux_core::git::changed_files(&wt).map(|(staged, unstaged)| {
-            let live = match section {
-                Section::Staged => &staged,
-                Section::Unstaged => &unstaged,
+        dux_core::git::changed_files(&wt).and_then(|(staged, unstaged)| {
+            let (live, side) = match section {
+                Section::Staged => (&staged, dux_core::git::ChangesSide::Staged),
+                Section::Unstaged => (&unstaged, dux_core::git::ChangesSide::Unstaged),
             };
+            // One git call confirms every path inside a folded folder, so an
+            // ignored or missing file there is refused rather than acted on.
+            let answered = dux_core::git::rows_answering(&wt, live, side, &requested)?;
             let mut seen = std::collections::HashSet::new();
             let mut done = Vec::new();
             let mut refused = Vec::new();
@@ -475,14 +483,15 @@ async fn files_op(
                     continue;
                 }
                 // A file inside a folded folder is in the section when the
-                // folder is, which is how an expanded row validates.
-                if dux_core::model::listing_row_for(live, &path).is_some() {
+                // folder is and git lists it there, which is how an expanded
+                // row validates.
+                if answered.contains(&path) {
                     done.push(path);
                 } else {
                     refused.push(path);
                 }
             }
-            (done, refused)
+            Ok((done, refused))
         })
     })
     .await;
@@ -1350,6 +1359,55 @@ mod tests {
                 .unwrap();
         assert!(staged.is_empty(), "{staged:?}");
         assert_eq!(unstaged.len(), 1, "{unstaged:?}");
+    }
+
+    /// A folder row answers only for what git lists inside it: an ignored file
+    /// or a missing one is refused by every route, and the ignored file stays.
+    #[tokio::test]
+    async fn a_path_inside_a_folder_that_git_does_not_list_is_refused() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::write(worktree.join(".gitignore"), "*.env\n").unwrap();
+        run_git(&worktree, &["add", ".gitignore"]);
+        run_git(&worktree, &["commit", "-q", "-m", "ignore"]);
+        std::fs::create_dir_all(worktree.join("build")).unwrap();
+        std::fs::write(worktree.join("build/app.js"), "a\n").unwrap();
+        std::fs::write(worktree.join("build/secret.env"), "SECRET=1\n").unwrap();
+
+        for (route, body) in [
+            ("discard", r#"{"path":"build/secret.env"}"#),
+            ("discard", r#"{"path":"build/nope.js"}"#),
+            ("stage", r#"{"path":"build/secret.env"}"#),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(json_req(
+                    "POST",
+                    &format!("/api/v1/sessions/s1/git/{route}"),
+                    body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{route} {body}");
+        }
+        assert!(worktree.join("build/secret.env").exists());
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage-files",
+                r#"{"paths":["build/app.js","build/nope.js","build/secret.env"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(parsed["done"], serde_json::json!(["build/app.js"]));
+        assert_eq!(
+            parsed["refused"],
+            serde_json::json!(["build/nope.js", "build/secret.env"])
+        );
     }
 
     /// The unstage batch is the mirror image: it names what it reset, leaves

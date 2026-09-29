@@ -373,6 +373,82 @@ fn folder_row(path: String, status: &str, file_count: usize) -> ChangedFile {
     }
 }
 
+/// Which of `paths` are real changes on `side` of this listing (`files` is
+/// that side's listing).
+///
+/// A path that is a row of its own answers as it is. A path inside a folded
+/// folder is asked of git, in one call for the whole batch, because the folder
+/// row alone would also answer for an ignored file, a file that does not
+/// exist and a file inside a repository of its own, none of which is a change:
+/// on the unstaged side `ls-files --others --exclude-standard` must list the
+/// path (or, for a folder, something inside it, or, for a nested repository,
+/// the repository itself), and on the staged side `ls-files --cached` must.
+/// Anything else is left out, and the caller refuses it.
+pub fn rows_answering(
+    worktree: &Path,
+    files: &[ChangedFile],
+    side: ChangesSide,
+    paths: &[String],
+) -> Result<HashSet<String>> {
+    let mut answered = HashSet::new();
+    let mut to_confirm: Vec<&str> = Vec::new();
+    for path in paths {
+        match crate::model::listing_row_for(files, path) {
+            Some(row) if row.path == *path => {
+                answered.insert(path.clone());
+            }
+            Some(_) => to_confirm.push(path),
+            None => {}
+        }
+    }
+    if to_confirm.is_empty() {
+        return Ok(answered);
+    }
+    let mut command = Command::new("git");
+    command.args([
+        "--literal-pathspecs",
+        "-C",
+        worktree.to_string_lossy().as_ref(),
+        "ls-files",
+        "--full-name",
+        "-z",
+    ]);
+    match side {
+        ChangesSide::Unstaged => command.args(["--others", "--exclude-standard"]),
+        ChangesSide::Staged => command.arg("--cached"),
+    };
+    command.arg("--").args(&to_confirm);
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let wanted: HashSet<&str> = to_confirm.into_iter().collect();
+    for record in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|r| !r.is_empty())
+    {
+        let Ok(record) = std::str::from_utf8(record) else {
+            continue;
+        };
+        // A nested repository answers as `path/`; anything else answers for
+        // itself and for every asked folder above it.
+        let record = record.trim_end_matches('/');
+        if wanted.contains(record) {
+            answered.insert(record.to_string());
+        }
+        for ancestor in ancestors(record) {
+            if wanted.contains(ancestor) {
+                answered.insert(ancestor.to_string());
+            }
+        }
+    }
+    Ok(answered)
+}
+
 /// The contents of one folded folder, one level deep: every file directly
 /// inside it as an ordinary row, every folder inside it folded again with its
 /// own count, and every repository inside it as a nested repository row.
@@ -1376,6 +1452,86 @@ mod tests {
 
         assert!(discard_file(root, "dotgit/HEAD", true).is_err());
         assert!(root.join(".git/HEAD").exists());
+    }
+
+    // ── Paths inside a folder that git does not list ──────────────────────
+    //
+    // A folder row answers for the files inside it, but only for the ones git
+    // itself would list: an ignored file, a file that does not exist and a
+    // file inside a repository of its own are not changes, and a discard must
+    // not reach them through the folder.
+
+    fn child_repo() -> tempfile::TempDir {
+        let repo = repo();
+        let root = repo.path();
+        write(root, ".gitignore", "*.env\n");
+        git_in(root)(&["add", ".gitignore"]);
+        git_in(root)(&["commit", "-q", "-m", "ignore"]);
+        write(root, "build/app.js", "a\n");
+        write(root, "build/sub/b.js", "b\n");
+        write(root, "build/secret.env", "SECRET=1\n");
+        let nested = root.join("build/lib");
+        fs::create_dir_all(&nested).unwrap();
+        git_in(&nested)(&["init", "-q"]);
+        write(&nested, "own.txt", "own\n");
+        repo
+    }
+
+    #[test]
+    fn discard_refuses_a_path_inside_a_folder_that_git_does_not_list() {
+        let repo = child_repo();
+        let root = repo.path();
+        for path in ["build/secret.env", "build/nope.js", "build/lib/own.txt"] {
+            let refusal = discard_classify(root, path).expect_err(path);
+            assert!(
+                refusal.to_string().contains("is not a change git lists"),
+                "{path}: {refusal}"
+            );
+        }
+        assert!(root.join("build/secret.env").exists());
+        assert!(root.join("build/lib/own.txt").exists());
+        // What git does list inside the folder still answers.
+        assert!(discard_classify(root, "build/app.js").unwrap());
+        assert!(discard_classify(root, "build/sub").unwrap());
+        assert!(discard_classify(root, "build/lib").unwrap());
+    }
+
+    #[test]
+    fn only_listed_changes_inside_a_folder_answer_on_either_side() {
+        let repo = child_repo();
+        let root = repo.path();
+        let (_, unstaged) = changed_files(root).unwrap();
+        let asked: Vec<String> = [
+            "build/app.js",
+            "build/sub",
+            "build/secret.env",
+            "build/nope.js",
+            "build/lib/own.txt",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+        let answered = rows_answering(root, &unstaged, ChangesSide::Unstaged, &asked).unwrap();
+        let mut answered: Vec<_> = answered.into_iter().collect();
+        answered.sort();
+        assert_eq!(
+            answered,
+            vec!["build/app.js".to_string(), "build/sub".to_string()]
+        );
+
+        git_in(root)(&["add", "--", "build/app.js", "build/sub"]);
+        let (staged, _) = changed_files(root).unwrap();
+        let asked: Vec<String> = ["build/app.js", "build/sub/b.js", "build/sub/none.js"]
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        let answered = rows_answering(root, &staged, ChangesSide::Staged, &asked).unwrap();
+        let mut answered: Vec<_> = answered.into_iter().collect();
+        answered.sort();
+        assert_eq!(
+            answered,
+            vec!["build/app.js".to_string(), "build/sub/b.js".to_string()]
+        );
     }
 
     // ── Crafted paths ──────────────────────────────────────────────────────
