@@ -1631,6 +1631,168 @@ mod tests {
         );
     }
 
+    // ── Folder children (`changes_routes`), tested here for the helpers ─────
+
+    fn get_req(uri: &str) -> Request<axum::body::Body> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    fn children_uri(dir: &str, side: &str) -> String {
+        let dir: String = url_escape(dir);
+        format!("/api/v1/sessions/s1/changes/children?dir={dir}&side={side}")
+    }
+
+    /// Percent-encode a query value, so a test can send any byte it likes.
+    fn url_escape(raw: &str) -> String {
+        raw.bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (byte as char).to_string()
+                }
+                other => format!("%{other:02X}"),
+            })
+            .collect()
+    }
+
+    fn child_paths(json: &serde_json::Value) -> Vec<String> {
+        json["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|child| child["path"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A folded folder lists one level: its files as rows, its folders folded
+    /// again with their counts, the same row shape the listing uses.
+    #[tokio::test]
+    async fn folder_children_lists_one_level_of_a_folded_folder() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("node_modules/pkg0")).unwrap();
+        std::fs::write(worktree.join("node_modules/pkg0/a.js"), "a\n").unwrap();
+        std::fs::write(worktree.join("node_modules/pkg0/b.js"), "b\n").unwrap();
+        std::fs::write(worktree.join("node_modules/top.js"), "t\n").unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(get_req(&children_uri("node_modules", "unstaged")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(json["dir"], "node_modules");
+        assert_eq!(json["side"], "unstaged");
+        assert_eq!(
+            child_paths(&json),
+            ["node_modules/pkg0", "node_modules/top.js"]
+        );
+        assert_eq!(json["children"][0]["kind"], "directory");
+        assert_eq!(json["children"][0]["file_count"], 2);
+
+        // A folder inside an expanded one expands the same way.
+        let resp = app
+            .clone()
+            .oneshot(get_req(&children_uri("node_modules/pkg0", "unstaged")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(
+            child_paths(&json),
+            ["node_modules/pkg0/a.js", "node_modules/pkg0/b.js"]
+        );
+    }
+
+    /// A folder staged whole lists what the index holds, on the staged side.
+    #[tokio::test]
+    async fn folder_children_lists_a_staged_folder_from_the_index() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("app")).unwrap();
+        std::fs::write(worktree.join("app/a.rs"), "a\n").unwrap();
+        run_git(&worktree, &["add", "app"]);
+
+        let resp = app
+            .clone()
+            .oneshot(get_req(&children_uri("app", "staged")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(child_paths(&json), ["app/a.rs"]);
+        assert_eq!(json["children"][0]["status"], "A");
+
+        // The same folder is not a row on the other side.
+        let resp = app
+            .clone()
+            .oneshot(get_req(&children_uri("app", "unstaged")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Only a folder the live listing shows (or one inside it that git lists
+    /// something under) may be listed: a crafted path, a file, a tracked or
+    /// missing folder, a path climbing out, one through a symlink, and a bad
+    /// side are all refused, and nothing outside the worktree is ever read.
+    #[tokio::test]
+    async fn folder_children_refuses_anything_that_is_not_a_listed_folder() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("node_modules/pkg0")).unwrap();
+        std::fs::write(worktree.join("node_modules/pkg0/a.js"), "a\n").unwrap();
+        std::fs::write(worktree.join("node_modules/top.js"), "t\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("outside")).unwrap();
+        std::fs::write(tmp.path().join("outside/secret.txt"), "s\n").unwrap();
+        std::os::unix::fs::symlink(
+            tmp.path().join("outside"),
+            worktree.join("node_modules/link"),
+        )
+        .unwrap();
+
+        for (dir, side) in [
+            ("", "unstaged"),
+            ("/", "unstaged"),
+            ("..", "unstaged"),
+            ("../outside", "unstaged"),
+            ("node_modules/..", "unstaged"),
+            ("node_modules/../..", "unstaged"),
+            ("node_modules/./pkg0", "unstaged"),
+            ("node_modules//pkg0", "unstaged"),
+            ("/etc", "unstaged"),
+            ("node_modules/top.js", "unstaged"),
+            ("node_modules/link", "unstaged"),
+            ("node_modules/missing", "unstaged"),
+            ("f.txt", "unstaged"),
+            (".git", "unstaged"),
+            ("node_modules", "sideways"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(get_req(&children_uri(dir, side)))
+                .await
+                .unwrap();
+            let status = resp.status();
+            let body = body_text(resp).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{dir:?} {side}: {body}");
+            assert!(!body.contains("secret.txt"), "{dir:?}: {body}");
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(get_req(
+                "/api/v1/sessions/nobody/changes/children?dir=node_modules&side=unstaged",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// A folder delete carries how many files the dialog said would go: more
     /// now is refused, fewer goes, and the answer says how many actually went.
     /// A folder confirmation without a count is no confirmation at all.

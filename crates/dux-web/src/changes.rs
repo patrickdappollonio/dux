@@ -733,7 +733,7 @@ fn view_from(f: &ChangedFile) -> ChangedFileView {
 
 /// Project and sort a changed-files list by `(path, status)` so change detection
 /// is stable regardless of git's output order.
-fn sorted_views(files: &[ChangedFile]) -> Vec<ChangedFileView> {
+pub(crate) fn sorted_views(files: &[ChangedFile]) -> Vec<ChangedFileView> {
     let mut views: Vec<ChangedFileView> = files.iter().map(view_from).collect();
     views.sort_by(|a, b| {
         (a.path.as_str(), a.status.as_str()).cmp(&(b.path.as_str(), b.status.as_str()))
