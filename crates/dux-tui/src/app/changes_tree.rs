@@ -1098,6 +1098,38 @@ mod tests {
         );
     }
 
+    /// A folder staged whole beside a nested clone stays one staged row, and
+    /// the row says the repository inside was not staged.
+    #[test]
+    fn a_staged_folder_row_says_which_repositories_it_left_out() {
+        let mut app = test_app(default_bindings());
+        app.engine.staged_files = vec![ChangedFile {
+            kind: ChangedFileKind::Directory(dux_core::model::FolderContents {
+                file_count: 5,
+                repositories_not_staged: 1,
+                ..Default::default()
+            }),
+            ..file("vendor", "A")
+        }];
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Staged;
+        app.files_index = 0;
+        app.right_hidden = false;
+        // Wide enough for the whole label.
+        app.right_width_pct = 50;
+
+        let screen = render_text(&mut app, 160, 40);
+
+        let row = screen
+            .iter()
+            .find(|line| line.contains("vendor/"))
+            .unwrap_or_else(|| panic!("the folder renders a row:\n{}", screen.join("\n")));
+        assert!(
+            row.contains("5 files \u{b7} 1 nested repository not staged"),
+            "{row}"
+        );
+    }
+
     #[test]
     fn enter_expands_a_folder_a_level_at_a_time_and_collapses_it_again() {
         let (mut app, _worktree) = repo_app();

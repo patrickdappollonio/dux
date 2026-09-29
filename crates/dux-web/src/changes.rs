@@ -837,12 +837,16 @@ mod tests {
                 nested_repositories: 1,
                 linked_worktrees: 2,
                 fingerprint: Some(u64::MAX - 1),
+                repositories_not_staged: 4,
+                worktrees_not_staged: 5,
             });
 
         let json = serde_json::to_value(sorted_views(&[folder])).unwrap();
 
         assert_eq!(json[0]["file_count"], 3);
         assert_eq!(json[0]["nested_repositories"], 1);
+        assert_eq!(json[0]["nested_repositories_not_staged"], 4);
+        assert_eq!(json[0]["linked_worktrees_not_staged"], 5);
         assert_eq!(json[0]["linked_worktrees"], 2);
         assert_eq!(json[0]["fingerprint"], "fffffffffffffffe");
     }
@@ -1156,6 +1160,8 @@ mod tests {
                 nested_repositories: 0,
                 linked_worktrees: 0,
                 fingerprint: None,
+                nested_repositories_not_staged: 0,
+                linked_worktrees_not_staged: 0,
             }),
             "the row says how many files it stands for"
         );

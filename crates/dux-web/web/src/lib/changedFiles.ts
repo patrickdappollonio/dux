@@ -95,7 +95,21 @@ export function folderCountLabel(file: ChangedFileView): string | null {
       countWords(worktrees, "worktree of this repository", "worktrees of this repository"),
     )
   }
-  return joinWords(parts)
+  // A staged folder names the repositories inside it that the stage left out,
+  // after a middle dot, as the TUI's `folder_contents_words` does.
+  const notStaged: string[] = []
+  const nestedLeft = file.nested_repositories_not_staged ?? 0
+  const worktreesLeft = file.linked_worktrees_not_staged ?? 0
+  if (nestedLeft > 0) {
+    notStaged.push(countWords(nestedLeft, "nested repository", "nested repositories"))
+  }
+  if (worktreesLeft > 0) {
+    notStaged.push(
+      countWords(worktreesLeft, "worktree of this repository", "worktrees of this repository"),
+    )
+  }
+  const held = joinWords(parts)
+  return notStaged.length > 0 ? `${held} \u00b7 ${joinWords(notStaged)} not staged` : held
 }
 
 // `a`, `a and b`, `a, b and c`, as the TUI's `join_words` writes it.
@@ -213,6 +227,8 @@ export const CHANGED_FILE_FIELDS = {
   nested_repositories: true,
   linked_worktrees: true,
   fingerprint: true,
+  nested_repositories_not_staged: true,
+  linked_worktrees_not_staged: true,
 } as const satisfies Record<keyof ChangedFileView, true>
 
 const FIELD_KEYS = Object.keys(CHANGED_FILE_FIELDS) as (keyof ChangedFileView)[]

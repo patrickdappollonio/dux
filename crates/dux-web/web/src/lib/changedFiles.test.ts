@@ -207,6 +207,8 @@ describe("reuseUnchangedFiles", () => {
       nested_repositories: 0,
       linked_worktrees: 0,
       fingerprint: "aa",
+      nested_repositories_not_staged: 0,
+      linked_worktrees_not_staged: 0,
     }
     expect(Object.keys(CHANGED_FILE_FIELDS).sort()).toEqual(Object.keys(full).sort())
     const changed: { [K in keyof ChangedFileView]-?: ChangedFileView[K] } = {
@@ -222,6 +224,8 @@ describe("reuseUnchangedFiles", () => {
       nested_repositories: 1,
       linked_worktrees: 1,
       fingerprint: "bb",
+      nested_repositories_not_staged: 1,
+      linked_worktrees_not_staged: 1,
     }
     for (const key of Object.keys(full) as (keyof ChangedFileView)[]) {
       const next = { ...full, [key]: changed[key] }
@@ -412,6 +416,25 @@ describe("folded folders in the totals", () => {
     expect(folderCountLabel(withNested(28747, 0))).toBe("28,747 files")
     expect(folderCountLabel({ ...withNested(1, 1), linked_worktrees: 1 })).toBe(
       "1 file, 1 nested repository and 1 worktree of this repository",
+    )
+  })
+
+  // A folder staged whole leaves the repositories inside it out, and its row
+  // says so, in the same words as the terminal UI.
+  it("says which repositories a staged folder left out", () => {
+    const staged = (repositories: number, worktrees: number): ChangedFileView => ({
+      ...file("vendor", "A"),
+      kind: "directory",
+      file_count: 5,
+      nested_repositories_not_staged: repositories || undefined,
+      linked_worktrees_not_staged: worktrees || undefined,
+    })
+    expect(folderCountLabel(staged(1, 0))).toBe("5 files \u00b7 1 nested repository not staged")
+    expect(folderCountLabel(staged(0, 2))).toBe(
+      "5 files \u00b7 2 worktrees of this repository not staged",
+    )
+    expect(folderCountLabel(staged(2, 1))).toBe(
+      "5 files \u00b7 2 nested repositories and 1 worktree of this repository not staged",
     )
   })
 

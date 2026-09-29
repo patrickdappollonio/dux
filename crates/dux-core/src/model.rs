@@ -892,6 +892,13 @@ pub struct FolderContents {
     /// is the cost folding exists to avoid. Also `None` on the staged side,
     /// where an edit since staging is its own unstaged row.
     pub fingerprint: Option<u64>,
+    /// Staged side only: how many repositories of their own inside the folder
+    /// were left untracked, because staging a folder leaves them out. They do
+    /// not keep the folder from folding, so the row has to say they are not in
+    /// the index. Always zero on the untracked side.
+    pub repositories_not_staged: usize,
+    /// Staged side only: the same, for worktrees of this repository.
+    pub worktrees_not_staged: usize,
 }
 
 impl ChangedFileKind {
@@ -1039,8 +1046,32 @@ pub fn folder_count_label(file: &ChangedFile) -> Option<String> {
 }
 
 /// A folder's contents in words, nested repositories named only when there
-/// are some.
+/// are some, and a staged folder's left-out repositories after a middle dot:
+/// "5 files · 1 nested repository not staged".
 pub fn folder_contents_words(contents: &FolderContents) -> String {
+    let mut words = folder_held_words(contents);
+    let mut not_staged = Vec::new();
+    if contents.repositories_not_staged > 0 {
+        not_staged.push(count_words(
+            contents.repositories_not_staged,
+            "nested repository",
+            "nested repositories",
+        ));
+    }
+    if contents.worktrees_not_staged > 0 {
+        not_staged.push(count_words(
+            contents.worktrees_not_staged,
+            "worktree of this repository",
+            "worktrees of this repository",
+        ));
+    }
+    if !not_staged.is_empty() {
+        words.push_str(&format!(" \u{b7} {} not staged", join_words(&not_staged)));
+    }
+    words
+}
+
+fn folder_held_words(contents: &FolderContents) -> String {
     let mut parts = Vec::new();
     let others = contents.nested_repositories + contents.linked_worktrees;
     if contents.file_count > 0 || others == 0 {
@@ -1393,6 +1424,25 @@ mod changed_file_kind_tests {
         assert_eq!(
             folder_count_label(&only_nested).as_deref(),
             Some("2 nested repositories")
+        );
+        let staged = |repositories_not_staged, worktrees_not_staged| {
+            row(
+                "g",
+                ChangedFileKind::Directory(FolderContents {
+                    file_count: 5,
+                    repositories_not_staged,
+                    worktrees_not_staged,
+                    ..Default::default()
+                }),
+            )
+        };
+        assert_eq!(
+            folder_count_label(&staged(1, 0)).as_deref(),
+            Some("5 files \u{b7} 1 nested repository not staged")
+        );
+        assert_eq!(
+            folder_count_label(&staged(0, 2)).as_deref(),
+            Some("5 files \u{b7} 2 worktrees of this repository not staged")
         );
     }
 }

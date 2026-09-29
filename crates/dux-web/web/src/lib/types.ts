@@ -306,6 +306,12 @@ export interface ChangedFileView {
    * modification times), which moves when a file inside is edited. Absent for
    * a folder too large to fingerprint, and for a staged one. Opaque text. */
   fingerprint?: string
+  /** Staged side only: repositories of their own inside a `"directory"` row
+   * that staging the folder left out, so they are not in the index. They do
+   * not keep the folder from folding. Absent when there are none. */
+  nested_repositories_not_staged?: number
+  /** Staged side only: the same, for worktrees of this repository. */
+  linked_worktrees_not_staged?: number
 }
 
 export interface ChangedFiles {

@@ -44,7 +44,11 @@ repository`, and a folder that is itself a repository says "nested repository" i
 count, because dux does not look inside it.
 
 A folder row has no diff to open. Its `⋯` menu stages or unstages the whole folder at once,
-and discards it after a confirmation, the same one a file gets. Discarding an untracked folder
+and discards it after a confirmation, the same one a file gets. Staging a folder stages its
+files and leaves out any repository of its own, or worktree of this repository, inside it, so
+none of them is recorded as a link; dux tells you what it left out, and the folder's staged
+row says so too, as in `5 files · 1 nested repository not staged`. A folder that holds
+nothing but repositories has nothing to stage, so it offers no stage. Discarding an untracked folder
 deletes the untracked files it counted: files your `.gitignore` hides stay, and so does any
 repository of its own inside it, and the dialog says so. A folder that holds nothing but
 repositories of their own has nothing to delete, so it offers no discard. A folder that is a

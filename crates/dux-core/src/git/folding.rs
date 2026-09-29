@@ -142,6 +142,8 @@ fn finish_tallies(
                 nested_repositories,
                 linked_worktrees,
                 fingerprint,
+                repositories_not_staged: 0,
+                worktrees_not_staged: 0,
             };
             (folder, UntrackedFolder::Contents(contents, additions))
         })
@@ -356,9 +358,12 @@ fn ancestors(path: &str) -> impl Iterator<Item = &str> {
 /// inside keeps the folder open, because the row a rename needs (where it came
 /// from) cannot be said by a folder.
 ///
-/// The folder must also have been staged WHOLE: anything untracked inside it
-/// (a file, or a folded folder, in `unstaged`) means only part of it is in the
-/// index, and a folder row would claim the rest. A tracked change inside it
+/// The folder must also have been staged WHOLE: an untracked file inside it
+/// (a file, or a folded folder holding files, in `unstaged`) means only part of
+/// it is in the index, and a folder row would claim the rest. A repository or a
+/// worktree left untracked inside it does NOT: staging a folder leaves those
+/// out on purpose, so a folder staged whole beside a nested clone is still
+/// whole, and its row counts what it left out instead. A tracked change inside it
 /// (a staged file edited since) does not open it, because that file is in the
 /// index too; the edit is its own unstaged row, and opening the folder over it
 /// would put every file of a staged `node_modules` back on screen the first
@@ -391,11 +396,28 @@ pub(super) fn fold_added_directories(
         not_whole.extend(ancestors(&file.path));
     }
     // An intent-to-add file (`git add -N`, status ` A`) is not staged content
-    // either: its index entry is a placeholder.
+    // either: its index entry is a placeholder. A repository left untracked
+    // (on its own row, or all a folded folder holds) is what a folder stage
+    // leaves out, so it is set aside to be counted rather than breaking it.
+    let mut left_out: Vec<(&str, usize, usize)> = Vec::new();
     for file in unstaged
         .iter()
         .filter(|file| matches!(file.status.as_str(), "?" | "A"))
     {
+        if file.status == "?" {
+            let repositories = match &file.kind {
+                ChangedFileKind::NestedRepository => Some((1, 0)),
+                ChangedFileKind::LinkedWorktree => Some((0, 1)),
+                ChangedFileKind::Directory(contents) if contents.file_count == 0 => {
+                    Some((contents.nested_repositories, contents.linked_worktrees))
+                }
+                ChangedFileKind::Directory(_) | ChangedFileKind::File => None,
+            };
+            if let Some((repositories, worktrees)) = repositories {
+                left_out.push((file.path.as_str(), repositories, worktrees));
+                continue;
+            }
+        }
         not_whole.insert(file.path.as_str());
         not_whole.extend(ancestors(&file.path));
     }
@@ -440,6 +462,15 @@ pub(super) fn fold_added_directories(
             )
         })
         .collect();
+    for (path, repositories, worktrees) in left_out {
+        let Some(root) = ancestors(path).find(|ancestor| contents_of.contains_key(*ancestor))
+        else {
+            continue;
+        };
+        let contents = contents_of.get_mut(root).expect("found just above");
+        contents.repositories_not_staged += repositories;
+        contents.worktrees_not_staged += worktrees;
+    }
     for (path, kind) in &links {
         let Some(root) = ancestors(path).find(|ancestor| contents_of.contains_key(*ancestor))
         else {
@@ -1346,6 +1377,47 @@ mod tests {
         drop(git);
         git_in(root)(&["worktree", "add", "-q", "-b", "side", "vendor/wt"]);
         repo
+    }
+
+    /// Staging a folder leaves the repositories inside it out on purpose, so
+    /// they stay untracked; that must not keep the staged folder open, or every
+    /// file of a staged `vendor/` beside a nested clone comes back one row
+    /// each. The staged row stays one row and says what it left out. An
+    /// untracked FILE inside still opens it: that one is part of the folder.
+    #[test]
+    fn a_folder_staged_without_its_repositories_still_folds_and_says_so() {
+        let repo = folder_with_repositories();
+        let root = repo.path();
+        write(root, "vendor/y.js", "y\n");
+        let only = root.join("vendor/sub/lib");
+        fs::create_dir_all(&only).unwrap();
+        git_in(&only)(&["init", "-q"]);
+        write(&only, "own.txt", "own\n");
+
+        stage_with_report(root, &["vendor".to_string()]).unwrap();
+        let (staged, _) = changed_files(root).unwrap();
+
+        assert_eq!(staged.len(), 1, "{staged:?}");
+        let row = &staged[0];
+        assert_eq!(row.path, "vendor");
+        let contents = row.folder_contents().expect("a folder row");
+        assert_eq!(contents.file_count, 2);
+        assert_eq!(contents.repositories_not_staged, 2);
+        assert_eq!(contents.worktrees_not_staged, 1);
+        assert_eq!(
+            crate::model::folder_count_label(row).as_deref(),
+            Some(
+                "2 files \u{b7} 2 nested repositories and 1 worktree of this repository \
+                 not staged"
+            )
+        );
+
+        write(root, "vendor/z.js", "z\n");
+        let (staged, _) = changed_files(root).unwrap();
+        assert!(
+            staged.iter().all(|f| f.path != "vendor"),
+            "an untracked file inside opens it: {staged:?}"
+        );
     }
 
     fn index_modes(root: &Path) -> Vec<(String, String)> {
