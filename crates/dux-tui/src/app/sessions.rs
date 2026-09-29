@@ -9156,12 +9156,12 @@ mod tests {
         );
     }
 
-    /// The case the user hit. A create with nothing slow in it (a local
-    /// worktree, a provider that comes straight up) finishes well inside one
-    /// poll of the run loop, so a single drain applies its busy, every progress
-    /// line and its final together, and only what is left after that drain is
-    /// ever drawn. The busy cannot be what tells the user it happened; the final
-    /// has to.
+    /// A fast create can finish inside one poll of the run loop, so one drain
+    /// applies everything it posted and only what is left after that drain is
+    /// drawn. The create's busy rides the worker channel too (the dispatch
+    /// posts it there rather than setting it on the line), so it is among the
+    /// events held here. Whatever the spinner managed to show, the line must
+    /// end on the sentence, not blank.
     #[test]
     fn a_create_that_finishes_inside_one_drain_still_leaves_a_sentence() {
         let (_root, _repo, mut app) = project_based_on_develop();

@@ -98,13 +98,22 @@ struct ManagedCreatePlan {
 ///
 /// The browser can vouch for it: the new row appears in a sidebar that is
 /// always on screen and the page navigates to the new agent's pane. The
-/// terminal UI cannot, so it gets the sentence. The whole create usually
-/// finishes inside one poll of its run loop (nothing slow happens in it
-/// without a pull or a startup command), so the drain that applies its busy
-/// and progress also applies its final and the spinner is never drawn. What is
-/// left is the selection moving to one row in a list that can scroll it out of
-/// view and a pane that looks like every other agent's pane, which is the
-/// small-indicator case of the confirmation rule.
+/// terminal UI cannot: the new row can sit outside the visible scroll area,
+/// which is the small-indicator case of the confirmation rule. Quieting it
+/// there anyway left the line blank, because the terminal UI answers a quiet
+/// keyed info by retiring the create's spinner and showing nothing in its
+/// place. Nothing on screen then said the create had happened, and a fast
+/// create can land its busy, its progress and its final in one poll of the
+/// run loop, so the spinner may never have been drawn either.
+///
+/// The sentence is the engine's shared one, deliberately without the terminal
+/// UI's landing note (where the pane landed, the fullscreen key): that note
+/// belongs to launches the user asked to open, and a create says what it made.
+///
+/// The resumed reconnect launch stays quiet on both surfaces on purpose. A
+/// resume relaunches the pane the user is already looking at in place, and
+/// that pane streaming again is something the terminal UI's screen does vouch
+/// for.
 const ROW_AND_PANE_CREATE_QUIET: crate::statusline::QuietSurfaces =
     crate::statusline::QuietSurfaces::WEB;
 
