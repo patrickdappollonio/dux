@@ -12855,6 +12855,7 @@ mod tests {
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             })
             .collect();
         app.files_index = 1500;
@@ -23953,6 +23954,7 @@ mod tests {
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.focus = FocusPane::Files;
         app.right_section = RightSection::Unstaged;
@@ -24144,6 +24146,7 @@ mod tests {
             binary,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }
     }
 
@@ -24219,6 +24222,7 @@ mod tests {
             binary: false,
             diff_excluded: true,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }
     }
 
@@ -24321,6 +24325,7 @@ mod tests {
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             })
             .collect();
         let title = recap_title(&app, &files);
@@ -24343,6 +24348,7 @@ mod tests {
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             },
             ChangedFile {
                 path: "logo.png".to_string(),
@@ -24352,6 +24358,7 @@ mod tests {
                 binary: true,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             },
             ChangedFile {
                 path: "locked.txt".to_string(),
@@ -24361,6 +24368,7 @@ mod tests {
                 binary: false,
                 diff_excluded: true,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             },
         ];
         app.right_hidden = false;

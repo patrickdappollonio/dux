@@ -347,6 +347,7 @@ fn the_changes_list_cuts_a_wide_path_and_keeps_the_stats_right_aligned() {
         binary: false,
         diff_excluded: false,
         renamed_from: None,
+        kind: dux_core::model::ChangedFileKind::File,
     };
     let wide_path = format!("docs/{LONG_CJK}/{LONG_CJK}.md");
     app.engine.unstaged_files = vec![file("plain.md"), file(&wide_path)];

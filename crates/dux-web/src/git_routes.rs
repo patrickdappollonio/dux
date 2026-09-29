@@ -61,10 +61,10 @@ struct BatchResult {
     refused: Vec<String>,
 }
 
-/// Maximum number of paths one batch may name. `changed_files` runs
-/// `--untracked-files=all`, so a select-all in a repository with a large
-/// untracked tree can reach tens of thousands of paths; the cap keeps one
-/// request bounded and is answered with a sentence rather than a bare status.
+/// Maximum number of paths one batch may name. `changed_files` folds a wholly
+/// untracked folder into one row, but a repository can still hold tens of
+/// thousands of individually changed files; the cap keeps one request bounded
+/// and is answered with a sentence rather than a bare status.
 const MAX_BATCH_PATHS: usize = 2_000;
 
 /// Body cap for the batch routes. Comfortably holds `MAX_BATCH_PATHS` long
@@ -228,7 +228,11 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteR
     let wt = worktree.to_path_buf();
     let p = path.to_string();
     let ok = tokio::task::spawn_blocking(move || match dux_core::git::changed_files(&wt) {
-        Ok((staged, unstaged)) => staged.iter().chain(&unstaged).any(|f| f.path == p),
+        // A path inside a folded folder is answered for by the folder's row.
+        Ok((staged, unstaged)) => {
+            dux_core::model::listing_row_for(&staged, &p).is_some()
+                || dux_core::model::listing_row_for(&unstaged, &p).is_some()
+        }
         Err(_) => false,
     })
     .await
@@ -459,9 +463,9 @@ async fn files_op(
     let requested = paths.clone();
     let partition = tokio::task::spawn_blocking(move || {
         dux_core::git::changed_files(&wt).map(|(staged, unstaged)| {
-            let live: std::collections::HashSet<&str> = match section {
-                Section::Staged => staged.iter().map(|f| f.path.as_str()).collect(),
-                Section::Unstaged => unstaged.iter().map(|f| f.path.as_str()).collect(),
+            let live = match section {
+                Section::Staged => &staged,
+                Section::Unstaged => &unstaged,
             };
             let mut seen = std::collections::HashSet::new();
             let mut done = Vec::new();
@@ -470,7 +474,9 @@ async fn files_op(
                 if !seen.insert(path.clone()) {
                     continue;
                 }
-                if live.contains(path.as_str()) {
+                // A file inside a folded folder is in the section when the
+                // folder is, which is how an expanded row validates.
+                if dux_core::model::listing_row_for(live, &path).is_some() {
                     done.push(path);
                 } else {
                     refused.push(path);
@@ -1169,6 +1175,89 @@ mod tests {
             1,
             "a batch must refresh the changed files exactly once",
         );
+    }
+
+    /// A folded folder is one path on the wire and the git routes act on the
+    /// whole of it: stage it, unstage it, and discard it (which deletes it).
+    /// A file inside it, which a browser reaches by expanding the row, is a
+    /// real change too, so the section validation lets it through.
+    #[tokio::test]
+    async fn a_folded_folder_is_staged_unstaged_and_discarded_whole() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        for index in 0..12 {
+            let dir = worktree
+                .join("node_modules")
+                .join(format!("pkg{}", index / 4));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("f{index}.js")), "x\n").unwrap();
+        }
+        let lists = |worktree: PathBuf| async move {
+            tokio::task::spawn_blocking(move || dux_core::git::changed_files(&worktree).unwrap())
+                .await
+                .unwrap()
+        };
+        let folder = |count| dux_core::model::ChangedFileKind::Directory { file_count: count };
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage",
+                r#"{"path":"node_modules"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+        let (staged, unstaged) = lists(worktree.clone()).await;
+        assert!(unstaged.is_empty(), "{unstaged:?}");
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].path, "node_modules");
+        assert_eq!(staged[0].kind, folder(12));
+
+        // One file inside the staged folder, reached by expanding it.
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/unstage-files",
+                r#"{"paths":["node_modules/pkg0/f0.js"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+        let (staged, unstaged) = lists(worktree.clone()).await;
+        assert_eq!(staged[0].kind, folder(11));
+        assert!(unstaged.iter().any(|f| f.path == "node_modules/pkg0/f0.js"));
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/unstage",
+                r#"{"path":"node_modules"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+        let (staged, unstaged) = lists(worktree.clone()).await;
+        assert!(staged.is_empty(), "{staged:?}");
+        assert_eq!(unstaged.len(), 1);
+        assert_eq!(unstaged[0].kind, folder(12));
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"node_modules"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+        assert!(!worktree.join("node_modules").exists());
+        let (staged, unstaged) = lists(worktree.clone()).await;
+        assert!(staged.is_empty() && unstaged.is_empty());
     }
 
     /// The unstage batch is the mirror image: it names what it reset, leaves

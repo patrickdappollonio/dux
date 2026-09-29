@@ -12792,6 +12792,7 @@ mod tests {
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         });
         app.engine.staged_files.push(ChangedFile {
             path: "staged.txt".into(),
@@ -12801,6 +12802,7 @@ mod tests {
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         });
         assert_eq!(
             app.mouse_target(overlap.x, overlap.y),
@@ -13527,6 +13529,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
@@ -13578,6 +13581,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
@@ -16298,6 +16302,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         };
         app.engine.staged_files = vec![ghost.clone()];
         app.engine.unstaged_files = vec![ghost];
@@ -17318,6 +17323,7 @@ not_a_real_action = ["x"]
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             },
             ChangedFile {
                 path: "src/main.rs".into(),
@@ -17327,6 +17333,7 @@ not_a_real_action = ["x"]
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             },
         ];
         app.engine.staged_files = vec![ChangedFile {
@@ -17337,6 +17344,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
 
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
@@ -17379,6 +17387,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
 
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
@@ -17415,6 +17424,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.selected_left = 1;
         app.focus = FocusPane::Files;
@@ -17478,6 +17488,7 @@ not_a_real_action = ["x"]
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             },
             ChangedFile {
                 path: "b.txt".into(),
@@ -17487,6 +17498,7 @@ not_a_real_action = ["x"]
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             },
         ];
         app.focus = FocusPane::Center;
@@ -17512,6 +17524,7 @@ not_a_real_action = ["x"]
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             },
             ChangedFile {
                 path: "b.txt".into(),
@@ -17521,6 +17534,7 @@ not_a_real_action = ["x"]
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             },
         ];
         app.focus = FocusPane::Center;
@@ -17545,6 +17559,7 @@ not_a_real_action = ["x"]
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: dux_core::model::ChangedFileKind::File,
             })
             .collect();
         app.files_index = 0;
@@ -21260,6 +21275,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.engine.staged_files = vec![ChangedFile {
             path: "b.txt".into(),
@@ -21269,6 +21285,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 1));
@@ -21301,6 +21318,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.selected_left = 1;
         app.focus = FocusPane::Files;
@@ -21334,6 +21352,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.selected_left = 1;
 
@@ -21802,6 +21821,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.engine.staged_files = vec![ChangedFile {
             path: "b.txt".into(),
@@ -21811,6 +21831,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         let original = app.staged_pane_height_pct;
 
@@ -21857,6 +21878,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.engine.staged_files = vec![ChangedFile {
             path: "b.txt".into(),
@@ -21866,6 +21888,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         let original = app.staged_pane_height_pct;
 
@@ -21895,6 +21918,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         let original = app.commit_pane_height_pct;
 
@@ -21940,6 +21964,7 @@ not_a_real_action = ["x"]
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         let original = app.commit_pane_height_pct;
 
@@ -26833,6 +26858,7 @@ cyan = "#00ffff"
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.prompt = PromptState::ConfirmDiscardFile {
             file_path: "src/main.rs".to_string(),
@@ -26899,6 +26925,7 @@ cyan = "#00ffff"
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.selected_left = 1;
         app.right_section = RightSection::Unstaged;
@@ -26978,6 +27005,7 @@ cyan = "#00ffff"
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }];
         app.selected_left = 1;
         app.commit_input.text = "a real message".to_string();
@@ -36621,6 +36649,7 @@ cyan = "#00ffff"
                     binary: false,
                     diff_excluded: false,
                     renamed_from: None,
+                    kind: dux_core::model::ChangedFileKind::File,
                 }];
                 app.right_section = RightSection::Unstaged;
                 app.files_index = 0;

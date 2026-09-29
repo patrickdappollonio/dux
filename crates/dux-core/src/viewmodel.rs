@@ -958,6 +958,36 @@ pub struct ChangedFileView {
     /// leaves the payload every other consumer reads exactly as it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub renamed_from: Option<String>,
+    /// Present only on a row that stands for a whole folder, as
+    /// `"kind": "directory", "file_count": N` or `"kind": "nested_repository"`.
+    /// Absent on an ordinary file row, so a client that predates folding
+    /// reads every file row exactly as before and a folder row as a path.
+    #[serde(flatten)]
+    pub folder: Option<FolderView>,
+}
+
+/// What a folder row stands for on the wire. See
+/// [`crate::model::ChangedFileKind`] for what folds and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FolderView {
+    /// A folder standing for `file_count` files at any depth.
+    Directory { file_count: usize },
+    /// An untracked repository of its own, which is not looked inside.
+    NestedRepository,
+}
+
+impl FolderView {
+    /// The wire form of a row's kind, `None` for an ordinary file.
+    pub fn from_kind(kind: &crate::model::ChangedFileKind) -> Option<Self> {
+        match kind {
+            crate::model::ChangedFileKind::File => None,
+            crate::model::ChangedFileKind::Directory { file_count } => Some(Self::Directory {
+                file_count: *file_count,
+            }),
+            crate::model::ChangedFileKind::NestedRepository => Some(Self::NestedRepository),
+        }
+    }
 }
 
 /// One process inside a sampled tree, projected for web clients.

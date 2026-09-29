@@ -2806,6 +2806,7 @@ mod tests {
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: crate::model::ChangedFileKind::File,
         }
     }
 

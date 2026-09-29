@@ -727,6 +727,7 @@ fn view_from(f: &ChangedFile) -> ChangedFileView {
         binary: f.binary,
         diff_excluded: f.diff_excluded,
         renamed_from: f.renamed_from.clone(),
+        folder: dux_core::viewmodel::FolderView::from_kind(&f.kind),
     }
 }
 
@@ -759,6 +760,7 @@ mod tests {
             binary: false,
             diff_excluded: false,
             renamed_from: renamed_from.map(str::to_string),
+            kind: dux_core::model::ChangedFileKind::File,
         }
     }
 
@@ -795,6 +797,30 @@ mod tests {
 
         let json = serde_json::to_string(&views[0]).unwrap();
         assert!(!json.contains("renamed_from"), "{json}");
+        // Nor any folder fields: a client that predates folding reads a file
+        // row exactly as it always did.
+        assert!(!json.contains("kind"), "{json}");
+        assert!(!json.contains("file_count"), "{json}");
+    }
+
+    /// A folded folder travels as its bare path plus what it stands for, so a
+    /// browser can draw the trailing slash and the count.
+    #[test]
+    fn a_folder_row_travels_with_its_kind_and_file_count() {
+        let mut folder = changed("node_modules", "?", None);
+        folder.kind = dux_core::model::ChangedFileKind::Directory { file_count: 28_747 };
+        let mut nested = changed("vendor/lib", "?", None);
+        nested.kind = dux_core::model::ChangedFileKind::NestedRepository;
+
+        let views = sorted_views(&[folder, nested]);
+
+        let json = serde_json::to_value(&views).unwrap();
+        assert_eq!(json[0]["path"], "node_modules");
+        assert_eq!(json[0]["kind"], "directory");
+        assert_eq!(json[0]["file_count"], 28_747);
+        assert_eq!(json[1]["path"], "vendor/lib");
+        assert_eq!(json[1]["kind"], "nested_repository");
+        assert!(json[1].get("file_count").is_none(), "{json}");
     }
 
     fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
@@ -980,6 +1006,54 @@ mod tests {
                 unstaged.len(),
                 body.len()
             );
+
+            // The folder count: the exact `ls-files` the listing runs for it,
+            // and the record count over its answer.
+            let started = Instant::now();
+            let out = std::process::Command::new("git")
+                .args([
+                    "--literal-pathspecs",
+                    "-C",
+                    repo.to_string_lossy().as_ref(),
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "--full-name",
+                    "-z",
+                ])
+                .output()
+                .unwrap();
+            let counted = out
+                .stdout
+                .split(|b| *b == 0)
+                .filter(|r| !r.is_empty())
+                .count();
+            let count_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+            // Expanding the folder: its first level, then one package inside.
+            let started = Instant::now();
+            let children = dux_core::git::changed_dir_children(
+                &repo,
+                "node_modules",
+                dux_core::git::ChangesSide::Unstaged,
+            )
+            .unwrap();
+            let expand_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let started = Instant::now();
+            let grandchildren = dux_core::git::changed_dir_children(
+                &repo,
+                "node_modules/pkg0",
+                dux_core::git::ChangesSide::Unstaged,
+            )
+            .unwrap();
+            let expand_deeper_ms = started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "run {run}: folder count {count_ms:.1} ms ({counted} records); expand \
+                 node_modules {expand_ms:.1} ms ({} rows), node_modules/pkg0 \
+                 {expand_deeper_ms:.1} ms ({} rows)",
+                children.len(),
+                grandchildren.len()
+            );
         }
     }
 
@@ -1010,16 +1084,12 @@ mod tests {
         assert_eq!(again.rev, resp.rev, "rev must not advance without a change");
     }
 
-    /// HUGE-CHANGES REPRO, ignored and still failing: one untracked dependency
-    /// directory becomes one wire row PER FILE, because the sweep runs
-    /// `--untracked-files=all` and nothing caps or folds the list. The user's
-    /// `node_modules` was ~29k rows (3.9 MB of JSON in the preview repro,
-    /// 19.7 MB at 150k). The browser now windows the list, so the cost left is
-    /// the payload and its parse. Whether the answer should stay bounded by
-    /// folding untracked directories is an open decision; this test states the
-    /// bound it would have to meet.
+    /// One untracked dependency directory used to become one wire row PER
+    /// FILE: the user's `node_modules` was ~29k rows (3.9 MB of JSON in the
+    /// preview repro, 19.7 MB at 150k). The sweep now folds a wholly untracked
+    /// folder into one row that carries its file count, the way `git status`
+    /// itself reports it.
     #[tokio::test]
-    #[ignore = "awaits the untracked-folder folding decision"]
     async fn huge_changes_repro_untracked_directory_rows_are_bounded() {
         let (engine, bus, _tmp, wt) = boot();
         let file_count = 5_000;
@@ -1039,6 +1109,16 @@ mod tests {
             rows <= 1_000,
             "{file_count} files under one untracked directory became {rows} wire rows \
              ({bytes} bytes of JSON)"
+        );
+        let folder = resp
+            .unstaged
+            .iter()
+            .find(|row| row.path == "node_modules")
+            .expect("the folder is one row");
+        assert_eq!(
+            folder.folder,
+            Some(dux_core::viewmodel::FolderView::Directory { file_count }),
+            "the row says how many files it stands for"
         );
     }
 

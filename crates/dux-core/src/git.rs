@@ -14,6 +14,9 @@ use crate::logger;
 use crate::model::{ChangedFile, ProjectBranchStatus};
 use crate::worker::BranchWarningKind;
 
+mod folding;
+pub use folding::{ChangesSide, changed_dir_children};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWorktree {
     pub path: PathBuf,
@@ -2813,7 +2816,10 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
             "status",
             "--porcelain=v1",
             "-z",
-            "--untracked-files=all",
+            // git's own default: a folder with nothing tracked inside it is ONE
+            // entry, `dir/`, rather than one entry per file. `all` listed a
+            // 30,000-file `node_modules` as 30,000 rows; see `folding`.
+            "--untracked-files=normal",
         ])
         .output()?;
     if !output.status.success() {
@@ -2825,6 +2831,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
 
     let mut staged = Vec::new();
     let mut unstaged = Vec::new();
+    let mut untracked_folders = Vec::new();
 
     for entry in parse_status_porcelain_z(&output.stdout) {
         let index_status = entry.index_status;
@@ -2833,6 +2840,18 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
         let source = entry.renamed_from;
 
         if index_status == '?' && worktree_status == '?' {
+            // A trailing slash is how git says "this whole folder": the row
+            // keeps the bare path and says so in its kind, counted below.
+            let (path, kind) = match path.strip_suffix('/') {
+                Some(folder) => {
+                    untracked_folders.push(folder.to_string());
+                    (
+                        folder.to_string(),
+                        crate::model::ChangedFileKind::Directory { file_count: 0 },
+                    )
+                }
+                None => (path, crate::model::ChangedFileKind::File),
+            };
             unstaged.push(ChangedFile {
                 status: "?".to_string(),
                 path,
@@ -2841,6 +2860,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind,
             });
             continue;
         }
@@ -2854,6 +2874,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                 binary: false,
                 diff_excluded: false,
                 renamed_from: rename_source(index_status, &source),
+                kind: crate::model::ChangedFileKind::File,
             });
         }
 
@@ -2866,9 +2887,22 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                 binary: false,
                 diff_excluded: false,
                 renamed_from: rename_source(worktree_status, &source),
+                kind: crate::model::ChangedFileKind::File,
             });
         }
     }
+
+    // What each folded folder holds. A count git could not produce fails the
+    // read rather than claiming an empty folder.
+    if !untracked_folders.is_empty() {
+        let counts = folding::count_untracked_folders(worktree_path, &untracked_folders)?;
+        for file in unstaged.iter_mut().filter(|file| file.is_folder()) {
+            if let Some(folder) = counts.get(&file.path) {
+                file.kind = folder.kind();
+            }
+        }
+    }
+    let mut staged = folding::fold_added_directories(worktree_path, staged);
 
     // The tracked diff and the untracked counting are two independent sources,
     // so the git call's answer is resolved to a map FIRST and the loop runs
@@ -2876,7 +2910,12 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     // tracked rows their line counts and nothing else; running the loop inside
     // the call's `Ok` would take the untracked files' in-process counts with it.
     let tracked_stats = unstaged_numstat(wt.as_ref());
-    let staged_stats = staged_numstat(wt.as_ref());
+    let folded_staged: Vec<String> = staged
+        .iter()
+        .filter(|file| file.is_folder())
+        .map(|file| file.path.clone())
+        .collect();
+    let staged_stats = staged_numstat(wt.as_ref(), &folded_staged);
 
     // git prints `-\t-` for a path the repository excludes from diffs in
     // .gitattributes exactly as it prints it for a real binary, so numstat
@@ -2935,9 +2974,23 @@ fn unstaged_numstat(worktree: &str) -> HashMap<String, DiffStat> {
 
 /// Per-path line counts for the staged changes in `worktree`. Answers with an
 /// empty map on a failed call, for the same reason [`unstaged_numstat`] does.
-fn staged_numstat(worktree: &str) -> HashMap<String, DiffStat> {
-    Command::new("git")
-        .args(["-C", worktree, "diff", "--cached", "--numstat", "-z"])
+///
+/// `skip` names the folders staged whole, whose rows carry a file count rather
+/// than line counts: their blobs are left unread, which on a 30,000-file folder
+/// is most of the time this call takes. Each is an `exclude` pathspec with the
+/// `literal` magic, so a folder named like a glob excludes only itself, and all
+/// of them follow `--`, so one named like an option is a name. Past a few
+/// hundred folders the command line would grow for little gain, so the
+/// exclusion is dropped and everything is counted, which costs time only.
+fn staged_numstat(worktree: &str, skip: &[String]) -> HashMap<String, DiffStat> {
+    const MAX_SKIPPED_FOLDERS: usize = 256;
+    let mut command = Command::new("git");
+    command.args(["-C", worktree, "diff", "--cached", "--numstat", "-z"]);
+    if !skip.is_empty() && skip.len() <= MAX_SKIPPED_FOLDERS {
+        command.args(["--", "."]);
+        command.args(skip.iter().map(|dir| format!(":(exclude,literal){dir}")));
+    }
+    command
         .output()
         .ok()
         .filter(|ns| ns.status.success())
@@ -3186,7 +3239,7 @@ fn apply_unstaged_stats(
     for file in unstaged.iter_mut() {
         if let Some(stat) = tracked.get(&file.path) {
             apply_stat(file, stat, excluded);
-        } else if file.status == "?" {
+        } else if file.status == "?" && !file.is_folder() {
             if untracked_stats_budget == 0 {
                 continue;
             }
@@ -3723,13 +3776,18 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
 /// change has nothing to discard; both are reported as an error.
 pub fn discard_classify(worktree_path: &Path, path: &str) -> Result<bool> {
     let (staged, unstaged) = changed_files(worktree_path)?;
+    // A path inside a folded folder is answered for by that folder's row: a
+    // file reached by expanding an untracked folder is untracked, and one
+    // inside a folder staged whole is staged.
+    let staged_row = crate::model::listing_row_for(&staged, path);
+    let unstaged_row = crate::model::listing_row_for(&unstaged, path);
     // Reject when the file is staged (and has no separate unstaged change). The
     // TUI and web both surface "Unstage the file first to discard changes." for
     // this case.
-    if staged.iter().any(|f| f.path == path) && !unstaged.iter().any(|f| f.path == path) {
+    if staged_row.is_some() && unstaged_row.is_none() {
         anyhow::bail!("Unstage the file first to discard changes.");
     }
-    match unstaged.iter().find(|f| f.path == path) {
+    match unstaged_row {
         Some(file) => Ok(file.status == "?"),
         None => anyhow::bail!("No unstaged changes to discard for \"{path}\"."),
     }
@@ -8364,7 +8422,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_files_expands_untracked_directories_into_files() {
+    fn changed_files_folds_an_untracked_directory_into_one_row() {
         let repo = init_test_repo();
         let wt = add_worktree(repo.path(), "changes-pane-folder");
 
@@ -8378,39 +8436,18 @@ mod tests {
         fs::write(nested.join("two.txt"), "nested line\n").unwrap();
 
         let (_staged, unstaged) = changed_files(&wt).unwrap();
-        let mut actual: Vec<_> = unstaged
-            .into_iter()
-            .map(|file| {
-                (
-                    file.path,
-                    file.status,
-                    file.additions,
-                    file.deletions,
-                    file.binary,
-                )
-            })
-            .collect();
-        actual.sort();
 
+        assert_eq!(unstaged.len(), 1, "{unstaged:?}");
+        let row = &unstaged[0];
+        assert_eq!(row.path, "new-folder");
+        assert_eq!(row.status, "?");
         assert_eq!(
-            actual,
-            vec![
-                (
-                    "new-folder/nested/two.txt".to_string(),
-                    "?".to_string(),
-                    1,
-                    0,
-                    false,
-                ),
-                (
-                    "new-folder/one.txt".to_string(),
-                    "?".to_string(),
-                    2,
-                    0,
-                    false
-                ),
-            ]
+            row.kind,
+            crate::model::ChangedFileKind::Directory { file_count: 2 }
         );
+        // A folder row carries a count, never line counts it would have to
+        // read every file inside to produce.
+        assert_eq!((row.additions, row.deletions, row.binary), (0, 0, false));
     }
 
     #[test]
@@ -8992,6 +9029,7 @@ mod tests {
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: crate::model::ChangedFileKind::File,
             },
             ChangedFile {
                 status: "M".to_string(),
@@ -9001,6 +9039,7 @@ mod tests {
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: crate::model::ChangedFileKind::File,
             },
         ];
 
@@ -9034,6 +9073,7 @@ mod tests {
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: crate::model::ChangedFileKind::File,
             },
             ChangedFile {
                 status: "M".to_string(),
@@ -9043,6 +9083,7 @@ mod tests {
                 binary: false,
                 diff_excluded: false,
                 renamed_from: None,
+                kind: crate::model::ChangedFileKind::File,
             },
         ];
         let tracked = HashMap::from([("tracked.txt".to_string(), DiffStat::Text(7, 4))]);

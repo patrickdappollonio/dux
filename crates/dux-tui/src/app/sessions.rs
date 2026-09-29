@@ -6237,6 +6237,7 @@ mod tests {
             binary: false,
             diff_excluded: false,
             renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
         }
     }
 

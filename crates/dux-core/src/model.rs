@@ -831,6 +831,115 @@ pub struct ChangedFile {
     /// Where a rename or copy came from, for the surfaces that have to know
     /// which OTHER directory also changed. None for every other status.
     pub renamed_from: Option<String>,
+    /// Whether this row is one file or a whole folder folded into one row.
+    pub kind: ChangedFileKind,
+}
+
+/// What one changed-files row stands for.
+///
+/// A folder is folded the way `git status` folds one by default: a directory
+/// with nothing tracked inside it is ONE row, not one row per file, because a
+/// `node_modules` of thirty thousand files listed individually buried every
+/// real change and cost the browser megabytes. The row's `path` is the
+/// directory itself with no trailing slash, so the ordinary git verbs (`add`,
+/// `reset`, delete) act on the whole folder when handed it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ChangedFileKind {
+    /// One file (or one symlink, or one submodule entry git tracks).
+    #[default]
+    File,
+    /// A folder standing for every file inside it. On the unstaged side
+    /// (status `?`) it is a directory with nothing tracked inside it, exactly
+    /// the entry `git status` itself reports. On the staged side (status `A`)
+    /// it is a directory HEAD does not have whose every staged entry is newly
+    /// added, which is what the same folder becomes once it is staged whole.
+    /// `file_count` is how many files are inside, at any depth.
+    Directory { file_count: usize },
+    /// An untracked directory that holds a repository of its own. git does not
+    /// look inside another repository, so neither does dux: there is no file
+    /// count to give and nothing to expand, and the row says what it is.
+    NestedRepository,
+}
+
+impl ChangedFile {
+    /// True for a row that stands for a folder rather than one file.
+    pub fn is_folder(&self) -> bool {
+        match self.kind {
+            ChangedFileKind::File => false,
+            ChangedFileKind::Directory { .. } | ChangedFileKind::NestedRepository => true,
+        }
+    }
+
+    /// True for a folder row whose contents can be listed underneath it.
+    pub fn is_expandable(&self) -> bool {
+        match self.kind {
+            ChangedFileKind::Directory { .. } => true,
+            ChangedFileKind::File | ChangedFileKind::NestedRepository => false,
+        }
+    }
+
+    /// How many files this row stands for, which is what every total counts:
+    /// a folded folder of thirty thousand files is thirty thousand changed
+    /// files, not one. A nested repository is one entry, since dux does not
+    /// look inside it.
+    pub fn file_count(&self) -> usize {
+        match self.kind {
+            ChangedFileKind::File | ChangedFileKind::NestedRepository => 1,
+            ChangedFileKind::Directory { file_count } => file_count,
+        }
+    }
+}
+
+/// The number of changed files a list stands for, folded folders counted by
+/// what is inside them.
+pub fn total_file_count(files: &[ChangedFile]) -> usize {
+    files.iter().map(ChangedFile::file_count).sum()
+}
+
+/// The row in `files` that answers for `path`: the row with exactly that path,
+/// or else the folded folder the path sits inside. `None` when neither exists.
+///
+/// This is how an action on a file the user reached by expanding a folder is
+/// validated: the file is not a row of its own in the listing, but the folder
+/// it lives in is, and that is the proof it is a real change in this worktree.
+pub fn listing_row_for<'a>(files: &'a [ChangedFile], path: &str) -> Option<&'a ChangedFile> {
+    if let Some(exact) = files.iter().find(|file| file.path == path) {
+        return Some(exact);
+    }
+    files.iter().find(|file| {
+        file.is_expandable()
+            && path
+                .strip_prefix(file.path.as_str())
+                .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
+    })
+}
+
+/// `n` with a comma between every group of three digits, the form a folder
+/// row's file count is written in (`28,747 files`).
+pub fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// The words a folder row's count is written in: `1 file`, `28,747 files`,
+/// or `nested repository` for a repository dux does not look inside. `None`
+/// for an ordinary file row, which carries line counts instead.
+pub fn folder_count_label(file: &ChangedFile) -> Option<String> {
+    match file.kind {
+        ChangedFileKind::File => None,
+        ChangedFileKind::Directory { file_count: 1 } => Some("1 file".to_string()),
+        ChangedFileKind::Directory { file_count } => {
+            Some(format!("{} files", group_thousands(file_count)))
+        }
+        ChangedFileKind::NestedRepository => Some("nested repository".to_string()),
+    }
 }
 
 /// Who a companion terminal belongs to. A terminal is owned by exactly one
@@ -1056,6 +1165,85 @@ pub struct CompanionTerminal {
     /// compute the same "recently created" order over terminals and agents.
     /// RUNTIME ONLY (memory-only, like the terminal itself).
     pub created_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod changed_file_kind_tests {
+    use super::*;
+
+    fn row(path: &str, kind: ChangedFileKind) -> ChangedFile {
+        ChangedFile {
+            status: "?".to_string(),
+            path: path.to_string(),
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            renamed_from: None,
+            kind,
+        }
+    }
+
+    #[test]
+    fn totals_count_the_files_inside_a_folded_folder() {
+        let files = vec![
+            row("notes.md", ChangedFileKind::File),
+            row(
+                "node_modules",
+                ChangedFileKind::Directory { file_count: 28_747 },
+            ),
+            row("vendor/other", ChangedFileKind::NestedRepository),
+        ];
+        assert_eq!(total_file_count(&files), 1 + 28_747 + 1);
+    }
+
+    #[test]
+    fn a_file_inside_a_folded_folder_is_answered_for_by_the_folder() {
+        let files = vec![
+            row("node_modules", ChangedFileKind::Directory { file_count: 2 }),
+            row("node", ChangedFileKind::File),
+        ];
+        let found = listing_row_for(&files, "node_modules/pkg/index.js").map(|f| f.path.as_str());
+        assert_eq!(found, Some("node_modules"));
+        assert_eq!(
+            listing_row_for(&files, "node").map(|f| f.path.as_str()),
+            Some("node")
+        );
+        // A sibling that merely shares the prefix is not inside the folder.
+        assert!(listing_row_for(&files, "node_modules2/x.js").is_none());
+        assert!(listing_row_for(&files, "node_modules/").is_none());
+    }
+
+    #[test]
+    fn a_nested_repository_answers_for_nothing_inside_it() {
+        let files = vec![row("vendor/lib", ChangedFileKind::NestedRepository)];
+        assert!(listing_row_for(&files, "vendor/lib/src/main.rs").is_none());
+        assert!(listing_row_for(&files, "vendor/lib").is_some());
+    }
+
+    #[test]
+    fn counts_are_grouped_by_thousands() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1_000), "1,000");
+        assert_eq!(group_thousands(28_747), "28,747");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn a_folder_row_names_its_count_in_words() {
+        let one = row("a", ChangedFileKind::Directory { file_count: 1 });
+        let many = row("b", ChangedFileKind::Directory { file_count: 28_747 });
+        let nested = row("c", ChangedFileKind::NestedRepository);
+        let file = row("d", ChangedFileKind::File);
+        assert_eq!(folder_count_label(&one).as_deref(), Some("1 file"));
+        assert_eq!(folder_count_label(&many).as_deref(), Some("28,747 files"));
+        assert_eq!(
+            folder_count_label(&nested).as_deref(),
+            Some("nested repository")
+        );
+        assert_eq!(folder_count_label(&file), None);
+    }
 }
 
 #[cfg(test)]
