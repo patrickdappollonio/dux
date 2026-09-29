@@ -292,3 +292,72 @@ describe("every name a modal shows is the shared chip", () => {
     }
   })
 })
+
+// A path is a name, and a name in a dialog is a chip. The shape that slips past
+// the quote detector is a path interpolated into a plain template string that
+// a dialog then prints as text: nothing quotes it, and nothing chips it either.
+// This reads the dialogs and every lib/ module a dialog imports (where the
+// copy a dialog prints is often built), and flags a template literal that
+// interpolates a `.path` or a `path` into words: a template whose own text
+// reads as a sentence (two words in a row). A `prose` template, a `chip(...)`
+// argument and a template that is the child of an `<InlineCode>` are the chip
+// itself, and a template with no words (a URL, a key, a shell argument) is not
+// copy at all.
+const PLAIN_PATH_TEMPLATE =
+  /(?<!prose|chip\(|InlineCode>\{)`[^`]*\$\{[^}]*\bpath\b[^}]*\}[^`]*`/g
+
+function plainPathTemplates(source: string): string[] {
+  return [...source.matchAll(PLAIN_PATH_TEMPLATE)]
+    .filter((m) => /[A-Za-z]{2,} [A-Za-z]{2,}/.test(m[0].replace(/\$\{[^}]*\}/g, "")))
+    .map((m) => lineAround(source, m.index ?? 0))
+}
+
+// The lib modules the dialogs import, found from their import lines.
+function dialogLibModules(): { name: string; source: string }[] {
+  const dialogs = [...walk(join(srcDir, "components"))]
+    .map((path) => ({ name: relative(srcDir, path), source: readFileSync(path, "utf-8") }))
+    .filter(
+      ({ name, source }) =>
+        !name.includes(".test.") &&
+        ((/Dialog[^/]*\.tsx$/.test(name) && name.startsWith("components/")) ||
+          DIALOG_IMPORT.test(source)),
+    )
+  const imported = new Set<string>()
+  for (const { source } of dialogs) {
+    for (const m of source.matchAll(/from\s+["']@\/lib\/([\w./-]+)["']/g)) {
+      imported.add(m[1]!)
+    }
+  }
+  return [...imported].flatMap((module) => {
+    for (const ext of [".ts", ".tsx"]) {
+      try {
+        const name = `lib/${module}${ext}`
+        return [{ name, source: readFileSync(join(srcDir, name), "utf-8") }]
+      } catch {
+        // Not this extension.
+      }
+    }
+    return []
+  })
+}
+
+// Paths in templates that are not dialog copy: URLs, keys and file names
+// handed to APIs, never shown in a dialog body. Each names why.
+const PLAIN_PATH_ALLOWED: { file: string; line: string; reason: string }[] = []
+
+describe("a path in dialog copy is a chip, not a plain template", () => {
+  it("flags a path interpolated into a plain template string", () => {
+    expect(plainPathTemplates("return `${file.path}/ is kept here`")).toHaveLength(1)
+    expect(plainPathTemplates("return prose`${chip(file.path)} is a worktree`")).toEqual([])
+    expect(plainPathTemplates("chip(`${row.path}/`)")).toEqual([])
+  })
+
+  it("finds none in the dialogs or the modules they import", () => {
+    const found = [...scannedFiles(), ...dialogLibModules()].flatMap(({ name, source }) =>
+      plainPathTemplates(source)
+        .filter((line) => !PLAIN_PATH_ALLOWED.some((a) => a.file === name && a.line === line))
+        .map((line) => `${name}: ${line}`),
+    )
+    expect([...new Set(found)]).toEqual([])
+  })
+})

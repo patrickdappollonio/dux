@@ -205,6 +205,7 @@ describe("reuseUnchangedFiles", () => {
       kind: "directory",
       file_count: 3,
       nested_repositories: 0,
+      linked_worktrees: 0,
       fingerprint: "aa",
     }
     expect(Object.keys(CHANGED_FILE_FIELDS).sort()).toEqual(Object.keys(full).sort())
@@ -219,6 +220,7 @@ describe("reuseUnchangedFiles", () => {
       kind: "nested_repository",
       file_count: 4,
       nested_repositories: 1,
+      linked_worktrees: 1,
       fingerprint: "bb",
     }
     for (const key of Object.keys(full) as (keyof ChangedFileView)[]) {
@@ -408,6 +410,9 @@ describe("folded folders in the totals", () => {
     expect(folderCountLabel(withNested(3, 1))).toBe("3 files and 1 nested repository")
     expect(folderCountLabel(withNested(0, 2))).toBe("2 nested repositories")
     expect(folderCountLabel(withNested(28747, 0))).toBe("28,747 files")
+    expect(folderCountLabel({ ...withNested(1, 1), linked_worktrees: 1 })).toBe(
+      "1 file, 1 nested repository and 1 worktree of this repository",
+    )
   })
 
   it("compares the folder fields like every other field", () => {

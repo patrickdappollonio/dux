@@ -8236,6 +8236,21 @@ impl App {
                         }
                     ));
                 }
+                if contents.linked_worktrees > 0 {
+                    notes.push(format!(
+                        " The {} inside it {} kept.",
+                        dux_core::model::count_words(
+                            contents.linked_worktrees,
+                            "worktree of this repository",
+                            "worktrees of this repository"
+                        ),
+                        if contents.linked_worktrees == 1 {
+                            "is"
+                        } else {
+                            "are"
+                        }
+                    ));
+                }
                 notes.push(" Files the repository ignores inside it are kept.".to_string());
             }
             dux_core::model::ChangedFileKind::NestedRepository => {

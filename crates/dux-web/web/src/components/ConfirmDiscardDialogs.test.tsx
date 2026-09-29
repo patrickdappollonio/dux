@@ -72,6 +72,7 @@ const folder: ChangedFileView = {
   kind: "directory",
   file_count: 28747,
   nested_repositories: 1,
+  linked_worktrees: 1,
 }
 const nested: ChangedFileView = {
   path: "vendor/lib",
@@ -118,6 +119,7 @@ describe("the single discard dialog", () => {
     expect(text).toContain("28,747 files")
     expect(text).toContain("Files the repository ignores inside it are kept")
     expect(text).toContain("The 1 nested repository inside it is kept")
+    expect(text).toContain("The 1 worktree of this repository inside it is kept")
     expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy()
     // The folder is a chip, never a quotation.
     expect(
@@ -203,6 +205,13 @@ describe("the bulk discard dialog", () => {
     expect(text).toContain("2 selected rows are left out")
     expect(text).toContain("inner-wt/ is a worktree of this repository")
     expect(text).toContain("vendor-only/ holds only repositories of their own")
+    // Each left-out folder is a chip, not a path in a plain sentence.
+    for (const name of ["inner-wt/", "vendor-only/"]) {
+      expect(
+        screen.getAllByText(name).some((el) => el.closest("code") !== null),
+        name,
+      ).toBe(true)
+    }
     screen.getByRole("button", { name: "Discard" }).click()
     expect(onConfirm).toHaveBeenCalledWith(["node_modules"])
   })

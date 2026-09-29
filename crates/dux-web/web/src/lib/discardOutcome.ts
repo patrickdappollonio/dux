@@ -85,3 +85,15 @@ function oneRow(row: ChangedFileView): Prose {
   }
   return prose`Discarded the unstaged changes to ${chip(row.path)}. Staged changes, if any, are kept.`
 }
+
+// Why a discard leaves this row out, or null when it acts on it. The same
+// rule as `discardActsOn`, worded for the dialog that lists what it skipped.
+export function discardLeftOutReason(file: ChangedFileView): Prose | null {
+  if (file.kind === "linked_worktree") {
+    return prose`${chip(`${file.path}/`)} is a worktree of this repository, which the worktree manager removes`
+  }
+  if (file.kind === "directory" && (file.file_count ?? 0) === 0) {
+    return prose`${chip(`${file.path}/`)} holds only repositories of their own, which a delete keeps`
+  }
+  return null
+}

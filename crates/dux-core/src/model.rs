@@ -876,6 +876,11 @@ pub struct FolderContents {
     /// How many repositories of their own sit inside, which git does not look
     /// into. Deleting the folder keeps them, so the dialogs have to say so.
     pub nested_repositories: usize,
+    /// How many linked worktrees of this same repository sit inside. git
+    /// reports them like repositories of their own, but they are not, so they
+    /// are counted and named apart; deleting or staging the folder keeps them
+    /// out just the same.
+    pub linked_worktrees: usize,
     /// A cheap fingerprint of the files inside: their paths, sizes and
     /// modification times, hashed. It moves when a file inside is edited, which
     /// the count alone does not, and that is what tells a surface to look at an
@@ -1036,16 +1041,34 @@ pub fn folder_count_label(file: &ChangedFile) -> Option<String> {
 /// A folder's contents in words, nested repositories named only when there
 /// are some.
 pub fn folder_contents_words(contents: &FolderContents) -> String {
-    let files = count_words(contents.file_count, "file", "files");
-    match contents.nested_repositories {
-        0 => files,
-        nested if contents.file_count == 0 => {
-            count_words(nested, "nested repository", "nested repositories")
-        }
-        nested => format!(
-            "{files} and {}",
-            count_words(nested, "nested repository", "nested repositories")
-        ),
+    let mut parts = Vec::new();
+    let others = contents.nested_repositories + contents.linked_worktrees;
+    if contents.file_count > 0 || others == 0 {
+        parts.push(count_words(contents.file_count, "file", "files"));
+    }
+    if contents.nested_repositories > 0 {
+        parts.push(count_words(
+            contents.nested_repositories,
+            "nested repository",
+            "nested repositories",
+        ));
+    }
+    if contents.linked_worktrees > 0 {
+        parts.push(count_words(
+            contents.linked_worktrees,
+            "worktree of this repository",
+            "worktrees of this repository",
+        ));
+    }
+    join_words(&parts)
+}
+
+/// `a`, `a and b`, `a, b and c`.
+pub fn join_words(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [only] => only.clone(),
+        [head @ .., last] => format!("{} and {last}", head.join(", ")),
     }
 }
 
@@ -1352,7 +1375,7 @@ mod changed_file_kind_tests {
             ChangedFileKind::Directory(FolderContents {
                 file_count: 3,
                 nested_repositories: 1,
-                fingerprint: None,
+                ..Default::default()
             }),
         );
         assert_eq!(
@@ -1364,7 +1387,7 @@ mod changed_file_kind_tests {
             ChangedFileKind::Directory(FolderContents {
                 file_count: 0,
                 nested_repositories: 2,
-                fingerprint: None,
+                ..Default::default()
             }),
         );
         assert_eq!(

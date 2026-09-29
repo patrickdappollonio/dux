@@ -27,7 +27,9 @@ export function changedPathsFrom(slice: ChangesSliceView | null): string[] {
   for (const f of [...slice.unstaged, ...slice.staged]) {
     if (f.kind) {
       paths.add(
-        `${f.path}/${FOLDER_COUNT_MARK}${f.file_count ?? 0}:${f.nested_repositories ?? 0}`,
+        `${f.path}/${FOLDER_COUNT_MARK}${f.file_count ?? 0}:${f.nested_repositories ?? 0}:${
+          f.linked_worktrees ?? 0
+        }`,
       )
     } else {
       paths.add(f.path)

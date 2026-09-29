@@ -1087,7 +1087,8 @@ mod tests {
             kind: ChangedFileKind::Directory(dux_core::model::FolderContents {
                 file_count: 1_200,
                 nested_repositories: 1,
-                fingerprint: None,
+                linked_worktrees: 2,
+                ..Default::default()
             }),
             focus: ConfirmFocus::Cancel,
         };
@@ -1100,6 +1101,10 @@ mod tests {
         assert!(screen.contains("1,200 files"), "{screen}");
         assert!(
             screen.contains("The 1 nested repository inside it is kept"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("The 2 worktrees of this repository inside it are kept"),
             "{screen}"
         );
         assert!(
@@ -1138,7 +1143,7 @@ mod tests {
                 kind: ChangedFileKind::Directory(dux_core::model::FolderContents {
                     file_count: 0,
                     nested_repositories: 2,
-                    fingerprint: None,
+                    ..Default::default()
                 }),
                 ..file("vendor", "?")
             },

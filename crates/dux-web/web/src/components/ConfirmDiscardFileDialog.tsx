@@ -97,6 +97,18 @@ export function ConfirmDiscardFileDialog() {
                   )}{" "}
                   inside it {row?.nested_repositories === 1 ? "is" : "are"} kept.
                 </>
+              )}
+              {(row?.linked_worktrees ?? 0) > 0 && (
+                <>
+                  {" "}
+                  The{" "}
+                  {countWords(
+                    row?.linked_worktrees ?? 0,
+                    "worktree of this repository",
+                    "worktrees of this repository",
+                  )}{" "}
+                  inside it {row?.linked_worktrees === 1 ? "is" : "are"} kept.
+                </>
               )}{" "}
               This action cannot be undone.
             </>

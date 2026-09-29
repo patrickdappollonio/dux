@@ -835,6 +835,7 @@ mod tests {
             dux_core::model::ChangedFileKind::Directory(dux_core::model::FolderContents {
                 file_count: 3,
                 nested_repositories: 1,
+                linked_worktrees: 2,
                 fingerprint: Some(u64::MAX - 1),
             });
 
@@ -842,6 +843,7 @@ mod tests {
 
         assert_eq!(json[0]["file_count"], 3);
         assert_eq!(json[0]["nested_repositories"], 1);
+        assert_eq!(json[0]["linked_worktrees"], 2);
         assert_eq!(json[0]["fingerprint"], "fffffffffffffffe");
     }
 
@@ -1152,6 +1154,7 @@ mod tests {
             Some(dux_core::viewmodel::FolderView::Directory {
                 file_count,
                 nested_repositories: 0,
+                linked_worktrees: 0,
                 fingerprint: None,
             }),
             "the row says how many files it stands for"

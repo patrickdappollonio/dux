@@ -980,6 +980,10 @@ pub enum FolderView {
         file_count: usize,
         #[serde(skip_serializing_if = "is_zero")]
         nested_repositories: usize,
+        /// Worktrees of this same repository inside the folder, counted apart
+        /// from repositories of their own. Omitted when there are none.
+        #[serde(skip_serializing_if = "is_zero")]
+        linked_worktrees: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         fingerprint: Option<String>,
     },
@@ -998,6 +1002,7 @@ impl FolderView {
             crate::model::ChangedFileKind::Directory(contents) => Some(Self::Directory {
                 file_count: contents.file_count,
                 nested_repositories: contents.nested_repositories,
+                linked_worktrees: contents.linked_worktrees,
                 fingerprint: contents.fingerprint.map(|print| format!("{print:016x}")),
             }),
             crate::model::ChangedFileKind::NestedRepository => Some(Self::NestedRepository),

@@ -12,20 +12,22 @@ import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   changedFileCount,
   countWords,
-  discardLeftOutReason,
   fileStatusMeta,
 } from "@/lib/changedFiles"
 import { formatRegularCount } from "@/lib/formatRegularCount"
+import { discardLeftOutReason } from "@/lib/discardOutcome"
+import { joinProse, prose, renderProse, type Prose } from "@/lib/prose"
 import type { ChangedFileView } from "@/lib/types"
 
 const NO_TARGETS: ChangedFileView[] = []
-const NO_REASONS: string[] = []
+const NO_REASONS: Prose[] = []
 const EMPTY_SUMMARY = {
   untracked: 0,
   tracked: 0,
   repositories: 0,
   folders: 0,
   nestedInside: 0,
+  worktreesInside: 0,
 }
 
 interface Props {
@@ -62,7 +64,7 @@ export function ConfirmDiscardFilesDialog({
     const selected = unstaged.filter((f) => checked.has(f.path))
     // Rows a delete would not act on are left out of the count and of the
     // request, and named with their reason, rather than sent to be refused.
-    const leftOut: string[] = []
+    const leftOut: Prose[] = []
     const targets: ChangedFileView[] = []
     for (const f of selected) {
       const reason = discardLeftOutReason(f)
@@ -76,6 +78,7 @@ export function ConfirmDiscardFilesDialog({
     let repositories = 0
     let folders = 0
     let nestedInside = 0
+    let worktreesInside = 0
     for (const f of targets) {
       if (f.kind === "nested_repository") {
         repositories += 1
@@ -84,15 +87,33 @@ export function ConfirmDiscardFilesDialog({
         if (f.kind === "directory") {
           folders += 1
           nestedInside += f.nested_repositories ?? 0
+          worktreesInside += f.linked_worktrees ?? 0
         }
       } else {
         tracked += changedFileCount(f)
       }
     }
-    return { targets, leftOut, untracked, tracked, repositories, folders, nestedInside }
+    return {
+      targets,
+      leftOut,
+      untracked,
+      tracked,
+      repositories,
+      folders,
+      nestedInside,
+      worktreesInside,
+    }
   }, [paths, unstaged])
-  const { targets, leftOut, untracked, tracked, repositories, folders, nestedInside } =
-    summary
+  const {
+    targets,
+    leftOut,
+    untracked,
+    tracked,
+    repositories,
+    folders,
+    nestedInside,
+    worktreesInside,
+  } = summary
   // Closes itself once every checked path has left the unstaged list, rather
   // than lingering with copy about files that are no longer there.
   const isOpen = useVanishedTargetGuard(
@@ -127,15 +148,24 @@ export function ConfirmDiscardFilesDialog({
         } kept.`,
       )
     }
+    if (worktreesInside > 0) {
+      sentences.push(
+        `The ${countWords(
+          worktreesInside,
+          "worktree of this repository",
+          "worktrees of this repository",
+        )} inside them ${worktreesInside === 1 ? "is" : "are"} kept.`,
+      )
+    }
   }
-  if (leftOut.length > 0) {
-    sentences.push(
-      `${formatRegularCount(leftOut.length, "selected row")} ${
-        leftOut.length === 1 ? "is" : "are"
-      } left out: ${leftOut.join("; ")}.`,
-    )
-  }
-  sentences.push("This action cannot be undone.")
+  // The rows left out name their folders, so they are prose with chips.
+  const leftOutSentence: Prose | null =
+    leftOut.length > 0
+      ? prose`${formatRegularCount(leftOut.length, "selected row")} ${
+          leftOut.length === 1 ? "is" : "are"
+        } left out: ${joinProse(leftOut, "; ")}.`
+      : null
+  const closing = "This action cannot be undone."
   const body = sentences.join(" ")
 
   return (
@@ -151,7 +181,10 @@ export function ConfirmDiscardFilesDialog({
             ?
           </DialogTitle>
         </DialogHeader>
-        <p className="text-sm text-destructive">{body}</p>
+        <p className="text-sm text-destructive">
+          {body}
+          {leftOutSentence && <> {renderProse(leftOutSentence)}</>} {closing}
+        </p>
         {/* Misclick-safe spacing between the warning and the buttons. */}
         <div className="h-2" />
         <DialogFooter>

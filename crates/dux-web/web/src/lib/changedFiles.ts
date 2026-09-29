@@ -84,11 +84,24 @@ export function folderCountLabel(file: ChangedFileView): string | null {
   if (file.kind === "nested_repository") return "nested repository"
   if (file.kind === "linked_worktree") return "worktree of this repository"
   if (file.kind !== "directory") return null
-  const files = countWords(file.file_count ?? 0, "file", "files")
+  const count = file.file_count ?? 0
   const nested = file.nested_repositories ?? 0
-  if (nested === 0) return files
-  const repositories = countWords(nested, "nested repository", "nested repositories")
-  return (file.file_count ?? 0) === 0 ? repositories : `${files} and ${repositories}`
+  const worktrees = file.linked_worktrees ?? 0
+  const parts: string[] = []
+  if (count > 0 || nested + worktrees === 0) parts.push(countWords(count, "file", "files"))
+  if (nested > 0) parts.push(countWords(nested, "nested repository", "nested repositories"))
+  if (worktrees > 0) {
+    parts.push(
+      countWords(worktrees, "worktree of this repository", "worktrees of this repository"),
+    )
+  }
+  return joinWords(parts)
+}
+
+// `a`, `a and b`, `a, b and c`, as the TUI's `join_words` writes it.
+export function joinWords(parts: readonly string[]): string {
+  if (parts.length <= 1) return parts[0] ?? ""
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`
 }
 
 // A count with its noun, grouped by thousands the way the TUI writes it.
@@ -111,18 +124,6 @@ export function discardActsOn(file: ChangedFileView): boolean {
 // it is not offered and a bulk stage leaves it out.
 export function stageActsOn(file: ChangedFileView): boolean {
   return file.kind !== "linked_worktree"
-}
-
-// Why a discard leaves this row out, or null when it acts on it. The same
-// rule as `discardActsOn`, worded for the dialog that lists what it skipped.
-export function discardLeftOutReason(file: ChangedFileView): string | null {
-  if (file.kind === "linked_worktree") {
-    return `${file.path}/ is a worktree of this repository, which the worktree manager removes`
-  }
-  if (file.kind === "directory" && (file.file_count ?? 0) === 0) {
-    return `${file.path}/ holds only repositories of their own, which a delete keeps`
-  }
-  return null
 }
 
 // The recap describes exactly the rows visible beneath it, so callers pass the
@@ -193,6 +194,7 @@ export const CHANGED_FILE_FIELDS = {
   kind: true,
   file_count: true,
   nested_repositories: true,
+  linked_worktrees: true,
   fingerprint: true,
 } as const satisfies Record<keyof ChangedFileView, true>
 

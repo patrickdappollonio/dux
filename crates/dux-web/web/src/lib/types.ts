@@ -299,6 +299,9 @@ export interface ChangedFileView {
   /** How many repositories of their own a `"directory"` row holds, which
    * deleting the folder keeps. Absent when there are none. */
   nested_repositories?: number
+  /** How many worktrees of this same repository a `"directory"` row holds,
+   * counted apart from repositories of their own. Absent when there are none. */
+  linked_worktrees?: number
   /** A fingerprint of the files inside a `"directory"` row (their sizes and
    * modification times), which moves when a file inside is edited. Absent for
    * a folder too large to fingerprint, and for a staged one. Opaque text. */

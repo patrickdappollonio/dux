@@ -57,8 +57,10 @@ struct Tally<'r> {
     is_repository: bool,
     /// Every file record inside it, kept for the fingerprint.
     files: Vec<&'r [u8]>,
-    /// Repositories of their own inside it, at any depth.
-    nested_repositories: usize,
+    /// Every repository record inside it (`path/`), at any depth: told apart
+    /// into repositories of their own and worktrees of this repository once
+    /// the tally is finished.
+    repositories: Vec<&'r [u8]>,
 }
 
 impl<'r> Tally<'r> {
@@ -66,7 +68,7 @@ impl<'r> Tally<'r> {
     /// repository git did not look inside, and it is not a file.
     fn add(&mut self, record: &'r [u8]) {
         if record.ends_with(b"/") {
-            self.nested_repositories += 1;
+            self.repositories.push(record);
         } else {
             self.files.push(record);
         }
@@ -117,9 +119,28 @@ fn finish_tallies(
             } else {
                 (None, 0)
             };
+            // A repository inside is either one of its own or a worktree of
+            // this repository, read from its `.git` file alone.
+            let mut nested_repositories = 0;
+            let mut linked_worktrees = 0;
+            if !tally.repositories.is_empty() {
+                use std::os::unix::ffi::OsStrExt;
+                let common = common.get_or_insert_with(|| common_dir_of(worktree));
+                for record in &tally.repositories {
+                    let rel =
+                        std::ffi::OsStr::from_bytes(record.strip_suffix(b"/").unwrap_or(record));
+                    match repository_kind(common.as_deref(), &worktree.join(rel)) {
+                        UntrackedDirectoryKind::LinkedWorktree => linked_worktrees += 1,
+                        UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder => {
+                            nested_repositories += 1
+                        }
+                    }
+                }
+            }
             let contents = crate::model::FolderContents {
                 file_count: tally.files.len(),
-                nested_repositories: tally.nested_repositories,
+                nested_repositories,
+                linked_worktrees,
                 fingerprint,
             };
             (folder, UntrackedFolder::Contents(contents, additions))
@@ -881,7 +902,7 @@ mod tests {
         ChangedFileKind::Directory(crate::model::FolderContents {
             file_count: files,
             nested_repositories: nested,
-            fingerprint: None,
+            ..Default::default()
         })
     }
 
@@ -1030,6 +1051,37 @@ mod tests {
                 ),
                 ("vendor/x.js".to_string(), "?".to_string(), file()),
             ]
+        );
+    }
+
+    /// A worktree of this same repository inside a folded folder is not a
+    /// repository of its own and is counted apart from them.
+    #[test]
+    fn a_folder_counts_worktrees_of_this_repository_apart() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "vendor/x.js", "x\n");
+        let nested = root.join("vendor/lib");
+        fs::create_dir_all(&nested).unwrap();
+        git_in(&nested)(&["init", "-q"]);
+        write(&nested, "own.txt", "own\n");
+        git_in(root)(&["worktree", "add", "-q", "-b", "side", "vendor/wt"]);
+
+        let (_, unstaged) = changed_files(root).unwrap();
+
+        let row = unstaged.iter().find(|f| f.path == "vendor").unwrap();
+        let contents = row.folder_contents().unwrap();
+        assert_eq!(
+            (
+                contents.file_count,
+                contents.nested_repositories,
+                contents.linked_worktrees
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            crate::model::folder_count_label(row).as_deref(),
+            Some("1 file, 1 nested repository and 1 worktree of this repository")
         );
     }
 
