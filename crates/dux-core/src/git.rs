@@ -2902,7 +2902,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
             }
         }
     }
-    let mut staged = folding::fold_added_directories(worktree_path, staged);
+    let mut staged = folding::fold_added_directories(worktree_path, staged, &unstaged);
 
     // The tracked diff and the untracked counting are two independent sources,
     // so the git call's answer is resolved to a map FIRST and the loop runs

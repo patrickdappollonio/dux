@@ -205,9 +205,18 @@ fn ancestors(path: &str) -> impl Iterator<Item = &str> {
 /// shallowest such ancestor of each added file is the fold. A rename or copy
 /// inside keeps the folder open, because the row a rename needs (where it came
 /// from) cannot be said by a folder.
+///
+/// The folder must also have been staged WHOLE: anything untracked inside it
+/// (a file, or a folded folder, in `unstaged`) means only part of it is in the
+/// index, and a folder row would claim the rest. A tracked change inside it
+/// (a staged file edited since) does not open it, because that file is in the
+/// index too; the edit is its own unstaged row, and opening the folder over it
+/// would put every file of a staged `node_modules` back on screen the first
+/// time anything touched one.
 pub(super) fn fold_added_directories(
     worktree: &Path,
     staged: Vec<ChangedFile>,
+    unstaged: &[ChangedFile],
 ) -> Vec<ChangedFile> {
     let mut candidates: Vec<&str> = staged
         .iter()
@@ -242,6 +251,13 @@ pub(super) fn fold_added_directories(
     }
     // A root holding anything other than a plain addition stays open.
     for file in staged.iter().filter(|file| file.status != "A") {
+        for ancestor in ancestors(&file.path) {
+            roots.remove(ancestor);
+        }
+    }
+    // So does one staged in part: something inside it is still untracked.
+    for file in unstaged.iter().filter(|file| file.status == "?") {
+        roots.remove(file.path.as_str());
         for ancestor in ancestors(&file.path) {
             roots.remove(ancestor);
         }
@@ -765,6 +781,74 @@ mod tests {
         let (staged, _) = changed_files(root).unwrap();
         let lib = staged.iter().find(|f| f.path == "src/lib.rs").unwrap();
         assert_eq!((lib.additions, lib.deletions), (2, 1));
+    }
+
+    /// Staging one file of a new folder is not staging the folder: the rest is
+    /// still untracked, and a folder row would claim the whole of it.
+    #[test]
+    fn a_folder_staged_in_part_stays_one_row_per_staged_file() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "app/feature/a.rs", "a\n");
+        write(root, "app/feature/b.rs", "b\n");
+        write(root, "app/top.rs", "t\n");
+        git_in(root)(&["add", "--", "app/feature/a.rs"]);
+
+        let (staged, unstaged) = changed_files(root).unwrap();
+
+        assert_eq!(
+            shape(&staged),
+            vec![("app/feature/a.rs".to_string(), "A".to_string(), file())]
+        );
+        assert_eq!(staged[0].additions, 1, "a file row keeps its line count");
+        assert_eq!(crate::model::total_file_count(&unstaged), 2);
+    }
+
+    /// Something untracked appearing inside a folder staged whole makes it a
+    /// folder staged in part, so it opens up again.
+    #[test]
+    fn an_untracked_file_inside_a_staged_folder_opens_it() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "app/a.rs", "a\n");
+        write(root, "app/b.rs", "b\n");
+        git_in(root)(&["add", "--", "app"]);
+        write(root, "app/late.rs", "late\n");
+
+        let (staged, _) = changed_files(root).unwrap();
+
+        assert_eq!(
+            shape(&staged),
+            vec![
+                ("app/a.rs".to_string(), "A".to_string(), file()),
+                ("app/b.rs".to_string(), "A".to_string(), file()),
+            ]
+        );
+    }
+
+    /// Editing a file after staging the folder whole leaves the folder staged
+    /// whole: every file in it is in the index, and the edit is its own
+    /// unstaged row. Opening the folder here would put every file of a staged
+    /// `node_modules` back on screen the first time anything touched one.
+    #[test]
+    fn an_edit_after_staging_a_folder_whole_keeps_it_one_row() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "app/a.rs", "a\n");
+        write(root, "app/b.rs", "b\n");
+        git_in(root)(&["add", "--", "app"]);
+        write(root, "app/a.rs", "a\nmore\n");
+
+        let (staged, unstaged) = changed_files(root).unwrap();
+
+        assert_eq!(
+            shape(&staged),
+            vec![("app".to_string(), "A".to_string(), folder(2))]
+        );
+        assert_eq!(
+            shape(&unstaged),
+            vec![("app/a.rs".to_string(), "M".to_string(), file())]
+        );
     }
 
     #[test]

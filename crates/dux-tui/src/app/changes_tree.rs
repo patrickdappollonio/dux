@@ -993,16 +993,12 @@ mod tests {
 
         app.handle_key(space()).unwrap();
 
-        // Only that file is staged. HEAD has no `node_modules`, so the staged
-        // side folds the one new file into its folder, counting one.
+        // Only that file is staged, and it is its own row: the folder is not
+        // staged whole, so no folder row may claim it.
         let (staged, unstaged) = git::changed_files(&worktree).unwrap();
         assert_eq!(staged.len(), 1, "{staged:?}");
-        assert_eq!(staged[0].path, "node_modules");
-        assert_eq!(staged[0].file_count(), 1);
-        let children =
-            git::changed_dir_children(&worktree, "node_modules", ChangesSide::Staged).unwrap();
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0].path, "node_modules/top.js");
+        assert_eq!(staged[0].path, "node_modules/top.js");
+        assert!(!staged[0].is_folder());
         assert_eq!(
             dux_core::model::total_file_count(&unstaged),
             13,

@@ -1226,9 +1226,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+        // The folder is staged in part now, so it opens up into its files.
         let (staged, unstaged) = lists(worktree.clone()).await;
-        assert_eq!(staged[0].kind, folder(11));
+        assert_eq!(staged.len(), 11, "{staged:?}");
+        assert!(staged.iter().all(|f| !f.is_folder()));
         assert!(unstaged.iter().any(|f| f.path == "node_modules/pkg0/f0.js"));
+
+        // Staging that file again makes the folder whole, and one row again.
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage-files",
+                r#"{"paths":["node_modules/pkg0/f0.js"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+        let (staged, _) = lists(worktree.clone()).await;
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].kind, folder(12));
 
         let resp = app
             .clone()
