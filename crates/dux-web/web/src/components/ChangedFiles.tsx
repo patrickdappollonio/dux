@@ -1141,6 +1141,15 @@ function ChangesList({
   // section's rows (while it is open), and the separator. Walked once per
   // change of the items, never per render.
   const structure = useMemo(() => changesListStructure(items), [items])
+  // Each section's rows as ranges and folder containers, walked once per
+  // change of the items, never per scroll step.
+  const rowTrees = useMemo(() => {
+    const trees = new Map<number, ChangesRowPart[]>()
+    for (const part of structure) {
+      if (part.kind === "rows") trees.set(part.first, changesRowTree(items, part.first, part.last))
+    }
+    return trees
+  }, [items, structure])
   const baseId = useId()
   const rowsId = (section: ChangesSection) => `${baseId}-${section}-rows`
   // An expanded folder's contents container, named from the folder row's key.
@@ -1218,8 +1227,10 @@ function ChangesList({
   // exists whatever part of it is mounted.
   const renderRowParts = (parts: ChangesRowPart[], origin: number): ReactElement[] =>
     parts.flatMap((part) => {
-      if (part.kind === "item") {
-        return indices.includes(part.index) ? [renderHolder(part.index, origin)] : []
+      if (part.kind === "items") {
+        return indices
+          .filter((index) => index >= part.first && index <= part.last)
+          .map((index) => renderHolder(index, origin))
       }
       const top = offsets[part.first]!
       return [
@@ -1331,7 +1342,7 @@ function ChangesList({
                     height: offsets[part.last + 1]! - top,
                   }}
                 >
-                  {renderRowParts(changesRowTree(items, part.first, part.last), top)}
+                  {renderRowParts(rowTrees.get(part.first) ?? [], top)}
                 </div>
               )
             })}

@@ -146,9 +146,11 @@ export function changesListStructure(items: ChangesListItem[]): ChangesListPart[
 // A section's rows as a tree: each expanded folder's contents (its rows, and
 // its loading or failure row) as one contiguous range right after the folder's
 // own row, nested the way the folders are. The pane gives each range a
-// container of its own, which is what a folder's toggle points at.
+// container of its own, which is what a folder's toggle points at. Rows
+// between containers come as ranges, never one part per row, so walking the
+// tree costs the number of expanded folders, not the number of rows.
 export type ChangesRowPart =
-  | { kind: "item"; index: number }
+  | { kind: "items"; first: number; last: number }
   | { kind: "folder"; key: string; first: number; last: number; parts: ChangesRowPart[] }
 
 export function changesRowTree(
@@ -164,7 +166,9 @@ export function changesRowTree(
     const parts: ChangesRowPart[] = []
     let index = from
     while (index <= to) {
-      parts.push({ kind: "item", index })
+      const previous = parts.at(-1)
+      if (previous?.kind === "items" && previous.last === index - 1) previous.last = index
+      else parts.push({ kind: "items", first: index, last: index })
       const item = items[index]!
       index += 1
       if (item.kind !== "row" || !item.expanded) continue

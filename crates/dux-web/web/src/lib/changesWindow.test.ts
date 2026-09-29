@@ -123,36 +123,38 @@ describe("changesRowTree", () => {
     })
     // header, a, a/sub, loading, a/x, b
     expect(changesRowTree(items, 1, 5)).toEqual([
-      { kind: "item", index: 1 },
+      { kind: "items", first: 1, last: 1 },
       {
         kind: "folder",
         key: "unstaged:a",
         first: 2,
         last: 4,
         parts: [
-          { kind: "item", index: 2 },
+          { kind: "items", first: 2, last: 2 },
           {
             kind: "folder",
             key: "unstaged:a/sub",
             first: 3,
             last: 3,
-            parts: [{ kind: "item", index: 3 }],
+            parts: [{ kind: "items", first: 3, last: 3 }],
           },
-          { kind: "item", index: 4 },
+          { kind: "items", first: 4, last: 4 },
         ],
       },
-      { kind: "item", index: 5 },
+      { kind: "items", first: 5, last: 5 },
     ])
   })
 
-  it("is a flat run of items when nothing is expanded", () => {
+  // A run of rows is one range, so a render walks the few ranges and groups
+  // rather than every row of a listing of tens of thousands.
+  it("is one range when nothing is expanded", () => {
+    const files = Array.from({ length: 20_000 }, (_, index) => file(`f${index}`))
     const items = buildChangesItems({
       staged: { files: [], open: true },
-      unstaged: { files: [file("a"), file("b")], open: true },
+      unstaged: { files, open: true },
     })
-    expect(changesRowTree(items, 1, 2)).toEqual([
-      { kind: "item", index: 1 },
-      { kind: "item", index: 2 },
+    expect(changesRowTree(items, 1, 20_000)).toEqual([
+      { kind: "items", first: 1, last: 20_000 },
     ])
   })
 })
