@@ -89,6 +89,7 @@ import {
 import type { ChangesSlice, DuxState } from "@/lib/store"
 import {
   buildChangesItems,
+  changesListStructure,
   layoutChangesItems,
   visibleChangesIndices,
   type ChangesItemHeights,
@@ -400,6 +401,8 @@ interface GroupHeaderProps {
   recap: ChangedFilesRecap
   filtering: boolean
   open: boolean
+  // The id of the container holding this section's rows.
+  controls: string
   onToggleOpen: () => void
 }
 
@@ -485,6 +488,7 @@ function GroupHeader({
   recap,
   filtering,
   open,
+  controls,
   onToggleOpen,
 }: GroupHeaderProps) {
   return (
@@ -493,6 +497,7 @@ function GroupHeader({
     <button
       type="button"
       aria-expanded={open}
+      aria-controls={controls}
       onClick={onToggleOpen}
       className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 max-md:min-h-11"
     >
@@ -889,6 +894,35 @@ function ChangesList({
     pinned,
   )
 
+  // The list's outline in reading order: each heading, the container of that
+  // section's rows (while it is open), and the separator. Walked once per
+  // change of the items, never per render.
+  const structure = useMemo(() => changesListStructure(items), [items])
+  const baseId = useId()
+  const rowsId = (section: ChangesSection) => `${baseId}-${section}-rows`
+
+  // One positioned holder per mounted item, placed relative to `origin` (the
+  // top of the container it sits in).
+  const renderHolder = (index: number, origin: number) => {
+    const item = items[index]!
+    return (
+      <div
+        key={item.key}
+        data-item-key={item.key}
+        data-item-kind={item.kind}
+        className={ITEM_SPACING[item.kind]}
+        style={{
+          position: "absolute",
+          top: offsets[index]! - origin,
+          left: 0,
+          right: 0,
+        }}
+      >
+        {renderItem(item)}
+      </div>
+    )
+  }
+
   const renderItem = (item: ChangesListItem) => {
     if (item.kind === "separator") return <Separator />
     const section = item.section
@@ -902,6 +936,7 @@ function ChangesList({
           recap={recap[section]}
           filtering={filtering}
           open={open[section]}
+          controls={rowsId(section)}
           onToggleOpen={() => toggleOpen(section)}
         />
       )
@@ -971,27 +1006,47 @@ function ChangesList({
               }
             }}
             onBlur={(event) => {
-              const next = event.relatedTarget as Node | null
+              const next = event.relatedTarget as HTMLElement | null
               if (next && listRef.current?.contains(next)) return
+              // A row's ⋯ menu is portaled out of this subtree, so focus moving
+              // into it looks like leaving the list. It is the row's own menu
+              // (focus reaches a menu from its trigger), and unmounting the row
+              // would take the open menu with it, so the pin stays. Focus
+              // leaving that menu for anywhere else bubbles here through the
+              // portal and clears the pin then.
+              if (next?.closest?.('[data-slot="dropdown-menu-content"]')) return
               setFocusedKey(null)
             }}
           >
-            {indices.map((index) => {
-              const item = items[index]!
+            {structure.map((part) => {
+              if (part.kind !== "rows") {
+                return indices.includes(part.index)
+                  ? renderHolder(part.index, 0)
+                  : null
+              }
+              // Each section's rows sit in one container, the element its
+              // heading's `aria-controls` names. It spans the section's whole
+              // range, so it exists whatever part of it is mounted.
+              const top = offsets[part.first]!
               return (
                 <div
-                  key={item.key}
-                  data-item-key={item.key}
-                  data-item-kind={item.kind}
-                  className={ITEM_SPACING[item.kind]}
+                  key={`rows:${part.section}`}
+                  id={rowsId(part.section)}
+                  role="group"
+                  aria-label={
+                    part.section === "staged" ? "Staged files" : "Unstaged files"
+                  }
                   style={{
                     position: "absolute",
-                    top: offsets[index],
+                    top,
                     left: 0,
                     right: 0,
+                    height: offsets[part.last + 1]! - top,
                   }}
                 >
-                  {renderItem(item)}
+                  {indices
+                    .filter((index) => index >= part.first && index <= part.last)
+                    .map((index) => renderHolder(index, top))}
                 </div>
               )
             })}

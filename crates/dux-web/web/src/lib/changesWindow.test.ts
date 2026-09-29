@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   buildChangesItems,
+  changesListStructure,
   layoutChangesItems,
   visibleChangesIndices,
   type ChangesItemHeights,
@@ -64,6 +65,32 @@ describe("buildChangesItems", () => {
     })
     const keys = items.map((item) => item.key)
     expect(new Set(keys).size).toBe(keys.length)
+  })
+})
+
+describe("changesListStructure", () => {
+  it("outlines headings, each section's row range and the separator in order", () => {
+    const items = buildChangesItems({
+      staged: { files: [file("a"), file("b")], open: true },
+      unstaged: { files: [file("c")], open: true },
+    })
+    expect(changesListStructure(items)).toEqual([
+      { kind: "header", index: 0 },
+      { kind: "rows", section: "staged", first: 1, last: 2 },
+      { kind: "separator", index: 3 },
+      { kind: "header", index: 4 },
+      { kind: "rows", section: "unstaged", first: 5, last: 5 },
+    ])
+  })
+
+  it("has no row range for a folded section", () => {
+    const items = buildChangesItems({
+      staged: { files: [file("a")], open: false },
+      unstaged: { files: [file("c")], open: true },
+    })
+    expect(
+      changesListStructure(items).filter((part) => part.kind === "rows"),
+    ).toEqual([{ kind: "rows", section: "unstaged", first: 3, last: 3 }])
   })
 })
 

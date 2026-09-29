@@ -1421,6 +1421,22 @@ describe("the Changes pane's windowed list", () => {
     expect(screen.getByText("staged.ts")).toBeTruthy()
   })
 
+  it("points each heading at the container holding its own rows", () => {
+    mockState = withFiles([["staged.ts", "M"]], [["a.ts", "M"]])
+    render(<ChangedFiles />)
+    for (const [name, mine, theirs] of [
+      [/^Staged/, "staged.ts", "a.ts"],
+      [/^Unstaged/, "a.ts", "staged.ts"],
+    ] as const) {
+      const id = screen.getByRole("button", { name }).getAttribute("aria-controls")
+      expect(id).toBeTruthy()
+      const rows = document.getElementById(id!)
+      expect(rows).toBeTruthy()
+      expect(within(rows!).getByText(mine)).toBeTruthy()
+      expect(within(rows!).queryByText(theirs)).toBeNull()
+    }
+  })
+
   it("mounts the rows the scroll position shows rather than the first screenful", () => {
     mockState = withFiles([], numbered(5000))
     render(<ChangedFiles />)
@@ -1446,6 +1462,27 @@ describe("the Changes pane's windowed list", () => {
     expect(screen.getByText("src/file2500.ts")).toBeTruthy()
     expect(box.isConnected).toBe(true)
     expect(document.activeElement).toBe(box)
+  })
+
+  // The row's ⋯ menu is portaled out of the list, so focus moving into it
+  // looks like focus leaving the list. It has not: the menu is the row's own,
+  // and unmounting the row would take the open menu with it.
+  it("keeps the row pinned while focus is in that row's own menu", async () => {
+    mockState = withFiles([], numbered(5000))
+    render(<ChangedFiles />)
+    const trigger = screen.getByLabelText("Actions for src/file3.ts")
+    act(() => trigger.focus())
+    fireEvent.click(trigger)
+    const menu = await screen.findByRole("menu")
+    const item = within(menu).getByText("Stage").closest('[role="menuitem"]') as HTMLElement
+    act(() => item.focus())
+    expect(menu.contains(document.activeElement)).toBe(true)
+
+    scrollTo(ROW_2500)
+
+    expect(screen.getByText("src/file2500.ts")).toBeTruthy()
+    expect(trigger.isConnected).toBe(true)
+    expect(screen.getByRole("menu")).toBeTruthy()
   })
 
   it("releases the pin once focus leaves the list", () => {

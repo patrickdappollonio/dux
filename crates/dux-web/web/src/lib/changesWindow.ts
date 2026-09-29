@@ -49,6 +49,31 @@ export function buildChangesItems(sections: {
   return items
 }
 
+// The list's outline in reading order: a heading or the separator by its item
+// index, and each open section's rows as one contiguous range, so the pane can
+// hold a section's rows in one container its heading points at.
+export type ChangesListPart =
+  | { kind: "header" | "separator"; index: number }
+  | { kind: "rows"; section: ChangesSection; first: number; last: number }
+
+export function changesListStructure(items: ChangesListItem[]): ChangesListPart[] {
+  const parts: ChangesListPart[] = []
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!
+    if (item.kind !== "row") {
+      parts.push({ kind: item.kind, index })
+      continue
+    }
+    const previous = parts.at(-1)
+    if (previous?.kind === "rows" && previous.section === item.section) {
+      previous.last = index
+    } else {
+      parts.push({ kind: "rows", section: item.section, first: index, last: index })
+    }
+  }
+  return parts
+}
+
 // Each item's top offset, plus one trailing entry holding the total height.
 export function layoutChangesItems(
   items: ChangesListItem[],
