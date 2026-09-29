@@ -306,7 +306,7 @@ async fn stage(
     if !id_within_bound(&id) {
         return unknown_session();
     }
-    file_op(state, id, op.path, "stage the file", |wt, p| {
+    file_op(state, id, op.path, STAGE_ACTION, |wt, p| {
         dux_core::git::stage_file(&wt, &p)
     })
     .await
@@ -528,6 +528,16 @@ async fn files_op(
             .into_response();
     }
 
+    // A path git may not be asked to stage (a linked worktree) refuses the
+    // batch as a refusal, naming why, before anything reaches the index.
+    if matches!(section, Section::Unstaged)
+        && let Some(sentence) = done
+            .iter()
+            .find_map(|path| dux_core::git::stage_refusal(&worktree, path))
+    {
+        return (StatusCode::BAD_REQUEST, sentence).into_response();
+    }
+
     let wt = worktree.clone();
     let batch = done.clone();
     if let Err(r) = run_git(section.action(), &worktree, move || match section {
@@ -541,6 +551,10 @@ async fn files_op(
     refresh_changed_files_now(&state, session_id, &worktree);
     (StatusCode::OK, Json(BatchResult { done, refused })).into_response()
 }
+
+/// What the single-path stage route attempts, which is also how `file_op`
+/// knows to ask whether the path may be staged at all.
+const STAGE_ACTION: &str = "stage the file";
 
 async fn file_op<F>(
     state: AppState,
@@ -558,6 +572,14 @@ where
     };
     if let Err(r) = validate_changed_path(&worktree, &path).await {
         return r.into_response();
+    }
+    // A path git may not be asked to stage is refused as such, not reported as
+    // a git failure. Only staging has one (a linked worktree), and the check
+    // reads files only.
+    if action == STAGE_ACTION
+        && let Some(sentence) = dux_core::git::stage_refusal(&worktree, &path)
+    {
+        return (StatusCode::BAD_REQUEST, sentence).into_response();
     }
     let wt = worktree.clone();
     if let Err(r) = run_git(action, &worktree, move || op(wt, path)).await {
@@ -1359,6 +1381,44 @@ mod tests {
                 .unwrap();
         assert!(staged.is_empty(), "{staged:?}");
         assert_eq!(unstaged.len(), 1, "{unstaged:?}");
+    }
+
+    /// A worktree of this same repository placed inside the worktree is the
+    /// worktree manager's: both stage routes refuse it with a sentence, as a
+    /// refusal rather than a failure, and nothing reaches the index.
+    #[tokio::test]
+    async fn staging_a_linked_worktree_is_refused_by_both_routes() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        run_git(
+            &worktree,
+            &["worktree", "add", "-q", "-b", "side", "inner-wt"],
+        );
+
+        for (route, body) in [
+            ("stage", r#"{"path":"inner-wt"}"#),
+            ("stage-files", r#"{"paths":["inner-wt"]}"#),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(json_req(
+                    "POST",
+                    &format!("/api/v1/sessions/s1/git/{route}"),
+                    body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{route}");
+            assert!(
+                body_text(resp).await.contains("worktree manager"),
+                "{route}"
+            );
+        }
+        let (staged, _) =
+            tokio::task::spawn_blocking(move || dux_core::git::changed_files(&worktree).unwrap())
+                .await
+                .unwrap();
+        assert!(staged.is_empty(), "{staged:?}");
     }
 
     /// A folder row answers only for what git lists inside it: an ignored file

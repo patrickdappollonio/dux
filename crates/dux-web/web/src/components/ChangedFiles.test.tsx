@@ -1578,6 +1578,36 @@ describe("a folded folder row", () => {
     expect(openEditor).not.toHaveBeenCalled()
   })
 
+  it("leaves a worktree of this repository out of the bar's counts", () => {
+    const base = withFolder()
+    mockState = {
+      ...base,
+      changes: {
+        ...base.changes,
+        unstaged: [
+          ...base.changes.unstaged,
+          {
+            path: "inner-wt",
+            status: "??",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            kind: "linked_worktree",
+          },
+        ],
+      },
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Select node_modules"))
+    fireEvent.click(screen.getByLabelText("Select inner-wt"))
+    const toolbar = within(
+      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
+    )
+    expect(toolbar.getByText("Stage 28747")).toBeTruthy()
+    expect(toolbar.getByText("Discard 28747…")).toBeTruthy()
+  })
+
   it("offers no discard for a folder a delete would not act on", async () => {
     mockState = {
       selectedSessionId: "s1",
@@ -1612,7 +1642,10 @@ describe("a folded folder row", () => {
     for (const path of ["vendor", "inner-wt"]) {
       fireEvent.click(screen.getByLabelText(`Actions for ${path}`))
       const menu = within(await screen.findByRole("menu"))
-      expect(menu.getByText("Stage")).toBeTruthy()
+      // A worktree of this repository is not staged either: the server
+      // refuses it, so the menu does not offer it.
+      if (path === "inner-wt") expect(menu.queryByText("Stage")).toBeNull()
+      else expect(menu.getByText("Stage")).toBeTruthy()
       expect(menu.queryByText("Discard…")).toBeNull()
       fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
       cleanup()

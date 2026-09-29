@@ -9,11 +9,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { changedFileCount, countWords, fileStatusMeta } from "@/lib/changedFiles"
+import {
+  changedFileCount,
+  countWords,
+  discardLeftOutReason,
+  fileStatusMeta,
+} from "@/lib/changedFiles"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import type { ChangedFileView } from "@/lib/types"
 
 const NO_TARGETS: ChangedFileView[] = []
+const NO_REASONS: string[] = []
 const EMPTY_SUMMARY = {
   untracked: 0,
   tracked: 0,
@@ -49,9 +55,20 @@ export function ConfirmDiscardFilesDialog({
   // list moves, never on a render that changed neither. An empty selection,
   // the usual state, never walks the list at all.
   const summary = useMemo(() => {
-    if (paths.length === 0) return { ...EMPTY_SUMMARY, targets: NO_TARGETS }
+    if (paths.length === 0) {
+      return { ...EMPTY_SUMMARY, targets: NO_TARGETS, leftOut: NO_REASONS }
+    }
     const checked = new Set(paths)
-    const targets = unstaged.filter((f) => checked.has(f.path))
+    const selected = unstaged.filter((f) => checked.has(f.path))
+    // Rows a delete would not act on are left out of the count and of the
+    // request, and named with their reason, rather than sent to be refused.
+    const leftOut: string[] = []
+    const targets: ChangedFileView[] = []
+    for (const f of selected) {
+      const reason = discardLeftOutReason(f)
+      if (reason === null) targets.push(f)
+      else leftOut.push(reason)
+    }
     // A folded folder counts the files inside it; a repository of its own is
     // counted apart, because it goes with its history.
     let untracked = 0
@@ -72,12 +89,17 @@ export function ConfirmDiscardFilesDialog({
         tracked += changedFileCount(f)
       }
     }
-    return { targets, untracked, tracked, repositories, folders, nestedInside }
+    return { targets, leftOut, untracked, tracked, repositories, folders, nestedInside }
   }, [paths, unstaged])
-  const { targets, untracked, tracked, repositories, folders, nestedInside } = summary
+  const { targets, leftOut, untracked, tracked, repositories, folders, nestedInside } =
+    summary
   // Closes itself once every checked path has left the unstaged list, rather
   // than lingering with copy about files that are no longer there.
-  const isOpen = useVanishedTargetGuard(open, targets.length > 0, onCancel)
+  const isOpen = useVanishedTargetGuard(
+    open,
+    targets.length + leftOut.length > 0,
+    onCancel,
+  )
 
   const deleted = `${countWords(untracked, "untracked file", "untracked files")} will be permanently DELETED from disk`
   const restored = `${countWords(tracked, "tracked file", "tracked files")} will be restored to ${
@@ -106,6 +128,13 @@ export function ConfirmDiscardFilesDialog({
       )
     }
   }
+  if (leftOut.length > 0) {
+    sentences.push(
+      `${formatRegularCount(leftOut.length, "selected row")} ${
+        leftOut.length === 1 ? "is" : "are"
+      } left out: ${leftOut.join("; ")}.`,
+    )
+  }
   sentences.push("This action cannot be undone.")
   const body = sentences.join(" ")
 
@@ -131,6 +160,8 @@ export function ConfirmDiscardFilesDialog({
           </Button>
           <Button
             variant="destructive"
+            // Nothing left to delete once every selected row is left out.
+            disabled={targets.length === 0}
             onClick={() => onConfirm(targets.map((f) => f.path))}
           >
             Discard

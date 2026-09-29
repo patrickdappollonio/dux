@@ -106,6 +106,25 @@ export function discardActsOn(file: ChangedFileView): boolean {
   return true
 }
 
+// Whether staging this row does what staging says. A worktree of this same
+// repository would be recorded as a link to it, which the server refuses, so
+// it is not offered and a bulk stage leaves it out.
+export function stageActsOn(file: ChangedFileView): boolean {
+  return file.kind !== "linked_worktree"
+}
+
+// Why a discard leaves this row out, or null when it acts on it. The same
+// rule as `discardActsOn`, worded for the dialog that lists what it skipped.
+export function discardLeftOutReason(file: ChangedFileView): string | null {
+  if (file.kind === "linked_worktree") {
+    return `${file.path}/ is a worktree of this repository, which the worktree manager removes`
+  }
+  if (file.kind === "directory" && (file.file_count ?? 0) === 0) {
+    return `${file.path}/ holds only repositories of their own, which a delete keeps`
+  }
+  return null
+}
+
 // The recap describes exactly the rows visible beneath it, so callers pass the
 // filtered list, never the source one.
 export function summarizeChangedFiles(

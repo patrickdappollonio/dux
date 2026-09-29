@@ -12,6 +12,7 @@ import { git } from "@/lib/git"
 import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
 import { chip, prose } from "@/lib/prose"
 import { discardOutcome, selectedFileCount } from "@/lib/discardOutcome"
+import { discardActsOn, stageActsOn } from "@/lib/changedFiles"
 import type { ChangesSlice } from "@/lib/store"
 import type { ChangedFileView } from "@/lib/types"
 
@@ -290,7 +291,13 @@ export function useChangedFilesController(
 
   async function runBulk(verb: ChangesBulkVerb): Promise<void> {
     const section = verb === "stage" ? "unstaged" : "staged"
-    const paths = [...model.selected[section]]
+    // A worktree of this repository is never staged (the server refuses it),
+    // so a bulk stage leaves it out rather than failing the whole batch.
+    const unstageable =
+      verb === "stage"
+        ? new Set(changes.unstaged.filter((f) => !stageActsOn(f)).map((f) => f.path))
+        : new Set<string>()
+    const paths = [...model.selected[section]].filter((path) => !unstageable.has(path))
     if (busy !== null || paths.length === 0) return
     setBusy(verb)
     try {
@@ -328,7 +335,8 @@ export function useChangedFilesController(
     // inside it, the same count its dialog and its toast use.
     selectedCounts: {
       staged: selectedFileCount(model.selected.staged, changes.staged),
-      unstaged: selectedFileCount(model.selected.unstaged, changes.unstaged),
+      unstaged: selectedFileCount(model.selected.unstaged, changes.unstaged, stageActsOn),
+      discard: selectedFileCount(model.selected.unstaged, changes.unstaged, discardActsOn),
     },
     busy,
     discarding,

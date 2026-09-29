@@ -164,6 +164,49 @@ describe("the bulk discard dialog", () => {
     )
   }
 
+  // Rows a delete would not act on are left out of the count and the
+  // request, and the dialog says which and why rather than letting the
+  // server refuse them afterwards.
+  it("leaves out the rows it would not delete, and says why", () => {
+    const onConfirm = vi.fn()
+    const linked: ChangedFileView = {
+      path: "inner-wt",
+      status: "??",
+      additions: 0,
+      deletions: 0,
+      binary: false,
+      diff_excluded: false,
+      kind: "linked_worktree",
+    }
+    const nestedOnly: ChangedFileView = {
+      path: "vendor-only",
+      status: "??",
+      additions: 0,
+      deletions: 0,
+      binary: false,
+      diff_excluded: false,
+      kind: "directory",
+      file_count: 0,
+      nested_repositories: 1,
+    }
+    render(
+      <ConfirmDiscardFilesDialog
+        open
+        paths={["node_modules", "inner-wt", "vendor-only"]}
+        unstaged={[folder, linked, nestedOnly]}
+        onCancel={() => {}}
+        onConfirm={onConfirm}
+      />,
+    )
+    const text = dialogText()
+    expect(text).toContain("28,747 untracked files will be permanently DELETED")
+    expect(text).toContain("2 selected rows are left out")
+    expect(text).toContain("inner-wt/ is a worktree of this repository")
+    expect(text).toContain("vendor-only/ holds only repositories of their own")
+    screen.getByRole("button", { name: "Discard" }).click()
+    expect(onConfirm).toHaveBeenCalledWith(["node_modules"])
+  })
+
   it("counts the files inside a folder rather than one for it", () => {
     openBulk(["node_modules", "notes.md"])
     const text = dialogText()

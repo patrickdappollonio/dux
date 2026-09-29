@@ -3662,13 +3662,22 @@ fn refuse_unplain_path(path: &str, what: &str) -> Result<()> {
 /// meant, and the worktree belongs to the worktree manager. Files are read,
 /// no process is spawned, and only for a directory holding a `.git` entry.
 fn refuse_staging_a_linked_worktree(worktree_path: &Path, path: &str) -> Result<()> {
-    if folding::is_linked_worktree_dir(worktree_path, &worktree_path.join(path)) {
-        return Err(anyhow!(
+    match stage_refusal(worktree_path, path) {
+        Some(sentence) => Err(anyhow!(sentence)),
+        None => Ok(()),
+    }
+}
+
+/// Why `path` must not be staged, or `None` when it may be. Today that is one
+/// case, a linked worktree of this same repository; a route asks this first so
+/// the refusal reaches the browser as a refusal rather than as a git failure.
+pub fn stage_refusal(worktree_path: &Path, path: &str) -> Option<String> {
+    folding::is_linked_worktree_dir(worktree_path, &worktree_path.join(path)).then(|| {
+        format!(
             "\"{path}/\" is a worktree of this same repository; staging it would record a link \
              to it, not its files. Manage it from the worktree manager."
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 fn run_pathspec_batch(

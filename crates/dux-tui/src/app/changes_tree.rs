@@ -564,6 +564,13 @@ impl App {
             let label = &pending.label;
             let count = &pending.count_words;
             let (tone, message) = match (pending.op, outcome) {
+                (FolderOp::Stage, Ok(())) if pending.repository => (
+                    StatusTone::Info,
+                    format!(
+                        "Staged \"{label}\" as a link to the repository inside it (a \
+                         submodule-style entry recording its current commit), not as its files."
+                    ),
+                ),
                 (FolderOp::Stage, Ok(())) => (
                     StatusTone::Info,
                     format!(
@@ -925,6 +932,69 @@ mod tests {
         let child = &screen[folder_row + 1];
         assert!(child.contains("  \u{25b8} pkg0/"), "{child}");
         assert!(child.contains("4 files"), "{child}");
+    }
+
+    /// A worktree of this same repository is the worktree manager's, so the
+    /// stage key refuses it rather than recording a link to it.
+    #[test]
+    fn space_refuses_to_stage_a_linked_worktree() {
+        let mut app = test_app(default_bindings());
+        app.engine.unstaged_files = vec![ChangedFile {
+            kind: ChangedFileKind::LinkedWorktree,
+            ..file("inner-wt", "?")
+        }];
+        app.selected_left = 1;
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+        app.files_index = 0;
+
+        app.handle_key(space()).unwrap();
+
+        assert!(app.changes_tree.pending_ops.is_empty());
+        assert!(
+            app.status.text().contains("worktree manager"),
+            "{}",
+            app.status.text()
+        );
+    }
+
+    /// Staging a repository of its own records a link to it, not its files,
+    /// and the status line says exactly that.
+    #[test]
+    fn staging_a_nested_repository_says_it_records_a_link() {
+        let (mut app, worktree) = repo_app();
+        let nested = worktree.join("clone");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_git(&nested, &["init", "-q", "-b", "main"]);
+        run_git(&nested, &["config", "user.name", "t"]);
+        run_git(&nested, &["config", "user.email", "t@t"]);
+        std::fs::write(nested.join("a.txt"), "a\n").unwrap();
+        run_git(&nested, &["add", "a.txt"]);
+        run_git(&nested, &["commit", "-q", "-m", "a"]);
+        load_lists(&mut app, &worktree);
+        app.files_index = app
+            .changes_rows(RightSection::Unstaged)
+            .iter()
+            .position(|row| row.file().is_some_and(|f| f.path == "clone"))
+            .expect("the nested repository row");
+
+        app.handle_key(space()).unwrap();
+        settle(&mut app, idle);
+
+        assert!(
+            app.status
+                .text()
+                .contains("a link to the repository inside it"),
+            "{}",
+            app.status.text()
+        );
+        assert!(
+            !app.status
+                .text()
+                .contains("the whole folder is in the staged changes"),
+            "{}",
+            app.status.text()
+        );
     }
 
     #[test]

@@ -2727,6 +2727,14 @@ impl App {
         };
         // A folder can hold tens of thousands of files, so staging it whole is
         // a worker's job with a busy and a final, never this thread's.
+        if file.kind == dux_core::model::ChangedFileKind::LinkedWorktree {
+            let path = file.path.clone();
+            self.set_error(format!(
+                "\"{path}/\" is a worktree of this same repository; staging it would record a \
+                 link to it, not its files. Manage it from the worktree manager."
+            ));
+            return Ok(());
+        }
         if file.is_folder() {
             let folder = file.clone();
             let op = match self.right_section {

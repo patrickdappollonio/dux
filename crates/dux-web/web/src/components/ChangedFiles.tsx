@@ -73,6 +73,7 @@ import { Separator } from "@/components/ui/separator"
 import {
   changedFileCount,
   discardActsOn,
+  stageActsOn,
   fileStatusMeta,
   folderCountLabel,
   formatRecapCount,
@@ -384,10 +385,12 @@ const FileRow = memo(function FileRow({
                   Edit
                 </DropdownMenuItem>
               )}
-              <DropdownMenuItem onClick={() => void runAction()}>
-                {action === "stage" ? <Plus /> : <Minus />}
-                {action === "stage" ? "Stage" : "Unstage"}
-              </DropdownMenuItem>
+              {(action === "unstage" || stageActsOn(file)) && (
+                <DropdownMenuItem onClick={() => void runAction()}>
+                  {action === "stage" ? <Plus /> : <Minus />}
+                  {action === "stage" ? "Stage" : "Unstage"}
+                </DropdownMenuItem>
+              )}
               {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
                 * and the confirm dialog carry the danger and the item itself
                 * stays neutral. */}
@@ -692,7 +695,8 @@ function ChangesHeader({
 interface BulkToolbarProps {
   selected: ChangedFileSelection
   // Files, not rows, per section: a checked folder counts what is inside it.
-  counts: { staged: number; unstaged: number }
+  // `discard` leaves out the rows a delete would not act on.
+  counts: { staged: number; unstaged: number; discard: number }
   busy: ChangesBusyAction
   visibleCount: number
   allVisibleChecked: boolean
@@ -759,7 +763,7 @@ function BulkToolbar({
         >
           <BusyGlyph busy={busy === "discard"} />
           {busy !== "discard" ? <Undo2 /> : null}
-          Discard {counts.unstaged}…
+          Discard {counts.discard}…
         </Button>
       ) : null}
       {visibleCount > 0 ? (

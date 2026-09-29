@@ -16,14 +16,17 @@ import type { ChangedFileView } from "@/lib/types"
 export function selectedFileCount(
   paths: ReadonlySet<string>,
   files: readonly ChangedFileView[],
+  // Rows the act would leave out (see `discardActsOn`, `stageActsOn`) are
+  // not counted at all.
+  actsOn: (file: ChangedFileView) => boolean = () => true,
 ): number {
   if (paths.size === 0) return 0
   let count = 0
   let found = 0
   for (const file of files) {
     if (!paths.has(file.path)) continue
-    count += changedFileCount(file)
     found += 1
+    if (actsOn(file)) count += changedFileCount(file)
   }
   // A checked path that already left the list still counts as one, the way
   // the bar counted it before folders existed.
