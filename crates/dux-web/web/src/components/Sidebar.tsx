@@ -118,7 +118,12 @@ function CollapsedAgentIcon({
             {/* The same glyph cue as the sidebar list's row: every stop, a
                 higher state taking over included, finishes the bounce at rest
                 while the pulse yields at once. */}
-            <WorkingGlyph icon={Bot} working={working} className="size-4.5!" />
+            <WorkingGlyph
+              icon={Bot}
+              working={working}
+              handover={attention || typing}
+              className="size-4.5!"
+            />
           </span>
         </SidebarMenuButton>
       </SimpleTooltip>

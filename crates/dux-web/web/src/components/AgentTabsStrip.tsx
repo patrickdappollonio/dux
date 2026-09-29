@@ -183,10 +183,16 @@ function TabPill({
           : "border-transparent bg-muted text-muted-foreground hover:text-foreground",
       )}
     >
-      {/* The same glyph cue as the sidebar: every stop finishes the bounce at
-          rest. The attention dot is a separate element beside it, so it
-          appears at once without touching the glyph. */}
-      <WorkingGlyph icon={Bot} working={tab.working} className="size-3.5" />
+      {/* The same glyph cue as the sidebar, on the pill's own ladder: typing
+          and needs-you outrank working, so either one stands the cue down.
+          Every stop finishes the bounce at rest; the attention dot is a
+          separate element beside it, so it appears at once. */}
+      <WorkingGlyph
+        icon={Bot}
+        working={tab.working && !tab.typing && !tab.needs_attention}
+        handover={tab.typing || tab.needs_attention}
+        className="size-3.5"
+      />
       {/* Cyan attention dot on the flagged tab's pill (a permission prompt or a
           finished turn on this specific tab). */}
       {tab.needs_attention && <AttentionDot />}

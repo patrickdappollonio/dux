@@ -27,11 +27,12 @@ import {
   SquareTerminal,
   TriangleAlert,
 } from "lucide-react"
-import type { ComponentProps, CSSProperties, ReactNode } from "react"
-import { useState } from "react"
+import type { ComponentProps, CSSProperties, ReactNode, Ref } from "react"
+import { useRef, useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
+import { useWorkingPulseAnchor } from "@/hooks/use-working-cue"
 import { PaneMenuBody } from "@/components/PaneMenu"
 import {
   quietTailManualChoice,
@@ -187,10 +188,21 @@ function RowLineTwo({ children }: { children: ReactNode }) {
 // the glyph and carries the cycling ellipsis in a fixed slot behind it. The
 // pulse takes the place of the one-shot swap fade rather than joining it, since
 // both are the `animation` shorthand and only one of them can win; the word is
-// already at full opacity when the pulse starts, so nothing snaps.
-function RowStateWord({ word, working }: { word: StateWord; working: boolean }) {
+// already at full opacity when the pulse starts, so nothing snaps. The row
+// anchors it to the glyph's bounce (`useWorkingPulseAnchor`) through `ref`, so
+// work resuming mid-settle keeps the word in step with the glyph.
+function RowStateWord({
+  word,
+  working,
+  ref,
+}: {
+  word: StateWord
+  working: boolean
+  ref?: Ref<HTMLSpanElement>
+}) {
   return (
     <span
+      ref={ref}
       className={cn(
         "shrink-0 font-medium",
         working
@@ -279,6 +291,11 @@ function AgentFlatRow({
     session.typing,
   )
   const word = stateWord(session)
+  // The glyph's frame and the state word, so the word's pulse stays in step
+  // with the glyph's bounce when work resumes mid-settle.
+  const frameRef = useRef<HTMLSpanElement>(null)
+  const wordRef = useRef<HTMLSpanElement>(null)
+  useWorkingPulseAnchor(working, frameRef, wordRef)
   // Which thing this agent is IN: its project, or a standalone agent's folder.
   // Tagged so the row picks the glyph without re-deriving the agent kind.
   const location = workspaceLocation(session.workspace)
@@ -350,7 +367,13 @@ function AgentFlatRow({
               {/* `working` is already resolved through the ladder, so a higher
                   state taking over is a stop like any other: the pulse yields
                   at once and the bounce in flight finishes at rest. */}
-              <WorkingGlyph icon={Bot} working={working} className="size-4.5" />
+              <WorkingGlyph
+                icon={Bot}
+                working={working}
+                handover={attention || typing}
+                frameRef={frameRef}
+                className="size-4.5"
+              />
             </span>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               {/* Line one: name + PR + time. */}
@@ -407,7 +430,12 @@ function AgentFlatRow({
                 {/* Keyed on the label so a state change (Working ⇄ Idle ⇄ Detached
                     …) remounts the span and replays the one-shot fade instead of
                     snapping the text. */}
-                <RowStateWord key={word.label} word={word} working={working} />
+                <RowStateWord
+                  key={word.label}
+                  ref={wordRef}
+                  word={word}
+                  working={working}
+                />
                 {/* No branch here, by decision: a drifted agent would put a
                     long mono branch inline on every row, noise, and worst on a
                     tablet. The branch's one home is the top bar's
@@ -513,6 +541,9 @@ function TerminalFlatRow({
   // typing (typing owns the caret) so the two read apart.
   const working = terminal.working && !terminal.typing
   const word = terminalStateWord(terminal)
+  const frameRef = useRef<HTMLSpanElement>(null)
+  const wordRef = useRef<HTMLSpanElement>(null)
+  useWorkingPulseAnchor(working, frameRef, wordRef)
 
   // Whether this row wears the standalone star instead of the owned-by arrow,
   // decided by the exhaustive owner matcher so a new owner kind must answer.
@@ -557,6 +588,8 @@ function TerminalFlatRow({
         <WorkingGlyph
           icon={SquareTerminal}
           working={working}
+          handover={terminal.typing}
+          frameRef={frameRef}
           frameClassName="mt-0.5"
           className="size-4 text-muted-foreground"
         />
@@ -588,7 +621,7 @@ function TerminalFlatRow({
               </span>
             )}
             <Dot className="text-muted-foreground" />
-            <RowStateWord key={word.label} word={word} working={working} />
+            <RowStateWord key={word.label} ref={wordRef} word={word} working={working} />
           </RowLineTwo>
         </span>
       </button>

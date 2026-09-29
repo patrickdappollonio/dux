@@ -232,6 +232,28 @@ describe("AgentTabsStrip phone height", () => {
   })
 })
 
+// The pill's cue follows its own ladder: needs-you and typing outrank
+// working, so a pill flagged for either shows that state and no working cue.
+describe("AgentTabsStrip working cue ladder", () => {
+  for (const [name, over] of [
+    ["needs attention", { needs_attention: true }],
+    ["is typing", { typing: true }],
+  ] as const) {
+    it(`does not pulse or bounce a working tab that ${name}`, () => {
+      const s = session()
+      s.tabs[1] = { ...s.tabs[1], working: true, ...over }
+      const { container } = render(
+        <AgentTabsStrip session={s} activeTabId="s1" maxTabs={20} />,
+      )
+      const icon = container.querySelectorAll("[role='tab'] svg.lucide-bot")[1]
+      expect(icon.getAttribute("class")).not.toContain("animate-working")
+      expect(
+        icon.closest("[data-slot='working-glyph']")!.getAttribute("class"),
+      ).not.toContain("animate-working")
+    })
+  }
+})
+
 // USER-LOCKED. A working tab's pill icon bounces with the pulse and finishes its
 // bounce at rest on every stop, a hand-over to needs-you included, like the
 // sidebar list. This guard is named by CLAUDE.md's "Locked by the user"

@@ -4,8 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { fireAnimationStart } from "@/test/animationEvents"
 
+import { useRef } from "react"
+
 import {
   useWorkingCue,
+  useWorkingPulseAnchor,
   WORKING_BOUNCE_ANIMATION,
   WORKING_PULSE_ANIMATION,
   WORKING_PULSE_FADE_MS,
@@ -14,11 +17,11 @@ import {
 // The bounce and the pulse live on two elements, a frame and the glyph inside
 // it, so dropping the pulse is a style change on the glyph alone and can never
 // restart, re-time or jump the bounce running on the frame.
-function Probe({ working }: { working: boolean }) {
+function Probe({ working, handover = false }: { working: boolean; handover?: boolean }) {
   const { bouncing, pulsing, attachBounce, attachPulse, handlers } = useWorkingCue<
     HTMLSpanElement,
     HTMLSpanElement
-  >(working)
+  >(working, handover)
   return (
     <span
       ref={attachBounce}
@@ -225,5 +228,70 @@ describe("useWorkingCue", () => {
     withAnimations(glyph(), () => [pulse.animation])
     rerender(<Probe working />)
     expect(pulse.clockWrites).toEqual([])
+  })
+
+  // A higher state taking over brings its own blink with it, and an ease back
+  // under a blinking ancestor is two opacity animations multiplying, which is
+  // exactly what the pulse yields to avoid. So a hand-over snaps to full.
+  it("snaps to full opacity on a hand-over, with no ease", () => {
+    const pulse = fakeAnimation("working-pulse", 0)
+    const { rerender } = render(<Probe working />)
+    withAnimations(glyph(), () => [pulse.animation])
+    const { animate } = withAnimate(glyph())
+    rerender(<Probe working={false} handover />)
+    expect(animate).not.toHaveBeenCalled()
+    expect(pulsing()).toBe(false)
+  })
+
+  it("cuts a plain stop's ease short when a higher state arrives mid-ease", () => {
+    const pulse = fakeAnimation("working-pulse", 0)
+    const { rerender } = render(<Probe working />)
+    withAnimations(glyph(), () => [pulse.animation])
+    const { animate, fade } = withAnimate(glyph())
+    rerender(<Probe working={false} />)
+    expect(animate).toHaveBeenCalledTimes(1)
+    expect(fade.cancel).not.toHaveBeenCalled()
+    rerender(<Probe working={false} handover />)
+    expect(fade.cancel).toHaveBeenCalled()
+  })
+})
+
+// The state word pulses in step with the glyph, so when work resumes while the
+// last bounce is still in flight its restarted pulse is anchored to the same
+// bounce the glyph's pulse is.
+function AnchorProbe({ working }: { working: boolean }) {
+  const frameRef = useRef<HTMLSpanElement>(null)
+  const wordRef = useRef<HTMLSpanElement>(null)
+  useWorkingPulseAnchor(working, frameRef, wordRef)
+  return (
+    <>
+      <span ref={frameRef} data-testid="frame" />
+      <span ref={wordRef} data-testid="word" />
+    </>
+  )
+}
+
+describe("useWorkingPulseAnchor", () => {
+  afterEach(() => cleanup())
+
+  it("anchors another element's pulse to the bounce's start on resume", () => {
+    const bounce = fakeAnimation("working-bounce", 3, 1000)
+    const word = fakeAnimation("working-pulse", 0, 2345)
+    const { rerender } = render(<AnchorProbe working={false} />)
+    withAnimations(screen.getByTestId("frame"), () => [bounce.animation])
+    withAnimations(screen.getByTestId("word"), () => [word.animation])
+    rerender(<AnchorProbe working />)
+    expect(word.animation.startTime).toBe(1000)
+    expect(bounce.clockWrites).toEqual([])
+  })
+
+  it("leaves a pulse already in step alone", () => {
+    const bounce = fakeAnimation("working-bounce", 0, 50)
+    const word = fakeAnimation("working-pulse", 0, 50)
+    const { rerender } = render(<AnchorProbe working={false} />)
+    withAnimations(screen.getByTestId("frame"), () => [bounce.animation])
+    withAnimations(screen.getByTestId("word"), () => [word.animation])
+    rerender(<AnchorProbe working />)
+    expect(word.clockWrites).toEqual([])
   })
 })

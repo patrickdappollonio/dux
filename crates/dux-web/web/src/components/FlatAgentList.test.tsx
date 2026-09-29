@@ -1959,12 +1959,92 @@ describe("FlatAgentList working cue", () => {
 })
 
 
+// The cue's animation clocks, played by stand-ins: jsdom implements neither
+// `getAnimations` nor `animate`, so the tests answer for the browser.
+describe("FlatAgentList working cue timing", () => {
+  function fake(animationName: string, startTime: number) {
+    return {
+      animationName,
+      startTime,
+      finished: new Promise<void>(() => {}),
+      effect: { getComputedTiming: () => ({ currentIteration: 0 }), updateTiming: vi.fn() },
+    }
+  }
+  function stub(name: "getAnimations" | "animate", value: unknown) {
+    Object.defineProperty(Element.prototype, name, { configurable: true, value })
+  }
+  afterEach(() => {
+    delete (Element.prototype as { getAnimations?: unknown }).getAnimations
+    delete (Element.prototype as { animate?: unknown }).animate
+  })
+  function withAlpha(over: Partial<SessionView>): DuxState {
+    const base = makeState("name")
+    return {
+      ...base,
+      spine: {
+        ...base.spine,
+        sessions: [makeSession({ id: "alpha", title: "Alpha", ...over })],
+        terminals: [],
+      },
+    } as DuxState
+  }
+
+  // Work resuming while the last bounce is in flight restarts both pulses; the
+  // word's is anchored to the same bounce as the glyph's, so the two stay in
+  // step instead of the word starting over at its own phase zero.
+  it("anchors a resumed state word's pulse to the glyph's bounce", () => {
+    const bounce = fake("working-bounce", 1000)
+    const wordPulse = fake("working-pulse", 2345)
+    stub("getAnimations", function (this: Element) {
+      if (this.getAttribute("data-slot") === "working-glyph") return [bounce]
+      if (this.textContent === "Working" && this.tagName === "SPAN") return [wordPulse]
+      return []
+    })
+    mockState = withAlpha({ working: true })
+    const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
+    const frame = container.querySelector("[data-slot='working-glyph']")!
+    fireAnimationStart(frame, "working-bounce")
+
+    mockState = withAlpha({})
+    rerender(<FlatAgentList handlers={handlers} />)
+    mockState = withAlpha({ working: true })
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(wordPulse.startTime).toBe(1000)
+    expect(bounce.startTime).toBe(1000)
+  })
+
+  // A plain stop eases the glyph back to full; a higher state taking over
+  // snaps it, because its own blink is already running around the glyph.
+  it("eases the glyph back on a plain stop and snaps it on a hand-over", () => {
+    const glyphPulse = fake("working-pulse", 0)
+    stub("getAnimations", function (this: Element) {
+      return this.matches("svg.lucide-bot") ? [glyphPulse] : []
+    })
+    const animate = vi.fn(() => ({ cancel: vi.fn() }))
+    stub("animate", animate)
+
+    mockState = withAlpha({ working: true })
+    const { rerender } = render(<FlatAgentList handlers={handlers} />)
+    mockState = withAlpha({ working: true, needs_attention: true })
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(animate).not.toHaveBeenCalled()
+
+    mockState = withAlpha({ working: true })
+    rerender(<FlatAgentList handlers={handlers} />)
+    mockState = withAlpha({})
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(animate).toHaveBeenCalledTimes(1)
+  })
+})
+
+
 // USER-LOCKED. The user decided that a working agent's and a running terminal's
 // sidebar glyph BOUNCES together with the pulse, four bounces per pulse on the
 // shared clock, and always finishes its cycle at rest: on a plain stop AND on a
 // hand-over to a higher state (needs-you, typing), where only the pulse yields
 // at once and the bounce in flight still finishes (user, 2026-09-28: "finish
-// the bounce of course but you can add the icon at any time"). It was deleted
+// the bounce of course but you can add the icon at any time, what we care to
+// maintain is the bounce so it doesn't teleport"). It was deleted
 // once by an autonomous pass that rewrote the tenet to allow it; this guard is
 // what CLAUDE.md's "Locked by the user" section names. Do not edit, weaken or
 // delete it, or change what it pins, without the user's explicit request.

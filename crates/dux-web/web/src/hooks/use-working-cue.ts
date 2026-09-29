@@ -17,13 +17,16 @@ import {
 // the bounce in flight finishes and rests exactly at translateY(0). With both
 // in one `animation` list, dropping the pulse would be a restyle of the very
 // element the bounce runs on; on a frame of its own, the bounce is never
-// touched by it.
+// touched by it. Splitting them costs nothing in phase: both classes land in
+// the same commit, so both animations start on the same style change, and in
+// Chromium they were measured to share one startTime.
 export const WORKING_BOUNCE_NAME = "working-bounce"
 export const WORKING_PULSE_NAME = "working-pulse"
 export const WORKING_BOUNCE_ANIMATION = "motion-safe:animate-working-bounce"
 export const WORKING_PULSE_ANIMATION = "motion-safe:animate-working-pulse"
 // How long the glyph takes to come back to full opacity once the pulse
-// yields. Short enough to read as immediate, long enough not to flash.
+// yields on a plain stop. Short enough to read as immediate, long enough not
+// to flash.
 export const WORKING_PULSE_FADE_MS = 300
 
 function pageHidden(): boolean {
@@ -35,25 +38,56 @@ function findAnimation(el: Element | null, name: string): Animation | undefined 
   return el.getAnimations().find((a) => (a as CSSAnimation).animationName === name)
 }
 
+// Work resuming while the last bounce is still in flight restarts every pulse
+// but not the bounce, so a restarted pulse is anchored to the bounce's own
+// start and every pulse boundary stays a bounce boundary. A fresh start needs
+// nothing: everything begins on the same frame with the same startTime.
+function anchorPulse(frame: Element | null, target: Element | null) {
+  const pulse = findAnimation(target, WORKING_PULSE_NAME)
+  const bounce = findAnimation(frame, WORKING_BOUNCE_NAME)
+  if (!pulse || !bounce || bounce.startTime === null) return
+  if (pulse.startTime !== bounce.startTime) pulse.startTime = bounce.startTime
+}
+
+/**
+ * Keeps another element's working pulse (the row's state word) in step with a
+ * `WorkingGlyph`'s bounce when work resumes mid-settle. It belongs in the
+ * component that renders both, because a parent's layout effect runs after its
+ * children's refs are attached and their classes applied.
+ */
+export function useWorkingPulseAnchor(
+  working: boolean,
+  frameRef: React.RefObject<Element | null>,
+  targetRef: React.RefObject<Element | null>,
+) {
+  React.useLayoutEffect(() => {
+    if (working) anchorPulse(frameRef.current, targetRef.current)
+  }, [working, frameRef, targetRef])
+}
+
 /**
  * Drives one working glyph: `bouncing` keys the bounce class on the frame that
  * `attachBounce` and `handlers` go on, and `pulsing` keys the pulse class on the
  * glyph that `attachPulse` goes on.
  *
  * `working` is the cue's one flag, already resolved through the state word's
- * ladder by the caller, so a higher state taking over is simply `working`
- * turning false. The pulse follows it exactly; the bounce settles through
- * `useSettlingAnimation`, which is also what makes a cancelled animation, a
- * hidden tab and reduced motion stop at once.
+ * ladder by the caller, so a higher state taking over is `working` turning
+ * false with `handover` true. The pulse follows `working` exactly; the bounce
+ * settles through `useSettlingAnimation` on every stop, which is also what
+ * makes a cancelled animation, a hidden tab and reduced motion stop at once.
  *
  * Removing a CSS animation starts no CSS transition from its animated value
- * (the opacity snaps straight to full in Chromium), so the pulse is held for
- * one layout pass after a stop, long enough to read the opacity it had reached
- * and ease the glyph from there back to full with a script animation, and then
- * dropped before anything is painted.
+ * (the opacity snaps straight to full in Chromium), so on a plain stop the
+ * pulse is held for one layout pass, long enough to read the opacity it had
+ * reached and ease the glyph from there back to full with a script animation,
+ * and then dropped before anything is painted. A hand-over snaps instead, and
+ * cuts short an ease already running: the higher state's own blink is running
+ * around the glyph, and an ease under it would be two opacity animations
+ * multiplying, which is the very thing the pulse yields to avoid.
  */
 export function useWorkingCue<B extends Element, G extends Element>(
   working: boolean,
+  handover = false,
 ): {
   bouncing: boolean
   pulsing: boolean
@@ -84,7 +118,13 @@ export function useWorkingCue<B extends Element, G extends Element>(
   React.useLayoutEffect(() => {
     if (!leaving) return
     const pulse = findAnimation(glyph, WORKING_PULSE_NAME)
-    if (glyph && pulse && !pageHidden() && typeof glyph.animate === "function") {
+    if (
+      glyph &&
+      pulse &&
+      !handover &&
+      !pageHidden() &&
+      typeof glyph.animate === "function"
+    ) {
       const from = window.getComputedStyle(glyph).opacity
       fade.current = glyph.animate([{ opacity: from }, { opacity: "1" }], {
         duration: WORKING_PULSE_FADE_MS,
@@ -96,20 +136,17 @@ export function useWorkingCue<B extends Element, G extends Element>(
     // belongs in this layout effect rather than after it.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLeaving(false)
-  }, [leaving, glyph])
+  }, [leaving, glyph, handover])
 
-  // Work resuming while the last bounce is still in flight restarts the pulse
-  // but not the bounce, so the new pulse is anchored to the bounce's own start
-  // and every pulse boundary stays a bounce boundary. A fresh start needs
-  // nothing: both animations begin on the same frame.
+  // Resuming, or a higher state arriving, ends an ease still running.
   React.useLayoutEffect(() => {
-    if (!working) return
+    if (!working && !handover) return
     fade.current?.cancel()
     fade.current = null
-    const pulse = findAnimation(glyph, WORKING_PULSE_NAME)
-    const running = findAnimation(frame, WORKING_BOUNCE_NAME)
-    if (!pulse || !running || running.startTime === null) return
-    if (pulse.startTime !== running.startTime) pulse.startTime = running.startTime
+  }, [working, handover])
+
+  React.useLayoutEffect(() => {
+    if (working) anchorPulse(frame, glyph)
   }, [working, glyph, frame])
 
   const { attach } = bounce

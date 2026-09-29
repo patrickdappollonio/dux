@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react"
+import { type RefObject, useCallback } from "react"
 
 import {
   useWorkingCue,
@@ -15,28 +16,43 @@ import { cn } from "@/lib/utils"
  * higher state without restarting or jumping the bounce; `useWorkingCue` holds
  * the reasoning.
  *
- * `working` must already be resolved through the surface's state ladder.
- * `className` styles the icon, `frameClassName` places the frame, which is the
- * element that sits in the surrounding layout.
+ * `working` must already be resolved through the surface's state ladder, and
+ * `handover` says a higher state on that ladder is what outranks it now, so a
+ * stop snaps the glyph to full opacity rather than easing it under that
+ * state's own blink. `className` styles the icon, `frameClassName` places the
+ * frame, which is the element that sits in the surrounding layout, and
+ * `frameRef` hands the frame to `useWorkingPulseAnchor` so a state word can
+ * pulse in step with it.
  */
 export function WorkingGlyph({
   icon: Icon,
   working,
+  handover = false,
   className,
   frameClassName,
+  frameRef,
 }: {
   icon: LucideIcon
   working: boolean
+  handover?: boolean
   className?: string
   frameClassName?: string
+  frameRef?: RefObject<HTMLSpanElement | null>
 }) {
   const { bouncing, pulsing, attachBounce, attachPulse, handlers } = useWorkingCue<
     HTMLSpanElement,
     SVGSVGElement
-  >(working)
+  >(working, handover)
+  const attachFrame = useCallback(
+    (el: HTMLSpanElement | null) => {
+      attachBounce(el)
+      if (frameRef) frameRef.current = el
+    },
+    [attachBounce, frameRef],
+  )
   return (
     <span
-      ref={attachBounce}
+      ref={attachFrame}
       {...handlers}
       data-slot="working-glyph"
       className={cn(
