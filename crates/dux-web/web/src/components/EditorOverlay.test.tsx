@@ -1298,7 +1298,8 @@ describe("editor header controls share one outline look", () => {
     if (phoneFloor) {
       expect(control.className).toMatch(/max-md:(h-10|size-10)/)
     } else {
-      expect(control.className).toContain("max-md:hidden")
+      // Hidden on a phone by itself or by the wrapper it sits in.
+      expect(control.closest(".max-md\\:hidden")).not.toBeNull()
     }
   }
 
@@ -1318,10 +1319,11 @@ describe("editor header controls share one outline look", () => {
 
     // Desktop only: the phone reaches these through the fold.
     expectOutline(screen.getByRole("button", { name: /preview/i }), false)
-    expectOutline(
-      screen.getByRole("button", { name: /open local editor/i }),
-      false,
-    )
+    const local = screen.getByRole("button", { name: /open local editor/i })
+    expectOutline(local, false)
+    // Its tooltip wrapper is what hides it on a phone, once, not the button too.
+    expect(local.className).not.toContain("max-md:hidden")
+    expect(local.parentElement!.className).toContain("max-md:hidden")
   })
 
   it("joins File and Diff as one outline button group, the current mode pressed", async () => {

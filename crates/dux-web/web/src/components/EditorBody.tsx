@@ -1205,7 +1205,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 <Button
                   variant="outline"
                   // The wrapper span, not the button, carries max-md:hidden.
-                  className={cn(HEADER_CONTROL, "max-md:hidden")}
+                  className={HEADER_CONTROL}
                   disabled={!localAccess || openingEditor}
                   aria-busy={openingEditor}
                 />
