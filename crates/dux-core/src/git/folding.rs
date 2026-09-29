@@ -1323,6 +1323,61 @@ mod tests {
         assert!(!nested.exists());
     }
 
+    /// Deleting a link removes the link, whatever it points at, so the guard
+    /// against landing on the worktree or `.git` asks where the LINK is, not
+    /// where it leads.
+    #[test]
+    fn an_untracked_symlink_to_the_worktree_or_into_git_is_still_discardable() {
+        let repo = repo();
+        let root = repo.path();
+        fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        fs::write(root.join(".git/hooks/keep"), "keep\n").unwrap();
+        std::os::unix::fs::symlink(".", root.join("self")).unwrap();
+        std::os::unix::fs::symlink(".git/hooks", root.join("hooks")).unwrap();
+
+        discard_file(root, "self", true).unwrap();
+        discard_file(root, "hooks", true).unwrap();
+
+        assert!(
+            root.join("self").symlink_metadata().is_err(),
+            "the link is gone"
+        );
+        assert!(
+            root.join("hooks").symlink_metadata().is_err(),
+            "the link is gone"
+        );
+        assert!(
+            root.join("src/lib.rs").exists(),
+            "the worktree is untouched"
+        );
+        assert!(root.join(".git/hooks/keep").exists(), ".git is untouched");
+    }
+
+    #[test]
+    fn a_tracked_symlink_retargeted_at_git_is_restored_by_discard() {
+        let repo = repo();
+        let root = repo.path();
+        std::os::unix::fs::symlink("src", root.join("link")).unwrap();
+        git_in(root)(&["add", "link"]);
+        git_in(root)(&["commit", "-q", "-m", "link"]);
+        fs::remove_file(root.join("link")).unwrap();
+        std::os::unix::fs::symlink(".git", root.join("link")).unwrap();
+
+        discard_file(root, "link", false).unwrap();
+
+        assert_eq!(fs::read_link(root.join("link")).unwrap(), Path::new("src"));
+    }
+
+    #[test]
+    fn a_path_through_a_link_into_git_is_still_refused() {
+        let repo = repo();
+        let root = repo.path();
+        std::os::unix::fs::symlink(".git", root.join("dotgit")).unwrap();
+
+        assert!(discard_file(root, "dotgit/HEAD", true).is_err());
+        assert!(root.join(".git/HEAD").exists());
+    }
+
     // ── Crafted paths ──────────────────────────────────────────────────────
     //
     // A folded folder answers for the files inside it, and "inside" is decided

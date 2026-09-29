@@ -3781,12 +3781,34 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
     // Whatever the path's text says, a discard never lands on the worktree
     // itself or on anything inside `.git`, the two targets whose loss takes
     // every other file (or the whole history) with it.
+    //
+    // The entry itself is what gets deleted or restored, so its location is
+    // what is checked: the parent directory resolved (which is how a symlinked
+    // parent reaching into `.git` is caught) with the entry's own name put back.
+    // Canonicalizing the whole path would follow a link at the end, and an
+    // untracked `self -> .` or `hooks -> .git/hooks` would read as the worktree
+    // or `.git` although deleting it removes only the link.
+    let entry_location = |path: &Path| -> Option<PathBuf> {
+        let name = path.file_name()?;
+        let parent = path.parent()?.canonicalize().ok()?;
+        Some(parent.join(name))
+    };
     let target = worktree_path.join(file_path);
-    let lands_on_root = matches!(
-        (worktree_path.canonicalize(), target.canonicalize()),
-        (Ok(root), Ok(resolved)) if root == resolved
-    );
-    if lands_on_root || resolves_into_git_dir(worktree_path, &target) {
+    let root = worktree_path.canonicalize().ok();
+    let entry = entry_location(&target);
+    let lands_on_root = matches!((&root, &entry), (Some(root), Some(entry)) if root == entry);
+    let lands_in_git = match (&root, &entry) {
+        (Some(root), Some(entry)) => entry.strip_prefix(root).is_ok_and(|rel| {
+            rel.components().any(|component| {
+                component
+                    .as_os_str()
+                    .to_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+            })
+        }),
+        _ => false,
+    };
+    if lands_on_root || lands_in_git {
         return Err(anyhow!(
             "refusing to discard {file_path:?}: it resolves to the worktree itself or into .git"
         ));
@@ -3796,9 +3818,13 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
         // Defense-in-depth before a destructive remove: callers classify the
         // path against live `git status` output (which never yields paths
         // outside the worktree), but a filesystem delete should not rest on
-        // that invariant alone. `is_under` rejects any resolved path that
-        // escapes the worktree (e.g. via a symlinked parent component).
-        if !is_under(worktree_path, &full) {
+        // that invariant alone. The entry's own location (its parent resolved,
+        // so a symlinked parent component that escapes is caught) must lie in
+        // the worktree. A link at the end is not followed: deleting it removes
+        // the link, whatever it points at, even at nothing.
+        let inside =
+            matches!((&root, &entry), (Some(root), Some(entry)) if entry.starts_with(root));
+        if !inside {
             return Err(anyhow!(
                 "refusing to delete \"{file_path}\": it resolves outside the worktree"
             ));
