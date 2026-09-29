@@ -190,7 +190,7 @@ reach an older conversation, use the provider's own history command.
 
 When an agent needs you (a permission prompt, a finished turn), its sidebar icon turns cyan
 and pulses, its tab-strip pill gains a small cyan dot, the browser tab title gains a count
-like `(2) dux`, and the favicon grows a small cyan dot. The flag clears the moment you look
+like `(2) dux`, and the favicon grows a small blinking cyan dot. The flag clears the moment you look
 at that agent. The whole model, and how to make sure your agents emit the signal, is in
 [Attention indicators](/docs/attention-indicators).
 

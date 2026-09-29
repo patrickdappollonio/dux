@@ -23,7 +23,10 @@ looking.
   `(2) dux` when two agents are waiting. A backgrounded tab updates the count without
   you visiting it.
 - **The favicon** gets a small cyan dot in the corner of the duck while the count is
-  above zero.
+  above zero, and the dot blinks with the same double pulse as the sidebar's, so it
+  catches your eye from the tab strip. While you are in another tab it settles into
+  a plain, slower on-off blink, which is what a browser lets a background tab keep
+  up. It holds still if you have reduced-motion turned on.
 
 This is the web sidebar.
 
