@@ -46,19 +46,21 @@ count, because dux does not look inside it. A bare repository is different: to g
 folder of ordinary files, so dux counts and stages it as files, the way `git add` would.
 Discarding a folder keeps any bare repository inside it, and the dialog names it.
 
-A folder row has no diff to open. Click its name, or Tab to it and press Enter or Space, to
-expand it and list what is inside, one level at a time; click it again to fold it back up.
-The folders inside are folded the same way and expand the same way, and every file inside is
-a full row: click it for its diff, check it, or stage, unstage or discard it from its own
-`⋯`. A folder whose contents could not be listed says why and offers Retry. What you have
-expanded is remembered for each agent until you reload the page, and it follows the files as
-they change: an expanded folder that gains or loses files lists itself again on its own, at
-any depth, one that is gone is folded away, and collapsing a folder unchecks the rows inside
-it. If a refresh cannot be listed, the rows from before stay, and the folder says it
-couldn't refresh and offers Retry. From the keyboard, the list is one stop in the Tab order:
-the arrow keys move between rows, Right opens a folder and Left folds it or steps back to
-the folder above, Home and End jump to the first and last row, Enter does what a click on
-the row does, and Space checks it.
+A folder row has no diff to open. Click its name to expand it and list what is inside, one
+level at a time; click it again to fold it back up. The folders inside are folded the same
+way and expand the same way, and every file inside is a full row: click it for its diff,
+check it, or stage, unstage or discard it from its own `⋯`. A folder whose contents could
+not be listed says why and offers Retry. What you have expanded is remembered for each agent
+until you reload the page, and it follows the files as they change: an expanded folder that
+gains or loses files lists itself again on its own, at any depth, one that is gone is folded
+away, and collapsing a folder unchecks the rows inside it. If a refresh cannot be listed,
+the rows from before stay, and the folder says it couldn't refresh and offers Retry. From
+the keyboard, the list is one stop in the Tab order and a row holds the focus: the arrow
+keys move between rows, Right opens a folder (or steps into one already open) and Left folds
+it (or steps back to the folder above), Home and End jump to the first and last row, Enter
+does what a click on the row does (a file's diff, a folder opening or folding), and Space
+checks the row. Tab from a row goes through that row's own controls, the checkbox, the
+folder's name and its menu, and then out of the list.
 
 A folder row's own `⋯` menu stages or unstages the whole folder at once, and discards it
 after a confirmation, the same one a file gets. Staging a folder stages its files and leaves
