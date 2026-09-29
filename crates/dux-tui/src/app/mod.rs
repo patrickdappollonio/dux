@@ -969,6 +969,10 @@ pub(crate) struct ChangesTreeState {
     pub(crate) pending_ops: Vec<PendingFolderOp>,
     /// Stamped into every listing request so a superseded answer is dropped.
     pub(crate) listing_seq: u64,
+    /// Which listing (by its `listing_seq`) raised the busy now on each
+    /// listing status key. Two listings of one folder share a key, so only
+    /// the owner may finish or clear it.
+    pub(crate) listing_status_owner: HashMap<String, u64>,
     /// Bumped by every change to an expanded folder's entry, so the cached row
     /// layout below knows to rebuild.
     pub(crate) generation: u64,

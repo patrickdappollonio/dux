@@ -484,6 +484,9 @@ impl App {
         let seq = self.changes_tree.listing_seq;
         let status_key = announce.then(|| listing_status_key(session_id, side, dir));
         if let Some(key) = &status_key {
+            self.changes_tree
+                .listing_status_owner
+                .insert(key.clone(), seq);
             self.engine.register_status_key(key);
             self.status.set(
                 Instant::now(),
@@ -570,6 +573,15 @@ impl App {
         pending: PendingFolderListing,
         answer: Result<Vec<ChangedFile>, String>,
     ) {
+        // Only the listing that raised the key's busy may finish or clear it:
+        // a newer listing of the same folder shares the key.
+        let owns_status = pending.status_key.as_ref().is_some_and(|key| {
+            self.changes_tree.listing_status_owner.get(key) == Some(&pending.seq)
+        });
+        if owns_status && let Some(key) = &pending.status_key {
+            self.changes_tree.listing_status_owner.remove(key);
+        }
+        let status_key = pending.status_key.clone().filter(|_| owns_status);
         let entry = self
             .changes_tree
             .by_session
@@ -579,8 +591,9 @@ impl App {
             .filter(|entry| entry.pending_seq == Some(pending.seq));
         let Some(entry) = entry else {
             // Collapsed, or asked for again, while the worker ran: nothing on
-            // screen is waiting for this answer, so retire its spinner quietly.
-            if let Some(key) = &pending.status_key {
+            // screen is waiting for this answer, so retire its spinner quietly,
+            // when the spinner is its own.
+            if let Some(key) = &status_key {
                 self.status.clear(key, None);
             }
             return;
@@ -618,7 +631,7 @@ impl App {
         };
         // The folder's rows changed (its contents, or why they failed).
         self.bump_changes_tree();
-        if let Some(key) = pending.status_key {
+        if let Some(key) = status_key {
             self.status
                 .set(Instant::now(), Some(key), message.0, message.1);
         }
@@ -1597,6 +1610,31 @@ mod tests {
             );
             assert!(app.status.text().contains(holds), "{}", app.status.text());
         }
+    }
+
+    /// A listing superseded by a newer one for the same folder answers late:
+    /// its answer is dropped, and it must not take the newer listing's spinner
+    /// with it, since both share the folder's status key.
+    #[test]
+    fn a_superseded_listing_leaves_the_newer_listings_spinner_alone() {
+        let (mut app, _worktree) = repo_app();
+        app.handle_key(enter()).unwrap();
+        app.handle_key(enter()).unwrap();
+        app.handle_key(enter()).unwrap();
+        assert_eq!(app.changes_tree.pending_listings.len(), 2);
+        assert_eq!(app.status.tone(), StatusTone::Busy);
+
+        let superseded = app.changes_tree.pending_listings.remove(0);
+        app.apply_folder_listing(superseded, Ok(Vec::new()));
+
+        assert_eq!(app.status.tone(), StatusTone::Busy, "{}", app.status.text());
+        assert!(app.status.text().contains("Listing what is inside"));
+        settle(&mut app, idle);
+        assert!(
+            app.status.text().contains("Expanded"),
+            "{}",
+            app.status.text()
+        );
     }
 
     /// The dialog promised one file; if a folder takes its name before the
