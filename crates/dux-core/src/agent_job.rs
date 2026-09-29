@@ -3839,7 +3839,8 @@ mod tests {
         let paths = |count: usize| -> Vec<String> {
             (0..count).map(|index| format!("dir/repo{index}")).collect()
         };
-        let lead = "Some paths were not copied (submodules, embedded repositories, or special files): ";
+        let lead =
+            "Some paths were not copied (submodules, embedded repositories, or special files): ";
 
         let one = skipped_paths_note(&paths(1));
         assert_eq!(one.message(), format!("{lead}dir/repo0."));
@@ -3851,7 +3852,9 @@ mod tests {
         let many = skipped_paths_note(&paths(40));
         assert_eq!(
             many.message(),
-            format!("{lead}dir/repo0, dir/repo1, dir/repo2, and 37 more (dux.log lists every one).")
+            format!(
+                "{lead}dir/repo0, dir/repo1, dir/repo2, and 37 more (dux.log lists every one)."
+            )
         );
         let names: Vec<String> = many
             .segments()
