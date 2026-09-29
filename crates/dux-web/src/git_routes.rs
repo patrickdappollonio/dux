@@ -1228,10 +1228,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
-        // The folder is staged in part now, so it opens up into its files.
+        // The folder is staged in part now, so it opens up, but only down the
+        // path to the unstaged file: its sibling packages stay folded.
         let (staged, unstaged) = lists(worktree.clone()).await;
-        assert_eq!(staged.len(), 11, "{staged:?}");
-        assert!(staged.iter().all(|f| !f.is_folder()));
+        let mut rows: Vec<(String, bool, usize)> = staged
+            .iter()
+            .map(|f| (f.path.clone(), f.is_folder(), f.file_count()))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("node_modules/pkg0/f1.js".to_string(), false, 1),
+                ("node_modules/pkg0/f2.js".to_string(), false, 1),
+                ("node_modules/pkg0/f3.js".to_string(), false, 1),
+                ("node_modules/pkg1".to_string(), true, 4),
+                ("node_modules/pkg2".to_string(), true, 4),
+            ]
+        );
         assert!(unstaged.iter().any(|f| f.path == "node_modules/pkg0/f0.js"));
 
         // Staging that file again makes the folder whole, and one row again.

@@ -307,7 +307,22 @@ pub(super) fn fold_added_directories(
         return staged;
     }
 
-    // The fold root of each added file: its shallowest ancestor HEAD lacks.
+    // Folders that are not whole: every folder holding something other than a
+    // plain addition, and every folder with something untracked inside it
+    // (staged in part).
+    let mut not_whole: HashSet<&str> = HashSet::new();
+    for file in staged.iter().filter(|file| file.status != "A") {
+        not_whole.extend(ancestors(&file.path));
+    }
+    for file in unstaged.iter().filter(|file| file.status == "?") {
+        not_whole.insert(file.path.as_str());
+        not_whole.extend(ancestors(&file.path));
+    }
+    // The fold root of each added file: its shallowest ancestor that HEAD
+    // lacks AND that is whole. Trying each ancestor in turn, rather than only
+    // the shallowest one HEAD lacks, is what lets a subfolder staged whole fold
+    // under a folder staged in part. Roots never nest: a whole folder's
+    // subfolders are whole too, so every file under it stops at it first.
     let root_of: Vec<Option<String>> = staged
         .iter()
         .map(|file| {
@@ -315,34 +330,17 @@ pub(super) fn fold_added_directories(
                 return None;
             }
             ancestors(&file.path)
-                .find(|ancestor| missing.contains(*ancestor))
+                .find(|ancestor| missing.contains(*ancestor) && !not_whole.contains(ancestor))
                 .map(str::to_string)
         })
         .collect();
-    let mut roots: HashMap<&str, usize> = HashMap::new();
+    let mut roots: HashMap<String, usize> = HashMap::new();
     for root in root_of.iter().flatten() {
-        *roots.entry(root.as_str()).or_default() += 1;
-    }
-    // A root holding anything other than a plain addition stays open.
-    for file in staged.iter().filter(|file| file.status != "A") {
-        for ancestor in ancestors(&file.path) {
-            roots.remove(ancestor);
-        }
-    }
-    // So does one staged in part: something inside it is still untracked.
-    for file in unstaged.iter().filter(|file| file.status == "?") {
-        roots.remove(file.path.as_str());
-        for ancestor in ancestors(&file.path) {
-            roots.remove(ancestor);
-        }
+        *roots.entry(root.clone()).or_default() += 1;
     }
     if roots.is_empty() {
         return staged;
     }
-    let roots: HashMap<String, usize> = roots
-        .into_iter()
-        .map(|(root, count)| (root.to_string(), count))
-        .collect();
 
     let mut folded = Vec::with_capacity(staged.len());
     let mut emitted: HashSet<String> = HashSet::new();
@@ -1003,6 +1001,68 @@ mod tests {
         );
         assert_eq!(staged[0].additions, 1, "a file row keeps its line count");
         assert_eq!(crate::model::total_file_count(&unstaged), 2);
+    }
+
+    /// Staging one whole subfolder of an untracked folder folds that subfolder,
+    /// even though the folder above it is only staged in part.
+    #[test]
+    fn a_subfolder_staged_whole_folds_under_a_folder_staged_in_part() {
+        let repo = repo();
+        let root = repo.path();
+        for index in 0..50 {
+            write(root, &format!("node_modules/big/f{index}.js"), "x\n");
+        }
+        write(root, "node_modules/other/x.js", "x\n");
+        git_in(root)(&["add", "--", "node_modules/big"]);
+
+        let (staged, _) = changed_files(root).unwrap();
+
+        assert_eq!(
+            shape(&staged),
+            vec![("node_modules/big".to_string(), "A".to_string(), folder(50))]
+        );
+    }
+
+    /// Unstaging one file of a folder staged whole opens only the folders on
+    /// that file's way down; its sibling folders stay folded.
+    #[test]
+    fn unstaging_one_file_opens_only_the_folders_that_held_it() {
+        let repo = repo();
+        let root = repo.path();
+        for index in 0..12 {
+            write(
+                root,
+                &format!("node_modules/pkg{}/f{index}.js", index / 4),
+                "x\n",
+            );
+        }
+        git_in(root)(&["add", "--", "node_modules"]);
+        git_in(root)(&["reset", "-q", "HEAD", "--", "node_modules/pkg0/f0.js"]);
+
+        let (staged, _) = changed_files(root).unwrap();
+
+        assert_eq!(
+            shape(&staged),
+            vec![
+                (
+                    "node_modules/pkg0/f1.js".to_string(),
+                    "A".to_string(),
+                    file()
+                ),
+                (
+                    "node_modules/pkg0/f2.js".to_string(),
+                    "A".to_string(),
+                    file()
+                ),
+                (
+                    "node_modules/pkg0/f3.js".to_string(),
+                    "A".to_string(),
+                    file()
+                ),
+                ("node_modules/pkg1".to_string(), "A".to_string(), folder(4)),
+                ("node_modules/pkg2".to_string(), "A".to_string(), folder(4)),
+            ]
+        );
     }
 
     /// Something untracked appearing inside a folder staged whole makes it a
