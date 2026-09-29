@@ -399,6 +399,10 @@ pub(super) fn fold_added_directories(
     // either: its index entry is a placeholder. A repository left untracked
     // (on its own row, or all a folded folder holds) is what a folder stage
     // leaves out, so it is set aside to be counted rather than breaking it.
+    // Only a folder KNOWN to hold repositories and nothing else counts as
+    // that: one counted empty (no files and no repositories, as when it
+    // emptied between two reads) is not known to hold anything, and breaks
+    // the folder around it like any untracked entry.
     let mut left_out: Vec<(&str, usize, usize)> = Vec::new();
     for file in unstaged
         .iter()
@@ -408,7 +412,10 @@ pub(super) fn fold_added_directories(
             let repositories = match &file.kind {
                 ChangedFileKind::NestedRepository => Some((1, 0)),
                 ChangedFileKind::LinkedWorktree => Some((0, 1)),
-                ChangedFileKind::Directory(contents) if contents.file_count == 0 => {
+                ChangedFileKind::Directory(contents)
+                    if contents.file_count == 0
+                        && contents.nested_repositories + contents.linked_worktrees > 0 =>
+                {
                     Some((contents.nested_repositories, contents.linked_worktrees))
                 }
                 ChangedFileKind::Directory(_) | ChangedFileKind::File => None,
@@ -1417,6 +1424,45 @@ mod tests {
         assert!(
             staged.iter().all(|f| f.path != "vendor"),
             "an untracked file inside opens it: {staged:?}"
+        );
+    }
+
+    /// An untracked folder row that holds neither files nor repositories (its
+    /// count came back empty, say because it emptied between two reads) is
+    /// not known to hold only repositories, so it keeps the staged folder
+    /// around it open rather than letting it claim to be whole.
+    #[test]
+    fn an_untracked_folder_counted_empty_keeps_the_staged_folder_open() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "app/a.rs", "a\n");
+        git_in(root)(&["add", "--", "app/a.rs"]);
+        let staged = vec![ChangedFile {
+            status: "A".to_string(),
+            path: "app/a.rs".to_string(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            renamed_from: None,
+            kind: ChangedFileKind::File,
+        }];
+        let unstaged = vec![ChangedFile {
+            status: "?".to_string(),
+            path: "app/empty".to_string(),
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            renamed_from: None,
+            kind: ChangedFileKind::directory(0),
+        }];
+
+        let folded = fold_added_directories(root, staged, &unstaged);
+
+        assert!(
+            folded.iter().all(|f| !f.is_folder()),
+            "the folder is not whole: {folded:?}"
         );
     }
 
