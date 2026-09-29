@@ -1081,6 +1081,25 @@ mod tests {
         assert_eq!(sub.additions, 1);
     }
 
+    /// Loose untracked files are served first and folders from what is left,
+    /// so a file beside a large folder keeps the count it always had.
+    #[test]
+    fn a_loose_file_keeps_its_count_beside_a_folder_that_fills_the_budget() {
+        let repo = repo();
+        let root = repo.path();
+        for index in 0..UNTRACKED_STATS_MAX_FILES {
+            write(root, &format!("big/f{index}.js"), "x\n");
+        }
+        write(root, "a.txt", "one\ntwo\n");
+
+        let (_, unstaged) = changed_files(root).unwrap();
+
+        let loose = unstaged.iter().find(|f| f.path == "a.txt").unwrap();
+        assert_eq!(loose.additions, 2);
+        let big = unstaged.iter().find(|f| f.path == "big").unwrap();
+        assert_eq!(big.additions, 0, "the folder no longer fits what is left");
+    }
+
     #[test]
     fn a_folder_over_the_budget_carries_no_line_counts() {
         let repo = repo();

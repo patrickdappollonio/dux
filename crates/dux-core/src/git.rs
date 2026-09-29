@@ -2899,7 +2899,14 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     // read rather than claiming an empty folder.
     // One budget for every untracked file this read opens, folders' files and
     // loose ones alike: folding must not make a listing read more than it did.
-    let mut read_budget = UNTRACKED_STATS_MAX_FILES;
+    // Loose files are served first, exactly as before folding, and folders
+    // share only what they leave, so a file beside a large folder keeps its
+    // count.
+    let loose_untracked = unstaged
+        .iter()
+        .filter(|file| file.status == "?" && !file.is_folder())
+        .count();
+    let mut read_budget = UNTRACKED_STATS_MAX_FILES.saturating_sub(loose_untracked);
     if !untracked_folders.is_empty() {
         let mut counts =
             folding::count_untracked_folders(worktree_path, &untracked_folders, &mut read_budget)?;
@@ -2954,7 +2961,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
         &mut unstaged,
         &tracked_stats,
         &excluded_unstaged,
-        read_budget,
+        UNTRACKED_STATS_MAX_FILES,
     );
 
     for file in &mut staged {
