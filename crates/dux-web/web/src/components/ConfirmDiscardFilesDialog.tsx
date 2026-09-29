@@ -1,3 +1,5 @@
+import { useMemo } from "react"
+
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -10,6 +12,8 @@ import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { fileStatusMeta } from "@/lib/changedFiles"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import type { ChangedFileView } from "@/lib/types"
+
+const NO_TARGETS: ChangedFileView[] = []
 
 interface Props {
   open: boolean
@@ -33,15 +37,23 @@ export function ConfirmDiscardFilesDialog({
   onCancel,
   onConfirm,
 }: Props) {
-  const checked = new Set(paths)
-  const targets = unstaged.filter((f) => checked.has(f.path))
+  // The dialog stays mounted beside a list that can hold tens of thousands of
+  // files, so the intersection is recomputed only when the selection or the
+  // list moves, never on a render that changed neither. An empty selection,
+  // the usual state, never walks the list at all.
+  const { targets, untracked } = useMemo(() => {
+    if (paths.length === 0) return { targets: NO_TARGETS, untracked: 0 }
+    const checked = new Set(paths)
+    const targets = unstaged.filter((f) => checked.has(f.path))
+    const untracked = targets.filter(
+      (f) => fileStatusMeta(f.status).kind === "untracked",
+    ).length
+    return { targets, untracked }
+  }, [paths, unstaged])
   // Closes itself once every checked path has left the unstaged list, rather
   // than lingering with copy about files that are no longer there.
   const isOpen = useVanishedTargetGuard(open, targets.length > 0, onCancel)
 
-  const untracked = targets.filter(
-    (f) => fileStatusMeta(f.status).kind === "untracked",
-  ).length
   const tracked = targets.length - untracked
   const deleted = `${formatRegularCount(untracked, "untracked file")} will be permanently DELETED from disk`
   const restored = `${formatRegularCount(tracked, "tracked file")} will be restored to ${

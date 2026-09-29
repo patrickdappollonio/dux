@@ -134,16 +134,27 @@ export interface ChangedFileSelection {
 
 // Drop every checked path that is no longer in the section it was checked in: a file
 // checked to be staged and then staged leaves the set rather than following the file across.
+//
+// A section whose checked paths all survive is returned as the SAME set, and the
+// whole selection as the same object when both do, so a caller can tell "nothing
+// changed" by reference. An empty section costs nothing, which is the common case
+// for a pane listing tens of thousands of files and checking none of them.
 export function reconcileSelection(
   prev: ChangedFileSelection,
   slice: { staged: ChangedFileView[]; unstaged: ChangedFileView[] },
 ): ChangedFileSelection {
   const survivors = (checked: Set<string>, files: ChangedFileView[]) => {
+    if (checked.size === 0) return checked
     const live = new Set(files.map((f) => f.path))
-    return new Set([...checked].filter((path) => live.has(path)))
+    for (const path of checked) {
+      if (!live.has(path)) {
+        return new Set([...checked].filter((kept) => live.has(kept)))
+      }
+    }
+    return checked
   }
-  return {
-    staged: survivors(prev.staged, slice.staged),
-    unstaged: survivors(prev.unstaged, slice.unstaged),
-  }
+  const staged = survivors(prev.staged, slice.staged)
+  const unstaged = survivors(prev.unstaged, slice.unstaged)
+  if (staged === prev.staged && unstaged === prev.unstaged) return prev
+  return { staged, unstaged }
 }

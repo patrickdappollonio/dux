@@ -126,6 +126,41 @@ describe("reconcileSelection", () => {
     expect(next.staged.size).toBe(0)
     expect(next.unstaged.size).toBe(0)
   })
+
+  // A caller memoizes on the selection's identity, so "nothing dropped" must be
+  // answered by reference rather than by a rebuilt copy of every set.
+  it("returns the same selection when every checked path survives", () => {
+    const prev = {
+      staged: new Set(["kept-staged.ts"]),
+      unstaged: new Set(["kept-unstaged.ts"]),
+    }
+    expect(reconcileSelection(prev, slice)).toBe(prev)
+  })
+
+  it("keeps the surviving section's set when only the other one drops a path", () => {
+    const prev = {
+      staged: new Set(["kept-staged.ts"]),
+      unstaged: new Set(["gone.ts"]),
+    }
+    const next = reconcileSelection(prev, slice)
+    expect(next).not.toBe(prev)
+    expect(next.staged).toBe(prev.staged)
+    expect(next.unstaged.size).toBe(0)
+  })
+
+  it("does not index the live list for an empty selection", () => {
+    const huge = {
+      staged: [] as ChangedFileView[],
+      unstaged: new Proxy([] as ChangedFileView[], {
+        get(target, key, receiver) {
+          if (key === "map") throw new Error("indexed the list for nothing")
+          return Reflect.get(target, key, receiver)
+        },
+      }),
+    }
+    const prev = { staged: new Set<string>(), unstaged: new Set<string>() }
+    expect(reconcileSelection(prev, huge)).toBe(prev)
+  })
 })
 
 function counted(

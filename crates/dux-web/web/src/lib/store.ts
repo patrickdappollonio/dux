@@ -2120,6 +2120,19 @@ export function useDux(): DuxState {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
+// The selective form of `useDux`: the component re-renders only when what
+// `select` returns changes by reference, not on every `setState` anywhere in
+// the app. `select` must return something the store already holds (a slice, a
+// field, an element of an array), never a freshly built object or array, or
+// every read looks like a change and React loops. For a pane whose render cost
+// grows with its data (the Changes pane at tens of thousands of files) this is
+// the difference between rendering when its data moves and rendering on every
+// keystroke, tick and toast.
+export function useDuxSelector<T>(select: (state: DuxState) => T): T {
+  const read = () => select(state)
+  return useSyncExternalStore(subscribe, read, read)
+}
+
 // --- Routing (a tiny hash router) -----------------------------------------
 //
 // `location.hash` is the source of truth for the whole position, the mobile

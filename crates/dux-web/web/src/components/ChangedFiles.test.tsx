@@ -27,11 +27,27 @@ const refreshChanges = vi.fn()
 const openEditor = vi.fn()
 
 let mockState: DuxState
+// The pane subscribes selectively and is memoized, so a new state reaches it
+// the way the real store delivers one: through its subscribers, not through a
+// parent re-render.
+const mockListeners = new Set<() => void>()
+function publishMockState() {
+  act(() => {
+    for (const listener of mockListeners) listener()
+  })
+}
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
+  const { useSyncExternalStore } = await import("react")
+  const subscribe = (listener: () => void) => {
+    mockListeners.add(listener)
+    return () => void mockListeners.delete(listener)
+  }
   return {
     ...actual,
     useDux: () => mockState,
+    useDuxSelector: <T,>(select: (state: DuxState) => T): T =>
+      useSyncExternalStore(subscribe, () => select(mockState)),
     forceRefreshChanges: () => forceRefreshChanges(),
     refreshChanges: () => refreshChanges(),
     openEditor: (...args: unknown[]) => openEditor(...args),
@@ -620,12 +636,12 @@ describe("the changes pane's multi-select", () => {
   })
 
   it("drops a checked path once a refresh moves it to the other section", () => {
-    const view = render(<ChangedFiles />)
+    render(<ChangedFiles />)
     check("a.ts")
     expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
 
     mockState = withFiles([["staged.ts", "M"], ["a.ts", "M"]], [["b.ts", "??"]])
-    view.rerender(<ChangedFiles />)
+    publishMockState()
 
     expect(
       screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
@@ -633,7 +649,7 @@ describe("the changes pane's multi-select", () => {
   })
 
   it("scopes checked paths to their session and restores them on return", () => {
-    const view = render(<ChangedFiles />)
+    render(<ChangedFiles />)
     check("a.ts")
 
     const second = withFiles([], [["other.ts", "M"]])
@@ -642,7 +658,7 @@ describe("the changes pane's multi-select", () => {
       selectedSessionId: "s2",
       changes: { ...second.changes, sessionId: "s2" },
     }
-    view.rerender(<ChangedFiles />)
+    publishMockState()
 
     expect(
       screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
@@ -655,7 +671,7 @@ describe("the changes pane's multi-select", () => {
       [["staged.ts", "M"]],
       [["a.ts", "M"], ["b.ts", "??"]],
     )
-    view.rerender(<ChangedFiles />)
+    publishMockState()
 
     expect(screen.getByLabelText("Select a.ts").getAttribute("aria-checked")).toBe(
       "true",
@@ -945,13 +961,13 @@ describe("the multi-file discard confirm", () => {
   // The dialog's copy and its target both come from the live unstaged list, so
   // a file that leaves the list while the dialog is open is not discarded.
   it("acts on the survivors when a checked path leaves the list", async () => {
-    const view = render(<ChangedFiles />)
+    render(<ChangedFiles />)
     check("a.ts")
     check("gone.ts")
     fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
 
     mockState = withFiles([], [["a.ts", "M"]])
-    view.rerender(<ChangedFiles />)
+    publishMockState()
 
     const dialog = within(screen.getByRole("dialog"))
     expect(dialog.getByText(/1 file/)).toBeTruthy()
@@ -962,7 +978,7 @@ describe("the multi-file discard confirm", () => {
   })
 
   it("closes itself once every checked path has left the list", async () => {
-    const view = render(<ChangedFiles />)
+    render(<ChangedFiles />)
     check("a.ts")
     check("gone.ts")
     fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
@@ -970,7 +986,7 @@ describe("the multi-file discard confirm", () => {
 
     mockState = withFiles([["a.ts", "M"], ["gone.ts", "??"]], [])
     await act(async () => {
-      view.rerender(<ChangedFiles />)
+      publishMockState()
     })
 
     expect(screen.queryByRole("dialog")).toBeNull()
@@ -1364,5 +1380,94 @@ describe("huge-changes repro: the pane with thousands of changed files", () => {
     } finally {
       Object.defineProperty(HTMLInputElement.prototype, "labels", descriptor!)
     }
+  })
+})
+
+// The windowed list has to keep every behaviour the full list had: the section
+// headings fold, the window follows the scroll, a focused row survives being
+// scrolled away, and a row's menu still opens.
+describe("the Changes pane's windowed list", () => {
+  function numbered(count: number): Array<[string, string]> {
+    return Array.from({ length: count }, (_, index): [string, string] => [
+      `src/file${index}.ts`,
+      "M",
+    ])
+  }
+
+  function scrollTo(top: number) {
+    const el = document.querySelector(
+      '[data-slot="scroll-area-viewport"]',
+    ) as HTMLElement
+    Object.defineProperty(el, "scrollTop", { configurable: true, value: top })
+    fireEvent.scroll(el)
+  }
+
+  // Default desktop heights: a 32px heading, then 42px rows.
+  const ROW_2500 = 32 + 2500 * 42
+
+  it("folds a section's rows away under its heading and brings them back", () => {
+    mockState = withFiles([["staged.ts", "M"]], [["a.ts", "M"]])
+    render(<ChangedFiles />)
+    const heading = screen.getByRole("button", { name: /^Staged/ })
+    expect(heading.getAttribute("aria-expanded")).toBe("true")
+
+    fireEvent.click(heading)
+
+    expect(heading.getAttribute("aria-expanded")).toBe("false")
+    expect(screen.queryByText("staged.ts")).toBeNull()
+    expect(screen.getByText("a.ts")).toBeTruthy()
+
+    fireEvent.click(heading)
+    expect(screen.getByText("staged.ts")).toBeTruthy()
+  })
+
+  it("mounts the rows the scroll position shows rather than the first screenful", () => {
+    mockState = withFiles([], numbered(5000))
+    render(<ChangedFiles />)
+    expect(screen.getByText("src/file0.ts")).toBeTruthy()
+    expect(screen.queryByText("src/file2500.ts")).toBeNull()
+
+    scrollTo(ROW_2500)
+
+    expect(screen.getByText("src/file2500.ts")).toBeTruthy()
+    expect(screen.queryByText("src/file0.ts")).toBeNull()
+    expect(screen.getAllByRole("row").length).toBeLessThanOrEqual(60)
+  })
+
+  it("keeps a focused row mounted when it is scrolled out of the window", () => {
+    mockState = withFiles([], numbered(5000))
+    render(<ChangedFiles />)
+    const box = screen.getByLabelText("Select src/file3.ts")
+    act(() => box.focus())
+    expect(document.activeElement).toBe(box)
+
+    scrollTo(ROW_2500)
+
+    expect(screen.getByText("src/file2500.ts")).toBeTruthy()
+    expect(box.isConnected).toBe(true)
+    expect(document.activeElement).toBe(box)
+  })
+
+  it("releases the pin once focus leaves the list", () => {
+    mockState = withFiles([], numbered(5000))
+    render(<ChangedFiles />)
+    act(() => screen.getByLabelText("Select src/file3.ts").focus())
+    act(() => screen.getByLabelText("Filter changed files").focus())
+
+    scrollTo(ROW_2500)
+
+    expect(screen.queryByText("src/file3.ts")).toBeNull()
+  })
+
+  it("mounts a row's menu only once it is opened, and it still opens", async () => {
+    mockState = withFiles([], [["a.ts", "M"]])
+    render(<ChangedFiles />)
+    expect(document.querySelector('[data-slot="dropdown-menu-content"]')).toBeNull()
+
+    fireEvent.click(screen.getByLabelText("Actions for a.ts"))
+
+    const menu = within(await screen.findByRole("menu"))
+    expect(menu.getByText("Stage")).toBeTruthy()
+    expect(menu.getByText("Discard…")).toBeTruthy()
   })
 })

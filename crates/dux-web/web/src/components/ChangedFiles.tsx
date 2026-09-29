@@ -1,4 +1,14 @@
-import { useId, useState, type ReactElement } from "react"
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+} from "react"
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -45,11 +55,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible"
-import {
   Empty,
   EmptyContent,
   EmptyDescription,
@@ -79,9 +84,18 @@ import {
   refreshChanges,
   standaloneEditorHash,
   toggleChangesPane,
-  useDux,
+  useDuxSelector,
 } from "@/lib/store"
-import type { ChangesSlice } from "@/lib/store"
+import type { ChangesSlice, DuxState } from "@/lib/store"
+import {
+  buildChangesItems,
+  layoutChangesItems,
+  visibleChangesIndices,
+  type ChangesItemHeights,
+  type ChangesItemKind,
+  type ChangesListItem,
+  type ChangesSection,
+} from "@/lib/changesWindow"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
@@ -210,7 +224,9 @@ interface FileRowProps {
   onOpenDiff: (path: string) => void
 }
 
-function FileRow({
+// Memoized: the list re-renders on every scroll step and selection change, and
+// a row whose file, selection and handlers did not move has nothing to redraw.
+const FileRow = memo(function FileRow({
   file,
   action,
   sessionId,
@@ -220,6 +236,10 @@ function FileRow({
 }: FileRowProps) {
   const { kind } = fileStatusMeta(file.status)
   const [busy, setBusy] = useState(false)
+  // The menu's content mounts on the first open and stays mounted after, so
+  // its closing animation still plays: a row nobody opens a menu on pays for a
+  // trigger only, not for a popup tree and its media subscription.
+  const [menuMounted, setMenuMounted] = useState(false)
 
   async function runAction() {
     setBusy(true)
@@ -312,7 +332,11 @@ function FileRow({
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <DropdownMenu>
+        <DropdownMenu
+          onOpenChange={(open) => {
+            if (open) setMenuMounted(true)
+          }}
+        >
           <DropdownMenuTrigger
             render={
               <Button
@@ -327,56 +351,56 @@ function FileRow({
           >
             {busy ? <Loader2 className="motion-safe:animate-spin" /> : <Ellipsis />}
           </DropdownMenuTrigger>
-          <DropdownMenuContent side="bottom" align="end">
-            {/* Open in editor, desktop only (Monaco is poor on touch). Skipped
-                for deleted files (nothing on disk to edit). */}
-            {kind !== "deleted" && (
-              <DropdownMenuItem
-                className="hidden md:flex"
-                onClick={() => openEditor(agentRoot(sessionId), file.path)}
-              >
-                <Pencil />
-                Edit
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuItem onClick={() => void runAction()}>
-              {action === "stage" ? <Plus /> : <Minus />}
-              {action === "stage" ? "Stage" : "Unstage"}
-            </DropdownMenuItem>
-            {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
-              * and the confirm dialog carry the danger and the item itself
-              * stays neutral. */}
-            {action === "stage" && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={runDiscard}>
-                  <Undo2 />
-                  Discard…
+          {menuMounted ? (
+            <DropdownMenuContent side="bottom" align="end">
+              {/* Open in editor, desktop only (Monaco is poor on touch). Skipped
+                  for deleted files (nothing on disk to edit). */}
+              {kind !== "deleted" && (
+                <DropdownMenuItem
+                  className="hidden md:flex"
+                  onClick={() => openEditor(agentRoot(sessionId), file.path)}
+                >
+                  <Pencil />
+                  Edit
                 </DropdownMenuItem>
-              </>
-            )}
-          </DropdownMenuContent>
+              )}
+              <DropdownMenuItem onClick={() => void runAction()}>
+                {action === "stage" ? <Plus /> : <Minus />}
+                {action === "stage" ? "Stage" : "Unstage"}
+              </DropdownMenuItem>
+              {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
+                * and the confirm dialog carry the danger and the item itself
+                * stays neutral. */}
+              {action === "stage" && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={runDiscard}>
+                    <Undo2 />
+                    Discard…
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          ) : null}
         </DropdownMenu>
       </div>
     </div>
   )
-}
+})
 
-interface FileGroupProps {
+interface GroupHeaderProps {
   heading: string
-  files: ChangedFileView[]
+  // The filtered group size, the rows listed beneath this heading.
+  shown: number
   // The unfiltered group size, so the badge can show "N of M" while a search is
-  // active. Equal to `files.length` when nothing is filtered out.
+  // active. Equal to `shown` when nothing is filtered out.
   total: number
-  // Summed over `files`, the filtered set, so the recap describes exactly the
-  // rows visible beneath it.
+  // Summed over the filtered set, so the recap describes exactly the rows
+  // visible beneath it.
   recap: ChangedFilesRecap
   filtering: boolean
-  action: "stage" | "unstage"
-  sessionId: string
-  selected: Set<string>
-  onToggleSelected: (path: string) => void
-  onOpenDiff: (path: string) => void
+  open: boolean
+  onToggleOpen: () => void
 }
 
 // What a recap says out loud: the glyphs are a dense column of figures, so the
@@ -451,51 +475,33 @@ function ChangesRecap({
   )
 }
 
-function FileGroup({
+// A section's heading, which folds its rows away. The rows are not its
+// children: the list is one flat window over both sections, so the heading is a
+// disclosure button that says whether its rows are showing.
+function GroupHeader({
   heading,
-  files,
+  shown,
   total,
   recap,
   filtering,
-  action,
-  sessionId,
-  selected,
-  onToggleSelected,
-  onOpenDiff,
-}: FileGroupProps) {
-  const [open, setOpen] = useState(true)
-
-  // A group empty in the source is hidden, and so is one whose files all fail
-  // the filter; the empty state below covers no matches anywhere.
-  if (files.length === 0) return null
-
+  open,
+  onToggleOpen,
+}: GroupHeaderProps) {
   return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      {/* No checkbox here: the whole-list selection is the bulk bar's Select
-          all / Select none, which spans both sections at once. */}
-      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted max-md:min-h-11">
-        <span className="flex-1 text-left">{heading}</span>
-        <ChangesRecap scope={heading} recap={recap} />
-        <Badge variant="secondary">
-          {filtering ? `${files.length} of ${total}` : files.length}
-        </Badge>
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="mt-1 flex flex-col gap-0.5">
-          {files.map((f) => (
-            <FileRow
-              key={f.path}
-              file={f}
-              action={action}
-              sessionId={sessionId}
-              selected={selected.has(f.path)}
-              onToggleSelected={onToggleSelected}
-              onOpenDiff={onOpenDiff}
-            />
-          ))}
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
+    // No checkbox here: the whole-list selection is the bulk bar's Select all /
+    // Select none, which spans both sections at once.
+    <button
+      type="button"
+      aria-expanded={open}
+      onClick={onToggleOpen}
+      className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 max-md:min-h-11"
+    >
+      <span className="flex-1 text-left">{heading}</span>
+      <ChangesRecap scope={heading} recap={recap} />
+      <Badge variant="secondary">
+        {filtering ? `${shown} of ${total}` : shown}
+      </Badge>
+    </button>
   )
 }
 
@@ -746,6 +752,28 @@ function BulkToolbar({
   )
 }
 
+// Rows mounted beyond each edge of the viewport, so a fast scroll or a Tab to
+// the next row lands on something already there.
+const OVERSCAN = 10
+// The list's own inset (`p-3`), which sits between the viewport's scroll
+// position and the first item.
+const LIST_PADDING = 12
+const ITEM_KINDS: ChangesItemKind[] = ["header", "row", "separator"]
+// The space after each kind of item. It lives on the positioned holder so the
+// measured height carries it and the stacking needs no gap of its own.
+const ITEM_SPACING: Record<ChangesItemKind, string> = {
+  header: "pb-1",
+  row: "pb-0.5",
+  separator: "py-1",
+}
+// Desktop heights with a fine pointer, spacing included, standing in until the
+// first item of each kind is measured.
+const DEFAULT_ITEM_HEIGHTS: ChangesItemHeights = {
+  header: 32,
+  row: 42,
+  separator: 9,
+}
+
 interface ChangesListProps {
   changed: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
   filtered: { staged: ChangedFileView[]; unstaged: ChangedFileView[] }
@@ -771,11 +799,135 @@ function ChangesList({
 }: ChangesListProps) {
   const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
   const hasMatches = filtered.staged.length > 0 || filtered.unstaged.length > 0
-  const openDiff = (path: string) =>
-    openEditor(agentRoot(sessionId), path, "diff")
+  // Stable per session, like the toggles below, so the memoized rows skip a
+  // re-render of the list that did not touch them.
+  const openDiff = useCallback(
+    (path: string) => openEditor(agentRoot(sessionId), path, "diff"),
+    [sessionId],
+  )
+  const toggleStaged = useCallback(
+    (path: string) => onToggle("staged", path),
+    [onToggle],
+  )
+  const toggleUnstaged = useCallback(
+    (path: string) => onToggle("unstaged", path),
+    [onToggle],
+  )
+  const [open, setOpen] = useState<Record<ChangesSection, boolean>>({
+    staged: true,
+    unstaged: true,
+  })
+  const toggleOpen = (section: ChangesSection) =>
+    setOpen((previous) => ({ ...previous, [section]: !previous[section] }))
+
+  const items = useMemo(
+    () =>
+      buildChangesItems({
+        staged: { files: filtered.staged, open: open.staged },
+        unstaged: { files: filtered.unstaged, open: open.unstaged },
+      }),
+    [filtered, open],
+  )
+
+  // Rows are windowed against the pane's own ScrollArea, the approach the
+  // editor's file tree takes: only what is near the viewport is mounted, so a
+  // worktree with tens of thousands of untracked files costs a screenful of
+  // rows. Item heights are measured from the DOM rather than hard-coded,
+  // because rows and headings grow on a phone and under a coarse pointer
+  // through CSS alone; until one of each is mounted the defaults stand in.
+  const [heights, setHeights] = useState<ChangesItemHeights>(DEFAULT_ITEM_HEIGHTS)
+  const offsets = useMemo(() => layoutChangesItems(items, heights), [items, heights])
+  const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(400)
+  const [viewportWidth, setViewportWidth] = useState(0)
+  const listRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!viewportEl) return
+    // ResizeObserver delivers an initial notification on observe(), so this
+    // both seeds the height and tracks later resizes.
+    const observer = new ResizeObserver(() => {
+      setViewportHeight(viewportEl.clientHeight)
+      setViewportWidth(viewportEl.clientWidth)
+    })
+    observer.observe(viewportEl)
+    return () => observer.disconnect()
+  }, [viewportEl])
+
+  // Re-measured when the items change and when the pane's width does, which is
+  // what crosses the phone breakpoint and resizes rows and headings. One read
+  // per kind, and a state update only when a height truly moved.
+  useLayoutEffect(() => {
+    const list = listRef.current
+    if (!list) return
+    let next: ChangesItemHeights | null = null
+    for (const kind of ITEM_KINDS) {
+      const el = list.querySelector<HTMLElement>(`[data-item-kind="${kind}"]`)
+      const measured = el?.offsetHeight ?? 0
+      if (measured > 0 && measured !== (next ?? heights)[kind]) {
+        next = { ...(next ?? heights), [kind]: measured }
+      }
+    }
+    if (next) setHeights(next)
+  }, [items, heights, viewportWidth])
+
+  // The item holding keyboard focus stays mounted however far it is scrolled
+  // away, so wheel-scrolling past a focused checkbox never drops focus to the
+  // page and loses the reader's place in the Tab order.
+  const [focusedKey, setFocusedKey] = useState<string | null>(null)
+  const pinned = useMemo(() => {
+    if (focusedKey === null) return null
+    const index = items.findIndex((item) => item.key === focusedKey)
+    return index >= 0 ? index : null
+  }, [items, focusedKey])
+  const indices = visibleChangesIndices(
+    offsets,
+    scrollTop - LIST_PADDING,
+    viewportHeight,
+    OVERSCAN,
+    pinned,
+  )
+
+  const renderItem = (item: ChangesListItem) => {
+    if (item.kind === "separator") return <Separator />
+    const section = item.section
+    const files = filtered[section]
+    if (item.kind === "header") {
+      return (
+        <GroupHeader
+          heading={section === "staged" ? "Staged" : "Unstaged"}
+          shown={files.length}
+          total={changed[section].length}
+          recap={recap[section]}
+          filtering={filtering}
+          open={open[section]}
+          onToggleOpen={() => toggleOpen(section)}
+        />
+      )
+    }
+    return (
+      <FileRow
+        file={item.file}
+        action={section === "staged" ? "unstage" : "stage"}
+        sessionId={sessionId}
+        selected={selected[section].has(item.file.path)}
+        onToggleSelected={section === "staged" ? toggleStaged : toggleUnstaged}
+        onOpenDiff={openDiff}
+      />
+    )
+  }
 
   return (
-    <ScrollArea className="min-h-0 flex-1">
+    <ScrollArea
+      className="min-h-0 flex-1"
+      viewportRef={setViewportEl}
+      onViewportScroll={(event) => {
+        setScrollTop(event.currentTarget.scrollTop)
+        // Tracked here too: cheap, and covers an inert ResizeObserver.
+        setViewportHeight(event.currentTarget.clientHeight)
+      }}
+    >
       <div className="flex flex-col gap-1 p-3">
         {!hasChanges ? (
           <Empty className="border-0 py-6">
@@ -803,33 +955,48 @@ function ChangesList({
             </EmptyHeader>
           </Empty>
         ) : null}
-        <FileGroup
-          heading="Staged"
-          files={filtered.staged}
-          total={changed.staged.length}
-          recap={recap.staged}
-          filtering={filtering}
-          action="unstage"
-          sessionId={sessionId}
-          selected={selected.staged}
-          onToggleSelected={(path) => onToggle("staged", path)}
-          onOpenDiff={openDiff}
-        />
-        {filtered.staged.length > 0 && filtered.unstaged.length > 0 ? (
-          <Separator className="my-1" />
+        {items.length > 0 ? (
+          <div
+            ref={listRef}
+            // The full height, so the scrollbar reflects the whole list.
+            style={{ position: "relative", height: offsets[items.length] }}
+            onFocus={(event) => {
+              const holder = (event.target as HTMLElement).closest?.(
+                "[data-item-key]",
+              ) as HTMLElement | null
+              // Focus inside a row's portaled menu has no holder in this DOM
+              // subtree; the row keeps whatever pin it already had.
+              if (holder && listRef.current?.contains(holder)) {
+                setFocusedKey(holder.dataset.itemKey ?? null)
+              }
+            }}
+            onBlur={(event) => {
+              const next = event.relatedTarget as Node | null
+              if (next && listRef.current?.contains(next)) return
+              setFocusedKey(null)
+            }}
+          >
+            {indices.map((index) => {
+              const item = items[index]!
+              return (
+                <div
+                  key={item.key}
+                  data-item-key={item.key}
+                  data-item-kind={item.kind}
+                  className={ITEM_SPACING[item.kind]}
+                  style={{
+                    position: "absolute",
+                    top: offsets[index],
+                    left: 0,
+                    right: 0,
+                  }}
+                >
+                  {renderItem(item)}
+                </div>
+              )
+            })}
+          </div>
         ) : null}
-        <FileGroup
-          heading="Unstaged"
-          files={filtered.unstaged}
-          total={changed.unstaged.length}
-          recap={recap.unstaged}
-          filtering={filtering}
-          action="stage"
-          sessionId={sessionId}
-          selected={selected.unstaged}
-          onToggleSelected={(path) => onToggle("unstaged", path)}
-          onOpenDiff={openDiff}
-        />
       </div>
     </ScrollArea>
   )
@@ -917,16 +1084,25 @@ function unavailableChangesScreen(
   )
 }
 
-export function ChangedFiles() {
-  const { changes, selectedSessionId, spine } = useDux()
+// Memoized and subscribed selectively: the pane re-renders when its changes,
+// its selected session or that session's record move, and not on the
+// keystrokes, ticks and toasts that move the rest of the store. Its parents
+// re-render on all of those, which with the pane's list was the whole tab.
+export const ChangedFiles = memo(function ChangedFiles() {
+  const changes = useDuxSelector(selectChanges)
+  const selectedSessionId = useDuxSelector(selectSelectedSessionId)
+  const selectedSession = useDuxSelector((state) =>
+    state.spine?.sessions.find((session) => session.id === state.selectedSessionId),
+  )
   // The hide-pane action is desktop-only: the mobile hub reaches Changes through
   // its own nav, so there's no panel to hide there.
   const isMobile = useIsMobile()
   const controller = useChangedFilesController(selectedSessionId, changes)
-
-  const selectedSession = spine?.sessions.find(
-    (session) => session.id === selectedSessionId,
+  const discardPaths = useMemo(
+    () => [...controller.selected.unstaged],
+    [controller.selected.unstaged],
   )
+
   const unavailable = unavailableChangesScreen(
     selectedSessionId,
     selectedSession,
@@ -1015,11 +1191,19 @@ export function ChangedFiles() {
       </Card>
       <ConfirmDiscardFilesDialog
         open={discarding}
-        paths={[...selected.unstaged]}
+        paths={discardPaths}
         unstaged={changed.unstaged}
         onCancel={closeDiscardMany}
         onConfirm={(paths) => void runDiscardMany(paths)}
       />
     </>
   )
+})
+
+function selectChanges(state: DuxState): ChangesSlice {
+  return state.changes
+}
+
+function selectSelectedSessionId(state: DuxState): string | null {
+  return state.selectedSessionId
 }

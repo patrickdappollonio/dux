@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import {
   filterChangedFiles,
   mergeChangedFilesRecaps,
@@ -48,7 +48,15 @@ function emptySelection(): ChangedFileSelection {
   return { staged: new Set(), unstaged: new Set() }
 }
 
-function changedFilesModel(
+// Never mutated: every edit copies the sets first (see `editSelection`).
+const EMPTY_SELECTION: ChangedFileSelection = emptySelection()
+const EMPTY_FILES: ChangedFileView[] = []
+
+// The pane's derived model, every piece memoized on exactly what it reads. The
+// pane re-renders for reasons that move none of it (a busy flag, the discard
+// dialog opening), and at tens of thousands of files a filter, a recap sum or a
+// Set rebuild per render is what makes the tab stutter.
+function useChangedFilesModel(
   selectedSessionId: string | null,
   changes: ChangesSlice,
   search: ScopedSearch,
@@ -56,47 +64,53 @@ function changedFilesModel(
 ): ChangedFilesModel {
   const query = search.sessionId === selectedSessionId ? search.query : ""
   const slice = changes.sessionId === selectedSessionId ? changes : null
-  const changed = {
-    staged: slice?.staged ?? [],
-    unstaged: slice?.unstaged ?? [],
-  }
-  const filtered = {
-    staged: filterChangedFiles(changed.staged, query),
-    unstaged: filterChangedFiles(changed.unstaged, query),
-  }
+  const stagedSource = slice?.staged ?? EMPTY_FILES
+  const unstagedSource = slice?.unstaged ?? EMPTY_FILES
+  const changed = useMemo(
+    () => ({ staged: stagedSource, unstaged: unstagedSource }),
+    [stagedSource, unstagedSource],
+  )
+  const filtered = useMemo(
+    () => ({
+      staged: filterChangedFiles(stagedSource, query),
+      unstaged: filterChangedFiles(unstagedSource, query),
+    }),
+    [stagedSource, unstagedSource, query],
+  )
   // The recap describes exactly the rows visible beneath it, so it is summed over
   // the filtered lists and the header's figure is the visible sets added
   // together, never an unfiltered total.
-  const stagedRecap = summarizeChangedFiles(filtered.staged)
-  const unstagedRecap = summarizeChangedFiles(filtered.unstaged)
-  const selected = reconcileSelection(
-    selection.sessionId === selectedSessionId ? selection : emptySelection(),
-    changed,
+  const recap = useMemo(() => {
+    const staged = summarizeChangedFiles(filtered.staged)
+    const unstaged = summarizeChangedFiles(filtered.unstaged)
+    return { staged, unstaged, all: mergeChangedFilesRecaps(staged, unstaged) }
+  }, [filtered])
+  const scopedSelection: ChangedFileSelection =
+    selection.sessionId === selectedSessionId ? selection : EMPTY_SELECTION
+  const selected = useMemo(
+    () => reconcileSelection(scopedSelection, changed),
+    [scopedSelection, changed],
   )
-  const visibleStaged = filtered.staged.map((file) => file.path)
-  const visibleUnstaged = filtered.unstaged.map((file) => file.path)
-  const visibleCount = visibleStaged.length + visibleUnstaged.length
-  const allVisibleChecked =
-    visibleCount > 0 &&
-    visibleStaged.every((path) => selected.staged.has(path)) &&
-    visibleUnstaged.every((path) => selected.unstaged.has(path))
+  const visible = useMemo(() => {
+    const visibleStaged = filtered.staged.map((file) => file.path)
+    const visibleUnstaged = filtered.unstaged.map((file) => file.path)
+    const visibleCount = visibleStaged.length + visibleUnstaged.length
+    const allVisibleChecked =
+      visibleCount > 0 &&
+      visibleStaged.every((path) => selected.staged.has(path)) &&
+      visibleUnstaged.every((path) => selected.unstaged.has(path))
+    return { visibleStaged, visibleUnstaged, visibleCount, allVisibleChecked }
+  }, [filtered, selected])
 
   return {
     changed,
     filtered,
-    recap: {
-      staged: stagedRecap,
-      unstaged: unstagedRecap,
-      all: mergeChangedFilesRecaps(stagedRecap, unstagedRecap),
-    },
+    recap,
     query,
     filtering: query.trim() !== "",
     selected,
     anySelected: selected.staged.size > 0 || selected.unstaged.size > 0,
-    visibleStaged,
-    visibleUnstaged,
-    visibleCount,
-    allVisibleChecked,
+    ...visible,
   }
 }
 
@@ -199,21 +213,22 @@ export function useChangedFilesController(
   const [busy, setBusy] = useState<ChangesBusyAction>(null)
   const [discarding, setDiscarding] = useState(false)
   const sessionId = selectedSessionId ?? ""
-  const model = changedFilesModel(selectedSessionId, changes, search, selection)
+  const model = useChangedFilesModel(selectedSessionId, changes, search, selection)
 
-  const editSelection = (
-    mutate: (next: ChangedFileSelection) => void,
-  ): void => {
-    setSelection((previous) => {
-      const base = previous.sessionId === sessionId ? previous : emptySelection()
-      const next = {
-        staged: new Set(base.staged),
-        unstaged: new Set(base.unstaged),
-      }
-      mutate(next)
-      return { sessionId, ...next }
-    })
-  }
+  const editSelection = useCallback(
+    (mutate: (next: ChangedFileSelection) => void): void => {
+      setSelection((previous) => {
+        const base = previous.sessionId === sessionId ? previous : emptySelection()
+        const next = {
+          staged: new Set(base.staged),
+          unstaged: new Set(base.unstaged),
+        }
+        mutate(next)
+        return { sessionId, ...next }
+      })
+    },
+    [sessionId],
+  )
 
   const dropActed = (
     section: "staged" | "unstaged",
@@ -224,12 +239,17 @@ export function useChangedFilesController(
     })
   }
 
-  function toggleOne(section: "staged" | "unstaged", path: string): void {
-    editSelection((next) => {
-      if (next[section].has(path)) next[section].delete(path)
-      else next[section].add(path)
-    })
-  }
+  // Stable per session, because every row holds it and the rows are memoized:
+  // a fresh function per render would re-render every mounted row with it.
+  const toggleOne = useCallback(
+    (section: "staged" | "unstaged", path: string): void => {
+      editSelection((next) => {
+        if (next[section].has(path)) next[section].delete(path)
+        else next[section].add(path)
+      })
+    },
+    [editSelection],
+  )
 
   function toggleVisible(): void {
     const wanted = !model.allVisibleChecked
