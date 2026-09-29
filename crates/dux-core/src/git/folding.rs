@@ -27,6 +27,8 @@ pub(super) enum UntrackedFolder {
     Contents(crate::model::FolderContents),
     /// The folder is a repository of its own, which git does not look inside.
     NestedRepository,
+    /// The folder is a linked worktree of this same repository.
+    LinkedWorktree,
 }
 
 impl UntrackedFolder {
@@ -34,6 +36,7 @@ impl UntrackedFolder {
         match self {
             Self::Contents(contents) => ChangedFileKind::Directory(contents),
             Self::NestedRepository => ChangedFileKind::NestedRepository,
+            Self::LinkedWorktree => ChangedFileKind::LinkedWorktree,
         }
     }
 }
@@ -65,8 +68,14 @@ impl<'r> Tally<'r> {
 /// folders in order for as long as the read's stat budget lasts. A folder that
 /// would not fit in what is left gets no fingerprint at all rather than a
 /// partial one, which could miss exactly the file that changed.
+///
+/// `prefix` is what turns a tally's name into its worktree-relative path, so
+/// a repository row can be told apart from a linked worktree of this same
+/// repository (which asks git, but only for a directory whose `.git` is a
+/// file).
 fn finish_tallies(
     worktree: &Path,
+    prefix: &str,
     tallies: Vec<(String, Tally<'_>)>,
 ) -> Vec<(String, UntrackedFolder)> {
     let mut budget = UNTRACKED_STATS_MAX_FILES;
@@ -74,7 +83,12 @@ fn finish_tallies(
         .into_iter()
         .map(|(folder, tally)| {
             if tally.is_repository {
-                return (folder, UntrackedFolder::NestedRepository);
+                let kind = if super::is_linked_worktree_of(worktree, &format!("{prefix}{folder}")) {
+                    UntrackedFolder::LinkedWorktree
+                } else {
+                    UntrackedFolder::NestedRepository
+                };
+                return (folder, kind);
             }
             let fingerprint = (tally.files.len() <= budget).then(|| {
                 budget -= tally.files.len();
@@ -197,7 +211,7 @@ pub(super) fn count_untracked_folders(
             tallies[position].1.add(record);
         }
     }
-    Ok(finish_tallies(worktree, tallies).into_iter().collect())
+    Ok(finish_tallies(worktree, "", tallies).into_iter().collect())
 }
 
 /// Which of `dirs` HEAD does not have. An empty set when git could not be
@@ -548,7 +562,7 @@ fn untracked_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
     }
 
     files.extend(
-        finish_tallies(worktree, folders)
+        finish_tallies(worktree, &prefix, folders)
             .into_iter()
             .map(|(child, folder)| ChangedFile {
                 status: "?".to_string(),
@@ -1452,6 +1466,64 @@ mod tests {
 
         assert!(discard_file(root, "dotgit/HEAD", true).is_err());
         assert!(root.join(".git/HEAD").exists());
+    }
+
+    /// A folder holding only repositories of their own has nothing a delete
+    /// would take, since those are kept: the delete says so instead of
+    /// reporting a deletion that did not happen.
+    #[test]
+    fn deleting_a_folder_that_holds_only_nested_repositories_is_refused() {
+        let repo = repo();
+        let root = repo.path();
+        let nested = root.join("vendor/lib");
+        fs::create_dir_all(&nested).unwrap();
+        git_in(&nested)(&["init", "-q"]);
+        write(&nested, "own.txt", "own\n");
+
+        let refusal = discard_file(root, "vendor", true).unwrap_err();
+
+        assert!(
+            refusal
+                .to_string()
+                .contains("nothing in \"vendor/\" that a delete would remove"),
+            "{refusal}"
+        );
+        assert!(nested.join("own.txt").exists());
+    }
+
+    /// A linked worktree of this same repository placed inside the worktree
+    /// looks like a repository of its own, but deleting its directory would
+    /// leave the repository believing the worktree still exists. It belongs
+    /// to the worktree manager.
+    #[test]
+    fn a_linked_worktree_of_this_repository_is_not_deleted_as_a_folder() {
+        let repo = repo();
+        let root = repo.path();
+        git_in(root)(&["worktree", "add", "-q", "-b", "side", "inner-wt"]);
+        assert!(is_linked_worktree_of(root, "inner-wt"));
+        let (_, unstaged) = changed_files(root).unwrap();
+        assert_eq!(
+            shape(&unstaged),
+            vec![(
+                "inner-wt".to_string(),
+                "?".to_string(),
+                ChangedFileKind::LinkedWorktree
+            )],
+            "the listing says what it is, so no surface offers a delete"
+        );
+
+        let refusal = discard_file(root, "inner-wt", true).unwrap_err();
+
+        assert!(
+            refusal.to_string().contains("worktree manager"),
+            "{refusal}"
+        );
+        assert!(root.join("inner-wt/src/lib.rs").exists());
+        // An ordinary nested repository is not one.
+        let nested = root.join("clone");
+        fs::create_dir_all(&nested).unwrap();
+        git_in(&nested)(&["init", "-q"]);
+        assert!(!is_linked_worktree_of(root, "clone"));
     }
 
     // ── Paths inside a folder that git does not list ──────────────────────

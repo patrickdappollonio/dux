@@ -985,6 +985,9 @@ pub enum FolderView {
     },
     /// An untracked repository of its own, which is not looked inside.
     NestedRepository,
+    /// A linked worktree of this same repository placed inside the worktree,
+    /// which dux does not delete (the worktree manager removes it).
+    LinkedWorktree,
 }
 
 impl FolderView {
@@ -998,6 +1001,7 @@ impl FolderView {
                 fingerprint: contents.fingerprint.map(|print| format!("{print:016x}")),
             }),
             crate::model::ChangedFileKind::NestedRepository => Some(Self::NestedRepository),
+            crate::model::ChangedFileKind::LinkedWorktree => Some(Self::LinkedWorktree),
         }
     }
 }

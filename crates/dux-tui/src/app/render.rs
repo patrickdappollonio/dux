@@ -8204,6 +8204,13 @@ impl App {
                 name_chip(&format!("{file_path}/"), &self.theme),
                 Span::raw(", a repository of its own, and everything inside it?"),
             ],
+            // Never opened for one (the discard key refuses it first), but
+            // named truthfully should it ever be.
+            dux_core::model::ChangedFileKind::LinkedWorktree => vec![
+                Span::raw(" "),
+                name_chip(&format!("{file_path}/"), &self.theme),
+                Span::raw(" is a worktree of this repository."),
+            ],
         };
         // What the delete keeps, said beside what it takes: a folder's ignored
         // files were never counted, and a repository of its own inside it is
@@ -8235,6 +8242,10 @@ impl App {
                 warning = " This removes a whole repository, including its history and any \
                            commits not pushed anywhere else. It cannot be undone."
                     .to_string();
+            }
+            dux_core::model::ChangedFileKind::LinkedWorktree => {
+                warning =
+                    " dux does not delete it: remove it from the worktree manager.".to_string();
             }
         }
         let mut lines = vec![Line::from(""), Line::from(question)];

@@ -2775,6 +2775,33 @@ impl App {
         let Some(file) = self.selected_changed_file() else {
             return Ok(());
         };
+        // Two folders a delete would not act on get a sentence, not a dialog
+        // that offers a deletion: one holding only repositories of their own
+        // (which the delete keeps), and a worktree of this same repository
+        // (which the worktree manager removes). The core delete refuses both
+        // too; this only spares the user a dialog that could not keep its word.
+        match &file.kind {
+            dux_core::model::ChangedFileKind::Directory(contents) if contents.file_count == 0 => {
+                let path = file.path.clone();
+                self.set_info(format!(
+                    "There is nothing in \"{path}/\" that a delete would remove: it holds only \
+                     repositories of their own, which a delete keeps. Expand it to delete one \
+                     of them from its own row."
+                ));
+                return Ok(());
+            }
+            dux_core::model::ChangedFileKind::LinkedWorktree => {
+                let path = file.path.clone();
+                self.set_error(format!(
+                    "\"{path}/\" is a worktree of this same repository, not a repository of its \
+                     own; remove it from the worktree manager so git forgets it too."
+                ));
+                return Ok(());
+            }
+            dux_core::model::ChangedFileKind::File
+            | dux_core::model::ChangedFileKind::Directory(_)
+            | dux_core::model::ChangedFileKind::NestedRepository => {}
+        }
         // Capture only the path. The tracked/untracked classification that decides
         // the destructive branch is re-derived from live git status at confirm
         // time (see `resolve_confirm_discard_file`), so nothing here can go stale.

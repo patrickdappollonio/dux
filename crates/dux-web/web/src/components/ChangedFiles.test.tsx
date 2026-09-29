@@ -1567,6 +1567,48 @@ describe("a folded folder row", () => {
     expect(openEditor).not.toHaveBeenCalled()
   })
 
+  it("offers no discard for a folder a delete would not act on", async () => {
+    mockState = {
+      selectedSessionId: "s1",
+      changes: {
+        ...loadedChanges(),
+        unstaged: [
+          {
+            path: "vendor",
+            status: "??",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            kind: "directory",
+            file_count: 0,
+            nested_repositories: 2,
+          },
+          {
+            path: "inner-wt",
+            status: "??",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            kind: "linked_worktree",
+          },
+        ],
+      },
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    expect(screen.getByText("worktree of this repository")).toBeTruthy()
+    for (const path of ["vendor", "inner-wt"]) {
+      fireEvent.click(screen.getByLabelText(`Actions for ${path}`))
+      const menu = within(await screen.findByRole("menu"))
+      expect(menu.getByText("Stage")).toBeTruthy()
+      expect(menu.queryByText("Discard…")).toBeNull()
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
+      cleanup()
+      render(<ChangedFiles />)
+    }
+  })
+
   it("offers staging and discarding the folder but no editor", async () => {
     mockState = withFolder()
     render(<ChangedFiles />)

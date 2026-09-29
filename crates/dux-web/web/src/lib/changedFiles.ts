@@ -82,6 +82,7 @@ export function changedFileCount(file: ChangedFileView): number {
 // null for an ordinary file row. The TUI's `folder_count_label` says the same.
 export function folderCountLabel(file: ChangedFileView): string | null {
   if (file.kind === "nested_repository") return "nested repository"
+  if (file.kind === "linked_worktree") return "worktree of this repository"
   if (file.kind !== "directory") return null
   const files = countWords(file.file_count ?? 0, "file", "files")
   const nested = file.nested_repositories ?? 0
@@ -93,6 +94,16 @@ export function folderCountLabel(file: ChangedFileView): string | null {
 // A count with its noun, grouped by thousands the way the TUI writes it.
 export function countWords(count: number, one: string, many: string): string {
   return `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`
+}
+
+// Whether discarding this row would delete anything. A folder holding only
+// repositories of their own has nothing a delete takes (they are kept), and a
+// worktree of this same repository belongs to the worktree manager; the server
+// refuses both, so neither is offered. The TUI refuses the same two.
+export function discardActsOn(file: ChangedFileView): boolean {
+  if (file.kind === "linked_worktree") return false
+  if (file.kind === "directory") return (file.file_count ?? 0) > 0
+  return true
 }
 
 // The recap describes exactly the rows visible beneath it, so callers pass the

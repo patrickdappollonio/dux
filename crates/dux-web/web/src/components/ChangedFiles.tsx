@@ -72,6 +72,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
   changedFileCount,
+  discardActsOn,
   fileStatusMeta,
   folderCountLabel,
   formatRecapCount,
@@ -390,7 +391,7 @@ const FileRow = memo(function FileRow({
               {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
                 * and the confirm dialog carry the danger and the item itself
                 * stays neutral. */}
-              {action === "stage" && (
+              {action === "stage" && discardActsOn(file) && (
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={runDiscard}>

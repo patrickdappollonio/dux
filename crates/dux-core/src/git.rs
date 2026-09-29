@@ -3753,6 +3753,85 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
 /// folder: both measured on git 2.53. A directory that still holds an ignored
 /// file stays, with that file in it. `--literal-pathspecs` and `--` keep a
 /// folder named like a glob or an option to itself.
+/// True when `rel` (a directory inside `worktree_path`) is a linked worktree
+/// of the SAME repository: its `.git` is a file whose `gitdir:` points into
+/// this repository's `worktrees/` administration directory.
+///
+/// Such a directory is reported by `git status` exactly like a repository of
+/// its own, but it is not one: deleting the directory leaves the repository
+/// believing the worktree still exists, and none of the history goes with it.
+/// It belongs to the worktree manager, which removes it properly. Any answer
+/// git could not give reads as "no", leaving the ordinary nested-repository
+/// handling in charge.
+pub fn is_linked_worktree_of(worktree_path: &Path, rel: &str) -> bool {
+    let dir = worktree_path.join(rel);
+    let Ok(text) = fs::read_to_string(dir.join(".git")) else {
+        // A directory (an ordinary repository) or nothing at all.
+        return false;
+    };
+    let Some(gitdir) = text.lines().find_map(|line| line.strip_prefix("gitdir:")) else {
+        return false;
+    };
+    let gitdir = Path::new(gitdir.trim());
+    let gitdir = if gitdir.is_absolute() {
+        gitdir.to_path_buf()
+    } else {
+        dir.join(gitdir)
+    };
+    let Ok(gitdir) = gitdir.canonicalize() else {
+        return false;
+    };
+    let Ok(common) = run_git_capture(
+        worktree_path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        "git rev-parse --git-common-dir",
+    ) else {
+        return false;
+    };
+    let Ok(common) = Path::new(common.trim()).canonicalize() else {
+        return false;
+    };
+    gitdir.starts_with(common.join("worktrees"))
+}
+
+/// Refuse to delete a folder that holds nothing a delete would remove: its
+/// only contents are repositories of their own (which the delete keeps) or
+/// files the repository ignores. Reporting a deletion that did not happen is
+/// the lie this stops.
+fn refuse_empty_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args([
+            "--literal-pathspecs",
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+        ])
+        .arg(format!("{dir}/"))
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let has_a_file = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .any(|record| !record.is_empty() && !record.ends_with(b"/"));
+    if has_a_file {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "there is nothing in \"{dir}/\" that a delete would remove: it holds only \
+         repositories of their own, which a delete keeps, and files the repository ignores. \
+         Delete a nested repository from its own row after expanding the folder."
+    ))
+}
+
 fn clean_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> {
     let output = Command::new("git")
         .args([
@@ -3834,10 +3913,17 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
         if !meta.is_dir() {
             fs::remove_file(&full)?;
         } else if full.join(".git").symlink_metadata().is_ok() {
+            if is_linked_worktree_of(worktree_path, file_path) {
+                return Err(anyhow!(
+                    "\"{file_path}/\" is a worktree of this same repository, not a repository \
+                     of its own; remove it from the worktree manager so git forgets it too"
+                ));
+            }
             // A repository of its own is one row, and deleting it removes it
             // whole, history included; both surfaces' dialogs say so.
             fs::remove_dir_all(&full)?;
         } else {
+            refuse_empty_untracked_folder(worktree_path, file_path)?;
             clean_untracked_folder(worktree_path, file_path)?;
         }
         return Ok(());

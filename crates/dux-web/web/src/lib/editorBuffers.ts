@@ -35,7 +35,7 @@ export interface ChangedRowView {
   additions: number
   deletions: number
   renamed_from?: string
-  kind?: "directory" | "nested_repository"
+  kind?: "directory" | "nested_repository" | "linked_worktree"
   file_count?: number
   fingerprint?: string
 }

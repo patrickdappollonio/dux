@@ -858,6 +858,13 @@ pub enum ChangedFileKind {
     /// look inside another repository, so neither does dux: there is no file
     /// count to give and nothing to expand, and the row says what it is.
     NestedRepository,
+    /// An untracked directory that is a linked worktree of this SAME
+    /// repository (its `.git` is a file pointing into this repository's
+    /// `worktrees/`). git reports it like a repository of its own, but it is
+    /// not one: none of its history lives in it, and deleting the directory
+    /// would leave the repository believing the worktree still exists. dux
+    /// does not delete it; the worktree manager removes it properly.
+    LinkedWorktree,
 }
 
 /// What a folded folder holds.
@@ -897,7 +904,9 @@ impl ChangedFile {
     pub fn is_folder(&self) -> bool {
         match self.kind {
             ChangedFileKind::File => false,
-            ChangedFileKind::Directory { .. } | ChangedFileKind::NestedRepository => true,
+            ChangedFileKind::Directory { .. }
+            | ChangedFileKind::NestedRepository
+            | ChangedFileKind::LinkedWorktree => true,
         }
     }
 
@@ -905,7 +914,9 @@ impl ChangedFile {
     pub fn is_expandable(&self) -> bool {
         match self.kind {
             ChangedFileKind::Directory { .. } => true,
-            ChangedFileKind::File | ChangedFileKind::NestedRepository => false,
+            ChangedFileKind::File
+            | ChangedFileKind::NestedRepository
+            | ChangedFileKind::LinkedWorktree => false,
         }
     }
 
@@ -915,7 +926,9 @@ impl ChangedFile {
     /// look inside it.
     pub fn file_count(&self) -> usize {
         match self.kind {
-            ChangedFileKind::File | ChangedFileKind::NestedRepository => 1,
+            ChangedFileKind::File
+            | ChangedFileKind::NestedRepository
+            | ChangedFileKind::LinkedWorktree => 1,
             ChangedFileKind::Directory(ref contents) => contents.file_count,
         }
     }
@@ -924,7 +937,9 @@ impl ChangedFile {
     pub fn folder_contents(&self) -> Option<&FolderContents> {
         match &self.kind {
             ChangedFileKind::Directory(contents) => Some(contents),
-            ChangedFileKind::File | ChangedFileKind::NestedRepository => None,
+            ChangedFileKind::File
+            | ChangedFileKind::NestedRepository
+            | ChangedFileKind::LinkedWorktree => None,
         }
     }
 }
@@ -1014,6 +1029,7 @@ pub fn folder_count_label(file: &ChangedFile) -> Option<String> {
         ChangedFileKind::File => None,
         ChangedFileKind::Directory(contents) => Some(folder_contents_words(contents)),
         ChangedFileKind::NestedRepository => Some("nested repository".to_string()),
+        ChangedFileKind::LinkedWorktree => Some("worktree of this repository".to_string()),
     }
 }
 

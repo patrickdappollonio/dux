@@ -292,7 +292,7 @@ export interface ChangedFileView {
    * folder with nothing tracked inside it (or, staged, one added whole), and
    * `"nested_repository"` for an untracked repository of its own. The row's
    * `path` is the folder with no trailing slash. Absent on a file row. */
-  kind?: "directory" | "nested_repository"
+  kind?: "directory" | "nested_repository" | "linked_worktree"
   /** How many files a `"directory"` row stands for, at any depth. Files
    * only: repositories of their own inside it are `nested_repositories`. */
   file_count?: number

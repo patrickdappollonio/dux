@@ -173,7 +173,7 @@ impl App {
                 let expanded = self.selected_folder_expanded().unwrap_or(false);
                 hints[position].1 = if expanded { "Collapse" } else { "Expand" };
             }
-            Some(ChangedFileKind::NestedRepository) => {
+            Some(ChangedFileKind::NestedRepository | ChangedFileKind::LinkedWorktree) => {
                 hints.remove(position);
             }
             Some(ChangedFileKind::File) | None => {}
@@ -209,6 +209,13 @@ impl App {
                     "\"{path}/\" is a repository of its own, so git does not look inside it and \
                      there is nothing of this worktree's in it to list. Its row stages, unstages \
                      and deletes it whole."
+                ));
+                return true;
+            }
+            ChangedFileKind::LinkedWorktree => {
+                self.set_info(format!(
+                    "\"{path}/\" is a worktree of this same repository, so its changes are its \
+                     own and git does not list them here. Manage it from the worktree manager."
                 ));
                 return true;
             }
@@ -1032,6 +1039,51 @@ mod tests {
         assert!(
             screen.contains("including its history and any commits not pushed anywhere else"),
             "{screen}"
+        );
+    }
+
+    /// A folder holding only repositories of their own has nothing the delete
+    /// would take, and a worktree of this repository is the worktree
+    /// manager's: neither opens a delete dialog.
+    #[test]
+    fn the_discard_key_refuses_folders_it_would_not_delete() {
+        let mut app = test_app(default_bindings());
+        app.engine.unstaged_files = vec![
+            ChangedFile {
+                kind: ChangedFileKind::Directory(dux_core::model::FolderContents {
+                    file_count: 0,
+                    nested_repositories: 2,
+                    fingerprint: None,
+                }),
+                ..file("vendor", "?")
+            },
+            ChangedFile {
+                kind: ChangedFileKind::LinkedWorktree,
+                ..file("inner-wt", "?")
+            },
+        ];
+        app.selected_left = 1;
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+
+        app.files_index = 0;
+        app.confirm_discard_selected_file().unwrap();
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            app.status
+                .text()
+                .contains("nothing in \"vendor/\" that a delete would remove"),
+            "{}",
+            app.status.text()
+        );
+
+        app.files_index = 1;
+        app.confirm_discard_selected_file().unwrap();
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            app.status.text().contains("worktree manager"),
+            "{}",
+            app.status.text()
         );
     }
 
