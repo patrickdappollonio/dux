@@ -17,7 +17,9 @@ vi.mock("@/lib/store", async (importOriginal) => {
   return { ...actual, useDux: () => mockState, closeDiscard }
 })
 
-const discard = vi.hoisted(() => vi.fn(() => Promise.resolve()))
+// The server answers how many files actually went: five here, whatever the
+// dialog said, so a toast that reports it shows the server's number.
+const discard = vi.hoisted(() => vi.fn(() => Promise.resolve(5)))
 vi.mock("@/lib/git", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/git")>()
   return { ...actual, git: { ...actual.git, discard } }
@@ -150,12 +152,17 @@ describe("the single discard dialog", () => {
     openOn("node_modules")
     screen.getByRole("button", { name: "Delete" }).click()
     await vi.waitFor(() => expect(notifySuccess).toHaveBeenCalledTimes(1))
+    // The toast says how many files actually went, not the dialog's count.
     expect(proseText(notifySuccess.mock.calls[0]![0])).toContain(
-      "Deleted the untracked files in node_modules/ (28,747 files)",
+      "Deleted the untracked files in node_modules/ (5 files)",
     )
-    // What the user confirmed travels with the request, so the server can
-    // refuse a folder that became something else meanwhile.
-    expect(discard).toHaveBeenCalledWith("s1", "node_modules", "directory")
+    // What the user confirmed travels with the request, its file count
+    // included, so the server can refuse a folder that became something else
+    // or grew meanwhile.
+    expect(discard).toHaveBeenCalledWith("s1", "node_modules", {
+      kind: "directory",
+      files: 28747,
+    })
   })
 
   // The dialog says what it opened on, and that is what a click confirms: a
@@ -183,6 +190,24 @@ describe("the single discard dialog", () => {
     )
   })
 
+  it("closes and says so when the folder grows while it is open", () => {
+    const { rerender } = openOn("node_modules")
+    mockState = stateOn("node_modules", [
+      { ...folder, file_count: 30003 },
+      nested,
+      plain,
+    ])
+    rerender(<ConfirmDiscardFileDialog />)
+
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(closeDiscard).toHaveBeenCalled()
+    expect(discard).not.toHaveBeenCalled()
+    expect(proseText(notifyWarning.mock.calls[0]![0])).toBe(
+      "node_modules/ changed while the dialog was open: it now holds 30,003 files. " +
+        "Nothing was deleted; look at it again before deleting it.",
+    )
+  })
+
   it("keeps the file wording for a file", () => {
     openOn("notes.md")
     expect(dialogText()).toContain("is untracked and will be permanently DELETED")
@@ -195,7 +220,7 @@ describe("the single discard dialog", () => {
     openOn("notes.md")
     screen.getByRole("button", { name: "Discard" }).click()
     await vi.waitFor(() => expect(discard).toHaveBeenCalledTimes(1))
-    expect(discard).toHaveBeenCalledWith("s1", "notes.md", "file")
+    expect(discard).toHaveBeenCalledWith("s1", "notes.md", { kind: "file" })
   })
 })
 
@@ -318,7 +343,7 @@ describe("the bulk discard dialog", () => {
     screen.getByRole("button", { name: "Discard" }).click()
     // What each folder was when the dialog opened travels with it.
     expect(onConfirm).toHaveBeenCalledWith(["node_modules"], {
-      node_modules: "directory",
+      node_modules: { kind: "directory", files: 28747 },
     })
   })
 
@@ -347,6 +372,25 @@ describe("the bulk discard dialog", () => {
     )
   })
 
+  it("closes and says so when a selected folder grows while it is open", () => {
+    const onCancel = vi.fn()
+    const dialog = (unstaged: ChangedFileView[]) => (
+      <ConfirmDiscardFilesDialog
+        open
+        paths={["node_modules"]}
+        unstaged={unstaged}
+        onCancel={onCancel}
+        onConfirm={() => {}}
+      />
+    )
+    const { rerender } = render(dialog([folder]))
+    rerender(dialog([{ ...folder, file_count: 30003 }]))
+
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(onCancel).toHaveBeenCalled()
+    expect(proseText(notifyWarning.mock.calls[0]![0])).toContain("it now holds 30,003 files")
+  })
+
   // The copy is what the rows were when the dialog opened, not whatever the
   // live list says a moment later.
   it("words the dialog from the rows it opened on", () => {
@@ -360,6 +404,8 @@ describe("the bulk discard dialog", () => {
       />
     )
     const { rerender } = render(dialog([folder]))
+    // Fewer files is still the folder the user meant: the dialog stays, and
+    // the server reports what actually went.
     rerender(dialog([{ ...folder, file_count: 5 }]))
     expect(dialogText()).toContain("28,747 untracked files")
   })

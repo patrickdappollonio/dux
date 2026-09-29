@@ -1043,8 +1043,17 @@ pub(crate) struct PendingFolderOp {
     /// The folder is a repository of its own, deleted whole with its history.
     pub(crate) repository: bool,
     pub(crate) status_key: String,
-    /// A stage reports what it left out; the other operations report nothing.
-    pub(crate) rx: mpsc::Receiver<Result<git::StageReport, String>>,
+    /// What the operation did, or why it could not.
+    pub(crate) rx: mpsc::Receiver<Result<FolderOpDone, String>>,
+}
+
+/// What a finished folder operation did: a stage says what it left out, and
+/// a delete how many files actually went, which the final line reports
+/// rather than the count the dialog showed.
+#[derive(Debug, Default)]
+pub(crate) struct FolderOpDone {
+    pub(crate) report: git::StageReport,
+    pub(crate) deleted_files: usize,
 }
 
 /// How long a diff may take before the status line explains the empty pane.

@@ -8,7 +8,7 @@ import {
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
 import { formatRegularCount } from "@/lib/formatRegularCount"
-import { git, type BatchResult } from "@/lib/git"
+import { git, type BatchResult, type DiscardConfirmation } from "@/lib/git"
 import { notifyError, notifyInfo, notifySuccess, notifyWarning } from "@/lib/notify"
 import { chip, joinProse, prose, type Prose } from "@/lib/prose"
 import { discardOutcome, leftOutNotice, selectedFileCount } from "@/lib/discardOutcome"
@@ -156,6 +156,8 @@ function bulkResultToast(
 function discardResultToast(
   result: {
     done: string[]
+    // The server's count of what each done folder actually took.
+    deleted?: Record<string, number>
     failed: { path: string; message: string }[]
   },
   rows: readonly ChangedFileView[],
@@ -175,7 +177,7 @@ function discardResultToast(
       },
   )
   if (result.failed.length === 0) {
-    notifySuccess(discardOutcome(doneRows))
+    notifySuccess(discardOutcome(doneRows, result.deleted))
     return
   }
   if (result.done.length === 0) {
@@ -185,7 +187,7 @@ function discardResultToast(
     return
   }
   notifyWarning(
-    prose`${discardOutcome(doneRows)} ${formatRegularCount(
+    prose`${discardOutcome(doneRows, result.deleted)} ${formatRegularCount(
       result.failed.length,
       "row",
     )} could not be discarded, starting with ${chip(result.failed[0]!.path)}: ${
@@ -228,7 +230,7 @@ interface DiscardTransaction {
   sessionId: string
   paths: string[]
   // What each folder was when the dialog opened, which is what was confirmed.
-  kinds: Readonly<Record<string, string>>
+  confirmations: Readonly<Record<string, DiscardConfirmation>>
   rows: readonly ChangedFileView[]
   dropActed: (section: "unstaged", paths: string[]) => void
 }
@@ -236,12 +238,12 @@ interface DiscardTransaction {
 async function runDiscardTransaction({
   sessionId,
   paths,
-  kinds,
+  confirmations,
   rows,
   dropActed,
 }: DiscardTransaction): Promise<void> {
   // What the user confirmed for each folder travels with its request.
-  const result = await git.discardMany(sessionId, paths, kinds)
+  const result = await git.discardMany(sessionId, paths, confirmations)
   dropActed("unstaged", paths)
   discardResultToast(result, rows)
 }
@@ -336,7 +338,7 @@ export function useChangedFilesController(
 
   async function runDiscardMany(
     paths: string[],
-    kinds: Readonly<Record<string, string>>,
+    confirmations: Readonly<Record<string, DiscardConfirmation>>,
   ): Promise<void> {
     setDiscarding(false)
     if (busy !== null || paths.length === 0) return
@@ -345,7 +347,7 @@ export function useChangedFilesController(
       await runDiscardTransaction({
         sessionId,
         paths,
-        kinds,
+        confirmations,
         rows: changes.unstaged,
         dropActed,
       })

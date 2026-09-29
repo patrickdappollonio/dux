@@ -742,23 +742,39 @@ impl App {
         let path = folder.path.clone();
         // What the user confirmed they were deleting; the delete refuses if the
         // folder is no longer that when it runs.
-        let confirmed = match folder.kind {
+        // A folder carries the number of files the dialog said would go,
+        // which the delete refuses to exceed.
+        let confirmed = match &folder.kind {
             ChangedFileKind::NestedRepository => git::ConfirmedEntry::Repository,
-            ChangedFileKind::File
-            | ChangedFileKind::Directory(_)
-            | ChangedFileKind::LinkedWorktree => git::ConfirmedEntry::Folder,
+            ChangedFileKind::Directory(contents) => git::ConfirmedEntry::Folder {
+                files: contents.deletable_files(),
+            },
+            ChangedFileKind::File | ChangedFileKind::LinkedWorktree => {
+                git::ConfirmedEntry::Folder {
+                    files: folder.file_count(),
+                }
+            }
         };
         let _ = thread::Builder::new()
             .name("dux-changes-folder-op".into())
             .spawn(move || {
-                let outcome = match op {
-                    FolderOp::Stage => git::stage_with_report(&worktree, &[path]),
-                    FolderOp::Unstage => {
-                        git::unstage_file(&worktree, &path).map(|()| git::StageReport::default())
-                    }
-                    FolderOp::Delete => delete_untracked_folder(&worktree, &path, confirmed)
-                        .map(|()| git::StageReport::default()),
-                };
+                let outcome =
+                    match op {
+                        FolderOp::Stage => {
+                            git::stage_with_report(&worktree, &[path]).map(|report| FolderOpDone {
+                                report,
+                                deleted_files: 0,
+                            })
+                        }
+                        FolderOp::Unstage => {
+                            git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
+                        }
+                        FolderOp::Delete => delete_untracked_folder(&worktree, &path, confirmed)
+                            .map(|deleted_files| FolderOpDone {
+                                deleted_files,
+                                ..FolderOpDone::default()
+                            }),
+                    };
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
             });
         self.changes_tree.pending_ops.push(PendingFolderOp {
@@ -801,12 +817,12 @@ impl App {
                          submodule-style entry recording its current commit), not as its files."
                     ),
                 ),
-                (FolderOp::Stage, Ok(report)) if report.left_anything_out() => (
+                (FolderOp::Stage, Ok(done)) if done.report.left_anything_out() => (
                     StatusTone::Info,
                     format!(
                         "Staged \"{label}\" without the repositories inside it: left out {}, \
                          which staging would record as links to repositories, not as files.",
-                        left_out_words(&report)
+                        left_out_words(&done.report)
                     ),
                 ),
                 (FolderOp::Stage, Ok(_)) => (
@@ -830,12 +846,14 @@ impl App {
                          cannot be undone."
                     ),
                 ),
-                (FolderOp::Delete, Ok(_)) => (
+                // What actually went, which may be fewer than the dialog said.
+                (FolderOp::Delete, Ok(done)) => (
                     StatusTone::Info,
                     format!(
-                        "Deleted the untracked files in \"{label}\" ({count}). Files the \
-                         repository ignores and repositories of their own inside it are kept. \
-                         This cannot be undone."
+                        "Deleted the untracked files in \"{label}\" ({}). Files the repository \
+                         ignores and repositories of their own inside it are kept. This cannot \
+                         be undone.",
+                        dux_core::model::count_words(done.deleted_files, "file", "files")
                     ),
                 ),
                 (op, Err(err)) => {
@@ -899,7 +917,7 @@ fn delete_untracked_folder(
     worktree: &Path,
     path: &str,
     confirmed: git::ConfirmedEntry,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     if !git::discard_classify(worktree, path)? {
         anyhow::bail!(
             "it is no longer untracked, so dux left it alone; refresh the changes and look again"
@@ -1695,6 +1713,46 @@ mod tests {
             "{}",
             app.status.text()
         );
+    }
+
+    /// The dialog promised thirteen files; a folder that holds more by the
+    /// time the confirm lands is refused, and nothing is deleted.
+    #[test]
+    fn a_folder_that_grew_after_the_dialog_is_not_deleted() {
+        let (mut app, worktree) = repo_app();
+        app.confirm_discard_selected_file().unwrap();
+        std::fs::write(worktree.join("node_modules/late.js"), "late\n").unwrap();
+
+        app.resolve_confirm_discard_file(true);
+        settle(&mut app, idle);
+
+        assert_eq!(app.status.tone(), StatusTone::Error);
+        assert!(
+            app.status.text().contains("it now holds 14 files"),
+            "{}",
+            app.status.text()
+        );
+        assert!(worktree.join("node_modules/top.js").exists());
+    }
+
+    /// Fewer files than the dialog said still goes, and the final line says
+    /// how many actually went, not how many the dialog promised.
+    #[test]
+    fn a_folder_that_shrank_after_the_dialog_reports_what_went() {
+        let (mut app, worktree) = repo_app();
+        app.confirm_discard_selected_file().unwrap();
+        std::fs::remove_file(worktree.join("node_modules/top.js")).unwrap();
+
+        app.resolve_confirm_discard_file(true);
+        settle(&mut app, idle);
+
+        assert_eq!(app.status.tone(), StatusTone::Info, "{}", app.status.text());
+        assert!(
+            app.status.text().contains("(12 files)"),
+            "{}",
+            app.status.text()
+        );
+        assert!(!worktree.join("node_modules").exists());
     }
 
     /// The dialog promised one file; if a folder takes its name before the

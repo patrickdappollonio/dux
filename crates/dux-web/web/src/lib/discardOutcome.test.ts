@@ -71,6 +71,19 @@ describe("selectedFileCount", () => {
   })
 })
 
+// A toast reports what actually went, which the server counts: a folder that
+// shrank while its dialog was open reports the smaller number.
+describe("discardOutcome with the server's counts", () => {
+  it("reports the files the server deleted for a folder", () => {
+    expect(proseText(discardOutcome([folder], { node_modules: 3 }))).toContain(
+      "node_modules/ (3 files)",
+    )
+    expect(
+      proseText(discardOutcome([folder, row("a.txt", "??")], { node_modules: 3 })),
+    ).toContain("Discarded the changes to 4 files")
+  })
+})
+
 // A folder holding nothing but repositories is named by what it holds: a
 // worktree of this repository is not a repository of its own, and a mix names
 // both. Neither a delete nor a stage acts on it.

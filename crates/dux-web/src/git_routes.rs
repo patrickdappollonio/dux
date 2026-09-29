@@ -48,19 +48,25 @@ struct FileOp {
 /// `"file"`, or a folder row's wire kind (`"directory"`,
 /// `"nested_repository"`). Absent from an older client: then a plain file is
 /// discarded as it always was and a directory of any kind is refused, because
-/// nothing said the user was looking at a folder.
+/// nothing said the user was looking at a folder. A `"directory"` also names
+/// `files`, how many files its dialog said would go: the delete refuses to
+/// take more, and a `"directory"` without it confirms nothing.
 #[derive(Deserialize)]
 struct DiscardOp {
     path: String,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default)]
+    files: Option<usize>,
 }
 
 impl DiscardOp {
     fn confirmed(&self) -> Option<dux_core::git::ConfirmedEntry> {
         match self.kind.as_deref() {
             Some("file") => Some(dux_core::git::ConfirmedEntry::File),
-            Some("directory") => Some(dux_core::git::ConfirmedEntry::Folder),
+            Some("directory") => self
+                .files
+                .map(|files| dux_core::git::ConfirmedEntry::Folder { files }),
             Some("nested_repository") => Some(dux_core::git::ConfirmedEntry::Repository),
             _ => None,
         }
@@ -451,15 +457,22 @@ async fn discard(
     let path = op.path;
     // A folder that is no longer what the user confirmed is a refusal they can
     // act on (look again), which `run_git` answers as one.
-    if let Err(r) = run_git("discard the file's changes", &worktree, move || {
+    let files_deleted = match run_git("discard the file's changes", &worktree, move || {
         dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed)
     })
     .await
     {
-        return r.into_response();
-    }
+        Ok(files) => files,
+        Err(r) => return r.into_response(),
+    };
     refresh_changed_files_now(&state, session_id, &worktree);
-    StatusCode::OK.into_response()
+    // How many files actually went, which the browser reports rather than
+    // the count its dialog showed.
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "files_deleted": files_deleted })),
+    )
+        .into_response()
 }
 
 async fn stage_files(
@@ -1417,7 +1430,7 @@ mod tests {
             .oneshot(json_req(
                 "POST",
                 "/api/v1/sessions/s1/git/discard",
-                r#"{"path":"node_modules","kind":"directory"}"#,
+                r#"{"path":"node_modules","kind":"directory","files":12}"#,
             ))
             .await
             .unwrap();
@@ -1498,7 +1511,7 @@ mod tests {
         run_git(&worktree.join("scratch"), &["init", "-q"]);
 
         for body in [
-            r#"{"path":"scratch","kind":"directory"}"#,
+            r#"{"path":"scratch","kind":"directory","files":1}"#,
             r#"{"path":"scratch"}"#,
         ] {
             let resp = app
@@ -1514,7 +1527,7 @@ mod tests {
             .oneshot(json_req(
                 "POST",
                 "/api/v1/sessions/s1/git/discard",
-                r#"{"path":"scratch","kind":"directory"}"#,
+                r#"{"path":"scratch","kind":"directory","files":1}"#,
             ))
             .await
             .unwrap();
@@ -1616,6 +1629,56 @@ mod tests {
             staged.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
             ["plain.txt"]
         );
+    }
+
+    /// A folder delete carries how many files the dialog said would go: more
+    /// now is refused, fewer goes, and the answer says how many actually went.
+    /// A folder confirmation without a count is no confirmation at all.
+    #[tokio::test]
+    async fn a_folder_discard_is_held_to_the_count_it_confirmed() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        for name in ["a", "b", "c", "d", "e"] {
+            std::fs::create_dir_all(worktree.join("out")).unwrap();
+            std::fs::write(worktree.join(format!("out/{name}.js")), "x\n").unwrap();
+        }
+
+        for body in [
+            r#"{"path":"out","kind":"directory","files":3}"#,
+            r#"{"path":"out","kind":"directory"}"#,
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(json_req("POST", "/api/v1/sessions/s1/git/discard", body))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+            assert!(worktree.join("out/e.js").exists(), "{body}");
+        }
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"out","kind":"directory","files":3}"#,
+            ))
+            .await
+            .unwrap();
+        assert!(body_text(resp).await.contains("it now holds 5 files"));
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"out","kind":"directory","files":9}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(json["files_deleted"], 5);
+        assert!(!worktree.join("out").exists());
     }
 
     /// A file row confirmed as a file, which a folder has since replaced, is

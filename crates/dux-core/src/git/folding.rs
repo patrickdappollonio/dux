@@ -1716,15 +1716,26 @@ mod tests {
         let repo = folder_with_bare_repositories();
         let root = repo.path();
 
-        discard_confirmed(root, "d", true, Some(ConfirmedEntry::Folder)).unwrap();
+        discard_confirmed(
+            root,
+            "d",
+            true,
+            Some(ConfirmedEntry::Folder { files: usize::MAX }),
+        )
+        .unwrap();
 
         assert!(!root.join("d/a.txt").exists());
         assert!(!root.join("d/sub").exists(), "a directory left empty goes");
         assert!(root.join("d/bare.git/HEAD").exists());
         assert!(root.join("d/deep/b2.git/HEAD").exists());
         assert!(root.join("d/deep/secret.env").exists());
-        let refusal =
-            discard_confirmed(root, "top.git", true, Some(ConfirmedEntry::Folder)).unwrap_err();
+        let refusal = discard_confirmed(
+            root,
+            "top.git",
+            true,
+            Some(ConfirmedEntry::Folder { files: usize::MAX }),
+        )
+        .unwrap_err();
         assert!(refusal.to_string().contains("nothing in"), "{refusal}");
         assert!(root.join("top.git/HEAD").exists());
     }
@@ -1839,6 +1850,45 @@ mod tests {
             "{refusal}"
         );
         assert!(root.join("x/a.txt").exists() && root.join("x/b.txt").exists());
+    }
+
+    /// The dialog promised three files; a folder that has grown since is
+    /// refused rather than taking files nobody was shown.
+    #[test]
+    fn a_folder_that_grew_after_the_dialog_is_not_deleted() {
+        let repo = repo();
+        let root = repo.path();
+        for name in ["a", "b", "c"] {
+            write(root, &format!("out/{name}.js"), "x\n");
+        }
+        write(root, "out/late/d.js", "x\n");
+        write(root, "out/late/e.js", "x\n");
+
+        let refusal =
+            discard_confirmed(root, "out", true, Some(ConfirmedEntry::Folder { files: 3 }))
+                .unwrap_err();
+
+        let text = refusal.to_string();
+        assert!(text.contains("changed since you looked"), "{text}");
+        assert!(text.contains("it now holds 5 files"), "{text}");
+        assert!(root.join("out/a.js").exists() && root.join("out/late/e.js").exists());
+    }
+
+    /// Fewer files than confirmed is still the folder the user meant, so it
+    /// goes, and the answer says how many actually went.
+    #[test]
+    fn a_folder_that_shrank_is_deleted_and_says_how_many_went() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "out/a.js", "x\n");
+        write(root, "out/b.js", "x\n");
+
+        let deleted =
+            discard_confirmed(root, "out", true, Some(ConfirmedEntry::Folder { files: 3 }))
+                .unwrap();
+
+        assert_eq!(deleted, 2);
+        assert!(!root.join("out").exists());
     }
 
     /// With nothing confirmed, which is what an older client sends, a plain
@@ -2011,9 +2061,14 @@ mod tests {
                 "{text}"
             );
             assert!(text.contains(holds), "{text}");
-            let refusal = discard_confirmed(root, folder, true, Some(ConfirmedEntry::Folder))
-                .unwrap_err()
-                .to_string();
+            let refusal = discard_confirmed(
+                root,
+                folder,
+                true,
+                Some(ConfirmedEntry::Folder { files: usize::MAX }),
+            )
+            .unwrap_err()
+            .to_string();
             assert!(refusal.contains(holds), "{refusal}");
         }
         let (staged, _) = changed_files(root).unwrap();
@@ -2659,7 +2714,13 @@ mod tests {
             vec![("dist".to_string(), "?".to_string(), folder(5))]
         );
 
-        discard_confirmed(root, "dist", true, Some(ConfirmedEntry::Folder)).unwrap();
+        discard_confirmed(
+            root,
+            "dist",
+            true,
+            Some(ConfirmedEntry::Folder { files: usize::MAX }),
+        )
+        .unwrap();
         let (staged, unstaged) = changed_files(root).unwrap();
         assert!(staged.is_empty() && unstaged.is_empty());
         assert!(!root.join("dist").exists());
@@ -2688,7 +2749,13 @@ mod tests {
         write(&nested, "own.txt", "own\n");
 
         assert!(discard_classify(root, "config").unwrap());
-        discard_confirmed(root, "config", true, Some(ConfirmedEntry::Folder)).unwrap();
+        discard_confirmed(
+            root,
+            "config",
+            true,
+            Some(ConfirmedEntry::Folder { files: usize::MAX }),
+        )
+        .unwrap();
 
         assert!(!root.join("config/app.js").exists());
         assert!(!root.join("config/sub").exists());
@@ -2710,8 +2777,20 @@ mod tests {
         write(root, "ab/keep.txt", "keep\n");
         write(root, "axb/keep.txt", "keep\n");
 
-        discard_confirmed(root, "-rf", true, Some(ConfirmedEntry::Folder)).unwrap();
-        discard_confirmed(root, "a*b", true, Some(ConfirmedEntry::Folder)).unwrap();
+        discard_confirmed(
+            root,
+            "-rf",
+            true,
+            Some(ConfirmedEntry::Folder { files: usize::MAX }),
+        )
+        .unwrap();
+        discard_confirmed(
+            root,
+            "a*b",
+            true,
+            Some(ConfirmedEntry::Folder { files: usize::MAX }),
+        )
+        .unwrap();
 
         assert!(!root.join("-rf").exists());
         assert!(!root.join("a*b").exists());
@@ -2733,8 +2812,13 @@ mod tests {
         write(root, "scratch/secret.env", "SECRET=1\n");
         git_in(&root.join("scratch"))(&["init", "-q"]);
 
-        let refusal =
-            discard_confirmed(root, "scratch", true, Some(ConfirmedEntry::Folder)).unwrap_err();
+        let refusal = discard_confirmed(
+            root,
+            "scratch",
+            true,
+            Some(ConfirmedEntry::Folder { files: usize::MAX }),
+        )
+        .unwrap_err();
 
         assert!(refusal.to_string().contains("changed since"), "{refusal}");
         assert!(root.join("scratch/secret.env").exists());
@@ -2844,8 +2928,13 @@ mod tests {
         git_in(&nested)(&["init", "-q"]);
         write(&nested, "own.txt", "own\n");
 
-        let refusal =
-            discard_confirmed(root, "vendor", true, Some(ConfirmedEntry::Folder)).unwrap_err();
+        let refusal = discard_confirmed(
+            root,
+            "vendor",
+            true,
+            Some(ConfirmedEntry::Folder { files: usize::MAX }),
+        )
+        .unwrap_err();
 
         assert!(
             refusal
@@ -2880,8 +2969,13 @@ mod tests {
             "the listing says what it is, so no surface offers a delete"
         );
 
-        let refusal =
-            discard_confirmed(root, "inner-wt", true, Some(ConfirmedEntry::Folder)).unwrap_err();
+        let refusal = discard_confirmed(
+            root,
+            "inner-wt",
+            true,
+            Some(ConfirmedEntry::Folder { files: usize::MAX }),
+        )
+        .unwrap_err();
 
         assert!(
             refusal.to_string().contains("worktree manager"),
@@ -2947,7 +3041,13 @@ mod tests {
                 untracked_directory_kind(root, folder).unwrap(),
                 UntrackedDirectoryKind::Folder
             );
-            discard_confirmed(root, folder, true, Some(ConfirmedEntry::Folder)).unwrap();
+            discard_confirmed(
+                root,
+                folder,
+                true,
+                Some(ConfirmedEntry::Folder { files: usize::MAX }),
+            )
+            .unwrap();
             assert!(
                 !root.join(folder).join("a.js").exists(),
                 "{folder}: its file went"

@@ -1283,7 +1283,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
         paths={discardPaths}
         unstaged={changed.unstaged}
         onCancel={closeDiscardMany}
-        onConfirm={(paths, kinds) => void runDiscardMany(paths, kinds)}
+        onConfirm={(paths, confirmations) => void runDiscardMany(paths, confirmations)}
       />
     </>
   )

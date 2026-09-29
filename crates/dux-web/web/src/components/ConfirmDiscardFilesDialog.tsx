@@ -19,9 +19,11 @@ import { formatRegularCount } from "@/lib/formatRegularCount"
 import {
   bareRepositoriesKept,
   changedWhileOpen,
+  discardConfirmation,
   discardLeftOutReason,
   firstChangedKind,
 } from "@/lib/discardOutcome"
+import type { DiscardConfirmation } from "@/lib/git"
 import { notifyWarning } from "@/lib/notify"
 import { joinProse, prose, renderProse, type Prose } from "@/lib/prose"
 import type { ChangedFileView } from "@/lib/types"
@@ -50,8 +52,8 @@ interface Props {
   unstaged: ChangedFileView[]
   onCancel: () => void
   // The paths to discard, and what each folder among them was when the
-  // dialog opened, which is what the user confirmed.
-  onConfirm: (paths: string[], kinds: Record<string, string>) => void
+  // dialog opened (its kind and file count), which is what the user confirmed.
+  onConfirm: (paths: string[], confirmations: Record<string, DiscardConfirmation>) => void
 }
 
 // Confirmation before discarding a whole checked selection. The rows are
@@ -244,7 +246,7 @@ export function ConfirmDiscardFilesDialog({
               onConfirm(
                 targets.map((f) => f.path),
                 Object.fromEntries(
-                  targets.flatMap((f) => (f.kind ? [[f.path, f.kind]] : [])),
+                  targets.flatMap((f) => (f.kind ? [[f.path, discardConfirmation(f)]] : [])),
                 ),
               )
             }

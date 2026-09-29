@@ -42,6 +42,14 @@ export interface LeftOut {
   left_out_worktrees?: number
 }
 
+// What the user confirmed a discarded row was: `kind` is "file" or a folder
+// row's kind, and a "directory" also carries `files`, how many files its
+// dialog said would go, which the server refuses to exceed.
+export interface DiscardConfirmation {
+  kind: string
+  files?: number
+}
+
 // A batch route's answer: what it acted on, and what it did not. A refused
 // path with an entry in `reasons` was refused for a reason of its own (a
 // folder holding only repositories, a worktree of this repository), in the
@@ -93,14 +101,24 @@ export const git = {
   discardMany: async (
     sessionId: string,
     paths: string[],
-    kinds: Readonly<Record<string, string>>,
-  ): Promise<{ done: string[]; failed: { path: string; message: string }[] }> => {
+    confirmations: Readonly<Record<string, DiscardConfirmation>>,
+  ): Promise<{
+    done: string[]
+    // How many files each done path actually took, by the server's count.
+    deleted: Record<string, number>
+    failed: { path: string; message: string }[]
+  }> => {
     const done: string[] = []
+    const deleted: Record<string, number> = {}
     const failed: { path: string; message: string }[] = []
     for (const path of paths) {
       try {
-        await postGit(gitUrl(sessionId, "discard"), { path, kind: kinds[path] ?? "file" })
+        const answer = await postGitJson<{ files_deleted?: number }>(
+          gitUrl(sessionId, "discard"),
+          { path, ...(confirmations[path] ?? { kind: "file" }) },
+        )
         done.push(path)
+        if (typeof answer.files_deleted === "number") deleted[path] = answer.files_deleted
       } catch (err) {
         failed.push({
           path,
@@ -108,16 +126,25 @@ export const git = {
         })
       }
     }
-    return { done, failed }
+    return { done, deleted, failed }
   },
   // `untracked` is deliberately not sent: the server re-derives delete versus restore
   // from live git status rather than trusting a client about a destructive outcome.
-  // `kind` is what the user confirmed the row was: "file" for a file row, or a
-  // folder row's kind ("directory" or "nested_repository"). The server refuses
-  // when the path is no longer that, and deletes a repository of its own only
-  // when told it is one.
-  discard: (sessionId: string, path: string, kind: string) =>
-    postGit(gitUrl(sessionId, "discard"), { path, kind }),
+  // `confirmation` is what the user confirmed the row was (see
+  // `DiscardConfirmation`). The server refuses when the path is no longer that
+  // or a folder now holds more files, deletes a repository of its own only when
+  // told it is one, and answers how many files actually went.
+  discard: async (
+    sessionId: string,
+    path: string,
+    confirmation: DiscardConfirmation,
+  ): Promise<number | undefined> => {
+    const answer = await postGitJson<{ files_deleted?: number }>(
+      gitUrl(sessionId, "discard"),
+      { path, ...confirmation },
+    )
+    return answer.files_deleted
+  },
   commit: (sessionId: string, message: string) =>
     postGit(gitUrl(sessionId, "commit"), { message }),
   // Forces a changed-files recompute and mutates nothing, so a change dux did not

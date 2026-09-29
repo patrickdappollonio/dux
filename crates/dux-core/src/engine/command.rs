@@ -634,9 +634,9 @@ impl Engine {
                 confirmed,
             } => {
                 // The discard refuses anything that is no longer what was
-                // confirmed, so a success is exactly what the user confirmed
-                // and the message can say so from the confirmation.
-                crate::git::discard_confirmed(
+                // confirmed, so a success is the kind the user confirmed; the
+                // number of files is what actually went, which may be fewer.
+                let went = crate::git::discard_confirmed(
                     &worktree_path,
                     &path,
                     is_untracked,
@@ -648,11 +648,14 @@ impl Engine {
                         q(format!("{path}/")),
                         ", a repository of its own, with its history."
                     ],
-                    crate::git::ConfirmedEntry::Folder => crate::status_text![
+                    crate::git::ConfirmedEntry::Folder { .. } => crate::status_text![
                         "Deleted the untracked files in ",
                         q(format!("{path}/")),
-                        "; files the repository ignores and repositories of their own inside it \
-                         are kept."
+                        format!(
+                            " ({}); files the repository ignores and repositories of their own \
+                             inside it are kept.",
+                            crate::model::count_words(went, "file", "files")
+                        )
                     ],
                     crate::git::ConfirmedEntry::File if is_untracked => {
                         crate::status_text!["Deleted untracked file ", q(path), "."]
@@ -2447,14 +2450,15 @@ mod tests {
                 worktree_path: repo.path().to_path_buf(),
                 path: "node_modules".to_string(),
                 is_untracked: true,
-                confirmed: crate::git::ConfirmedEntry::Folder,
+                // Confirmed at three; one is there now, and one is what went.
+                confirmed: crate::git::ConfirmedEntry::Folder { files: 3 },
             })
             .expect("apply");
 
         match reaction {
             EventReaction::Status(update) => assert!(
                 update.message.contains(
-                    "Deleted the untracked files in \"node_modules/\"; files the repository ignores and repositories of their own inside it are kept."
+                    "Deleted the untracked files in \"node_modules/\" (1 file); files the repository ignores and repositories of their own inside it are kept."
                 ),
                 "{}",
                 update.message
@@ -2479,7 +2483,7 @@ mod tests {
                 worktree_path: repo.path().to_path_buf(),
                 path: "lookalike".to_string(),
                 is_untracked: true,
-                confirmed: crate::git::ConfirmedEntry::Folder,
+                confirmed: crate::git::ConfirmedEntry::Folder { files: 1 },
             })
             .expect("apply");
 

@@ -11,7 +11,11 @@ import { useEffect } from "react"
 
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { countWords, deletableFileCount } from "@/lib/changedFiles"
-import { bareRepositoriesKept, changedWhileOpen } from "@/lib/discardOutcome"
+import {
+  bareRepositoriesKept,
+  changedSinceOpened,
+  changedWhileOpen,
+} from "@/lib/discardOutcome"
 import { renderProse } from "@/lib/prose"
 import { notifyWarning } from "@/lib/notify"
 import { closeDiscard, discardFile, useDux } from "@/lib/store"
@@ -31,7 +35,7 @@ export function ConfirmDiscardFileDialog() {
   // row that has since become something else (a folder turned repository by
   // `git init`) is not quietly re-worded one click from a different delete.
   const changedKind =
-    discardTarget !== null && live !== undefined && live.kind !== discardTarget.row.kind
+    discardTarget !== null && live !== undefined && changedSinceOpened(discardTarget.row, live)
   useEffect(() => {
     if (!changedKind || discardTarget === null || live === undefined) return
     notifyWarning(changedWhileOpen(discardTarget.row, live))

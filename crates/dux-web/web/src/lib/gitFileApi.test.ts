@@ -311,9 +311,8 @@ describe("discardMany", () => {
     await Promise.resolve()
     expect(fetchMock).toHaveBeenCalledTimes(1)
     releases[0]()
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // The first answer's body is read before the second request goes.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     releases[1]()
     const result = await pending
 

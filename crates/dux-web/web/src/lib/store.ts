@@ -19,7 +19,7 @@ import { getComposeInsertSink } from "./composeInsert"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
 import { reuseUnchangedFiles } from "./changedFiles"
-import { discardOutcome } from "./discardOutcome"
+import { discardConfirmation, discardOutcome } from "./discardOutcome"
 import { terminalsApi } from "./terminalsApi"
 import { tabsApi } from "./tabsApi"
 import { browseApi } from "./browseApi"
@@ -3929,8 +3929,10 @@ export function closeDiscard(): void {
 // files, and a repository of its own goes with its history.
 export function discardFile(sessionId: string, row: ChangedFileView): void {
   git
-    .discard(sessionId, row.path, row.kind ?? "file")
-    .then(() => notifySuccess(discardOutcome([row])))
+    .discard(sessionId, row.path, discardConfirmation(row))
+    .then((went) =>
+      notifySuccess(discardOutcome([row], went === undefined ? {} : { [row.path]: went })),
+    )
     .catch((e) => notifyError(e instanceof Error ? e.message : "discard failed"))
 }
 

@@ -1617,7 +1617,7 @@ describe("a folded folder row", () => {
     )
     await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
     expect(discardMany).toHaveBeenCalledWith("s1", ["node_modules"], {
-      node_modules: "directory",
+      node_modules: { kind: "directory", files: 28747 },
     })
   })
 

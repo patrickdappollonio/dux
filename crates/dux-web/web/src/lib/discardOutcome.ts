@@ -16,7 +16,7 @@ import {
   joinWords,
   onlyRepositoriesWords,
 } from "@/lib/changedFiles"
-import type { LeftOut } from "@/lib/git"
+import type { DiscardConfirmation, LeftOut } from "@/lib/git"
 import { chip, joinProse, prose, type Prose } from "@/lib/prose"
 import type { ChangedFileView } from "@/lib/types"
 
@@ -61,9 +61,24 @@ export function selectedFileCount(
   return count + (paths.size - found)
 }
 
-/** The toast for discarding `rows` successfully. */
-export function discardOutcome(rows: readonly ChangedFileView[]): Prose {
-  if (rows.length === 1) return oneRow(rows[0]!)
+/** What the user confirms by discarding `row`, as the server is told it. */
+export function discardConfirmation(row: ChangedFileView): DiscardConfirmation {
+  if (row.kind === "directory") return { kind: row.kind, files: deletableFileCount(row) }
+  return { kind: row.kind ?? "file" }
+}
+
+/**
+ * The toast for discarding `rows` successfully. `deleted` is the server's
+ * count of what each folder actually took, which wins over the row's count:
+ * a folder can lose files while its dialog is open.
+ */
+export function discardOutcome(
+  rows: readonly ChangedFileView[],
+  deleted: Readonly<Record<string, number>> = {},
+): Prose {
+  const went = (row: ChangedFileView) =>
+    row.kind === "directory" ? (deleted[row.path] ?? deletableFileCount(row)) : changedFileCount(row)
+  if (rows.length === 1) return oneRow(rows[0]!, went(rows[0]!))
   let files = 0
   let repositories = 0
   let folders = 0
@@ -73,7 +88,7 @@ export function discardOutcome(rows: readonly ChangedFileView[]): Prose {
       continue
     }
     if (row.kind === "directory") folders += 1
-    files += changedFileCount(row)
+    files += went(row)
   }
   const parts: string[] = []
   if (files > 0) parts.push(`Discarded the changes to ${countWords(files, "file", "files")}`)
@@ -94,11 +109,11 @@ export function discardOutcome(rows: readonly ChangedFileView[]): Prose {
   return prose`${sentence}`
 }
 
-function oneRow(row: ChangedFileView): Prose {
+function oneRow(row: ChangedFileView, went: number): Prose {
   switch (row.kind) {
     case "directory":
       return prose`Deleted the untracked files in ${chip(`${row.path}/`)} (${countWords(
-        row.file_count ?? 0,
+        went,
         "file",
         "files",
       )}); files the repository ignores and repositories of their own inside it are kept.`
@@ -145,9 +160,20 @@ function whatItIs(file: ChangedFileView): string {
 // so nothing is deleted and the user looks again.
 export function changedWhileOpen(before: ChangedFileView, now: ChangedFileView): Prose {
   const name = before.kind || now.kind ? `${before.path}/` : before.path
-  return prose`${chip(name)} changed while the dialog was open: it is now ${whatItIs(
-    now,
-  )}. Nothing was deleted; look at it again before deleting it.`
+  const what =
+    now.kind === before.kind
+      ? `it now holds ${countWords(deletableFileCount(now), "file", "files")}`
+      : `it is now ${whatItIs(now)}`
+  return prose`${chip(name)} changed while the dialog was open: ${what}. Nothing was deleted; look at it again before deleting it.`
+}
+
+// Whether a row a discard dialog opened on is no longer what it confirmed: a
+// different kind, or a folder that would now delete more files. A folder that
+// holds fewer is still the folder the user meant, and the server reports what
+// actually went.
+export function changedSinceOpened(before: ChangedFileView, now: ChangedFileView): boolean {
+  if (now.kind !== before.kind) return true
+  return now.kind === "directory" && deletableFileCount(now) > deletableFileCount(before)
 }
 
 // The first row of `openedOn` whose live row in `live` is now a different
@@ -160,7 +186,7 @@ export function firstChangedKind(
   const byPath = new Map(live.map((row) => [row.path, row]))
   for (const before of openedOn) {
     const now = byPath.get(before.path)
-    if (now !== undefined && now.kind !== before.kind) return { before, now }
+    if (now !== undefined && changedSinceOpened(before, now)) return { before, now }
   }
   return null
 }

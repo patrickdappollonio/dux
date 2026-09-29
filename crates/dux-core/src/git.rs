@@ -4137,8 +4137,10 @@ pub enum ConfirmedEntry {
     /// One file: deleted when untracked, restored from HEAD when tracked.
     File,
     /// An ordinary folder: its untracked files are cleaned, ignored files and
-    /// repositories inside it kept.
-    Folder,
+    /// repositories inside it kept. `files` is how many files the user was
+    /// told would go: the delete refuses when more would go now, and takes
+    /// fewer without asking again.
+    Folder { files: usize },
     /// A repository of its own: removed whole, history included.
     Repository,
 }
@@ -4162,7 +4164,7 @@ impl std::error::Error for Refusal {}
 /// before, and a directory of any kind is refused, because nothing said the
 /// user was looking at a folder.
 pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -> Result<()> {
-    discard_confirmed(worktree_path, file_path, is_untracked, None)
+    discard_confirmed(worktree_path, file_path, is_untracked, None).map(|_| ())
 }
 
 /// Discard `file_path`, refusing when a folder is no longer what the user
@@ -4172,15 +4174,20 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
 /// of deleting, and compared with `confirmed`: a folder that became a
 /// repository (an agent ran `git init` in it) or a repository that became a
 /// folder is refused with a sentence asking the user to look again, because
-/// the dialog they agreed to described something else. With nothing
-/// confirmed, a folder is cleaned as before and a repository is refused: a
-/// whole repository, history included, goes only when a caller said so.
+/// the dialog they agreed to described something else. A folder that now
+/// holds more files than the user was told is refused the same way; one that
+/// holds fewer is deleted. With nothing confirmed a plain file is discarded
+/// and any directory refused.
+///
+/// Answers how many files went: one for a file (deleted or restored), the
+/// files actually deleted for a folder, and none for a repository of its own,
+/// which goes whole and was never counted in files.
 pub fn discard_confirmed(
     worktree_path: &Path,
     file_path: &str,
     is_untracked: bool,
     confirmed: Option<ConfirmedEntry>,
-) -> Result<()> {
+) -> Result<usize> {
     refuse_unplain_path(file_path, "discard")?;
     // Whatever the path's text says, a discard never lands on the worktree
     // itself or on anything inside `.git`, the two targets whose loss takes
@@ -4246,17 +4253,18 @@ pub fn discard_confirmed(
                 // No confirmation is what an older client sends for a file,
                 // and deleting one file is what it always meant.
                 None | Some(ConfirmedEntry::File) => fs::remove_file(&full)?,
-                Some(ConfirmedEntry::Folder | ConfirmedEntry::Repository) => {
+                Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository) => {
                     return Err(changed("a file, not a folder"));
                 }
             }
+            return Ok(1);
         } else {
             // A directory goes only when the delete names what it is: a file
             // row that a folder has since replaced, or a request that says
             // nothing, must not clean a folder nobody was shown.
-            let whole_repository = match confirmed {
-                Some(ConfirmedEntry::Folder) => false,
-                Some(ConfirmedEntry::Repository) => true,
+            let (whole_repository, promised) = match confirmed {
+                Some(ConfirmedEntry::Folder { files }) => (false, files),
+                Some(ConfirmedEntry::Repository) => (true, 0),
                 Some(ConfirmedEntry::File) => return Err(changed("a folder, not one file")),
                 None => {
                     return Err(anyhow::Error::new(Refusal(format!(
@@ -4284,23 +4292,34 @@ pub fn discard_confirmed(
                         return Err(changed("a repository of its own, with a history"));
                     }
                     fs::remove_dir_all(&full)?;
+                    return Ok(0);
                 }
                 UntrackedDirectoryKind::Folder => {
                     if whole_repository {
                         return Err(changed("an ordinary folder, not a repository"));
                     }
                     let inside = refuse_empty_untracked_folder(worktree_path, file_path)?;
+                    let going = inside.deletable_files().count();
+                    if going > promised {
+                        return Err(anyhow::Error::new(Refusal(format!(
+                            "\"{file_path}/\" changed since you looked: it now holds {}, more \
+                             than the {} you agreed to delete. Nothing was deleted; refresh the \
+                             changes and look again before deleting it.",
+                            crate::model::count_words(going, "file", "files"),
+                            promised
+                        ))));
+                    }
                     clean_untracked_folder(worktree_path, file_path, &inside)?;
+                    return Ok(going);
                 }
             }
         }
-        return Ok(());
     }
     // A tracked path is one file restored from HEAD; a folder confirmation
     // for it means the row the user saw is not what is there now.
     if matches!(
         confirmed,
-        Some(ConfirmedEntry::Folder | ConfirmedEntry::Repository)
+        Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository)
     ) {
         return Err(anyhow::Error::new(Refusal(format!(
             "\"{file_path}\" changed since you looked: it is now a tracked file. Nothing was \
@@ -4324,7 +4343,7 @@ pub fn discard_confirmed(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(())
+    Ok(1)
 }
 
 /// Classify a discard request against the worktree's LIVE git status and return
