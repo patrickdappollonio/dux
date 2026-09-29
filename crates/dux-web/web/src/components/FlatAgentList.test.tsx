@@ -1919,3 +1919,66 @@ describe("FlatAgentList working cue", () => {
   })
 })
 
+
+// USER-LOCKED. The user decided that a working agent's and a running terminal's
+// sidebar glyph BOUNCES together with the pulse, four bounces per pulse on the
+// shared clock, and always finishes its cycle at rest. It was deleted once by
+// an autonomous pass that rewrote the tenet to allow it; this guard is what
+// CLAUDE.md's "Locked by the user" section names. Do not edit, weaken or delete
+// it, or change what it pins, without the user's explicit request.
+describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest", () => {
+  const LOCKED =
+    'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
+    "(the web working glyph bounces with the pulse, four per pulse, and settles " +
+    "at rest). Do not change it without the user's explicit request."
+  const CUE = "motion-safe:animate-working-cue"
+
+  it("keeps the bounce keyframes and four bounces per pulse", async () => {
+    const { readFileSync } = await import("node:fs")
+    const css = readFileSync(`${process.cwd()}/src/index.css`, "utf8")
+    const rust = readFileSync(
+      `${process.cwd()}/../../dux-core/src/working_cue.rs`,
+      "utf8",
+    )
+    const periodMs = Number(/WORKING_CUE_PERIOD_MS: u64 = (\d+)/.exec(rust)![1])
+
+    const bob = /@keyframes working-bounce\s*\{([\s\S]*?)\n\}/.exec(css)
+    expect(bob, LOCKED).toBeTruthy()
+    expect(bob![1], LOCKED).toContain("0%, 100% { transform: translateY(0); }")
+    expect(bob![1], LOCKED).toMatch(/translateY\(-\d+%\)/)
+    expect(css, LOCKED).toContain(
+      `--animate-working-cue: working-pulse ${periodMs / 1000}s ease-in-out infinite, working-bounce ${periodMs / 4 / 1000}s ease-in-out infinite;`,
+    )
+  })
+
+  function stateWith(sessions: SessionView[], terminals: TerminalView[]): DuxState {
+    const base = makeState("name")
+    return { ...base, spine: { ...base.spine, sessions, terminals } } as DuxState
+  }
+
+  it("bounces both sidebar glyphs while working and settles each at rest", () => {
+    mockState = stateWith(
+      [makeSession({ id: "alpha", title: "Alpha", working: true })],
+      [makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim", working: true })],
+    )
+    const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
+    const bot = () => container.querySelector("svg.lucide-bot")!
+    const term = () => container.querySelector("svg.lucide-square-terminal")!
+    for (const glyph of [bot(), term()]) {
+      expect(glyph.getAttribute("class"), LOCKED).toContain(CUE)
+      fireAnimationStart(glyph, "working-pulse")
+    }
+
+    // Work stops: neither glyph may drop the bounce until its cycle is done.
+    mockState = stateWith(
+      [makeSession({ id: "alpha", title: "Alpha" })],
+      [makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim" })],
+    )
+    rerender(<FlatAgentList handlers={handlers} />)
+    for (const glyph of [bot(), term()]) {
+      expect(glyph.getAttribute("class"), LOCKED).toContain(CUE)
+      fireAnimationIteration(glyph, "working-pulse")
+      expect(glyph.getAttribute("class"), LOCKED).not.toContain(CUE)
+    }
+  })
+})
