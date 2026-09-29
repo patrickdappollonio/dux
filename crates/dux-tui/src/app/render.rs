@@ -12666,6 +12666,45 @@ fn confirm_close_tab_tail_prose(will_detach: bool, successor: Option<&str>) -> P
     tail
 }
 
+/// The folder delete dialog's line naming the bare repositories inside the
+/// folder, which the delete keeps along with the files they hold (counted in
+/// the row's files, because to git they are ordinary files). Up to three are
+/// named as chips and the rest counted; `None` when there are none.
+fn bare_repositories_kept_line(
+    contents: &dux_core::model::FolderContents,
+    theme: &Theme,
+) -> Option<Line<'static>> {
+    let bare = &contents.bare_repositories;
+    if bare.is_empty() {
+        return None;
+    }
+    const NAMED: usize = 3;
+    let one = bare.len() == 1;
+    let mut spans = vec![Span::raw(if one {
+        " The bare repository "
+    } else {
+        " The bare repositories "
+    })];
+    let named = bare.len().min(NAMED);
+    for (index, path) in bare.iter().take(NAMED).enumerate() {
+        if index > 0 {
+            let last = index + 1 == named && bare.len() <= NAMED;
+            spans.push(Span::raw(if last { " and " } else { ", " }));
+        }
+        spans.push(name_chip(&format!("{path}/"), theme));
+    }
+    if bare.len() > NAMED {
+        spans.push(Span::raw(format!(" and {} more", bare.len() - NAMED)));
+    }
+    spans.push(Span::raw(format!(
+        " inside it {} kept, with the {} {}.",
+        if one { "is" } else { "are" },
+        dux_core::model::count_words(contents.files_in_bare_repositories, "file", "files"),
+        if one { "it holds" } else { "they hold" },
+    )));
+    Some(Line::from(spans))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -24771,43 +24810,4 @@ mod tests {
             "the buttons must not move when the box is toggled"
         );
     }
-}
-
-/// The folder delete dialog's line naming the bare repositories inside the
-/// folder, which the delete keeps along with the files they hold (counted in
-/// the row's files, because to git they are ordinary files). Up to three are
-/// named as chips and the rest counted; `None` when there are none.
-fn bare_repositories_kept_line(
-    contents: &dux_core::model::FolderContents,
-    theme: &Theme,
-) -> Option<Line<'static>> {
-    let bare = &contents.bare_repositories;
-    if bare.is_empty() {
-        return None;
-    }
-    const NAMED: usize = 3;
-    let one = bare.len() == 1;
-    let mut spans = vec![Span::raw(if one {
-        " The bare repository "
-    } else {
-        " The bare repositories "
-    })];
-    let named = bare.len().min(NAMED);
-    for (index, path) in bare.iter().take(NAMED).enumerate() {
-        if index > 0 {
-            let last = index + 1 == named && bare.len() <= NAMED;
-            spans.push(Span::raw(if last { " and " } else { ", " }));
-        }
-        spans.push(name_chip(&format!("{path}/"), theme));
-    }
-    if bare.len() > NAMED {
-        spans.push(Span::raw(format!(" and {} more", bare.len() - NAMED)));
-    }
-    spans.push(Span::raw(format!(
-        " inside it {} kept, with the {} {}.",
-        if one { "is" } else { "are" },
-        dux_core::model::count_words(contents.files_in_bare_repositories, "file", "files"),
-        if one { "it holds" } else { "they hold" },
-    )));
-    Some(Line::from(spans))
 }
