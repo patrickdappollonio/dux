@@ -708,6 +708,55 @@ describe("the changes treegrid keyboard", () => {
     expect(toggle("node_modules/").getAttribute("aria-expanded")).toBe("true")
   })
 
+  // Focus never falls out of the grid when the row holding it goes: a
+  // collapse lands it on the folder, a refresh on the row now in its place.
+  it("moves focus to the folder when a collapse takes the focused row away", async () => {
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("node_modules/"))
+    await answer(0, [file("node_modules/top.js")])
+    rowOf("top.js").focus()
+
+    fireEvent.click(toggle("node_modules/"))
+
+    expect(screen.queryByText("top.js")).toBeNull()
+    expect(document.activeElement).toBe(rowOf("node_modules/"))
+    expect(rowOf("node_modules/").tabIndex).toBe(0)
+  })
+
+  it("moves focus to the row now in its place when a refresh removes a row with no folder above", () => {
+    mockState = {
+      ...mockState,
+      changes: slice([file("a.md"), file("notes.md"), file("z.md")]),
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    rowOf("notes.md").focus()
+
+    mockState = {
+      ...mockState,
+      changes: slice([file("a.md"), file("z.md")], 2),
+    } as unknown as DuxState
+    publishMockState()
+
+    expect(screen.queryByText("notes.md")).toBeNull()
+    expect(document.activeElement).toBe(rowOf("z.md"))
+  })
+
+  it("moves focus to the folder when a refresh removes a row inside it", async () => {
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("node_modules/"))
+    await answer(0, [file("node_modules/a.js"), file("node_modules/top.js")])
+    rowOf("top.js").focus()
+
+    mockState = {
+      ...mockState,
+      changes: slice([folder("node_modules", 1, "f2"), file("notes.md")], 2),
+    } as unknown as DuxState
+    publishMockState()
+    await answer(1, [file("node_modules/a.js")])
+
+    expect(document.activeElement).toBe(rowOf("node_modules/"))
+  })
+
   it("brings a row outside the window in before focusing it", () => {
     const many = Array.from({ length: 400 }, (_, index) =>
       file(`src/file${String(index).padStart(3, "0")}.ts`, { status: "M" }),

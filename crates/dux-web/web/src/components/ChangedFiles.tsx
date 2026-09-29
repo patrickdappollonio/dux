@@ -1339,6 +1339,42 @@ function ChangesList({
     setPendingFocus(null)
   }, [pendingFocus, focusedKey, scrollTop, items])
 
+  // The row that last held focus inside the grid, by key and by index. When
+  // it leaves the list while focus was in it (a collapse by mouse, a refresh
+  // that removed it), focus moves to the nearest row that survives, rather
+  // than falling to the page: the folder it hung from when that is still
+  // there, else the row now at its index.
+  const lastFocus = useRef<{ key: string; index: number } | null>(null)
+  useLayoutEffect(() => {
+    const last = lastFocus.current
+    if (!last) return
+    const still = items.findIndex((item) => item.key === last.key)
+    if (still >= 0) {
+      last.index = still
+      return
+    }
+    const active = document.activeElement
+    // Focus already somewhere else on the page on purpose: leave it there.
+    if (active && active !== document.body && !listRef.current?.contains(active)) {
+      lastFocus.current = null
+      return
+    }
+    lastFocus.current = null
+    const cut = last.key.indexOf(":")
+    const section = last.key.slice(0, cut)
+    const path = last.key.slice(cut + 1).split("\u0000")[0]!
+    let target = -1
+    for (let end = path.lastIndexOf("/"); end > 0 && target < 0; end = path.lastIndexOf("/", end - 1)) {
+      target = items.findIndex((item) => item.key === `${section}:${path.slice(0, end)}`)
+    }
+    if (target < 0 && rowItems.length > 0) {
+      target = rowItems.find((index) => index >= last.index) ?? rowItems[rowItems.length - 1]!
+    }
+    if (target >= 0) focusItem(target)
+    // Only a change of the items can take a row away.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items])
+
   // What the keys do on a focused row. Controls inside a row keep their own
   // keys: this answers only when the row itself holds focus.
   const onGridKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1615,6 +1651,13 @@ function ChangesList({
               // subtree; the row keeps whatever pin it already had.
               if (holder && listRef.current?.contains(holder)) {
                 setFocusedKey(holder.dataset.itemKey ?? null)
+                const heldKey = holder.dataset.itemKey
+                if (heldKey) {
+                  lastFocus.current = {
+                    key: heldKey,
+                    index: items.findIndex((item) => item.key === heldKey),
+                  }
+                }
                 // Wherever focus lands (a click into a row's checkbox, a Tab
                 // into the grid), that row becomes the tab stop.
                 if (holder.dataset.itemKind !== "separator") {
@@ -1625,6 +1668,12 @@ function ChangesList({
             onBlur={(event) => {
               const next = event.relatedTarget as HTMLElement | null
               if (next && listRef.current?.contains(next)) return
+              // Focus moving to something else on the page forgets the row;
+              // focus going nowhere (the row was removed, the window lost
+              // focus) keeps it, so a removed row's focus can be put back.
+              if (next && !next.closest?.('[data-slot="dropdown-menu-content"]')) {
+                lastFocus.current = null
+              }
               // A row's ⋯ menu is portaled out of this subtree, so focus moving
               // into it looks like leaving the list. It is the row's own menu
               // (focus reaches a menu from its trigger), and unmounting the row
