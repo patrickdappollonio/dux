@@ -7,6 +7,7 @@ import {
   mergeChangedFilesRecaps,
   CHANGED_FILE_FIELDS,
   changedFileCount,
+  folderCountLabel,
   reconcileSelection,
   reuseUnchangedFiles,
   summarizeChangedFiles,
@@ -203,6 +204,8 @@ describe("reuseUnchangedFiles", () => {
       renamed_from: "old.ts",
       kind: "directory",
       file_count: 3,
+      nested_repositories: 0,
+      fingerprint: "aa",
     }
     expect(Object.keys(CHANGED_FILE_FIELDS).sort()).toEqual(Object.keys(full).sort())
     const changed: { [K in keyof ChangedFileView]-?: ChangedFileView[K] } = {
@@ -215,6 +218,8 @@ describe("reuseUnchangedFiles", () => {
       renamed_from: "elsewhere.ts",
       kind: "nested_repository",
       file_count: 4,
+      nested_repositories: 1,
+      fingerprint: "bb",
     }
     for (const key of Object.keys(full) as (keyof ChangedFileView)[]) {
       const next = { ...full, [key]: changed[key] }
@@ -391,6 +396,18 @@ describe("folded folders in the totals", () => {
     expect(changedFileCount(nested)).toBe(1)
     expect(changedFileCount(file("a.ts"))).toBe(1)
     expect(summarizeChangedFiles([folder, nested, file("a.ts")]).count).toBe(28749)
+  })
+
+  it("names the nested repositories a folder holds apart from its files", () => {
+    const withNested = (files: number, nested: number): ChangedFileView => ({
+      ...file("vendor", "??"),
+      kind: "directory",
+      file_count: files,
+      nested_repositories: nested,
+    })
+    expect(folderCountLabel(withNested(3, 1))).toBe("3 files and 1 nested repository")
+    expect(folderCountLabel(withNested(0, 2))).toBe("2 nested repositories")
+    expect(folderCountLabel(withNested(28747, 0))).toBe("28,747 files")
   })
 
   it("compares the folder fields like every other field", () => {

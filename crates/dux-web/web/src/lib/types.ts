@@ -293,8 +293,16 @@ export interface ChangedFileView {
    * `"nested_repository"` for an untracked repository of its own. The row's
    * `path` is the folder with no trailing slash. Absent on a file row. */
   kind?: "directory" | "nested_repository"
-  /** How many files a `"directory"` row stands for, at any depth. */
+  /** How many files a `"directory"` row stands for, at any depth. Files
+   * only: repositories of their own inside it are `nested_repositories`. */
   file_count?: number
+  /** How many repositories of their own a `"directory"` row holds, which
+   * deleting the folder keeps. Absent when there are none. */
+  nested_repositories?: number
+  /** A fingerprint of the files inside a `"directory"` row (their sizes and
+   * modification times), which moves when a file inside is edited. Absent for
+   * a folder too large to fingerprint, and for a staged one. Opaque text. */
+  fingerprint?: string
 }
 
 export interface ChangedFiles {

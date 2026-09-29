@@ -202,8 +202,8 @@ impl App {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             return true;
         };
-        let count = match kind {
-            ChangedFileKind::Directory(ref contents) => contents.file_count,
+        let seen = match kind {
+            ChangedFileKind::Directory(contents) => contents,
             ChangedFileKind::NestedRepository => {
                 self.set_info(format!(
                     "\"{path}/\" is a repository of its own, so git does not look inside it and \
@@ -237,7 +237,7 @@ impl App {
                     children: None,
                     pending_seq: Some(seq),
                     error: None,
-                    seen_count: count,
+                    seen,
                 },
             );
         true
@@ -413,15 +413,17 @@ impl App {
             return;
         };
         let mut drops: Vec<(ChangesSide, String)> = Vec::new();
-        let mut refreshes: Vec<(ChangesSide, String, usize)> = Vec::new();
+        let mut refreshes: Vec<(ChangesSide, String, dux_core::model::FolderContents)> = Vec::new();
         for (side, map) in &tree.expanded {
             let top = self.side_files(*side);
             for (dir, listing) in map {
                 match find_folder_row(top, map, dir) {
                     RowLookup::Found(row) if row.is_expandable() => {
-                        let count = row.file_count();
-                        if count != listing.seen_count && listing.pending_seq.is_none() {
-                            refreshes.push((*side, dir.clone(), count));
+                        if let Some(now) = row.folder_contents()
+                            && *now != listing.seen
+                            && listing.pending_seq.is_none()
+                        {
+                            refreshes.push((*side, dir.clone(), now.clone()));
                         }
                     }
                     RowLookup::Found(_) | RowLookup::Gone => drops.push((*side, dir.clone())),
@@ -443,7 +445,7 @@ impl App {
         else {
             return;
         };
-        for (side, dir, count) in refreshes {
+        for (side, dir, seen) in refreshes {
             let seq = self.spawn_folder_listing(&session_id, worktree.clone(), side, &dir, false);
             if let Some(entry) = self
                 .changes_tree
@@ -453,7 +455,7 @@ impl App {
                 .and_then(|map| map.get_mut(&dir))
             {
                 entry.pending_seq = Some(seq);
-                entry.seen_count = count;
+                entry.seen = seen;
             }
         }
     }
@@ -1049,6 +1051,31 @@ mod tests {
                 .contains(&"  node_modules/extra.js 1".to_string())
         );
         assert_eq!(app.status.text(), settled_message);
+    }
+
+    /// An edit to a file already inside the folder keeps its count, so the
+    /// folder's fingerprint is what says the rows under it are stale.
+    #[test]
+    fn a_folder_whose_file_was_edited_is_listed_again_quietly() {
+        let (mut app, worktree) = repo_app();
+        app.handle_key(enter()).unwrap();
+        settle(&mut app, idle);
+
+        std::fs::write(worktree.join("node_modules/top.js"), "top\nmore\nlines\n").unwrap();
+        load_lists(&mut app, &worktree);
+
+        assert_eq!(
+            app.changes_tree.pending_listings.len(),
+            1,
+            "the folder's contents changed, so it is listed again"
+        );
+        settle(&mut app, idle);
+        let top = app
+            .changes_rows(RightSection::Unstaged)
+            .into_iter()
+            .find_map(|row| row.file().filter(|f| f.path == "node_modules/top.js"))
+            .map(|f| f.additions);
+        assert_eq!(top, Some(3), "the edited file's line count is current");
     }
 
     #[test]

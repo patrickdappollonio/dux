@@ -23,7 +23,9 @@ export function changedPathsFrom(slice: ChangesSliceView | null): string[] {
   const paths = new Set<string>()
   for (const f of [...slice.unstaged, ...slice.staged]) {
     if (f.kind) {
-      paths.add(`${f.path}/${FOLDER_COUNT_MARK}${f.file_count ?? 0}`)
+      paths.add(
+        `${f.path}/${FOLDER_COUNT_MARK}${f.file_count ?? 0}:${f.fingerprint ?? ""}`,
+      )
     } else {
       paths.add(f.path)
     }

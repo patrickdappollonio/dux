@@ -986,9 +986,12 @@ pub(crate) struct FolderListing {
     pub(crate) pending_seq: Option<u64>,
     /// Why the last listing failed, shown in place of the contents.
     pub(crate) error: Option<String>,
-    /// The folder's file count when the listing was asked for, so a later read
-    /// of the pane can tell the folder changed and list it again.
-    pub(crate) seen_count: usize,
+    /// What the folder's row said it held (count, nested repositories and
+    /// fingerprint) when the listing was asked for, so a later read of the pane
+    /// can tell the folder changed and list it again. The fingerprint is what
+    /// catches an edit to a file already inside; a folder too large to carry
+    /// one is followed by its counts alone.
+    pub(crate) seen: dux_core::model::FolderContents,
 }
 
 /// A folder listing a worker is producing.

@@ -283,6 +283,29 @@ describe("changeSignalFor", () => {
     expect(before).not.toBe(after)
     expect(changeSignalFor(folder(3), "node_modules2/x.js")).toBe("")
   })
+
+  // An edit to a file already inside keeps the count; the folder's
+  // fingerprint is what moves.
+  it("moves with the folded folder's fingerprint", () => {
+    const folder = (fingerprint: string) =>
+      slice({
+        unstaged: [
+          {
+            path: "dist",
+            status: "?",
+            additions: 0,
+            deletions: 0,
+            kind: "directory",
+            file_count: 2,
+            fingerprint,
+          },
+        ],
+        staged: [],
+      })
+    expect(changeSignalFor(folder("aa"), "dist/a.js")).not.toBe(
+      changeSignalFor(folder("bb"), "dist/a.js"),
+    )
+  })
 })
 
 // The truth table the plan review demanded, because an empty-string signal is

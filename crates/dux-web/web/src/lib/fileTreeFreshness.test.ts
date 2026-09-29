@@ -137,6 +137,23 @@ describe("folded folders", () => {
     ])
   })
 
+  it("refetches the listings inside a folder whose fingerprint moved", () => {
+    const withPrint = (fingerprint: string): ChangesSliceView => ({
+      phase: "loaded",
+      unstaged: [
+        { ...row("node_modules"), kind: "directory", file_count: 3, fingerprint },
+      ],
+      staged: [],
+    })
+    expect(
+      dirsToRefetch(
+        changedPathsFrom(withPrint("aa")),
+        changedPathsFrom(withPrint("bb")),
+        LOADED_INSIDE,
+      ),
+    ).toEqual(["", "node_modules", "node_modules/pkg"])
+  })
+
   it("leaves the tree alone when the folder did not change", () => {
     const paths = changedPathsFrom(withFolder(3))
     expect(dirsToRefetch(paths, paths, LOADED_INSIDE)).toEqual([])

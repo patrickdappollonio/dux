@@ -37,6 +37,7 @@ export interface ChangedRowView {
   renamed_from?: string
   kind?: "directory" | "nested_repository"
   file_count?: number
+  fingerprint?: string
 }
 
 // One tab's Monaco buffer and diff cache, keyed by tab id. A preview-replace
@@ -217,7 +218,9 @@ export function changeSignalFor(
   const folder = [...slice.unstaged, ...slice.staged].find(
     (x) => x.kind === "directory" && path.startsWith(`${x.path}/`),
   )
-  return folder ? `${folder.status}:folder:${folder.file_count ?? 0}` : ""
+  return folder
+    ? `${folder.status}:folder:${folder.file_count ?? 0}:${folder.fingerprint ?? ""}`
+    : ""
 }
 
 // Whether the open file's change signal has moved since this buffer was read.

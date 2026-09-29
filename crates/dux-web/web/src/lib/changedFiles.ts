@@ -83,8 +83,16 @@ export function changedFileCount(file: ChangedFileView): number {
 export function folderCountLabel(file: ChangedFileView): string | null {
   if (file.kind === "nested_repository") return "nested repository"
   if (file.kind !== "directory") return null
-  const count = file.file_count ?? 0
-  return `${count.toLocaleString("en-US")} ${count === 1 ? "file" : "files"}`
+  const files = countWords(file.file_count ?? 0, "file", "files")
+  const nested = file.nested_repositories ?? 0
+  if (nested === 0) return files
+  const repositories = countWords(nested, "nested repository", "nested repositories")
+  return (file.file_count ?? 0) === 0 ? repositories : `${files} and ${repositories}`
+}
+
+// A count with its noun, grouped by thousands the way the TUI writes it.
+export function countWords(count: number, one: string, many: string): string {
+  return `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`
 }
 
 // The recap describes exactly the rows visible beneath it, so callers pass the
@@ -154,6 +162,8 @@ export const CHANGED_FILE_FIELDS = {
   renamed_from: true,
   kind: true,
   file_count: true,
+  nested_repositories: true,
+  fingerprint: true,
 } as const satisfies Record<keyof ChangedFileView, true>
 
 const FIELD_KEYS = Object.keys(CHANGED_FILE_FIELDS) as (keyof ChangedFileView)[]
