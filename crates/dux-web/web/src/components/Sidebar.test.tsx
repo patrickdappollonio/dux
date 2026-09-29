@@ -1846,11 +1846,13 @@ describe("AppSidebar collapsed icon rail", () => {
 
     const rail = screen.getByTestId("collapsed-agent-rail")
     const buttons = rail.querySelectorAll("button")
-    // s1 is active + working: its Bot icon bounces and pulses, the same cue
-    // the row wears.
+    // s1 is active + working: its Bot icon pulses and its frame bounces, the
+    // same cue the row wears.
+    const working = buttons[0].querySelector("svg")!
+    expect(working.getAttribute("class")).toContain("motion-safe:animate-working-pulse")
     expect(
-      buttons[0].querySelector("svg")?.getAttribute("class"),
-    ).toContain("motion-safe:animate-working-cue")
+      working.closest("[data-slot='working-glyph']")?.getAttribute("class"),
+    ).toContain("motion-safe:animate-working-bounce")
     // s2 needs attention: its icon wrapper carries the cyan blink.
     expect(
       buttons[1].querySelector("[aria-label='Needs attention']"),
@@ -1884,9 +1886,12 @@ describe("AppSidebar collapsed icon rail", () => {
     const rail = screen.getByTestId("collapsed-agent-rail")
     const icon = rail.querySelectorAll("button")[0].querySelector("svg")
     expect(icon?.getAttribute("class")).not.toContain("animate-working")
-    expect(icon?.parentElement?.getAttribute("class")).toContain(
-      "motion-safe:animate-attention-pulse",
-    )
+    expect(
+      icon?.closest("[data-slot='working-glyph']")?.getAttribute("class"),
+    ).not.toContain("animate-working")
+    expect(
+      icon?.closest("[aria-label='Needs attention']")?.getAttribute("class"),
+    ).toContain("motion-safe:animate-attention-pulse")
   })
 
   it("scrolls internally in icon mode instead of relying on SidebarContent's clipped overflow", () => {
@@ -2043,21 +2048,29 @@ describe("AppSidebar expanded agent row vitals tooltip", () => {
 })
 
 // USER-LOCKED. The collapsed rail's working agent icon bounces with the pulse
-// and finishes its bounce at rest, like the sidebar list. This guard is named by
+// and finishes its bounce at rest on every stop, a hand-over to a higher state
+// (needs-you, typing) included, like the sidebar list. This guard is named by
 // CLAUDE.md's "Locked by the user" section. Do not edit, weaken or delete it, or
 // change what it pins, without the user's explicit request.
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (collapsed rail)", () => {
   const LOCKED =
     'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
     "(the web working glyph bounces with the pulse, four per pulse, and finishes " +
-    "its bounce at rest). Do not change it without the user's explicit request."
-  const CUE = "motion-safe:animate-working-cue"
+    "its bounce at rest on every stop, a hand-over to a higher state included). " +
+    "Do not change it without the user's explicit request."
+  const BOUNCE = "motion-safe:animate-working-bounce"
+  const PULSE = "motion-safe:animate-working-pulse"
 
-  function railState(working: boolean): DuxState {
+  function railState(
+    working: boolean,
+    over: { needs_attention?: boolean; typing?: boolean } = {},
+  ): DuxState {
     const spine = makeTwoProjectSpine() as unknown as {
-      sessions: { working: boolean }[]
+      sessions: { working: boolean; needs_attention: boolean; typing: boolean }[]
     }
     spine.sessions[0].working = working
+    spine.sessions[0].needs_attention = over.needs_attention ?? false
+    spine.sessions[0].typing = over.typing ?? false
     return makeState({
       spine: spine as unknown as DuxState["spine"],
       bootstrap: { title: "dux", dux_version: "v1", available_providers: ["claude"] },
@@ -2065,23 +2078,47 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
     })
   }
 
+  const tree = () => (
+    <SidebarProvider defaultOpen={false}>
+      <AppSidebar />
+    </SidebarProvider>
+  )
+  const button = () => screen.getByTestId("collapsed-agent-rail").querySelectorAll("button")[0]
+  const icon = () => button().querySelector("svg")!
+  const frame = () => icon().closest("[data-slot='working-glyph']")!
+
   it("bounces the rail icon while working and lets it finish its bounce", () => {
     mockState = railState(true)
-    const tree = () => (
-      <SidebarProvider defaultOpen={false}>
-        <AppSidebar />
-      </SidebarProvider>
-    )
     const { rerender } = render(tree())
-    const icon = () =>
-      screen.getByTestId("collapsed-agent-rail").querySelectorAll("button")[0].querySelector("svg")!
-    expect(icon().getAttribute("class"), LOCKED).toContain(CUE)
-    fireAnimationStart(icon(), "working-bounce")
+    expect(frame().getAttribute("class"), LOCKED).toContain(BOUNCE)
+    expect(icon().getAttribute("class"), LOCKED).toContain(PULSE)
+    fireAnimationStart(frame(), "working-bounce")
 
     mockState = railState(false)
     rerender(tree())
-    expect(icon().getAttribute("class"), LOCKED).toContain(CUE)
-    fireAnimationIteration(icon(), "working-bounce")
-    expect(icon().getAttribute("class"), LOCKED).not.toContain(CUE)
+    expect(frame().getAttribute("class"), LOCKED).toContain(BOUNCE)
+    fireAnimationIteration(frame(), "working-bounce")
+    expect(frame().getAttribute("class"), LOCKED).not.toContain(BOUNCE)
   })
+
+  // A higher state is there at once (its blink, its tint, its label) and the
+  // pulse is gone at once, but the bounce in flight still finishes at rest.
+  for (const [name, over, label] of [
+    ["needs-you", { needs_attention: true }, "Needs attention"],
+    ["typing", { typing: true }, "Typing"],
+  ] as const) {
+    it(`finishes the rail icon's bounce when ${name} takes it over`, () => {
+      mockState = railState(true)
+      const { rerender } = render(tree())
+      fireAnimationStart(frame(), "working-bounce")
+
+      mockState = railState(true, over)
+      rerender(tree())
+      expect(button().querySelector(`[aria-label='${label}']`), LOCKED).toBeTruthy()
+      expect(icon().getAttribute("class"), LOCKED).not.toContain(PULSE)
+      expect(frame().getAttribute("class"), LOCKED).toContain(BOUNCE)
+      fireAnimationIteration(frame(), "working-bounce")
+      expect(frame().getAttribute("class"), LOCKED).not.toContain(BOUNCE)
+    })
+  }
 })

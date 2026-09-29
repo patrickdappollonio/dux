@@ -58,11 +58,7 @@ import {
 } from "@/lib/store"
 import type { ChangesSlice, SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
-import {
-  useWorkingCue,
-  WORKING_GLYPH_ANIMATION,
-  WORKING_GLYPH_CLASS,
-} from "@/hooks/use-working-cue"
+import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { SessionView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
@@ -85,17 +81,6 @@ function CollapsedAgentIcon({
     session.working,
     session.needs_attention,
     session.typing,
-  )
-  // The same glyph cue as the sidebar list's row: it finishes its bounce after
-  // a stop, and a higher state takes it over at once.
-  const {
-    running: cueRunning,
-    attach: attachGlyph,
-    handlers: cueHandlers,
-  } = useWorkingCue<SVGSVGElement>(
-    working,
-    !agentRowVisual(session.status, true, session.needs_attention, session.typing)
-      .working,
   )
   return (
     <SidebarMenuItem>
@@ -130,15 +115,10 @@ function CollapsedAgentIcon({
                   : "text-sidebar-accent-foreground",
             )}
           >
-            <Bot
-              ref={attachGlyph}
-              {...cueHandlers}
-              className={cn(
-                "size-4.5! shrink-0",
-                WORKING_GLYPH_CLASS,
-                cueRunning && WORKING_GLYPH_ANIMATION,
-              )}
-            />
+            {/* The same glyph cue as the sidebar list's row: every stop, a
+                higher state taking over included, finishes the bounce at rest
+                while the pulse yields at once. */}
+            <WorkingGlyph icon={Bot} working={working} className="size-4.5!" />
           </span>
         </SidebarMenuButton>
       </SimpleTooltip>

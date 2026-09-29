@@ -13,10 +13,8 @@ import { useSettlingAnimation } from "./use-settling-animation"
 
 const NAME = "working-bounce"
 
-function Probe({ active, cancel = false }: { active: boolean; cancel?: boolean }) {
-  const { running, attach, handlers } = useSettlingAnimation<HTMLDivElement>(active, NAME, {
-    cancel,
-  })
+function Probe({ active }: { active: boolean }) {
+  const { running, attach, handlers } = useSettlingAnimation<HTMLDivElement>(active, NAME)
   return (
     <div
       ref={attach}
@@ -245,18 +243,6 @@ describe("useSettlingAnimation", () => {
     act(() => {
       document.dispatchEvent(new Event("visibilitychange"))
     })
-    expect(animating()).toBe(false)
-  })
-
-  // A higher state taking over is not a stop: it takes the element at once.
-  it("drops the animation immediately when cancelled mid-settle", () => {
-    const { rerender } = render(<Probe active />)
-    start()
-    rerender(<Probe active={false} />)
-    expect(animating()).toBe(true)
-    rerender(<Probe active={false} cancel />)
-    expect(animating()).toBe(false)
-    iterate()
     expect(animating()).toBe(false)
   })
 

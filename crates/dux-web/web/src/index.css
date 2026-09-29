@@ -165,19 +165,20 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        the agent or terminal is busy. The period and the floor are
        `dux_core::working_cue`'s WORKING_CUE_PERIOD_MS and PULSE_FLOOR, so the
        browser and the terminal UI pulse on one clock; a test pins them equal.
-       Opacity only, so it rides the compositor, and the surfaces that carry it
-       pair it with `motion-safe:transition-opacity` so a stop eases back to full
-       rather than freezing mid-dip. */
+       Opacity only, so it rides the compositor. On the glyph a stop eases back
+       to full from wherever the dip was (`useWorkingCue`), rather than
+       freezing or snapping. */
     --animate-working-pulse: working-pulse 1.6s ease-in-out infinite;
-    /* The glyph's half of the cue: the same pulse plus a bounce, four bounces
-       per pulse (WORKING_CUE_PERIOD_MS / 4), in ONE `animation` value so both
-       start on the same frame and every pulse boundary is a bounce boundary.
-       A stop lets the bounce in flight finish (`useSettlingAnimation` ends it
-       with its current iteration), so the glyph rests exactly at
-       translateY(0), while the opacity eases back to full through the paired
-       transition. The bounce is a user-locked decision (CLAUDE.md, "Locked by
-       the user"). */
-    --animate-working-cue: working-pulse 1.6s ease-in-out infinite, working-bounce 0.4s ease-in-out infinite;
+    /* The glyph's half of the cue: the pulse above on the icon, plus this
+       bounce on a frame around it, four bounces per pulse
+       (WORKING_CUE_PERIOD_MS / 4), so every pulse boundary is a bounce
+       boundary. Two elements rather than one `animation` list, so the pulse
+       can yield at once to a higher state without restyling the element the
+       bounce runs on. Every stop lets the bounce in flight finish
+       (`useSettlingAnimation` ends it with its current iteration), so the
+       glyph rests exactly at translateY(0). The bounce is a user-locked
+       decision (CLAUDE.md, "Locked by the user"). */
+    --animate-working-bounce: working-bounce 0.4s ease-in-out infinite;
     /* The ellipsis that runs after the state word: four states over the SAME
        period, one every ELLIPSIS_STEP_MS, held rather than tweened. It rides in
        a slot the width of three dots, so the row behind it never shifts.

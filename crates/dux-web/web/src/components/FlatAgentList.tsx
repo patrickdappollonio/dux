@@ -31,11 +31,7 @@ import type { ComponentProps, CSSProperties, ReactNode } from "react"
 import { useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
-import {
-  useWorkingCue,
-  WORKING_GLYPH_ANIMATION,
-  WORKING_GLYPH_CLASS,
-} from "@/hooks/use-working-cue"
+import { WorkingGlyph } from "@/components/WorkingGlyph"
 import { PaneMenuBody } from "@/components/PaneMenu"
 import {
   quietTailManualChoice,
@@ -282,18 +278,6 @@ function AgentFlatRow({
     session.needs_attention,
     session.typing,
   )
-  // The glyph finishes its bounce after a stop; a higher state outranking
-  // working is a hand-over instead, since the ladder would not say "Working"
-  // even with the flag on.
-  const {
-    running: cueRunning,
-    attach: attachGlyph,
-    handlers: cueHandlers,
-  } = useWorkingCue<SVGSVGElement>(
-    working,
-    !agentRowVisual(session.status, true, session.needs_attention, session.typing)
-      .working,
-  )
   const word = stateWord(session)
   // Which thing this agent is IN: its project, or a standalone agent's folder.
   // Tagged so the row picks the glyph without re-deriving the agent kind.
@@ -363,15 +347,10 @@ function AgentFlatRow({
                   : "text-sidebar-accent-foreground",
               )}
             >
-              <Bot
-                ref={attachGlyph}
-                {...cueHandlers}
-                className={cn(
-                  "size-4.5 shrink-0",
-                  WORKING_GLYPH_CLASS,
-                  cueRunning && WORKING_GLYPH_ANIMATION,
-                )}
-              />
+              {/* `working` is already resolved through the ladder, so a higher
+                  state taking over is a stop like any other: the pulse yields
+                  at once and the bounce in flight finishes at rest. */}
+              <WorkingGlyph icon={Bot} working={working} className="size-4.5" />
             </span>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               {/* Line one: name + PR + time. */}
@@ -533,11 +512,6 @@ function TerminalFlatRow({
   // The same working cue as the agent row, and only while streaming and NOT
   // typing (typing owns the caret) so the two read apart.
   const working = terminal.working && !terminal.typing
-  const {
-    running: cueRunning,
-    attach: attachGlyph,
-    handlers: cueHandlers,
-  } = useWorkingCue<SVGSVGElement>(working, terminal.typing)
   const word = terminalStateWord(terminal)
 
   // Whether this row wears the standalone star instead of the owned-by arrow,
@@ -580,14 +554,11 @@ function TerminalFlatRow({
         onClick={() => onSelect(terminal.id, owner)}
         className="flex min-w-0 flex-1 touch-manipulation items-start gap-2.5 py-2 pl-2 text-left max-md:min-h-10"
       >
-        <SquareTerminal
-          ref={attachGlyph}
-          {...cueHandlers}
-          className={cn(
-            "mt-0.5 size-4 shrink-0 text-muted-foreground",
-            WORKING_GLYPH_CLASS,
-            cueRunning && WORKING_GLYPH_ANIMATION,
-          )}
+        <WorkingGlyph
+          icon={SquareTerminal}
+          working={working}
+          frameClassName="mt-0.5"
+          className="size-4 text-muted-foreground"
         />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex items-center gap-2">

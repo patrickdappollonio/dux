@@ -31,14 +31,12 @@ function pageHidden(): boolean {
  *
  * A stop is immediate when there is nothing to finish: the animation never
  * reported `animationstart` (reduced motion gates it off in CSS, or the
- * element is not rendered), the browser cancelled it, the tab is hidden and
- * nothing is painted, or `cancel` says a different state has taken the element
- * over.
+ * element is not rendered), the browser cancelled it, or the tab is hidden and
+ * nothing is painted.
  */
 export function useSettlingAnimation<T extends Element>(
   active: boolean,
   animationName: string,
-  { cancel = false }: { cancel?: boolean } = {},
 ): {
   running: boolean
   attach: (el: T | null) => void
@@ -61,9 +59,8 @@ export function useSettlingAnimation<T extends Element>(
     settlingNow = !active && started && !pageHidden()
     setSettling(settlingNow)
   }
-  const holding = settlingNow && !cancel
-  const running = !cancel && (active || holding)
-  if (!running && (started || settlingNow)) {
+  const running = active || settlingNow
+  if (!running && started) {
     // The class is gone, so the animation is too: forget this run.
     setStarted(false)
     setSettling(false)
@@ -84,7 +81,7 @@ export function useSettlingAnimation<T extends Element>(
   }, [el, animationName])
 
   React.useLayoutEffect(() => {
-    if (!holding) return
+    if (!settlingNow) return
     let live = true
     const finish = () => {
       if (live) setSettling(false)
@@ -124,7 +121,7 @@ export function useSettlingAnimation<T extends Element>(
       // the class is leaving in this same commit, which cancels it anyway.
       effect.updateTiming({ iterations: Infinity })
     }
-  }, [el, holding, animationName])
+  }, [el, settlingNow, animationName])
 
   const onAnimationStart = React.useCallback(
     (event: React.AnimationEvent) => {
