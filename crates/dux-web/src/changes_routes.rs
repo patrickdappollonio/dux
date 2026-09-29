@@ -86,6 +86,10 @@ fn list_children(
     worktree: &std::path::Path,
     dir: &str,
     side: dux_core::git::ChangesSide,
+    listing: Option<(
+        Vec<dux_core::model::ChangedFile>,
+        Vec<dux_core::model::ChangedFile>,
+    )>,
 ) -> Result<Vec<dux_core::model::ChangedFile>, ChildrenError> {
     use dux_core::git::{ChangesSide, changed_dir_children, changed_files, rows_answering};
     if dir.is_empty() || !dux_core::model::is_lexically_normal_path(dir) {
@@ -108,8 +112,13 @@ fn list_children(
         dir.to_string()
     };
     let refused = |why: &str| ChildrenError::Refused(format!("\"{shown}\" {why}"));
-    let (staged, unstaged) =
-        changed_files(worktree).map_err(|e| ChildrenError::Git(format!("{e:#}")))?;
+    // The listing the pane shows (the service's cache), or a fresh one when
+    // nothing is cached. A folder row answers for itself from it; only a folder
+    // inside a folded one is asked of git, scoped to that folder.
+    let (staged, unstaged) = match listing {
+        Some(listing) => listing,
+        None => changed_files(worktree).map_err(|e| ChildrenError::Git(format!("{e:#}")))?,
+    };
     let files = match side {
         ChangesSide::Staged => &staged,
         ChangesSide::Unstaged => &unstaged,
@@ -168,13 +177,17 @@ async fn get_children(
     // Resolved from the agent's folder like every other changes read: a plain
     // folder, one inside somebody else's repository and one that is gone each
     // get the folder's own sentence before any git runs.
-    let worktree = match crate::git_routes::resolve_changes_worktree(&state, id).await {
+    let worktree = match crate::git_routes::resolve_changes_worktree(&state, id.clone()).await {
         Ok(worktree) => worktree,
         Err(resp) => return resp.into_response(),
     };
     let dir = query.dir.clone();
     let wt = worktree.clone();
-    let answer = tokio::task::spawn_blocking(move || list_children(&wt, &dir, side)).await;
+    let listing = state.changes.cached_listing(&id);
+    if listing.is_none() {
+        state.changes.note_fresh_validation_read();
+    }
+    let answer = tokio::task::spawn_blocking(move || list_children(&wt, &dir, side, listing)).await;
     match answer {
         Ok(Ok(children)) => Json(ChildrenResponseBody {
             dir: query.dir,
@@ -238,5 +251,68 @@ async fn get_changes(State(state): State<AppState>, Path(id): Path<String>) -> R
             "changed files are temporarily unavailable (the repository is busy); retry shortly",
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dux_core::git::ChangesSide;
+
+    /// How long one folder-children request takes and how many git processes
+    /// one refresh tick of three expanded folders runs, validated against a
+    /// fresh listing (a cold cache) and against the cached one. Ignored: it
+    /// needs a prepared repository and prints numbers rather than asserting.
+    ///
+    /// DUX_FOLD_BENCH_REPO=<repo with a 30,000-file node_modules> \
+    ///   cargo test --release -p dux-web --lib measure_folder_children -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn measure_folder_children_against_a_prepared_repository() {
+        let Ok(repo) = std::env::var("DUX_FOLD_BENCH_REPO") else {
+            eprintln!("DUX_FOLD_BENCH_REPO is not set; nothing measured");
+            return;
+        };
+        let worktree = std::path::PathBuf::from(repo);
+        let cached = dux_core::git::changed_files(&worktree).expect("listing");
+        let dirs = ["node_modules", "node_modules/pkg0", "node_modules/pkg1"];
+
+        for (label, use_cache) in [("fresh listing", false), ("cached listing", true)] {
+            let mut times = Vec::new();
+            for _ in 0..5 {
+                let began = std::time::Instant::now();
+                let listing = use_cache.then(|| cached.clone());
+                let rows = list_children(&worktree, "node_modules", ChangesSide::Unstaged, listing)
+                    .unwrap_or_else(|_| panic!("listable"));
+                times.push(began.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(rows.len(), 600);
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!(
+                "{label}: node_modules children median {:.1} ms, worst {:.1} ms (n=5)",
+                times[2], times[4]
+            );
+
+            // One refresh tick: every expanded folder asked again.
+            let trace = std::env::temp_dir().join(format!(
+                "dux-fold-trace-{}-{use_cache}.jsonl",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&trace);
+            // SAFETY: an ignored measurement run single-threaded on its own.
+            unsafe { std::env::set_var("GIT_TRACE2_EVENT", &trace) };
+            for dir in dirs {
+                let listing = use_cache.then(|| cached.clone());
+                list_children(&worktree, dir, ChangesSide::Unstaged, listing)
+                    .unwrap_or_else(|_| panic!("{dir} listable"));
+            }
+            unsafe { std::env::remove_var("GIT_TRACE2_EVENT") };
+            let events = std::fs::read_to_string(&trace).unwrap_or_default();
+            let processes = events
+                .lines()
+                .filter(|line| line.contains("\"event\":\"start\""))
+                .count();
+            eprintln!("{label}: one tick of 3 expanded folders runs {processes} git processes");
+        }
     }
 }

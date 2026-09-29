@@ -129,6 +129,10 @@ pub struct ChangesService {
     invalidation_gen: AtomicU64,
     /// Total git computes run. Test instrumentation for the single-flight test.
     compute_count: AtomicUsize,
+    /// Full listings read outside the cache to validate a folder-children
+    /// request (a cold cache). Instrumentation: expanding folders must not
+    /// multiply full statuses.
+    fresh_validation_reads: AtomicUsize,
 }
 
 impl ChangesService {
@@ -144,6 +148,7 @@ impl ChangesService {
             uninterested_since: Mutex::new(HashMap::new()),
             invalidation_gen: AtomicU64::new(0),
             compute_count: AtomicUsize::new(0),
+            fresh_validation_reads: AtomicUsize::new(0),
         });
         Self::spawn_poller(Arc::downgrade(&svc));
         svc
@@ -351,6 +356,35 @@ impl ChangesService {
             }
             _ => None,
         }
+    }
+
+    /// The session's cached listing as model rows, or `None` when nothing
+    /// successful is cached. It is what the pane is showing, so a folder the
+    /// pane can expand is validated against it without another full status.
+    pub(crate) fn cached_listing(
+        &self,
+        session_id: &str,
+    ) -> Option<(Vec<ChangedFile>, Vec<ChangedFile>)> {
+        let cache = lock(&self.cache);
+        match cache.get(session_id) {
+            Some(Cached::Ok { prev, .. }) => Some((
+                prev.0.iter().map(model_from_view).collect(),
+                prev.1.iter().map(model_from_view).collect(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Record a full listing read outside the cache (see
+    /// `fresh_validation_reads`).
+    pub(crate) fn note_fresh_validation_read(&self) {
+        self.fresh_validation_reads.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many full listings were read outside the cache to validate a folder
+    /// request.
+    pub(crate) fn fresh_validation_reads(&self) -> usize {
+        self.fresh_validation_reads.load(Ordering::SeqCst)
     }
 
     /// Drop a session's cached lists and trigger a fresh compute and emit, so the
@@ -733,6 +767,51 @@ fn view_from(f: &ChangedFile) -> ChangedFileView {
 
 /// Project and sort a changed-files list by `(path, status)` so change detection
 /// is stable regardless of git's output order.
+/// A wire row back as a model row, with what validating a path needs: its
+/// path, status and kind, a folder's counts and the repositories inside it.
+fn model_from_view(view: &ChangedFileView) -> ChangedFile {
+    use dux_core::model::{ChangedFileKind, FolderContents};
+    use dux_core::viewmodel::FolderView;
+    let kind = match &view.folder {
+        None => ChangedFileKind::File,
+        Some(FolderView::NestedRepository) => ChangedFileKind::NestedRepository,
+        Some(FolderView::LinkedWorktree) => ChangedFileKind::LinkedWorktree,
+        Some(FolderView::Directory {
+            file_count,
+            nested_repositories,
+            linked_worktrees,
+            fingerprint,
+            nested_repositories_not_staged,
+            linked_worktrees_not_staged,
+            bare_repositories,
+            files_in_bare_repositories,
+            repositories_inside,
+        }) => ChangedFileKind::Directory(FolderContents {
+            file_count: *file_count,
+            nested_repositories: *nested_repositories,
+            linked_worktrees: *linked_worktrees,
+            fingerprint: fingerprint
+                .as_deref()
+                .and_then(|hex| u64::from_str_radix(hex, 16).ok()),
+            repositories_not_staged: *nested_repositories_not_staged,
+            worktrees_not_staged: *linked_worktrees_not_staged,
+            bare_repositories: bare_repositories.clone(),
+            files_in_bare_repositories: *files_in_bare_repositories,
+            repositories_inside: repositories_inside.clone(),
+        }),
+    };
+    ChangedFile {
+        status: view.status.clone(),
+        path: view.path.clone(),
+        additions: view.additions,
+        deletions: view.deletions,
+        binary: view.binary,
+        diff_excluded: view.diff_excluded,
+        renamed_from: view.renamed_from.clone(),
+        kind,
+    }
+}
+
 pub(crate) fn sorted_views(files: &[ChangedFile]) -> Vec<ChangedFileView> {
     let mut views: Vec<ChangedFileView> = files.iter().map(view_from).collect();
     views.sort_by(|a, b| {

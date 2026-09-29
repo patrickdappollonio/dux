@@ -1756,6 +1756,53 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// A folder list is validated against the changes list the service
+    /// already holds for the agent, so expanding (or refreshing) any number of
+    /// folders runs no full status of its own; only a cold cache reads one.
+    #[tokio::test]
+    async fn folder_children_validate_against_the_cached_listing() {
+        let (tmp, app, state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("node_modules/pkg0/deep")).unwrap();
+        std::fs::write(worktree.join("node_modules/pkg0/deep/a.js"), "a\n").unwrap();
+        std::fs::write(worktree.join("node_modules/top.js"), "t\n").unwrap();
+
+        // Cold: nothing cached yet, so the first request reads a listing.
+        let resp = app
+            .clone()
+            .oneshot(get_req(&children_uri("node_modules", "unstaged")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(state.changes.fresh_validation_reads(), 1);
+
+        // Warm: the pane's own read fills the cache, and every folder after it
+        // is validated against that.
+        let resp = app
+            .clone()
+            .oneshot(get_req("/api/v1/sessions/s1/changes"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        for dir in [
+            "node_modules",
+            "node_modules/pkg0",
+            "node_modules/pkg0/deep",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(get_req(&children_uri(dir, "unstaged")))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{dir}");
+        }
+        assert_eq!(
+            state.changes.fresh_validation_reads(),
+            1,
+            "no further full reads"
+        );
+    }
+
     /// The folder list is a changes read like any other, resolved from the
     /// agent's folder: a plain folder, one inside somebody else's repository
     /// (which git would answer for from the parent) and one that is gone all
