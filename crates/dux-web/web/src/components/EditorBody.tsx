@@ -1115,11 +1115,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       <>
         {activeTab && !isImageTab && hasDiff && (
           // One switch, two outline buttons joined by the shared ButtonGroup;
-          // the outline variant's pressed fill marks the current mode.
+          // the Button toggle look's primary fill marks the current mode.
           <ButtonGroup className="shrink-0 max-md:hidden" aria-label="View mode">
             <Button
               variant="outline"
               className={HEADER_CONTROL}
+              toggle
               aria-pressed={activeTab.mode === "file"}
               onClick={() => editorSetTabMode(root, activeTab.id, "file")}
             >
@@ -1129,6 +1130,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             <Button
               variant="outline"
               className={HEADER_CONTROL}
+              toggle
               aria-pressed={activeTab.mode === "diff"}
               onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
             >
@@ -1154,6 +1156,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           <Button
             variant="outline"
             className={cn(HEADER_CONTROL, "max-md:hidden")}
+            toggle
             aria-pressed={showPreview}
             onClick={togglePreview}
           >

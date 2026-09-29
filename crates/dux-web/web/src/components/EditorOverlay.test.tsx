@@ -1293,7 +1293,7 @@ describe("editor header controls share one outline look", () => {
   function expectOutline(control: HTMLElement, phoneFloor: boolean) {
     expect(control.getAttribute("data-slot")).not.toBeNull()
     expect(control.className).toContain("border-border")
-    expect(control.className).not.toContain("bg-primary")
+    expect(control.className).not.toMatch(/(^|\s)bg-primary(\s|$)/)
     expect(control.className).toMatch(/(^|\s)(h-8|size-8)(\s|$)/)
     if (phoneFloor) {
       expect(control.className).toMatch(/max-md:(h-10|size-10)/)
@@ -1335,13 +1335,17 @@ describe("editor header controls share one outline look", () => {
     const diff = within(group).getByRole("button", { name: /diff/i })
     for (const control of [file, diff]) {
       expect(control.className).toContain("border-border")
-      expect(control.className).not.toContain("bg-primary")
+      expect(control.className).not.toMatch(/(^|\s)bg-primary(\s|$)/)
       expect(control.className).toMatch(/(^|\s)h-8(\s|$)/)
       // The variant marks the pressed one, so a mode is visible at a glance.
-      expect(control.className).toContain("aria-pressed:bg-muted")
+      expect(control.className).toContain("aria-pressed:bg-primary")
     }
     expect(file.getAttribute("aria-pressed")).toBe("true")
     expect(diff.getAttribute("aria-pressed")).toBe("false")
+    // Preview is the header's other toggle, so it wears the same pressed look.
+    expect(
+      screen.getByRole("button", { name: /preview/i }).className,
+    ).toContain("aria-pressed:bg-primary")
   })
 })
 
