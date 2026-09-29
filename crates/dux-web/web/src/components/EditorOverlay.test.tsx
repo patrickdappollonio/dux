@@ -1315,7 +1315,6 @@ describe("editor header controls share one outline look", () => {
       screen.getByRole("button", { name: /hide the file explorer/i }),
       true,
     )
-    expectOutline(screen.getByRole("button", { name: /save/i }), true)
     expectOutline(screen.getByLabelText("More editor actions"), true)
     expectOutline(screen.getByRole("link", { name: /open in new tab/i }), true)
     expectOutline(screen.getByRole("button", { name: /^close$/i }), true)
@@ -1327,6 +1326,30 @@ describe("editor header controls share one outline look", () => {
     // Its tooltip wrapper is what hides it on a phone, once, not the button too.
     expect(local.className).not.toContain("max-md:hidden")
     expect(local.parentElement!.className).toContain("max-md:hidden")
+  })
+
+  // Save is the cluster's one filled primary action, because it commits the
+  // user's work; it keeps the one height, and nothing else in the header is
+  // filled.
+  it("fills Save alone, at the header's one height", async () => {
+    await mountWithTab("README.md")
+    await screen.findByTestId("code-editor")
+    const save = screen.getByRole("button", { name: /save/i })
+    expect(save.className).toMatch(/(^|\s)bg-primary(\s|$)/)
+    expect(save.className).not.toContain("border-border")
+    expect(save.className).toMatch(/(^|\s)h-8(\s|$)/)
+    expect(save.className).toContain("pointer-coarse:h-10")
+    expect(save.className).toContain("max-md:h-10")
+
+    const row = save.closest("div.border-b") as HTMLElement
+    const filled = [...row.querySelectorAll<HTMLElement>("button, a")].filter(
+      (control) => /(^|\s)bg-primary(\s|$)/.test(control.className),
+    )
+    expect(filled).toEqual([save])
+    for (const control of row.querySelectorAll<HTMLElement>("button, a")) {
+      if (control === save) continue
+      expect(control.className, control.textContent ?? "").toContain("border-border")
+    }
   })
 
   // The header must fit from the md breakpoint up, where its labelled controls

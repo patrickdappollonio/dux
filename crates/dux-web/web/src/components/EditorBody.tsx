@@ -1260,9 +1260,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
 
   function renderSaveAction(): React.ReactNode {
     if (activeTab?.mode !== "file" || isImageTab) return null
+    // The cluster's one filled primary action, beside its outline peers: Save
+    // commits the user's work, so it is the header's primary act. A
+    // user-approved exception, like the launcher's filled verb; it still keeps
+    // the header's one height.
     return (
       <Button
-        variant="outline"
+        variant="default"
         className={cn(HEADER_CONTROL, "max-md:h-10")}
         disabled={!dirty || isSaving || readOnly}
         aria-busy={isSaving}
