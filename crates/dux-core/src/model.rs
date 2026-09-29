@@ -902,9 +902,17 @@ pub fn total_file_count(files: &[ChangedFile]) -> usize {
 /// This is how an action on a file the user reached by expanding a folder is
 /// validated: the file is not a row of its own in the listing, but the folder
 /// it lives in is, and that is the proof it is a real change in this worktree.
+///
+/// "Inside" is decided on the path's text, so only a plain path can be inside
+/// anything: `node_modules/..` is the worktree root and `node_modules/../README`
+/// is a tracked file, and either one taken for a file of the folder would hand
+/// a destructive act the wrong target. See [`is_plain_relative_path`].
 pub fn listing_row_for<'a>(files: &'a [ChangedFile], path: &str) -> Option<&'a ChangedFile> {
     if let Some(exact) = files.iter().find(|file| file.path == path) {
         return Some(exact);
+    }
+    if !is_plain_relative_path(path) {
+        return None;
     }
     files.iter().find(|file| {
         file.is_expandable()
@@ -912,6 +920,30 @@ pub fn listing_row_for<'a>(files: &'a [ChangedFile], path: &str) -> Option<&'a C
                 .strip_prefix(file.path.as_str())
                 .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
     })
+}
+
+/// True when `path` is a relative path in its simplest spelling: not empty,
+/// not starting with `/`, and every `/`-separated component a real name (none
+/// empty, none `.` or `..`). This is the form git itself prints paths in, and
+/// the only form in which "is this path inside that folder" can be answered by
+/// comparing text. See [`is_plain_relative_path`] for the stricter form.
+pub fn is_lexically_normal_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+/// [`is_lexically_normal_path`], and no backslash anywhere. On the platforms
+/// dux runs on a backslash is an ordinary name character and cannot climb out
+/// of anything, but a name that reads like a Windows traversal has no business
+/// being answered for by a folder row: the cost is that a file with a backslash
+/// in its name, inside a folded folder, is acted on through the folder rather
+/// than on its own.
+pub fn is_plain_relative_path(path: &str) -> bool {
+    is_lexically_normal_path(path) && !path.contains('\\')
 }
 
 /// `n` with a comma between every group of three digits, the form a folder

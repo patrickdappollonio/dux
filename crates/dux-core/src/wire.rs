@@ -5773,6 +5773,35 @@ mod tests {
         }
     }
 
+    /// A path that climbs out of an untracked folder is not a file inside it,
+    /// so the wire never turns it into a discard: `node_modules/..` would have
+    /// been the whole worktree.
+    #[test]
+    fn wire_to_command_discard_refuses_a_path_climbing_out_of_a_folder() {
+        let repo = init_repo_with_commit();
+        std::fs::create_dir_all(repo.path().join("node_modules")).expect("folder");
+        std::fs::write(repo.path().join("node_modules/x.js"), "x\n").expect("file");
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+        for path in [
+            "node_modules/..",
+            "node_modules/../a.txt",
+            "node_modules/./x.js",
+        ] {
+            assert!(
+                engine
+                    .wire_to_command(WireCommand::DiscardFile {
+                        session_id: "s1".to_string(),
+                        path: path.to_string(),
+                    })
+                    .is_err(),
+                "{path:?} must be refused"
+            );
+        }
+        assert!(repo.path().join("a.txt").exists());
+        assert!(repo.path().join(".git").exists());
+    }
+
     #[test]
     fn wire_to_command_discard_derives_tracked_for_modified_file() {
         // init_repo_with_commit commits a.txt; modify it so it has an unstaged

@@ -1260,6 +1260,65 @@ mod tests {
         assert!(staged.is_empty() && unstaged.is_empty());
     }
 
+    /// A path that climbs out of a folded folder is not a file inside it. Each
+    /// route refuses one before git or the filesystem sees it, and the worktree
+    /// is exactly as it was: before this, `node_modules/..` as a discard emptied
+    /// the worktree, `.git` included.
+    #[tokio::test]
+    async fn crafted_paths_through_a_folded_folder_are_refused_by_every_route() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("node_modules/pkg")).unwrap();
+        std::fs::write(worktree.join("node_modules/pkg/a.js"), "a\n").unwrap();
+        let crafted = [
+            "node_modules/..",
+            "node_modules/../f.txt",
+            "node_modules/./pkg/a.js",
+            "node_modules//pkg/a.js",
+            "node_modules/pkg/../../f.txt",
+            "node_modules/../.git",
+            "/node_modules/pkg/a.js",
+        ];
+        for path in crafted {
+            let one = serde_json::json!({ "path": path }).to_string();
+            let many = serde_json::json!({ "paths": [path] }).to_string();
+            for (route, body) in [
+                ("discard", &one),
+                ("stage", &one),
+                ("unstage", &one),
+                ("stage-files", &many),
+                ("unstage-files", &many),
+            ] {
+                let resp = app
+                    .clone()
+                    .oneshot(json_req(
+                        "POST",
+                        &format!("/api/v1/sessions/s1/git/{route}"),
+                        body,
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    resp.status().is_client_error() || resp.status().is_server_error(),
+                    "{route} with {path:?} must be refused, got {}",
+                    resp.status()
+                );
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
+            "line1\n"
+        );
+        assert!(worktree.join(".git/HEAD").exists());
+        assert!(worktree.join("node_modules/pkg/a.js").exists());
+        let (staged, unstaged) =
+            tokio::task::spawn_blocking(move || dux_core::git::changed_files(&worktree).unwrap())
+                .await
+                .unwrap();
+        assert!(staged.is_empty(), "{staged:?}");
+        assert_eq!(unstaged.len(), 1, "{unstaged:?}");
+    }
+
     /// The unstage batch is the mirror image: it names what it reset, leaves
     /// nothing in `refused`, and refreshes the changed files exactly once.
     #[tokio::test]

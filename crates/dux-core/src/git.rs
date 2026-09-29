@@ -3640,6 +3640,20 @@ pub fn unstage_files(worktree_path: &Path, file_paths: &[String]) -> Result<()> 
     )
 }
 
+/// Refuse a worktree-relative path that is not in its plain spelling before it
+/// reaches git or the filesystem. Every path the changed-files listing hands
+/// out is already plain, so this only ever stops a crafted one: `x/..` names
+/// the whole worktree to `git add`, `git reset`, `git checkout` and a delete.
+fn refuse_unplain_path(path: &str, what: &str) -> Result<()> {
+    if crate::model::is_lexically_normal_path(path) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "refusing to {what} {path:?}: it is not a plain path inside the worktree"
+        ))
+    }
+}
+
 fn run_pathspec_batch(
     worktree_path: &Path,
     subcommand: &[&str],
@@ -3650,6 +3664,9 @@ fn run_pathspec_batch(
         return Err(anyhow!(
             "{what} was asked to act on no files; git would read that as the whole index"
         ));
+    }
+    for path in file_paths {
+        refuse_unplain_path(path, "act on")?;
     }
     let wt = worktree_path.to_string_lossy();
     let mut args: Vec<&str> = vec!["--literal-pathspecs", "-C", wt.as_ref()];
@@ -3683,6 +3700,7 @@ fn run_pathspec_batch(
 }
 
 pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
+    refuse_unplain_path(file_path, "stage")?;
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
         .args([
@@ -3704,6 +3722,7 @@ pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
 }
 
 pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
+    refuse_unplain_path(file_path, "unstage")?;
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
         .args([
@@ -3726,6 +3745,20 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
 }
 
 pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -> Result<()> {
+    refuse_unplain_path(file_path, "discard")?;
+    // Whatever the path's text says, a discard never lands on the worktree
+    // itself or on anything inside `.git`, the two targets whose loss takes
+    // every other file (or the whole history) with it.
+    let target = worktree_path.join(file_path);
+    let lands_on_root = matches!(
+        (worktree_path.canonicalize(), target.canonicalize()),
+        (Ok(root), Ok(resolved)) if root == resolved
+    );
+    if lands_on_root || resolves_into_git_dir(worktree_path, &target) {
+        return Err(anyhow!(
+            "refusing to discard {file_path:?}: it resolves to the worktree itself or into .git"
+        ));
+    }
     if is_untracked {
         let full = worktree_path.join(file_path);
         // Defense-in-depth before a destructive remove: callers classify the
@@ -3775,6 +3808,7 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
 /// STAGED cannot be discarded (unstage it first), and a file with no working-tree
 /// change has nothing to discard; both are reported as an error.
 pub fn discard_classify(worktree_path: &Path, path: &str) -> Result<bool> {
+    refuse_unplain_path(path, "discard")?;
     let (staged, unstaged) = changed_files(worktree_path)?;
     // A path inside a folded folder is answered for by that folder's row: a
     // file reached by expanding an untracked folder is untracked, and one

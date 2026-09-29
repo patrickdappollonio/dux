@@ -907,4 +907,128 @@ mod tests {
         assert!(staged.is_empty() && unstaged.is_empty());
         assert!(!root.join("dist").exists());
     }
+
+    // ── Crafted paths ──────────────────────────────────────────────────────
+    //
+    // A folded folder answers for the files inside it, and "inside" is decided
+    // on the path's text. A path that climbs back out of the folder, or names
+    // the folder itself in a roundabout way, must never be taken for one of
+    // its files: `node_modules/..` is the worktree root, and discarding it
+    // emptied the whole worktree, `.git` included.
+
+    const CRAFTED: &[&str] = &[
+        "node_modules/..",
+        "node_modules/../README",
+        "node_modules/../src/lib.rs",
+        "node_modules/./pkg/a.js",
+        "node_modules//pkg/a.js",
+        "node_modules/pkg/../../README",
+        "node_modules/",
+        "node_modules\\..\\README",
+        "node_modules/..\\README",
+        "/node_modules/pkg/a.js",
+        "node_modules/../.git",
+    ];
+
+    /// A repository with a committed README and `src/lib.rs`, and an
+    /// untracked `node_modules` of two files.
+    fn crafted_repo() -> tempfile::TempDir {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "README", "readme\n");
+        git_in(root)(&["add", "README"]);
+        git_in(root)(&["commit", "-q", "-m", "readme"]);
+        write(root, "node_modules/pkg/a.js", "a\n");
+        write(root, "node_modules/b.js", "b\n");
+        repo
+    }
+
+    /// Everything a crafted discard could have destroyed is still there.
+    fn assert_untouched(root: &Path) {
+        assert!(root.join("README").exists(), "README survived");
+        assert!(root.join("src/lib.rs").exists(), "src/lib.rs survived");
+        assert!(root.join(".git/HEAD").exists(), ".git survived");
+        assert!(
+            root.join("node_modules/pkg/a.js").exists(),
+            "the folder survived"
+        );
+        let (staged, unstaged) = changed_files(root).unwrap();
+        assert!(staged.is_empty(), "nothing got staged: {staged:?}");
+        assert_eq!(
+            shape(&unstaged),
+            vec![("node_modules".to_string(), "?".to_string(), folder(2))]
+        );
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_of_a_folder_is_not_inside_it() {
+        let repo = crafted_repo();
+        let (_, unstaged) = changed_files(repo.path()).unwrap();
+        for path in CRAFTED {
+            assert!(
+                crate::model::listing_row_for(&unstaged, path).is_none(),
+                "{path:?} must not be answered for by the folder"
+            );
+        }
+        // The honest spellings still are.
+        assert!(crate::model::listing_row_for(&unstaged, "node_modules/pkg/a.js").is_some());
+        assert!(crate::model::listing_row_for(&unstaged, "node_modules").is_some());
+    }
+
+    #[test]
+    fn a_crafted_path_is_never_classified_for_discard() {
+        let repo = crafted_repo();
+        for path in CRAFTED {
+            assert!(
+                discard_classify(repo.path(), path).is_err(),
+                "{path:?} must be refused"
+            );
+        }
+        assert_untouched(repo.path());
+    }
+
+    #[test]
+    fn discard_refuses_a_crafted_path_whatever_it_is_told() {
+        let repo = crafted_repo();
+        let root = repo.path();
+        for path in CRAFTED.iter().chain(&[".", "", ".git", "src/.."]) {
+            for untracked in [true, false] {
+                assert!(
+                    discard_file(root, path, untracked).is_err(),
+                    "discarding {path:?} (untracked: {untracked}) must be refused"
+                );
+            }
+        }
+        assert_untouched(root);
+    }
+
+    #[test]
+    fn stage_and_unstage_refuse_a_crafted_path() {
+        let repo = crafted_repo();
+        let root = repo.path();
+        for path in CRAFTED.iter().chain(&[".", "", "src/.."]) {
+            if path.contains('\\') {
+                // A backslash is an ordinary name character here, so git reads
+                // these as one literal name that does not exist: whatever git
+                // answers, nothing else in the tree can be reached through it,
+                // which `assert_untouched` below checks.
+                let _ = stage_file(root, path);
+                let _ = unstage_file(root, path);
+                continue;
+            }
+            assert!(
+                stage_file(root, path).is_err(),
+                "staging {path:?} is refused"
+            );
+            assert!(
+                unstage_file(root, path).is_err(),
+                "unstaging {path:?} is refused"
+            );
+            assert!(
+                stage_files(root, &[path.to_string()]).is_err(),
+                "batch-staging {path:?} is refused"
+            );
+        }
+        assert_untouched(root);
+    }
 }
