@@ -38,6 +38,9 @@ vi.mock("@/lib/store", async (importOriginal) => {
   return {
     ...actual,
     useDux: () => mockState,
+    // The Changes screen's pane subscribes selectively; these tests render one
+    // state each, so reading it straight through is enough.
+    useDuxSelector: <T,>(select: (state: DuxState) => T): T => select(mockState),
     addTab: addTabMock,
     navigateUp: navigateUpMock,
     openDeleteTerminal: openDeleteTerminalMock,
@@ -177,6 +180,16 @@ function makeSessionSpine(tabCount: number): DuxState["spine"] {
 
 beforeEach(() => {
   installBootStubs()
+  // The Changes screen's list windows itself against its viewport's size,
+  // which it watches with a ResizeObserver jsdom does not ship.
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  )
   addTabMock.mockClear()
   navigateUpMock.mockClear()
   openDeleteTerminalMock.mockClear()
