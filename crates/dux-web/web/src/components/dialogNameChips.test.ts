@@ -59,11 +59,21 @@ const QUOTE_BEFORE_NAME =
 // The ad hoc chip the shared component replaced: any monospace span.
 const HAND_ROLLED_CHIP = /<span\s+className="[^"]*\bfont-mono\b[^"]*"/g
 
+// The same chip one level up: StartTruncatedText renders its own span, so a
+// monospace class handed to it is a monospace span all the same. Its props may
+// span lines, so the element is matched up to its className, and the line
+// reported is the className's own.
+const MONO_START_TRUNCATED =
+  /<StartTruncatedText\b[^>]*?\bclassName="[^"]*\bfont-mono\b[^"]*"/g
+
 function nameDelimiterViolations(source: string): string[] {
   return [
-    ...[...source.matchAll(QUOTE_BEFORE_NAME)],
-    ...[...source.matchAll(HAND_ROLLED_CHIP)],
-  ].map((m) => lineAround(source, m.index ?? 0))
+    ...[...source.matchAll(QUOTE_BEFORE_NAME)].map((m) => m.index ?? 0),
+    ...[...source.matchAll(HAND_ROLLED_CHIP)].map((m) => m.index ?? 0),
+    ...[...source.matchAll(MONO_START_TRUNCATED)].map(
+      (m) => (m.index ?? 0) + m[0].lastIndexOf("className="),
+    ),
+  ].map((index) => lineAround(source, index))
 }
 
 function lineAround(source: string, index: number): string {
@@ -116,8 +126,19 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     line: '<span className="truncate font-mono text-sm">{entry.branch_name}</span>',
     reason: "A worktree row that is only its branch: a list row, out of the chip rule's scope.",
   },
+  {
+    file: "components/ProjectsDialog.tsx",
+    line: '<StartTruncatedText text={project.path} className="font-mono" tooltip />',
+    reason: "A project row's folder on its second line: part of a list row, not a name in a sentence.",
+  },
   // The files below are scanned because they build toast prose, not because
   // they are dialogs; each line is something other than a name in a sentence.
+  {
+    file: "components/EditorBody.tsx",
+    line: 'className="flex-1 font-mono text-sm"',
+    reason:
+      "The editor header's open path and a search result row: a path that is the whole element, not a name in a sentence.",
+  },
   {
     file: "components/EditorBody.tsx",
     line: '<span className="max-w-full shrink-0 truncate font-mono text-xs text-muted-foreground">',
@@ -171,9 +192,30 @@ describe("the name-delimiter detector", () => {
       "Delete &#34;{name}&#34; now.",
       "Delete &#39;{name}&#39; now.",
       "Delete &apos;{name}&apos; now.",
+      // The start-ellipsizing text component renders a span of its own, so a
+      // monospace one is the same hand-rolled chip one level up.
+      '<StartTruncatedText text={path} className="font-mono" />',
+      '<StartTruncatedText text={path} className="flex-1 font-mono text-sm" />',
+      '<StartTruncatedText\n  text={path}\n  className="font-mono text-xs"\n/>',
     ]) {
       expect(nameDelimiterViolations(bad), bad).toHaveLength(1)
     }
+  })
+
+  // The line reported, and matched against the allowlist, is the one carrying
+  // the monospace class, so an exception names exactly what it excuses.
+  it("reports a multi-line StartTruncatedText by its className line", () => {
+    expect(
+      nameDelimiterViolations(
+        '<StartTruncatedText\n  text={path}\n  className="flex-1 font-mono text-sm"\n/>',
+      ),
+    ).toEqual(['className="flex-1 font-mono text-sm"'])
+  })
+
+  it("leaves a StartTruncatedText without a monospace class alone", () => {
+    expect(
+      nameDelimiterViolations('<StartTruncatedText text={name} className="text-sm" />'),
+    ).toEqual([])
   })
 
   it("leaves quoted UI words and the shared chip alone", () => {
