@@ -4,6 +4,7 @@
 // (StandaloneEditor.tsx). Exactly one of the two mounts it at a time (the
 // overlay stands down while the tab is the standalone surface), so there is
 // never a second Monaco model set or a second buffer map over the same files.
+import { changedStatusLookup } from "@/lib/changedFiles"
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
 import {
   Check,
@@ -563,16 +564,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // focus and tab activation instead.
   const slice = changesForRoot(changes, root)
 
-  // Mark the tree's changed files from the slice. Stores the raw git status code
-  // per path; FileStatusIcon maps it to an icon + label.
-  const changedMap = useMemo(() => {
-    const map = new Map<string, string>()
-    if (!slice) return map
-    for (const f of [...slice.unstaged, ...slice.staged]) {
-      if (!map.has(f.path)) map.set(f.path, f.status)
-    }
-    return map
-  }, [slice])
+  // Mark the tree's changed files from the slice: the raw git status code per
+  // path, a file inside a folded folder answering as that folder;
+  // FileStatusIcon maps it to an icon + label.
+  const changedMap = useMemo(
+    () => changedStatusLookup(slice ? [slice.unstaged, slice.staged] : []),
+    [slice],
+  )
 
   // A per-file change-signal for the open file: status plus line counts, which
   // move when the content changes, though an edit keeping identical +/- counts
@@ -1580,7 +1578,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                               p === openPath && "bg-muted",
                             )}
                           >
-                            {changedMap.has(p) && (
+                            {changedMap.get(p) && (
                               <FileStatusIcon status={changedMap.get(p)!} />
                             )}
                             {/* The full path, giving way at its start so the

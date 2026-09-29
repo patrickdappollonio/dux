@@ -47,6 +47,7 @@ if (!Element.prototype.getAnimations) {
 }
 
 const { FileTree } = await import("./FileTree")
+const { changedStatusLookup } = await import("@/lib/changedFiles")
 const { vanishedDirPaths } = await import("@/lib/fileTreeFreshness")
 
 // A promise the test resolves when it wants the response to land.
@@ -78,6 +79,49 @@ afterEach(() => {
 })
 
 describe("FileTree", () => {
+  // A folded folder is one changed row, so the folder and every file under
+  // it carry its mark, rather than the files losing theirs to the fold.
+  it("marks a folded folder and the files inside it with the folder's status", async () => {
+    const listings: Record<string, DirEntry[]> = {
+      "": [dir("node_modules"), file("README.md")],
+      node_modules: [file("node_modules/a.js")],
+    }
+    treeMock.mockImplementation((_sid, d) =>
+      Promise.resolve({ dir: d, entries: listings[d] ?? [] }),
+    )
+    const changed = changedStatusLookup([
+      [
+        {
+          path: "node_modules",
+          status: "?",
+          additions: 0,
+          deletions: 0,
+          binary: false,
+          diff_excluded: false,
+          kind: "directory",
+          file_count: 1,
+        },
+      ],
+    ])
+
+    render(
+      <FileTree
+        root={agentRoot("s1")}
+        openPath="node_modules/a.js"
+        changed={changed}
+        initialPath="node_modules/a.js"
+        onOpen={() => {}}
+      />,
+    )
+
+    const fileRow = (await screen.findByText("a.js")).closest("button")!
+    expect(fileRow.querySelector('[aria-label="Untracked"]')).not.toBeNull()
+    const folderRow = screen.getByText("node_modules").closest("button")!
+    expect(folderRow.querySelector('[aria-label="Untracked"]')).not.toBeNull()
+    const readme = screen.getByText("README.md").closest("button")!
+    expect(readme.querySelector('[role="img"][aria-label]')).toBeNull()
+  })
+
   it("auto-expands ancestors and reveals a deep initialPath on mount", async () => {
     const listings: Record<string, DirEntry[]> = {
       "": [dir("src")],

@@ -7,6 +7,7 @@ import {
   mergeChangedFilesRecaps,
   CHANGED_FILE_FIELDS,
   changedFileCount,
+  changedStatusLookup,
   folderCountLabel,
   reconcileSelection,
   reuseUnchangedFiles,
@@ -443,5 +444,38 @@ describe("folded folders in the totals", () => {
     const after: ChangedFileView = { ...before, file_count: 4 }
     expect(reuseUnchangedFiles([before], [after])).toEqual([after])
     expect(reuseUnchangedFiles([before], [after])[0]).toBe(after)
+  })
+})
+
+// A file inside a folded folder has no row of its own, so its status is the
+// folder's: the editor marks it the way the changes pane would if it listed it.
+describe("changedStatusLookup", () => {
+  const folded = (path: string, status: string): ChangedFileView => ({
+    ...file(path, status),
+    kind: "directory",
+    file_count: 3,
+  })
+
+  it("answers a path exactly, else from its nearest folded folder", () => {
+    const lookup = changedStatusLookup([
+      [folded("node_modules", "?"), file("src/a.ts", "M"), folded("gen/out", "?")],
+      [folded("vendor", "A"), file("src/a.ts", "A")],
+    ])
+    expect(lookup.get("src/a.ts")).toBe("M")
+    expect(lookup.get("node_modules")).toBe("?")
+    expect(lookup.get("node_modules/pkg/index.js")).toBe("?")
+    expect(lookup.get("vendor/lib/x.c")).toBe("A")
+    expect(lookup.get("gen/out/a.js")).toBe("?")
+    expect(lookup.get("gen/other.js")).toBeUndefined()
+    expect(lookup.get("node_modules_x/a.js")).toBeUndefined()
+    expect(lookup.get("src/b.ts")).toBeUndefined()
+  })
+
+  it("does not answer for a path inside a repository of its own", () => {
+    const lookup = changedStatusLookup([
+      [{ ...file("vendor/lib", "?"), kind: "nested_repository" }],
+    ])
+    expect(lookup.get("vendor/lib")).toBe("?")
+    expect(lookup.get("vendor/lib/own.c")).toBeUndefined()
   })
 })

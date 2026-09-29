@@ -294,3 +294,42 @@ export function reconcileSelection(
   if (staged === prev.staged && unstaged === prev.unstaged) return prev
   return { staged, unstaged }
 }
+
+// Something that answers "what is this path's raw git status code". A `Map`
+// is one, which is what a caller with nothing folded passes.
+export interface StatusLookup {
+  get(path: string): string | undefined
+}
+
+// The git status code for any path under a worktree, from the changes lists
+// (`lists` in priority order, the unstaged side first): a path that is a row
+// answers as its row, and a path with no row of its own answers as the
+// nearest folded folder it sits in, because that row stands for every file
+// under it. A repository of its own is not looked inside, so a path in one
+// answers nothing. The one place the editor asks this, for its tree, its
+// search results and anything else that marks a path.
+export function changedStatusLookup(
+  lists: readonly (readonly Pick<ChangedFileView, "path" | "status" | "kind">[])[],
+): StatusLookup {
+  const exact = new Map<string, string>()
+  const folders = new Map<string, string>()
+  for (const list of lists) {
+    for (const file of list) {
+      if (!exact.has(file.path)) exact.set(file.path, file.status)
+      if (file.kind === "directory" && !folders.has(file.path)) {
+        folders.set(file.path, file.status)
+      }
+    }
+  }
+  return {
+    get(path: string): string | undefined {
+      const own = exact.get(path)
+      if (own !== undefined || folders.size === 0) return own
+      for (let cut = path.lastIndexOf("/"); cut > 0; cut = path.lastIndexOf("/", cut - 1)) {
+        const status = folders.get(path.slice(0, cut))
+        if (status !== undefined) return status
+      }
+      return undefined
+    },
+  }
+}
