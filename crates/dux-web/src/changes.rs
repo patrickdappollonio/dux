@@ -382,7 +382,8 @@ impl ChangesService {
     }
 
     /// How many full listings were read outside the cache to validate a folder
-    /// request.
+    /// request. Read by tests only.
+    #[cfg(test)]
     pub(crate) fn fresh_validation_reads(&self) -> usize {
         self.fresh_validation_reads.load(Ordering::SeqCst)
     }
