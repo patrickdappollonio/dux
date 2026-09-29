@@ -8191,15 +8191,18 @@ impl App {
                 name_chip(file_path, &self.theme),
                 Span::raw("?"),
             ],
-            dux_core::model::ChangedFileKind::Directory { file_count } => vec![
+            dux_core::model::ChangedFileKind::Directory(contents) => vec![
                 Span::raw(" Delete the untracked folder "),
                 name_chip(&format!("{file_path}/"), &self.theme),
                 Span::raw(format!(
                     " and the {} inside it?",
-                    if *file_count == 1 {
+                    if contents.file_count == 1 {
                         "1 file".to_string()
                     } else {
-                        format!("{} files", dux_core::model::group_thousands(*file_count))
+                        format!(
+                            "{} files",
+                            dux_core::model::group_thousands(contents.file_count)
+                        )
                     }
                 )),
             ],

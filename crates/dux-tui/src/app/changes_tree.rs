@@ -203,7 +203,7 @@ impl App {
             return true;
         };
         let count = match kind {
-            ChangedFileKind::Directory { file_count } => file_count,
+            ChangedFileKind::Directory(ref contents) => contents.file_count,
             ChangedFileKind::NestedRepository => {
                 self.set_info(format!(
                     "\"{path}/\" is a repository of its own, so git does not look inside it and \
@@ -647,7 +647,7 @@ mod tests {
             binary: false,
             diff_excluded: false,
             renamed_from: None,
-            kind: ChangedFileKind::Directory { file_count },
+            kind: ChangedFileKind::directory(file_count),
         }
     }
 
@@ -943,7 +943,10 @@ mod tests {
             panic!("the discard asks first");
         };
         assert_eq!(file_path, "node_modules");
-        assert_eq!(kind, &ChangedFileKind::Directory { file_count: 13 });
+        assert!(
+            matches!(kind, ChangedFileKind::Directory(contents) if contents.file_count == 13),
+            "{kind:?}"
+        );
         assert_eq!(*focus, ConfirmFocus::Cancel, "Cancel is focused");
         let screen = render_text(&mut app, 140, 40).join("\n");
         assert!(screen.contains("node_modules/"), "{screen}");

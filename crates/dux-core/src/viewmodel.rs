@@ -971,8 +971,18 @@ pub struct ChangedFileView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FolderView {
-    /// A folder standing for `file_count` files at any depth.
-    Directory { file_count: usize },
+    /// A folder standing for `file_count` files at any depth. The other two
+    /// fields are omitted when there is nothing to say: `nested_repositories`
+    /// when there are none, `fingerprint` when the folder was too large to
+    /// fingerprint (or is staged). The fingerprint travels as hex text, because
+    /// a 64-bit number does not survive a JavaScript number.
+    Directory {
+        file_count: usize,
+        #[serde(skip_serializing_if = "is_zero")]
+        nested_repositories: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<String>,
+    },
     /// An untracked repository of its own, which is not looked inside.
     NestedRepository,
 }
@@ -982,12 +992,18 @@ impl FolderView {
     pub fn from_kind(kind: &crate::model::ChangedFileKind) -> Option<Self> {
         match kind {
             crate::model::ChangedFileKind::File => None,
-            crate::model::ChangedFileKind::Directory { file_count } => Some(Self::Directory {
-                file_count: *file_count,
+            crate::model::ChangedFileKind::Directory(contents) => Some(Self::Directory {
+                file_count: contents.file_count,
+                nested_repositories: contents.nested_repositories,
+                fingerprint: contents.fingerprint.map(|print| format!("{print:016x}")),
             }),
             crate::model::ChangedFileKind::NestedRepository => Some(Self::NestedRepository),
         }
     }
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 /// One process inside a sampled tree, projected for web clients.

@@ -2847,7 +2847,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                     untracked_folders.push(folder.to_string());
                     (
                         folder.to_string(),
-                        crate::model::ChangedFileKind::Directory { file_count: 0 },
+                        crate::model::ChangedFileKind::directory(0),
                     )
                 }
                 None => (path, crate::model::ChangedFileKind::File),
@@ -2895,9 +2895,9 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     // What each folded folder holds. A count git could not produce fails the
     // read rather than claiming an empty folder.
     if !untracked_folders.is_empty() {
-        let counts = folding::count_untracked_folders(worktree_path, &untracked_folders)?;
+        let mut counts = folding::count_untracked_folders(worktree_path, &untracked_folders)?;
         for file in unstaged.iter_mut().filter(|file| file.is_folder()) {
-            if let Some(folder) = counts.get(&file.path) {
+            if let Some(folder) = counts.remove(&file.path) {
                 file.kind = folder.kind();
             }
         }
@@ -8475,10 +8475,8 @@ mod tests {
         let row = &unstaged[0];
         assert_eq!(row.path, "new-folder");
         assert_eq!(row.status, "?");
-        assert_eq!(
-            row.kind,
-            crate::model::ChangedFileKind::Directory { file_count: 2 }
-        );
+        assert!(row.is_expandable());
+        assert_eq!(row.file_count(), 2);
         // A folder row carries a count, never line counts it would have to
         // read every file inside to produce.
         assert_eq!((row.additions, row.deletions, row.binary), (0, 0, false));

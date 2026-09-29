@@ -808,7 +808,7 @@ mod tests {
     #[test]
     fn a_folder_row_travels_with_its_kind_and_file_count() {
         let mut folder = changed("node_modules", "?", None);
-        folder.kind = dux_core::model::ChangedFileKind::Directory { file_count: 28_747 };
+        folder.kind = dux_core::model::ChangedFileKind::directory(28_747);
         let mut nested = changed("vendor/lib", "?", None);
         nested.kind = dux_core::model::ChangedFileKind::NestedRepository;
 
@@ -821,6 +821,28 @@ mod tests {
         assert_eq!(json[1]["path"], "vendor/lib");
         assert_eq!(json[1]["kind"], "nested_repository");
         assert!(json[1].get("file_count").is_none(), "{json}");
+        // Nothing to say is said by leaving the field out.
+        assert!(json[0].get("nested_repositories").is_none(), "{json}");
+        assert!(json[0].get("fingerprint").is_none(), "{json}");
+    }
+
+    /// The nested repositories inside a folder and its fingerprint travel too,
+    /// the fingerprint as hex text because a JavaScript number cannot hold it.
+    #[test]
+    fn a_folder_row_carries_its_nested_repositories_and_fingerprint() {
+        let mut folder = changed("vendor", "?", None);
+        folder.kind =
+            dux_core::model::ChangedFileKind::Directory(dux_core::model::FolderContents {
+                file_count: 3,
+                nested_repositories: 1,
+                fingerprint: Some(u64::MAX - 1),
+            });
+
+        let json = serde_json::to_value(sorted_views(&[folder])).unwrap();
+
+        assert_eq!(json[0]["file_count"], 3);
+        assert_eq!(json[0]["nested_repositories"], 1);
+        assert_eq!(json[0]["fingerprint"], "fffffffffffffffe");
     }
 
     fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
@@ -1117,7 +1139,11 @@ mod tests {
             .expect("the folder is one row");
         assert_eq!(
             folder.folder,
-            Some(dux_core::viewmodel::FolderView::Directory { file_count }),
+            Some(dux_core::viewmodel::FolderView::Directory {
+                file_count,
+                nested_repositories: 0,
+                fingerprint: None,
+            }),
             "the row says how many files it stands for"
         );
     }

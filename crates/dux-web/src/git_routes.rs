@@ -1197,7 +1197,9 @@ mod tests {
                 .await
                 .unwrap()
         };
-        let folder = |count| dux_core::model::ChangedFileKind::Directory { file_count: count };
+        // A folder row of `count` files, whatever its fingerprint.
+        let folder =
+            |file: &dux_core::model::ChangedFile| (file.is_expandable(), file.file_count());
 
         let resp = app
             .clone()
@@ -1213,7 +1215,7 @@ mod tests {
         assert!(unstaged.is_empty(), "{unstaged:?}");
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].path, "node_modules");
-        assert_eq!(staged[0].kind, folder(12));
+        assert_eq!(folder(&staged[0]), (true, 12));
 
         // One file inside the staged folder, reached by expanding it.
         let resp = app
@@ -1245,7 +1247,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
         let (staged, _) = lists(worktree.clone()).await;
         assert_eq!(staged.len(), 1);
-        assert_eq!(staged[0].kind, folder(12));
+        assert_eq!(folder(&staged[0]), (true, 12));
 
         let resp = app
             .clone()
@@ -1260,7 +1262,7 @@ mod tests {
         let (staged, unstaged) = lists(worktree.clone()).await;
         assert!(staged.is_empty(), "{staged:?}");
         assert_eq!(unstaged.len(), 1);
-        assert_eq!(unstaged[0].kind, folder(12));
+        assert_eq!(folder(&unstaged[0]), (true, 12));
 
         let resp = app
             .clone()

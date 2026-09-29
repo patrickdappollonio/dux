@@ -853,12 +853,43 @@ pub enum ChangedFileKind {
     /// the entry `git status` itself reports. On the staged side (status `A`)
     /// it is a directory HEAD does not have whose every staged entry is newly
     /// added, which is what the same folder becomes once it is staged whole.
-    /// `file_count` is how many files are inside, at any depth.
-    Directory { file_count: usize },
+    Directory(FolderContents),
     /// An untracked directory that holds a repository of its own. git does not
     /// look inside another repository, so neither does dux: there is no file
     /// count to give and nothing to expand, and the row says what it is.
     NestedRepository,
+}
+
+/// What a folded folder holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FolderContents {
+    /// How many files are inside, at any depth. Files only: a repository of
+    /// its own inside the folder is counted in `nested_repositories` instead.
+    pub file_count: usize,
+    /// How many repositories of their own sit inside, which git does not look
+    /// into. Deleting the folder keeps them, so the dialogs have to say so.
+    pub nested_repositories: usize,
+    /// A cheap fingerprint of the files inside: their paths, sizes and
+    /// modification times, hashed. It moves when a file inside is edited, which
+    /// the count alone does not, and that is what tells a surface to look at an
+    /// expanded folder or an open buffer again. `None` when the folder holds
+    /// more files than one read is allowed to stat (see the listing's budget):
+    /// such a folder is followed by its count alone, and an edit that keeps the
+    /// count is not noticed until something else asks. That gap is accepted,
+    /// because statting a thirty-thousand-file dependency folder on every poll
+    /// is the cost folding exists to avoid. Also `None` on the staged side,
+    /// where an edit since staging is its own unstaged row.
+    pub fingerprint: Option<u64>,
+}
+
+impl ChangedFileKind {
+    /// A folder of `file_count` files with nothing else known about it.
+    pub fn directory(file_count: usize) -> Self {
+        Self::Directory(FolderContents {
+            file_count,
+            ..FolderContents::default()
+        })
+    }
 }
 
 impl ChangedFile {
@@ -885,7 +916,15 @@ impl ChangedFile {
     pub fn file_count(&self) -> usize {
         match self.kind {
             ChangedFileKind::File | ChangedFileKind::NestedRepository => 1,
-            ChangedFileKind::Directory { file_count } => file_count,
+            ChangedFileKind::Directory(ref contents) => contents.file_count,
+        }
+    }
+
+    /// What a folded folder holds, `None` for any other row.
+    pub fn folder_contents(&self) -> Option<&FolderContents> {
+        match &self.kind {
+            ChangedFileKind::Directory(contents) => Some(contents),
+            ChangedFileKind::File | ChangedFileKind::NestedRepository => None,
         }
     }
 }
@@ -960,17 +999,37 @@ pub fn group_thousands(n: usize) -> String {
     out
 }
 
+/// `count` and its noun, singular or plural, the count grouped by thousands.
+pub fn count_words(count: usize, one: &str, many: &str) -> String {
+    let noun = if count == 1 { one } else { many };
+    format!("{} {noun}", group_thousands(count))
+}
+
 /// The words a folder row's count is written in: `1 file`, `28,747 files`,
-/// or `nested repository` for a repository dux does not look inside. `None`
-/// for an ordinary file row, which carries line counts instead.
+/// `3 files and 1 nested repository`, or `nested repository` for a repository
+/// dux does not look inside. `None` for an ordinary file row, which carries
+/// line counts instead.
 pub fn folder_count_label(file: &ChangedFile) -> Option<String> {
-    match file.kind {
+    match &file.kind {
         ChangedFileKind::File => None,
-        ChangedFileKind::Directory { file_count: 1 } => Some("1 file".to_string()),
-        ChangedFileKind::Directory { file_count } => {
-            Some(format!("{} files", group_thousands(file_count)))
-        }
+        ChangedFileKind::Directory(contents) => Some(folder_contents_words(contents)),
         ChangedFileKind::NestedRepository => Some("nested repository".to_string()),
+    }
+}
+
+/// A folder's contents in words, nested repositories named only when there
+/// are some.
+pub fn folder_contents_words(contents: &FolderContents) -> String {
+    let files = count_words(contents.file_count, "file", "files");
+    match contents.nested_repositories {
+        0 => files,
+        nested if contents.file_count == 0 => {
+            count_words(nested, "nested repository", "nested repositories")
+        }
+        nested => format!(
+            "{files} and {}",
+            count_words(nested, "nested repository", "nested repositories")
+        ),
     }
 }
 
@@ -1220,10 +1279,7 @@ mod changed_file_kind_tests {
     fn totals_count_the_files_inside_a_folded_folder() {
         let files = vec![
             row("notes.md", ChangedFileKind::File),
-            row(
-                "node_modules",
-                ChangedFileKind::Directory { file_count: 28_747 },
-            ),
+            row("node_modules", ChangedFileKind::directory(28_747)),
             row("vendor/other", ChangedFileKind::NestedRepository),
         ];
         assert_eq!(total_file_count(&files), 1 + 28_747 + 1);
@@ -1232,7 +1288,7 @@ mod changed_file_kind_tests {
     #[test]
     fn a_file_inside_a_folded_folder_is_answered_for_by_the_folder() {
         let files = vec![
-            row("node_modules", ChangedFileKind::Directory { file_count: 2 }),
+            row("node_modules", ChangedFileKind::directory(2)),
             row("node", ChangedFileKind::File),
         ];
         let found = listing_row_for(&files, "node_modules/pkg/index.js").map(|f| f.path.as_str());
@@ -1264,8 +1320,8 @@ mod changed_file_kind_tests {
 
     #[test]
     fn a_folder_row_names_its_count_in_words() {
-        let one = row("a", ChangedFileKind::Directory { file_count: 1 });
-        let many = row("b", ChangedFileKind::Directory { file_count: 28_747 });
+        let one = row("a", ChangedFileKind::directory(1));
+        let many = row("b", ChangedFileKind::directory(28_747));
         let nested = row("c", ChangedFileKind::NestedRepository);
         let file = row("d", ChangedFileKind::File);
         assert_eq!(folder_count_label(&one).as_deref(), Some("1 file"));
@@ -1275,6 +1331,30 @@ mod changed_file_kind_tests {
             Some("nested repository")
         );
         assert_eq!(folder_count_label(&file), None);
+        let mixed = row(
+            "e",
+            ChangedFileKind::Directory(FolderContents {
+                file_count: 3,
+                nested_repositories: 1,
+                fingerprint: None,
+            }),
+        );
+        assert_eq!(
+            folder_count_label(&mixed).as_deref(),
+            Some("3 files and 1 nested repository")
+        );
+        let only_nested = row(
+            "f",
+            ChangedFileKind::Directory(FolderContents {
+                file_count: 0,
+                nested_repositories: 2,
+                fingerprint: None,
+            }),
+        );
+        assert_eq!(
+            folder_count_label(&only_nested).as_deref(),
+            Some("2 nested repositories")
+        );
     }
 }
 

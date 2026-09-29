@@ -20,10 +20,11 @@ pub enum ChangesSide {
 }
 
 /// What git says is inside one untracked folder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum UntrackedFolder {
-    /// This many untracked, not-ignored files at any depth.
-    Files(usize),
+    /// Its untracked, not-ignored files, and the repositories of their own it
+    /// holds.
+    Contents(crate::model::FolderContents),
     /// The folder is a repository of its own, which git does not look inside.
     NestedRepository,
 }
@@ -31,10 +32,88 @@ pub(super) enum UntrackedFolder {
 impl UntrackedFolder {
     pub(super) fn kind(self) -> ChangedFileKind {
         match self {
-            Self::Files(file_count) => ChangedFileKind::Directory { file_count },
+            Self::Contents(contents) => ChangedFileKind::Directory(contents),
             Self::NestedRepository => ChangedFileKind::NestedRepository,
         }
     }
+}
+
+/// One untracked folder's `ls-files` records, gathered while they are read.
+#[derive(Default)]
+struct Tally<'r> {
+    /// The folder is itself a repository of its own.
+    is_repository: bool,
+    /// Every file record inside it, kept for the fingerprint.
+    files: Vec<&'r [u8]>,
+    /// Repositories of their own inside it, at any depth.
+    nested_repositories: usize,
+}
+
+impl<'r> Tally<'r> {
+    /// Count one record found inside the folder. A record ending in `/` is a
+    /// repository git did not look inside, and it is not a file.
+    fn add(&mut self, record: &'r [u8]) {
+        if record.ends_with(b"/") {
+            self.nested_repositories += 1;
+        } else {
+            self.files.push(record);
+        }
+    }
+}
+
+/// Turn the tallies of one read into what each folder holds, fingerprinting
+/// folders in order for as long as the read's stat budget lasts. A folder that
+/// would not fit in what is left gets no fingerprint at all rather than a
+/// partial one, which could miss exactly the file that changed.
+fn finish_tallies(
+    worktree: &Path,
+    tallies: Vec<(String, Tally<'_>)>,
+) -> Vec<(String, UntrackedFolder)> {
+    let mut budget = UNTRACKED_STATS_MAX_FILES;
+    tallies
+        .into_iter()
+        .map(|(folder, tally)| {
+            if tally.is_repository {
+                return (folder, UntrackedFolder::NestedRepository);
+            }
+            let fingerprint = (tally.files.len() <= budget).then(|| {
+                budget -= tally.files.len();
+                fingerprint_files(worktree, &tally.files)
+            });
+            let contents = crate::model::FolderContents {
+                file_count: tally.files.len(),
+                nested_repositories: tally.nested_repositories,
+                fingerprint,
+            };
+            (folder, UntrackedFolder::Contents(contents))
+        })
+        .collect()
+}
+
+/// A hash over each file's path, size and modification time: a stat each,
+/// never a read, so it is cheap next to the line counts. Records arrive in
+/// `ls-files` order, which is sorted, so the same files hash the same way. A
+/// file that vanished between the listing and the stat hashes as a marker.
+fn fingerprint_files(worktree: &Path, records: &[&[u8]]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::os::unix::ffi::OsStrExt;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for record in records {
+        record.hash(&mut hasher);
+        let path = worktree.join(std::ffi::OsStr::from_bytes(record));
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                meta.len().hash(&mut hasher);
+                meta.modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|since| since.as_nanos())
+                    .hash(&mut hasher);
+            }
+            Err(_) => u64::MAX.hash(&mut hasher),
+        }
+    }
+    hasher.finish()
 }
 
 /// Every untracked, not-ignored path git knows of in `worktree`, as the raw
@@ -90,40 +169,35 @@ pub(super) fn count_untracked_folders(
     worktree: &Path,
     folders: &[String],
 ) -> Result<HashMap<String, UntrackedFolder>> {
-    let mut counts: HashMap<String, UntrackedFolder> = folders
-        .iter()
-        .map(|folder| (folder.clone(), UntrackedFolder::Files(0)))
-        .collect();
     if folders.is_empty() {
-        return Ok(counts);
+        return Ok(HashMap::new());
     }
-    let wanted: HashSet<&[u8]> = folders.iter().map(|f| f.as_bytes()).collect();
+    let index: HashMap<&[u8], usize> = folders
+        .iter()
+        .enumerate()
+        .map(|(position, folder)| (folder.as_bytes(), position))
+        .collect();
+    let mut tallies: Vec<(String, Tally<'_>)> = folders
+        .iter()
+        .map(|folder| (folder.clone(), Tally::default()))
+        .collect();
     let raw = untracked_records(worktree, None)?;
     for record in raw.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
-        // A record ending in `/` is a repository git did not look inside.
-        let (entry, nested) = match record.strip_suffix(b"/") {
-            Some(entry) => (entry, true),
-            None => (record, false),
-        };
-        if nested && wanted.contains(entry) {
-            let folder = String::from_utf8_lossy(entry).into_owned();
-            counts.insert(folder, UntrackedFolder::NestedRepository);
+        // The folder itself answering as `folder/` is a repository of its own.
+        if let Some(&position) = record.strip_suffix(b"/").and_then(|e| index.get(e)) {
+            tallies[position].1.is_repository = true;
             continue;
         }
-        let owner = entry
+        let owner = record
             .iter()
             .enumerate()
-            .filter(|(_, byte)| **byte == b'/')
-            .map(|(index, _)| &entry[..index])
-            .find(|ancestor| wanted.contains(ancestor));
-        if let Some(owner) = owner {
-            let folder = String::from_utf8_lossy(owner).into_owned();
-            if let Some(UntrackedFolder::Files(count)) = counts.get_mut(&folder) {
-                *count += 1;
-            }
+            .filter(|(position, byte)| **byte == b'/' && *position + 1 < record.len())
+            .find_map(|(position, _)| index.get(&record[..position]).copied());
+        if let Some(position) = owner {
+            tallies[position].1.add(record);
         }
     }
-    Ok(counts)
+    Ok(finish_tallies(worktree, tallies).into_iter().collect())
 }
 
 /// Which of `dirs` HEAD does not have. An empty set when git could not be
@@ -297,7 +371,7 @@ fn folder_row(path: String, status: &str, file_count: usize) -> ChangedFile {
         binary: false,
         diff_excluded: false,
         renamed_from: None,
-        kind: ChangedFileKind::Directory { file_count },
+        kind: ChangedFileKind::directory(file_count),
     }
 }
 
@@ -342,7 +416,7 @@ fn untracked_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
     let prefix = format!("{dir}/");
     let mut files: Vec<ChangedFile> = Vec::new();
     // Sub-folder name → what is inside it, in first-seen order.
-    let mut folders: Vec<(String, UntrackedFolder)> = Vec::new();
+    let mut folders: Vec<(String, Tally<'_>)> = Vec::new();
     let mut folder_index: HashMap<String, usize> = HashMap::new();
     for record in raw.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
         let Some(rest) = record.strip_prefix(prefix.as_bytes()) else {
@@ -372,16 +446,15 @@ fn untracked_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
             });
             continue;
         }
-        // `name/` alone is a repository git did not look inside.
-        let nested_here = rest.len() == child.len() + 1;
         let slot = *folder_index.entry(child.to_string()).or_insert_with(|| {
-            folders.push((child.to_string(), UntrackedFolder::Files(0)));
+            folders.push((child.to_string(), Tally::default()));
             folders.len() - 1
         });
-        if nested_here {
-            folders[slot].1 = UntrackedFolder::NestedRepository;
-        } else if let UntrackedFolder::Files(count) = &mut folders[slot].1 {
-            *count += 1;
+        // `name/` alone is a repository git did not look inside.
+        if rest.len() == child.len() + 1 {
+            folders[slot].1.is_repository = true;
+        } else {
+            folders[slot].1.add(record);
         }
     }
 
@@ -400,16 +473,20 @@ fn untracked_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
         }
     }
 
-    files.extend(folders.into_iter().map(|(child, folder)| ChangedFile {
-        status: "?".to_string(),
-        path: format!("{prefix}{child}"),
-        additions: 0,
-        deletions: 0,
-        binary: false,
-        diff_excluded: false,
-        renamed_from: None,
-        kind: folder.kind(),
-    }));
+    files.extend(
+        finish_tallies(worktree, folders)
+            .into_iter()
+            .map(|(child, folder)| ChangedFile {
+                status: "?".to_string(),
+                path: format!("{prefix}{child}"),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+                diff_excluded: false,
+                renamed_from: None,
+                kind: folder.kind(),
+            }),
+    );
     Ok(files)
 }
 
@@ -546,17 +623,42 @@ mod tests {
     }
 
     /// (path, status, kind) for every row, sorted by path.
+    /// The fingerprint is left out: its value is a hash, pinned by its own
+    /// tests below, and every other test compares shapes.
     fn shape(files: &[ChangedFile]) -> Vec<(String, String, ChangedFileKind)> {
         let mut rows: Vec<_> = files
             .iter()
-            .map(|f| (f.path.clone(), f.status.clone(), f.kind.clone()))
+            .map(|f| {
+                let mut kind = f.kind.clone();
+                if let ChangedFileKind::Directory(contents) = &mut kind {
+                    contents.fingerprint = None;
+                }
+                (f.path.clone(), f.status.clone(), kind)
+            })
             .collect();
         rows.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
         rows
     }
 
     fn folder(count: usize) -> ChangedFileKind {
-        ChangedFileKind::Directory { file_count: count }
+        ChangedFileKind::directory(count)
+    }
+
+    fn folder_with_nested(files: usize, nested: usize) -> ChangedFileKind {
+        ChangedFileKind::Directory(crate::model::FolderContents {
+            file_count: files,
+            nested_repositories: nested,
+            fingerprint: None,
+        })
+    }
+
+    fn fingerprint_of(files: &[ChangedFile], path: &str) -> Option<u64> {
+        files
+            .iter()
+            .find(|f| f.path == path)
+            .and_then(|f| f.folder_contents())
+            .expect("a folder row")
+            .fingerprint
     }
 
     fn file() -> ChangedFileKind {
@@ -604,7 +706,7 @@ mod tests {
             .iter()
             .find(|f| f.path == "build")
             .expect("build row");
-        assert_eq!(build.kind, folder(1));
+        assert_eq!(shape(std::slice::from_ref(build))[0].2, folder(1));
     }
 
     #[test]
@@ -639,9 +741,9 @@ mod tests {
             vec![(
                 "vendor".to_string(),
                 "?".to_string(),
-                // git does not look inside the nested repository, so the folder
-                // holding it counts it as the one entry git reports.
-                folder(1)
+                // git does not look inside the nested repository: it is counted
+                // apart from the files, of which there are none here.
+                folder_with_nested(0, 1)
             )]
         );
 
@@ -654,6 +756,105 @@ mod tests {
                 ChangedFileKind::NestedRepository
             )]
         );
+    }
+
+    #[test]
+    fn a_folder_counts_its_files_and_its_nested_repositories_apart() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "vendor/x.js", "x\n");
+        write(root, "vendor/deep/y.js", "y\n");
+        for nested in ["vendor/lib", "vendor/deep/other"] {
+            fs::create_dir_all(root.join(nested)).unwrap();
+            git_in(&root.join(nested))(&["init", "-q"]);
+            write(&root.join(nested), "inside.txt", "i\n");
+        }
+
+        let (_, unstaged) = changed_files(root).unwrap();
+        assert_eq!(
+            shape(&unstaged),
+            vec![(
+                "vendor".to_string(),
+                "?".to_string(),
+                folder_with_nested(2, 2)
+            )]
+        );
+        assert_eq!(crate::model::total_file_count(&unstaged), 2, "files only");
+
+        let children = changed_dir_children(root, "vendor", ChangesSide::Unstaged).unwrap();
+        assert_eq!(
+            shape(&children),
+            vec![
+                (
+                    "vendor/deep".to_string(),
+                    "?".to_string(),
+                    folder_with_nested(1, 1)
+                ),
+                (
+                    "vendor/lib".to_string(),
+                    "?".to_string(),
+                    ChangedFileKind::NestedRepository
+                ),
+                ("vendor/x.js".to_string(), "?".to_string(), file()),
+            ]
+        );
+    }
+
+    /// Editing a file inside a folded folder changes neither its path nor its
+    /// count, so the fingerprint is what moves.
+    #[test]
+    fn a_folder_fingerprint_moves_when_a_file_inside_is_edited() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "dist/a.js", "a\n");
+        write(root, "dist/sub/b.js", "b\n");
+
+        let (_, first) = changed_files(root).unwrap();
+        let (_, again) = changed_files(root).unwrap();
+        let before = fingerprint_of(&first, "dist");
+        assert!(before.is_some(), "a small folder is fingerprinted");
+        assert_eq!(
+            before,
+            fingerprint_of(&again, "dist"),
+            "stable while nothing changes"
+        );
+
+        write(root, "dist/sub/b.js", "b\nand more\n");
+        let (_, edited) = changed_files(root).unwrap();
+        assert_ne!(before, fingerprint_of(&edited, "dist"));
+
+        let children = changed_dir_children(root, "dist", ChangesSide::Unstaged).unwrap();
+        assert!(fingerprint_of(&children, "dist/sub").is_some());
+    }
+
+    /// Past the stat budget a folder is followed by its count alone: the
+    /// accepted gap, since statting a whole dependency folder on every read is
+    /// the cost folding exists to avoid.
+    #[test]
+    fn a_folder_over_the_budget_carries_no_fingerprint() {
+        let repo = repo();
+        let root = repo.path();
+        for index in 0..=UNTRACKED_STATS_MAX_FILES {
+            write(root, &format!("big/f{index}.js"), "x\n");
+        }
+        write(root, "small/a.js", "a\n");
+
+        let (_, unstaged) = changed_files(root).unwrap();
+
+        assert_eq!(fingerprint_of(&unstaged, "big"), None);
+        assert!(fingerprint_of(&unstaged, "small").is_some());
+    }
+
+    #[test]
+    fn a_staged_folder_carries_no_fingerprint() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "app/a.rs", "a\n");
+        git_in(root)(&["add", "--", "app"]);
+
+        let (staged, _) = changed_files(root).unwrap();
+
+        assert_eq!(fingerprint_of(&staged, "app"), None);
     }
 
     #[test]
@@ -923,9 +1124,9 @@ mod tests {
 
         let (_, unstaged) = changed_files(root).unwrap();
         let dash = unstaged.iter().find(|f| f.path == "-rf").expect("dash row");
-        assert_eq!(dash.kind, folder(1));
+        assert_eq!(shape(std::slice::from_ref(dash))[0].2, folder(1));
         let glob = unstaged.iter().find(|f| f.path == "a*b").expect("glob row");
-        assert_eq!(glob.kind, folder(1));
+        assert_eq!(shape(std::slice::from_ref(glob))[0].2, folder(1));
 
         let children = changed_dir_children(root, "a*b", ChangesSide::Unstaged).unwrap();
         assert_eq!(
