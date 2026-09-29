@@ -131,6 +131,23 @@ describe("Toaster severity styling", () => {
   })
 })
 
+// A toast's text comes from producers that do not know how long it will run (a
+// list of skipped paths once ran to 2,500 characters), so the toast caps its
+// own height and scrolls its text inside rather than covering the screen.
+describe("Toaster height cap", () => {
+  it("caps the text's height and scrolls it inside the toast", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("a very long message")
+    })
+    const text = await screen.findByText("a very long message")
+    const title = text.closest("[data-title]") as HTMLElement
+    expect(title).toBeTruthy()
+    expect(title.className).toContain("overflow-y-auto")
+    expect(title.className).toMatch(/max-h-/)
+  })
+})
+
 describe("Toaster swipe to dismiss", () => {
   it("declares the horizontal directions sonner would not infer from bottom-center", () => {
     // sonner derives its default directions by splitting the position string,

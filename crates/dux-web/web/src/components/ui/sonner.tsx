@@ -116,6 +116,12 @@ const Toaster = ({ ...props }: ToasterProps) => {
       toastOptions={{
         classNames: {
           toast: "cn-toast",
+          // Producers do not know how long their text runs (a list of skipped
+          // paths once ran to 2,500 characters), so the text caps its own
+          // height and scrolls inside the toast rather than covering the
+          // screen. `overscroll-contain` keeps a wheel at the end of the text
+          // from scrolling the page underneath.
+          title: "max-h-[min(12rem,40vh)] overflow-y-auto overscroll-contain",
         },
       }}
       {...props}
