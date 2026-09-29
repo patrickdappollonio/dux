@@ -1690,6 +1690,45 @@ mod tests {
         }
     }
 
+    /// A rename inside a folder staged whole keeps its count, but moves its
+    /// index fingerprint, so an expanded staged folder is listed again.
+    #[test]
+    fn a_rename_inside_an_expanded_staged_folder_lists_it_again() {
+        let (mut app, worktree) = repo_app();
+        run_git(&worktree, &["add", "node_modules"]);
+        load_lists(&mut app, &worktree);
+        app.right_section = RightSection::Staged;
+        app.files_index = 0;
+        app.handle_key(enter()).unwrap();
+        settle(&mut app, idle);
+        assert!(
+            describe(&app, RightSection::Staged).contains(&"  node_modules/top.js 1".to_string()),
+            "{:?}",
+            describe(&app, RightSection::Staged)
+        );
+
+        run_git(
+            &worktree,
+            &["mv", "node_modules/top.js", "node_modules/moved.js"],
+        );
+        load_lists(&mut app, &worktree);
+        assert!(
+            !app.changes_tree.pending_listings.is_empty(),
+            "listed again"
+        );
+        settle(&mut app, idle);
+
+        let rows = describe(&app, RightSection::Staged);
+        assert!(
+            rows.contains(&"  node_modules/moved.js 1".to_string()),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.contains(&"  node_modules/top.js 1".to_string()),
+            "{rows:?}"
+        );
+    }
+
     /// A listing superseded by a newer one for the same folder answers late:
     /// its answer is dropped, and it must not take the newer listing's spinner
     /// with it, since both share the folder's status key.

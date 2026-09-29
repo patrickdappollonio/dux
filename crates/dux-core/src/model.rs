@@ -889,8 +889,10 @@ pub struct FolderContents {
     /// such a folder is followed by its count alone, and an edit that keeps the
     /// count is not noticed until something else asks. That gap is accepted,
     /// because statting a thirty-thousand-file dependency folder on every poll
-    /// is the cost folding exists to avoid. Also `None` on the staged side,
-    /// where an edit since staging is its own unstaged row.
+    /// is the cost folding exists to avoid. On the staged side it is taken from
+    /// the index instead, each entry's path, mode and object id, read in the
+    /// same pass that counts the folder, so a rename or a re-add inside a
+    /// staged folder moves it; an edit since staging is its own unstaged row.
     pub fingerprint: Option<u64>,
     /// Staged side only: how many repositories of their own inside the folder
     /// were left untracked, because staging a folder leaves them out. They do

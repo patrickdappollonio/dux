@@ -516,7 +516,14 @@ pub(super) fn fold_added_directories(
     // it is counted apart, as the untracked side counts the repositories it
     // does not enter. The folded roots are asked once, from the index.
     let root_names: Vec<&str> = roots.keys().map(String::as_str).collect();
-    let links = staged_links(worktree, &root_names);
+    let index = staged_index(worktree, &root_names);
+    let links = &index.links;
+    // Each folded root's fingerprint, from its entries in the same read.
+    let mut root_prints = index.fingerprints(|path| {
+        ancestors(path)
+            .find(|ancestor| roots.contains_key(*ancestor))
+            .map(str::to_string)
+    });
     let mut contents_of: HashMap<String, crate::model::FolderContents> = roots
         .iter()
         .map(|(root, count)| {
@@ -524,6 +531,7 @@ pub(super) fn fold_added_directories(
                 root.clone(),
                 crate::model::FolderContents {
                     file_count: *count,
+                    fingerprint: root_prints.remove(root),
                     ..Default::default()
                 },
             )
@@ -546,7 +554,7 @@ pub(super) fn fold_added_directories(
             None => contents.repositories_inside.push(file.path.clone()),
         }
     }
-    for (path, kind) in &links {
+    for (path, kind) in links {
         let Some(root) = ancestors(path).find(|ancestor| contents_of.contains_key(*ancestor))
         else {
             continue;
@@ -578,14 +586,50 @@ pub(super) fn fold_added_directories(
     folded
 }
 
-/// The staged links to repositories (index mode 160000) under `dirs`, each
-/// told apart into a repository of its own or a worktree of this repository
-/// by reading files. One `ls-files --stage` over the folded folders; an answer
-/// git could not give is no links at all.
-fn staged_links(worktree: &Path, dirs: &[&str]) -> HashMap<String, UntrackedDirectoryKind> {
-    let mut links = HashMap::new();
+/// What the index holds under some folders, from one `ls-files --stage`.
+#[derive(Default)]
+struct StagedIndex {
+    /// The links to repositories (index mode 160000), each told apart into a
+    /// repository of its own or a worktree of this repository by reading
+    /// files.
+    links: HashMap<String, UntrackedDirectoryKind>,
+    /// Every entry's record (`<mode> <object id> <stage>\t<path>`), in the
+    /// index's order: what a staged folder's fingerprint is made of.
+    entries: Vec<Vec<u8>>,
+}
+
+impl StagedIndex {
+    /// A fingerprint per folder, from the entries under it: each entry's path,
+    /// mode and object id, hashed in the index's order. A rename or a re-add
+    /// inside the folder moves it even when the folder's count does not.
+    /// `owner` names the folder an entry's path is counted under, if any.
+    fn fingerprints(&self, owner: impl Fn(&str) -> Option<String>) -> HashMap<String, u64> {
+        use std::hash::{Hash, Hasher};
+        let mut hashers: HashMap<String, std::collections::hash_map::DefaultHasher> =
+            HashMap::new();
+        for record in &self.entries {
+            let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+                continue;
+            };
+            let path = String::from_utf8_lossy(&record[tab + 1..]);
+            if let Some(folder) = owner(&path) {
+                record.hash(hashers.entry(folder).or_default());
+            }
+        }
+        hashers
+            .into_iter()
+            .map(|(folder, hasher)| (folder, hasher.finish()))
+            .collect()
+    }
+}
+
+/// What the index holds under `dirs`: its links to repositories and its
+/// entries. One `ls-files --stage` over the folded folders; an answer git
+/// could not give is nothing at all.
+fn staged_index(worktree: &Path, dirs: &[&str]) -> StagedIndex {
+    let mut index = StagedIndex::default();
     if dirs.is_empty() {
-        return links;
+        return index;
     }
     let Ok(output) = Command::new("git")
         .args([
@@ -600,13 +644,17 @@ fn staged_links(worktree: &Path, dirs: &[&str]) -> HashMap<String, UntrackedDire
         .args(dirs)
         .output()
     else {
-        return links;
+        return index;
     };
     if !output.status.success() {
-        return links;
+        return index;
     }
     let mut common: Option<Option<PathBuf>> = None;
     for record in output.stdout.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        index.entries.push(record.to_vec());
         if !record.starts_with(b"160000 ") {
             continue;
         }
@@ -618,9 +666,9 @@ fn staged_links(worktree: &Path, dirs: &[&str]) -> HashMap<String, UntrackedDire
         };
         let common = common.get_or_insert_with(|| common_dir_of(worktree));
         let kind = repository_kind(common.as_deref(), &worktree.join(path));
-        links.insert(path.to_string(), kind);
+        index.links.insert(path.to_string(), kind);
     }
-    links
+    index
 }
 
 /// A folded folder row with what it holds.
@@ -1214,7 +1262,14 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
         ));
     }
 
-    let links = staged_links(worktree, &[dir]);
+    let index = staged_index(worktree, &[dir]);
+    let links = &index.links;
+    // Each sub-folder's fingerprint, from its entries in the same read.
+    let mut child_prints = index.fingerprints(|path| {
+        let rest = path.strip_prefix(&pathspec)?;
+        let (child, deeper) = split_child(rest.as_bytes());
+        deeper.then(|| String::from_utf8_lossy(child).into_owned())
+    });
     let mut files: Vec<ChangedFile> = Vec::new();
     // Sub-folder name → what is inside it, in first-seen order.
     let mut folders: Vec<(String, crate::model::FolderContents)> = Vec::new();
@@ -1233,7 +1288,13 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
         let child = String::from_utf8_lossy(child).into_owned();
         if deeper {
             let slot = *folder_index.entry(child.clone()).or_insert_with(|| {
-                folders.push((child.clone(), crate::model::FolderContents::default()));
+                folders.push((
+                    child.clone(),
+                    crate::model::FolderContents {
+                        fingerprint: child_prints.remove(&child),
+                        ..Default::default()
+                    },
+                ));
                 folders.len() - 1
             });
             // A link to a repository is counted apart, never as a file.
@@ -2367,16 +2428,37 @@ mod tests {
         assert!(fingerprint_of(&unstaged, "small").is_some());
     }
 
+    /// A staged folder's fingerprint is its index entries (path, mode and
+    /// object id): a rename or a re-add inside it moves the fingerprint even
+    /// when its count stays, so an expanded staged folder is listed again. Its
+    /// sub-folders carry their own the same way.
     #[test]
-    fn a_staged_folder_carries_no_fingerprint() {
+    fn a_staged_folder_is_fingerprinted_from_the_index() {
         let repo = repo();
         let root = repo.path();
         write(root, "app/a.rs", "a\n");
+        write(root, "app/sub/b.rs", "b\n");
         git_in(root)(&["add", "--", "app"]);
+        let fingerprint = |root: &Path| {
+            let (staged, _) = changed_files(root).unwrap();
+            fingerprint_of(&staged, "app").expect("a staged folder is fingerprinted")
+        };
+        let child = |root: &Path| {
+            let children = changed_dir_children(root, "app", ChangesSide::Staged).unwrap();
+            fingerprint_of(&children, "app/sub").expect("a staged sub-folder is fingerprinted")
+        };
+        let first = fingerprint(root);
+        let first_child = child(root);
+        assert_eq!(fingerprint(root), first, "unchanged, it holds still");
 
-        let (staged, _) = changed_files(root).unwrap();
+        git_in(root)(&["mv", "app/a.rs", "app/c.rs"]);
+        let renamed = fingerprint(root);
+        assert_ne!(renamed, first, "a rename inside moves it");
 
-        assert_eq!(fingerprint_of(&staged, "app"), None);
+        write(root, "app/sub/b.rs", "b2\n");
+        git_in(root)(&["add", "--", "app/sub/b.rs"]);
+        assert_ne!(fingerprint(root), renamed, "a re-add inside moves it");
+        assert_ne!(child(root), first_child, "and moves the sub-folder's own");
     }
 
     #[test]

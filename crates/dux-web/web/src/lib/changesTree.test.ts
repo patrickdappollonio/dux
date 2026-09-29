@@ -312,3 +312,20 @@ describe("an automatic refetch after a failed first answer", () => {
     expect(items.map((item) => item.kind)).toEqual(["header", "row", "loading"])
   })
 })
+
+// A staged folder's fingerprint comes from the index, so a rename inside it
+// that keeps its count still asks for its expanded contents again.
+describe("an expanded staged folder", () => {
+  it("is asked for again when its index fingerprint moves", () => {
+    const before = folder("app", 2, { status: "A", fingerprint: "i1" })
+    let exp = settleFolder(expandFolder(EMPTY, "staged", before), "staged", "app", [
+      file("app/a.rs", "A"),
+      file("app/b.rs", "A"),
+    ])
+    const after = folder("app", 2, { status: "A", fingerprint: "i2" })
+    const result = reconcileExpansions(exp, [after], [])
+    expect(result.refetch).toEqual([{ section: "staged", path: "app" }])
+    exp = result.next
+    expect(exp.get(folderKey("staged", "app"))?.loading).toBe(true)
+  })
+})

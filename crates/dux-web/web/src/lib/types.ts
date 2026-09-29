@@ -304,7 +304,8 @@ export interface ChangedFileView {
   linked_worktrees?: number
   /** A fingerprint of the files inside a `"directory"` row (their sizes and
    * modification times), which moves when a file inside is edited. Absent for
-   * a folder too large to fingerprint, and for a staged one. Opaque text. */
+   * a folder too large to fingerprint. A staged folder's is taken from the
+   * index (each entry's path, mode and object id). Opaque text. */
   fingerprint?: string
   /** Staged side only: repositories of their own inside a `"directory"` row
    * that staging the folder left out, so they are not in the index. They do
