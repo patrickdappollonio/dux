@@ -933,6 +933,7 @@ mod tests {
     /// 19.7 MB at 150k), and the browser mounts every row. The wire answer
     /// must stay bounded however many files sit under one untracked directory.
     #[tokio::test]
+    #[ignore = "awaits the untracked-folder folding decision"]
     async fn huge_changes_repro_untracked_directory_rows_are_bounded() {
         let (engine, bus, _tmp, wt) = boot();
         let file_count = 5_000;

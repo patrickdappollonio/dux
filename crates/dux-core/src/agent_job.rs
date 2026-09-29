@@ -1255,6 +1255,32 @@ fn handle_copy_mismatch(
     }
 }
 
+/// How many skipped paths the creation note names before it counts the rest.
+const SKIPPED_PATHS_NAMED: usize = 3;
+
+/// The creation note for paths the uncommitted-changes copy left behind. A
+/// checkout full of nested repositories (agent worktrees under an unignored
+/// folder, say) skips dozens, and naming every one turned a toast into a wall
+/// of paths, so it names a few and counts the rest. The caller logs the full
+/// list to `dux.log`, which the note points at.
+fn skipped_paths_note(paths: &[String]) -> crate::status_text::StatusText {
+    let mut note = crate::status_text![
+        "Some paths were not copied (submodules, embedded repositories, or special files): "
+    ];
+    for (index, path) in paths.iter().take(SKIPPED_PATHS_NAMED).enumerate() {
+        if index > 0 {
+            note.push(", ");
+        }
+        note.push_name(path);
+    }
+    let unnamed = paths.len().saturating_sub(SKIPPED_PATHS_NAMED);
+    if unnamed > 0 {
+        note.push(format!(", and {unnamed} more (dux.log lists every one)"));
+    }
+    note.push(".");
+    note
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_pending_copy(
     copy: PendingCopy,
@@ -1278,10 +1304,13 @@ fn apply_pending_copy(
         CopyHeadCheck::Equal => match git::copy_uncommitted_changes(&copy.source, worktree) {
             Ok(summary) => {
                 if !summary.skipped_paths.is_empty() {
-                    creation_notes.push(format!(
-                        "Some paths were not copied (submodules, embedded repositories, or special files): {}.",
+                    logger::info(&format!(
+                        "uncommitted-changes copy into {} skipped {} path(s) (submodules, embedded repositories, or special files): {}",
+                        session.directory(),
+                        summary.skipped_paths.len(),
                         summary.skipped_paths.join(", ")
-                    ).into());
+                    ));
+                    creation_notes.push(skipped_paths_note(&summary.skipped_paths));
                 }
                 true
             }
@@ -3800,6 +3829,40 @@ mod tests {
             status.contains(&format!("{}", nested_count - named)),
             "the note must count the paths it does not name: {status}"
         );
+    }
+
+    /// The note names every path while there are few, then a fixed number and
+    /// a count, and each named path is a name (a chip on the web) rather than
+    /// part of the words.
+    #[test]
+    fn skipped_paths_note_names_a_few_and_counts_the_rest() {
+        let paths = |count: usize| -> Vec<String> {
+            (0..count).map(|index| format!("dir/repo{index}")).collect()
+        };
+        let lead = "Some paths were not copied (submodules, embedded repositories, or special files): ";
+
+        let one = skipped_paths_note(&paths(1));
+        assert_eq!(one.message(), format!("{lead}dir/repo0."));
+        let three = skipped_paths_note(&paths(3));
+        assert_eq!(
+            three.message(),
+            format!("{lead}dir/repo0, dir/repo1, dir/repo2.")
+        );
+        let many = skipped_paths_note(&paths(40));
+        assert_eq!(
+            many.message(),
+            format!("{lead}dir/repo0, dir/repo1, dir/repo2, and 37 more (dux.log lists every one).")
+        );
+        let names: Vec<String> = many
+            .segments()
+            .unwrap()
+            .iter()
+            .filter_map(|segment| match segment {
+                crate::prose::ProseSegment::Name { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["dir/repo0", "dir/repo1", "dir/repo2"]);
     }
 
     /// Happy path: the checkout's dirt travels; gitignored files do not.
