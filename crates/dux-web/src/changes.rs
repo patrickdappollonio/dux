@@ -1052,6 +1052,16 @@ mod tests {
                 .count();
             let count_ms = started.elapsed().as_secs_f64() * 1000.0;
 
+            // What fingerprinting every file would cost, which the listing does
+            // not pay past its stat budget: one stat per untracked file.
+            let started = Instant::now();
+            for record in out.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+                let name = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(record);
+                let _ = std::fs::symlink_metadata(repo.join(name));
+            }
+            let stat_all_ms = started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("run {run}: stat of every untracked file {stat_all_ms:.1} ms");
+
             // Expanding the folder: its first level, then one package inside.
             let started = Instant::now();
             let children = dux_core::git::changed_dir_children(
