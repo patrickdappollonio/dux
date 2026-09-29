@@ -3729,22 +3729,76 @@ impl StageReport {
 /// old behavior (git records it as a link, and the surfaces say so), except a
 /// worktree of this repository, which is refused.
 pub fn stage_with_report(worktree_path: &Path, file_paths: &[String]) -> Result<StageReport> {
+    let plan = plan_stage(worktree_path, file_paths)?;
+    // One path is the whole request: a path that must not be staged refuses
+    // it before anything reaches the index.
+    if let Some((_, sentence)) = plan.refused.first() {
+        return Err(anyhow::Error::new(Refusal(sentence.clone())));
+    }
+    run_stage_plan(worktree_path, &plan)?;
+    Ok(plan.report)
+}
+
+/// What [`stage_partitioned`] did: the paths it staged, what it left out of
+/// them on purpose, and each path it refused with the sentence that says why.
+#[derive(Debug, Default)]
+pub struct StagePartition {
+    pub staged: Vec<String>,
+    pub report: StageReport,
+    pub refused: Vec<(String, String)>,
+}
+
+/// Stage every path that may be staged and refuse the rest one by one, for a
+/// batch: a folder holding nothing but repositories, or a worktree of this
+/// repository, is refused on its own with its sentence rather than failing
+/// the paths around it. Nothing is staged when every path is refused.
+pub fn stage_partitioned(worktree_path: &Path, file_paths: &[String]) -> Result<StagePartition> {
+    let plan = plan_stage(worktree_path, file_paths)?;
+    if !plan.staged.is_empty() {
+        run_stage_plan(worktree_path, &plan)?;
+    }
+    Ok(StagePartition {
+        staged: plan.staged,
+        report: plan.report,
+        refused: plan.refused,
+    })
+}
+
+/// A stage worked out before it runs: the paths to add, the repositories
+/// inside them to leave out, and the paths refused with their sentences.
+struct StagePlan {
+    staged: Vec<String>,
+    excludes: Vec<Vec<u8>>,
+    report: StageReport,
+    refused: Vec<(String, String)>,
+}
+
+fn plan_stage(worktree_path: &Path, file_paths: &[String]) -> Result<StagePlan> {
     if file_paths.is_empty() {
         return Err(anyhow!(
             "git add was asked to act on no files; git would read that as the whole index"
         ));
     }
-    let mut report = StageReport::default();
-    let mut excludes: Vec<Vec<u8>> = Vec::new();
+    let mut plan = StagePlan {
+        staged: Vec::new(),
+        excludes: Vec::new(),
+        report: StageReport::default(),
+        refused: Vec::new(),
+    };
     for path in file_paths {
         refuse_unplain_path(path, "stage")?;
-        refuse_staging_a_linked_worktree(worktree_path, path)?;
+        if let Some(sentence) = stage_refusal(worktree_path, path) {
+            plan.refused.push((path.clone(), sentence));
+            continue;
+        }
         let is_dir = fs::symlink_metadata(worktree_path.join(path)).is_ok_and(|meta| meta.is_dir());
         if !is_dir {
+            plan.staged.push(path.clone());
             continue;
         }
         let inside = folding::folder_inside(worktree_path, path)?;
         if inside.repositories.is_empty() {
+            plan.staged.push(path.clone());
             continue;
         }
         let (repositories, worktrees) = inside.counts();
@@ -3761,30 +3815,33 @@ pub fn stage_with_report(worktree_path: &Path, file_paths: &[String]) -> Result<
             && !index_holds_anything_in(worktree_path, path)?
             && !stages_anything(worktree_path, path, &own)?
         {
-            return Err(anyhow::Error::new(Refusal(nothing_in_folder(
-                path,
-                repositories,
-                worktrees,
-                FolderAction::Stage,
-            ))));
+            plan.refused.push((
+                path.clone(),
+                nothing_in_folder(path, repositories, worktrees, FolderAction::Stage),
+            ));
+            continue;
         }
-        report.left_out_repositories += repositories;
-        report.left_out_worktrees += worktrees;
-        excludes.extend(own);
+        plan.report.left_out_repositories += repositories;
+        plan.report.left_out_worktrees += worktrees;
+        plan.excludes.extend(own);
+        plan.staged.push(path.clone());
     }
-    if excludes.is_empty() {
-        run_pathspecs(worktree_path, &["add"], file_paths, true, "git add")?;
-        return Ok(report);
+    Ok(plan)
+}
+
+fn run_stage_plan(worktree_path: &Path, plan: &StagePlan) -> Result<()> {
+    if plan.excludes.is_empty() {
+        return run_pathspecs(worktree_path, &["add"], &plan.staged, true, "git add");
     }
     // Magic pathspecs, so no global literal flag: each path is `literal` on
     // its own, which keeps a name like a glob to itself all the same.
-    let specs: Vec<Vec<u8>> = file_paths
+    let specs: Vec<Vec<u8>> = plan
+        .staged
         .iter()
         .map(|path| format!(":(literal){path}").into_bytes())
-        .chain(excludes)
+        .chain(plan.excludes.iter().cloned())
         .collect();
-    run_pathspecs(worktree_path, &["add"], &specs, false, "git add")?;
-    Ok(report)
+    run_pathspecs(worktree_path, &["add"], &specs, false, "git add")
 }
 
 /// The pathspec that leaves `rel` out, in its own bytes: the pathspec file is
@@ -3854,17 +3911,6 @@ fn refuse_unplain_path(path: &str, what: &str) -> Result<()> {
         Err(anyhow!(
             "refusing to {what} {path:?}: it is not a plain path inside the worktree"
         ))
-    }
-}
-
-/// Refuse to stage a linked worktree of this same repository: `git add` would
-/// record a link to it in the index, which is never what staging a folder
-/// meant, and the worktree belongs to the worktree manager. Files are read,
-/// no process is spawned, and only for a directory holding a `.git` entry.
-fn refuse_staging_a_linked_worktree(worktree_path: &Path, path: &str) -> Result<()> {
-    match stage_refusal(worktree_path, path) {
-        Some(sentence) => Err(anyhow!(sentence)),
-        None => Ok(()),
     }
 }
 

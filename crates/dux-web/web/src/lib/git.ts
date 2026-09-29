@@ -42,11 +42,14 @@ export interface LeftOut {
   left_out_worktrees?: number
 }
 
-// A batch route's answer: what it acted on, and what had already left the
-// section it validates against.
+// A batch route's answer: what it acted on, and what it did not. A refused
+// path with an entry in `reasons` was refused for a reason of its own (a
+// folder holding only repositories, a worktree of this repository), in the
+// server's words; any other had already left the section it validates against.
 export interface BatchResult extends LeftOut {
   done: string[]
   refused: string[]
+  reasons?: Record<string, string>
 }
 
 async function postGitJson<T>(

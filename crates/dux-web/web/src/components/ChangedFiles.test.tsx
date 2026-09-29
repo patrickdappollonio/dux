@@ -703,6 +703,27 @@ describe("the changes pane's multi-select", () => {
     )
   })
 
+  // A path the server refused for a reason of its own (a folder holding only
+  // repositories) is explained with the server's sentence, not as a path that
+  // left the list.
+  it("says why the server refused a path in a bulk stage", async () => {
+    const reason =
+      'There is nothing in "b.ts/" to stage: it holds only repositories of their own.'
+    stageMany.mockResolvedValueOnce({
+      done: ["a.ts"],
+      refused: ["b.ts"],
+      reasons: { "b.ts": reason },
+    })
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("b.ts")
+
+    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(notifyWarning).toHaveBeenCalledWith(`1 file staged. ${reason}`)
+  })
+
   it("keeps the selection and releases busy state after a bulk request error", async () => {
     stageMany.mockRejectedValueOnce("offline")
     render(<ChangedFiles />)

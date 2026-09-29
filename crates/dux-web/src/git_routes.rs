@@ -81,6 +81,12 @@ struct FilesOp {
 struct BatchResult {
     done: Vec<String>,
     refused: Vec<String>,
+    /// For each path in `refused` that was refused for a reason of its own
+    /// (a folder holding nothing but repositories, a worktree of this
+    /// repository) rather than for having left the list, the sentence that
+    /// says why. Omitted when there are none.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    reasons: std::collections::BTreeMap<String, String>,
     /// What a stage batch left out on purpose (zero for an unstage batch).
     #[serde(flatten)]
     left_out: LeftOut,
@@ -603,35 +609,52 @@ async fn files_op(
             .into_response();
     }
 
-    // A path git may not be asked to stage (a linked worktree) refuses the
-    // batch as a refusal, naming why, before anything reaches the index.
-    if matches!(section, Section::Unstaged)
-        && let Some(sentence) = done
-            .iter()
-            .find_map(|path| dux_core::git::stage_refusal(&worktree, path))
-    {
-        return (StatusCode::BAD_REQUEST, sentence).into_response();
-    }
-
+    // A path git may not be asked to stage (a worktree of this repository, a
+    // folder holding nothing but repositories) is refused on its own with its
+    // sentence, and the rest of the batch goes ahead.
     let wt = worktree.clone();
     let batch = done.clone();
-    let left_out = match run_git(section.action(), &worktree, move || match section {
-        Section::Staged => dux_core::git::unstage_files(&wt, &batch)
-            .map(|()| dux_core::git::StageReport::default()),
-        Section::Unstaged => dux_core::git::stage_with_report(&wt, &batch),
+    let partition = match run_git(section.action(), &worktree, move || match section {
+        Section::Staged => {
+            dux_core::git::unstage_files(&wt, &batch).map(|()| dux_core::git::StagePartition {
+                staged: batch,
+                ..Default::default()
+            })
+        }
+        Section::Unstaged => dux_core::git::stage_partitioned(&wt, &batch),
     })
     .await
     {
-        Ok(report) => LeftOut::from(report),
+        Ok(partition) => partition,
         Err(r) => return r.into_response(),
     };
+    if partition.staged.is_empty() {
+        // Every path left was refused for a reason of its own: say the first.
+        let sentence = partition
+            .refused
+            .first()
+            .map(|(_, sentence)| sentence.clone())
+            .unwrap_or_default();
+        return (
+            StatusCode::BAD_REQUEST,
+            dux_core::git::redact_worktree_path(&sentence, &worktree),
+        )
+            .into_response();
+    }
+    let mut refused = refused;
+    let mut reasons = std::collections::BTreeMap::new();
+    for (path, sentence) in partition.refused {
+        refused.push(path.clone());
+        reasons.insert(path, sentence);
+    }
     refresh_changed_files_now(&state, session_id, &worktree);
     (
         StatusCode::OK,
         Json(BatchResult {
-            done,
+            done: partition.staged,
             refused,
-            left_out,
+            reasons,
+            left_out: LeftOut::from(partition.report),
         }),
     )
         .into_response()
@@ -1547,6 +1570,60 @@ mod tests {
         );
         let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
         assert!(staged.is_empty(), "{staged:?}");
+    }
+
+    /// In a batch, a folder holding nothing but a repository is refused on its
+    /// own, with its sentence, and the rest of the batch is staged; a batch of
+    /// nothing else is a 400 carrying that sentence.
+    #[tokio::test]
+    async fn a_batch_stage_refuses_a_repositories_only_folder_and_stages_the_rest() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("only/lib")).unwrap();
+        std::fs::write(worktree.join("only/lib/own.txt"), "own\n").unwrap();
+        run_git(&worktree.join("only/lib"), &["init", "-q"]);
+        std::fs::write(worktree.join("plain.txt"), "plain\n").unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage-files",
+                r#"{"paths":["only"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            body_text(resp)
+                .await
+                .contains("nothing in \"only/\" to stage")
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/stage-files",
+                r#"{"paths":["only","plain.txt"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(json["done"], serde_json::json!(["plain.txt"]));
+        assert_eq!(json["refused"], serde_json::json!(["only"]));
+        assert!(
+            json["reasons"]["only"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("it holds only repositories of their own")),
+            "{json}"
+        );
+        let (staged, _) = dux_core::git::changed_files(&worktree).unwrap();
+        assert_eq!(
+            staged.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            ["plain.txt"]
+        );
     }
 
     /// Staging a folder stages its files and leaves the repositories inside it

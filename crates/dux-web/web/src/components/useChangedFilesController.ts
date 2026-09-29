@@ -132,12 +132,25 @@ function bulkResultToast(
   // is of files, so a folded folder counts what is inside it.
   if (result.refused.length === 0) return
   const done = selectedFileCount(new Set(result.done), rows)
-  notifyWarning(
-    `${formatRegularCount(done, "file")} ${past}. ${formatRegularCount(
-      result.refused.length,
-      "file",
-    )} had already left the list, starting with ${result.refused[0]}.`,
-  )
+  const reasons = result.reasons ?? {}
+  const gone = result.refused.filter((path) => reasons[path] === undefined)
+  const explained = result.refused.flatMap((path) => reasons[path] ?? [])
+  const parts = [`${formatRegularCount(done, "file")} ${past}.`]
+  if (gone.length > 0) {
+    parts.push(
+      `${formatRegularCount(gone.length, "file")} had already left the list, starting with ${gone[0]}.`,
+    )
+  }
+  // The server's own sentence says why it refused a path; the first one is
+  // spelled out and the rest are counted.
+  if (explained.length > 0) {
+    parts.push(explained[0]!)
+    if (explained.length > 1) {
+      const more = explained.length - 1
+      parts.push(`${more} more ${more === 1 ? "row was" : "rows were"} refused too.`)
+    }
+  }
+  notifyWarning(parts.join(" "))
 }
 
 function discardResultToast(
