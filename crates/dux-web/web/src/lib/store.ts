@@ -3925,7 +3925,7 @@ export function closeDiscard(): void {
 // files, and a repository of its own goes with its history.
 export function discardFile(sessionId: string, row: ChangedFileView): void {
   git
-    .discard(sessionId, row.path)
+    .discard(sessionId, row.path, row.kind)
     .then(() => notifySuccess(discardOutcome([row])))
     .catch((e) => notifyError(e instanceof Error ? e.message : "discard failed"))
 }

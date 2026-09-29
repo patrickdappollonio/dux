@@ -3978,7 +3978,54 @@ fn clean_untracked_folder(worktree_path: &Path, dir: &str) -> Result<()> {
     Ok(())
 }
 
+/// What the user confirmed they were deleting, for a folder row: the dialog is
+/// worded from the row's kind when it opened, and the delete must not do
+/// something else if the folder changed kind before the confirm landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmedEntry {
+    /// An ordinary folder: its untracked files are cleaned, ignored files and
+    /// repositories inside it kept.
+    Folder,
+    /// A repository of its own: removed whole, history included.
+    Repository,
+}
+
+/// A discard refused because the entry is not what the user confirmed. A
+/// refusal rather than a failure, so a route can answer it as one.
+#[derive(Debug)]
+pub struct DiscardRefusal(pub String);
+
+impl std::fmt::Display for DiscardRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DiscardRefusal {}
+
+/// [`discard_confirmed`] with nothing confirmed, which is what a plain file
+/// needs. For a folder it means "an ordinary folder" at most: a repository of
+/// its own is never removed unless the caller confirmed exactly that.
 pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -> Result<()> {
+    discard_confirmed(worktree_path, file_path, is_untracked, None)
+}
+
+/// Discard `file_path`, refusing when a folder is no longer what the user
+/// confirmed.
+///
+/// The kind of an untracked folder is re-derived here, from git, at the moment
+/// of deleting, and compared with `confirmed`: a folder that became a
+/// repository (an agent ran `git init` in it) or a repository that became a
+/// folder is refused with a sentence asking the user to look again, because
+/// the dialog they agreed to described something else. With nothing
+/// confirmed, a folder is cleaned as before and a repository is refused: a
+/// whole repository, history included, goes only when a caller said so.
+pub fn discard_confirmed(
+    worktree_path: &Path,
+    file_path: &str,
+    is_untracked: bool,
+    confirmed: Option<ConfirmedEntry>,
+) -> Result<()> {
     refuse_unplain_path(file_path, "discard")?;
     // Whatever the path's text says, a discard never lands on the worktree
     // itself or on anything inside `.git`, the two targets whose loss takes
@@ -4033,7 +4080,16 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
         }
         // `symlink_metadata`, so a link to a directory is removed as the link.
         let meta = fs::symlink_metadata(&full)?;
+        let changed = |now: &str| {
+            anyhow::Error::new(DiscardRefusal(format!(
+                "\"{file_path}/\" changed since you looked: it is now {now}. Nothing was \
+                 deleted; refresh the changes and look again before deleting it."
+            )))
+        };
         if !meta.is_dir() {
+            if confirmed.is_some() {
+                return Err(changed("a file, not a folder"));
+            }
             fs::remove_file(&full)?;
         } else {
             // Re-derived now, from git, the way the listing decided it: a
@@ -4049,8 +4105,23 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
                 }
                 // A repository of its own is one row, and deleting it removes
                 // it whole, history included; both surfaces' dialogs say so.
-                UntrackedDirectoryKind::Repository => fs::remove_dir_all(&full)?,
+                UntrackedDirectoryKind::Repository => match confirmed {
+                    Some(ConfirmedEntry::Repository) => fs::remove_dir_all(&full)?,
+                    Some(ConfirmedEntry::Folder) => {
+                        return Err(changed("a repository of its own, with a history"));
+                    }
+                    None => {
+                        return Err(anyhow::Error::new(DiscardRefusal(format!(
+                            "\"{file_path}/\" is a repository of its own; it is deleted, \
+                             history included, only when the delete names it as one. Refresh \
+                             the changes and delete it from its own row."
+                        ))));
+                    }
+                },
                 UntrackedDirectoryKind::Folder => {
+                    if confirmed == Some(ConfirmedEntry::Repository) {
+                        return Err(changed("an ordinary folder, not a repository"));
+                    }
                     refuse_empty_untracked_folder(worktree_path, file_path)?;
                     clean_untracked_folder(worktree_path, file_path)?;
                 }

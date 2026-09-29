@@ -961,7 +961,7 @@ describe("the multi-file discard confirm", () => {
     )
     await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
 
-    expect(discardMany).toHaveBeenCalledWith("s1", ["a.ts", "gone.ts"])
+    expect(discardMany).toHaveBeenCalledWith("s1", ["a.ts", "gone.ts"], {})
     expect(notifySuccess).toHaveBeenCalledTimes(1)
   })
 
@@ -981,7 +981,7 @@ describe("the multi-file discard confirm", () => {
     fireEvent.click(dialog.getByRole("button", { name: "Discard" }))
     await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
 
-    expect(discardMany).toHaveBeenCalledWith("s1", ["a.ts"])
+    expect(discardMany).toHaveBeenCalledWith("s1", ["a.ts"], {})
   })
 
   it("closes itself once every checked path has left the list", async () => {
@@ -1576,6 +1576,22 @@ describe("a folded folder row", () => {
     )
     expect(toolbar.getByText("Stage 28747")).toBeTruthy()
     expect(toolbar.getByText("Discard 28747…")).toBeTruthy()
+  })
+
+  // The bulk discard names what the user confirmed for each folder, so the
+  // server can refuse one that changed kind since the dialog opened.
+  it("tells the server what each folder was when the bulk discard was confirmed", async () => {
+    mockState = withFolder()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Select node_modules"))
+    fireEvent.click(bar().getByRole("button", { name: "Discard 28747…" }))
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }),
+    )
+    await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
+    expect(discardMany).toHaveBeenCalledWith("s1", ["node_modules"], {
+      node_modules: "directory",
+    })
   })
 
   it("does not open a diff when a folder row is clicked", () => {

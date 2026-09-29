@@ -143,7 +143,9 @@ describe("the single discard dialog", () => {
     expect(proseText(notifySuccess.mock.calls[0]![0])).toContain(
       "Deleted the untracked files in node_modules/ (28,747 files)",
     )
-    expect(discard).toHaveBeenCalledWith("s1", "node_modules")
+    // What the user confirmed travels with the request, so the server can
+    // refuse a folder that became something else meanwhile.
+    expect(discard).toHaveBeenCalledWith("s1", "node_modules", "directory")
   })
 
   it("keeps the file wording for a file", () => {

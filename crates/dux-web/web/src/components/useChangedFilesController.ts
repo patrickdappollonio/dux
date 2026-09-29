@@ -224,7 +224,12 @@ async function runDiscardTransaction({
   rows,
   dropActed,
 }: DiscardTransaction): Promise<void> {
-  const result = await git.discardMany(sessionId, paths)
+  // What the user confirmed for each folder travels with its request.
+  const kinds: Record<string, string> = {}
+  for (const row of rows) {
+    if (row.kind && paths.includes(row.path)) kinds[row.path] = row.kind
+  }
+  const result = await git.discardMany(sessionId, paths, kinds)
   dropActed("unstaged", paths)
   discardResultToast(result, rows)
 }

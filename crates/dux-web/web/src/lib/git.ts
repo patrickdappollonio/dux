@@ -84,15 +84,20 @@ export const git = {
   // Discard has no batch route: a refusal on one file must not block the rest.
   // Sequential because parallel checkouts contend on index.lock, at the accepted cost
   // of one changed-files refresh and broadcast per file.
+  //
+  // `kinds` names, for each folder row, what the user confirmed deleting (see
+  // `discard`); a file row has no entry.
   discardMany: async (
     sessionId: string,
     paths: string[],
+    kinds: Readonly<Record<string, string>>,
   ): Promise<{ done: string[]; failed: { path: string; message: string }[] }> => {
     const done: string[] = []
     const failed: { path: string; message: string }[] = []
     for (const path of paths) {
       try {
-        await postGit(gitUrl(sessionId, "discard"), { path })
+        const kind = kinds[path]
+        await postGit(gitUrl(sessionId, "discard"), kind ? { path, kind } : { path })
         done.push(path)
       } catch (err) {
         failed.push({
@@ -105,8 +110,11 @@ export const git = {
   },
   // `untracked` is deliberately not sent: the server re-derives delete versus restore
   // from live git status rather than trusting a client about a destructive outcome.
-  discard: (sessionId: string, path: string) =>
-    postGit(gitUrl(sessionId, "discard"), { path }),
+  // `kind` is what the user confirmed for a folder row ("directory" or
+  // "nested_repository"): the server refuses when the folder is no longer that,
+  // and deletes a repository of its own only when told it is one.
+  discard: (sessionId: string, path: string, kind?: string) =>
+    postGit(gitUrl(sessionId, "discard"), kind ? { path, kind } : { path }),
   commit: (sessionId: string, message: string) =>
     postGit(gitUrl(sessionId, "commit"), { message }),
   // Forces a changed-files recompute and mutates nothing, so a change dux did not

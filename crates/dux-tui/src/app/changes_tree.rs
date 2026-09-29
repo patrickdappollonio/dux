@@ -726,6 +726,14 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         let path = folder.path.clone();
+        // What the user confirmed they were deleting; the delete refuses if the
+        // folder is no longer that when it runs.
+        let confirmed = match folder.kind {
+            ChangedFileKind::NestedRepository => git::ConfirmedEntry::Repository,
+            ChangedFileKind::File
+            | ChangedFileKind::Directory(_)
+            | ChangedFileKind::LinkedWorktree => git::ConfirmedEntry::Folder,
+        };
         let _ = thread::Builder::new()
             .name("dux-changes-folder-op".into())
             .spawn(move || {
@@ -734,7 +742,7 @@ impl App {
                     FolderOp::Unstage => {
                         git::unstage_file(&worktree, &path).map(|()| git::StageReport::default())
                     }
-                    FolderOp::Delete => delete_untracked_folder(&worktree, &path)
+                    FolderOp::Delete => delete_untracked_folder(&worktree, &path, confirmed)
                         .map(|()| git::StageReport::default()),
                 };
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
@@ -873,13 +881,17 @@ fn find_folder_row<'a>(
 /// classified when the dialog opened, and an agent may have staged or
 /// committed inside it since: deleting what is now tracked would destroy work
 /// that exists in no other place.
-fn delete_untracked_folder(worktree: &Path, path: &str) -> anyhow::Result<()> {
+fn delete_untracked_folder(
+    worktree: &Path,
+    path: &str,
+    confirmed: git::ConfirmedEntry,
+) -> anyhow::Result<()> {
     if !git::discard_classify(worktree, path)? {
         anyhow::bail!(
             "it is no longer untracked, so dux left it alone; refresh the changes and look again"
         );
     }
-    git::discard_file(worktree, path, true)
+    git::discard_confirmed(worktree, path, true, Some(confirmed))
 }
 
 /// What a stage left out, in words: "1 nested repository and 2 worktrees of
@@ -1437,6 +1449,54 @@ mod tests {
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
             app.status.text().contains("worktree manager"),
+            "{}",
+            app.status.text()
+        );
+    }
+
+    /// The dialog promised an ordinary folder; if it becomes a repository
+    /// before the confirm lands, the delete refuses and deletes nothing.
+    #[test]
+    fn a_folder_that_became_a_repository_after_the_dialog_is_not_deleted() {
+        let (mut app, worktree) = repo_app();
+        app.confirm_discard_selected_file().unwrap();
+        run_git(&worktree.join("node_modules"), &["init", "-q"]);
+
+        app.resolve_confirm_discard_file(true);
+        settle(&mut app, idle);
+
+        assert_eq!(app.status.tone(), StatusTone::Error);
+        assert!(
+            app.status.text().contains("changed since you looked"),
+            "{}",
+            app.status.text()
+        );
+        assert!(worktree.join("node_modules/top.js").exists());
+        assert!(worktree.join("node_modules/.git").exists());
+    }
+
+    /// A repository row confirmed as one is deleted whole, and the line says
+    /// what went.
+    #[test]
+    fn a_nested_repository_confirmed_as_one_is_deleted_whole() {
+        let (mut app, worktree) = repo_app();
+        let clone = worktree.join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        run_git(&clone, &["init", "-q"]);
+        std::fs::write(clone.join("a.txt"), "a\n").unwrap();
+        load_lists(&mut app, &worktree);
+        app.files_index = describe(&app, RightSection::Unstaged)
+            .iter()
+            .position(|row| row.starts_with("clone/"))
+            .expect("the repository row");
+
+        app.confirm_discard_selected_file().unwrap();
+        app.resolve_confirm_discard_file(true);
+        settle(&mut app, idle);
+
+        assert!(!clone.exists());
+        assert!(
+            app.status.text().contains("a repository of its own"),
             "{}",
             app.status.text()
         );

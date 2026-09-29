@@ -44,6 +44,28 @@ struct FileOp {
     path: String,
 }
 
+/// The discard body: the path, and what the user confirmed they were
+/// deleting when it is a folder row (`"directory"` or `"nested_repository"`,
+/// the wire's own kinds). Absent for a file, and for an older client: then a
+/// folder is at most cleaned as an ordinary folder, and a repository of its
+/// own is refused, because nothing confirmed deleting its history.
+#[derive(Deserialize)]
+struct DiscardOp {
+    path: String,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+impl DiscardOp {
+    fn confirmed(&self) -> Option<dux_core::git::ConfirmedEntry> {
+        match self.kind.as_deref() {
+            Some("directory") => Some(dux_core::git::ConfirmedEntry::Folder),
+            Some("nested_repository") => Some(dux_core::git::ConfirmedEntry::Repository),
+            _ => None,
+        }
+    }
+}
+
 /// A batch of worktree-relative paths for the stage-files / unstage-files
 /// routes.
 #[derive(Deserialize)]
@@ -371,7 +393,7 @@ async fn unstage(
 async fn discard(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
-    Json(op): Json<FileOp>,
+    Json(op): Json<DiscardOp>,
 ) -> Response {
     if !id_within_bound(&id) {
         return unknown_session();
@@ -410,13 +432,41 @@ async fn discard(
             }
         };
     let wt = worktree.clone();
+    let confirmed = op.confirmed();
     let path = op.path;
-    if let Err(r) = run_git("discard the file's changes", &worktree, move || {
-        dux_core::git::discard_file(&wt, &path, untracked)
+    // A folder that is no longer what the user confirmed is a refusal they can
+    // act on (look again), not a git failure.
+    let outcome = tokio::task::spawn_blocking(move || {
+        dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed)
     })
-    .await
-    {
-        return r.into_response();
+    .await;
+    match outcome {
+        Ok(Err(e)) if e.downcast_ref::<dux_core::git::DiscardRefusal>().is_some() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                dux_core::git::redact_worktree_path(&e.to_string(), &worktree),
+            )
+                .into_response();
+        }
+        Ok(Err(e)) => {
+            dux_core::logger::warn(&format!(
+                "[web] could not discard the file's changes: {e:#}"
+            ));
+            let detail = dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not discard the file's changes. {detail}"),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git task failed: {e}"),
+            )
+                .into_response();
+        }
+        Ok(Ok(())) => {}
     }
     refresh_changed_files_now(&state, session_id, &worktree);
     StatusCode::OK.into_response()
@@ -1436,6 +1486,53 @@ mod tests {
                 .unwrap();
         assert!(staged.is_empty(), "{staged:?}");
         assert_eq!(unstaged.len(), 1, "{unstaged:?}");
+    }
+
+    /// The discard names what the user confirmed. A folder that became a
+    /// repository before the request landed is refused, and a repository is
+    /// deleted only when the request names it as one.
+    #[tokio::test]
+    async fn a_discard_is_refused_when_the_folder_changed_kind() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("scratch")).unwrap();
+        std::fs::write(worktree.join("scratch/a.js"), "a\n").unwrap();
+        run_git(&worktree.join("scratch"), &["init", "-q"]);
+
+        for body in [
+            r#"{"path":"scratch","kind":"directory"}"#,
+            r#"{"path":"scratch"}"#,
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(json_req("POST", "/api/v1/sessions/s1/git/discard", body))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+            assert!(worktree.join("scratch/.git").exists(), "{body}");
+        }
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"scratch","kind":"directory"}"#,
+            ))
+            .await
+            .unwrap();
+        assert!(body_text(resp).await.contains("changed since you looked"));
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"scratch","kind":"nested_repository"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!worktree.join("scratch").exists());
     }
 
     /// Staging a folder stages its files and leaves the repositories inside it

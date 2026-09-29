@@ -1971,6 +1971,48 @@ mod tests {
         assert!(root.join("axb/keep.txt").exists());
     }
 
+    /// A folder the user agreed to clean, which becomes a repository before the
+    /// confirm lands (an agent runs `git init` in it), must not be removed
+    /// whole: the dialog never said its ignored files or new history would go.
+    #[test]
+    fn a_folder_that_became_a_repository_after_the_dialog_is_not_deleted() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, ".gitignore", "*.env\n");
+        git_in(root)(&["add", ".gitignore"]);
+        git_in(root)(&["commit", "-q", "-m", "ignore"]);
+        write(root, "scratch/a.js", "a\n");
+        write(root, "scratch/secret.env", "SECRET=1\n");
+        git_in(&root.join("scratch"))(&["init", "-q"]);
+
+        let refusal =
+            discard_confirmed(root, "scratch", true, Some(ConfirmedEntry::Folder)).unwrap_err();
+
+        assert!(refusal.to_string().contains("changed since"), "{refusal}");
+        assert!(root.join("scratch/secret.env").exists());
+        assert!(root.join("scratch/.git").exists());
+        // Nothing named it a repository, so nothing may delete it as one.
+        assert!(discard_confirmed(root, "scratch", true, None).is_err());
+        assert!(root.join("scratch/.git").exists());
+        // Named as what it is, it goes.
+        discard_confirmed(root, "scratch", true, Some(ConfirmedEntry::Repository)).unwrap();
+        assert!(!root.join("scratch").exists());
+    }
+
+    /// The opposite change: confirmed as a repository, now an ordinary folder.
+    #[test]
+    fn a_repository_that_became_a_folder_after_the_dialog_is_not_cleaned() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "was-repo/a.js", "a\n");
+
+        let refusal = discard_confirmed(root, "was-repo", true, Some(ConfirmedEntry::Repository))
+            .unwrap_err();
+
+        assert!(refusal.to_string().contains("changed since"), "{refusal}");
+        assert!(root.join("was-repo/a.js").exists());
+    }
+
     /// A repository of its own at the top keeps the delete it always had: the
     /// row is the repository, and deleting it removes it whole.
     #[test]
@@ -1982,7 +2024,7 @@ mod tests {
         git_in(&nested)(&["init", "-q"]);
         write(&nested, "a.txt", "a\n");
 
-        discard_file(root, "clone", true).unwrap();
+        discard_confirmed(root, "clone", true, Some(ConfirmedEntry::Repository)).unwrap();
 
         assert!(!nested.exists());
     }
