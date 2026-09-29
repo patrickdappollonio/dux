@@ -72,16 +72,24 @@ enum ChildrenError {
 }
 
 /// The children of `dir` on `side`, refusing anything that is not a folder
-/// the live listing shows.
+/// the changes listing shows.
 ///
 /// The folder must be a folded folder row of that side, or a folder inside
-/// one that git itself lists something under (which is how a sub-folder of
-/// an expanded folder is reached). The path must be in its plain spelling, so
-/// nothing like `node_modules/..` can name the worktree or climb out. On the
-/// unstaged side it must be a real directory rather than a symlink, so nothing
-/// outside the worktree is ever read; on the staged side, which reads the
-/// index, it may be gone from disk but may not be a symlink. The listing is read fresh, the same way the git
-/// routes validate a path.
+/// one that git itself lists something under (which is how a sub-folder of an
+/// expanded folder is reached). The listing checked against is `listing`, the
+/// changes service's cached snapshot for the agent, which is the list the pane
+/// is showing and at most one poll old; only a cold cache (`None`) reads a
+/// fresh one. A folder inside a folded one is still confirmed with git, scoped
+/// to that path.
+///
+/// A snapshot can be a poll behind the disk, and containment does not rest on
+/// it. The path must be in its plain spelling, so nothing like
+/// `node_modules/..` can name the worktree or climb out. On the unstaged side
+/// it must be a real directory rather than a symlink, checked on disk now, so
+/// nothing outside the worktree is ever read; on the staged side, which reads
+/// the index, it may be gone from disk but may not be a symlink. And the
+/// listing itself is read from git now, so a snapshot that is behind can only
+/// answer with what git holds today, or with nothing.
 fn list_children(
     worktree: &std::path::Path,
     dir: &str,

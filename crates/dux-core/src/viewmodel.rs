@@ -974,8 +974,9 @@ pub enum FolderView {
     /// A folder standing for `file_count` files at any depth. The other two
     /// fields are omitted when there is nothing to say: `nested_repositories`
     /// when there are none, `fingerprint` when the folder was too large to
-    /// fingerprint (a staged one's comes from the index). The fingerprint travels as hex text, because
-    /// a 64-bit number does not survive a JavaScript number.
+    /// fingerprint (a staged one's comes from the index). The fingerprint
+    /// travels as hex text, because a 64-bit number does not survive a
+    /// JavaScript number.
     Directory {
         file_count: usize,
         #[serde(skip_serializing_if = "is_zero")]
