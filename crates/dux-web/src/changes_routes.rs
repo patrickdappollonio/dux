@@ -77,9 +77,10 @@ enum ChildrenError {
 /// The folder must be a folded folder row of that side, or a folder inside
 /// one that git itself lists something under (which is how a sub-folder of
 /// an expanded folder is reached). The path must be in its plain spelling, so
-/// nothing like `node_modules/..` can name the worktree or climb out, and it
-/// must be a real directory rather than a symlink, so nothing outside the
-/// worktree is ever read. The listing is read fresh, the same way the git
+/// nothing like `node_modules/..` can name the worktree or climb out. On the
+/// unstaged side it must be a real directory rather than a symlink, so nothing
+/// outside the worktree is ever read; on the staged side, which reads the
+/// index, it may be gone from disk but may not be a symlink. The listing is read fresh, the same way the git
 /// routes validate a path.
 fn list_children(
     worktree: &std::path::Path,
@@ -87,10 +88,26 @@ fn list_children(
     side: dux_core::git::ChangesSide,
 ) -> Result<Vec<dux_core::model::ChangedFile>, ChildrenError> {
     use dux_core::git::{ChangesSide, changed_dir_children, changed_files, rows_answering};
-    let refused = |why: &str| ChildrenError::Refused(format!("\"{dir}/\" {why}"));
     if dir.is_empty() || !dux_core::model::is_lexically_normal_path(dir) {
-        return Err(refused("is not a plain path inside the worktree"));
+        return Err(ChildrenError::Refused(format!(
+            "\"{dir}\" is not a plain path inside the worktree"
+        )));
     }
+    // What is at the path, not followed through a link. A refusal names a
+    // directory with its trailing slash and anything else as it is.
+    let on_disk = std::fs::symlink_metadata(worktree.join(dir)).ok();
+    let is_dir = on_disk
+        .as_ref()
+        .is_some_and(|meta| meta.file_type().is_dir());
+    let is_symlink = on_disk
+        .as_ref()
+        .is_some_and(|meta| meta.file_type().is_symlink());
+    let shown = if is_dir {
+        format!("{dir}/")
+    } else {
+        dir.to_string()
+    };
+    let refused = |why: &str| ChildrenError::Refused(format!("\"{shown}\" {why}"));
     let (staged, unstaged) =
         changed_files(worktree).map_err(|e| ChildrenError::Git(format!("{e:#}")))?;
     let files = match side {
@@ -109,9 +126,15 @@ fn list_children(
             "is not a folder the changes list shows; refresh the changes and expand it from its row",
         ));
     }
-    let is_real_dir =
-        std::fs::symlink_metadata(worktree.join(dir)).is_ok_and(|meta| meta.file_type().is_dir());
-    if !is_real_dir {
+    // The unstaged side lists the working tree, so it must be a real directory
+    // there. The staged side lists the index, which still holds a folder staged
+    // whole and then deleted from disk; it is refused only when something at
+    // the path is a symlink, which nothing may be read through.
+    let listable = match side {
+        ChangesSide::Unstaged => is_dir,
+        ChangesSide::Staged => !is_symlink,
+    };
+    if !listable {
         return Err(refused("is not a folder in the worktree"));
     }
     changed_dir_children(worktree, dir, side).map_err(|e| ChildrenError::Git(format!("{e:#}")))

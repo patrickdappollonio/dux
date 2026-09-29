@@ -1735,6 +1735,51 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// A folder staged whole and then deleted from disk is still a staged row,
+    /// and what the index holds for it is still listable: the staged side
+    /// answers from the index, so it does not need the folder on disk.
+    #[tokio::test]
+    async fn folder_children_lists_a_staged_folder_that_is_gone_from_disk() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("build/sub")).unwrap();
+        std::fs::write(worktree.join("build/a.o"), "a\n").unwrap();
+        std::fs::write(worktree.join("build/sub/b.o"), "b\n").unwrap();
+        run_git(&worktree, &["add", "build"]);
+        std::fs::remove_dir_all(worktree.join("build")).unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(get_req(&children_uri("build", "staged")))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = body_text(resp).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(child_paths(&json), ["build/a.o", "build/sub"]);
+    }
+
+    /// A refusal names a file as a file, with no trailing slash.
+    #[tokio::test]
+    async fn folder_children_refusal_names_a_file_without_a_slash() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("node_modules")).unwrap();
+        std::fs::write(worktree.join("node_modules/top.js"), "t\n").unwrap();
+        std::fs::write(worktree.join("node_modules/b.js"), "b\n").unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(get_req(&children_uri("node_modules/top.js", "unstaged")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_text(resp).await;
+        assert!(body.contains("\"node_modules/top.js\""), "{body}");
+        assert!(!body.contains("top.js/"), "{body}");
+    }
+
     /// Only a folder the live listing shows (or one inside it that git lists
     /// something under) may be listed: a crafted path, a file, a tracked or
     /// missing folder, a path climbing out, one through a symlink, and a bad
