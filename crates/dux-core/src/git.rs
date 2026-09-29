@@ -2897,10 +2897,15 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
 
     // What each folded folder holds. A count git could not produce fails the
     // read rather than claiming an empty folder.
+    // One budget for every untracked file this read opens, folders' files and
+    // loose ones alike: folding must not make a listing read more than it did.
+    let mut read_budget = UNTRACKED_STATS_MAX_FILES;
     if !untracked_folders.is_empty() {
-        let mut counts = folding::count_untracked_folders(worktree_path, &untracked_folders)?;
+        let mut counts =
+            folding::count_untracked_folders(worktree_path, &untracked_folders, &mut read_budget)?;
         for file in unstaged.iter_mut().filter(|file| file.is_folder()) {
             if let Some(folder) = counts.remove(&file.path) {
+                file.additions = folder.additions();
                 file.kind = folder.kind();
             }
         }
@@ -2949,6 +2954,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
         &mut unstaged,
         &tracked_stats,
         &excluded_unstaged,
+        read_budget,
     );
 
     for file in &mut staged {
@@ -3237,8 +3243,8 @@ fn apply_unstaged_stats(
     unstaged: &mut [ChangedFile],
     tracked: &HashMap<String, DiffStat>,
     excluded: &HashSet<String>,
+    mut untracked_stats_budget: usize,
 ) {
-    let mut untracked_stats_budget = UNTRACKED_STATS_MAX_FILES;
     for file in unstaged.iter_mut() {
         if let Some(stat) = tracked.get(&file.path) {
             apply_stat(file, stat, excluded);
@@ -8646,9 +8652,9 @@ mod tests {
         assert_eq!(row.status, "?");
         assert!(row.is_expandable());
         assert_eq!(row.file_count(), 2);
-        // A folder row carries a count, never line counts it would have to
-        // read every file inside to produce.
-        assert_eq!((row.additions, row.deletions, row.binary), (0, 0, false));
+        // Within the read budget a folder row carries its files' lines, so the
+        // recap still counts what was written into a new folder.
+        assert_eq!((row.additions, row.deletions, row.binary), (3, 0, false));
     }
 
     #[test]
@@ -9244,7 +9250,13 @@ mod tests {
             },
         ];
 
-        apply_unstaged_stats(dir.path(), &mut unstaged, &HashMap::new(), &HashSet::new());
+        apply_unstaged_stats(
+            dir.path(),
+            &mut unstaged,
+            &HashMap::new(),
+            &HashSet::new(),
+            UNTRACKED_STATS_MAX_FILES,
+        );
 
         assert_eq!(
             (unstaged[0].additions, unstaged[0].deletions),
@@ -9289,7 +9301,13 @@ mod tests {
         ];
         let tracked = HashMap::from([("tracked.txt".to_string(), DiffStat::Text(7, 4))]);
 
-        apply_unstaged_stats(dir.path(), &mut unstaged, &tracked, &HashSet::new());
+        apply_unstaged_stats(
+            dir.path(),
+            &mut unstaged,
+            &tracked,
+            &HashSet::new(),
+            UNTRACKED_STATS_MAX_FILES,
+        );
 
         assert_eq!((unstaged[0].additions, unstaged[0].deletions), (2, 0));
         assert_eq!((unstaged[1].additions, unstaged[1].deletions), (7, 4));

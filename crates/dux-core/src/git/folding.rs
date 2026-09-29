@@ -22,9 +22,9 @@ pub enum ChangesSide {
 /// What git says is inside one untracked folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum UntrackedFolder {
-    /// Its untracked, not-ignored files, and the repositories of their own it
-    /// holds.
-    Contents(crate::model::FolderContents),
+    /// Its untracked, not-ignored files, the repositories of their own it
+    /// holds, and the lines its files hold between them (0 past the budget).
+    Contents(crate::model::FolderContents, usize),
     /// The folder is a repository of its own, which git does not look inside.
     NestedRepository,
     /// The folder is a linked worktree of this same repository.
@@ -32,9 +32,18 @@ pub(super) enum UntrackedFolder {
 }
 
 impl UntrackedFolder {
+    /// The lines the folder's files hold, as its row's additions: an
+    /// untracked file is all additions.
+    pub(super) fn additions(&self) -> usize {
+        match self {
+            Self::Contents(_, additions) => *additions,
+            Self::NestedRepository | Self::LinkedWorktree => 0,
+        }
+    }
+
     pub(super) fn kind(self) -> ChangedFileKind {
         match self {
-            Self::Contents(contents) => ChangedFileKind::Directory(contents),
+            Self::Contents(contents, _) => ChangedFileKind::Directory(contents),
             Self::NestedRepository => ChangedFileKind::NestedRepository,
             Self::LinkedWorktree => ChangedFileKind::LinkedWorktree,
         }
@@ -65,9 +74,12 @@ impl<'r> Tally<'r> {
 }
 
 /// Turn the tallies of one read into what each folder holds, fingerprinting
-/// folders in order for as long as the read's stat budget lasts. A folder that
-/// would not fit in what is left gets no fingerprint at all rather than a
-/// partial one, which could miss exactly the file that changed.
+/// folders and counting their lines in order for as long as `budget` lasts.
+/// It is the budget that already bounds the untracked files' line counts,
+/// shared with them, so a listing reads no more files than it did before
+/// folding. A folder that would not fit in what is left gets neither a
+/// fingerprint nor line counts rather than partial ones, which could miss
+/// exactly the file that changed.
 ///
 /// `prefix` is what turns a tally's name into its worktree-relative path, so
 /// a repository row can be told apart from a linked worktree of this same
@@ -77,8 +89,8 @@ fn finish_tallies(
     worktree: &Path,
     prefix: &str,
     tallies: Vec<(String, Tally<'_>)>,
+    budget: &mut usize,
 ) -> Vec<(String, UntrackedFolder)> {
-    let mut budget = UNTRACKED_STATS_MAX_FILES;
     // Read once per listing, and only if some folder is a repository.
     let mut common: Option<Option<PathBuf>> = None;
     tallies
@@ -95,18 +107,39 @@ fn finish_tallies(
                 };
                 return (folder, kind);
             }
-            let fingerprint = (tally.files.len() <= budget).then(|| {
-                budget -= tally.files.len();
-                fingerprint_files(worktree, &tally.files)
-            });
+            let fits = tally.files.len() <= *budget;
+            let (fingerprint, additions) = if fits {
+                *budget -= tally.files.len();
+                (
+                    Some(fingerprint_files(worktree, &tally.files)),
+                    folder_lines(worktree, &tally.files),
+                )
+            } else {
+                (None, 0)
+            };
             let contents = crate::model::FolderContents {
                 file_count: tally.files.len(),
                 nested_repositories: tally.nested_repositories,
                 fingerprint,
             };
-            (folder, UntrackedFolder::Contents(contents))
+            (folder, UntrackedFolder::Contents(contents, additions))
         })
         .collect()
+}
+
+/// The lines a folder's files hold between them, each counted by git's rules
+/// (see `untracked_file_stat`); a binary file holds none.
+fn folder_lines(worktree: &Path, records: &[&[u8]]) -> usize {
+    use std::os::unix::ffi::OsStrExt;
+    records
+        .iter()
+        .map(|record| {
+            match untracked_file_stat(&worktree.join(std::ffi::OsStr::from_bytes(record))) {
+                DiffStat::Text(additions, _) => additions,
+                DiffStat::Binary => 0,
+            }
+        })
+        .sum()
 }
 
 /// A hash over each file's path, size and modification time: a stat each,
@@ -187,6 +220,7 @@ fn untracked_records(worktree: &Path, dir: Option<&str>) -> Result<Vec<u8>> {
 pub(super) fn count_untracked_folders(
     worktree: &Path,
     folders: &[String],
+    budget: &mut usize,
 ) -> Result<HashMap<String, UntrackedFolder>> {
     if folders.is_empty() {
         return Ok(HashMap::new());
@@ -216,7 +250,9 @@ pub(super) fn count_untracked_folders(
             tallies[position].1.add(record);
         }
     }
-    Ok(finish_tallies(worktree, "", tallies).into_iter().collect())
+    Ok(finish_tallies(worktree, "", tallies, budget)
+        .into_iter()
+        .collect())
 }
 
 /// Which of `dirs` HEAD does not have. An empty set when git could not be
@@ -671,12 +707,12 @@ fn untracked_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
     }
 
     files.extend(
-        finish_tallies(worktree, &prefix, folders)
+        finish_tallies(worktree, &prefix, folders, &mut budget)
             .into_iter()
             .map(|(child, folder)| ChangedFile {
                 status: "?".to_string(),
                 path: format!("{prefix}{child}"),
-                additions: 0,
+                additions: folder.additions(),
                 deletions: 0,
                 binary: false,
                 diff_excluded: false,
@@ -1022,6 +1058,40 @@ mod tests {
 
         let children = changed_dir_children(root, "dist", ChangesSide::Unstaged).unwrap();
         assert!(fingerprint_of(&children, "dist/sub").is_some());
+    }
+
+    /// A new module is a folded folder, and the lines written into it are still
+    /// lines: the row carries the sum of its files' line counts, read within
+    /// the same budget that already bounds the untracked files' counts.
+    #[test]
+    fn a_folder_row_carries_the_lines_of_its_files() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "module/a.rs", "1\n2\n");
+        write(root, "module/sub/b.rs", "1\n");
+        write(root, "module/c.rs", "1\n2\n3\n");
+        fs::write(root.join("module/blob.bin"), [0u8, 1, 2, 3]).unwrap();
+
+        let (_, unstaged) = changed_files(root).unwrap();
+        let row = unstaged.iter().find(|f| f.path == "module").unwrap();
+        assert_eq!((row.additions, row.deletions), (6, 0));
+
+        let children = changed_dir_children(root, "module", ChangesSide::Unstaged).unwrap();
+        let sub = children.iter().find(|f| f.path == "module/sub").unwrap();
+        assert_eq!(sub.additions, 1);
+    }
+
+    #[test]
+    fn a_folder_over_the_budget_carries_no_line_counts() {
+        let repo = repo();
+        let root = repo.path();
+        for index in 0..=UNTRACKED_STATS_MAX_FILES {
+            write(root, &format!("big/f{index}.js"), "x\n");
+        }
+
+        let (_, unstaged) = changed_files(root).unwrap();
+        let row = unstaged.iter().find(|f| f.path == "big").unwrap();
+        assert_eq!(row.additions, 0);
     }
 
     /// Past the stat budget a folder is followed by its count alone: the
