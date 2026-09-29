@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import {
   filterChangedFiles,
   mergeChangedFilesRecaps,
@@ -327,19 +327,23 @@ export function useChangedFilesController(
   // checked path (it was staged elsewhere, its folder lost it), the check is
   // forgotten for good rather than only hidden, so the row does not come back
   // checked if it returns. Only against a loaded listing for this agent, so a
-  // listing still loading clears nothing.
+  // listing still loading clears nothing. Adjusted during render, React's
+  // pattern for state derived from what was rendered: it runs again at once
+  // with the pruned selection, and settles because that one needs no pruning.
   const listingLoaded =
     changes.sessionId === selectedSessionId && changes.phase === "loaded"
-  useEffect(() => {
-    if (!listingLoaded || !selectedSessionId) return
-    if (selection.sessionId !== selectedSessionId) return
-    if (model.selected === selection) return
+  if (
+    listingLoaded &&
+    selectedSessionId &&
+    selection.sessionId === selectedSessionId &&
+    model.selected !== selection
+  ) {
     setSelection({
       sessionId: selectedSessionId,
       staged: model.selected.staged,
       unstaged: model.selected.unstaged,
     })
-  }, [listingLoaded, selectedSessionId, selection, model.selected])
+  }
 
   const editSelection = useCallback(
     (mutate: (next: ChangedFileSelection) => void): void => {
