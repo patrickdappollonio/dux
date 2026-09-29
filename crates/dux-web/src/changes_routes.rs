@@ -165,7 +165,10 @@ async fn get_children(
                 .into_response();
         }
     };
-    let worktree = match resolve_worktree(&state, id).await {
+    // Resolved from the agent's folder like every other changes read: a plain
+    // folder, one inside somebody else's repository and one that is gone each
+    // get the folder's own sentence before any git runs.
+    let worktree = match crate::git_routes::resolve_changes_worktree(&state, id).await {
         Ok(worktree) => worktree,
         Err(resp) => return resp.into_response(),
     };

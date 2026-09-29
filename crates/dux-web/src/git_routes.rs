@@ -922,6 +922,27 @@ mod tests {
             store
                 .create_session(&standalone_session("sa1", plain.to_string_lossy().as_ref()))
                 .unwrap();
+            // A standalone agent whose folder sits INSIDE another repository,
+            // which git would happily answer for from the parent.
+            let parent = root.join("parent");
+            std::fs::create_dir_all(parent.join("inside/node_modules")).unwrap();
+            run_git(&parent, &["init", "-q"]);
+            std::fs::write(parent.join("inside/node_modules/a.js"), "a\n").unwrap();
+            store
+                .create_session(&standalone_session(
+                    "sa2",
+                    parent.join("inside").to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+            // A standalone agent whose folder a test deletes.
+            let doomed = root.join("doomed");
+            std::fs::create_dir_all(&doomed).unwrap();
+            store
+                .create_session(&standalone_session(
+                    "sa3",
+                    doomed.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
         }
         let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
@@ -1733,6 +1754,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The folder list is a changes read like any other, resolved from the
+    /// agent's folder: a plain folder, one inside somebody else's repository
+    /// (which git would answer for from the parent) and one that is gone all
+    /// get the folder's own quiet sentence, never a listing and never a raw
+    /// git failure.
+    #[tokio::test]
+    async fn folder_children_are_refused_where_the_changes_panel_is_quiet() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        std::fs::remove_dir_all(tmp.path().join("doomed")).unwrap();
+        for (agent, dir) in [
+            ("sa1", "node_modules"),
+            ("sa2", "node_modules"),
+            ("sa2", "inside/node_modules"),
+            ("sa3", "node_modules"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(get_req(&format!(
+                    "/api/v1/sessions/{agent}/changes/children?dir={}&side=unstaged",
+                    url_escape(dir)
+                )))
+                .await
+                .unwrap();
+            let status = resp.status();
+            let body = body_text(resp).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{agent} {dir}: {body}");
+            assert!(!body.contains("a.js"), "{agent} {dir}: {body}");
+            assert!(
+                !body.contains("Could not list the folder"),
+                "{agent} {dir}: {body}"
+            );
+        }
     }
 
     /// A folder staged whole and then deleted from disk is still a staged row,
