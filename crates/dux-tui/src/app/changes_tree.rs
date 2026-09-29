@@ -1464,6 +1464,66 @@ mod tests {
         );
     }
 
+    /// A folder delete keeps the bare repositories inside it, whose files the
+    /// row counts: the dialog names them and says how many files it deletes.
+    #[test]
+    fn the_folder_delete_dialog_names_the_bare_repositories_it_keeps() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDiscardFile {
+            file_path: "vendor".to_string(),
+            kind: ChangedFileKind::Directory(dux_core::model::FolderContents {
+                file_count: 43,
+                bare_repositories: vec!["vendor/fixture.git".to_string()],
+                files_in_bare_repositories: 40,
+                ..Default::default()
+            }),
+            focus: ConfirmFocus::Cancel,
+        };
+
+        let screen = render_text(&mut app, 160, 50).join(" ");
+        let screen = screen.replace('\u{2502}', " ");
+        let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(screen.contains("and the 3 files inside it?"), "{screen}");
+        assert!(
+            screen.contains(
+                "The bare repository vendor/fixture.git/ inside it is kept, with the 40 files it holds"
+            ),
+            "{screen}"
+        );
+    }
+
+    /// A folder holding nothing but a bare repository has nothing a delete
+    /// would remove, so the discard key says so instead of opening a dialog.
+    #[test]
+    fn the_discard_key_refuses_a_folder_holding_only_a_bare_repository() {
+        let mut app = test_app(default_bindings());
+        app.engine.unstaged_files = vec![ChangedFile {
+            kind: ChangedFileKind::Directory(dux_core::model::FolderContents {
+                file_count: 12,
+                bare_repositories: vec!["top.git".to_string()],
+                files_in_bare_repositories: 12,
+                ..Default::default()
+            }),
+            ..file("top.git", "?")
+        }];
+        app.selected_left = 1;
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+        app.files_index = 0;
+
+        app.confirm_discard_selected_file().unwrap();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            app.status
+                .text()
+                .contains("only repositories of their own, which a delete keeps"),
+            "{}",
+            app.status.text()
+        );
+    }
+
     #[test]
     fn the_nested_repository_delete_dialog_warns_about_its_history() {
         let mut app = test_app(default_bindings());

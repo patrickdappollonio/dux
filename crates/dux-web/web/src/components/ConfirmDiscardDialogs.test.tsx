@@ -199,6 +199,63 @@ describe("the single discard dialog", () => {
   })
 })
 
+describe("bare repositories inside a folder", () => {
+  const withBare: ChangedFileView = {
+    path: "vendor",
+    status: "??",
+    additions: 0,
+    deletions: 0,
+    binary: false,
+    diff_excluded: false,
+    kind: "directory",
+    file_count: 43,
+    bare_repositories: ["vendor/fixture.git"],
+    files_in_bare_repositories: 40,
+  }
+
+  // To git a bare repository is files, so the row counts them; a folder
+  // delete keeps it, so the dialog names it and counts only what goes.
+  it("names the bare repository the single delete keeps", () => {
+    mockState = {
+      discardTarget: { sessionId: "s1", path: "vendor", untracked: true, row: withBare },
+      changes: {
+        sessionId: "s1",
+        phase: "loaded",
+        rev: 1,
+        staged: [],
+        unstaged: [withBare],
+        error: null,
+      },
+    } as unknown as DuxState
+    render(<ConfirmDiscardFileDialog />)
+    const text = dialogText()
+    expect(text).toContain("The 3 files inside vendor/ will be permanently DELETED")
+    expect(text).toContain(
+      "The bare repository vendor/fixture.git/ inside it is kept, with the 40 files it holds.",
+    )
+    expect(
+      screen.getAllByText("vendor/fixture.git/").some((el) => el.closest("code") !== null),
+    ).toBe(true)
+  })
+
+  it("counts only what the bulk delete removes and names what it keeps", () => {
+    render(
+      <ConfirmDiscardFilesDialog
+        open
+        paths={["vendor", "notes.md"]}
+        unstaged={[withBare, plain]}
+        onCancel={() => {}}
+        onConfirm={() => {}}
+      />,
+    )
+    const text = dialogText()
+    expect(text).toContain("4 untracked files will be permanently DELETED")
+    expect(text).toContain(
+      "The bare repository vendor/fixture.git/ inside them is kept, with the 40 files it holds.",
+    )
+  })
+})
+
 describe("the bulk discard dialog", () => {
   function openBulk(paths: string[]) {
     render(

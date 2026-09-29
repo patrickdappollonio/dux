@@ -97,20 +97,7 @@ fn finish_tallies(
     let mut common: Option<Option<PathBuf>> = None;
     tallies
         .into_iter()
-        .map(|(folder, mut tally)| {
-            // git lists a bare repository's insides as files; it is a
-            // repository all the same, the folder itself included.
-            let bares = bare_repositories(worktree, &tally.files);
-            if !bares.is_empty() {
-                let own = format!("{prefix}{folder}");
-                if bares.iter().any(|bare| bare.as_slice() == own.as_bytes()) {
-                    tally.is_repository = true;
-                } else {
-                    tally
-                        .files
-                        .retain(|record| !bares.iter().any(|bare| is_inside(record, bare)));
-                }
-            }
+        .map(|(folder, tally)| {
             if tally.is_repository {
                 let common = common.get_or_insert_with(|| common_dir_of(worktree));
                 let dir = worktree.join(format!("{prefix}{folder}"));
@@ -134,7 +121,7 @@ fn finish_tallies(
             };
             // A repository inside is either one of its own or a worktree of
             // this repository, read from its `.git` file alone.
-            let mut nested_repositories = bares.len();
+            let mut nested_repositories = 0;
             let mut linked_worktrees = 0;
             if !tally.repositories.is_empty() {
                 use std::os::unix::ffi::OsStrExt;
@@ -150,6 +137,19 @@ fn finish_tallies(
                     }
                 }
             }
+            // To git a bare repository is a folder of ordinary files, so they
+            // are counted, staged and listed as files. Only a delete keeps
+            // them, so the row says how many of its files sit in one.
+            let bares = bare_repositories(worktree, &tally.files);
+            let files_in_bare_repositories = if bares.is_empty() {
+                0
+            } else {
+                tally
+                    .files
+                    .iter()
+                    .filter(|record| bares.iter().any(|bare| is_inside(record, bare)))
+                    .count()
+            };
             let contents = crate::model::FolderContents {
                 file_count: tally.files.len(),
                 nested_repositories,
@@ -157,6 +157,11 @@ fn finish_tallies(
                 fingerprint,
                 repositories_not_staged: 0,
                 worktrees_not_staged: 0,
+                bare_repositories: bares
+                    .iter()
+                    .map(|bare| String::from_utf8_lossy(bare).into_owned())
+                    .collect(),
+                files_in_bare_repositories,
             };
             (folder, UntrackedFolder::Contents(contents, additions))
         })
@@ -651,13 +656,11 @@ pub fn untracked_directory_kind(worktree: &Path, rel: &str) -> Result<UntrackedD
     let reported_as_repository = raw
         .split(|byte| *byte == 0)
         .any(|record| record == itself.as_bytes());
+    // A bare repository is never reported as one: to git it is a folder of
+    // files, and it is one here too (a folder delete keeps it, see
+    // `FolderInside::deletable_files`).
     if !reported_as_repository {
-        // A bare repository is never reported as one; git's own rule says it is.
-        return Ok(if is_git_directory(&worktree.join(rel)) {
-            UntrackedDirectoryKind::Repository
-        } else {
-            UntrackedDirectoryKind::Folder
-        });
+        return Ok(UntrackedDirectoryKind::Folder);
     }
     Ok(repository_kind(
         common_dir_of(worktree).as_deref(),
@@ -668,18 +671,20 @@ pub fn untracked_directory_kind(worktree: &Path, rel: &str) -> Result<UntrackedD
 /// What an untracked folder holds, from the records it is counted from.
 #[derive(Debug, Default)]
 pub(crate) struct FolderInside {
-    /// Its untracked, not-ignored files outside every repository inside it,
-    /// as worktree-relative paths in git's own bytes.
+    /// Its untracked, not-ignored files, as worktree-relative paths in git's
+    /// own bytes, the files inside bare repositories included: to git, and so
+    /// to a stage, those are ordinary files.
     pub(crate) files: Vec<Vec<u8>>,
-    /// The bare repositories among `repositories`: git lists their insides
-    /// as files, so a delete has to be told to keep them.
+    /// The bare repositories inside it (or the folder itself, when it is
+    /// one), found by git's own rule for a git directory. A delete keeps them.
     pub(crate) bare: Vec<Vec<u8>>,
     /// The repositories inside it (not the folder itself), each with what it
     /// is, as worktree-relative paths in git's own bytes with no trailing
     /// slash. Bytes, because a name need not be UTF-8 and one that is not
     /// must still be left out of a stage rather than skipped.
     pub(crate) repositories: Vec<(Vec<u8>, UntrackedDirectoryKind)>,
-    /// True when at least one untracked, not-ignored file is inside it.
+    /// True when at least one untracked, not-ignored file is inside it, bare
+    /// repositories' files included.
     pub(crate) has_file: bool,
 }
 
@@ -693,6 +698,15 @@ impl FolderInside {
             .filter(|(_, kind)| *kind == UntrackedDirectoryKind::LinkedWorktree)
             .count();
         (self.repositories.len() - worktrees, worktrees)
+    }
+
+    /// The files a folder delete removes: every counted file outside the
+    /// bare repositories, which it keeps.
+    pub(crate) fn deletable_files(&self) -> impl Iterator<Item = &[u8]> {
+        self.files
+            .iter()
+            .map(Vec::as_slice)
+            .filter(|record| !self.bare.iter().any(|bare| is_inside(record, bare)))
     }
 }
 
@@ -723,19 +737,9 @@ pub(crate) fn folder_inside(worktree: &Path, dir: &str) -> Result<FolderInside> 
         );
         inside.repositories.push((rel.to_vec(), kind));
     }
-    let bares = bare_repositories(worktree, &files);
-    inside.files = files
-        .into_iter()
-        .filter(|record| !bares.iter().any(|bare| is_inside(record, bare)))
-        .map(<[u8]>::to_vec)
-        .collect();
+    inside.bare = bare_repositories(worktree, &files);
+    inside.files = files.into_iter().map(<[u8]>::to_vec).collect();
     inside.has_file = !inside.files.is_empty();
-    for bare in &bares {
-        inside
-            .repositories
-            .push((bare.clone(), UntrackedDirectoryKind::Repository));
-    }
-    inside.bare = bares;
     Ok(inside)
 }
 
@@ -977,15 +981,11 @@ pub fn rows_answering(
 ) -> Result<HashSet<String>> {
     let mut answered = HashSet::new();
     let mut to_confirm: Vec<&str> = Vec::new();
-    let mut seen = HashMap::new();
     for path in paths {
         match crate::model::listing_row_for(files, path) {
             Some(row) if row.path == *path => {
                 answered.insert(path.clone());
             }
-            // A path inside a repository's git directory (a bare repository
-            // git lists as plain files) is that repository's, not a change.
-            Some(_) if git_directory_above(worktree, path, &mut seen).is_some() => {}
             Some(_) => to_confirm.push(path),
             None => {}
         }
@@ -1650,12 +1650,28 @@ mod tests {
         repo
     }
 
-    /// git lists a bare repository's insides as untracked files, but it is a
-    /// repository: counted as one, never as its files.
+    /// How many untracked, not-ignored files git lists under `dir`.
+    fn untracked_count(root: &Path, dir: &str) -> usize {
+        let out = test_support::git_command()
+            .args(["-C", root.to_string_lossy().as_ref()])
+            .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+            .arg(format!("{dir}/"))
+            .output()
+            .unwrap();
+        out.stdout
+            .split(|b| *b == 0)
+            .filter(|r| !r.is_empty())
+            .count()
+    }
+
+    /// To git a bare repository is a folder of ordinary files, and staging
+    /// follows git: they are counted as the folder's files. The row also says
+    /// which of them sit in bare repositories, because a delete keeps those.
     #[test]
-    fn a_bare_repository_is_counted_as_a_repository() {
+    fn a_bare_repository_counts_as_files_and_is_noted_for_the_delete() {
         let repo = folder_with_bare_repositories();
         let root = repo.path();
+        let in_bare = untracked_count(root, "d/bare.git") + untracked_count(root, "d/deep/b2.git");
 
         let (_, unstaged) = changed_files(root).unwrap();
 
@@ -1664,38 +1680,37 @@ mod tests {
             .find(|f| f.path == "d")
             .expect("the folder row");
         let contents = d.folder_contents().expect("a folder");
-        assert_eq!(contents.file_count, 2, "{contents:?}");
-        assert_eq!(contents.nested_repositories, 2, "{contents:?}");
+        assert_eq!(contents.file_count, 2 + in_bare, "{contents:?}");
+        assert_eq!(contents.nested_repositories, 0, "{contents:?}");
+        assert_eq!(
+            contents.bare_repositories,
+            ["d/bare.git", "d/deep/b2.git"],
+            "{contents:?}"
+        );
+        assert_eq!(contents.files_in_bare_repositories, in_bare, "{contents:?}");
         let top = unstaged
             .iter()
             .find(|f| f.path == "top.git")
             .expect("top.git");
-        assert_eq!(top.kind, ChangedFileKind::NestedRepository);
+        let top_contents = top.folder_contents().expect("a folder of files");
+        assert_eq!(top_contents.bare_repositories, ["top.git"]);
         assert_eq!(
-            untracked_directory_kind(root, "top.git").unwrap(),
-            UntrackedDirectoryKind::Repository
+            top_contents.files_in_bare_repositories,
+            top_contents.file_count
         );
         assert_eq!(
-            untracked_directory_kind(root, "d").unwrap(),
+            untracked_directory_kind(root, "top.git").unwrap(),
             UntrackedDirectoryKind::Folder
         );
 
         let children = changed_dir_children(root, "d", ChangesSide::Unstaged).unwrap();
-        let bare = children
-            .iter()
-            .find(|f| f.path == "d/bare.git")
-            .expect("the bare repository row");
-        assert_eq!(bare.kind, ChangedFileKind::NestedRepository);
-        let deep = children.iter().find(|f| f.path == "d/deep").unwrap();
-        assert_eq!(
-            deep.folder_contents()
-                .map(|c| (c.file_count, c.nested_repositories)),
-            Some((0, 1))
-        );
+        let bare = children.iter().find(|f| f.path == "d/bare.git").unwrap();
+        assert!(bare.is_expandable(), "{bare:?}");
     }
 
-    /// Deleting the folder deletes the files it counted and keeps the bare
-    /// repositories inside it, and the ignored file, as the dialog promises.
+    /// Deleting the folder deletes the files it counted outside bare
+    /// repositories and keeps the bare repositories, and the ignored file.
+    /// A folder that is nothing but a bare repository has nothing to delete.
     #[test]
     fn deleting_a_folder_keeps_the_bare_repositories_inside_it() {
         let repo = folder_with_bare_repositories();
@@ -1708,59 +1723,82 @@ mod tests {
         assert!(root.join("d/bare.git/HEAD").exists());
         assert!(root.join("d/deep/b2.git/HEAD").exists());
         assert!(root.join("d/deep/secret.env").exists());
+        let refusal =
+            discard_confirmed(root, "top.git", true, Some(ConfirmedEntry::Folder)).unwrap_err();
+        assert!(refusal.to_string().contains("nothing in"), "{refusal}");
+        assert!(root.join("top.git/HEAD").exists());
     }
 
-    /// Staging the folder stages its files and leaves the bare repositories
-    /// out, as it does any repository; a bare repository row is not staged.
+    /// Staging a folder stages a bare repository inside it as the files git
+    /// sees, the way `git add` does, and one staged on its own stages whole.
     #[test]
-    fn staging_a_folder_leaves_its_bare_repositories_out() {
+    fn staging_a_folder_stages_its_bare_repositories_as_files() {
         let repo = folder_with_bare_repositories();
         let root = repo.path();
 
         let report = stage_with_report(root, &["d".to_string()]).unwrap();
+        stage_with_report(root, &["top.git".to_string()]).unwrap();
 
-        assert_eq!(report.left_out_repositories, 2);
-        let mut staged: Vec<String> = index_modes(root)
+        assert_eq!(report.left_out_repositories, 0);
+        let index: Vec<String> = index_modes(root)
             .into_iter()
             .map(|(path, _)| path)
-            .filter(|path| path.starts_with("d/"))
             .collect();
-        staged.sort();
-        assert_eq!(staged, ["d/a.txt", "d/sub/b.txt"]);
-        let refusal = stage_with_report(root, &["top.git".to_string()]).unwrap_err();
-        assert!(refusal.to_string().contains("bare repository"), "{refusal}");
+        for path in [
+            "d/a.txt",
+            "d/bare.git/HEAD",
+            "d/deep/b2.git/HEAD",
+            "top.git/HEAD",
+        ] {
+            assert!(index.iter().any(|p| p == path), "{path} in {index:?}");
+        }
     }
 
-    /// A path inside a bare repository is part of that repository, not a
-    /// change of this one: no action may reach it through the folder above.
+    /// A bare repository kept as a test fixture is tracked like any file: an
+    /// edit inside it stages, and a new fixture folded in a folder stages
+    /// whole, file by file included. Only a discard reached through a folded
+    /// folder is kept out of one.
     #[test]
-    fn a_path_inside_a_bare_repository_answers_for_nothing() {
-        let repo = folder_with_bare_repositories();
+    fn a_tracked_bare_fixture_stages_like_any_file() {
+        let repo = repo();
         let root = repo.path();
+        git_in(root)(&["init", "-q", "--bare", "testdata/fixture.git"]);
+        git_in(root)(&["add", "--", "testdata"]);
+        git_in(root)(&["commit", "-q", "-m", "fixture"]);
+        let config = root.join("testdata/fixture.git/config");
+        fs::write(
+            &config,
+            format!("{}# edited\n", fs::read_to_string(&config).unwrap()),
+        )
+        .unwrap();
+        git_in(root)(&["init", "-q", "--bare", "testdata/new.git"]);
+
+        stage_with_report(root, &["testdata/fixture.git/config".to_string()]).unwrap();
         let (_, unstaged) = changed_files(root).unwrap();
-        let asked: Vec<String> = [
-            "d/bare.git/HEAD",
-            "d/bare.git/config",
-            "d/a.txt",
-            "d/bare.git",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-
+        let asked = vec![
+            "testdata/new.git/config".to_string(),
+            "testdata/new.git/HEAD".to_string(),
+        ];
         let answered = rows_answering(root, &unstaged, ChangesSide::Unstaged, &asked).unwrap();
+        stage_with_report(root, &["testdata/new.git".to_string()]).unwrap();
 
-        let mut answered: Vec<&str> = answered.iter().map(String::as_str).collect();
-        answered.sort_unstable();
-        assert_eq!(answered, ["d/a.txt", "d/bare.git"]);
-        assert!(discard_classify(root, "d/bare.git/HEAD").is_err());
-        let refusal = stage_with_report(root, &["d/bare.git/config".to_string()]).unwrap_err();
-        assert!(refusal.to_string().contains("inside"), "{refusal}");
+        assert_eq!(answered.len(), 2, "{answered:?}");
+        let (staged, _) = changed_files(root).unwrap();
         assert!(
-            index_modes(root)
+            staged
                 .iter()
-                .all(|(path, _)| !path.starts_with("d/bare.git"))
+                .any(|f| f.path == "testdata/fixture.git/config" && f.status == "M")
         );
+        assert!(
+            staged
+                .iter()
+                .any(|f| f.path == "testdata/new.git" && f.is_folder()),
+            "{staged:?}"
+        );
+        write(root, "d/a.txt", "a\n");
+        git_in(root)(&["init", "-q", "--bare", "d/b.git"]);
+        assert!(discard_classify(root, "d/b.git/HEAD").is_err());
+        assert!(discard_classify(root, "d/a.txt").unwrap());
     }
 
     /// git's own rule: a HEAD that names a ref or an object, and objects/ and

@@ -2808,10 +2808,14 @@ impl App {
         // (which the worktree manager removes). The core delete refuses both
         // too; this only spares the user a dialog that could not keep its word.
         match &file.kind {
-            dux_core::model::ChangedFileKind::Directory(contents) if contents.file_count == 0 => {
+            // The bare repositories a delete keeps count as repositories of
+            // their own here: their files are all it would otherwise take.
+            dux_core::model::ChangedFileKind::Directory(contents)
+                if contents.deletable_files() == 0 =>
+            {
                 self.set_info(git::nothing_in_folder(
                     &file.path,
-                    contents.nested_repositories,
+                    contents.nested_repositories + contents.bare_repositories.len(),
                     contents.linked_worktrees,
                     git::FolderAction::Delete,
                 ));

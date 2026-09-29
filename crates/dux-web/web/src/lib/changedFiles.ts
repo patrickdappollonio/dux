@@ -129,7 +129,7 @@ export function countWords(count: number, one: string, many: string): string {
 // refuses both, so neither is offered. The TUI refuses the same two.
 export function discardActsOn(file: ChangedFileView): boolean {
   if (file.kind === "linked_worktree") return false
-  if (file.kind === "directory") return (file.file_count ?? 0) > 0
+  if (file.kind === "directory") return deletableFileCount(file) > 0
   return true
 }
 
@@ -148,7 +148,9 @@ export function stageActsOn(file: ChangedFileView): boolean {
 // its own, so each is named for what it is. The terminal UI and the server
 // word it the same way.
 export function onlyRepositoriesWords(file: ChangedFileView): string {
-  const repositories = (file.nested_repositories ?? 0) > 0
+  // A bare repository a delete keeps is a repository of its own too.
+  const repositories =
+    (file.nested_repositories ?? 0) + (file.bare_repositories?.length ?? 0) > 0
   const worktrees = (file.linked_worktrees ?? 0) > 0
   if (worktrees && !repositories) return "only worktrees of this repository"
   if (worktrees && repositories) {
@@ -229,12 +231,30 @@ export const CHANGED_FILE_FIELDS = {
   fingerprint: true,
   nested_repositories_not_staged: true,
   linked_worktrees_not_staged: true,
+  bare_repositories: true,
+  files_in_bare_repositories: true,
 } as const satisfies Record<keyof ChangedFileView, true>
 
 const FIELD_KEYS = Object.keys(CHANGED_FILE_FIELDS) as (keyof ChangedFileView)[]
 
 function sameChangedFile(a: ChangedFileView, b: ChangedFileView): boolean {
-  return FIELD_KEYS.every((key) => a[key] === b[key])
+  return FIELD_KEYS.every((key) => sameField(a[key], b[key]))
+}
+
+// A list field arrives as a fresh array on every fetch, so it is compared by
+// what it holds; every other field is a primitive.
+function sameField(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, index) => item === b[index])
+  }
+  return a === b
+}
+
+// How many of a folder row's files a delete removes: all but those inside the
+// bare repositories it keeps. A file row is its one file.
+export function deletableFileCount(file: ChangedFileView): number {
+  if (file.kind !== "directory") return changedFileCount(file)
+  return Math.max(0, (file.file_count ?? 0) - (file.files_in_bare_repositories ?? 0))
 }
 
 // A freshly fetched list with every file that did not change swapped back for

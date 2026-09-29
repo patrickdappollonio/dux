@@ -994,6 +994,15 @@ pub enum FolderView {
         /// that staging it left out. Omitted when there are none.
         #[serde(skip_serializing_if = "is_zero")]
         linked_worktrees_not_staged: usize,
+        /// The bare repositories inside the folder (worktree-relative paths),
+        /// whose files are counted in `file_count` but kept by a delete.
+        /// Omitted when there are none.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        bare_repositories: Vec<String>,
+        /// How many of `file_count` sit inside those bare repositories.
+        /// Omitted when there are none.
+        #[serde(skip_serializing_if = "is_zero")]
+        files_in_bare_repositories: usize,
     },
     /// An untracked repository of its own, which is not looked inside.
     NestedRepository,
@@ -1014,6 +1023,8 @@ impl FolderView {
                 fingerprint: contents.fingerprint.map(|print| format!("{print:016x}")),
                 nested_repositories_not_staged: contents.repositories_not_staged,
                 linked_worktrees_not_staged: contents.worktrees_not_staged,
+                bare_repositories: contents.bare_repositories.clone(),
+                files_in_bare_repositories: contents.files_in_bare_repositories,
             }),
             crate::model::ChangedFileKind::NestedRepository => Some(Self::NestedRepository),
             crate::model::ChangedFileKind::LinkedWorktree => Some(Self::LinkedWorktree),

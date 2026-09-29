@@ -10,8 +10,9 @@ import { InlineCode } from "@/components/ui/inline-code"
 import { useEffect } from "react"
 
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { countWords } from "@/lib/changedFiles"
-import { changedWhileOpen } from "@/lib/discardOutcome"
+import { countWords, deletableFileCount } from "@/lib/changedFiles"
+import { bareRepositoriesKept, changedWhileOpen } from "@/lib/discardOutcome"
+import { renderProse } from "@/lib/prose"
 import { notifyWarning } from "@/lib/notify"
 import { closeDiscard, discardFile, useDux } from "@/lib/store"
 
@@ -47,6 +48,11 @@ export function ConfirmDiscardFileDialog() {
   // history; the wording is the row the dialog opened on.
   const row = discardTarget?.row
   const kind = row?.kind
+  const bareKept = bareRepositoriesKept(
+    row?.bare_repositories ?? [],
+    row?.files_in_bare_repositories ?? 0,
+    "it",
+  )
 
   function handleConfirm() {
     if (!discardTarget) return
@@ -81,9 +87,10 @@ export function ConfirmDiscardFileDialog() {
         <p className="text-sm text-destructive">
           {kind === "directory" ? (
             <>
-              The {countWords(row?.file_count ?? 0, "file", "files")} inside{" "}
+              The {countWords(row ? deletableFileCount(row) : 0, "file", "files")} inside{" "}
               <InlineCode>{`${path}/`}</InlineCode> will be permanently DELETED from disk.
               Files the repository ignores inside it are kept.
+              {bareKept && <> {renderProse(bareKept)}</>}
               {(row?.nested_repositories ?? 0) > 0 && (
                 <>
                   {" "}

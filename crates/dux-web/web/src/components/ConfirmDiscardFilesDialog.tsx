@@ -12,10 +12,12 @@ import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   changedFileCount,
   countWords,
+  deletableFileCount,
   fileStatusMeta,
 } from "@/lib/changedFiles"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import {
+  bareRepositoriesKept,
   changedWhileOpen,
   discardLeftOutReason,
   firstChangedKind,
@@ -26,7 +28,10 @@ import type { ChangedFileView } from "@/lib/types"
 
 const NO_TARGETS: ChangedFileView[] = []
 const NO_REASONS: Prose[] = []
+const NO_BARE: string[] = []
 const EMPTY_SUMMARY = {
+  bare: NO_BARE,
+  filesInBare: 0,
   untracked: 0,
   tracked: 0,
   repositories: 0,
@@ -109,15 +114,21 @@ export function ConfirmDiscardFilesDialog({
     let folders = 0
     let nestedInside = 0
     let worktreesInside = 0
+    const bare: string[] = []
+    let filesInBare = 0
     for (const f of targets) {
       if (f.kind === "nested_repository") {
         repositories += 1
       } else if (fileStatusMeta(f.status).kind === "untracked") {
-        untracked += changedFileCount(f)
+        // A folder delete keeps the bare repositories inside, whose files
+        // the row counts, so only the rest is said to go.
+        untracked += deletableFileCount(f)
         if (f.kind === "directory") {
           folders += 1
           nestedInside += f.nested_repositories ?? 0
           worktreesInside += f.linked_worktrees ?? 0
+          bare.push(...(f.bare_repositories ?? []))
+          filesInBare += f.files_in_bare_repositories ?? 0
         }
       } else {
         tracked += changedFileCount(f)
@@ -126,6 +137,8 @@ export function ConfirmDiscardFilesDialog({
     return {
       targets,
       leftOut,
+      bare,
+      filesInBare,
       untracked,
       tracked,
       repositories,
@@ -137,6 +150,8 @@ export function ConfirmDiscardFilesDialog({
   const {
     targets,
     leftOut,
+    bare,
+    filesInBare,
     untracked,
     tracked,
     repositories,
@@ -193,6 +208,7 @@ export function ConfirmDiscardFilesDialog({
           leftOut.length === 1 ? "is" : "are"
         } left out: ${joinProse(leftOut, "; ")}.`
       : null
+  const bareKept = bareRepositoriesKept(bare, filesInBare, "them")
   const closing = "This action cannot be undone."
   const body = sentences.join(" ")
 
@@ -211,6 +227,7 @@ export function ConfirmDiscardFilesDialog({
         </DialogHeader>
         <p className="text-sm text-destructive">
           {body}
+          {bareKept && <> {renderProse(bareKept)}</>}
           {leftOutSentence && <> {renderProse(leftOutSentence)}</>} {closing}
         </p>
         {/* Misclick-safe spacing between the warning and the buttons. */}

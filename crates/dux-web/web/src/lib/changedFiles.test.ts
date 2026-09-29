@@ -8,6 +8,7 @@ import {
   CHANGED_FILE_FIELDS,
   changedFileCount,
   changedStatusLookup,
+  discardActsOn,
   folderCountLabel,
   reconcileSelection,
   reuseUnchangedFiles,
@@ -210,6 +211,8 @@ describe("reuseUnchangedFiles", () => {
       fingerprint: "aa",
       nested_repositories_not_staged: 0,
       linked_worktrees_not_staged: 0,
+      bare_repositories: ["a.git"],
+      files_in_bare_repositories: 0,
     }
     expect(Object.keys(CHANGED_FILE_FIELDS).sort()).toEqual(Object.keys(full).sort())
     const changed: { [K in keyof ChangedFileView]-?: ChangedFileView[K] } = {
@@ -227,6 +230,8 @@ describe("reuseUnchangedFiles", () => {
       fingerprint: "bb",
       nested_repositories_not_staged: 1,
       linked_worktrees_not_staged: 1,
+      bare_repositories: ["b.git"],
+      files_in_bare_repositories: 1,
     }
     for (const key of Object.keys(full) as (keyof ChangedFileView)[]) {
       const next = { ...full, [key]: changed[key] }
@@ -437,6 +442,33 @@ describe("folded folders in the totals", () => {
     expect(folderCountLabel(staged(2, 1))).toBe(
       "5 files \u00b7 2 nested repositories and 1 worktree of this repository not staged",
     )
+  })
+
+  // A list field compares by what it holds: a refetch hands over a fresh
+  // array for the same bare repositories, which must not count as a change.
+  it("compares the bare repositories by what they name", () => {
+    const before: ChangedFileView = {
+      ...file("vendor", "??"),
+      kind: "directory",
+      file_count: 3,
+      bare_repositories: ["vendor/a.git"],
+    }
+    const same: ChangedFileView = { ...before, bare_repositories: ["vendor/a.git"] }
+    const moved: ChangedFileView = { ...before, bare_repositories: ["vendor/b.git"] }
+    expect(reuseUnchangedFiles([before], [same])[0]).toBe(before)
+    expect(reuseUnchangedFiles([before], [moved])[0]).toBe(moved)
+  })
+
+  it("does not offer a delete for a folder whose files all sit in bare repositories", () => {
+    const allBare: ChangedFileView = {
+      ...file("top.git", "??"),
+      kind: "directory",
+      file_count: 12,
+      bare_repositories: ["top.git"],
+      files_in_bare_repositories: 12,
+    }
+    expect(discardActsOn(allBare)).toBe(false)
+    expect(discardActsOn({ ...allBare, file_count: 13 })).toBe(true)
   })
 
   it("compares the folder fields like every other field", () => {

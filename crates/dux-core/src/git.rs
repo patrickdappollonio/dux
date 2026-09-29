@@ -3917,23 +3917,7 @@ fn refuse_unplain_path(path: &str, what: &str) -> Result<()> {
 /// case, a linked worktree of this same repository; a route asks this first so
 /// the refusal reaches the browser as a refusal rather than as a git failure.
 pub fn stage_refusal(worktree_path: &Path, path: &str) -> Option<String> {
-    if let Some(repository) = folding::git_directory_above(worktree_path, path, &mut HashMap::new())
-    {
-        return Some(format!(
-            "\"{path}\" is inside \"{repository}/\", which is a repository's own git \
-             directory; it is not a file of this repository, so it is not staged."
-        ));
-    }
     let dir = worktree_path.join(path);
-    // git reads a bare repository as a folder of files, so adding one would
-    // copy its objects and refs into this repository rather than link it.
-    if fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) && folding::is_git_directory(&dir)
-    {
-        return Some(format!(
-            "\"{path}/\" is a bare repository of its own; staging it would add its internal \
-             files (objects, refs) to this repository, not a link to it. Leave it untracked."
-        ));
-    }
     folding::is_linked_worktree_dir(worktree_path, &dir).then(|| {
         format!(
             "\"{path}/\" is a worktree of this same repository; staging it would record a link \
@@ -4047,13 +4031,14 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
 /// the lie this stops.
 fn refuse_empty_untracked_folder(worktree_path: &Path, dir: &str) -> Result<folding::FolderInside> {
     let inside = folding::folder_inside(worktree_path, dir)?;
-    if inside.has_file {
+    if inside.deletable_files().next().is_some() {
         return Ok(inside);
     }
+    // The bare repositories a delete keeps are repositories of their own too.
     let (repositories, worktrees) = inside.counts();
     Err(anyhow::Error::new(Refusal(nothing_in_folder(
         dir,
-        repositories,
+        repositories + inside.bare.len(),
         worktrees,
         FolderAction::Delete,
     ))))
@@ -4117,7 +4102,7 @@ fn delete_counted_files(
 ) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let mut parents: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
-    for record in &inside.files {
+    for record in inside.deletable_files() {
         let path = worktree_path.join(std::ffi::OsStr::from_bytes(record));
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -4376,6 +4361,18 @@ pub fn discard_classify(worktree_path: &Path, path: &str) -> Result<bool> {
         Some(row) if row.path != path && !confirmed(&unstaged, ChangesSide::Unstaged)? => None,
         other => other,
     };
+    // A file inside a repository's git directory (a bare repository in a
+    // folded folder) is one git lists as a plain file, and a folder delete
+    // keeps it: it is not discarded through the folder either.
+    if under_a_folder
+        && let Some(repository) =
+            folding::git_directory_above(worktree_path, path, &mut HashMap::new())
+    {
+        anyhow::bail!(
+            "\"{path}\" is inside \"{repository}/\", a repository's own git directory, which \
+             a delete keeps, so there is nothing to discard."
+        );
+    }
     if under_a_folder && staged_row.is_none() && unstaged_row.is_none() {
         anyhow::bail!(
             "\"{path}\" is not a change git lists: it may be ignored, missing, or inside a \

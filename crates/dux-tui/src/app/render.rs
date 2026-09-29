@@ -8208,7 +8208,7 @@ impl App {
                 name_chip(&format!("{file_path}/"), &self.theme),
                 Span::raw(format!(
                     " and the {} inside it?",
-                    dux_core::model::count_words(contents.file_count, "file", "files")
+                    dux_core::model::count_words(contents.deletable_files(), "file", "files")
                 )),
             ],
             dux_core::model::ChangedFileKind::NestedRepository => vec![
@@ -8229,6 +8229,7 @@ impl App {
         // not entered. A repository row is the opposite case and warns that
         // its whole history goes with it.
         let mut notes: Vec<String> = Vec::new();
+        let mut bare_note: Option<Line<'static>> = None;
         let mut warning = " This action cannot be undone.".to_string();
         match kind {
             dux_core::model::ChangedFileKind::File => {}
@@ -8264,6 +8265,7 @@ impl App {
                     ));
                 }
                 notes.push(" Files the repository ignores inside it are kept.".to_string());
+                bare_note = bare_repositories_kept_line(contents, &self.theme);
             }
             dux_core::model::ChangedFileKind::NestedRepository => {
                 warning = " This removes a whole repository, including its history and any \
@@ -8276,6 +8278,7 @@ impl App {
             }
         }
         let mut lines = vec![Line::from(""), Line::from(question)];
+        lines.extend(bare_note);
         lines.extend(notes.into_iter().map(Line::from));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -24768,4 +24771,43 @@ mod tests {
             "the buttons must not move when the box is toggled"
         );
     }
+}
+
+/// The folder delete dialog's line naming the bare repositories inside the
+/// folder, which the delete keeps along with the files they hold (counted in
+/// the row's files, because to git they are ordinary files). Up to three are
+/// named as chips and the rest counted; `None` when there are none.
+fn bare_repositories_kept_line(
+    contents: &dux_core::model::FolderContents,
+    theme: &Theme,
+) -> Option<Line<'static>> {
+    let bare = &contents.bare_repositories;
+    if bare.is_empty() {
+        return None;
+    }
+    const NAMED: usize = 3;
+    let one = bare.len() == 1;
+    let mut spans = vec![Span::raw(if one {
+        " The bare repository "
+    } else {
+        " The bare repositories "
+    })];
+    let named = bare.len().min(NAMED);
+    for (index, path) in bare.iter().take(NAMED).enumerate() {
+        if index > 0 {
+            let last = index + 1 == named && bare.len() <= NAMED;
+            spans.push(Span::raw(if last { " and " } else { ", " }));
+        }
+        spans.push(name_chip(&format!("{path}/"), theme));
+    }
+    if bare.len() > NAMED {
+        spans.push(Span::raw(format!(" and {} more", bare.len() - NAMED)));
+    }
+    spans.push(Span::raw(format!(
+        " inside it {} kept, with the {} {}.",
+        if one { "is" } else { "are" },
+        dux_core::model::count_words(contents.files_in_bare_repositories, "file", "files"),
+        if one { "it holds" } else { "they hold" },
+    )));
+    Some(Line::from(spans))
 }

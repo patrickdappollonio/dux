@@ -12,11 +12,12 @@ import {
   changedFileCount,
   countWords,
   fileStatusMeta,
+  deletableFileCount,
   joinWords,
   onlyRepositoriesWords,
 } from "@/lib/changedFiles"
 import type { LeftOut } from "@/lib/git"
-import { chip, prose, type Prose } from "@/lib/prose"
+import { chip, joinProse, prose, type Prose } from "@/lib/prose"
 import type { ChangedFileView } from "@/lib/types"
 
 /**
@@ -119,7 +120,7 @@ export function discardLeftOutReason(file: ChangedFileView): Prose | null {
   if (file.kind === "linked_worktree") {
     return prose`${chip(`${file.path}/`)} is a worktree of this repository, which the worktree manager removes`
   }
-  if (file.kind === "directory" && (file.file_count ?? 0) === 0) {
+  if (file.kind === "directory" && deletableFileCount(file) === 0) {
     return prose`${chip(`${file.path}/`)} holds ${onlyRepositoriesWords(file)}, which a delete keeps`
   }
   return null
@@ -162,4 +163,31 @@ export function firstChangedKind(
     if (now !== undefined && now.kind !== before.kind) return { before, now }
   }
   return null
+}
+
+// The delete dialogs' sentence naming the bare repositories a folder delete
+// keeps, with the files they hold (counted in the row, because to git they
+// are ordinary files). Up to three are named as chips and the rest counted;
+// null when there are none. `where` is "it" for one folder, "them" for many.
+export function bareRepositoriesKept(
+  bare: readonly string[],
+  files: number,
+  where: "it" | "them",
+): Prose | null {
+  if (bare.length === 0) return null
+  const NAMED = 3
+  const one = bare.length === 1
+  const names = bare.slice(0, NAMED).map((path) => [chip(`${path}/`)] as Prose)
+  const more = bare.length > NAMED ? [[`${bare.length - NAMED} more`] as Prose] : []
+  const listed = [...names, ...more]
+  const joined =
+    listed.length === 1
+      ? listed[0]!
+      : joinProse(
+          [joinProse(listed.slice(0, -1), ", "), listed[listed.length - 1]!],
+          " and ",
+        )
+  return prose`The bare ${one ? "repository" : "repositories"} ${joined} inside ${where} ${
+    one ? "is" : "are"
+  } kept, with the ${countWords(files, "file", "files")} ${one ? "it holds" : "they hold"}.`
 }

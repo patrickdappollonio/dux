@@ -899,6 +899,24 @@ pub struct FolderContents {
     pub repositories_not_staged: usize,
     /// Staged side only: the same, for worktrees of this repository.
     pub worktrees_not_staged: usize,
+    /// The bare repositories inside the folder (the folder itself when it is
+    /// one), as worktree-relative paths. git lists their contents as ordinary
+    /// files, so they are counted in `file_count`, staged with the folder and
+    /// listed when it is expanded; a folder delete keeps them, so the delete
+    /// dialogs name them.
+    pub bare_repositories: Vec<String>,
+    /// How many of `file_count` sit inside those bare repositories, which a
+    /// folder delete leaves: it deletes the rest.
+    pub files_in_bare_repositories: usize,
+}
+
+impl FolderContents {
+    /// How many of the folder's files a delete removes: all but those inside
+    /// bare repositories.
+    pub fn deletable_files(&self) -> usize {
+        self.file_count
+            .saturating_sub(self.files_in_bare_repositories)
+    }
 }
 
 impl ChangedFileKind {

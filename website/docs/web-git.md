@@ -42,8 +42,9 @@ are listed one by one. Every count of changed files, the
 group badges included, counts the files inside a folder rather than one for the folder. A
 git repository of its own inside a folder is counted apart, as in `3 files and 1 nested
 repository`, and a folder that is itself a repository says "nested repository" instead of a
-count, because dux does not look inside it. A bare repository counts as a repository too,
-never as the files it is made of, so staging and discarding a folder leave it alone as well.
+count, because dux does not look inside it. A bare repository is different: to git it is a
+folder of ordinary files, so dux counts and stages it as files, the way `git add` would.
+Discarding a folder keeps any bare repository inside it, and the dialog names it.
 
 A folder row has no diff to open. Its `⋯` menu stages or unstages the whole folder at once,
 and discards it after a confirmation, the same one a file gets. Staging a folder stages its

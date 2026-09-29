@@ -312,6 +312,13 @@ export interface ChangedFileView {
   nested_repositories_not_staged?: number
   /** Staged side only: the same, for worktrees of this repository. */
   linked_worktrees_not_staged?: number
+  /** The bare repositories inside a `"directory"` row (worktree-relative
+   * paths; the folder itself when it is one). To git their contents are
+   * ordinary files, counted in `file_count`; a folder delete keeps them.
+   * Absent when there are none. */
+  bare_repositories?: string[]
+  /** How many of `file_count` sit inside those bare repositories. */
+  files_in_bare_repositories?: number
 }
 
 export interface ChangedFiles {
