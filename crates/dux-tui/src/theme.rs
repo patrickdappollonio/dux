@@ -85,6 +85,19 @@ pub const TYPING_GLYPH: &str = "▍";
 /// glyph without re-pinning.
 pub const STANDALONE_GLYPH: &str = "✷";
 
+/// The project glyph, worn (in the row's muted tone) ahead of the project name
+/// on a managed agent row's second line. It is U+1F5C0 FOLDER, mirroring the
+/// folder icon the web UI draws in the same place, so one picture means
+/// "project" on both surfaces.
+///
+/// The codepoint has East Asian Width "N" and no default emoji presentation,
+/// so the `CellWidth` machinery the row layout measures with counts it as one
+/// cell; a test pins that, and the bare codepoint, because an emoji variation
+/// selector would ask the host terminal for a two-cell colour emoji and shear
+/// the row. A terminal font that lacks the glyph falls back to another font
+/// for it, which is the same risk the standalone star already carries.
+pub const PROJECT_GLYPH: &str = "\u{1F5C0}";
+
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.
 const DUX_DARK_TOML: &str = include_str!("../../../assets/themes/dux_dark.toml");
@@ -902,6 +915,23 @@ mod tests {
             STANDALONE_GLYPH.cell_width(),
             1,
             "the standalone glyph must be one cell wide in the width machinery the rows trust"
+        );
+    }
+
+    /// The project folder glyph is pinned the same way as the standalone
+    /// star: one cell in the `CellWidth` machinery the row layout advances
+    /// columns with. It must also be the bare codepoint, U+1F5C0 alone: an
+    /// emoji variation selector would ask the host terminal for a two-cell
+    /// colour emoji the width machinery still counts as one.
+    #[test]
+    fn the_project_glyph_is_a_bare_folder_that_measures_one_cell_wide() {
+        use ratatui::buffer::CellWidth;
+        assert_eq!(PROJECT_GLYPH, "\u{1F5C0}", "the bare FOLDER codepoint");
+        assert_eq!(PROJECT_GLYPH.chars().count(), 1, "no variation selector");
+        assert_eq!(
+            PROJECT_GLYPH.cell_width(),
+            1,
+            "the project glyph must be one cell wide in the width machinery the rows trust"
         );
     }
 

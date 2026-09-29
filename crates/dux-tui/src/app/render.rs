@@ -1656,7 +1656,10 @@ impl App {
             self.engine.working_copy_missing(&session.id),
         ) {
             AgentRowOwnerTag::Project(ProjectTagKind::Healthy, project_name) => (
-                Span::styled("  ※ ", Style::default().fg(muted)),
+                Span::styled(
+                    format!("  {} ", crate::theme::PROJECT_GLYPH),
+                    Style::default().fg(muted),
+                ),
                 Some(Span::styled(project_name, Style::default().fg(muted))),
             ),
             AgentRowOwnerTag::Project(ProjectTagKind::PathMissing, project_name) => {
@@ -1790,7 +1793,8 @@ impl App {
         let found = session
             .project_id()
             .and_then(|project_id| self.engine.projects.iter().find(|p| p.id == project_id));
-        // The project is marked with `※` rather than a word, indented so the
+        // The project is marked with the folder glyph (`theme::PROJECT_GLYPH`,
+        // the web's folder icon) rather than a word, indented so the
         // glyph column lines up with the name on line one. The marker span
         // includes that indent; the project name is a separate, truncatable span.
         //
@@ -11816,10 +11820,10 @@ fn terminal_row_lines(
         (word.to_string(), muted)
     };
     // A two-space indent aligns the owner marker under the label column,
-    // echoing the agent row's "  ※ " project marker. An owned terminal wears
-    // the muted return arrow ("owned by"); a standalone terminal wears the
-    // standalone star and its directory in the standalone identity tone, the
-    // one indicator every standalone row shares.
+    // echoing the agent row's project marker (`theme::PROJECT_GLYPH`). An
+    // owned terminal wears the muted return arrow ("owned by"); a standalone
+    // terminal wears the standalone star and its directory in the standalone
+    // identity tone, the one indicator every standalone row shares.
     let (marker, marker_fg) = if standalone {
         (
             format!("  {} ", crate::theme::STANDALONE_GLYPH),
@@ -13549,7 +13553,7 @@ mod tests {
 
         // The managed row is untouched: the project marker and name keep the
         // muted provider-label color they always had.
-        let (mx, my) = cell_at("※");
+        let (mx, my) = cell_at(crate::theme::PROJECT_GLYPH);
         assert_eq!(
             buf[(mx, my)].fg,
             app.theme.provider_label_fg,
@@ -13559,11 +13563,80 @@ mod tests {
         assert_eq!(
             buf[project_start].symbol(),
             "d",
-            "expected `demo` after `※ `"
+            "expected `demo` after the project glyph"
         );
         assert_eq!(
             buf[project_start].fg, app.theme.provider_label_fg,
             "the managed row's project name must stay muted"
+        );
+    }
+
+    /// The project folder glyph must hold exactly one column in the rendered
+    /// row, not merely in isolation: it sits under the name on line one (the
+    /// indent the marker exists for), the project name follows two cells
+    /// later, the state word after its separator lands at the column the
+    /// widths add up to, and a standalone row's star and folder share the
+    /// same columns. A glyph measured two cells wide would push every one of
+    /// these one column right.
+    #[test]
+    fn the_project_glyph_keeps_the_agent_rows_columns_in_line() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let mut standalone = app.engine.sessions[0].clone();
+        standalone.id = "session-2".to_string();
+        standalone.title = Some("Notes".to_string());
+        standalone.workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/srv/notes".to_string(),
+            });
+        app.engine.sessions.push(standalone);
+        app.focus = FocusPane::Left;
+        app.rebuild_left_items();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let cell_at = |sym: &str| {
+            (0..buf.area.height)
+                .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+                .find(|&(x, y)| buf[(x, y)].symbol() == sym)
+                .unwrap_or_else(|| panic!("no `{sym}` cell rendered"))
+        };
+        let run = |x: u16, y: u16, len: u16| -> String {
+            (x..x + len).map(|cx| buf[(cx, y)].symbol()).collect()
+        };
+
+        let (mx, my) = cell_at(crate::theme::PROJECT_GLYPH);
+        assert_eq!(
+            buf[(mx + 1, my)].symbol(),
+            " ",
+            "the glyph must not claim the gap cell after it"
+        );
+        assert_eq!(
+            run(mx, my - 1, 12),
+            "agent-branch",
+            "the glyph sits under the first letter of the name on line one"
+        );
+        assert_eq!(
+            run(mx + 2, my, 4),
+            "demo",
+            "the project name follows the glyph"
+        );
+        let word = agent_state_word(app.engine.sessions[0].status, false, false, false);
+        assert_eq!(
+            run(mx + 6, my, 3 + word.chars().count() as u16),
+            format!(" · {word}"),
+            "the state word stays at the column the row's widths add up to"
+        );
+
+        let (hx, _) = cell_at(crate::theme::STANDALONE_GLYPH);
+        assert_eq!(
+            hx, mx,
+            "the project glyph and the standalone star share one column"
         );
     }
 
@@ -13941,7 +14014,7 @@ mod tests {
                         .map(|x| buf[(x, y)].symbol().to_string())
                         .collect::<String>()
                 })
-                .find(|line| line.contains('※'))
+                .find(|line| line.contains(crate::theme::PROJECT_GLYPH))
                 .expect("the agent row's line two is on screen")
         };
 
@@ -19003,7 +19076,7 @@ mod tests {
     fn fit_agent_meta_line_fits_without_truncation() {
         let out = fit_agent_meta_line(
             80,
-            Span::raw("  ※ ".to_string()),
+            Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH)),
             Some(Span::raw("proj".to_string())),
             Span::raw("Idle".to_string()),
             None,
@@ -19013,7 +19086,10 @@ mod tests {
                 highlight: None,
             },
         );
-        assert_eq!(spans_text(&out), "  ※ proj · Idle");
+        assert_eq!(
+            spans_text(&out),
+            format!("  {} proj · Idle", crate::theme::PROJECT_GLYPH)
+        );
         assert!(!spans_text(&out).contains('…'));
     }
 
@@ -19021,7 +19097,7 @@ mod tests {
     fn fit_agent_meta_line_truncates_name_keeps_state_and_tabs() {
         let out = fit_agent_meta_line(
             30,
-            Span::raw("  ※ ".to_string()),
+            Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH)),
             Some(Span::raw("a-very-long-project-name".to_string())),
             Span::raw("Idle".to_string()),
             None,
@@ -19033,7 +19109,10 @@ mod tests {
         );
         assert!(spans_width(&out) <= 30, "never overflows the width");
         let text = spans_text(&out);
-        assert!(text.starts_with("  ※ "), "marker stays: {text:?}");
+        assert!(
+            text.starts_with(&format!("  {} ", crate::theme::PROJECT_GLYPH)),
+            "marker stays: {text:?}"
+        );
         assert!(text.contains("Idle"), "state word stays fixed: {text:?}");
         assert!(text.contains("3 tabs"), "tab count stays fixed: {text:?}");
         assert!(
@@ -19046,7 +19125,7 @@ mod tests {
     fn fit_agent_meta_line_shares_budget_between_name_and_branch() {
         let out = fit_agent_meta_line(
             34,
-            Span::raw("  ※ ".to_string()),
+            Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH)),
             Some(Span::raw("longproject".to_string())),
             Span::raw("Working".to_string()),
             Some(Span::raw("feature/some-long-branch".to_string())),
