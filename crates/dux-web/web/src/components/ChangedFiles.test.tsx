@@ -1271,20 +1271,20 @@ describe("the Changes pane header's Open editor button", () => {
     expect(button.parentElement!.className).toContain("gap-2")
   })
 
-  // Same geometry as the `⋯` (including the touch floor), quieter weight: this
-  // control navigates to another surface rather than acting on the changes.
-  it("matches the ⋯ on geometry and stays quieter than it", () => {
+  // One cluster, one look: the editor button wears the `⋯`'s outline variant at
+  // the same height token (including the touch floor), so it reads as a button
+  // rather than a bare glyph. jsdom cannot paint, so the shared Button's variant
+  // and size classes are what is pinned.
+  it("matches the ⋯ on variant and geometry", () => {
     render(<ChangedFiles />)
     const button = editorButton()
     const ellipsis = actionsTrigger()
 
-    expect(button.className).toContain("size-8")
-    expect(button.className).toContain("max-md:size-11")
-    expect(ellipsis.className).toContain("size-8")
-    expect(ellipsis.className).toContain("max-md:size-11")
-
-    expect(ellipsis.className).toContain("border-border")
-    expect(button.className).not.toContain("border-border")
+    for (const control of [button, ellipsis]) {
+      expect(control.className).toContain("size-8")
+      expect(control.className).toContain("max-md:size-11")
+      expect(control.className).toContain("border-border")
+    }
   })
 
   it("names itself for a screen reader and hints the same words on hover", () => {

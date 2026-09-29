@@ -498,8 +498,10 @@ function FileGroup({
 // standalone editor's address, which also keeps long-press and middle-click
 // doing what the browser makes them do.
 //
-// It matches the `⋯` on geometry and is quieter than it: this control navigates
-// rather than acting, and the header's one outline control is the menu of acts.
+// It matches the `⋯` on variant as well as geometry. It navigates rather than
+// acts, and the tenet would let it be quieter, but a ghost glyph beside an
+// outlined square read as a decoration rather than a control, so the two share
+// the header's one outline treatment.
 function OpenEditorButton({
   sessionId,
   isMobile,
@@ -511,7 +513,7 @@ function OpenEditorButton({
   const label = "Open editor"
   const shared = {
     size: "icon",
-    variant: "ghost",
+    variant: "outline",
     "aria-label": label,
     className: "max-md:size-11",
   } as const
