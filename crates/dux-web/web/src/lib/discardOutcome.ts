@@ -217,3 +217,26 @@ export function bareRepositoriesKept(
     one ? "is" : "are"
   } kept, with the ${countWords(files, "file", "files")} ${one ? "it holds" : "they hold"}.`
 }
+
+// Why a stage leaves `file` out, the stage twin of `discardLeftOutReason`, or
+// null when a stage acts on it. The same rule as `stageActsOn`.
+export function stageLeftOutReason(file: ChangedFileView): Prose | null {
+  if (file.kind === "linked_worktree") {
+    return prose`${chip(`${file.path}/`)} is a worktree of this repository, which staging would record as a link`
+  }
+  if (file.kind === "directory" && (file.file_count ?? 0) === 0) {
+    return prose`${chip(`${file.path}/`)} holds ${onlyRepositoriesWords(file)}, which staging a folder leaves out`
+  }
+  return null
+}
+
+// The notice for the selected rows a bulk action left out, with why, or null
+// when it left none out. Those rows did not move, and nothing else on screen
+// says so.
+export function bulkLeftOutNotice(reasons: readonly Prose[]): Prose | null {
+  if (reasons.length === 0) return null
+  return prose`${reasons.length} selected ${reasons.length === 1 ? "row was" : "rows were"} left out: ${joinProse(
+    reasons,
+    "; ",
+  )}.`
+}

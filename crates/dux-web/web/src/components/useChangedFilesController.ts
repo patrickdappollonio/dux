@@ -11,7 +11,14 @@ import { formatRegularCount } from "@/lib/formatRegularCount"
 import { git, type BatchResult, type DiscardConfirmation } from "@/lib/git"
 import { notifyError, notifyInfo, notifySuccess, notifyWarning } from "@/lib/notify"
 import { chip, joinProse, prose, type Prose } from "@/lib/prose"
-import { discardOutcome, leftOutNotice, selectedFileCount } from "@/lib/discardOutcome"
+import {
+  bulkLeftOutNotice,
+  discardLeftOutReason,
+  discardOutcome,
+  leftOutNotice,
+  selectedFileCount,
+  stageLeftOutReason,
+} from "@/lib/discardOutcome"
 import { discardActsOn, stageActsOn } from "@/lib/changedFiles"
 import type { ChangesSlice } from "@/lib/store"
 import type { ChangedFileView } from "@/lib/types"
@@ -248,6 +255,21 @@ async function runDiscardTransaction({
   discardResultToast(result, rows)
 }
 
+// Why each selected row a bulk action will leave out is left out, in the
+// order the list shows them.
+function leftOutReasons(
+  selected: ReadonlySet<string>,
+  rows: readonly ChangedFileView[],
+  reason: (file: ChangedFileView) => Prose | null,
+): Prose[] {
+  if (selected.size === 0) return []
+  return rows.flatMap((file) => {
+    if (!selected.has(file.path)) return []
+    const why = reason(file)
+    return why === null ? [] : [why]
+  })
+}
+
 export function useChangedFilesController(
   selectedSessionId: string | null,
   changes: ChangesSlice,
@@ -322,6 +344,10 @@ export function useChangedFilesController(
         : new Set<string>()
     const paths = [...model.selected[section]].filter((path) => !unstageable.has(path))
     if (busy !== null || paths.length === 0) return
+    const leftOut =
+      verb === "stage"
+        ? leftOutReasons(model.selected.unstaged, changes.unstaged, stageLeftOutReason)
+        : []
     setBusy(verb)
     try {
       await runBulkTransaction({
@@ -331,6 +357,8 @@ export function useChangedFilesController(
         rows: verb === "stage" ? changes.unstaged : changes.staged,
         dropActed,
       })
+      const notice = bulkLeftOutNotice(leftOut)
+      if (notice) notifyInfo(notice)
     } finally {
       setBusy(null)
     }
@@ -342,6 +370,7 @@ export function useChangedFilesController(
   ): Promise<void> {
     setDiscarding(false)
     if (busy !== null || paths.length === 0) return
+    const leftOut = leftOutReasons(model.selected.unstaged, changes.unstaged, discardLeftOutReason)
     setBusy("discard")
     try {
       await runDiscardTransaction({
@@ -351,6 +380,8 @@ export function useChangedFilesController(
         rows: changes.unstaged,
         dropActed,
       })
+      const notice = bulkLeftOutNotice(leftOut)
+      if (notice) notifyInfo(notice)
     } finally {
       setBusy(null)
     }

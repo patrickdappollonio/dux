@@ -187,6 +187,7 @@ beforeEach(() => {
   unstageMany.mockClear()
   discardMany.mockClear()
   notifySuccess.mockClear()
+  notifyInfo.mockClear()
   notifyWarning.mockClear()
   notifyError.mockClear()
   mockState = {
@@ -1626,6 +1627,80 @@ describe("a folded folder row", () => {
     render(<ChangedFiles />)
     fireEvent.click(screen.getByText("node_modules/"))
     expect(openEditor).not.toHaveBeenCalled()
+  })
+
+  function withWorktree(): DuxState {
+    const base = withFolder()
+    return {
+      ...base,
+      changes: {
+        ...base.changes,
+        unstaged: [
+          ...base.changes.unstaged,
+          {
+            path: "inner-wt",
+            status: "??",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            kind: "linked_worktree",
+          },
+        ],
+      },
+    } as unknown as DuxState
+  }
+
+  // A verb with nothing to act on is not offered as a click that silently
+  // does nothing: it is disabled, and its tooltip says why.
+  it("disables a bulk verb whose count is zero and says why", () => {
+    mockState = withWorktree()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Select inner-wt"))
+
+    const stage = bar().getByRole("button", { name: /Stage 0/ })
+    const discard = bar().getByRole("button", { name: /Discard 0/ })
+    expect((stage as HTMLButtonElement).disabled).toBe(true)
+    expect((discard as HTMLButtonElement).disabled).toBe(true)
+    const hints = bar()
+      .getAllByTestId("tooltip-content")
+      .map((el) => el.textContent ?? "")
+    expect(hints.some((text) => text.startsWith("Nothing selected can be staged"))).toBe(true)
+    expect(hints.some((text) => text.startsWith("Nothing selected can be discarded"))).toBe(true)
+  })
+
+  // In a mixed selection the rows a bulk stage leaves out are named with why,
+  // because they did not move and nothing on screen says so.
+  it("names the rows a mixed bulk stage left out", async () => {
+    mockState = withWorktree()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Select node_modules"))
+    fireEvent.click(screen.getByLabelText("Select inner-wt"))
+
+    fireEvent.click(bar().getByRole("button", { name: /Stage 28747/ }))
+    await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
+
+    expect(stageMany).toHaveBeenCalledWith("s1", ["node_modules"])
+    const notice = notifyInfo.mock.calls.map((call) => proseText(call[0] as Prose))
+    expect(notice).toContain(
+      "1 selected row was left out: inner-wt/ is a worktree of this repository, which staging would record as a link.",
+    )
+  })
+
+  it("names the rows a mixed bulk discard left out", async () => {
+    mockState = withWorktree()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Select node_modules"))
+    fireEvent.click(screen.getByLabelText("Select inner-wt"))
+
+    fireEvent.click(bar().getByRole("button", { name: /Discard 28747/ }))
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }))
+    await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
+
+    const notice = notifyInfo.mock.calls.map((call) => proseText(call[0] as Prose))
+    expect(notice).toContain(
+      "1 selected row was left out: inner-wt/ is a worktree of this repository, which the worktree manager removes.",
+    )
   })
 
   it("leaves a worktree of this repository out of the bar's counts", () => {

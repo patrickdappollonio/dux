@@ -730,6 +730,33 @@ function BusyGlyph({ busy }: { busy: boolean }) {
   return busy ? <Loader2 className="motion-safe:animate-spin" /> : null
 }
 
+// Why a bulk verb is disabled when every selected row is one it would leave
+// out, rather than a click that silently does nothing.
+const NOTHING_TO_STAGE =
+  "Nothing selected can be staged: a worktree of this repository, and a folder holding only repositories, are left out of a stage."
+const NOTHING_TO_DISCARD =
+  "Nothing selected can be discarded: a worktree of this repository, and a folder holding only repositories, have nothing a delete would remove."
+
+// A disabled button takes no pointer events, so its explanation hangs off a
+// focusable wrapper around it, through the shared tooltip. With nothing to
+// explain the button renders bare.
+function ExplainedWhenIdle({
+  why,
+  children,
+}: {
+  why: string | null
+  children: React.ReactElement
+}) {
+  if (why === null) return children
+  return (
+    <SimpleTooltip content={why}>
+      <span tabIndex={0} className="inline-flex">
+        {children}
+      </span>
+    </SimpleTooltip>
+  )
+}
+
 function BulkToolbar({
   selected,
   counts,
@@ -748,17 +775,21 @@ function BulkToolbar({
       className="flex flex-wrap items-center gap-2 border-b p-2"
     >
       {selected.unstaged.size > 0 ? (
-        <Button
-          variant="outline"
-          className={BULK_CONTROL}
-          disabled={busy !== null}
-          aria-busy={busy === "stage"}
-          onClick={() => onRunBulk("stage")}
+        <ExplainedWhenIdle
+          why={counts.unstaged === 0 ? NOTHING_TO_STAGE : null}
         >
-          <BusyGlyph busy={busy === "stage"} />
-          {busy !== "stage" ? <Plus /> : null}
-          Stage {counts.unstaged}
-        </Button>
+          <Button
+            variant="outline"
+            className={BULK_CONTROL}
+            disabled={busy !== null || counts.unstaged === 0}
+            aria-busy={busy === "stage"}
+            onClick={() => onRunBulk("stage")}
+          >
+            <BusyGlyph busy={busy === "stage"} />
+            {busy !== "stage" ? <Plus /> : null}
+            Stage {counts.unstaged}
+          </Button>
+        </ExplainedWhenIdle>
       ) : null}
       {selected.staged.size > 0 ? (
         <Button
@@ -774,17 +805,21 @@ function BulkToolbar({
         </Button>
       ) : null}
       {selected.unstaged.size > 0 ? (
-        <Button
-          variant="outline"
-          className={BULK_CONTROL}
-          disabled={busy !== null}
-          aria-busy={busy === "discard"}
-          onClick={onDiscard}
+        <ExplainedWhenIdle
+          why={counts.discard === 0 ? NOTHING_TO_DISCARD : null}
         >
-          <BusyGlyph busy={busy === "discard"} />
-          {busy !== "discard" ? <Undo2 /> : null}
-          Discard {counts.discard}…
-        </Button>
+          <Button
+            variant="outline"
+            className={BULK_CONTROL}
+            disabled={busy !== null || counts.discard === 0}
+            aria-busy={busy === "discard"}
+            onClick={onDiscard}
+          >
+            <BusyGlyph busy={busy === "discard"} />
+            {busy !== "discard" ? <Undo2 /> : null}
+            Discard {counts.discard}…
+          </Button>
+        </ExplainedWhenIdle>
       ) : null}
       {visibleCount > 0 ? (
         <Button
