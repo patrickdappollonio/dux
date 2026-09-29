@@ -93,6 +93,21 @@ struct ManagedCreatePlan {
     branch_provenance: BranchProvenance,
 }
 
+/// Who withholds the final of a create whose whole answer is "a row appeared
+/// and its pane launched": the web only.
+///
+/// The browser can vouch for it: the new row appears in a sidebar that is
+/// always on screen and the page navigates to the new agent's pane. The
+/// terminal UI cannot, so it gets the sentence. The whole create usually
+/// finishes inside one poll of its run loop (nothing slow happens in it
+/// without a pull or a startup command), so the drain that applies its busy
+/// and progress also applies its final and the spinner is never drawn. What is
+/// left is the selection moving to one row in a list that can scroll it out of
+/// view and a pane that looks like every other agent's pane, which is the
+/// small-indicator case of the confirmation rule.
+const ROW_AND_PANE_CREATE_QUIET: crate::statusline::QuietSurfaces =
+    crate::statusline::QuietSurfaces::WEB;
+
 /// How many review names a fresh copy of a pull request tries before giving
 /// up: `<branch>-review`, then `<branch>-review-2` up to this number. The limit
 /// bounds the git calls the worker makes.
@@ -461,11 +476,12 @@ impl CreatePlanContext<'_> {
             status_message,
             // Attaching to a branch that already existed is nowhere on screen,
             // so that arm stays loud. A plain create says only what the new row
-            // and its streaming pane already say.
+            // and its streaming pane already say, which only the web can vouch
+            // for.
             status_quiet: if attach_existing {
                 crate::statusline::QuietSurfaces::LOUD
             } else {
-                crate::statusline::QuietSurfaces::BOTH
+                ROW_AND_PANE_CREATE_QUIET
             },
             branch_name,
             worktree_path,
@@ -850,10 +866,10 @@ impl CreatePlanContext<'_> {
                 provider: project.default_provider.clone(),
                 source_branch: project.current_branch.clone(),
                 status_message: created,
-                // Quiet on both: the new row carries the pull-request chip and
-                // its pane launches and streams. A fresh copy's note makes it
-                // loud when the job folds the notes in.
-                status_quiet: crate::statusline::QuietSurfaces::BOTH,
+                // Quiet on the web: the new row carries the pull-request chip
+                // and its pane launches and streams. A fresh copy's note makes
+                // it loud when the job folds the notes in.
+                status_quiet: ROW_AND_PANE_CREATE_QUIET,
                 branch_name,
                 worktree_path,
                 owns_worktree: true,
@@ -1034,8 +1050,8 @@ impl CreatePlanContext<'_> {
                 provider: project.default_provider.clone(),
                 source_branch: branch_name.clone(),
                 status_message,
-                // Quiet on both: the new row appears and its pane launches.
-                status_quiet: crate::statusline::QuietSurfaces::BOTH,
+                // Quiet on the web: the new row appears and its pane launches.
+                status_quiet: ROW_AND_PANE_CREATE_QUIET,
                 branch_name,
                 worktree_path,
                 owns_worktree: false,
@@ -3246,8 +3262,8 @@ mod tests {
         assert_eq!(ordinary_final.tone, crate::statusline::StatusTone::Info);
         assert_eq!(
             ordinary_final.quiet_on,
-            crate::statusline::QuietSurfaces::BOTH,
-            "an ordinary create stays quiet, as before"
+            crate::statusline::QuietSurfaces::WEB,
+            "an ordinary create stays quiet on the web only"
         );
         let ordinary = engine
             .sessions
@@ -3600,15 +3616,16 @@ mod tests {
     }
 
     /// A plain create says only what the new row and its streaming pane already
-    /// say, so it is quiet on both surfaces. Attaching to a branch that already
-    /// existed is nowhere on screen, so that one speaks.
+    /// say, so the web, which can vouch for that, stays quiet; the terminal UI
+    /// cannot and gets the sentence. Attaching to a branch that already existed
+    /// is nowhere on screen, so that one speaks on both.
     #[test]
-    fn a_plain_create_is_quiet_on_both_surfaces_and_an_attach_is_not() {
+    fn a_plain_create_is_quiet_on_the_web_only_and_an_attach_is_loud() {
         let repo = init_test_repo();
         let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, false));
         assert!(run.failure.is_none(), "creation must succeed");
         assert!(run.status_message.unwrap().starts_with("Created "));
-        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::BOTH);
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::WEB);
 
         let repo = init_test_repo();
         create_branch(repo.path(), "already-here");
@@ -3627,9 +3644,9 @@ mod tests {
 
     /// The two other creates whose whole answer is "a row appeared and its pane
     /// launched": from a pull request (the row carries the chip) and from an
-    /// existing managed worktree.
+    /// existing managed worktree. Quiet on the web only, for the same reason.
     #[test]
-    fn the_pull_request_and_import_creates_are_quiet_on_both_surfaces() {
+    fn the_pull_request_and_import_creates_are_quiet_on_the_web_only() {
         let (_origin, repo) = pr_repo_with_fake_origin();
         let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
         assert!(run.failure.is_none(), "creation must succeed");
@@ -3639,7 +3656,7 @@ mod tests {
                 .expect("a create message")
                 .contains("from PR #42")
         );
-        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::BOTH);
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::WEB);
 
         let repo = init_test_repo();
         let run = drive_create_job_run(
@@ -3658,7 +3675,7 @@ mod tests {
                 .expect("a create message")
                 .starts_with("Imported ")
         );
-        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::BOTH);
+        assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::WEB);
     }
 
     /// The two creates whose sentence carries a copy rule the screen never

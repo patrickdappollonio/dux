@@ -9074,6 +9074,138 @@ mod tests {
         )
     }
 
+    /// Drain the worker channel one event at a time until `done` holds,
+    /// recording what the status line shows after every event, so a status that
+    /// is set and replaced within one drain is still seen.
+    fn drain_recording_statuses(
+        app: &mut App,
+        what: &str,
+        mut done: impl FnMut(&App) -> bool,
+    ) -> Vec<(StatusTone, String)> {
+        fn record(app: &App, seen: &mut Vec<(StatusTone, String)>) {
+            let now = (app.status.tone(), app.status.message());
+            if !now.1.is_empty() && seen.last() != Some(&now) {
+                seen.push(now);
+            }
+        }
+        let mut seen = Vec::new();
+        record(app, &mut seen);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !done(app) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}; statuses so far: {seen:?}"
+            );
+            while let Ok(event) = app.engine.worker_rx.try_recv() {
+                let reaction = app.engine.process_worker_event(event);
+                app.apply_reaction(reaction);
+                record(app, &mut seen);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        seen
+    }
+
+    /// Create an agent called `name` in the only project the way a user does:
+    /// the palette's New agent, the project row, the name prompt, Enter.
+    fn create_agent_through_the_name_prompt(app: &mut App, name: &str) {
+        run_via_project_list(app, "new-agent").expect("pick the project");
+        drain_until(app, "the name prompt", |app| {
+            matches!(app.prompt, PromptState::NameNewAgent { .. })
+        });
+        for c in name.chars() {
+            app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "Enter dispatches the create and closes the prompt, got {:?}",
+            app.prompt
+        );
+    }
+
+    const CREATED_SENTENCE: &str = "Created claude agent \"agent-one\" in project \"repo\". The new worktree is ready in a fresh session.";
+
+    /// Creating an agent on the terminal UI must say so for its whole life: a
+    /// spinner the moment it is dispatched, the worker's progress while the
+    /// worktree is made, and a sentence when it lands.
+    #[test]
+    fn creating_an_agent_shows_its_busy_progress_and_final_on_the_status_line() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        create_agent_through_the_name_prompt(&mut app, "agent-one");
+        let seen = drain_recording_statuses(&mut app, "the agent", |app| {
+            !app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::CreateAgent)
+        });
+        assert!(
+            seen.iter().any(|(tone, text)| *tone == StatusTone::Busy
+                && text.starts_with("Creating a new agent worktree \"agent-one\"")),
+            "the dispatch busy must reach the line: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|(tone, text)| *tone == StatusTone::Busy
+                && text.starts_with("Pulling latest changes")),
+            "the worker's progress must reach the line: {seen:?}"
+        );
+        assert_eq!(
+            seen.last(),
+            Some(&(StatusTone::Info, CREATED_SENTENCE.to_string())),
+            "the create must end on a sentence, not a blank line: {seen:?}"
+        );
+    }
+
+    /// The case the user hit. A create with nothing slow in it (a local
+    /// worktree, a provider that comes straight up) finishes well inside one
+    /// poll of the run loop, so a single drain applies its busy, every progress
+    /// line and its final together, and only what is left after that drain is
+    /// ever drawn. The busy cannot be what tells the user it happened; the final
+    /// has to.
+    #[test]
+    fn a_create_that_finishes_inside_one_drain_still_leaves_a_sentence() {
+        let (_root, _repo, mut app) = project_based_on_develop();
+        create_agent_through_the_name_prompt(&mut app, "agent-one");
+
+        // Hold every event the create posts until it has posted its last, then
+        // hand them all back for ONE drain, which is a create faster than a
+        // frame.
+        let mut held = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the create's worker"
+            );
+            match app.engine.worker_rx.try_recv() {
+                Ok(event) => {
+                    let last = matches!(
+                        event,
+                        WorkerEvent::AgentLaunchReady(_)
+                            | WorkerEvent::AgentLaunchFailed(_)
+                            | WorkerEvent::CreateAgentFailed { .. }
+                    );
+                    held.push(event);
+                    if last {
+                        break;
+                    }
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+        for event in held {
+            app.engine.worker_tx.send(event).unwrap();
+        }
+        app.drain_events();
+
+        assert_eq!(app.engine.sessions.len(), 1, "the agent was created");
+        assert_eq!(
+            (app.status.tone(), app.status.message()),
+            (StatusTone::Info, CREATED_SENTENCE.to_string()),
+            "a create the line never got to show a spinner for must still say it happened"
+        );
+    }
+
     fn worktree_has_commit(worktree: &Path, commit: &str) -> bool {
         dux_core::test_git::fixture_git()
             .args(["merge-base", "--is-ancestor", commit, "HEAD"])
