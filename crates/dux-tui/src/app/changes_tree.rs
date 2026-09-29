@@ -80,39 +80,245 @@ enum RowLookup<'a> {
     Gone,
 }
 
-/// Every row of one section, with expanded folders' contents under them.
-fn push_rows<'a>(
-    rows: &mut Vec<ChangesRow<'a>>,
-    files: &'a [ChangedFile],
-    expanded: Option<&'a HashMap<String, FolderListing>>,
+/// Where one row of an expanded section comes from, without borrowing it: the
+/// layout is cached across frames, and the rows are materialized from it on
+/// demand.
+#[derive(Clone, Copy, Debug)]
+enum RowSlot {
+    /// `files[index]` of the listing itself.
+    Top { index: usize, expanded: bool },
+    /// `children[index]` of the expanded folder `dirs[dir]`.
+    Child {
+        dir: usize,
+        index: usize,
+        depth: usize,
+        expanded: bool,
+    },
+    /// The expanded folder `dirs[dir]` is being listed.
+    Loading { depth: usize },
+    /// The expanded folder `dirs[dir]` failed to list.
+    Failed { dir: usize, depth: usize },
+}
+
+/// What a cached layout was built from. A list replaced by a new read lives
+/// in a new allocation (the old one is still alive while the new one is
+/// built), so its address and length tell a new list from the old; the
+/// generation covers every change to the expansions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LayoutKey {
+    session: Option<String>,
+    list_addr: usize,
+    list_len: usize,
+    generation: u64,
+}
+
+/// The cached row layout of one half of the pane.
+pub(crate) struct RowsLayout {
+    key: LayoutKey,
+    dirs: Vec<String>,
+    slots: Vec<RowSlot>,
+}
+
+fn layout_rows(
+    slots: &mut Vec<RowSlot>,
+    dirs: &mut Vec<String>,
+    files: &[ChangedFile],
+    parent: Option<usize>,
+    expanded: &HashMap<String, FolderListing>,
     depth: usize,
 ) {
-    for file in files {
-        let listing = expanded
-            .filter(|_| file.is_expandable())
-            .and_then(|map| map.get(&file.path));
-        rows.push(ChangesRow::Entry {
-            file,
-            depth,
-            expanded: listing.is_some(),
+    for (index, file) in files.iter().enumerate() {
+        let listing = file
+            .is_expandable()
+            .then(|| expanded.get(&file.path))
+            .flatten();
+        slots.push(match parent {
+            None => RowSlot::Top {
+                index,
+                expanded: listing.is_some(),
+            },
+            Some(dir) => RowSlot::Child {
+                dir,
+                index,
+                depth,
+                expanded: listing.is_some(),
+            },
         });
         let Some(listing) = listing else {
             continue;
         };
-        if let Some(message) = listing.error.as_deref() {
-            rows.push(ChangesRow::Failed {
+        dirs.push(file.path.clone());
+        let dir = dirs.len() - 1;
+        if listing.error.is_some() {
+            slots.push(RowSlot::Failed {
+                dir,
                 depth: depth + 1,
-                message,
             });
         } else if let Some(children) = listing.children.as_deref() {
-            push_rows(rows, children, expanded, depth + 1);
+            layout_rows(slots, dirs, children, Some(dir), expanded, depth + 1);
         } else {
-            rows.push(ChangesRow::Loading { depth: depth + 1 });
+            slots.push(RowSlot::Loading { depth: depth + 1 });
         }
     }
 }
 
 impl App {
+    /// Mark the expansions changed, so the cached row layout rebuilds.
+    fn bump_changes_tree(&mut self) {
+        self.changes_tree.generation = self.changes_tree.generation.wrapping_add(1);
+    }
+
+    /// The key the cached layout of `side` must match.
+    fn layout_key(&self, side: ChangesSide) -> LayoutKey {
+        let files = self.side_files(side);
+        LayoutKey {
+            session: self.selected_session().map(|s| s.id.clone()),
+            list_addr: files.as_ptr() as usize,
+            list_len: files.len(),
+            generation: self.changes_tree.generation,
+        }
+    }
+
+    /// Run `read` against the up-to-date layout of `side`, rebuilding it first
+    /// when the lists, the expansions or the agent moved.
+    fn with_layout<T>(&self, side: ChangesSide, read: impl FnOnce(&RowsLayout) -> T) -> T {
+        let key = self.layout_key(side);
+        let mut cache = self.changes_tree.rows_cache.borrow_mut();
+        let stale = cache.get(&side).is_none_or(|layout| layout.key != key);
+        if stale {
+            let mut slots = Vec::new();
+            let mut dirs = Vec::new();
+            if let Some(expanded) = self.expanded_folders(side) {
+                layout_rows(
+                    &mut slots,
+                    &mut dirs,
+                    self.side_files(side),
+                    None,
+                    expanded,
+                    0,
+                );
+            }
+            cache.insert(side, RowsLayout { key, dirs, slots });
+        }
+        read(cache.get(&side).expect("inserted just above"))
+    }
+
+    /// True when no folder of `side` is expanded, which is the common case
+    /// and needs no layout at all: the rows are the listing, one to one.
+    fn nothing_expanded(&self, side: ChangesSide) -> bool {
+        self.expanded_folders(side).is_none_or(HashMap::is_empty)
+    }
+
+    /// Turn one cached slot back into a row borrowing the lists.
+    fn materialize(
+        &self,
+        side: ChangesSide,
+        dirs: &[String],
+        slot: RowSlot,
+    ) -> Option<ChangesRow<'_>> {
+        let files = self.side_files(side);
+        let expanded = self.expanded_folders(side);
+        let listing = |dir: usize| expanded.and_then(|map| map.get(dirs.get(dir)?));
+        Some(match slot {
+            RowSlot::Top { index, expanded } => ChangesRow::Entry {
+                file: files.get(index)?,
+                depth: 0,
+                expanded,
+            },
+            RowSlot::Child {
+                dir,
+                index,
+                depth,
+                expanded,
+            } => ChangesRow::Entry {
+                file: listing(dir)?.children.as_deref()?.get(index)?,
+                depth,
+                expanded,
+            },
+            RowSlot::Loading { depth } => ChangesRow::Loading { depth },
+            RowSlot::Failed { dir, depth } => ChangesRow::Failed {
+                depth,
+                message: listing(dir)?.error.as_deref()?,
+            },
+        })
+    }
+
+    /// How many rows `section` shows, expanded folders included.
+    pub(crate) fn changes_row_count(&self, section: RightSection) -> usize {
+        let Some(side) = changes_side(section) else {
+            return 0;
+        };
+        if self.nothing_expanded(side) {
+            return self.side_files(side).len();
+        }
+        self.with_layout(side, |layout| layout.slots.len())
+    }
+
+    /// Row `index` of `section`.
+    pub(crate) fn changes_row(
+        &self,
+        section: RightSection,
+        index: usize,
+    ) -> Option<ChangesRow<'_>> {
+        let side = changes_side(section)?;
+        if self.nothing_expanded(side) {
+            return self
+                .side_files(side)
+                .get(index)
+                .map(|file| ChangesRow::Entry {
+                    file,
+                    depth: 0,
+                    expanded: false,
+                });
+        }
+        let found = self.with_layout(side, |layout| {
+            layout
+                .slots
+                .get(index)
+                .copied()
+                .map(|slot| (slot, layout.dirs.clone()))
+        });
+        let (slot, dirs) = found?;
+        self.materialize(side, &dirs, slot)
+    }
+
+    /// Rows `start..end` of `section`, which is all a frame draws.
+    pub(crate) fn changes_rows_window(
+        &self,
+        section: RightSection,
+        start: usize,
+        end: usize,
+    ) -> Vec<ChangesRow<'_>> {
+        let Some(side) = changes_side(section) else {
+            return Vec::new();
+        };
+        if self.nothing_expanded(side) {
+            let files = self.side_files(side);
+            let end = end.min(files.len());
+            return files
+                .get(start.min(end)..end)
+                .unwrap_or_default()
+                .iter()
+                .map(|file| ChangesRow::Entry {
+                    file,
+                    depth: 0,
+                    expanded: false,
+                })
+                .collect();
+        }
+        let (slots, dirs) = self.with_layout(side, |layout| {
+            let end = end.min(layout.slots.len());
+            (
+                layout.slots[start.min(end)..end].to_vec(),
+                layout.dirs.clone(),
+            )
+        });
+        slots
+            .into_iter()
+            .filter_map(|slot| self.materialize(side, &dirs, slot))
+            .collect()
+    }
+
     /// The listing one half of the pane shows, before any folder is expanded.
     fn side_files(&self, side: ChangesSide) -> &[ChangedFile] {
         match side {
@@ -133,21 +339,16 @@ impl App {
 
     /// The rows the pane shows for `section`: the listing, with every expanded
     /// folder's contents under it. `files_index` indexes this.
+    ///
+    /// Every row at once: for the rare readers that need them all (the file
+    /// search, the collapsed rail). A frame draws only its window.
     pub(crate) fn changes_rows(&self, section: RightSection) -> Vec<ChangesRow<'_>> {
-        let Some(side) = changes_side(section) else {
-            return Vec::new();
-        };
-        let files = self.side_files(side);
-        let mut rows = Vec::with_capacity(files.len());
-        push_rows(&mut rows, files, self.expanded_folders(side), 0);
-        rows
+        self.changes_rows_window(section, 0, usize::MAX)
     }
 
     /// The row the cursor is on.
     pub(crate) fn selected_changes_row(&self) -> Option<ChangesRow<'_>> {
-        self.changes_rows(self.right_section)
-            .into_iter()
-            .nth(self.files_index)
+        self.changes_row(self.right_section, self.files_index)
     }
 
     /// `Some(expanded)` when the cursor is on a folder that can be expanded,
@@ -247,6 +448,7 @@ impl App {
                     seen,
                 },
             );
+        self.bump_changes_tree();
         true
     }
 
@@ -262,6 +464,7 @@ impl App {
         };
         let inside = format!("{dir}/");
         map.retain(|path, _| path != dir && !path.starts_with(&inside));
+        self.bump_changes_tree();
         self.clamp_files_cursor();
     }
 
@@ -412,6 +615,8 @@ impl App {
                 )
             }
         };
+        // The folder's rows changed (its contents, or why they failed).
+        self.bump_changes_tree();
         if let Some(key) = pending.status_key {
             self.status
                 .set(Instant::now(), Some(key), message.0, message.1);
@@ -1420,6 +1625,37 @@ mod tests {
             "v node_modules/ 13"
         );
         assert!(app.changes_tree.by_session.contains_key("session-1"));
+    }
+
+    /// The row layout is cached across frames, so it has to follow a new read
+    /// of the lists and a change to the expansions, never serve stale rows.
+    #[test]
+    fn the_cached_rows_follow_the_lists_and_the_expansions() {
+        let (mut app, worktree) = repo_app();
+        app.handle_key(enter()).unwrap();
+        settle(&mut app, idle);
+        assert_eq!(app.current_files_len(), 6);
+
+        std::fs::write(worktree.join("later.md"), "later\n").unwrap();
+        load_lists(&mut app, &worktree);
+        assert_eq!(app.current_files_len(), 7, "a new read adds its row");
+        assert_eq!(
+            describe(&app, RightSection::Unstaged)
+                .last()
+                .map(String::as_str),
+            Some("notes.md 1")
+        );
+
+        app.files_index = describe(&app, RightSection::Unstaged)
+            .iter()
+            .position(|row| row == "v node_modules/ 13")
+            .expect("the expanded folder");
+        app.handle_key(enter()).unwrap();
+        assert_eq!(
+            app.current_files_len(),
+            3,
+            "collapsing drops the folder's rows"
+        );
     }
 
     #[test]

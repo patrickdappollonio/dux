@@ -7058,7 +7058,7 @@ impl App {
             && contains_point(area, column, row)
         {
             let index = usize::from(row.saturating_sub(area.y));
-            let rows = self.changes_rows(RightSection::Unstaged).len();
+            let rows = self.changes_row_count(RightSection::Unstaged);
             let file_index = (index < rows).then_some(index);
             return Some(MouseTarget::UnstagedFile(file_index));
         }
@@ -7066,7 +7066,7 @@ impl App {
             && contains_point(area, column, row)
         {
             let index = usize::from(row.saturating_sub(area.y));
-            let rows = self.changes_rows(RightSection::Staged).len();
+            let rows = self.changes_row_count(RightSection::Staged);
             let file_index = (index < rows).then_some(index);
             return Some(MouseTarget::StagedFile(file_index));
         }

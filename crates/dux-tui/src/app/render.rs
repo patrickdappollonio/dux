@@ -4447,20 +4447,29 @@ impl App {
         if self.right_collapsed {
             let focused = self.focus == FocusPane::Files;
             let block = self.themed_block("", focused);
-            let rows: Vec<_> = self
-                .changes_rows(RightSection::Unstaged)
-                .into_iter()
-                .chain(self.changes_rows(RightSection::Staged))
-                .collect();
-            let total = rows.len();
+            let unstaged_rows = self.changes_row_count(RightSection::Unstaged);
+            let total = unstaged_rows + self.changes_row_count(RightSection::Staged);
             // The rail is one status glyph per row, but a row is still a row:
-            // slice to the visible window exactly as the full pane does.
+            // slice to the visible window exactly as the full pane does, and
+            // build only the rows in it.
             let viewport = block.inner(area).height as usize;
             let window_start = list_window_start(total, Some(self.files_index), viewport);
+            let window_end = window_start.saturating_add(viewport).min(total);
+            let rows: Vec<_> = self
+                .changes_rows_window(
+                    RightSection::Unstaged,
+                    window_start.min(unstaged_rows),
+                    window_end.min(unstaged_rows),
+                )
+                .into_iter()
+                .chain(self.changes_rows_window(
+                    RightSection::Staged,
+                    window_start.saturating_sub(unstaged_rows),
+                    window_end.saturating_sub(unstaged_rows),
+                ))
+                .collect();
             let items: Vec<ListItem> = rows
                 .into_iter()
-                .skip(window_start)
-                .take(viewport)
                 .map(|row| {
                     // A placeholder row inside an expanded folder has no status.
                     let glyph = row
@@ -4620,7 +4629,9 @@ impl App {
         };
         // What the list shows: the listing with every expanded folder's
         // contents under it. The title still sums the listing itself.
-        let rows = self.changes_rows(section);
+        // How many rows there are, and later only the window that is drawn:
+        // building every row each frame is what a long list cannot afford.
+        let row_count = self.changes_row_count(section);
         let pane_focused = self.focus == FocusPane::Files;
         let is_active_section = pane_focused && self.right_section == section;
         let block = self.themed_block_line(
@@ -4680,9 +4691,10 @@ impl App {
         // fit, on every keystroke and every tick.
         let selected = is_active_section.then_some(self.files_index);
         let viewport = list_area.height as usize;
-        let window_start = list_window_start(rows.len(), selected, viewport);
-        let window_end = window_start.saturating_add(viewport).min(rows.len());
-        let items = rows[window_start..window_end]
+        let window_start = list_window_start(row_count, selected, viewport);
+        let window_end = window_start.saturating_add(viewport).min(row_count);
+        let items = self
+            .changes_rows_window(section, window_start, window_end)
             .iter()
             .enumerate()
             .map(|(offset, row)| {
@@ -4813,8 +4825,8 @@ impl App {
         // the selection is addressed within it and ratatui scrolls no further.
         let mut state = ListState::default().with_selected(
             selected
-                .filter(|_| !rows.is_empty())
-                .map(|index| index.min(rows.len().saturating_sub(1)) - window_start),
+                .filter(|_| row_count > 0)
+                .map(|index| index.min(row_count.saturating_sub(1)) - window_start),
         );
         StatefulWidget::render(List::new(items), list_area, frame.buffer_mut(), &mut state);
 

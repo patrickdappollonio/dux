@@ -969,6 +969,14 @@ pub(crate) struct ChangesTreeState {
     pub(crate) pending_ops: Vec<PendingFolderOp>,
     /// Stamped into every listing request so a superseded answer is dropped.
     pub(crate) listing_seq: u64,
+    /// Bumped by every change to an expanded folder's entry, so the cached row
+    /// layout below knows to rebuild.
+    pub(crate) generation: u64,
+    /// The row layout of each half of the pane while folders are expanded,
+    /// rebuilt only when the lists, the expansions or the agent change: every
+    /// frame and keystroke asks for rows, and building all of them each time
+    /// is what made a long list slower to draw.
+    pub(crate) rows_cache: std::cell::RefCell<HashMap<git::ChangesSide, changes_tree::RowsLayout>>,
     /// The agent whose changed-files lists the engine holds right now, or
     /// `None` while an agent switch has emptied them and the new read has not
     /// landed. Expanded folders are only reconciled against lists that are
@@ -6523,7 +6531,7 @@ impl App {
 
     /// How many rows the focused section shows, expanded folders included.
     pub(crate) fn current_files_len(&self) -> usize {
-        self.changes_rows(self.right_section).len()
+        self.changes_row_count(self.right_section)
     }
 
     pub(crate) fn clamp_files_cursor(&mut self) {
