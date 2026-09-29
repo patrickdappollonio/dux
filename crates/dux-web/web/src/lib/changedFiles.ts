@@ -125,6 +125,42 @@ export function mergeChangedFilesRecaps(
   }
 }
 
+function sameChangedFile(a: ChangedFileView, b: ChangedFileView): boolean {
+  return (
+    a.path === b.path &&
+    a.status === b.status &&
+    a.additions === b.additions &&
+    a.deletions === b.deletions &&
+    a.binary === b.binary &&
+    a.diff_excluded === b.diff_excluded &&
+    a.renamed_from === b.renamed_from
+  )
+}
+
+// A freshly fetched list with every file that did not change swapped back for
+// the object already on screen, and the previous array itself when nothing
+// changed at all. Everything downstream memoizes by reference, so a refetch
+// that moved one file re-renders one row, and one that moved nothing re-renders
+// none.
+export function reuseUnchangedFiles(
+  previous: ChangedFileView[],
+  next: ChangedFileView[],
+): ChangedFileView[] {
+  if (previous === next) return previous
+  if (
+    previous.length === next.length &&
+    next.every((file, index) => sameChangedFile(previous[index]!, file))
+  ) {
+    return previous
+  }
+  if (previous.length === 0) return next
+  const byPath = new Map(previous.map((file) => [file.path, file]))
+  return next.map((file) => {
+    const old = byPath.get(file.path)
+    return old && sameChangedFile(old, file) ? old : file
+  })
+}
+
 // One section's worth of checked paths each. Staged and unstaged are kept apart
 // because the two sections carry opposite verbs.
 export interface ChangedFileSelection {

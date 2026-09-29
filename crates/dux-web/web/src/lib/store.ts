@@ -18,6 +18,7 @@ import type { ReconnectPlanEvent } from "./reconnectingSocket"
 import { getComposeInsertSink } from "./composeInsert"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
+import { reuseUnchangedFiles } from "./changedFiles"
 import { terminalsApi } from "./terminalsApi"
 import { tabsApi } from "./tabsApi"
 import { browseApi } from "./browseApi"
@@ -1148,10 +1149,14 @@ function handleSessionChanges(event: EventsServerMessage): void {
   const id = event.id
   if (id === undefined || id !== state.selectedSessionId) return
   const rev = event.rev
+  // Strictly newer only: an event at the rev already applied reports nothing
+  // this pane does not have, and at tens of thousands of files a refetch is
+  // megabytes of JSON. A revless event (a cold-cache catch-up) and the error
+  // state still always refetch.
   if (
     state.changes.phase === "error" ||
     rev === undefined ||
-    rev >= state.changes.rev
+    rev > state.changes.rev
   ) {
     loadChanges(id)
   }
@@ -1332,10 +1337,40 @@ function switchChangesSubscription(
 // guarded apply and error handlers, so a failed fetch never surfaces as an
 // unhandled rejection. The returned promise never rejects; it exists for a
 // caller that must report on the result, such as the forced refresh.
+//
+// One fetch per session at a time. A request made while one is in flight for
+// the same session does not race it: it books ONE follow-up that starts when
+// the current fetch settles, because the fetch in flight may predate whatever
+// prompted the request, and any further requests share that follow-up. The
+// promise a caller gets settles once the fetch that answers its request has.
+let changesFetch: {
+  sessionId: string
+  settled: Promise<void>
+  followUp: Promise<void> | null
+} | null = null
+
 function loadChanges(sessionId: string): Promise<void> {
-  return fetchChanges(sessionId)
+  const current = changesFetch
+  if (current !== null && current.sessionId === sessionId) {
+    current.followUp ??= current.settled.then(() =>
+      // Nobody is looking any more: the session was switched away from.
+      state.selectedSessionId === sessionId ? loadChanges(sessionId) : undefined,
+    )
+    return current.followUp
+  }
+  const entry: NonNullable<typeof changesFetch> = {
+    sessionId,
+    settled: Promise.resolve(),
+    followUp: null,
+  }
+  entry.settled = fetchChanges(sessionId)
     .then((resp) => applyChangesResponse(sessionId, resp))
     .catch((err) => applyChangesError(sessionId, err))
+    .finally(() => {
+      if (changesFetch === entry) changesFetch = null
+    })
+  changesFetch = entry
+  return entry.settled
 }
 
 // Apply a fetch response, dropping it when it lost a race. Two guards:
@@ -1350,13 +1385,29 @@ function applyChangesResponse(
   if (state.selectedSessionId !== sessionId) return
   if (state.changes.sessionId !== sessionId) return
   if (resp.rev < state.changes.rev) return
+  const previous = state.changes
+  // Everything downstream memoizes by reference, so an answer that repeats
+  // what is on screen keeps the arrays and file objects already there, and one
+  // that changes nothing at all is not applied: every `setState` re-renders
+  // every unselective subscriber in the app.
+  const staged = reuseUnchangedFiles(previous.staged, resp.staged)
+  const unstaged = reuseUnchangedFiles(previous.unstaged, resp.unstaged)
+  if (
+    previous.phase === "loaded" &&
+    previous.rev === resp.rev &&
+    previous.error === null &&
+    staged === previous.staged &&
+    unstaged === previous.unstaged
+  ) {
+    return
+  }
   setState({
     changes: {
       sessionId,
       phase: "loaded",
       rev: resp.rev,
-      staged: resp.staged,
-      unstaged: resp.unstaged,
+      staged,
+      unstaged,
       error: null,
     },
   })

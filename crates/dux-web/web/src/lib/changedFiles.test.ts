@@ -6,6 +6,7 @@ import {
   formatRecapCount,
   mergeChangedFilesRecaps,
   reconcileSelection,
+  reuseUnchangedFiles,
   summarizeChangedFiles,
 } from "./changedFiles"
 import type { ChangedFileView } from "./types"
@@ -160,6 +161,36 @@ describe("reconcileSelection", () => {
     }
     const prev = { staged: new Set<string>(), unstaged: new Set<string>() }
     expect(reconcileSelection(prev, huge)).toBe(prev)
+  })
+})
+
+describe("reuseUnchangedFiles", () => {
+  it("returns the previous array when the fresh one says the same thing", () => {
+    const previous = [file("a.ts"), file("b.ts", "??")]
+    const next = [file("a.ts"), file("b.ts", "??")]
+    expect(reuseUnchangedFiles(previous, next)).toBe(previous)
+  })
+
+  it("keeps each unchanged file's object and takes the changed ones", () => {
+    const previous = [file("a.ts"), file("b.ts")]
+    const moved = { ...file("b.ts"), additions: 4 }
+    const result = reuseUnchangedFiles(previous, [file("a.ts"), moved, file("c.ts")])
+    expect(result).not.toBe(previous)
+    expect(result[0]).toBe(previous[0])
+    expect(result[1]).toBe(moved)
+    expect(result.map((f) => f.path)).toEqual(["a.ts", "b.ts", "c.ts"])
+  })
+
+  it("treats a rename's source as part of the file", () => {
+    const previous = [{ ...file("new.ts", "R"), renamed_from: "old.ts" }]
+    const next = [{ ...file("new.ts", "R"), renamed_from: "other.ts" }]
+    expect(reuseUnchangedFiles(previous, next)[0]).toBe(next[0])
+  })
+
+  it("follows the fresh order when files only moved position", () => {
+    const previous = [file("a.ts"), file("b.ts")]
+    const result = reuseUnchangedFiles(previous, [file("b.ts"), file("a.ts")])
+    expect(result).toEqual([previous[1], previous[0]])
   })
 })
 

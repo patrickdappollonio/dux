@@ -224,11 +224,13 @@ describe("changes slice: request state machine", () => {
   it("a late losing error does not clobber an already-loaded slice", async () => {
     const mod = await loadStore()
     mod.selectSession("s1")
-    // A second in-flight fetch for the same session (an event-driven refetch).
-    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1", rev: 5 })
-    expect(pendingChanges).toHaveLength(2)
+    // A second in-flight fetch for the same session: events for one session
+    // coalesce, so the race comes from leaving and coming straight back.
+    mod.selectSession("s2")
+    mod.selectSession("s1")
+    expect(pendingChanges).toHaveLength(3)
     // The newer fetch wins the race and loads the pane.
-    pendingChanges[1].d.resolve(
+    pendingChanges[2].d.resolve(
       changesResponse({ rev: 5, staged: [file("loaded")], unstaged: [] }),
     )
     await tick()
@@ -248,11 +250,13 @@ describe("changes slice: request state machine", () => {
   it("drops an out-of-order response with an older rev", async () => {
     const mod = await loadStore()
     mod.selectSession("s1")
-    // Two fetches in flight: the initial load + an event-driven refetch.
-    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1", rev: 9 })
-    expect(pendingChanges).toHaveLength(2)
+    // Two fetches for s1 in flight: the initial load, and the one a quick
+    // switch away and back started.
+    mod.selectSession("s2")
+    mod.selectSession("s1")
+    expect(pendingChanges).toHaveLength(3)
     // The newer response lands first and is applied.
-    pendingChanges[1].d.resolve(
+    pendingChanges[2].d.resolve(
       changesResponse({ rev: 9, staged: [file("new")], unstaged: [] }),
     )
     await tick()
@@ -362,11 +366,100 @@ describe("changes slice: subscribe catch-up", () => {
     expect(mod.getSnapshot().changes.phase).toBe("loading")
 
     const before = pendingChanges.length
-    // The subscribe catch-up arrives before the initial fetch resolves.
+    // The subscribe catch-up arrives before the initial fetch resolves. The
+    // fetch in flight may predate what the event reports, so one more follows
+    // it; it waits for that one rather than racing it.
     mod.eventsSocket.onEvent({ event: "session.changes", id: "s1" })
+    pendingChanges[0].d.resolve(
+      changesResponse({ rev: 1, staged: [], unstaged: [] }),
+    )
+    await tick()
     expect(pendingChanges.length).toBe(
       before + 1,
       "a revless catch-up must trigger a second fetch even in the loading phase",
     )
+  })
+})
+
+// A worktree with tens of thousands of changed files makes every fetch and
+// every apply expensive: the response is megabytes of JSON and the pane lists
+// every row. Refetching on an event that reports nothing new, racing several
+// fetches for one session, and replacing an identical list all multiplied that.
+describe("changes slice: refetch economy", () => {
+  async function loadedAt(rev: number, unstaged: ChangedFileView[] = []) {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    pendingChanges[0].d.resolve(changesResponse({ rev, staged: [], unstaged }))
+    await tick()
+    expect(mod.getSnapshot().changes.rev).toBe(rev)
+    return mod
+  }
+
+  it("does not refetch for an event at the rev already applied", async () => {
+    const mod = await loadedAt(4)
+    const before = pendingChanges.length
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1", rev: 4 })
+    expect(pendingChanges.length).toBe(before)
+  })
+
+  it("refetches for a strictly newer rev", async () => {
+    const mod = await loadedAt(4)
+    const before = pendingChanges.length
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1", rev: 5 })
+    expect(pendingChanges.length).toBe(before + 1)
+  })
+
+  it("coalesces events that arrive while a fetch is in flight into one follow-up", async () => {
+    const mod = await loadedAt(1)
+    const before = pendingChanges.length
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1", rev: 2 })
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1", rev: 3 })
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1", rev: 4 })
+    expect(pendingChanges.length).toBe(before + 1)
+
+    pendingChanges.at(-1)!.d.resolve(
+      changesResponse({ rev: 2, staged: [], unstaged: [] }),
+    )
+    await tick()
+    // Exactly one follow-up, because the fetch that just landed may predate
+    // the later events.
+    expect(pendingChanges.length).toBe(before + 2)
+    pendingChanges.at(-1)!.d.resolve(
+      changesResponse({ rev: 4, staged: [], unstaged: [] }),
+    )
+    await tick()
+    expect(pendingChanges.length).toBe(before + 2)
+    expect(mod.getSnapshot().changes.rev).toBe(4)
+  })
+
+  it("leaves the state untouched when the answer is the one already applied", async () => {
+    const mod = await loadedAt(4, [file("a")])
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1" })
+    const before = mod.getSnapshot()
+    pendingChanges.at(-1)!.d.resolve(
+      changesResponse({ rev: 4, staged: [], unstaged: [file("a")] }),
+    )
+    await tick()
+    expect(mod.getSnapshot()).toBe(before)
+  })
+
+  it("keeps the applied lists, and every unchanged file, when only part of the answer moved", async () => {
+    const mod = await loadedAt(4, [file("a"), file("b")])
+    const applied = mod.getSnapshot().changes
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1", rev: 5 })
+    pendingChanges.at(-1)!.d.resolve(
+      changesResponse({
+        rev: 5,
+        staged: [],
+        unstaged: [file("a"), { ...file("b"), additions: 9 }],
+      }),
+    )
+    await tick()
+    const next = mod.getSnapshot().changes
+    expect(next.rev).toBe(5)
+    expect(next.staged).toBe(applied.staged)
+    expect(next.unstaged).not.toBe(applied.unstaged)
+    expect(next.unstaged[0]).toBe(applied.unstaged[0])
+    expect(next.unstaged[1]!.additions).toBe(9)
   })
 })
