@@ -30,7 +30,7 @@ describe("the shared attention pulse", () => {
   // DERIVED from them, so moving the rhythm in TS moves what this demands of
   // the stylesheet instead of quietly passing.
   it("keeps the stylesheet's row-dot animation equal to the shared constants", () => {
-    const css = readFileSync(`${process.cwd()}/src/index.css`, "utf8")
+    const css = readFileSync(new URL("../index.css", import.meta.url), "utf8")
     expect(css).toContain(
       `--animate-attention-pulse: attention-pulse ${ATTENTION_PULSE_PERIOD_MS / 1000}s ease-in-out infinite;`,
     )

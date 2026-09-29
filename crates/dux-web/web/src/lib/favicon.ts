@@ -243,6 +243,14 @@ export function applyAttentionFavicon(
     showDottedFavicon(href, cached)
     return
   }
+  // The favicon changed and its frames are not drawn yet: the old tint's blink
+  // must not carry on meanwhile, nor forever if the drawing fails. Show the new
+  // plain favicon until its dotted frames are ready.
+  if (blink && blink.base !== href) stopBlink()
+  if (appliedDottedIcon !== null) {
+    appliedDottedIcon = null
+    applyFavicon(raw)
+  }
   if (composing.has(href)) return
   composing.add(href)
 
@@ -306,7 +314,22 @@ function watchReducedMotion(): void {
   if (motionQuery) return
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") return
   motionQuery = window.matchMedia(REDUCED_MOTION_QUERY)
-  motionQuery.addEventListener?.("change", onReducedMotionChange)
+  if (typeof motionQuery.addEventListener === "function") {
+    motionQuery.addEventListener("change", onReducedMotionChange)
+  } else {
+    // Safari before 14 only has the deprecated MediaQueryList listener pair.
+    motionQuery.addListener?.(onReducedMotionChange)
+  }
+}
+
+function unwatchReducedMotion(): void {
+  if (!motionQuery) return
+  if (typeof motionQuery.removeEventListener === "function") {
+    motionQuery.removeEventListener("change", onReducedMotionChange)
+  } else {
+    motionQuery.removeListener?.(onReducedMotionChange)
+  }
+  motionQuery = null
 }
 
 function onReducedMotionChange(): void {
@@ -330,8 +353,7 @@ function stopBlink(): void {
 
 function stopAttentionMotion(): void {
   stopBlink()
-  motionQuery?.removeEventListener?.("change", onReducedMotionChange)
-  motionQuery = null
+  unwatchReducedMotion()
 }
 
 /** Draw the base favicon plus a cyan corner dot onto a canvas, once at full

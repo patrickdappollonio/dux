@@ -16,6 +16,8 @@ class FakeWorker {
   posted: unknown[] = []
   terminated = false
   onmessage: ((ev: { data: unknown }) => void) | null = null
+  onerror: ((ev: unknown) => void) | null = null
+  onmessageerror: ((ev: unknown) => void) | null = null
   url: unknown
   constructor(url: unknown) {
     this.url = url
@@ -149,6 +151,58 @@ describe("the wake timers", () => {
     vi.advanceTimersByTime(50)
     expect(fire).toHaveBeenCalledTimes(1)
     fallback.dispose()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  // A worker script that fails to load (a 404, the network, a worker-src
+  // policy) fails asynchronously, after construction succeeded.
+  for (const event of ["onerror", "onmessageerror"] as const) {
+    it(`moves a pending wake onto the page's timers when the worker reports ${event}`, () => {
+      vi.stubGlobal("Worker", FakeWorker)
+      const timer = workerWakeTimer()!
+      const worker = FakeWorker.instances[0] as FakeWorker & Record<string, unknown>
+      const fire = vi.fn()
+      timer.set(500, fire)
+      const { id } = worker.posted.at(-1) as { id: number }
+
+      vi.advanceTimersByTime(200)
+      ;(worker[event] as (ev: unknown) => void)({})
+      expect(worker.terminated).toBe(true)
+
+      // The wake keeps its original due time, 300 ms from here.
+      vi.advanceTimersByTime(299)
+      expect(fire).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(1)
+      expect(fire).toHaveBeenCalledTimes(1)
+
+      // A tick the dead worker still manages to deliver is not a second wake.
+      worker.reply({ type: "tick", id })
+      expect(fire).toHaveBeenCalledTimes(1)
+
+      // Later wakes run on the page's timers, and dispose clears them.
+      const posted = worker.posted.length
+      timer.set(100, fire)
+      expect(worker.posted).toHaveLength(posted)
+      vi.advanceTimersByTime(100)
+      expect(fire).toHaveBeenCalledTimes(2)
+      timer.set(100, fire)
+      timer.dispose()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  }
+
+  it("keeps a blink going when its worker fails to load", () => {
+    vi.stubGlobal("Worker", FakeWorker)
+    const shown: string[] = []
+    const blink = startAttentionBlink({
+      timer: createWakeTimer(),
+      show: (f) => shown.push(f),
+      hidden: () => false,
+    })
+    FakeWorker.instances[0].onerror?.({})
+    vi.advanceTimersByTime(ATTENTION_PULSE_PERIOD_MS)
+    expect(shown).toEqual(["on", "dim", "on", "dim", "on"])
+    blink.stop()
     expect(vi.getTimerCount()).toBe(0)
   })
 

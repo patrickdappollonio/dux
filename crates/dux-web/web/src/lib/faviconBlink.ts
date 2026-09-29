@@ -74,24 +74,48 @@ export function workerWakeTimer(): WakeTimer | null {
   // Each request gets a fresh id and only the latest one's tick fires, so a
   // tick already in flight when the page moved on is dropped.
   let seq = 0
-  let wanted: { id: number; fire: () => void } | null = null
+  let wanted: { id: number; due: number; fire: () => void } | null = null
   let disposed = false
+  // Set once the worker has failed; from then on every wake runs here.
+  let fallback: WakeTimer | null = null
   worker.onmessage = (ev: MessageEvent<{ type: string; id: number }>) => {
-    if (disposed || ev.data?.type !== "tick") return
+    if (disposed || fallback || ev.data?.type !== "tick") return
     if (!wanted || ev.data.id !== wanted.id) return
     const { fire } = wanted
     wanted = null
     fire()
   }
+  // A script that cannot load (a 404, the network, a worker-src policy) fails
+  // after construction, asynchronously. Drop the worker and carry the pending
+  // wake over to the page's timers at its original due time, so the schedule
+  // continues and nothing the dead worker still delivers fires it twice.
+  const failOver = () => {
+    if (disposed || fallback) return
+    worker.terminate()
+    fallback = windowWakeTimer()
+    const pending = wanted
+    wanted = null
+    if (pending) fallback.set(Math.max(0, pending.due - Date.now()), pending.fire)
+  }
+  worker.onerror = failOver
+  worker.onmessageerror = failOver
   return {
     set(delayMs, fire) {
       if (disposed) return
+      if (fallback) {
+        fallback.set(delayMs, fire)
+        return
+      }
       seq += 1
-      wanted = { id: seq, fire }
+      wanted = { id: seq, due: Date.now() + delayMs, fire }
       worker.postMessage({ type: "set", id: seq, delay: delayMs })
     },
     clear() {
       if (disposed) return
+      if (fallback) {
+        fallback.clear()
+        return
+      }
       wanted = null
       worker.postMessage({ type: "clear" })
     },
@@ -99,7 +123,8 @@ export function workerWakeTimer(): WakeTimer | null {
       if (disposed) return
       disposed = true
       wanted = null
-      worker.terminate()
+      if (fallback) fallback.dispose()
+      else worker.terminate()
     },
   }
 }

@@ -245,13 +245,44 @@ describe("applyAttentionFavicon blink", () => {
     )
   }
 
-  function reducedMotion(on: boolean) {
-    vi.stubGlobal("matchMedia", (q: string) => ({
-      matches: on && q.includes("reduce"),
-      media: q,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    }))
+  // A live reduced-motion query: `matches` reads the current preference and
+  // `setReducedMotion` fires the change listeners the way a browser does.
+  // `legacy` offers only old Safari's addListener/removeListener.
+  let motionReduced = false
+  let motionListeners = new Set<() => void>()
+
+  function reducedMotion(on: boolean, legacy = false) {
+    motionReduced = on
+    motionListeners = new Set()
+    vi.stubGlobal("matchMedia", (q: string) => {
+      const add = (fn: () => void) => motionListeners.add(fn)
+      const remove = (fn: () => void) => motionListeners.delete(fn)
+      return {
+        get matches() {
+          return motionReduced && q.includes("reduce")
+        },
+        media: q,
+        ...(legacy
+          ? { addListener: add, removeListener: remove }
+          : {
+              addEventListener: (_: string, fn: () => void) => add(fn),
+              removeEventListener: (_: string, fn: () => void) => remove(fn),
+            }),
+      }
+    })
+  }
+
+  function setReducedMotion(on: boolean) {
+    motionReduced = on
+    for (const fn of [...motionListeners]) fn()
+  }
+
+  function setHidden(hidden: boolean) {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => (hidden ? "hidden" : "visible"),
+    })
+    document.dispatchEvent(new Event("visibilitychange"))
   }
 
   async function loadImages() {
@@ -281,6 +312,8 @@ describe("applyAttentionFavicon blink", () => {
 
   afterEach(() => {
     applyAttentionFavicon("", false)
+    // Drop the per-test visibility override, back to jsdom's own getter.
+    delete (document as unknown as Record<string, unknown>).visibilityState
     vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
@@ -352,5 +385,115 @@ describe("applyAttentionFavicon blink", () => {
       frames.push(shownHref().includes("DIM") ? "dim" : "on")
     }
     expect(frames).toContain("dim")
+  })
+
+  it("stops the old tint's blink the moment the favicon changes, showing the new plain favicon while it draws", async () => {
+    applyAttentionFavicon("", true)
+    await loadImages()
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+    applyAttentionFavicon("blue", true) // new frames not drawn yet
+    expect(vi.getTimerCount()).toBe(0)
+    expect(shownHref().startsWith("data:image/svg+xml,")).toBe(true)
+    vi.advanceTimersByTime(ATTENTION_PULSE_PERIOD_MS * 2)
+    expect(shownHref().startsWith("data:image/svg+xml,")).toBe(true)
+
+    await loadImages()
+    expect(shownHref()).toContain("ON")
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+  })
+
+  it("keeps the new plain favicon, not the old tint's blink, when drawing the new frames fails", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+    applyAttentionFavicon("", true)
+    await loadImages()
+
+    applyAttentionFavicon("blue", true)
+    for (const img of images.splice(0)) img.onerror?.()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    vi.advanceTimersByTime(ATTENTION_PULSE_PERIOD_MS * 2)
+    expect(vi.getTimerCount()).toBe(0)
+    const decoded = decodeURIComponent(shownHref().replace("data:image/svg+xml,", ""))
+    expect(decoded).toContain('fill="#3b82f6"')
+  })
+
+  it("stills a running blink when reduced motion turns on, and resumes it when it turns off", async () => {
+    applyAttentionFavicon("", true)
+    await loadImages()
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+    setReducedMotion(true)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(shownHref()).toContain("ON")
+    vi.advanceTimersByTime(ATTENTION_PULSE_PERIOD_MS)
+    expect(shownHref()).toContain("ON")
+
+    setReducedMotion(false)
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    const seen = new Set<string>()
+    for (let t = 0; t < ATTENTION_PULSE_PERIOD_MS; t += 10) {
+      vi.advanceTimersByTime(10)
+      seen.add(shownHref().includes("DIM") ? "dim" : "on")
+    }
+    expect(seen).toEqual(new Set(["on", "dim"]))
+
+    // Clearing attention stops listening to the preference.
+    applyAttentionFavicon("", false)
+    expect(motionListeners.size).toBe(0)
+  })
+
+  it("follows the reduced-motion preference through old Safari's addListener", async () => {
+    reducedMotion(false, true)
+    applyAttentionFavicon("", true)
+    await loadImages()
+    expect(motionListeners.size).toBe(1)
+
+    setReducedMotion(true)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(shownHref()).toContain("ON")
+
+    applyAttentionFavicon("", false)
+    expect(motionListeners.size).toBe(0)
+  })
+
+  it("switches to the even blink when the tab is hidden and back when it returns", async () => {
+    const t0 = Date.now()
+    applyAttentionFavicon("", true)
+    await loadImages()
+
+    // Half a second in, the rhythm is in its second dip...
+    vi.advanceTimersByTime(500 - (Date.now() - t0))
+    expect(shownHref()).toContain("DIM")
+
+    // ...while the hidden tab's even blink is still in its on half.
+    setHidden(true)
+    expect(shownHref()).toContain("ON")
+    vi.advanceTimersByTime(499)
+    expect(shownHref()).toContain("ON")
+    vi.advanceTimersByTime(1)
+    expect(shownHref()).toContain("DIM")
+
+    // Back in front, 1.5 s into the cycle is the rhythm's hold.
+    vi.advanceTimersByTime(500)
+    setHidden(false)
+    expect(shownHref()).toContain("ON")
+  })
+
+  it("stops listening for visibility changes once attention clears", async () => {
+    const add = vi.spyOn(document, "addEventListener")
+    const remove = vi.spyOn(document, "removeEventListener")
+    applyAttentionFavicon("", true)
+    await loadImages()
+    const handler = add.mock.calls.find(([type]) => type === "visibilitychange")?.[1]
+    expect(handler).toBeTruthy()
+
+    applyAttentionFavicon("", false)
+    expect(remove).toHaveBeenCalledWith("visibilitychange", handler)
+    // A late visibility change starts nothing.
+    setHidden(true)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(shownHref()).toBe("/favicon.png")
   })
 })
