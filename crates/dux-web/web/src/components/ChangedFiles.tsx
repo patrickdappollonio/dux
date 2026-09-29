@@ -944,7 +944,6 @@ function ChangesList({
   const renderItem = (item: ChangesListItem) => {
     if (item.kind === "separator") return <Separator />
     const section = item.section
-    const files = filtered[section]
     if (item.kind === "header") {
       return (
         <GroupHeader

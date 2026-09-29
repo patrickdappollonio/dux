@@ -206,8 +206,9 @@ impl App {
             ChangedFileKind::Directory { file_count } => file_count,
             ChangedFileKind::NestedRepository => {
                 self.set_info(format!(
-                    "\"{path}/\" is a repository of its own, so there is nothing of this \
-                     worktree's inside it to list. Open it as its own project to see its changes."
+                    "\"{path}/\" is a repository of its own, so git does not look inside it and \
+                     there is nothing of this worktree's in it to list. Its row stages, unstages \
+                     and deletes it whole."
                 ));
                 return true;
             }
