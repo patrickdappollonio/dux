@@ -41,6 +41,7 @@ import {
 } from "./paneDivider"
 import { DEFAULT_SIDEBAR_WIDTH } from "./sidebarResize"
 import {
+  ChangesFetchAborted,
   ChangesFetchError,
   fetchChanges,
   type SessionChangesResponse,
@@ -1319,7 +1320,7 @@ eventsSocket.onOpen = () => {
   const id = state.selectedSessionId
   if (id === null) return
   setState({ changes: loadingChanges(id) })
-  loadChanges(id)
+  void restartChanges(id)
 }
 
 // Move the changed-files subscription from one session to another. A null side
@@ -1343,33 +1344,80 @@ function switchChangesSubscription(
 // the current fetch settles, because the fetch in flight may predate whatever
 // prompted the request, and any further requests share that follow-up. The
 // promise a caller gets settles once the fetch that answers its request has.
-let changesFetch: {
+//
+// Coalescing is for ordinary events only. Anything that puts the slice back
+// into loading (a reconnect, Refresh, a forced refresh, a session switch)
+// starts a new generation instead: it aborts the fetch in flight and starts its
+// own, so a request stuck on a half-open connection can never hold the pane in
+// loading behind it. A superseded fetch's late answer, success or failure, is
+// dropped by its generation.
+interface ChangesFetchEntry {
   sessionId: string
+  generation: number
+  controller: AbortController
   settled: Promise<void>
   followUp: Promise<void> | null
-} | null = null
+}
+let changesFetch: ChangesFetchEntry | null = null
+let changesGeneration = 0
+// The fetch that opened the current loading window, and so the only one whose
+// failure may turn that window into the error state.
+let changesWindowOpener: ChangesFetchEntry | null = null
 
-function loadChanges(sessionId: string): Promise<void> {
+// Abandon whatever is in flight: the next fetch starts a new generation.
+function supersedeChangesFetch(): void {
+  changesGeneration += 1
+  changesFetch?.controller.abort()
+  changesFetch = null
+  changesWindowOpener = null
+}
+
+// Put the slice into loading for `sessionId` and start the fetch that answers
+// for that loading window, superseding any fetch in flight.
+function restartChanges(sessionId: string): Promise<void> {
+  return loadChanges(sessionId, { opensWindow: true })
+}
+
+function loadChanges(
+  sessionId: string,
+  { opensWindow = false }: { opensWindow?: boolean } = {},
+): Promise<void> {
   const current = changesFetch
-  if (current !== null && current.sessionId === sessionId) {
+  if (!opensWindow && current !== null && current.sessionId === sessionId) {
     current.followUp ??= current.settled.then(() =>
-      // Nobody is looking any more: the session was switched away from.
-      state.selectedSessionId === sessionId ? loadChanges(sessionId) : undefined,
+      // Nobody needs it any more: the session was switched away from, or a
+      // reset started a newer fetch that answers for this request too.
+      state.selectedSessionId === sessionId &&
+      current.generation === changesGeneration
+        ? loadChanges(sessionId)
+        : undefined,
     )
     return current.followUp
   }
-  const entry: NonNullable<typeof changesFetch> = {
+  if (opensWindow) supersedeChangesFetch()
+  const entry: ChangesFetchEntry = {
     sessionId,
+    generation: changesGeneration,
+    controller: new AbortController(),
     settled: Promise.resolve(),
     followUp: null,
   }
-  entry.settled = fetchChanges(sessionId)
-    .then((resp) => applyChangesResponse(sessionId, resp))
-    .catch((err) => applyChangesError(sessionId, err))
+  const live = () => entry.generation === changesGeneration
+  entry.settled = fetchChanges(sessionId, entry.controller.signal)
+    .then((resp) => {
+      if (live()) applyChangesResponse(sessionId, resp)
+    })
+    .catch((err) => {
+      if (live() && !(err instanceof ChangesFetchAborted)) {
+        applyChangesError(sessionId, err, entry === changesWindowOpener)
+      }
+    })
     .finally(() => {
       if (changesFetch === entry) changesFetch = null
+      if (changesWindowOpener === entry) changesWindowOpener = null
     })
   changesFetch = entry
+  if (opensWindow) changesWindowOpener = entry
   return entry.settled
 }
 
@@ -1418,7 +1466,11 @@ function applyChangesResponse(
 // (409 git lock, 5xx, network) lands in `error` so the pane shows a Refresh
 // affordance; the poller's eventual recovery event self-heals it. Same staleness
 // guards as the success path so a late failure can't clobber a newer state.
-function applyChangesError(sessionId: string, err: unknown): void {
+function applyChangesError(
+  sessionId: string,
+  err: unknown,
+  opensWindow: boolean,
+): void {
   if (state.selectedSessionId !== sessionId) return
   if (state.changes.sessionId !== sessionId) return
   if (err instanceof ChangesFetchError && err.status === 404) {
@@ -1426,11 +1478,11 @@ function applyChangesError(sessionId: string, err: unknown): void {
     return
   }
   // Only the fetch that opened the current loading window may flip the slice to
-  // error. A late failure that lost the race to a successful concurrent fetch
-  // (e.g. a slow 409 arriving after a newer 200 already loaded the pane) must
-  // not turn a loaded pane into an error pane. The next `session.changes` event
-  // still self-heals an error state regardless.
-  if (state.changes.phase !== "loading") return
+  // error. A failure from any other fetch (a follow-up, or one that lost the
+  // race to a successful one) must not turn a loading or loaded pane into an
+  // error pane. The next `session.changes` event still self-heals an error
+  // state regardless.
+  if (!opensWindow || state.changes.phase !== "loading") return
   const message =
     err instanceof Error ? err.message : "Could not load changed files."
   setState({
@@ -1447,7 +1499,7 @@ export function refreshChanges(): void {
   const id = state.selectedSessionId
   if (id === null) return
   setState({ changes: loadingChanges(id) })
-  loadChanges(id)
+  void restartChanges(id)
 }
 
 // Force the server to ask git again, then re-read. Rejects when the forcing
@@ -1460,10 +1512,13 @@ export async function forceRefreshChanges(): Promise<void> {
   const id = state.selectedSessionId
   if (id === null) return
   setState({ changes: loadingChanges(id) })
+  // A fetch already in flight predates the forced refresh and answers nothing
+  // the pane is now waiting for.
+  supersedeChangesFetch()
   try {
     await git.refreshChanges(id)
   } finally {
-    await loadChanges(id)
+    await restartChanges(id)
   }
 }
 
@@ -3388,7 +3443,7 @@ function selectSessionRoute(
   // before the GET means an invalidation that races the fetch is never missed.
   switchChangesSubscription(prev, id)
   syncUrl(urlMode)
-  if (prev !== id) loadChanges(id)
+  if (prev !== id) void restartChanges(id)
 }
 
 // Drop the focused target and land on home. The target is cleared FIRST so any
@@ -3468,7 +3523,7 @@ export function selectTab(
   )
   switchChangesSubscription(prev, sessionId)
   syncUrl(opts?.urlMode)
-  if (prev !== sessionId) loadChanges(sessionId)
+  if (prev !== sessionId) void restartChanges(sessionId)
   if (opts?.persist === false) return
   persistFocusedTab(sessionId, isSlotTabOf(sessionId, tabId) ? null : tabId)
 }
@@ -3552,7 +3607,7 @@ export function selectTerminal(
   // terminal drops the subscription entirely.
   switchChangesSubscription(prev, sessionId)
   syncUrl(opts?.urlMode)
-  if (sessionId !== null && prev !== sessionId) loadChanges(sessionId)
+  if (sessionId !== null && prev !== sessionId) void restartChanges(sessionId)
 }
 
 // Spawn a new companion terminal for a session via REST. The 201 reply

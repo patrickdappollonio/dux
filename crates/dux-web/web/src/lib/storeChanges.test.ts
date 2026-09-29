@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { CHANGES_FETCH_TIMEOUT_MS } from "./changesApi"
 import type { ChangedFileView } from "./types"
 
 // Exercises the store's `changes` slice end to end: the subscription wiring on
@@ -29,7 +30,11 @@ function defer(): Deferred {
 }
 
 // In-flight changes fetches, in call order. Tests resolve them explicitly.
-let pendingChanges: { sessionId: string; d: Deferred }[] = []
+let pendingChanges: { sessionId: string; d: Deferred; signal?: AbortSignal }[] = []
+// A real fetch rejects once its signal aborts. A test that needs a late answer
+// from a superseded fetch (a server that answered before the abort landed)
+// turns this off.
+let honorAbort = true
 // Records subscribe/fetch ordering across the two different doubles.
 let callOrder: string[] = []
 
@@ -50,14 +55,20 @@ function changesResponse(
   }
 }
 
-const fetchMock = vi.fn(async (url: string) => {
+const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
   if (u.includes("/changes")) {
     callOrder.push("fetch")
     const m = u.match(/sessions\/([^/]+)\/changes/)
     const sessionId = m ? decodeURIComponent(m[1]) : ""
     const d = defer()
-    pendingChanges.push({ sessionId, d })
+    const signal = init?.signal ?? undefined
+    if (honorAbort) {
+      signal?.addEventListener("abort", () =>
+        d.reject(new DOMException("aborted", "AbortError")),
+      )
+    }
+    pendingChanges.push({ sessionId, d, signal })
     return d.promise as unknown as Response
   }
   throw new Error(`unexpected fetch: ${u}`)
@@ -77,6 +88,7 @@ class FakeWebSocket {
 beforeEach(() => {
   pendingChanges = []
   callOrder = []
+  honorAbort = true
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -461,5 +473,102 @@ describe("changes slice: refetch economy", () => {
     expect(next.unstaged).not.toBe(applied.unstaged)
     expect(next.unstaged[0]).toBe(applied.unstaged[0])
     expect(next.unstaged[1]!.additions).toBe(9)
+  })
+})
+
+// Coalescing must never let one stuck request hold the pane hostage: a
+// half-open connection never settles, and everything queued behind it would
+// wait with it. Anything that puts the pane back into loading starts over.
+describe("changes slice: a stuck fetch", () => {
+  it("is superseded by a reconnect, which starts a new fetch that loads the pane", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    const stuck = pendingChanges[0]!
+
+    mod.eventsSocket.onOpen()
+
+    expect(stuck.signal?.aborted).toBe(true)
+    expect(pendingChanges).toHaveLength(2)
+    pendingChanges[1]!.d.resolve(
+      changesResponse({ rev: 3, staged: [], unstaged: [file("a")] }),
+    )
+    await tick()
+    expect(mod.getSnapshot().changes).toMatchObject({ phase: "loaded", rev: 3 })
+  })
+
+  it("is superseded by Refresh, which starts a new fetch that loads the pane", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    const stuck = pendingChanges[0]!
+
+    mod.refreshChanges()
+
+    expect(stuck.signal?.aborted).toBe(true)
+    expect(pendingChanges).toHaveLength(2)
+    pendingChanges[1]!.d.resolve(
+      changesResponse({ rev: 2, staged: [], unstaged: [] }),
+    )
+    await tick()
+    expect(mod.getSnapshot().changes.phase).toBe("loaded")
+  })
+
+  it("never flashes an error for a superseded fetch that fails late", async () => {
+    honorAbort = false
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    const superseded = pendingChanges[0]!
+    mod.refreshChanges()
+
+    superseded.d.resolve(changesResponse("index.lock present", { status: 409 }))
+    await tick()
+
+    expect(mod.getSnapshot().changes.phase).toBe("loading")
+    pendingChanges[1]!.d.resolve(
+      changesResponse({ rev: 2, staged: [], unstaged: [] }),
+    )
+    await tick()
+    expect(mod.getSnapshot().changes.phase).toBe("loaded")
+  })
+
+  it("ignores a superseded fetch's late answer", async () => {
+    honorAbort = false
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    const superseded = pendingChanges[0]!
+    mod.refreshChanges()
+
+    superseded.d.resolve(
+      changesResponse({ rev: 9, staged: [file("stale")], unstaged: [] }),
+    )
+    await tick()
+
+    expect(mod.getSnapshot().changes.phase).toBe("loading")
+  })
+
+  it("does not book a follow-up behind a fetch a reset has superseded", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1" })
+    mod.refreshChanges()
+    pendingChanges[1]!.d.resolve(
+      changesResponse({ rev: 2, staged: [], unstaged: [] }),
+    )
+    await tick()
+    await tick()
+    expect(pendingChanges).toHaveLength(2)
+  })
+
+  it("times out into an error that says what happened", async () => {
+    const mod = await loadStore()
+    vi.useFakeTimers()
+    try {
+      mod.selectSession("s1")
+      await vi.advanceTimersByTimeAsync(CHANGES_FETCH_TIMEOUT_MS)
+      const changes = mod.getSnapshot().changes
+      expect(changes.phase).toBe("error")
+      expect(changes.error).toMatch(/did not send/)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
