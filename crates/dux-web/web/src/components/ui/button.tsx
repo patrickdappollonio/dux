@@ -11,7 +11,10 @@ const buttonVariants = cva(
       variant: {
         default: "bg-primary text-primary-foreground hover:bg-primary/80",
         outline:
-          "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground data-[popup-open]:bg-muted data-[popup-open]:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
+          // A toggle's pressed state (aria-pressed) takes the same fill as an
+          // open menu, so an outline toggle says which way it is set without a
+          // second variant; the dark: repeat outranks dark:bg-input/30.
+          "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground data-[popup-open]:bg-muted data-[popup-open]:text-foreground aria-pressed:bg-muted aria-pressed:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50 dark:aria-pressed:bg-muted",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_5%)] aria-expanded:bg-secondary aria-expanded:text-secondary-foreground data-[popup-open]:bg-secondary data-[popup-open]:text-secondary-foreground",
         ghost:

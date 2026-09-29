@@ -112,6 +112,7 @@ import { useEditorSave } from "@/components/useEditorSave"
 import { EditorTabsStrip } from "@/components/EditorTabsStrip"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { Button } from "@/components/ui/button"
+import { ButtonGroup } from "@/components/ui/button-group"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { FileTree } from "@/components/FileTree"
 import { useFileTreeFreshness } from "@/components/useFileTreeFreshness"
@@ -171,6 +172,12 @@ const MarkdownPreview = lazy(() => import("./MarkdownPreview"))
 // Cap how many results the search list renders so a 1-char query in a huge repo
 // can't mount thousands of rows.
 const MAX_SEARCH_RESULTS = 300
+
+// The header's one height token for its labelled controls, which all wear the
+// outline variant: the icon-only ones take the matching `size="icon"` (size-8).
+// A control painted on a phone adds its own 40px floor (max-md:h-10); the rest
+// are desktop-only and reached through the phone's fold instead.
+const HEADER_CONTROL = "h-8 shrink-0"
 
 // The two lines of I/O around the explorer's persisted width. The decisions
 // (what the value means, what an unrecognised one does) are all in the pure
@@ -1107,14 +1114,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     return (
       <>
         {activeTab && !isImageTab && hasDiff && (
-          <div
-            className="flex shrink-0 items-center gap-0.5 rounded-md border p-0.5 max-md:hidden"
-            role="group"
-            aria-label="View mode"
-          >
+          // One switch, two outline buttons joined by the shared ButtonGroup;
+          // the outline variant's pressed fill marks the current mode.
+          <ButtonGroup className="shrink-0 max-md:hidden" aria-label="View mode">
             <Button
-              size="sm"
-              variant={activeTab.mode === "file" ? "default" : "ghost"}
+              variant="outline"
+              className={HEADER_CONTROL}
               aria-pressed={activeTab.mode === "file"}
               onClick={() => editorSetTabMode(root, activeTab.id, "file")}
             >
@@ -1122,22 +1127,21 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               File
             </Button>
             <Button
-              size="sm"
-              variant={activeTab.mode === "diff" ? "default" : "ghost"}
+              variant="outline"
+              className={HEADER_CONTROL}
               aria-pressed={activeTab.mode === "diff"}
               onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
             >
               <GitCompare />
               Diff
             </Button>
-          </div>
+          </ButtonGroup>
         )}
         {hasDiff && activeTab?.mode === "diff" && diffStale && (
           <SimpleTooltip content="This file changed on disk: reload the diff">
             <Button
-              size="sm"
-              variant="ghost"
-              className="text-amber-500 max-md:hidden"
+              variant="outline"
+              className={cn(HEADER_CONTROL, "text-amber-500 max-md:hidden")}
               aria-label="Reload the diff. The file changed on disk"
               onClick={refreshDiff}
             >
@@ -1148,9 +1152,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         )}
         {canPreview && (
           <Button
-            size="sm"
-            variant={showPreview ? "default" : "ghost"}
-            className="max-md:hidden"
+            variant="outline"
+            className={cn(HEADER_CONTROL, "max-md:hidden")}
             aria-pressed={showPreview}
             onClick={togglePreview}
           >
@@ -1163,9 +1166,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             <DropdownMenuTrigger
               render={
                 <Button
-                  size="sm"
-                  variant="ghost"
-                  className="max-md:hidden"
+                  variant="outline"
+                  className={cn(HEADER_CONTROL, "max-md:hidden")}
                   aria-label={`Syntax language: ${activeLanguageLabel}`}
                 />
               }
@@ -1198,8 +1200,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             <DropdownMenuTrigger
               render={
                 <Button
-                  size="sm"
-                  variant="ghost"
+                  variant="outline"
+                  // The wrapper span, not the button, carries max-md:hidden.
+                  className={cn(HEADER_CONTROL, "max-md:hidden")}
                   disabled={!localAccess || openingEditor}
                   aria-busy={openingEditor}
                 />
@@ -1226,8 +1229,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     if (activeTab?.mode !== "file" || isImageTab) return null
     return (
       <Button
-        size="sm"
-        className="max-md:min-h-10"
+        variant="outline"
+        className={cn(HEADER_CONTROL, "max-md:h-10")}
         disabled={!dirty || isSaving || readOnly}
         aria-busy={isSaving}
         onClick={save}
@@ -1245,8 +1248,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         <DropdownMenuTrigger
           render={
             <Button
-              size="icon-sm"
-              variant="ghost"
+              size="icon"
+              variant="outline"
               className="shrink-0 md:hidden max-md:size-10"
               aria-label="More editor actions"
             />
@@ -1314,12 +1317,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
 
   function renderStandaloneActions(): React.ReactNode {
     if (standalone) return null
+    // Both of these leave the overlay rather than act on the file, and the
+    // tenet would let them be quieter; they wear the cluster's outline anyway,
+    // because a ghost label in a row of outlined buttons reads as text rather
+    // than as a control, and these are the overlay's only ways out.
     return (
       <>
         <Button
-          size="sm"
-          variant="ghost"
-          className="shrink-0 max-md:min-h-10"
+          variant="outline"
+          className={cn(HEADER_CONTROL, "max-md:h-10")}
           render={
             <a
               href={standaloneEditorHash(
@@ -1334,7 +1340,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           <ExternalLink />
           Open in new tab
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => closeEditor()}>
+        <Button
+          variant="outline"
+          className={cn(HEADER_CONTROL, "max-md:h-10")}
+          onClick={() => closeEditor()}
+        >
           <X />
           Close
         </Button>
@@ -1346,16 +1356,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     return (
       <>
         {/* Header: open file path, view toggle, dirty indicator, actions.
-          min-h-12.75 (51px) floors the row at its tallest control, the
-          File/Diff segmented group, an h-7 (28px) button inside p-0.5 (4px)
-          + border (2px) = 34px, plus the row's py-2 (16px) and its own
-          border-b (1px; min-h is border-box), so the bar keeps one height
-          as controls come and go instead of jumping 6px whenever a file
-          opens or closes (measured 51px with a file open, 45px without,
-          before the floor). The mobile toggle (max-md:size-10, 40px)
-          exceeds the floor on phones, where the toggle always renders, so
-          the row is constant there too. */}
-      <div className="flex min-h-12.75 items-center gap-2 border-b px-3 py-2">
+          Every control is HEADER_CONTROL's h-8 (32px), so min-h-12.25 (49px)
+          is that plus the row's py-2 (16px) and its own border-b (1px; min-h
+          is border-box): the bar keeps one height as controls come and go.
+          On a phone the painted controls take the 40px floor, and the
+          explorer toggle always renders there, so the row is constant too. */}
+      <div className="flex min-h-12.25 items-center gap-2 border-b px-3 py-2">
         {/* Explorer collapse/expand toggle: lives in the header, OUTSIDE the
             panel it hides, so it stays reachable while collapsed. */}
         <SimpleTooltip
@@ -1364,8 +1370,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           }
         >
           <Button
-            size="icon-sm"
-            variant="ghost"
+            size="icon"
+            variant="outline"
             className="shrink-0 max-md:size-10"
             aria-label={
               explorerCollapsed

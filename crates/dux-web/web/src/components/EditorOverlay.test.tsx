@@ -1264,11 +1264,92 @@ describe("the header's two open controls are told apart by their icons", () => {
   })
 })
 
-// The header row must not change height as its controls come and go: the
-// File/Diff segmented control (an h-7 button inside p-0.5 + border) is the
-// tallest thing the row can hold, and without a floor the row shrinks when no
-// file is open and jumps when one opens. jsdom cannot measure pixels, so what
-// is pinned is the min-h floor class; the pixel truth is the screenshot pass.
+// Every control across the editor's header is one of a cluster: the shared
+// Button's outline variant at the one h-8 height token, with the 40px floor on a
+// phone wherever the control is painted there. The File/Diff switch is the same
+// outline buttons joined as the shared ButtonGroup, its current mode marked by
+// the variant's pressed state rather than a filled button. jsdom cannot paint,
+// so the variant and size classes are what is pinned; the pixel truth is the
+// screenshot pass.
+describe("editor header controls share one outline look", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+    // `clearAllMocks` keeps implementations, and earlier describes leave
+    // `readMock` refusing; answer with a plain file so this is order-independent.
+    readMock.mockResolvedValue({
+      path: "README.md",
+      content: ON_DISK,
+      binary: false,
+      read_only: false,
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  function expectOutline(control: HTMLElement, phoneFloor: boolean) {
+    expect(control.getAttribute("data-slot")).not.toBeNull()
+    expect(control.className).toContain("border-border")
+    expect(control.className).not.toContain("bg-primary")
+    expect(control.className).toMatch(/(^|\s)(h-8|size-8)(\s|$)/)
+    if (phoneFloor) {
+      expect(control.className).toMatch(/max-md:(h-10|size-10)/)
+    } else {
+      expect(control.className).toContain("max-md:hidden")
+    }
+  }
+
+  it("draws every acting control as an outline button at one height", async () => {
+    await mountWithTab("README.md")
+    await screen.findByTestId("code-editor")
+
+    // Painted on a phone too, so each keeps the touch floor there.
+    expectOutline(
+      screen.getByRole("button", { name: /hide the file explorer/i }),
+      true,
+    )
+    expectOutline(screen.getByRole("button", { name: /save/i }), true)
+    expectOutline(screen.getByLabelText("More editor actions"), true)
+    expectOutline(screen.getByRole("link", { name: /open in new tab/i }), true)
+    expectOutline(screen.getByRole("button", { name: /^close$/i }), true)
+
+    // Desktop only: the phone reaches these through the fold.
+    expectOutline(screen.getByRole("button", { name: /preview/i }), false)
+    expectOutline(
+      screen.getByRole("button", { name: /open local editor/i }),
+      false,
+    )
+  })
+
+  it("joins File and Diff as one outline button group, the current mode pressed", async () => {
+    await mountWithTab("README.md")
+    await screen.findByTestId("code-editor")
+    const group = screen.getByRole("group", { name: "View mode" })
+    expect(group.getAttribute("data-slot")).toBe("button-group")
+    expect(group.className).toContain("max-md:hidden")
+
+    const file = within(group).getByRole("button", { name: /file/i })
+    const diff = within(group).getByRole("button", { name: /diff/i })
+    for (const control of [file, diff]) {
+      expect(control.className).toContain("border-border")
+      expect(control.className).not.toContain("bg-primary")
+      expect(control.className).toMatch(/(^|\s)h-8(\s|$)/)
+      // The variant marks the pressed one, so a mode is visible at a glance.
+      expect(control.className).toContain("aria-pressed:bg-muted")
+    }
+    expect(file.getAttribute("aria-pressed")).toBe("true")
+    expect(diff.getAttribute("aria-pressed")).toBe("false")
+  })
+})
+
+// The header row must not change height as its controls come and go. Every
+// control is the one h-8 (32px) token, and without a floor the row would still
+// shrink to the path's line box when no file is open. jsdom cannot measure
+// pixels, so what is pinned is the min-h floor class; the pixel truth is the
+// screenshot pass.
 describe("editor header keeps a stable height", () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -1293,7 +1374,7 @@ describe("editor header keeps a stable height", () => {
     await mountWithTab(PATH)
     await screen.findByRole("button", { name: /save/i })
     const row = await headerRow()
-    expect(row.className).toContain("min-h-12.75")
+    expect(row.className).toContain("min-h-12.25")
   })
 
   it("carries the same floor with no file open (Save absent)", async () => {
@@ -1307,7 +1388,7 @@ describe("editor header keeps a stable height", () => {
     render(<EditorOverlay />)
     expect(screen.queryByRole("button", { name: /save/i })).toBeNull()
     const row = await headerRow()
-    expect(row.className).toContain("min-h-12.75")
+    expect(row.className).toContain("min-h-12.25")
   })
 })
 
