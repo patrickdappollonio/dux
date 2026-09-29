@@ -36,8 +36,9 @@ A folder with nothing tracked inside it, like a freshly installed `node_modules`
 row rather than one row per file, the way `git status` shows it: its path with a trailing
 slash and how many files it holds, for example `node_modules/  28,747 files`. Files your
 `.gitignore` hides are not counted. Stage it whole and it stays one row in **Staged**, for as
-long as everything in it is newly added and nothing inside it is still untracked; stage only
-part of it and the staged files are listed one by one. Every count of changed files, the
+long as everything in it is newly added and no file inside it is still untracked (a
+repository left out of the stage does not count); stage only part of it and the staged files
+are listed one by one. Every count of changed files, the
 group badges included, counts the files inside a folder rather than one for the folder. A
 git repository of its own inside a folder is counted apart, as in `3 files and 1 nested
 repository`, and a folder that is itself a repository says "nested repository" instead of a
