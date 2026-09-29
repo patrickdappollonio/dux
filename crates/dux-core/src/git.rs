@@ -3926,6 +3926,13 @@ fn refuse_unplain_path(path: &str, what: &str) -> Result<()> {
 /// case, a linked worktree of this same repository; a route asks this first so
 /// the refusal reaches the browser as a refusal rather than as a git failure.
 pub fn stage_refusal(worktree_path: &Path, path: &str) -> Option<String> {
+    if let Some(repository) = folding::git_directory_above(worktree_path, path, &mut HashMap::new())
+    {
+        return Some(format!(
+            "\"{path}\" is inside \"{repository}/\", which is a repository's own git \
+             directory; it is not a file of this repository, so it is not staged."
+        ));
+    }
     let dir = worktree_path.join(path);
     // git reads a bare repository as a folder of files, so adding one would
     // copy its objects and refs into this repository rather than link it.

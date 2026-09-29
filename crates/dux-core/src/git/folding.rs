@@ -833,6 +833,23 @@ pub(crate) fn bare_repositories(worktree: &Path, records: &[&[u8]]) -> Vec<Vec<u
     found
 }
 
+/// The nearest proper ancestor of the worktree-relative `path` that is a git
+/// directory by [`is_git_directory`] (a bare repository, or some repository's
+/// `.git`), or `None`. A path under one belongs to that repository and is never
+/// a change of this one, whatever a folder row above it would answer. Files
+/// only, a few `stat`s per ancestor, with answers shared through `seen`.
+pub(crate) fn git_directory_above<'p>(
+    worktree: &Path,
+    path: &'p str,
+    seen: &mut HashMap<String, bool>,
+) -> Option<&'p str> {
+    ancestors(path).find(|ancestor| {
+        *seen
+            .entry((*ancestor).to_string())
+            .or_insert_with(|| is_git_directory(&worktree.join(ancestor)))
+    })
+}
+
 /// True when `path` is strictly inside the directory `dir`.
 pub(crate) fn is_inside(path: &[u8], dir: &[u8]) -> bool {
     path.len() > dir.len() && path.starts_with(dir) && path[dir.len()] == b'/'
@@ -921,11 +938,15 @@ pub fn rows_answering(
 ) -> Result<HashSet<String>> {
     let mut answered = HashSet::new();
     let mut to_confirm: Vec<&str> = Vec::new();
+    let mut seen = HashMap::new();
     for path in paths {
         match crate::model::listing_row_for(files, path) {
             Some(row) if row.path == *path => {
                 answered.insert(path.clone());
             }
+            // A path inside a repository's git directory (a bare repository
+            // git lists as plain files) is that repository's, not a change.
+            Some(_) if git_directory_above(worktree, path, &mut seen).is_some() => {}
             Some(_) => to_confirm.push(path),
             None => {}
         }
@@ -1669,6 +1690,38 @@ mod tests {
         assert_eq!(staged, ["d/a.txt", "d/sub/b.txt"]);
         let refusal = stage_with_report(root, &["top.git".to_string()]).unwrap_err();
         assert!(refusal.to_string().contains("bare repository"), "{refusal}");
+    }
+
+    /// A path inside a bare repository is part of that repository, not a
+    /// change of this one: no action may reach it through the folder above.
+    #[test]
+    fn a_path_inside_a_bare_repository_answers_for_nothing() {
+        let repo = folder_with_bare_repositories();
+        let root = repo.path();
+        let (_, unstaged) = changed_files(root).unwrap();
+        let asked: Vec<String> = [
+            "d/bare.git/HEAD",
+            "d/bare.git/config",
+            "d/a.txt",
+            "d/bare.git",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        let answered = rows_answering(root, &unstaged, ChangesSide::Unstaged, &asked).unwrap();
+
+        let mut answered: Vec<&str> = answered.iter().map(String::as_str).collect();
+        answered.sort_unstable();
+        assert_eq!(answered, ["d/a.txt", "d/bare.git"]);
+        assert!(discard_classify(root, "d/bare.git/HEAD").is_err());
+        let refusal = stage_with_report(root, &["d/bare.git/config".to_string()]).unwrap_err();
+        assert!(refusal.to_string().contains("inside"), "{refusal}");
+        assert!(
+            index_modes(root)
+                .iter()
+                .all(|(path, _)| !path.starts_with("d/bare.git"))
+        );
     }
 
     /// git's own rule: a HEAD that names a ref or an object, and objects/ and
