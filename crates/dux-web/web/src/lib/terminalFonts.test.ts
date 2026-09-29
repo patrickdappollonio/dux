@@ -320,6 +320,14 @@ describe("Dux Mono Fill subset contents", () => {
     }
   })
 
+  it("carries the terminal UI's project folder glyph", () => {
+    // The TUI marks a managed agent's project with a bare U+1F5C0 FOLDER
+    // (theme::PROJECT_GLYPH). Few system fonts carry it, so the web terminal
+    // and the screenshot tool draw it from this face; a recut that drops it
+    // puts tofu on every agent row the browser shows.
+    expect(coverage.has(0x1f5c0), "U+1F5C0").toBe(true)
+  })
+
   it("carries every frame of the UI's glyph spinner", () => {
     // `.glyph-spinner` (index.css) names this face first precisely because no
     // other bundled face and no UI font has these six arcs; a recut that drops
