@@ -188,6 +188,15 @@ describe("the single discard dialog", () => {
     expect(dialogText()).toContain("is untracked and will be permanently DELETED")
     expect(screen.getByRole("button", { name: "Discard" })).toBeTruthy()
   })
+
+  // A file row is confirmed as a file, so the server refuses it once a
+  // folder has taken the name rather than cleaning that folder.
+  it("tells the server a file row is a file", async () => {
+    openOn("notes.md")
+    screen.getByRole("button", { name: "Discard" }).click()
+    await vi.waitFor(() => expect(discard).toHaveBeenCalledTimes(1))
+    expect(discard).toHaveBeenCalledWith("s1", "notes.md", "file")
+  })
 })
 
 describe("the bulk discard dialog", () => {

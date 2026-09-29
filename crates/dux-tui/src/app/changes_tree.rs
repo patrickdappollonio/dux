@@ -1599,6 +1599,29 @@ mod tests {
         }
     }
 
+    /// The dialog promised one file; if a folder takes its name before the
+    /// confirm lands, the discard refuses and cleans nothing.
+    #[test]
+    fn a_file_that_became_a_folder_after_the_dialog_is_not_cleaned() {
+        let (mut app, worktree) = repo_app();
+        app.files_index = 1;
+        app.confirm_discard_selected_file().unwrap();
+        assert!(matches!(app.prompt, PromptState::ConfirmDiscardFile { .. }));
+        std::fs::remove_file(worktree.join("notes.md")).unwrap();
+        std::fs::create_dir_all(worktree.join("notes.md")).unwrap();
+        std::fs::write(worktree.join("notes.md/a.txt"), "a\n").unwrap();
+
+        app.resolve_confirm_discard_file(true);
+
+        assert_eq!(app.status.tone(), StatusTone::Error);
+        assert!(
+            app.status.text().contains("changed since you looked"),
+            "{}",
+            app.status.text()
+        );
+        assert!(worktree.join("notes.md/a.txt").exists());
+    }
+
     /// The dialog promised an ordinary folder; if it becomes a repository
     /// before the confirm lands, the delete refuses and deletes nothing.
     #[test]

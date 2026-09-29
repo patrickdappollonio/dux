@@ -137,6 +137,10 @@ pub enum Command {
         worktree_path: PathBuf,
         path: String,
         is_untracked: bool,
+        /// What the row the user confirmed was: the discard is refused when
+        /// the path is no longer that (a file a folder has replaced, a folder
+        /// that became a repository), rather than deleting something else.
+        confirmed: crate::git::ConfirmedEntry,
     },
 
     /// Run `git commit -m <message>` synchronously. The caller pre-formats
@@ -627,31 +631,37 @@ impl Engine {
                 worktree_path,
                 path,
                 is_untracked,
+                confirmed,
             } => {
-                // Whether the path is a folder is asked before the delete,
-                // because afterwards there is nothing left to ask about.
-                let full = worktree_path.join(&path);
-                let is_folder = is_untracked
-                    && std::fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_dir());
-                // Nothing here confirms what the user saw, so `discard_file`
-                // refuses a repository of its own: a folder that got this far
-                // was cleaned as an ordinary one.
-                crate::git::discard_file(&worktree_path, &path, is_untracked)?;
-                let message = if is_folder {
-                    crate::status_text![
+                // The discard refuses anything that is no longer what was
+                // confirmed, so a success is exactly what the user confirmed
+                // and the message can say so from the confirmation.
+                crate::git::discard_confirmed(
+                    &worktree_path,
+                    &path,
+                    is_untracked,
+                    Some(confirmed),
+                )?;
+                let message = match confirmed {
+                    crate::git::ConfirmedEntry::Repository => crate::status_text![
+                        "Deleted ",
+                        q(format!("{path}/")),
+                        ", a repository of its own, with its history."
+                    ],
+                    crate::git::ConfirmedEntry::Folder => crate::status_text![
                         "Deleted the untracked files in ",
                         q(format!("{path}/")),
                         "; files the repository ignores and repositories of their own inside it \
                          are kept."
-                    ]
-                } else if is_untracked {
-                    crate::status_text!["Deleted untracked file ", q(path), "."]
-                } else {
-                    crate::status_text![
+                    ],
+                    crate::git::ConfirmedEntry::File if is_untracked => {
+                        crate::status_text!["Deleted untracked file ", q(path), "."]
+                    }
+                    crate::git::ConfirmedEntry::File => crate::status_text![
                         "Discarded unstaged changes to ",
                         q(path),
                         ". Staged changes, if any, are kept."
-                    ]
+                    ],
                 };
                 Ok(EventReaction::Status(StatusUpdate::info(message)))
             }
@@ -2374,6 +2384,7 @@ mod tests {
                 worktree_path: repo.path().to_path_buf(),
                 path: "a.txt".to_string(),
                 is_untracked: false,
+                confirmed: crate::git::ConfirmedEntry::File,
             })
             .expect("apply");
 
@@ -2393,10 +2404,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original\n");
     }
 
-    /// This command carries no confirmation of what the user saw, so a
-    /// repository of its own is refused through it and nothing is deleted:
-    /// only the confirmed paths (the terminal UI's folder delete, the web's
-    /// discard route) may delete one.
+    /// A file row that a repository has since replaced is refused through
+    /// the command and nothing is deleted: the confirmation named a file.
     #[test]
     fn discarding_a_repository_through_the_command_is_refused() {
         let repo = discard_test_repo();
@@ -2415,6 +2424,7 @@ mod tests {
             worktree_path: repo.path().to_path_buf(),
             path: "clone".to_string(),
             is_untracked: true,
+            confirmed: crate::git::ConfirmedEntry::File,
         });
 
         assert!(refused.is_err());
@@ -2437,6 +2447,7 @@ mod tests {
                 worktree_path: repo.path().to_path_buf(),
                 path: "node_modules".to_string(),
                 is_untracked: true,
+                confirmed: crate::git::ConfirmedEntry::Folder,
             })
             .expect("apply");
 
@@ -2468,6 +2479,7 @@ mod tests {
                 worktree_path: repo.path().to_path_buf(),
                 path: "lookalike".to_string(),
                 is_untracked: true,
+                confirmed: crate::git::ConfirmedEntry::Folder,
             })
             .expect("apply");
 
@@ -2496,6 +2508,7 @@ mod tests {
                 worktree_path: repo.path().to_path_buf(),
                 path: "new.txt".to_string(),
                 is_untracked: true,
+                confirmed: crate::git::ConfirmedEntry::File,
             })
             .expect("apply");
 

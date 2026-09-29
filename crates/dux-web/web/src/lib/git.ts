@@ -88,8 +88,8 @@ export const git = {
   // Sequential because parallel checkouts contend on index.lock, at the accepted cost
   // of one changed-files refresh and broadcast per file.
   //
-  // `kinds` names, for each folder row, what the user confirmed deleting (see
-  // `discard`); a file row has no entry.
+  // `kinds` names, for each row, what the user confirmed it was (see
+  // `discard`); a row with no entry is sent as a file.
   discardMany: async (
     sessionId: string,
     paths: string[],
@@ -99,8 +99,7 @@ export const git = {
     const failed: { path: string; message: string }[] = []
     for (const path of paths) {
       try {
-        const kind = kinds[path]
-        await postGit(gitUrl(sessionId, "discard"), kind ? { path, kind } : { path })
+        await postGit(gitUrl(sessionId, "discard"), { path, kind: kinds[path] ?? "file" })
         done.push(path)
       } catch (err) {
         failed.push({
@@ -113,11 +112,12 @@ export const git = {
   },
   // `untracked` is deliberately not sent: the server re-derives delete versus restore
   // from live git status rather than trusting a client about a destructive outcome.
-  // `kind` is what the user confirmed for a folder row ("directory" or
-  // "nested_repository"): the server refuses when the folder is no longer that,
-  // and deletes a repository of its own only when told it is one.
-  discard: (sessionId: string, path: string, kind?: string) =>
-    postGit(gitUrl(sessionId, "discard"), kind ? { path, kind } : { path }),
+  // `kind` is what the user confirmed the row was: "file" for a file row, or a
+  // folder row's kind ("directory" or "nested_repository"). The server refuses
+  // when the path is no longer that, and deletes a repository of its own only
+  // when told it is one.
+  discard: (sessionId: string, path: string, kind: string) =>
+    postGit(gitUrl(sessionId, "discard"), { path, kind }),
   commit: (sessionId: string, message: string) =>
     postGit(gitUrl(sessionId, "commit"), { message }),
   // Forces a changed-files recompute and mutates nothing, so a change dux did not

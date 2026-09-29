@@ -44,11 +44,11 @@ struct FileOp {
     path: String,
 }
 
-/// The discard body: the path, and what the user confirmed they were
-/// deleting when it is a folder row (`"directory"` or `"nested_repository"`,
-/// the wire's own kinds). Absent for a file, and for an older client: then a
-/// folder is at most cleaned as an ordinary folder, and a repository of its
-/// own is refused, because nothing confirmed deleting its history.
+/// The discard body: the path, and what the user confirmed the row was:
+/// `"file"`, or a folder row's wire kind (`"directory"`,
+/// `"nested_repository"`). Absent from an older client: then a plain file is
+/// discarded as it always was and a directory of any kind is refused, because
+/// nothing said the user was looking at a folder.
 #[derive(Deserialize)]
 struct DiscardOp {
     path: String,
@@ -59,6 +59,7 @@ struct DiscardOp {
 impl DiscardOp {
     fn confirmed(&self) -> Option<dux_core::git::ConfirmedEntry> {
         match self.kind.as_deref() {
+            Some("file") => Some(dux_core::git::ConfirmedEntry::File),
             Some("directory") => Some(dux_core::git::ConfirmedEntry::Folder),
             Some("nested_repository") => Some(dux_core::git::ConfirmedEntry::Repository),
             _ => None,
@@ -1425,7 +1426,7 @@ mod tests {
             .oneshot(json_req(
                 "POST",
                 "/api/v1/sessions/s1/git/discard",
-                r#"{"path":"node_modules"}"#,
+                r#"{"path":"node_modules","kind":"directory"}"#,
             ))
             .await
             .unwrap();
@@ -1624,6 +1625,50 @@ mod tests {
             staged.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
             ["plain.txt"]
         );
+    }
+
+    /// A file row confirmed as a file, which a folder has since replaced, is
+    /// refused and the folder is left alone; so is the same request from an
+    /// older client that sends no kind at all.
+    #[tokio::test]
+    async fn a_discard_confirmed_for_a_file_is_refused_when_a_folder_took_its_place() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(worktree.join("x")).unwrap();
+        std::fs::write(worktree.join("x/a.txt"), "a\n").unwrap();
+
+        for body in [r#"{"path":"x","kind":"file"}"#, r#"{"path":"x"}"#] {
+            let resp = app
+                .clone()
+                .oneshot(json_req("POST", "/api/v1/sessions/s1/git/discard", body))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{body}");
+            assert!(worktree.join("x/a.txt").exists(), "{body}");
+        }
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"x","kind":"file"}"#,
+            ))
+            .await
+            .unwrap();
+        assert!(body_text(resp).await.contains("changed since you looked"));
+
+        std::fs::write(worktree.join("loose.txt"), "l\n").unwrap();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"loose.txt","kind":"file"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!worktree.join("loose.txt").exists());
     }
 
     /// Staging a folder stages its files and leaves the repositories inside it

@@ -8409,10 +8409,13 @@ impl App {
                     return false;
                 }
             };
+            // The prompt was a file's, and a file is what the discard may
+            // touch: a folder that has since taken the name is refused.
             let reaction = self.engine.apply(Command::DiscardFile {
                 worktree_path: worktree,
                 path: file_path,
                 is_untracked,
+                confirmed: git::ConfirmedEntry::File,
             });
             match reaction {
                 Ok(reaction) => {

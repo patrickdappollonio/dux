@@ -4342,10 +4342,14 @@ impl Engine {
             WireCommand::DiscardFile { session_id, path } => {
                 let worktree_path = self.changes_worktree(&session_id)?;
                 let is_untracked = crate::git::discard_classify(&worktree_path, &path)?;
+                // The wire names no kind, so it is a file's discard: a plain
+                // file is deleted or restored as it always was, and a folder
+                // (which only the confirmed routes may delete) is refused.
                 Command::DiscardFile {
                     worktree_path,
                     path,
                     is_untracked,
+                    confirmed: crate::git::ConfirmedEntry::File,
                 }
             }
             WireCommand::CommitChanges {
@@ -5764,7 +5768,9 @@ mod tests {
                 worktree_path,
                 path,
                 is_untracked,
+                confirmed,
             } => {
+                assert_eq!(confirmed, crate::git::ConfirmedEntry::File);
                 assert_eq!(worktree_path, repo.path());
                 assert_eq!(path, "a.txt");
                 assert!(is_untracked, "untracked file must be classified untracked");

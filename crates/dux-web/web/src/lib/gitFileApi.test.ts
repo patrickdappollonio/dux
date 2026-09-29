@@ -322,7 +322,8 @@ describe("discardMany", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       "/api/v1/sessions/s1/git/discard",
-      expect.objectContaining({ body: JSON.stringify({ path: "a.txt" }) }),
+      // A row with no kind of its own is confirmed as a file.
+      expect.objectContaining({ body: JSON.stringify({ path: "a.txt", kind: "file" }) }),
     )
   })
 

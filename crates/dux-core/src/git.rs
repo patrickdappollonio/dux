@@ -4151,6 +4151,8 @@ fn delete_counted_files(
 /// something else if the folder changed kind before the confirm landed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfirmedEntry {
+    /// One file: deleted when untracked, restored from HEAD when tracked.
+    File,
     /// An ordinary folder: its untracked files are cleaned, ignored files and
     /// repositories inside it kept.
     Folder,
@@ -4173,9 +4175,9 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// [`discard_confirmed`] with nothing confirmed, which is what a plain file
-/// needs. For a folder it means "an ordinary folder" at most: a repository of
-/// its own is never removed unless the caller confirmed exactly that.
+/// [`discard_confirmed`] with nothing confirmed: a plain file is discarded as
+/// before, and a directory of any kind is refused, because nothing said the
+/// user was looking at a folder.
 pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -> Result<()> {
     discard_confirmed(worktree_path, file_path, is_untracked, None)
 }
@@ -4257,11 +4259,30 @@ pub fn discard_confirmed(
             )))
         };
         if !meta.is_dir() {
-            if confirmed.is_some() {
-                return Err(changed("a file, not a folder"));
+            match confirmed {
+                // No confirmation is what an older client sends for a file,
+                // and deleting one file is what it always meant.
+                None | Some(ConfirmedEntry::File) => fs::remove_file(&full)?,
+                Some(ConfirmedEntry::Folder | ConfirmedEntry::Repository) => {
+                    return Err(changed("a file, not a folder"));
+                }
             }
-            fs::remove_file(&full)?;
         } else {
+            // A directory goes only when the delete names what it is: a file
+            // row that a folder has since replaced, or a request that says
+            // nothing, must not clean a folder nobody was shown.
+            let whole_repository = match confirmed {
+                Some(ConfirmedEntry::Folder) => false,
+                Some(ConfirmedEntry::Repository) => true,
+                Some(ConfirmedEntry::File) => return Err(changed("a folder, not one file")),
+                None => {
+                    return Err(anyhow::Error::new(Refusal(format!(
+                        "\"{file_path}/\" is a folder; a folder is deleted only when the \
+                         delete names it as one. Refresh the changes and delete it from its own \
+                         row."
+                    ))));
+                }
+            };
             // Re-derived now, from git, the way the listing decided it: a
             // folder that only looks like a repository must be cleaned, not
             // removed whole, or its ignored files go with it.
@@ -4275,21 +4296,14 @@ pub fn discard_confirmed(
                 }
                 // A repository of its own is one row, and deleting it removes
                 // it whole, history included; both surfaces' dialogs say so.
-                UntrackedDirectoryKind::Repository => match confirmed {
-                    Some(ConfirmedEntry::Repository) => fs::remove_dir_all(&full)?,
-                    Some(ConfirmedEntry::Folder) => {
+                UntrackedDirectoryKind::Repository => {
+                    if !whole_repository {
                         return Err(changed("a repository of its own, with a history"));
                     }
-                    None => {
-                        return Err(anyhow::Error::new(Refusal(format!(
-                            "\"{file_path}/\" is a repository of its own; it is deleted, \
-                             history included, only when the delete names it as one. Refresh \
-                             the changes and delete it from its own row."
-                        ))));
-                    }
-                },
+                    fs::remove_dir_all(&full)?;
+                }
                 UntrackedDirectoryKind::Folder => {
-                    if confirmed == Some(ConfirmedEntry::Repository) {
+                    if whole_repository {
                         return Err(changed("an ordinary folder, not a repository"));
                     }
                     let inside = refuse_empty_untracked_folder(worktree_path, file_path)?;
@@ -4298,6 +4312,17 @@ pub fn discard_confirmed(
             }
         }
         return Ok(());
+    }
+    // A tracked path is one file restored from HEAD; a folder confirmation
+    // for it means the row the user saw is not what is there now.
+    if matches!(
+        confirmed,
+        Some(ConfirmedEntry::Folder | ConfirmedEntry::Repository)
+    ) {
+        return Err(anyhow::Error::new(Refusal(format!(
+            "\"{file_path}\" changed since you looked: it is now a tracked file. Nothing was \
+             discarded; refresh the changes and look again before discarding it."
+        ))));
     }
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")

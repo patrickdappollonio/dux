@@ -1689,6 +1689,46 @@ mod tests {
         assert!(!is_git_directory(dir));
     }
 
+    /// The dialog promised one file; if a folder has taken its name before
+    /// the confirm lands, the delete refuses and cleans nothing.
+    #[test]
+    fn a_file_that_became_a_folder_after_the_dialog_is_not_cleaned() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "x", "one file\n");
+        assert!(discard_classify(root, "x").unwrap());
+        fs::remove_file(root.join("x")).unwrap();
+        write(root, "x/a.txt", "a\n");
+        write(root, "x/b.txt", "b\n");
+        assert!(discard_classify(root, "x").unwrap(), "the race is real");
+
+        let refusal = discard_confirmed(root, "x", true, Some(ConfirmedEntry::File)).unwrap_err();
+
+        assert!(
+            refusal.to_string().contains("changed since you looked"),
+            "{refusal}"
+        );
+        assert!(root.join("x/a.txt").exists() && root.join("x/b.txt").exists());
+    }
+
+    /// With nothing confirmed, which is what an older client sends, a plain
+    /// file is still deleted, but a directory is refused: nothing said the
+    /// user was looking at a folder.
+    #[test]
+    fn an_unconfirmed_discard_deletes_a_file_but_never_a_folder() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "loose.txt", "x\n");
+        write(root, "dir/a.txt", "a\n");
+
+        discard_confirmed(root, "loose.txt", true, None).unwrap();
+        let refusal = discard_confirmed(root, "dir", true, None).unwrap_err();
+
+        assert!(!root.join("loose.txt").exists());
+        assert!(root.join("dir/a.txt").exists());
+        assert!(refusal.to_string().contains("\"dir/\""), "{refusal}");
+    }
+
     fn index_modes(root: &Path) -> Vec<(String, String)> {
         let out = test_support::git_command()
             .args([
@@ -1802,7 +1842,9 @@ mod tests {
                 "{text}"
             );
             assert!(text.contains(holds), "{text}");
-            let refusal = discard_file(root, folder, true).unwrap_err().to_string();
+            let refusal = discard_confirmed(root, folder, true, Some(ConfirmedEntry::Folder))
+                .unwrap_err()
+                .to_string();
             assert!(refusal.contains(holds), "{refusal}");
         }
         let (staged, _) = changed_files(root).unwrap();
@@ -2423,7 +2465,7 @@ mod tests {
             vec![("dist".to_string(), "?".to_string(), folder(5))]
         );
 
-        discard_file(root, "dist", true).unwrap();
+        discard_confirmed(root, "dist", true, Some(ConfirmedEntry::Folder)).unwrap();
         let (staged, unstaged) = changed_files(root).unwrap();
         assert!(staged.is_empty() && unstaged.is_empty());
         assert!(!root.join("dist").exists());
@@ -2452,7 +2494,7 @@ mod tests {
         write(&nested, "own.txt", "own\n");
 
         assert!(discard_classify(root, "config").unwrap());
-        discard_file(root, "config", true).unwrap();
+        discard_confirmed(root, "config", true, Some(ConfirmedEntry::Folder)).unwrap();
 
         assert!(!root.join("config/app.js").exists());
         assert!(!root.join("config/sub").exists());
@@ -2474,8 +2516,8 @@ mod tests {
         write(root, "ab/keep.txt", "keep\n");
         write(root, "axb/keep.txt", "keep\n");
 
-        discard_file(root, "-rf", true).unwrap();
-        discard_file(root, "a*b", true).unwrap();
+        discard_confirmed(root, "-rf", true, Some(ConfirmedEntry::Folder)).unwrap();
+        discard_confirmed(root, "a*b", true, Some(ConfirmedEntry::Folder)).unwrap();
 
         assert!(!root.join("-rf").exists());
         assert!(!root.join("a*b").exists());
@@ -2608,7 +2650,8 @@ mod tests {
         git_in(&nested)(&["init", "-q"]);
         write(&nested, "own.txt", "own\n");
 
-        let refusal = discard_file(root, "vendor", true).unwrap_err();
+        let refusal =
+            discard_confirmed(root, "vendor", true, Some(ConfirmedEntry::Folder)).unwrap_err();
 
         assert!(
             refusal
@@ -2643,7 +2686,8 @@ mod tests {
             "the listing says what it is, so no surface offers a delete"
         );
 
-        let refusal = discard_file(root, "inner-wt", true).unwrap_err();
+        let refusal =
+            discard_confirmed(root, "inner-wt", true, Some(ConfirmedEntry::Folder)).unwrap_err();
 
         assert!(
             refusal.to_string().contains("worktree manager"),
@@ -2709,7 +2753,7 @@ mod tests {
                 untracked_directory_kind(root, folder).unwrap(),
                 UntrackedDirectoryKind::Folder
             );
-            discard_file(root, folder, true).unwrap();
+            discard_confirmed(root, folder, true, Some(ConfirmedEntry::Folder)).unwrap();
             assert!(
                 !root.join(folder).join("a.js").exists(),
                 "{folder}: its file went"
