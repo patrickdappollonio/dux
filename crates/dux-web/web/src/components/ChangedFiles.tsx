@@ -187,6 +187,7 @@ function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProp
         * There is deliberately no shift-click range, because the rows carry no
         * keyboard model for one to be reachable through. */}
       <div
+        role="gridcell"
         className={cn(
           "relative flex shrink-0 items-center justify-center",
           STATUS_SLOT,
@@ -254,24 +255,30 @@ function ExpandToggle({
   children: React.ReactNode
 }) {
   if (!expandable) {
-    return <div className="flex min-w-0 flex-1 items-baseline gap-2">{children}</div>
+    return (
+      <div role="gridcell" className="flex min-w-0 flex-1 items-baseline gap-2">
+        {children}
+      </div>
+    )
   }
   return (
-    <button
-      type="button"
-      aria-expanded={expanded}
-      aria-controls={expanded ? contentsId : undefined}
-      onClick={(event) => {
-        event.stopPropagation()
-        onToggle()
-      }}
-      className={cn(
-        "flex min-w-0 flex-1 items-baseline gap-2 self-stretch rounded border border-transparent text-left max-md:min-h-11 pointer-coarse:min-h-11",
-        FOCUS_RING,
-      )}
-    >
-      {children}
-    </button>
+    <div role="gridcell" className="flex min-w-0 flex-1 self-stretch">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={expanded ? contentsId : undefined}
+        onClick={(event) => {
+          event.stopPropagation()
+          onToggle()
+        }}
+        className={cn(
+          "flex min-w-0 flex-1 items-baseline gap-2 self-stretch rounded border border-transparent text-left max-md:min-h-11 pointer-coarse:min-h-11",
+          FOCUS_RING,
+        )}
+      >
+        {children}
+      </button>
+    </div>
   )
 }
 
@@ -384,6 +391,7 @@ const FileRow = memo(function FileRow({
     <div
       role="row"
       aria-level={depth + 1}
+      aria-expanded={expandable ? expanded : undefined}
       className={cn(
         "group flex items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11",
         folderCount === null && "cursor-pointer",
@@ -465,20 +473,22 @@ const FileRow = memo(function FileRow({
         * from before, which the row says quietly, with the reason on hover and
         * a way to ask again. A 44px target on touch, like every row control. */}
       {refreshError !== null && onRetryFolder && (
-        <SimpleTooltip content={refreshError}>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 shrink-0 px-2 text-xs text-muted-foreground max-md:min-h-11 pointer-coarse:min-h-11"
-            onClick={(event) => {
-              event.stopPropagation()
-              onRetryFolder(file)
-            }}
-          >
-            <TriangleAlert />
-            Couldn't refresh · Retry
-          </Button>
-        </SimpleTooltip>
+        <div role="gridcell" className="shrink-0">
+          <SimpleTooltip content={refreshError}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 shrink-0 px-2 text-xs text-muted-foreground max-md:min-h-11 pointer-coarse:min-h-11"
+              onClick={(event) => {
+                event.stopPropagation()
+                onRetryFolder(file)
+              }}
+            >
+              <TriangleAlert />
+              Couldn't refresh · Retry
+            </Button>
+          </SimpleTooltip>
+        </div>
       )}
 
       {/* The menu's items are computed first, and a row with none gets no
@@ -493,6 +503,7 @@ const FileRow = memo(function FileRow({
         * the trigger and on the portaled menu items off the row's open-diff
         * handler, which React routes through this ancestor. */
       <div
+        role="gridcell"
         className={cn(
           "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-10 md:group-hover:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 md:has-[[aria-busy=true]]:max-w-10 md:has-[[aria-busy=true]]:opacity-100",
           ALWAYS_REVEALED_ON_TOUCH,
@@ -1011,7 +1022,7 @@ function EmptyRow({ depth }: { depth: number }) {
       className="flex items-center gap-2 px-1 py-1 text-sm text-muted-foreground"
       style={depthIndent(depth)}
     >
-      Nothing git lists here anymore.
+      <div role="gridcell">Nothing git lists here anymore.</div>
     </div>
   )
 }
@@ -1026,8 +1037,10 @@ function LoadingRow({ depth }: { depth: number }) {
       className="flex items-center gap-2 px-1 py-1 text-sm text-muted-foreground"
       style={depthIndent(depth)}
     >
-      <Loader2 aria-hidden className="size-4 shrink-0 motion-safe:animate-spin" />
-      <span role="status">Loading…</span>
+      <div role="gridcell" className="flex items-center gap-2">
+        <Loader2 aria-hidden className="size-4 shrink-0 motion-safe:animate-spin" />
+        <span role="status">Loading…</span>
+      </div>
     </div>
   )
 }
@@ -1050,18 +1063,22 @@ function FailedRow({
       className="flex items-center gap-2 px-1 py-1 text-sm max-md:min-h-11"
       style={depthIndent(depth)}
     >
-      <TriangleAlert aria-hidden className="size-4 shrink-0 text-destructive" />
       {/* The message is the whole sentence, the server's or the deadline's. */}
-      <span className="min-w-0 flex-1 text-muted-foreground">{message}</span>
-      <Button
-        variant="outline"
-        size="sm"
-        className="h-8 max-md:h-11 pointer-coarse:min-h-11"
-        onClick={onRetry}
-      >
-        <RefreshCw />
-        Retry
-      </Button>
+      <div role="gridcell" className="flex min-w-0 flex-1 items-center gap-2">
+        <TriangleAlert aria-hidden className="size-4 shrink-0 text-destructive" />
+        <span className="min-w-0 flex-1 text-muted-foreground">{message}</span>
+      </div>
+      <div role="gridcell" className="shrink-0">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 max-md:h-11 pointer-coarse:min-h-11"
+          onClick={onRetry}
+        >
+          <RefreshCw />
+          Retry
+        </Button>
+      </div>
     </div>
   )
 }
@@ -1231,6 +1248,10 @@ function ChangesList({
         key={item.key}
         data-item-key={item.key}
         data-item-kind={item.kind}
+        // Only positions the item; the row inside is what the treegrid holds,
+        // and the separator is decoration.
+        role="none"
+        aria-hidden={item.kind === "separator" ? true : undefined}
         className={ITEM_SPACING[item.kind]}
         style={{
           position: "absolute",
@@ -1249,17 +1270,22 @@ function ChangesList({
     const section = item.section
     if (item.kind === "header") {
       return (
-        <GroupHeader
-          heading={section === "staged" ? "Staged" : "Unstaged"}
-          // Files, not rows: a folded folder counts what is inside it.
-          shown={recap[section].count}
-          total={changed[section].reduce((sum, file) => sum + changedFileCount(file), 0)}
-          recap={recap[section]}
-          filtering={filtering}
-          open={open[section]}
-          controls={rowsId(section)}
-          onToggleOpen={() => toggleOpen(section)}
-        />
+        // A section's heading is a row of the treegrid, its toggle in a cell.
+        <div role="row" aria-level={1}>
+          <div role="gridcell">
+            <GroupHeader
+              heading={section === "staged" ? "Staged" : "Unstaged"}
+              // Files, not rows: a folded folder counts what is inside it.
+              shown={recap[section].count}
+              total={changed[section].reduce((sum, file) => sum + changedFileCount(file), 0)}
+              recap={recap[section]}
+              filtering={filtering}
+              open={open[section]}
+              controls={rowsId(section)}
+              onToggleOpen={() => toggleOpen(section)}
+            />
+          </div>
+        </div>
       )
     }
     if (item.kind === "loading") return <LoadingRow depth={item.depth} />
@@ -1307,10 +1333,13 @@ function ChangesList({
       }
       const top = offsets[part.first]!
       return [
+        // A treegrid cannot nest rowgroups, so a folder's container only holds
+        // its rows in place (and is what the toggle's aria-controls names);
+        // the rows' levels say they are inside it.
         <div
           key={`contents:${part.key}`}
           id={contentsId(part.key)}
-          role="group"
+          role="none"
           style={{
             position: "absolute",
             top: top - origin,
@@ -1362,8 +1391,12 @@ function ChangesList({
           </Empty>
         ) : null}
         {items.length > 0 ? (
+          // Rows here hold widgets (a checkbox, a toggle, a menu) and nest by
+          // level, which the ARIA practices call a treegrid.
           <div
             ref={listRef}
+            role="treegrid"
+            aria-label="Changed files"
             // The full height, so the scrollbar reflects the whole list.
             style={{ position: "relative", height: offsets[items.length] }}
             onFocus={(event) => {
@@ -1403,7 +1436,7 @@ function ChangesList({
                 <div
                   key={`rows:${part.section}`}
                   id={rowsId(part.section)}
-                  role="group"
+                  role="rowgroup"
                   aria-label={
                     part.section === "staged" ? "Staged files" : "Unstaged files"
                   }

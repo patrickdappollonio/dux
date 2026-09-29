@@ -49,19 +49,20 @@ Discarding a folder keeps any bare repository inside it, and the dialog names it
 A folder row has no diff to open. Click its name, or Tab to it and press Enter or Space, to
 expand it and list what is inside, one level at a time; click it again to fold it back up.
 The folders inside are folded the same way and expand the same way, and every file inside is
-a full row: click it for its diff, check it, or stage, unstage or discard it from its own `⋯`.
-A folder whose contents could not be listed says why and offers Retry. What you have expanded
-is remembered for each agent until you reload the page, and it follows the files as they
-change: an expanded folder that gains or loses files lists itself again on its own, at any depth, one that is gone
-is folded away, and collapsing a folder unchecks the rows inside it. If a refresh cannot be
-listed, the rows from before stay, and the folder says it couldn't refresh and offers Retry.
+a full row: click it for its diff, check it, or stage, unstage or discard it from its own
+`⋯`. A folder whose contents could not be listed says why and offers Retry. What you have
+expanded is remembered for each agent until you reload the page, and it follows the files as
+they change: an expanded folder that gains or loses files lists itself again on its own, at
+any depth, one that is gone is folded away, and collapsing a folder unchecks the rows inside
+it. If a refresh cannot be listed, the rows from before stay, and the folder says it
+couldn't refresh and offers Retry.
 
-A folder row's own `⋯` menu stages or unstages the whole folder at once,
-and discards it after a confirmation, the same one a file gets. Staging a folder stages its
-files and leaves out any repository of its own, or worktree of this repository, inside it, so
-none of them is recorded as a link; dux tells you what it left out, and the folder's staged
-row says so too, as in `5 files · 1 nested repository not staged`. A folder that holds
-nothing but repositories has nothing to stage, so it offers no stage. Discarding an untracked folder
+A folder row's own `⋯` menu stages or unstages the whole folder at once, and discards it
+after a confirmation, the same one a file gets. Staging a folder stages its files and leaves
+out any repository of its own, or worktree of this repository, inside it, so none of them is
+recorded as a link; dux tells you what it left out, and the folder's staged row says so too,
+as in `5 files · 1 nested repository not staged`. A folder that holds nothing but
+repositories has nothing to stage, so it offers no stage. Discarding an untracked folder
 deletes the untracked files it counted: files your `.gitignore` hides stay, and so does any
 repository of its own inside it, and the dialog says so. A folder that holds nothing but
 repositories of their own has nothing to delete, so it offers no discard. A folder that is a

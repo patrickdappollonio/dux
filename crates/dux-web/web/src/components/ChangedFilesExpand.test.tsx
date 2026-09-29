@@ -171,7 +171,7 @@ describe("expanding a folded folder", () => {
 
     expect(button.getAttribute("aria-expanded")).toBe("true")
     const controls = button.getAttribute("aria-controls")!
-    expect(document.getElementById(controls)?.getAttribute("role")).toBe("group")
+    expect(document.getElementById(controls)).not.toBeNull()
     expect(fetchFolderChildren).toHaveBeenCalledWith(
       "s1",
       "node_modules",
@@ -190,6 +190,36 @@ describe("expanding a folded folder", () => {
     fireEvent.click(button)
     expect(button.getAttribute("aria-expanded")).toBe("false")
     expect(screen.queryByText("top.js")).toBeNull()
+  })
+
+  // Rows that hold widgets (a checkbox, a toggle, a menu) are a treegrid in
+  // the ARIA practices: the list is the treegrid, each section a rowgroup,
+  // each row carries its level and (on a folder) whether it is expanded, and
+  // every control sits in a gridcell.
+  it("is a treegrid whose rows say their level and whether they are expanded", async () => {
+    render(<ChangedFiles />)
+    const grid = screen.getByRole("treegrid", { name: "Changed files" })
+    const folderRow = toggle("node_modules/").closest('[role="row"]')!
+    expect(folderRow.getAttribute("aria-level")).toBe("1")
+    expect(folderRow.getAttribute("aria-expanded")).toBe("false")
+    for (const cell of folderRow.children) {
+      expect(cell.getAttribute("role")).toBe("gridcell")
+    }
+    expect(within(grid).getAllByRole("rowgroup").length).toBeGreaterThan(0)
+    // The section heading is a row too, its button in a gridcell.
+    const heading = screen.getByRole("button", { name: /^Unstaged/ })
+    expect(heading.closest('[role="gridcell"]')?.closest('[role="row"]')).not.toBeNull()
+
+    fireEvent.click(toggle("node_modules/"))
+    expect(folderRow.getAttribute("aria-expanded")).toBe("true")
+    await answer(0, [file("node_modules/top.js")])
+    const childRow = screen.getByText("top.js").closest('[role="row"]')!
+    expect(childRow.getAttribute("aria-level")).toBe("2")
+    expect(childRow.getAttribute("aria-expanded")).toBeNull()
+    const contents = document.getElementById(
+      toggle("node_modules/").getAttribute("aria-controls")!,
+    )!
+    expect(contents.contains(childRow)).toBe(true)
   })
 
   it("expands a folder inside an expanded one, a level deeper", async () => {
