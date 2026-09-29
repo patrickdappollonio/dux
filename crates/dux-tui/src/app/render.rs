@@ -1,3 +1,4 @@
+use super::changes_tree::ChangesRow;
 use super::components::BUTTON_HEIGHT;
 use super::components::ellipsis::{
     ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width, mark_cut_row,
@@ -4446,21 +4447,27 @@ impl App {
         if self.right_collapsed {
             let focused = self.focus == FocusPane::Files;
             let block = self.themed_block("", focused);
-            let total = self.engine.unstaged_files.len() + self.engine.staged_files.len();
+            let rows: Vec<_> = self
+                .changes_rows(RightSection::Unstaged)
+                .into_iter()
+                .chain(self.changes_rows(RightSection::Staged))
+                .collect();
+            let total = rows.len();
             // The rail is one status glyph per row, but a row is still a row:
             // slice to the visible window exactly as the full pane does.
             let viewport = block.inner(area).height as usize;
             let window_start = list_window_start(total, Some(self.files_index), viewport);
-            let items: Vec<ListItem> = self
-                .engine
-                .unstaged_files
-                .iter()
-                .chain(self.engine.staged_files.iter())
+            let items: Vec<ListItem> = rows
+                .into_iter()
                 .skip(window_start)
                 .take(viewport)
-                .map(|file| {
+                .map(|row| {
+                    // A placeholder row inside an expanded folder has no status.
+                    let glyph = row
+                        .file()
+                        .map_or_else(|| "\u{2026}".to_string(), |file| file.status.clone());
                     ListItem::new(Line::from(Span::styled(
-                        file.status.clone(),
+                        glyph,
                         Style::default().fg(self.theme.file_status_fg),
                     )))
                 })
@@ -4491,25 +4498,13 @@ impl App {
                     Constraint::Percentage(pct),          // Staged Changes (with commit input)
                 ])
                 .split(area);
-            let list_rect = self.render_file_list(
-                frame,
-                chunks[0],
-                "Changes",
-                &self.engine.unstaged_files,
-                RightSection::Unstaged,
-                true,
-            );
+            let list_rect =
+                self.render_file_list(frame, chunks[0], "Changes", RightSection::Unstaged, true);
             self.mouse_layout.unstaged_list = Some(list_rect);
             self.render_staged_with_commit(frame, chunks[1], focused);
         } else {
-            let list_rect = self.render_file_list(
-                frame,
-                area,
-                "Changes",
-                &self.engine.unstaged_files,
-                RightSection::Unstaged,
-                true,
-            );
+            let list_rect =
+                self.render_file_list(frame, area, "Changes", RightSection::Unstaged, true);
             self.mouse_layout.unstaged_list = Some(list_rect);
         }
     }
@@ -4532,7 +4527,6 @@ impl App {
             frame,
             files_area,
             "Staged Changes",
-            &self.engine.staged_files,
             RightSection::Staged,
             false,
         );
@@ -4617,10 +4611,16 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         title_prefix: &str,
-        files: &[ChangedFile],
         section: RightSection,
         show_hint: bool,
     ) -> Rect {
+        let files = match section {
+            RightSection::Staged => &self.engine.staged_files,
+            _ => &self.engine.unstaged_files,
+        };
+        // What the list shows: the listing with every expanded folder's
+        // contents under it. The title still sums the listing itself.
+        let rows = self.changes_rows(section);
         let pane_focused = self.focus == FocusPane::Files;
         let is_active_section = pane_focused && self.right_section == section;
         let block = self.themed_block_line(
@@ -4680,37 +4680,99 @@ impl App {
         // fit, on every keystroke and every tick.
         let selected = is_active_section.then_some(self.files_index);
         let viewport = list_area.height as usize;
-        let window_start = list_window_start(files.len(), selected, viewport);
-        let window_end = window_start.saturating_add(viewport).min(files.len());
-        let items = files[window_start..window_end]
+        let window_start = list_window_start(rows.len(), selected, viewport);
+        let window_end = window_start.saturating_add(viewport).min(rows.len());
+        let items = rows[window_start..window_end]
             .iter()
             .enumerate()
-            .map(|(offset, file)| {
+            .map(|(offset, row)| {
                 let index = window_start + offset;
                 let is_selected = is_active_section && index == self.files_index;
+                let base_style = if is_selected {
+                    sel_style
+                } else {
+                    Style::default()
+                };
+                let (file, depth, expanded) = match *row {
+                    ChangesRow::Entry {
+                        file,
+                        depth,
+                        expanded,
+                    } => (file, depth, expanded),
+                    ChangesRow::Loading { depth } => {
+                        return changes_placeholder_row(
+                            depth,
+                            "Loading\u{2026}",
+                            base_style.fg(self.theme.hint_desc_fg),
+                            base_style,
+                            content_width,
+                        );
+                    }
+                    ChangesRow::Failed { depth, message } => {
+                        return changes_placeholder_row(
+                            depth,
+                            &format!("Could not list this folder: {message}"),
+                            base_style.fg(self.theme.warning_fg),
+                            base_style,
+                            content_width,
+                        );
+                    }
+                };
 
-                // Build the right-aligned stats string, e.g. "+12 -3".
-                let stats = format_line_stats(
-                    file.additions,
-                    file.deletions,
-                    file.binary,
-                    file.diff_excluded,
-                    &self.theme,
-                );
+                // The right-aligned figures: a folder's file count, or a
+                // file's line counts, e.g. "+12 -3".
+                let stats = match dux_core::model::folder_count_label(file) {
+                    Some(count) => vec![Span::styled(
+                        count,
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )],
+                    None => format_line_stats(
+                        file.additions,
+                        file.deletions,
+                        file.binary,
+                        file.diff_excluded,
+                        &self.theme,
+                    ),
+                };
                 let stats_width = stats.iter().map(|s| s.width()).sum::<usize>();
 
-                // Status prefix takes 3 chars ("M  ").
-                let prefix_width = 3;
+                // Status prefix takes 3 chars ("M  "), then the row's place in
+                // the tree: two columns per expanded folder above it, and a
+                // folder's open or closed marker (or, inside a folder, two
+                // blank columns so a file lines up with its sibling folders).
+                let indent = "  ".repeat(depth);
+                let marker = if file.is_expandable() {
+                    if expanded { "\u{25be} " } else { "\u{25b8} " }
+                } else if depth > 0 {
+                    "  "
+                } else {
+                    ""
+                };
+                let prefix_width = 3 + display_width(&indent) + display_width(marker);
                 // Leave 1 char gap between path and stats.
                 let path_budget = content_width
                     .saturating_sub(prefix_width)
                     .saturating_sub(stats_width)
                     .saturating_sub(1);
 
-                let path = if is_selected {
-                    file.path.clone()
+                // Inside a folder the row names only itself: the folder it
+                // hangs from is the row above it.
+                let name = if depth == 0 {
+                    crate::app::changes_tree::folder_label(file)
                 } else {
-                    ellipsize_middle(&file.path, path_budget.max(10))
+                    let label = crate::app::changes_tree::folder_label(file);
+                    let trimmed = label.trim_end_matches('/');
+                    let leaf = trimmed.rsplit('/').next().unwrap_or(trimmed);
+                    if file.is_folder() {
+                        format!("{leaf}/")
+                    } else {
+                        leaf.to_string()
+                    }
+                };
+                let path = if is_selected {
+                    name
+                } else {
+                    ellipsize_middle(&name, path_budget.max(10))
                 };
 
                 let path_display_width = display_width(&path);
@@ -4719,17 +4781,12 @@ impl App {
                     .saturating_sub(path_display_width)
                     .saturating_sub(stats_width);
 
-                let base_style = if is_selected {
-                    sel_style
-                } else {
-                    Style::default()
-                };
-
                 let mut spans = vec![
                     Span::styled(
                         format!("{:>2} ", file.status),
                         base_style.fg(self.theme.file_status_fg),
                     ),
+                    Span::styled(format!("{indent}{marker}"), base_style),
                     Span::styled(path, base_style),
                     Span::styled(" ".repeat(padding), base_style),
                 ];
@@ -4756,8 +4813,8 @@ impl App {
         // the selection is addressed within it and ratatui scrolls no further.
         let mut state = ListState::default().with_selected(
             selected
-                .filter(|_| !files.is_empty())
-                .map(|index| index.min(files.len().saturating_sub(1)) - window_start),
+                .filter(|_| !rows.is_empty())
+                .map(|index| index.min(rows.len().saturating_sub(1)) - window_start),
         );
         StatefulWidget::render(List::new(items), list_area, frame.buffer_mut(), &mut state);
 
@@ -4984,6 +5041,9 @@ impl App {
             return hints;
         }
         let mut hints = self.bindings.hints_for(ctx);
+        if matches!(ctx, HintContext::Files) {
+            self.name_the_folder_key(&mut hints);
+        }
         if matches!(ctx, HintContext::Center) && self.current_pr_info().is_some() {
             let key = self.bindings.label_for(Action::OpenCurrentPullRequest);
             if !key.is_empty() {
@@ -8116,29 +8176,54 @@ impl App {
 
     fn render_confirm_discard_file_prompt(&mut self, frame: &mut Frame) {
         let PromptState::ConfirmDiscardFile {
-            file_path, focus, ..
+            file_path,
+            kind,
+            focus,
         } = &self.prompt
         else {
             return;
         };
-        let lines = vec![
-            Line::from(""),
-            Line::from(vec![
+        // A folded folder is deleted whole, so the question names it as the
+        // folder it is and says how much goes with it.
+        let question = match kind {
+            dux_core::model::ChangedFileKind::File => vec![
                 Span::raw(" Discard all changes to "),
                 name_chip(file_path, &self.theme),
                 Span::raw("?"),
-            ]),
+            ],
+            dux_core::model::ChangedFileKind::Directory { file_count } => vec![
+                Span::raw(" Delete the untracked folder "),
+                name_chip(&format!("{file_path}/"), &self.theme),
+                Span::raw(format!(
+                    " and the {} inside it?",
+                    if *file_count == 1 {
+                        "1 file".to_string()
+                    } else {
+                        format!("{} files", dux_core::model::group_thousands(*file_count))
+                    }
+                )),
+            ],
+            dux_core::model::ChangedFileKind::NestedRepository => vec![
+                Span::raw(" Delete "),
+                name_chip(&format!("{file_path}/"), &self.theme),
+                Span::raw(", a repository of its own, and everything inside it?"),
+            ],
+        };
+        let lines = vec![
+            Line::from(""),
+            Line::from(question),
             Line::from(""),
             Line::from(Span::styled(
                 " This action cannot be undone.",
                 Style::default().fg(self.theme.warning_fg),
             )),
         ];
+        let deletes_folder = *kind != dux_core::model::ChangedFileKind::File;
         let (cancel, act) = confirm_focus_buttons(
             *focus,
             ButtonPressedTarget::ConfirmDiscardCancel,
             (
-                "Discard",
+                if deletes_folder { "Delete" } else { "Discard" },
                 ButtonKind::Danger,
                 ButtonPressedTarget::ConfirmDiscardConfirm,
             ),
@@ -8146,7 +8231,11 @@ impl App {
         let layout = self.render_confirm_dialog(
             frame,
             ConfirmDialog {
-                title: "Discard Changes",
+                title: if deletes_folder {
+                    "Delete Folder"
+                } else {
+                    "Discard Changes"
+                },
                 body: lines,
                 controls_height: 0,
                 cancel,
@@ -11909,6 +11998,29 @@ pub(crate) fn list_window_start(len: usize, selected: Option<usize>, viewport: u
 /// the repository excludes from diffs (`-diff` in a `.gitattributes`) reads
 /// "Excl" in its own muted tone: git will not count its lines, but the file is
 /// text and the diff viewer opens it, so calling it binary would be a lie.
+/// A placeholder row under an expanded folder ("Loading…", or why its
+/// listing failed), indented to the depth of the rows it stands in for and
+/// padded to the row's full width so a selection highlight reaches the edge.
+pub(crate) fn changes_placeholder_row(
+    depth: usize,
+    text: &str,
+    text_style: Style,
+    row_style: Style,
+    content_width: usize,
+) -> ListItem<'static> {
+    let lead = format!("   {}  ", "  ".repeat(depth.saturating_sub(1)));
+    let budget = content_width.saturating_sub(display_width(&lead));
+    let text = ellipsize_middle(text, budget.max(10));
+    let padding = content_width
+        .saturating_sub(display_width(&lead))
+        .saturating_sub(display_width(&text));
+    ListItem::new(Line::from(vec![
+        Span::styled(lead, row_style),
+        Span::styled(text, text_style),
+        Span::styled(" ".repeat(padding + 1), row_style),
+    ]))
+}
+
 pub(crate) fn format_line_stats(
     additions: usize,
     deletions: usize,
@@ -12011,8 +12123,9 @@ pub(crate) fn changed_files_group_title(
         deletions += file.deletions;
     }
 
+    // A folded folder counts by the files inside it.
     let mut spans = vec![Span::styled(
-        format!("{prefix} ({})", files.len()),
+        format!("{prefix} ({})", dux_core::model::total_file_count(files)),
         title_style,
     )];
     let has_lines = additions > 0 || deletions > 0;

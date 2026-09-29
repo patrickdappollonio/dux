@@ -336,6 +336,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pr_banner_at_bottom: true,
         syntax_cache: std::sync::Arc::new(crate::diff::SyntaxCache::new()),
         pending_diff: None,
+        changes_tree: Default::default(),
         diff_request_seq: 0,
         snapshot_buf: crate::pty::TerminalSnapshot::empty(),
         last_snapshot_id: None,

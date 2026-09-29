@@ -1124,6 +1124,7 @@ pub(super) mod tests {
                 "ConfirmDiscardFile",
                 PromptState::ConfirmDiscardFile {
                     file_path: "my notes.txt".to_string(),
+                    kind: dux_core::model::ChangedFileKind::File,
                     focus: ConfirmFocus::Cancel,
                 },
             ),

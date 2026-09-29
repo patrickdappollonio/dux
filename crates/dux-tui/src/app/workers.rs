@@ -104,6 +104,7 @@ impl App {
         self.drain_unpushed_count();
         self.drain_branch_listing();
         self.drain_pending_diff();
+        self.drain_changes_tree_work();
         self.drain_worker_events();
         self.apply_resume_fallback_sweep();
         self.apply_reaped_terminations();
@@ -550,7 +551,12 @@ impl App {
             }
             EventReaction::RebuildLeftItems => self.rebuild_left_items(),
             EventReaction::ReloadChangedFiles => self.reload_changed_files(),
-            EventReaction::ClampFilesCursor => self.clamp_files_cursor(),
+            EventReaction::ClampFilesCursor => {
+                // A fresh changed-files read: expanded folders follow it before
+                // the cursor is clamped to the rows that result.
+                self.reconcile_changes_tree();
+                self.clamp_files_cursor();
+            }
 
             EventReaction::AgentLaunchReadyView(boxed) => {
                 self.apply_agent_launch_ready_view(*boxed);

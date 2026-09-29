@@ -466,10 +466,14 @@ impl Action {
             }
             Action::ScrollToBottom => "Exit scroll mode and jump to the latest output.",
             Action::ScrollToTop => "Jump to the top of the scrollback buffer.",
-            Action::OpenDiff => "Open the selected file's diff.",
-            Action::StageUnstage => "Stage or unstage the selected file.",
+            Action::OpenDiff => {
+                "Open the selected file's diff, or expand or collapse the selected folder."
+            }
+            Action::StageUnstage => "Stage or unstage the selected file, or a whole folder.",
             Action::CommitChanges => "Commit staged changes.",
-            Action::DiscardChanges => "Discard changes to the selected file.",
+            Action::DiscardChanges => {
+                "Discard changes to the selected file, or delete an untracked folder."
+            }
             Action::EngageCommitInput => "Open the commit message editor.",
             Action::PushToRemote => "Push to remote.",
             Action::PullFromRemote => "Pull from remote.",

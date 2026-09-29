@@ -562,6 +562,8 @@ pub struct App {
     /// one diff, so a new request supersedes the old one rather than queueing
     /// behind it.
     pub(crate) pending_diff: Option<PendingDiff>,
+    /// Expanded folders in the changes pane and the work in flight for them.
+    pub(crate) changes_tree: ChangesTreeState,
     /// Monotonic request counter, stamped into every [`crate::diff::DiffRequestKey`]
     /// so two requests that agree on file and settings are still told apart.
     pub(crate) diff_request_seq: u64,
@@ -953,6 +955,73 @@ pub struct PendingDiff {
 /// key: a new request retires the previous one's spinner rather than leaving
 /// two open at once.
 pub const DIFF_STATUS_KEY: &str = "diff-file";
+
+/// Which folded folders the changes pane has expanded, and the work in flight
+/// for them. See `changes_tree` for the behavior.
+#[derive(Default)]
+pub(crate) struct ChangesTreeState {
+    /// Expanded folders per agent, keyed by session id. Kept in memory only:
+    /// it is a view preference for this run, not state worth persisting.
+    pub(crate) by_session: HashMap<String, AgentChangesTree>,
+    /// Folder listings on their way back from a worker.
+    pub(crate) pending_listings: Vec<PendingFolderListing>,
+    /// Stage, unstage and delete operations on whole folders, in flight.
+    pub(crate) pending_ops: Vec<PendingFolderOp>,
+    /// Stamped into every listing request so a superseded answer is dropped.
+    pub(crate) listing_seq: u64,
+}
+
+/// One agent's expanded folders, per half of the changes pane, keyed by the
+/// folder's worktree-relative path.
+#[derive(Default)]
+pub(crate) struct AgentChangesTree {
+    pub(crate) expanded: HashMap<git::ChangesSide, HashMap<String, FolderListing>>,
+}
+
+/// What the pane knows about one expanded folder's contents.
+pub(crate) struct FolderListing {
+    /// The last listing that arrived, kept on screen while a newer one loads.
+    pub(crate) children: Option<Vec<ChangedFile>>,
+    /// The request whose answer this entry is waiting for, if any.
+    pub(crate) pending_seq: Option<u64>,
+    /// Why the last listing failed, shown in place of the contents.
+    pub(crate) error: Option<String>,
+    /// The folder's file count when the listing was asked for, so a later read
+    /// of the pane can tell the folder changed and list it again.
+    pub(crate) seen_count: usize,
+}
+
+/// A folder listing a worker is producing.
+pub(crate) struct PendingFolderListing {
+    pub(crate) session_id: String,
+    pub(crate) side: git::ChangesSide,
+    pub(crate) dir: String,
+    pub(crate) seq: u64,
+    /// The keyed busy this listing owes a final to, or `None` for a quiet
+    /// refresh of a folder that is already on screen.
+    pub(crate) status_key: Option<String>,
+    pub(crate) rx: mpsc::Receiver<Result<Vec<ChangedFile>, String>>,
+}
+
+/// A whole-folder git operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FolderOp {
+    Stage,
+    Unstage,
+    Delete,
+}
+
+/// A whole-folder operation a worker is running.
+pub(crate) struct PendingFolderOp {
+    pub(crate) session_id: String,
+    pub(crate) op: FolderOp,
+    /// The folder as the status line names it, trailing slash included.
+    pub(crate) label: String,
+    /// How many files it stands for, in words, for the status line.
+    pub(crate) count_words: String,
+    pub(crate) status_key: String,
+    pub(crate) rx: mpsc::Receiver<Result<(), String>>,
+}
 
 /// How long a diff may take before the status line explains the empty pane.
 /// The same judgement as [`SLOW_CHANGED_FILES_READ`], and deliberately the same
@@ -2706,6 +2775,11 @@ pub(crate) enum PromptState {
     },
     ConfirmDiscardFile {
         file_path: String,
+        /// A folded folder is deleted whole, so the dialog names it as a
+        /// folder with its file count instead of as one file. This is the
+        /// row's shape when the prompt opened, which decides only the wording:
+        /// whether anything is deleted is still decided from live status.
+        kind: dux_core::model::ChangedFileKind,
         // Deliberately NO tracked/untracked flag here: discard is destructive
         // (delete an untracked file vs restore a tracked one from HEAD), and the
         // file's state can change between when this prompt opens and when the user
@@ -3932,6 +4006,7 @@ pub(crate) use background_server::{BackgroundServerStart, CompanionRouting};
 // `pub(crate)` for its width helpers alone: the diff wrapper has to measure a
 // CJK glyph exactly as the pane's own wrapper does, and two functions that
 // disagree about that produce rows too wide for the box they were measured for.
+mod changes_tree;
 pub(crate) mod components;
 mod confirm_dialog;
 mod first_load;
@@ -4305,6 +4380,7 @@ impl App {
             pr_banner_at_bottom,
             syntax_cache: Arc::new(SyntaxCache::new()),
             pending_diff: None,
+            changes_tree: Default::default(),
             diff_request_seq: 0,
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -6407,8 +6483,9 @@ impl App {
                 self.status.clear(&pending.key, None);
             }
             None => {
-                let staged = self.engine.staged_files.len();
-                let unstaged = self.engine.unstaged_files.len();
+                // Folded folders count by the files inside them.
+                let staged = dux_core::model::total_file_count(&self.engine.staged_files);
+                let unstaged = dux_core::model::total_file_count(&self.engine.unstaged_files);
                 self.status.set(
                     Instant::now(),
                     Some(pending.key),
@@ -6421,20 +6498,15 @@ impl App {
         }
     }
 
+    /// The file or folder under the cursor, which may sit inside an expanded
+    /// folder. `None` on a placeholder row (a folder still being listed).
     pub(crate) fn selected_changed_file(&self) -> Option<&ChangedFile> {
-        match self.right_section {
-            RightSection::Staged => self.engine.staged_files.get(self.files_index),
-            RightSection::Unstaged => self.engine.unstaged_files.get(self.files_index),
-            RightSection::CommitInput => None,
-        }
+        self.selected_changes_row()?.file()
     }
 
+    /// How many rows the focused section shows, expanded folders included.
     pub(crate) fn current_files_len(&self) -> usize {
-        match self.right_section {
-            RightSection::Staged => self.engine.staged_files.len(),
-            RightSection::Unstaged => self.engine.unstaged_files.len(),
-            RightSection::CommitInput => 0,
-        }
+        self.changes_rows(self.right_section).len()
     }
 
     pub(crate) fn clamp_files_cursor(&mut self) {
@@ -6505,24 +6577,22 @@ impl App {
             return Vec::new();
         }
 
+        // Over the rows on screen, so a file inside an expanded folder is
+        // found too; a collapsed folder is matched by its own path.
         let needle = self.files_search.text.to_lowercase();
         let mut matches = Vec::new();
-        matches.extend(
-            self.engine
-                .unstaged_files
-                .iter()
-                .enumerate()
-                .filter(|(_, file)| file.path.to_lowercase().contains(&needle))
-                .map(|(index, _)| (RightSection::Unstaged, index)),
-        );
-        matches.extend(
-            self.engine
-                .staged_files
-                .iter()
-                .enumerate()
-                .filter(|(_, file)| file.path.to_lowercase().contains(&needle))
-                .map(|(index, _)| (RightSection::Staged, index)),
-        );
+        for section in [RightSection::Unstaged, RightSection::Staged] {
+            matches.extend(
+                self.changes_rows(section)
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, row)| {
+                        row.file()
+                            .is_some_and(|file| file.path.to_lowercase().contains(&needle))
+                    })
+                    .map(|(index, _)| (section, index)),
+            );
+        }
         matches
     }
 

@@ -778,7 +778,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Files],
         help: Some(HelpEntry {
             section: "Files pane",
-            description: "Open selected file diff",
+            description: "Open selected file diff, or expand or collapse a folder",
         }),
         hint_contexts: &[(HintContext::Files, "Diff")],
     },
@@ -788,7 +788,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Files],
         help: Some(HelpEntry {
             section: "Files pane",
-            description: "Stage or unstage selected file",
+            description: "Stage or unstage selected file or whole folder",
         }),
         hint_contexts: &[(HintContext::Files, "Stage/Unstage")],
     },
@@ -808,7 +808,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Files],
         help: Some(HelpEntry {
             section: "Files pane",
-            description: "Discard changes to selected file",
+            description: "Discard changes to selected file, or delete an untracked folder",
         }),
         hint_contexts: &[(HintContext::Files, "Discard")],
     },

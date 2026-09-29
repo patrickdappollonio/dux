@@ -3750,6 +3750,11 @@ impl App {
             self.set_error("Select a session first.");
             return Ok(());
         }
+        // A folder row expands or collapses instead: it has no diff, and
+        // reading a directory as a file is the one thing this must never do.
+        if self.toggle_selected_folder() {
+            return Ok(());
+        }
         let Some(rel_path) = self.selected_changed_file().map(|file| file.path.clone()) else {
             return Ok(());
         };
@@ -4827,6 +4832,7 @@ mod tests {
             pr_banner_at_bottom: true,
             syntax_cache: Arc::new(crate::diff::SyntaxCache::new()),
             pending_diff: None,
+            changes_tree: Default::default(),
             diff_request_seq: 0,
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,

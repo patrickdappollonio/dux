@@ -2719,12 +2719,23 @@ impl App {
         let Some(worktree) = self.changes_worktree_for_selection() else {
             return Ok(());
         };
-        let file = match self.right_section {
-            RightSection::Staged => self.engine.staged_files.get(self.files_index),
-            RightSection::Unstaged => self.engine.unstaged_files.get(self.files_index),
-            RightSection::CommitInput => return Ok(()),
+        if self.right_section == RightSection::CommitInput {
+            return Ok(());
+        }
+        let Some(file) = self.selected_changed_file() else {
+            return Ok(());
         };
-        let Some(file) = file else { return Ok(()) };
+        // A folder can hold tens of thousands of files, so staging it whole is
+        // a worker's job with a busy and a final, never this thread's.
+        if file.is_folder() {
+            let folder = file.clone();
+            let op = match self.right_section {
+                RightSection::Staged => FolderOp::Unstage,
+                _ => FolderOp::Stage,
+            };
+            self.start_folder_op(op, &folder);
+            return Ok(());
+        }
         let path = file.path.clone();
         let reaction = match self.right_section {
             RightSection::Unstaged => self.engine.apply(Command::StageFile {
@@ -2752,21 +2763,24 @@ impl App {
         Ok(())
     }
 
-    fn confirm_discard_selected_file(&mut self) -> Result<()> {
-        let file = match self.right_section {
-            RightSection::Unstaged => self.engine.unstaged_files.get(self.files_index),
+    pub(crate) fn confirm_discard_selected_file(&mut self) -> Result<()> {
+        match self.right_section {
+            RightSection::Unstaged => {}
             RightSection::Staged => {
                 self.set_error("Unstage the file first to discard changes.");
                 return Ok(());
             }
             RightSection::CommitInput => return Ok(()),
+        }
+        let Some(file) = self.selected_changed_file() else {
+            return Ok(());
         };
-        let Some(file) = file else { return Ok(()) };
         // Capture only the path. The tracked/untracked classification that decides
         // the destructive branch is re-derived from live git status at confirm
         // time (see `resolve_confirm_discard_file`), so nothing here can go stale.
         self.prompt = PromptState::ConfirmDiscardFile {
             file_path: file.path.clone(),
+            kind: file.kind.clone(),
             focus: ConfirmFocus::Cancel,
         };
         Ok(())
@@ -2835,7 +2849,7 @@ impl App {
     ///
     /// The web twin is `git_routes::resolve_changes_worktree`, and both read the
     /// one engine verdict.
-    fn changes_worktree_for_selection(&mut self) -> Option<PathBuf> {
+    pub(crate) fn changes_worktree_for_selection(&mut self) -> Option<PathBuf> {
         self.selection_changes_directory(true)
     }
 
@@ -7009,14 +7023,16 @@ impl App {
             && contains_point(area, column, row)
         {
             let index = usize::from(row.saturating_sub(area.y));
-            let file_index = (index < self.engine.unstaged_files.len()).then_some(index);
+            let rows = self.changes_rows(RightSection::Unstaged).len();
+            let file_index = (index < rows).then_some(index);
             return Some(MouseTarget::UnstagedFile(file_index));
         }
         if let Some(area) = self.mouse_layout.staged_list
             && contains_point(area, column, row)
         {
             let index = usize::from(row.saturating_sub(area.y));
-            let file_index = (index < self.engine.staged_files.len()).then_some(index);
+            let rows = self.changes_rows(RightSection::Staged).len();
+            let file_index = (index < rows).then_some(index);
             return Some(MouseTarget::StagedFile(file_index));
         }
         if let Some(area) = self.mouse_layout.commit_area
@@ -8296,12 +8312,30 @@ impl App {
         confirm
     }
 
-    pub(super) fn resolve_confirm_discard_file(&mut self, confirm: bool) -> bool {
-        let file_path = match &self.prompt {
-            PromptState::ConfirmDiscardFile { file_path, .. } => file_path.clone(),
+    pub(crate) fn resolve_confirm_discard_file(&mut self, confirm: bool) -> bool {
+        let (file_path, kind) = match &self.prompt {
+            PromptState::ConfirmDiscardFile {
+                file_path, kind, ..
+            } => (file_path.clone(), kind.clone()),
             _ => return false,
         };
         self.prompt = PromptState::None;
+        // A folder is deleted whole on a worker, which re-checks live status
+        // before it removes anything (see `changes_tree`).
+        if confirm && kind != dux_core::model::ChangedFileKind::File {
+            let folder = ChangedFile {
+                status: "?".to_string(),
+                path: file_path,
+                additions: 0,
+                deletions: 0,
+                binary: false,
+                diff_excluded: false,
+                renamed_from: None,
+                kind,
+            };
+            self.start_folder_op(FolderOp::Delete, &folder);
+            return false;
+        }
         // Discard is the most destructive of the changes actions, so the
         // folder-driven gate applies here too: it refuses in a folder with no
         // repository rather than handing git a directory it cannot answer for.
@@ -26862,6 +26896,7 @@ cyan = "#00ffff"
         }];
         app.prompt = PromptState::ConfirmDiscardFile {
             file_path: "src/main.rs".to_string(),
+            kind: dux_core::model::ChangedFileKind::File,
             focus: ConfirmFocus::Confirm,
         };
         install_confirm_discard_overlay(&mut app);

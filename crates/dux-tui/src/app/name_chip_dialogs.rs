@@ -440,6 +440,7 @@ fn the_discard_dialog_chips_the_file() {
         &mut app,
         PromptState::ConfirmDiscardFile {
             file_path: "src/discard-me.rs".to_string(),
+            kind: dux_core::model::ChangedFileKind::File,
             focus: ConfirmFocus::Cancel,
         },
     );
