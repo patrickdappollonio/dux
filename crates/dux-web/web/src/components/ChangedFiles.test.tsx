@@ -1658,7 +1658,7 @@ describe("a folded folder row", () => {
     expect(toolbar.getByText("Discard 28747…")).toBeTruthy()
   })
 
-  it("offers no discard for a folder a delete would not act on", async () => {
+  it("offers no menu for a row nothing acts on, and the row says what it is", async () => {
     mockState = {
       selectedSessionId: "s1",
       changes: {
@@ -1688,18 +1688,14 @@ describe("a folded folder row", () => {
       },
     } as unknown as DuxState
     render(<ChangedFiles />)
+    // Neither is staged nor discarded: the server refuses a worktree of this
+    // repository, and a folder holding only repositories has nothing a stage
+    // or a delete would act on. A menu with nothing in it is no menu, so the
+    // rows carry no trigger; their labels say what they are.
     expect(screen.getByText("worktree of this repository")).toBeTruthy()
+    expect(screen.getByText("2 nested repositories")).toBeTruthy()
     for (const path of ["vendor", "inner-wt"]) {
-      fireEvent.click(screen.getByLabelText(`Actions for ${path}`))
-      const menu = within(await screen.findByRole("menu"))
-      // Neither is staged: the server refuses a worktree of this repository,
-      // and a folder holding only repositories has nothing a stage would add
-      // (it leaves them out), so the menu offers neither.
-      expect(menu.queryByText("Stage")).toBeNull()
-      expect(menu.queryByText("Discard…")).toBeNull()
-      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
-      cleanup()
-      render(<ChangedFiles />)
+      expect(screen.queryByLabelText(`Actions for ${path}`)).toBeNull()
     }
   })
 

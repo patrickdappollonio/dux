@@ -283,6 +283,14 @@ const FileRow = memo(function FileRow({
   // Its expand control is a separate change; until then the row only says
   // what it is, with the trailing slash and its count.
   const folderCount = folderCountLabel(file)
+  // The row menu's items, decided before the trigger is: Edit (desktop only,
+  // and never for a deleted file or a folder), stage or unstage, and discard.
+  const showEdit = kind !== "deleted" && folderCount === null
+  const showStageAction = action === "unstage" || stageActsOn(file)
+  const showDiscard = action === "stage" && discardActsOn(file)
+  // Edit alone would leave a phone an empty menu (it is desktop only), so it
+  // never makes the trigger exist by itself.
+  const hasMenuItems = showStageAction || showDiscard
   const displayPath = folderCount === null ? file.path : `${file.path}/`
 
   return (
@@ -345,12 +353,17 @@ const FileRow = memo(function FileRow({
         )}
       </div>
 
-      {/* The wrapper consumes no width until the row is hovered, the menu is
+      {/* The menu's items are computed first, and a row with none gets no
+        * trigger at all: a menu that opens empty is a control that does
+        * nothing (a worktree of this repository, a folder holding only
+        * repositories). Such a row's label already says what it is. */}
+      {hasMenuItems && (
+      /* The wrapper consumes no width until the row is hovered, the menu is
         * open, or an action is in flight (aria-busy, so the spinner outlives the
         * menu), so the path and counts otherwise use the full row. Always
         * visible on touch at a 44px target. The stopPropagation keeps clicks on
         * the trigger and on the portaled menu items off the row's open-diff
-        * handler, which React routes through this ancestor. */}
+        * handler, which React routes through this ancestor. */
       <div
         className={cn(
           "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-10 md:group-hover:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 md:has-[[aria-busy=true]]:max-w-10 md:has-[[aria-busy=true]]:opacity-100",
@@ -382,7 +395,7 @@ const FileRow = memo(function FileRow({
               {/* Open in editor, desktop only (Monaco is poor on touch). Skipped
                   for deleted files (nothing on disk to edit) and for a folded
                   folder (a directory is not a file to edit). */}
-              {kind !== "deleted" && folderCount === null && (
+              {showEdit && (
                 <DropdownMenuItem
                   className="hidden md:flex"
                   onClick={() => openEditor(agentRoot(sessionId), file.path)}
@@ -391,7 +404,7 @@ const FileRow = memo(function FileRow({
                   Edit
                 </DropdownMenuItem>
               )}
-              {(action === "unstage" || stageActsOn(file)) && (
+              {showStageAction && (
                 <DropdownMenuItem onClick={() => void runAction()}>
                   {action === "stage" ? <Plus /> : <Minus />}
                   {action === "stage" ? "Stage" : "Unstage"}
@@ -400,7 +413,7 @@ const FileRow = memo(function FileRow({
               {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
                 * and the confirm dialog carry the danger and the item itself
                 * stays neutral. */}
-              {action === "stage" && discardActsOn(file) && (
+              {showDiscard && (
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={runDiscard}>
@@ -413,6 +426,7 @@ const FileRow = memo(function FileRow({
           ) : null}
         </DropdownMenu>
       </div>
+      )}
     </div>
   )
 })
