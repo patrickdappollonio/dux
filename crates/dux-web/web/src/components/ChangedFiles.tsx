@@ -79,8 +79,8 @@ import {
   fileStatusMeta,
   folderCountLabel,
   formatRecapCount,
+  actingPaths,
   groupDigits,
-  uncoveredPaths,
   type ChangedFileSelection,
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
@@ -1771,11 +1771,17 @@ export const ChangedFiles = memo(function ChangedFiles() {
   // page lives, so an expansion re-renders this pane and nothing else.
   const expansions = useExpansions(selectedSessionId ?? "")
   const controller = useChangedFilesController(selectedSessionId, changes, expansions)
-  // A checked row inside a checked folder is already part of the folder.
-  const discardPaths = useMemo(
-    () => uncoveredPaths(controller.selected.unstaged),
-    [controller.selected.unstaged],
-  )
+  // A checked row inside a checked folder a delete acts on is already part of
+  // it. A row a delete does not act on covers nothing, and is still handed to
+  // the dialog so it can say why it is left out.
+  const discardPaths = useMemo(() => {
+    const { acting, idle } = actingPaths(
+      controller.selected.unstaged,
+      controller.actionable.unstaged,
+      discardActsOn,
+    )
+    return [...acting, ...idle]
+  }, [controller.selected.unstaged, controller.actionable.unstaged])
   // Expand a folder, or collapse it and uncheck everything under it, which is
   // no longer shown. Stable per agent, because every folder row holds it.
   const { uncheckUnder } = controller

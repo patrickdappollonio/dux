@@ -2,9 +2,9 @@ import { useCallback, useMemo, useState } from "react"
 import {
   filterChangedFiles,
   mergeChangedFilesRecaps,
+  actingPaths,
   reconcileSelection,
   summarizeChangedFiles,
-  uncoveredPaths,
   type ChangedFileSelection,
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
@@ -414,14 +414,14 @@ export function useChangedFilesController(
     // A worktree of this repository is never staged (the server refuses it),
     // so a bulk stage leaves it out rather than failing the whole batch.
     const { actionable } = model
-    const unstageable =
-      verb === "stage"
-        ? new Set(actionable.unstaged.filter((f) => !stageActsOn(f)).map((f) => f.path))
-        : new Set<string>()
-    // A checked row inside a checked folder is already part of it.
-    const paths = uncoveredPaths(model.selected[section]).filter(
-      (path) => !unstageable.has(path),
-    )
+    // A checked row inside a checked folder the verb acts on is already part of
+    // it; a row the verb does not act on (a worktree of this repository, a
+    // folder holding only repositories) is left out and covers nothing.
+    const paths = actingPaths(
+      model.selected[section],
+      verb === "stage" ? actionable.unstaged : actionable.staged,
+      verb === "stage" ? stageActsOn : () => true,
+    ).acting
     if (busy !== null || paths.length === 0) return
     const leftOut =
       verb === "stage"
@@ -474,19 +474,25 @@ export function useChangedFilesController(
     ...model,
     // What the bulk bar counts: files, so a checked folder counts what is
     // inside it, the same count its dialog and its toast use.
-    // A checked row inside a checked folder is counted once, in the folder.
+    // A checked row inside a checked folder the verb acts on is counted once,
+    // in the folder; inside one it does not act on, it counts on its own.
     selectedCounts: {
       staged: selectedFileCount(
-        new Set(uncoveredPaths(model.selected.staged)),
+        new Set(actingPaths(model.selected.staged, model.actionable.staged, () => true).acting),
         model.actionable.staged,
       ),
       unstaged: selectedFileCount(
-        new Set(uncoveredPaths(model.selected.unstaged)),
+        new Set(
+          actingPaths(model.selected.unstaged, model.actionable.unstaged, stageActsOn).acting,
+        ),
         model.actionable.unstaged,
         stageActsOn,
       ),
       discard: selectedFileCount(
-        new Set(uncoveredPaths(model.selected.unstaged)),
+        new Set(
+          actingPaths(model.selected.unstaged, model.actionable.unstaged, discardActsOn)
+            .acting,
+        ),
         model.actionable.unstaged,
         discardActsOn,
       ),

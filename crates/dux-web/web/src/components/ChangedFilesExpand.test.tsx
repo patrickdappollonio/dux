@@ -503,6 +503,33 @@ describe("what is checked under an expanded folder", () => {
     await vi.waitFor(() => expect(stageMany).toHaveBeenCalledWith("s1", ["notes.md"]))
   })
 
+  // A checked folder a verb does not act on covers nothing: the rows checked
+  // inside it are acted on and counted on their own.
+  it("does not let a folder that cannot act swallow the rows checked inside it", async () => {
+    mockState = {
+      ...mockState,
+      changes: slice([
+        file("vendor", {
+          kind: "directory",
+          file_count: 0,
+          nested_repositories: 1,
+          repositories_inside: ["vendor/lib"],
+          additions: 0,
+        }),
+      ]),
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("vendor/"))
+    await answer(0, [file("vendor/lib", { kind: "nested_repository", additions: 0 })])
+    fireEvent.click(screen.getByLabelText("Select vendor"))
+    fireEvent.click(bar().getByRole("button", { name: /Select all/ }))
+
+    expect(bar().getByRole("button", { name: /Stage 1/ })).toBeTruthy()
+    expect(bar().getByRole("button", { name: /Discard 1/ })).toBeTruthy()
+    fireEvent.click(bar().getByRole("button", { name: /Stage 1/ }))
+    await vi.waitFor(() => expect(stageMany).toHaveBeenCalledWith("s1", ["vendor/lib"]))
+  })
+
   // A check belongs to a row on screen: a row that leaves (staged elsewhere)
   // takes its check with it, and does not come back checked when it returns.
   it("forgets the check of a row that left, even when it comes back", async () => {

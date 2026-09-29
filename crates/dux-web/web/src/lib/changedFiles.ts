@@ -396,3 +396,25 @@ export function uncoveredPaths(paths: Iterable<string>): string[] {
 export function groupDigits(count: number): string {
   return count.toLocaleString("en-US")
 }
+
+// The checked paths a verb acts on, with the ones inside another acting path
+// left out, and apart from them the checked paths it does not act on. Only a
+// folder the verb acts on covers the rows checked inside it: a folder holding
+// nothing but repositories is left out of a stage, so the repository checked
+// inside it must still be staged on its own. A path with no row (it left the
+// list) counts as acting, as it always has.
+export function actingPaths(
+  paths: Iterable<string>,
+  rows: readonly ChangedFileView[],
+  acts: (file: ChangedFileView) => boolean,
+): { acting: string[]; idle: string[] } {
+  const byPath = new Map(rows.map((row) => [row.path, row]))
+  const acting: string[] = []
+  const idle: string[] = []
+  for (const path of paths) {
+    const row = byPath.get(path)
+    if (row !== undefined && !acts(row)) idle.push(path)
+    else acting.push(path)
+  }
+  return { acting: uncoveredPaths(acting), idle }
+}
