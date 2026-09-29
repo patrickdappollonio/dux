@@ -16,6 +16,20 @@ vi.mock("@/lib/store", async (importOriginal) => {
   return { ...actual, useDux: () => mockState }
 })
 
+const discard = vi.hoisted(() => vi.fn(() => Promise.resolve()))
+vi.mock("@/lib/git", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/git")>()
+  return { ...actual, git: { ...actual.git, discard } }
+})
+
+const notifySuccess = vi.hoisted(() => vi.fn())
+vi.mock("@/lib/notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/notify")>()
+  return { ...actual, notifySuccess }
+})
+
+import { proseText } from "@/lib/prose"
+
 function installBootStubs() {
   const mem = new Map<string, string>()
   vi.stubGlobal("localStorage", {
@@ -116,6 +130,18 @@ describe("the single discard dialog", () => {
     expect(dialogText()).toContain(
       "including its history and any commits not pushed anywhere else",
     )
+  })
+
+  // A destructive act is always confirmed once it lands, in words that say
+  // what went: here, a whole folder's files.
+  it("confirms the delete with a toast once the server answers", async () => {
+    openOn("node_modules")
+    screen.getByRole("button", { name: "Delete" }).click()
+    await vi.waitFor(() => expect(notifySuccess).toHaveBeenCalledTimes(1))
+    expect(proseText(notifySuccess.mock.calls[0]![0])).toContain(
+      "Deleted the untracked files in node_modules/ (28,747 files)",
+    )
+    expect(discard).toHaveBeenCalledWith("s1", "node_modules")
   })
 
   it("keeps the file wording for a file", () => {

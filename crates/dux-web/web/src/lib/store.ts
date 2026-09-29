@@ -19,6 +19,7 @@ import { getComposeInsertSink } from "./composeInsert"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
 import { reuseUnchangedFiles } from "./changedFiles"
+import { discardOutcome } from "./discardOutcome"
 import { terminalsApi } from "./terminalsApi"
 import { tabsApi } from "./tabsApi"
 import { browseApi } from "./browseApi"
@@ -3918,9 +3919,14 @@ export function closeDiscard(): void {
 // the tracked/untracked distinction from live git status and rejects the command
 // if the file is staged, so this never trusts the client about the destructive
 // outcome.
-export function discardFile(sessionId: string, path: string): void {
+//
+// A destructive act is always confirmed once it lands, in words that say what
+// went, so the caller hands over the row it discarded: a folded folder is many
+// files, and a repository of its own goes with its history.
+export function discardFile(sessionId: string, row: ChangedFileView): void {
   git
-    .discard(sessionId, path)
+    .discard(sessionId, row.path)
+    .then(() => notifySuccess(discardOutcome([row])))
     .catch((e) => notifyError(e instanceof Error ? e.message : "discard failed"))
 }
 

@@ -40,7 +40,19 @@ export function ConfirmDiscardFileDialog() {
 
   function handleConfirm() {
     if (!discardTarget) return
-    discardFile(discardTarget.sessionId, discardTarget.path)
+    // The live row says what went; a target whose row has just left the list
+    // is worded from what the dialog was opened on.
+    discardFile(
+      discardTarget.sessionId,
+      row ?? {
+        path: discardTarget.path,
+        status: discardTarget.untracked ? "??" : "M",
+        additions: 0,
+        deletions: 0,
+        binary: false,
+        diff_excluded: false,
+      },
+    )
     closeDiscard()
   }
 

@@ -1560,6 +1560,17 @@ describe("a folded folder row", () => {
     expect(within(heading).getByText("28748")).toBeTruthy()
   })
 
+  it("counts the files inside a checked folder on the bulk bar", () => {
+    mockState = withFolder()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Select node_modules"))
+    const toolbar = within(
+      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
+    )
+    expect(toolbar.getByText("Stage 28747")).toBeTruthy()
+    expect(toolbar.getByText("Discard 28747…")).toBeTruthy()
+  })
+
   it("does not open a diff when a folder row is clicked", () => {
     mockState = withFolder()
     render(<ChangedFiles />)

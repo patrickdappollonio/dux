@@ -11,6 +11,7 @@ import { formatRegularCount } from "@/lib/formatRegularCount"
 import { git } from "@/lib/git"
 import { notifyError, notifySuccess, notifyWarning } from "@/lib/notify"
 import { chip, prose } from "@/lib/prose"
+import { discardOutcome, selectedFileCount } from "@/lib/discardOutcome"
 import type { ChangesSlice } from "@/lib/store"
 import type { ChangedFileView } from "@/lib/types"
 
@@ -117,28 +118,46 @@ function useChangedFilesModel(
 function bulkResultToast(
   verb: ChangesBulkVerb,
   result: { done: string[]; refused: string[] },
+  rows: readonly ChangedFileView[],
 ): void {
   const past = verb === "stage" ? "staged" : "unstaged"
   // A clean stage or unstage says nothing: the rows moving between the pane's
   // sections is the whole feedback. A refusal still speaks, because rows that
-  // did not move are the ones there is nothing on screen to explain.
+  // did not move are the ones there is nothing on screen to explain. The count
+  // is of files, so a folded folder counts what is inside it.
   if (result.refused.length === 0) return
+  const done = selectedFileCount(new Set(result.done), rows)
   notifyWarning(
-    `${formatRegularCount(result.done.length, "file")} ${past}. ${formatRegularCount(
+    `${formatRegularCount(done, "file")} ${past}. ${formatRegularCount(
       result.refused.length,
       "file",
     )} had already left the list, starting with ${result.refused[0]}.`,
   )
 }
 
-function discardResultToast(result: {
-  done: string[]
-  failed: { path: string; message: string }[]
-}): void {
+function discardResultToast(
+  result: {
+    done: string[]
+    failed: { path: string; message: string }[]
+  },
+  rows: readonly ChangedFileView[],
+): void {
+  // The rows discarded, as they were listed: a path the list no longer has is
+  // worded as a plain file.
+  const byPath = new Map(rows.map((row) => [row.path, row]))
+  const doneRows = result.done.map(
+    (path) =>
+      byPath.get(path) ?? {
+        path,
+        status: "M",
+        additions: 0,
+        deletions: 0,
+        binary: false,
+        diff_excluded: false,
+      },
+  )
   if (result.failed.length === 0) {
-    notifySuccess(
-      `Discarded the changes to ${formatRegularCount(result.done.length, "file")}.`,
-    )
+    notifySuccess(discardOutcome(doneRows))
     return
   }
   if (result.done.length === 0) {
@@ -148,10 +167,10 @@ function discardResultToast(result: {
     return
   }
   notifyWarning(
-    `Discarded the changes to ${formatRegularCount(result.done.length, "file")}. ${formatRegularCount(
+    prose`${discardOutcome(doneRows)} ${formatRegularCount(
       result.failed.length,
-      "file",
-    )} could not be discarded, starting with ${result.failed[0]!.path}: ${
+      "row",
+    )} could not be discarded, starting with ${chip(result.failed[0]!.path)}: ${
       result.failed[0]!.message
     }`,
   )
@@ -161,6 +180,7 @@ interface BulkTransaction {
   verb: ChangesBulkVerb
   sessionId: string
   paths: string[]
+  rows: readonly ChangedFileView[]
   dropActed: (section: "staged" | "unstaged", paths: string[]) => void
 }
 
@@ -168,6 +188,7 @@ async function runBulkTransaction({
   verb,
   sessionId,
   paths,
+  rows,
   dropActed,
 }: BulkTransaction): Promise<void> {
   const section = verb === "stage" ? "unstaged" : "staged"
@@ -177,7 +198,7 @@ async function runBulkTransaction({
         ? await git.stageMany(sessionId, paths)
         : await git.unstageMany(sessionId, paths)
     dropActed(section, paths)
-    bulkResultToast(verb, result)
+    bulkResultToast(verb, result, rows)
   } catch (error) {
     notifyError(
       error instanceof Error ? error.message : `could not ${verb} the files`,
@@ -188,17 +209,19 @@ async function runBulkTransaction({
 interface DiscardTransaction {
   sessionId: string
   paths: string[]
+  rows: readonly ChangedFileView[]
   dropActed: (section: "unstaged", paths: string[]) => void
 }
 
 async function runDiscardTransaction({
   sessionId,
   paths,
+  rows,
   dropActed,
 }: DiscardTransaction): Promise<void> {
   const result = await git.discardMany(sessionId, paths)
   dropActed("unstaged", paths)
-  discardResultToast(result)
+  discardResultToast(result, rows)
 }
 
 export function useChangedFilesController(
@@ -271,7 +294,13 @@ export function useChangedFilesController(
     if (busy !== null || paths.length === 0) return
     setBusy(verb)
     try {
-      await runBulkTransaction({ verb, sessionId, paths, dropActed })
+      await runBulkTransaction({
+        verb,
+        sessionId,
+        paths,
+        rows: verb === "stage" ? changes.unstaged : changes.staged,
+        dropActed,
+      })
     } finally {
       setBusy(null)
     }
@@ -282,7 +311,12 @@ export function useChangedFilesController(
     if (busy !== null || paths.length === 0) return
     setBusy("discard")
     try {
-      await runDiscardTransaction({ sessionId, paths, dropActed })
+      await runDiscardTransaction({
+        sessionId,
+        paths,
+        rows: changes.unstaged,
+        dropActed,
+      })
     } finally {
       setBusy(null)
     }
@@ -290,6 +324,12 @@ export function useChangedFilesController(
 
   return {
     ...model,
+    // What the bulk bar counts: files, so a checked folder counts what is
+    // inside it, the same count its dialog and its toast use.
+    selectedCounts: {
+      staged: selectedFileCount(model.selected.staged, changes.staged),
+      unstaged: selectedFileCount(model.selected.unstaged, changes.unstaged),
+    },
     busy,
     discarding,
     setQuery: (query: string) => setSearch({ sessionId, query }),

@@ -691,6 +691,8 @@ function ChangesHeader({
 
 interface BulkToolbarProps {
   selected: ChangedFileSelection
+  // Files, not rows, per section: a checked folder counts what is inside it.
+  counts: { staged: number; unstaged: number }
   busy: ChangesBusyAction
   visibleCount: number
   allVisibleChecked: boolean
@@ -706,6 +708,7 @@ function BusyGlyph({ busy }: { busy: boolean }) {
 
 function BulkToolbar({
   selected,
+  counts,
   busy,
   visibleCount,
   allVisibleChecked,
@@ -730,7 +733,7 @@ function BulkToolbar({
         >
           <BusyGlyph busy={busy === "stage"} />
           {busy !== "stage" ? <Plus /> : null}
-          Stage {selected.unstaged.size}
+          Stage {counts.unstaged}
         </Button>
       ) : null}
       {selected.staged.size > 0 ? (
@@ -743,7 +746,7 @@ function BulkToolbar({
         >
           <BusyGlyph busy={busy === "unstage"} />
           {busy !== "unstage" ? <Minus /> : null}
-          Unstage {selected.staged.size}
+          Unstage {counts.staged}
         </Button>
       ) : null}
       {selected.unstaged.size > 0 ? (
@@ -756,7 +759,7 @@ function BulkToolbar({
         >
           <BusyGlyph busy={busy === "discard"} />
           {busy !== "discard" ? <Undo2 /> : null}
-          Discard {selected.unstaged.size}…
+          Discard {counts.unstaged}…
         </Button>
       ) : null}
       {visibleCount > 0 ? (
@@ -1195,6 +1198,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
     query,
     filtering,
     selected,
+    selectedCounts,
     anySelected,
     visibleCount,
     allVisibleChecked,
@@ -1241,6 +1245,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
           {anySelected ? (
             <BulkToolbar
               selected={selected}
+              counts={selectedCounts}
               busy={busy}
               visibleCount={visibleCount}
               allVisibleChecked={allVisibleChecked}
