@@ -628,26 +628,16 @@ impl Engine {
                 path,
                 is_untracked,
             } => {
-                // A folded folder is deleted whole; asked before the delete,
+                // Whether the path is a folder is asked before the delete,
                 // because afterwards there is nothing left to ask about.
                 let full = worktree_path.join(&path);
                 let is_folder = is_untracked
                     && std::fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_dir());
-                // Decided from git, the way the listing and the delete decide
-                // it, never from a `.git` entry being present.
-                let is_repository = is_folder
-                    && matches!(
-                        crate::git::untracked_directory_kind(&worktree_path, &path),
-                        Ok(crate::git::UntrackedDirectoryKind::Repository)
-                    );
+                // Nothing here confirms what the user saw, so `discard_file`
+                // refuses a repository of its own: a folder that got this far
+                // was cleaned as an ordinary one.
                 crate::git::discard_file(&worktree_path, &path, is_untracked)?;
-                let message = if is_repository {
-                    crate::status_text![
-                        "Deleted ",
-                        q(format!("{path}/")),
-                        ", a repository of its own, with its history."
-                    ]
-                } else if is_folder {
+                let message = if is_folder {
                     crate::status_text![
                         "Deleted the untracked files in ",
                         q(format!("{path}/")),
@@ -2401,6 +2391,34 @@ mod tests {
         }
         // The working copy is back to the committed content.
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original\n");
+    }
+
+    /// This command carries no confirmation of what the user saw, so a
+    /// repository of its own is refused through it and nothing is deleted:
+    /// only the confirmed paths (the terminal UI's folder delete, the web's
+    /// discard route) may delete one.
+    #[test]
+    fn discarding_a_repository_through_the_command_is_refused() {
+        let repo = discard_test_repo();
+        let nested = repo.path().join("clone");
+        std::fs::create_dir_all(&nested).expect("folder");
+        let status = crate::test_git::fixture_git()
+            .args(["init", "-q"])
+            .current_dir(&nested)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        std::fs::write(nested.join("own.txt"), "own\n").expect("write");
+        let (mut engine, _tmp) = test_engine();
+
+        let refused = engine.apply(Command::DiscardFile {
+            worktree_path: repo.path().to_path_buf(),
+            path: "clone".to_string(),
+            is_untracked: true,
+        });
+
+        assert!(refused.is_err());
+        assert!(nested.join(".git").exists() && nested.join("own.txt").exists());
     }
 
     /// A folded folder is discarded whole, and the message says it was a
