@@ -43,10 +43,13 @@ git repository of its own inside a folder is counted apart, as in `3 files and 1
 repository`, and a folder that is itself a repository says "nested repository" instead of a
 count, because dux does not look inside it.
 
-A folder row has no diff to open. Its `⋯` menu stages, unstages, or discards the whole
-folder, after the same kind of confirmation a file gets. Discarding an untracked folder
+A folder row has no diff to open. Its `⋯` menu stages or unstages the whole folder at once,
+and discards it after a confirmation, the same one a file gets. Discarding an untracked folder
 deletes the untracked files it counted: files your `.gitignore` hides stay, and so does any
-repository of its own inside it, and the dialog says so.
+repository of its own inside it, and the dialog says so. A folder that holds nothing but
+repositories of their own has nothing to delete, so it offers no discard. A folder that is a
+worktree of this same repository is left to the worktree manager and offers no discard
+either.
 
 > [!CAUTION]
 > Discarding a row that is a repository of its own deletes that whole repository, including
