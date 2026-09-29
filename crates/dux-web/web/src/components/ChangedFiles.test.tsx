@@ -1310,3 +1310,59 @@ describe("the Changes pane header's Open editor button", () => {
     expect(screen.getByText("No session selected")).toBeTruthy()
   })
 })
+
+// HUGE-CHANGES REPRO (failing until fixed). An agent whose worktree held an
+// unignored node_modules (~29k untracked files) froze the whole browser tab on
+// selection. Two measured causes live in this pane: every changed file mounts
+// a full row (no windowing), and each row's base-ui Checkbox reads its hidden
+// input's `labels` after EVERY commit, which walks the whole document, so a
+// mount or re-render of n rows costs O(n^2). In the preview repro that lookup
+// alone took 1.2 s at 1000 rows, 4.8 s at 2000 and 13.2 s at 4000.
+describe("huge-changes repro: the pane with thousands of changed files", () => {
+  function manyUntracked(count: number): Array<[string, string]> {
+    return Array.from({ length: count }, (_, index): [string, string] => [
+      `web/node_modules/pkg${Math.floor(index / 50)}/lib/file${index % 50}.js`,
+      "?",
+    ])
+  }
+
+  it("mounts a bounded number of rows however long the list is", () => {
+    mockState = withFiles([], manyUntracked(2000))
+    render(<ChangedFiles />)
+    const rows = screen.getAllByRole("row").length
+    expect(rows, `2000 changed files mounted ${rows} rows`).toBeLessThanOrEqual(300)
+  })
+
+  it("does not look up a label per row on every commit", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "labels",
+    )
+    expect(descriptor?.get, "jsdom implements input.labels").toBeTruthy()
+    let reads = 0
+    Object.defineProperty(HTMLInputElement.prototype, "labels", {
+      configurable: true,
+      get(this: HTMLInputElement) {
+        reads += 1
+        return descriptor!.get!.call(this)
+      },
+    })
+    try {
+      mockState = withFiles([], manyUntracked(200))
+      const view = render(<ChangedFiles />)
+      const onMount = reads
+      reads = 0
+      // An unrelated store update hands the pane a new state object, as
+      // `useDux` does on every setState anywhere in the app.
+      mockState = { ...mockState }
+      view.rerender(<ChangedFiles />)
+      const onRerender = reads
+      expect(
+        { onMount: onMount <= 10, onRerender: onRerender <= 10 },
+        `label lookups scale with rows: ${onMount} on mount, ${onRerender} on a re-render of 200 rows`,
+      ).toEqual({ onMount: true, onRerender: true })
+    } finally {
+      Object.defineProperty(HTMLInputElement.prototype, "labels", descriptor!)
+    }
+  })
+})

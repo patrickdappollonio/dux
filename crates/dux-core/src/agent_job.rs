@@ -3762,6 +3762,46 @@ mod tests {
         assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::LOUD);
     }
 
+    /// HUGE-CHANGES REPRO (failing until fixed): a checkout holding many
+    /// embedded repositories (the user's case was 33 nested agent worktrees
+    /// under an unignored `.claude/worktrees/`) produced a create toast that
+    /// listed every skipped path, 2152 characters in the preview repro. The
+    /// note must name a bounded number of paths and count the rest.
+    #[test]
+    fn huge_changes_repro_skipped_paths_note_is_bounded() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "base"]);
+        let nested_count = 40;
+        for index in 0..nested_count {
+            let nested = repo
+                .path()
+                .join(".claude/worktrees")
+                .join(format!("agent-{index:032x}"));
+            std::fs::create_dir_all(&nested).unwrap();
+            git_in(&nested, &["init", "-q"]);
+            std::fs::write(nested.join("a"), "x\n").unwrap();
+        }
+
+        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, true));
+        assert!(run.failure.is_none(), "creation must succeed");
+        let status = run.status_message.unwrap();
+        assert!(status.contains("were not copied"), "{status}");
+        let named = (0..nested_count)
+            .filter(|index| status.contains(&format!("agent-{index:032x}")))
+            .count();
+        assert!(
+            named <= 5,
+            "the note named {named} of {nested_count} skipped paths ({} chars): {status}",
+            status.chars().count()
+        );
+        assert!(
+            status.contains(&format!("{}", nested_count - named)),
+            "the note must count the paths it does not name: {status}"
+        );
+    }
+
     /// Happy path: the checkout's dirt travels; gitignored files do not.
     #[test]
     fn fresh_agent_copies_uncommitted_changes_from_checkout() {

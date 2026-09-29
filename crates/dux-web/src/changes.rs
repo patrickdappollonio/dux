@@ -926,6 +926,35 @@ mod tests {
         assert_eq!(again.rev, resp.rev, "rev must not advance without a change");
     }
 
+    /// HUGE-CHANGES REPRO (failing until fixed): one untracked dependency
+    /// directory becomes one wire row PER FILE, because the sweep runs
+    /// `--untracked-files=all` and nothing caps or folds the list. The user's
+    /// `node_modules` was ~29k rows (3.9 MB of JSON in the preview repro,
+    /// 19.7 MB at 150k), and the browser mounts every row. The wire answer
+    /// must stay bounded however many files sit under one untracked directory.
+    #[tokio::test]
+    async fn huge_changes_repro_untracked_directory_rows_are_bounded() {
+        let (engine, bus, _tmp, wt) = boot();
+        let file_count = 5_000;
+        for index in 0..file_count {
+            let dir = wt.join("node_modules").join(format!("pkg{}", index / 50));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("f{index}.js")), "x\n").unwrap();
+        }
+        let svc = ChangesService::new(engine, bus);
+        let resp = svc
+            .get("s1")
+            .await
+            .unwrap_or_else(|_| panic!("expected Ok"));
+        let rows = resp.staged.len() + resp.unstaged.len();
+        let bytes = serde_json::to_vec(&resp.unstaged).unwrap().len();
+        assert!(
+            rows <= 1_000,
+            "{file_count} files under one untracked directory became {rows} wire rows \
+             ({bytes} bytes of JSON)"
+        );
+    }
+
     /// The recovery line retires a standing warning, so it has to say what it
     /// recovered from rather than only that things work now.
     #[tokio::test]
