@@ -200,7 +200,7 @@ describe("expanding a folded folder", () => {
     render(<ChangedFiles />)
     const grid = screen.getByRole("treegrid", { name: "Changed files" })
     const folderRow = toggle("node_modules/").closest('[role="row"]')!
-    expect(folderRow.getAttribute("aria-level")).toBe("1")
+    expect(folderRow.getAttribute("aria-level")).toBe("2")
     expect(folderRow.getAttribute("aria-expanded")).toBe("false")
     for (const cell of folderRow.children) {
       expect(cell.getAttribute("role")).toBe("gridcell")
@@ -214,7 +214,7 @@ describe("expanding a folded folder", () => {
     expect(folderRow.getAttribute("aria-expanded")).toBe("true")
     await answer(0, [file("node_modules/top.js")])
     const childRow = screen.getByText("top.js").closest('[role="row"]')!
-    expect(childRow.getAttribute("aria-level")).toBe("2")
+    expect(childRow.getAttribute("aria-level")).toBe("3")
     expect(childRow.getAttribute("aria-expanded")).toBeNull()
     const contents = document.getElementById(
       toggle("node_modules/").getAttribute("aria-controls")!,
@@ -237,7 +237,7 @@ describe("expanding a folded folder", () => {
     await answer(1, [file("node_modules/pkg0/a.js"), file("node_modules/pkg0/b.js")])
 
     const aRow = screen.getByText("a.js").closest('[role="row"]')!
-    expect(aRow.getAttribute("aria-level")).toBe("3")
+    expect(aRow.getAttribute("aria-level")).toBe("4")
   })
 
   it("says why a folder could not be listed, and Retry asks again", async () => {
@@ -593,5 +593,105 @@ describe("a user expanding and staging inside a folder", () => {
     publishMockState()
     expect(screen.getByText("node_modules/pkg0/a.js")).toBeTruthy()
     expect(fetchFolderChildren).toHaveBeenCalledTimes(3)
+  })
+})
+
+// The treegrid's keyboard, APG row-focus mode: a row holds focus, the arrows
+// move and fold, Home and End jump, Tab enters the grid once and leaves it.
+describe("the changes treegrid keyboard", () => {
+  function rowOf(text: string): HTMLElement {
+    return screen.getByText(text).closest('[role="row"]') as HTMLElement
+  }
+  function key(name: string) {
+    fireEvent.keyDown(document.activeElement!, { key: name })
+  }
+  function focusedRowText(): string {
+    const row = (document.activeElement as HTMLElement).closest('[role="row"]')
+    return row?.textContent ?? ""
+  }
+
+  it("puts headings at level 1 and numbers every row", async () => {
+    render(<ChangedFiles />)
+    const grid = screen.getByRole("treegrid", { name: "Changed files" })
+    const heading = screen.getByRole("button", { name: /^Unstaged/ }).closest('[role="row"]')!
+    expect(heading.getAttribute("aria-level")).toBe("1")
+    expect(rowOf("notes.md").getAttribute("aria-level")).toBe("2")
+    // heading, node_modules, notes.md
+    expect(grid.getAttribute("aria-rowcount")).toBe("3")
+    expect(heading.getAttribute("aria-rowindex")).toBe("1")
+    expect(rowOf("notes.md").getAttribute("aria-rowindex")).toBe("3")
+  })
+
+  it("is one tab stop, the active row, with the other rows' controls out of the tab order", () => {
+    render(<ChangedFiles />)
+    const rows = screen.getAllByRole("row")
+    expect(rows.filter((row) => row.tabIndex === 0)).toHaveLength(1)
+    const notes = rowOf("notes.md")
+    expect(notes.tabIndex).toBe(-1)
+    expect(
+      within(notes).getByLabelText("Actions for notes.md").getAttribute("tabindex"),
+    ).toBe("-1")
+  })
+
+  it("moves between rows with Up, Down, Home and End, headings included", () => {
+    render(<ChangedFiles />)
+    const first = screen.getAllByRole("row").find((row) => row.tabIndex === 0)!
+    first.focus()
+    expect(focusedRowText()).toContain("Unstaged")
+    key("ArrowDown")
+    expect(focusedRowText()).toContain("node_modules/")
+    key("ArrowDown")
+    expect(focusedRowText()).toContain("notes.md")
+    key("ArrowUp")
+    expect(focusedRowText()).toContain("node_modules/")
+    key("End")
+    expect(focusedRowText()).toContain("notes.md")
+    key("Home")
+    expect(focusedRowText()).toContain("Unstaged")
+    // The row that holds focus is the one tab stop now.
+    key("ArrowDown")
+    expect(rowOf("node_modules/").tabIndex).toBe(0)
+  })
+
+  it("expands with Right, steps in with Right, steps out with Left and folds with Left", async () => {
+    render(<ChangedFiles />)
+    rowOf("node_modules/").focus()
+    key("ArrowRight")
+    expect(fetchFolderChildren).toHaveBeenCalledTimes(1)
+    await answer(0, [file("node_modules/top.js")])
+    expect(focusedRowText()).toContain("node_modules/")
+    key("ArrowRight")
+    expect(focusedRowText()).toContain("top.js")
+    key("ArrowLeft")
+    expect(focusedRowText()).toContain("node_modules/")
+    key("ArrowLeft")
+    expect(toggle("node_modules/").getAttribute("aria-expanded")).toBe("false")
+    expect(screen.queryByText("top.js")).toBeNull()
+  })
+
+  it("keeps Enter for the row's own act and Space for its checkbox", async () => {
+    render(<ChangedFiles />)
+    rowOf("notes.md").focus()
+    key("Enter")
+    expect(openEditor).toHaveBeenCalledWith(expect.anything(), "notes.md", "diff")
+    key(" ")
+    expect(screen.getByLabelText("Select notes.md").getAttribute("aria-checked")).toBe("true")
+    rowOf("node_modules/").focus()
+    key("Enter")
+    expect(toggle("node_modules/").getAttribute("aria-expanded")).toBe("true")
+  })
+
+  it("brings a row outside the window in before focusing it", () => {
+    const many = Array.from({ length: 400 }, (_, index) =>
+      file(`src/file${String(index).padStart(3, "0")}.ts`, { status: "M" }),
+    )
+    mockState = { ...mockState, changes: slice(many) } as unknown as DuxState
+    render(<ChangedFiles />)
+    expect(screen.queryByText("src/file399.ts")).toBeNull()
+    screen.getAllByRole("row").find((row) => row.tabIndex === 0)!.focus()
+    key("End")
+    expect(focusedRowText()).toContain("src/file399.ts")
+    key("Home")
+    expect(focusedRowText()).toContain("Unstaged")
   })
 })

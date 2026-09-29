@@ -150,6 +150,8 @@ interface StatusSlotProps {
   path: string
   selected: boolean
   onToggleSelected: (path: string) => void
+  // Out of the tab order unless its row is the active one.
+  inTabOrder: boolean
 }
 
 // The status marker, which becomes the selection checkbox on hover, on keyboard
@@ -160,7 +162,13 @@ interface StatusSlotProps {
 // the marker keeps its `role="img"` label throughout for the same reason. The
 // tooltip sits on the slot rather than the marker, so hovering reveals the
 // checkbox and shows the status word at once.
-function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProps) {
+function StatusSlot({
+  status,
+  path,
+  selected,
+  onToggleSelected,
+  inTabOrder,
+}: StatusSlotProps) {
   const { label } = fileStatusMeta(status)
   // The checkbox is named by an element it points at rather than by
   // `aria-label`. Without an explicit `aria-labelledby`, base-ui hunts for a
@@ -212,6 +220,7 @@ function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProp
           checked={selected}
           onCheckedChange={() => onToggleSelected(path)}
           aria-labelledby={labelId}
+          tabIndex={inTabOrder ? undefined : -1}
           className={cn(
             reveal,
             "opacity-0 group-hover:opacity-100",
@@ -245,12 +254,14 @@ function ExpandToggle({
   expandable,
   expanded,
   contentsId,
+  inTabOrder,
   onToggle,
   children,
 }: {
   expandable: boolean
   expanded: boolean
   contentsId?: string
+  inTabOrder: boolean
   onToggle: () => void
   children: React.ReactNode
 }) {
@@ -267,6 +278,7 @@ function ExpandToggle({
         type="button"
         aria-expanded={expanded}
         aria-controls={expanded ? contentsId : undefined}
+        tabIndex={inTabOrder ? undefined : -1}
         onClick={(event) => {
           event.stopPropagation()
           onToggle()
@@ -309,7 +321,26 @@ interface FileRowProps {
   refreshError?: string | null
   // Ask for this folder's contents again.
   onRetryFolder?: (file: ChangedFileView) => void
+  // Its place among the treegrid's rows and whether it is the tab stop, as
+  // two primitives so the memoized row skips a render that moved neither.
+  rowIndex: number
+  active: boolean
 }
+
+// What makes an element a row of the treegrid's keyboard: its place among the
+// rows, and whether it is the one row in the tab order (the roving tab stop).
+// A row that is not the active one keeps its controls out of the tab order, so
+// Tab enters the grid once, walks the active row's controls, and leaves.
+interface GridRowProps {
+  rowIndex: number
+  active: boolean
+}
+
+// The row element's own attributes for a `GridRowProps`, and its focus ring.
+function gridRowAttrs({ rowIndex, active }: GridRowProps) {
+  return { "aria-rowindex": rowIndex, tabIndex: active ? 0 : -1 }
+}
+const ROW_FOCUS = cn("border border-transparent", FOCUS_RING)
 
 // How far each level of an expanded folder steps its rows in.
 const DEPTH_INDENT_REM = 1
@@ -332,7 +363,11 @@ const FileRow = memo(function FileRow({
   contentsId,
   refreshError = null,
   onRetryFolder,
+  rowIndex,
+  active,
 }: FileRowProps) {
+  const grid: GridRowProps = { rowIndex, active }
+  const inTabOrder = active
   const { kind } = fileStatusMeta(file.status)
   const [busy, setBusy] = useState(false)
   // The menu's content mounts on the first open and stays mounted after, so
@@ -390,10 +425,13 @@ const FileRow = memo(function FileRow({
   return (
     <div
       role="row"
-      aria-level={depth + 1}
+      // Headings are level 1, so a section's rows start at 2.
+      aria-level={depth + 2}
       aria-expanded={expandable ? expanded : undefined}
+      {...gridRowAttrs(grid)}
       className={cn(
         "group flex items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11",
+        ROW_FOCUS,
         folderCount === null && "cursor-pointer",
       )}
       style={depthIndent(depth)}
@@ -406,6 +444,7 @@ const FileRow = memo(function FileRow({
         path={file.path}
         selected={selected}
         onToggleSelected={onToggleSelected}
+        inTabOrder={inTabOrder}
       />
 
       {/* Path and counts share one baseline container: their line boxes differ,
@@ -417,6 +456,7 @@ const FileRow = memo(function FileRow({
         expandable={expandable}
         expanded={expanded}
         contentsId={contentsId}
+        inTabOrder={inTabOrder}
         onToggle={() => onToggleExpand?.(file)}
       >
         {expandable && (
@@ -478,6 +518,7 @@ const FileRow = memo(function FileRow({
             <Button
               variant="ghost"
               size="sm"
+              tabIndex={inTabOrder ? undefined : -1}
               className="h-7 shrink-0 px-2 text-xs text-muted-foreground max-md:min-h-11 pointer-coarse:min-h-11"
               onClick={(event) => {
                 event.stopPropagation()
@@ -522,6 +563,7 @@ const FileRow = memo(function FileRow({
                 size="icon"
                 disabled={busy}
                 aria-busy={busy}
+                tabIndex={inTabOrder ? undefined : -1}
                 aria-label={`Actions for ${file.path}`}
                 className="shrink-0 max-md:size-11"
               />
@@ -585,6 +627,8 @@ interface GroupHeaderProps {
   // The id of the container holding this section's rows.
   controls: string
   onToggleOpen: () => void
+  // Out of the tab order unless its row is the active one.
+  inTabOrder: boolean
 }
 
 // What a recap says out loud: the glyphs are a dense column of figures, so the
@@ -671,6 +715,7 @@ function GroupHeader({
   open,
   controls,
   onToggleOpen,
+  inTabOrder,
 }: GroupHeaderProps) {
   return (
     // No checkbox here: the whole-list selection is the bulk bar's Select all /
@@ -679,6 +724,7 @@ function GroupHeader({
       type="button"
       aria-expanded={open}
       aria-controls={controls}
+      tabIndex={inTabOrder ? undefined : -1}
       onClick={onToggleOpen}
       className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 max-md:min-h-11"
     >
@@ -1014,12 +1060,16 @@ const DEFAULT_ITEM_HEIGHTS: ChangesItemHeights = {
 
 // The row under an expanded folder that turned out to hold nothing git lists
 // (its files went between the listing and the answer).
-function EmptyRow({ depth }: { depth: number }) {
+function EmptyRow({ depth, grid }: { depth: number; grid: GridRowProps }) {
   return (
     <div
       role="row"
-      aria-level={depth + 1}
-      className="flex items-center gap-2 px-1 py-1 text-sm text-muted-foreground"
+      aria-level={depth + 2}
+      {...gridRowAttrs(grid)}
+      className={cn(
+        "flex items-center gap-2 rounded px-1 py-1 text-sm text-muted-foreground",
+        ROW_FOCUS,
+      )}
       style={depthIndent(depth)}
     >
       <div role="gridcell">Nothing git lists here anymore.</div>
@@ -1029,12 +1079,16 @@ function EmptyRow({ depth }: { depth: number }) {
 
 // The row standing in for an expanded folder's contents while they are asked
 // for. It says so in words, and a screen reader hears it once.
-function LoadingRow({ depth }: { depth: number }) {
+function LoadingRow({ depth, grid }: { depth: number; grid: GridRowProps }) {
   return (
     <div
       role="row"
-      aria-level={depth + 1}
-      className="flex items-center gap-2 px-1 py-1 text-sm text-muted-foreground"
+      aria-level={depth + 2}
+      {...gridRowAttrs(grid)}
+      className={cn(
+        "flex items-center gap-2 rounded px-1 py-1 text-sm text-muted-foreground",
+        ROW_FOCUS,
+      )}
       style={depthIndent(depth)}
     >
       <div role="gridcell" className="flex items-center gap-2">
@@ -1051,16 +1105,22 @@ function FailedRow({
   depth,
   message,
   onRetry,
+  grid,
 }: {
   depth: number
   message: string
   onRetry: () => void
+  grid: GridRowProps
 }) {
   return (
     <div
       role="row"
-      aria-level={depth + 1}
-      className="flex items-center gap-2 px-1 py-1 text-sm max-md:min-h-11"
+      aria-level={depth + 2}
+      {...gridRowAttrs(grid)}
+      className={cn(
+        "flex items-center gap-2 rounded px-1 py-1 text-sm max-md:min-h-11",
+        ROW_FOCUS,
+      )}
       style={depthIndent(depth)}
     >
       {/* The message is the whole sentence, the server's or the deadline's. */}
@@ -1072,6 +1132,7 @@ function FailedRow({
         <Button
           variant="outline"
           size="sm"
+          tabIndex={grid.active ? undefined : -1}
           className="h-8 max-md:h-11 pointer-coarse:min-h-11"
           onClick={onRetry}
         >
@@ -1170,6 +1231,12 @@ function ChangesList({
   const [heights, setHeights] = useState<ChangesItemHeights>(DEFAULT_ITEM_HEIGHTS)
   const offsets = useMemo(() => layoutChangesItems(items, heights), [items, heights])
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
+  // The same element for the keyboard's scrolling, which writes to it.
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const attachViewport = useCallback((element: HTMLDivElement | null) => {
+    viewportRef.current = element
+    setViewportEl(element)
+  }, [])
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(400)
   const [viewportWidth, setViewportWidth] = useState(0)
@@ -1221,6 +1288,134 @@ function ChangesList({
     pinned,
   )
 
+  // The treegrid's keyboard (APG, row focus). Every item but the separator is
+  // a row, numbered for aria-rowindex; one of them, the active row, is the
+  // grid's tab stop, and the arrows move it.
+  const rowItems = useMemo(
+    () => items.flatMap((item, index) => (item.kind === "separator" ? [] : [index])),
+    [items],
+  )
+  const rowNumber = useMemo(() => {
+    const numbers = new Map<number, number>()
+    rowItems.forEach((index, position) => numbers.set(index, position + 1))
+    return numbers
+  }, [rowItems])
+  const [activeKey, setActiveKey] = useState<string | null>(null)
+  const activeIndex = useMemo(() => {
+    const found = activeKey === null ? -1 : items.findIndex((item) => item.key === activeKey)
+    return found >= 0 && items[found]!.kind !== "separator" ? found : (rowItems[0] ?? -1)
+  }, [items, activeKey, rowItems])
+  const gridFor = (index: number): GridRowProps => ({
+    rowIndex: rowNumber.get(index) ?? 0,
+    active: index === activeIndex,
+  })
+  // A row the keyboard moved to may be outside the window: it is pinned (so it
+  // mounts wherever it is), scrolled into view, and focused once it is there.
+  const [pendingFocus, setPendingFocus] = useState<string | null>(null)
+  const focusItem = (index: number) => {
+    const item = items[index]
+    if (!item) return
+    setActiveKey(item.key)
+    setFocusedKey(item.key)
+    const top = offsets[index]! + LIST_PADDING
+    const bottom = offsets[index + 1]! + LIST_PADDING
+    let nextTop: number | null = null
+    if (top < scrollTop) nextTop = top
+    else if (bottom > scrollTop + viewportHeight) nextTop = Math.max(0, bottom - viewportHeight)
+    if (nextTop !== null) {
+      if (viewportRef.current) viewportRef.current.scrollTop = nextTop
+      setScrollTop(nextTop)
+    }
+    setPendingFocus(item.key)
+  }
+  useLayoutEffect(() => {
+    if (pendingFocus === null) return
+    const holder = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-item-key]") ?? [])].find(
+      (element) => element.dataset.itemKey === pendingFocus,
+    )
+    const row = holder?.querySelector<HTMLElement>('[role="row"]')
+    if (!row) return
+    row.focus()
+    setPendingFocus(null)
+  }, [pendingFocus, focusedKey, scrollTop, items])
+
+  // What the keys do on a focused row. Controls inside a row keep their own
+  // keys: this answers only when the row itself holds focus.
+  const onGridKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement
+    if (target.getAttribute("role") !== "row") return
+    const key = (target.closest("[data-item-key]") as HTMLElement | null)?.dataset.itemKey
+    const index = items.findIndex((item) => item.key === key)
+    if (index < 0) return
+    const item = items[index]!
+    const position = rowItems.indexOf(index)
+    const depthOf = (at: number) => {
+      const other = items[at]!
+      return other.kind === "header" || other.kind === "separator" ? -1 : other.depth
+    }
+    // The row this one hangs from: the folder above it, or its section heading.
+    const parentOf = (at: number) => {
+      const depth = depthOf(at)
+      for (let above = at - 1; above >= 0; above -= 1) {
+        const other = items[above]!
+        if (other.kind === "header") return above
+        if (other.kind === "row" && other.depth < depth) return above
+      }
+      return -1
+    }
+    let handled = true
+    switch (event.key) {
+      case "ArrowDown":
+        if (position + 1 < rowItems.length) focusItem(rowItems[position + 1]!)
+        break
+      case "ArrowUp":
+        if (position > 0) focusItem(rowItems[position - 1]!)
+        break
+      case "Home":
+        if (rowItems.length > 0) focusItem(rowItems[0]!)
+        break
+      case "End":
+        if (rowItems.length > 0) focusItem(rowItems[rowItems.length - 1]!)
+        break
+      case "ArrowRight": {
+        const next = rowItems[position + 1]
+        if (item.kind === "header") {
+          if (!open[item.section]) toggleOpen(item.section)
+          else if (next !== undefined && items[next]!.kind !== "header") focusItem(next)
+        } else if (item.kind === "row" && isExpandable(item.file)) {
+          if (!item.expanded) onToggleFolder(item.section, item.file)
+          else if (next !== undefined && depthOf(next) > item.depth) focusItem(next)
+        }
+        break
+      }
+      case "ArrowLeft":
+        if (item.kind === "header") {
+          if (open[item.section]) toggleOpen(item.section)
+        } else if (item.kind === "row" && item.expanded) {
+          onToggleFolder(item.section, item.file)
+        } else {
+          const parent = parentOf(index)
+          if (parent >= 0) focusItem(parent)
+        }
+        break
+      case "Enter":
+        if (item.kind === "header") toggleOpen(item.section)
+        else if (item.kind === "failed") retryFolderChildren(sessionId, item.section, item.dir)
+        else if (item.kind === "row") {
+          if (isExpandable(item.file)) onToggleFolder(item.section, item.file)
+          else if (folderCountLabel(item.file) === null) openDiff(item.file.path)
+        }
+        break
+      case " ":
+        if (item.kind === "header") toggleOpen(item.section)
+        else if (item.kind === "row") onToggle(item.section, item.file.path)
+        break
+      default:
+        handled = false
+    }
+    if (handled) event.preventDefault()
+  }
+
   // The list's outline in reading order: each heading, the container of that
   // section's rows (while it is open), and the separator. Walked once per
   // change of the items, never per render.
@@ -1260,18 +1455,25 @@ function ChangesList({
           right: 0,
         }}
       >
-        {renderItem(item)}
+        {renderItem(item, index)}
       </div>
     )
   }
 
-  const renderItem = (item: ChangesListItem) => {
+  const renderItem = (item: ChangesListItem, index: number) => {
     if (item.kind === "separator") return <Separator />
     const section = item.section
+    const grid = gridFor(index)
     if (item.kind === "header") {
       return (
         // A section's heading is a row of the treegrid, its toggle in a cell.
-        <div role="row" aria-level={1}>
+        <div
+          role="row"
+          aria-level={1}
+          aria-expanded={open[section]}
+          {...gridRowAttrs(grid)}
+          className={cn("rounded", ROW_FOCUS)}
+        >
           <div role="gridcell">
             <GroupHeader
               heading={section === "staged" ? "Staged" : "Unstaged"}
@@ -1283,17 +1485,19 @@ function ChangesList({
               open={open[section]}
               controls={rowsId(section)}
               onToggleOpen={() => toggleOpen(section)}
+              inTabOrder={grid.active}
             />
           </div>
         </div>
       )
     }
-    if (item.kind === "loading") return <LoadingRow depth={item.depth} />
-    if (item.kind === "empty") return <EmptyRow depth={item.depth} />
+    if (item.kind === "loading") return <LoadingRow depth={item.depth} grid={grid} />
+    if (item.kind === "empty") return <EmptyRow depth={item.depth} grid={grid} />
     if (item.kind === "failed") {
       return (
         <FailedRow
           depth={item.depth}
+          grid={grid}
           message={item.message}
           onRetry={() => retryFolderChildren(sessionId, section, item.dir)}
         />
@@ -1313,6 +1517,8 @@ function ChangesList({
         onRetryFolder={section === "staged" ? retryStaged : retryUnstaged}
         onToggleExpand={section === "staged" ? expandStaged : expandUnstaged}
         contentsId={item.expanded ? contentsId(item.key) : undefined}
+        rowIndex={grid.rowIndex}
+        active={grid.active}
       />
     )
   }
@@ -1356,7 +1562,7 @@ function ChangesList({
   return (
     <ScrollArea
       className="min-h-0 flex-1"
-      viewportRef={setViewportEl}
+      viewportRef={attachViewport}
       onViewportScroll={(event) => {
         setScrollTop(event.currentTarget.scrollTop)
         // Tracked here too: cheap, and covers an inert ResizeObserver.
@@ -1397,6 +1603,8 @@ function ChangesList({
             ref={listRef}
             role="treegrid"
             aria-label="Changed files"
+            aria-rowcount={rowItems.length}
+            onKeyDown={onGridKeyDown}
             // The full height, so the scrollbar reflects the whole list.
             style={{ position: "relative", height: offsets[items.length] }}
             onFocus={(event) => {
@@ -1407,6 +1615,11 @@ function ChangesList({
               // subtree; the row keeps whatever pin it already had.
               if (holder && listRef.current?.contains(holder)) {
                 setFocusedKey(holder.dataset.itemKey ?? null)
+                // Wherever focus lands (a click into a row's checkbox, a Tab
+                // into the grid), that row becomes the tab stop.
+                if (holder.dataset.itemKind !== "separator") {
+                  setActiveKey(holder.dataset.itemKey ?? null)
+                }
               }
             }}
             onBlur={(event) => {
