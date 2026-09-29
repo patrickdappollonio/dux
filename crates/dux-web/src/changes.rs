@@ -841,6 +841,7 @@ mod tests {
                 worktrees_not_staged: 5,
                 bare_repositories: vec!["vendor/fixture.git".to_string()],
                 files_in_bare_repositories: 2,
+                repositories_inside: vec!["vendor/lib".to_string()],
             });
 
         let json = serde_json::to_value(sorted_views(&[folder])).unwrap();
@@ -854,6 +855,10 @@ mod tests {
             serde_json::json!(["vendor/fixture.git"])
         );
         assert_eq!(json[0]["files_in_bare_repositories"], 2);
+        assert_eq!(
+            json[0]["repositories_inside"],
+            serde_json::json!(["vendor/lib"])
+        );
         assert_eq!(json[0]["linked_worktrees"], 2);
         assert_eq!(json[0]["fingerprint"], "fffffffffffffffe");
     }
@@ -1171,6 +1176,7 @@ mod tests {
                 linked_worktrees_not_staged: 0,
                 bare_repositories: Vec::new(),
                 files_in_bare_repositories: 0,
+                repositories_inside: Vec::new(),
             }),
             "the row says how many files it stands for"
         );

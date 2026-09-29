@@ -319,6 +319,10 @@ export interface ChangedFileView {
   bare_repositories?: string[]
   /** How many of `file_count` sit inside those bare repositories. */
   files_in_bare_repositories?: number
+  /** Repositories of their own and worktrees of this repository inside a
+   * `"directory"` row (on the staged side, the ones its stage left out), as
+   * worktree-relative paths. Absent when there are none. */
+  repositories_inside?: string[]
 }
 
 export interface ChangedFiles {

@@ -40,6 +40,7 @@ export interface ChangedRowView {
   nested_repositories?: number
   linked_worktrees?: number
   fingerprint?: string
+  repositories_inside?: string[]
 }
 
 // One tab's Monaco buffer and diff cache, keyed by tab id. A preview-replace

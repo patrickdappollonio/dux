@@ -123,12 +123,14 @@ fn finish_tallies(
             // this repository, read from its `.git` file alone.
             let mut nested_repositories = 0;
             let mut linked_worktrees = 0;
+            let mut repositories_inside = Vec::new();
             if !tally.repositories.is_empty() {
                 use std::os::unix::ffi::OsStrExt;
                 let common = common.get_or_insert_with(|| common_dir_of(worktree));
                 for record in &tally.repositories {
-                    let rel =
-                        std::ffi::OsStr::from_bytes(record.strip_suffix(b"/").unwrap_or(record));
+                    let bytes = record.strip_suffix(b"/").unwrap_or(record);
+                    repositories_inside.push(String::from_utf8_lossy(bytes).into_owned());
+                    let rel = std::ffi::OsStr::from_bytes(bytes);
                     match repository_kind(common.as_deref(), &worktree.join(rel)) {
                         UntrackedDirectoryKind::LinkedWorktree => linked_worktrees += 1,
                         UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder => {
@@ -162,6 +164,7 @@ fn finish_tallies(
                     .map(|bare| String::from_utf8_lossy(bare).into_owned())
                     .collect(),
                 files_in_bare_repositories,
+                repositories_inside,
             };
             (folder, UntrackedFolder::Contents(contents, additions))
         })
@@ -460,7 +463,7 @@ pub(super) fn fold_added_directories(
     // that: one counted empty (no files and no repositories, as when it
     // emptied between two reads) is not known to hold anything, and breaks
     // the folder around it like any untracked entry.
-    let mut left_out: Vec<(&str, usize, usize)> = Vec::new();
+    let mut left_out: Vec<(&ChangedFile, usize, usize)> = Vec::new();
     for file in unstaged
         .iter()
         .filter(|file| matches!(file.status.as_str(), "?" | "A"))
@@ -478,7 +481,7 @@ pub(super) fn fold_added_directories(
                 ChangedFileKind::Directory(_) | ChangedFileKind::File => None,
             };
             if let Some((repositories, worktrees)) = repositories {
-                left_out.push((file.path.as_str(), repositories, worktrees));
+                left_out.push((file, repositories, worktrees));
                 continue;
             }
         }
@@ -526,14 +529,22 @@ pub(super) fn fold_added_directories(
             )
         })
         .collect();
-    for (path, repositories, worktrees) in left_out {
-        let Some(root) = ancestors(path).find(|ancestor| contents_of.contains_key(*ancestor))
+    for (file, repositories, worktrees) in left_out {
+        let Some(root) = ancestors(&file.path).find(|ancestor| contents_of.contains_key(*ancestor))
         else {
             continue;
         };
         let contents = contents_of.get_mut(root).expect("found just above");
         contents.repositories_not_staged += repositories;
         contents.worktrees_not_staged += worktrees;
+        // The paths of what the stage left out: the row itself when it is a
+        // repository, or the ones a folder holding only repositories names.
+        match file.folder_contents() {
+            Some(inside) => contents
+                .repositories_inside
+                .extend(inside.repositories_inside.iter().cloned()),
+            None => contents.repositories_inside.push(file.path.clone()),
+        }
     }
     for (path, kind) in &links {
         let Some(root) = ancestors(path).find(|ancestor| contents_of.contains_key(*ancestor))
@@ -1379,10 +1390,13 @@ mod tests {
         ChangedFileKind::directory(count)
     }
 
-    fn folder_with_nested(files: usize, nested: usize) -> ChangedFileKind {
+    /// A folder of `files` files with the repositories of their own at
+    /// `nested` (worktree-relative, in git's order) inside it.
+    fn folder_with_nested(files: usize, nested: &[&str]) -> ChangedFileKind {
         ChangedFileKind::Directory(crate::model::FolderContents {
             file_count: files,
-            nested_repositories: nested,
+            nested_repositories: nested.len(),
+            repositories_inside: nested.iter().map(|path| path.to_string()).collect(),
             ..Default::default()
         })
     }
@@ -1478,7 +1492,7 @@ mod tests {
                 "?".to_string(),
                 // git does not look inside the nested repository: it is counted
                 // apart from the files, of which there are none here.
-                folder_with_nested(0, 1)
+                folder_with_nested(0, &["vendor/lib"])
             )]
         );
 
@@ -1511,7 +1525,7 @@ mod tests {
             vec![(
                 "vendor".to_string(),
                 "?".to_string(),
-                folder_with_nested(2, 2)
+                folder_with_nested(2, &["vendor/deep/other", "vendor/lib"])
             )]
         );
         assert_eq!(crate::model::total_file_count(&unstaged), 2, "files only");
@@ -1523,7 +1537,7 @@ mod tests {
                 (
                     "vendor/deep".to_string(),
                     "?".to_string(),
-                    folder_with_nested(1, 1)
+                    folder_with_nested(1, &["vendor/deep/other"])
                 ),
                 (
                     "vendor/lib".to_string(),
@@ -1971,6 +1985,40 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// A folder row names the repositories inside it, so a surface marking
+    /// paths by the row can leave theirs alone; a folder staged whole names
+    /// the ones the stage left out.
+    #[test]
+    fn a_folder_row_names_the_repositories_inside_it() {
+        let repo = folder_with_repositories();
+        let root = repo.path();
+
+        let (_, unstaged) = changed_files(root).unwrap();
+        let vendor = unstaged.iter().find(|f| f.path == "vendor").unwrap();
+        let mut inside = vendor
+            .folder_contents()
+            .unwrap()
+            .repositories_inside
+            .clone();
+        inside.sort();
+        assert_eq!(inside, ["vendor/lib", "vendor/wt"]);
+
+        stage_with_report(root, &["vendor".to_string()]).unwrap();
+        let (staged, _) = changed_files(root).unwrap();
+        let vendor = staged.iter().find(|f| f.path == "vendor").unwrap();
+        let mut inside = vendor
+            .folder_contents()
+            .unwrap()
+            .repositories_inside
+            .clone();
+        inside.sort();
+        assert_eq!(
+            inside,
+            ["vendor/lib", "vendor/wt"],
+            "the ones the stage left out"
+        );
     }
 
     /// Staging a folder stages exactly what its count covers, its files: the

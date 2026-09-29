@@ -213,6 +213,7 @@ describe("reuseUnchangedFiles", () => {
       linked_worktrees_not_staged: 0,
       bare_repositories: ["a.git"],
       files_in_bare_repositories: 0,
+      repositories_inside: ["a"],
     }
     expect(Object.keys(CHANGED_FILE_FIELDS).sort()).toEqual(Object.keys(full).sort())
     const changed: { [K in keyof ChangedFileView]-?: ChangedFileView[K] } = {
@@ -232,6 +233,7 @@ describe("reuseUnchangedFiles", () => {
       linked_worktrees_not_staged: 1,
       bare_repositories: ["b.git"],
       files_in_bare_repositories: 1,
+      repositories_inside: ["b"],
     }
     for (const key of Object.keys(full) as (keyof ChangedFileView)[]) {
       const next = { ...full, [key]: changed[key] }
@@ -501,6 +503,22 @@ describe("changedStatusLookup", () => {
     expect(lookup.get("gen/other.js")).toBeUndefined()
     expect(lookup.get("node_modules_x/a.js")).toBeUndefined()
     expect(lookup.get("src/b.ts")).toBeUndefined()
+  })
+
+  it("does not answer for a path inside a repository counted inside a folder", () => {
+    const lookup = changedStatusLookup([
+      [
+        {
+          ...folded("vendor", "?"),
+          repositories_inside: ["vendor/lib", "vendor/wt"],
+        },
+      ],
+    ])
+    expect(lookup.get("vendor/x.js")).toBe("?")
+    expect(lookup.get("vendor/lib")).toBeUndefined()
+    expect(lookup.get("vendor/lib/own.c")).toBeUndefined()
+    expect(lookup.get("vendor/wt/src/a.rs")).toBeUndefined()
+    expect(lookup.get("vendor/library/a.js")).toBe("?")
   })
 
   it("does not answer for a path inside a repository of its own", () => {

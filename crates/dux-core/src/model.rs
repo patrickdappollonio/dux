@@ -908,6 +908,11 @@ pub struct FolderContents {
     /// How many of `file_count` sit inside those bare repositories, which a
     /// folder delete leaves: it deletes the rest.
     pub files_in_bare_repositories: usize,
+    /// The repositories of their own and worktrees of this repository inside
+    /// the folder (on the staged side, the ones its stage left out), as
+    /// worktree-relative paths. Nothing inside one is a change of this
+    /// repository, so a surface marking paths by this row leaves them alone.
+    pub repositories_inside: Vec<String>,
 }
 
 impl FolderContents {

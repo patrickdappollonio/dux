@@ -1003,6 +1003,10 @@ pub enum FolderView {
         /// Omitted when there are none.
         #[serde(skip_serializing_if = "is_zero")]
         files_in_bare_repositories: usize,
+        /// Repositories of their own and worktrees of this repository inside
+        /// the folder, worktree-relative. Omitted when there are none.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        repositories_inside: Vec<String>,
     },
     /// An untracked repository of its own, which is not looked inside.
     NestedRepository,
@@ -1025,6 +1029,7 @@ impl FolderView {
                 linked_worktrees_not_staged: contents.worktrees_not_staged,
                 bare_repositories: contents.bare_repositories.clone(),
                 files_in_bare_repositories: contents.files_in_bare_repositories,
+                repositories_inside: contents.repositories_inside.clone(),
             }),
             crate::model::ChangedFileKind::NestedRepository => Some(Self::NestedRepository),
             crate::model::ChangedFileKind::LinkedWorktree => Some(Self::LinkedWorktree),

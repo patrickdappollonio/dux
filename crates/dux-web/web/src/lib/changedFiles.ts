@@ -233,6 +233,7 @@ export const CHANGED_FILE_FIELDS = {
   linked_worktrees_not_staged: true,
   bare_repositories: true,
   files_in_bare_repositories: true,
+  repositories_inside: true,
 } as const satisfies Record<keyof ChangedFileView, true>
 
 const FIELD_KEYS = Object.keys(CHANGED_FILE_FIELDS) as (keyof ChangedFileView)[]
@@ -325,28 +326,45 @@ export interface StatusLookup {
 // (`lists` in priority order, the unstaged side first): a path that is a row
 // answers as its row, and a path with no row of its own answers as the
 // nearest folded folder it sits in, because that row stands for every file
-// under it. A repository of its own is not looked inside, so a path in one
+// under it. A repository of its own is not looked inside, whether it is a row
+// or one the folder row names in `repositories_inside`, so a path in one
 // answers nothing. The one place the editor asks this, for its tree, its
 // search results and anything else that marks a path.
+//
+// One gap, stated rather than papered over: a file the repository IGNORES
+// inside a folded folder is answered with the folder's status too. Neither
+// the folder row nor the tree listing says which paths are ignored (the tree
+// endpoint returns names and kinds only, and only the per-entry info panel
+// asks git), so nothing on this side can tell an ignored `.env` in an
+// untracked folder from the untracked files around it.
 export function changedStatusLookup(
-  lists: readonly (readonly Pick<ChangedFileView, "path" | "status" | "kind">[])[],
+  lists: readonly (readonly Pick<
+    ChangedFileView,
+    "path" | "status" | "kind" | "repositories_inside"
+  >[])[],
 ): StatusLookup {
   const exact = new Map<string, string>()
   const folders = new Map<string, string>()
+  const repositories = new Set<string>()
   for (const list of lists) {
     for (const file of list) {
       if (!exact.has(file.path)) exact.set(file.path, file.status)
       if (file.kind === "directory" && !folders.has(file.path)) {
         folders.set(file.path, file.status)
       }
+      for (const repository of file.repositories_inside ?? []) repositories.add(repository)
     }
   }
   return {
     get(path: string): string | undefined {
       const own = exact.get(path)
       if (own !== undefined || folders.size === 0) return own
+      if (repositories.has(path)) return undefined
       for (let cut = path.lastIndexOf("/"); cut > 0; cut = path.lastIndexOf("/", cut - 1)) {
-        const status = folders.get(path.slice(0, cut))
+        const above = path.slice(0, cut)
+        // Inside a repository counted in a folder: not a change of this one.
+        if (repositories.has(above)) return undefined
+        const status = folders.get(above)
         if (status !== undefined) return status
       }
       return undefined
