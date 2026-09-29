@@ -108,8 +108,14 @@ function useChangedFilesModel(
       expansions.size === 0
         ? changed
         : {
-            staged: [...changed.staged, ...loadedChildren(expansions, "staged")],
-            unstaged: [...changed.unstaged, ...loadedChildren(expansions, "unstaged")],
+            staged: [
+              ...changed.staged,
+              ...loadedChildren(expansions, "staged", changed.staged),
+            ],
+            unstaged: [
+              ...changed.unstaged,
+              ...loadedChildren(expansions, "unstaged", changed.unstaged),
+            ],
           },
     [changed, expansions],
   )
@@ -119,16 +125,22 @@ function useChangedFilesModel(
     () => reconcileSelection(scopedSelection, actionable),
     [scopedSelection, actionable],
   )
+  // Every row shown: the filtered listing, and the rows under the expanded
+  // folders among it, which "Select all" covers as much as the rest.
   const visible = useMemo(() => {
-    const visibleStaged = filtered.staged.map((file) => file.path)
-    const visibleUnstaged = filtered.unstaged.map((file) => file.path)
+    const shown = (section: "staged" | "unstaged") => [
+      ...filtered[section].map((file) => file.path),
+      ...loadedChildren(expansions, section, filtered[section]).map((file) => file.path),
+    ]
+    const visibleStaged = shown("staged")
+    const visibleUnstaged = shown("unstaged")
     const visibleCount = visibleStaged.length + visibleUnstaged.length
     const allVisibleChecked =
       visibleCount > 0 &&
       visibleStaged.every((path) => selected.staged.has(path)) &&
       visibleUnstaged.every((path) => selected.unstaged.has(path))
     return { visibleStaged, visibleUnstaged, visibleCount, allVisibleChecked }
-  }, [filtered, selected])
+  }, [filtered, selected, expansions])
 
   return {
     changed,
@@ -326,6 +338,20 @@ export function useChangedFilesController(
     [sessionId],
   )
 
+  // Collapsing a folder hides what is under it, so it unchecks it too: a
+  // checked row nobody can see must not be counted or acted on.
+  const uncheckUnder = useCallback(
+    (section: "staged" | "unstaged", folder: string): void => {
+      const inside = `${folder}/`
+      editSelection((next) => {
+        for (const path of [...next[section]]) {
+          if (path.startsWith(inside)) next[section].delete(path)
+        }
+      })
+    },
+    [editSelection],
+  )
+
   const dropActed = (
     section: "staged" | "unstaged",
     paths: string[],
@@ -448,6 +474,7 @@ export function useChangedFilesController(
     setQuery: (query: string) => setSearch({ sessionId, query }),
     toggleOne,
     toggleVisible,
+    uncheckUnder,
     clearSelection: () => setSelection({ sessionId, ...emptySelection() }),
     openDiscard: () => setDiscarding(true),
     closeDiscard: () => setDiscarding(false),

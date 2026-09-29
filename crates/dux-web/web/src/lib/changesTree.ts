@@ -19,9 +19,11 @@ export interface FolderNode {
   signature: string
   // What is inside, one level deep, or null until the first answer lands.
   children: ChangedFileView[] | null
-  // Why the first answer failed, shown in place of the children. A failure of
-  // a later, quiet refresh keeps the children on screen and marks nothing.
+  // Why the first answer failed, shown in place of the children.
   error: string | null
+  // Why a later, quiet refresh failed: the children stay on screen, and the
+  // folder's row says quietly that they could not be brought up to date.
+  refreshError: string | null
   // A request for this folder is in flight.
   loading: boolean
 }
@@ -70,6 +72,7 @@ export function expandFolder(
     signature: folderSignature(row),
     children: null,
     error: null,
+    refreshError: null,
     loading: true,
   })
 }
@@ -101,14 +104,12 @@ export function settleFolder(
   path: string,
   children: ChangedFileView[],
 ): Expansions {
-  const key = folderKey(section, path)
-  const node = exp.get(key)
-  if (!node) return exp
-  return withNode(exp, key, { ...node, children, error: null, loading: false })
+  return settleFolderAndReconcile(exp, section, path, children).next
 }
 
 // A request for a folder failed. With nothing loaded yet the reason is shown in
-// place of the children; with children already on screen they stay, unmarked.
+// place of the children; with children already on screen they stay, and the
+// folder's row carries the reason quietly.
 export function failFolder(
   exp: Expansions,
   section: ChangesSection,
@@ -122,6 +123,7 @@ export function failFolder(
     ...node,
     loading: false,
     error: node.children === null ? message : null,
+    refreshError: node.children === null ? null : message,
   })
 }
 
@@ -134,21 +136,32 @@ export function retryFolder(
   const key = folderKey(section, path)
   const node = exp.get(key)
   if (!node) return exp
-  return withNode(exp, key, { ...node, loading: true, error: null })
+  return withNode(exp, key, { ...node, loading: true, error: null, refreshError: null })
 }
 
-// Every child row loaded under an expanded folder of `section`, in no
-// particular order. These are real rows a user can select and act on.
+// Every child row shown under the expanded folders among `rows` (a section's
+// listing, or the part of it a filter shows), and under the folders expanded
+// inside those, in no particular order. These are real rows a user can select
+// and act on. Only folders reachable through shown parents count: an
+// expansion whose parent is collapsed or gone holds nothing on screen.
 export function loadedChildren(
   exp: Expansions,
   section: ChangesSection,
+  rows: readonly ChangedFileView[],
 ): ChangedFileView[] {
-  const prefix = `${section}:`
-  const rows: ChangedFileView[] = []
-  for (const [key, node] of exp) {
-    if (key.startsWith(prefix) && node.children) rows.push(...node.children)
+  const out: ChangedFileView[] = []
+  if (exp.size === 0) return out
+  const walk = (level: readonly ChangedFileView[]) => {
+    for (const row of level) {
+      if (!isExpandable(row)) continue
+      const children = exp.get(folderKey(section, row.path))?.children
+      if (!children) continue
+      out.push(...children)
+      walk(children)
+    }
   }
-  return rows
+  walk(rows)
+  return out
 }
 
 export interface ReconcileResult {
@@ -157,60 +170,96 @@ export interface ReconcileResult {
   refetch: { section: ChangesSection; path: string }[]
 }
 
-function parentPath(path: string): string | null {
-  const cut = path.lastIndexOf("/")
-  return cut > 0 ? path.slice(0, cut) : null
+// Check the expanded folders among `rows` against those rows, and the folders
+// expanded inside each against its own children, recursively. A folder whose
+// row is gone or is no longer a folded folder is forgotten; one whose row moved
+// is marked to be asked for again, keeping its children on screen, and what is
+// expanded inside it waits for that answer, which is checked the same way when
+// it lands. Every folder reached is recorded in `reached`.
+function reconcileAmong(
+  next: Map<string, FolderNode>,
+  section: ChangesSection,
+  rows: readonly ChangedFileView[],
+  reached: Set<string>,
+  refetch: ReconcileResult["refetch"],
+): void {
+  for (const row of rows) {
+    const key = folderKey(section, row.path)
+    const node = next.get(key)
+    if (!node) continue
+    if (!isExpandable(row)) continue
+    reached.add(key)
+    const signature = folderSignature(row)
+    if (signature !== node.signature) {
+      next.set(key, { ...node, signature, loading: true })
+      refetch.push({ section, path: row.path })
+      // What is expanded inside waits for the new answer, untouched.
+      for (const other of next.keys()) {
+        if (other.startsWith(`${key}/`)) reached.add(other)
+      }
+      continue
+    }
+    if (node.children) reconcileAmong(next, section, node.children, reached, refetch)
+  }
 }
 
-// Bring the expanded folders in line with a new listing. A folder whose row is
-// gone (from the listing, or from its expanded parent's children), or is no
-// longer a folded folder, is forgotten with everything under it. A folder whose
-// row moved is asked for again, keeping its old children on screen until the
-// answer lands. Parents are settled before their children, since a sub-folder's
-// row lives in its parent's children.
+// Forget every expansion not reached from the rows, with everything under it.
+function dropUnreached(
+  next: Map<string, FolderNode>,
+  reached: Set<string>,
+  within: (key: string) => boolean,
+): void {
+  for (const key of [...next.keys()]) {
+    if (within(key) && !reached.has(key)) next.delete(key)
+  }
+}
+
+function sameExpansions(a: Expansions, b: Map<string, FolderNode>): boolean {
+  if (a.size !== b.size) return false
+  for (const [key, node] of b) if (a.get(key) !== node) return false
+  return true
+}
+
+// Bring the expanded folders in line with a new listing. A folder is kept only
+// while it is reachable: a row of the listing, or a folder among the children
+// of a kept, expanded parent. A folder whose row is gone, or is no longer a
+// folded folder, is forgotten with everything under it; a folder whose row
+// moved is asked for again, keeping its old children on screen until the
+// answer lands, and the folders expanded inside it are checked against that
+// answer (see `settleFolderAndReconcile`).
 export function reconcileExpansions(
   exp: Expansions,
   staged: readonly ChangedFileView[],
   unstaged: readonly ChangedFileView[],
 ): ReconcileResult {
   if (exp.size === 0) return { next: exp, refetch: [] }
-  const top: Record<ChangesSection, Map<string, ChangedFileView>> = {
-    staged: new Map(staged.map((row) => [row.path, row])),
-    unstaged: new Map(unstaged.map((row) => [row.path, row])),
-  }
-  const entries = [...exp.entries()]
-    .map(([key, node]) => {
-      const cut = key.indexOf(":")
-      return {
-        key,
-        node,
-        section: key.slice(0, cut) as ChangesSection,
-        path: key.slice(cut + 1),
-      }
-    })
-    .sort((a, b) => a.path.split("/").length - b.path.split("/").length)
-
-  let next: Map<string, FolderNode> | null = null
-  const current = () => next ?? exp
+  const next = new Map(exp)
+  const reached = new Set<string>()
   const refetch: ReconcileResult["refetch"] = []
-  for (const { key, node, section, path } of entries) {
-    const parent = parentPath(path)
-    let row = top[section].get(path)
-    if (row === undefined && parent !== null) {
-      row = current()
-        .get(folderKey(section, parent))
-        ?.children?.find((child) => child.path === path)
-    }
-    if (row === undefined || !isExpandable(row)) {
-      next ??= new Map(exp)
-      next.delete(key)
-      continue
-    }
-    const signature = folderSignature(row)
-    if (signature === node.signature) continue
-    next ??= new Map(exp)
-    next.set(key, { ...node, signature, loading: true })
-    refetch.push({ section, path })
-  }
-  return { next: current(), refetch }
+  reconcileAmong(next, "staged", staged, reached, refetch)
+  reconcileAmong(next, "unstaged", unstaged, reached, refetch)
+  dropUnreached(next, reached, () => true)
+  return { next: sameExpansions(exp, next) ? exp : next, refetch }
+}
+
+// A folder's children landed: settle them, then check the folders expanded
+// inside it against the NEW children, recursively. One that is gone is
+// forgotten with its subtree (so nothing hidden stays checked or counted, and
+// it comes back folded); one whose row moved is asked for again.
+export function settleFolderAndReconcile(
+  exp: Expansions,
+  section: ChangesSection,
+  path: string,
+  children: ChangedFileView[],
+): ReconcileResult {
+  const key = folderKey(section, path)
+  const node = exp.get(key)
+  if (!node) return { next: exp, refetch: [] }
+  const next = new Map(exp)
+  next.set(key, { ...node, children, error: null, refreshError: null, loading: false })
+  const reached = new Set<string>([key])
+  const refetch: ReconcileResult["refetch"] = []
+  reconcileAmong(next, section, children, reached, refetch)
+  dropUnreached(next, reached, (other) => other.startsWith(`${key}/`))
+  return { next, refetch }
 }

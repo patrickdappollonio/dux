@@ -9,6 +9,7 @@ import {
   reconcileExpansions,
   retryFolder,
   settleFolder,
+  settleFolderAndReconcile,
   type Expansions,
 } from "./changesTree"
 import { buildChangesItems } from "./changesWindow"
@@ -40,7 +41,7 @@ describe("expanding and collapsing", () => {
     ])
     exp = expandFolder(exp, "unstaged", folder("node_modules/pkg", 2))
     exp = settleFolder(exp, "unstaged", "node_modules/pkg", [file("node_modules/pkg/a.js")])
-    expect(loadedChildren(exp, "unstaged").map((f) => f.path)).toEqual([
+    expect(loadedChildren(exp, "unstaged", [nm]).map((f) => f.path)).toEqual([
       "node_modules/pkg",
       "node_modules/top.js",
       "node_modules/pkg/a.js",
@@ -130,11 +131,12 @@ describe("reconcileExpansions", () => {
     exp = settled(exp, "unstaged", "a", [folder("a/sub", 1)])
     exp = expandFolder(exp, "unstaged", folder("a/sub", 1))
     exp = settled(exp, "unstaged", "a/sub", [file("a/sub/q")])
-    // The parent refetched and its sub-folder now holds two files.
-    exp = settled(exp, "unstaged", "a", [folder("a/sub", 2)])
-
-    const result = reconcileExpansions(exp, [], [folder("a", 3)])
+    // The parent refetched and its sub-folder now holds two files: the
+    // parent's answer is what asks for the sub-folder again.
+    const result = settleFolderAndReconcile(exp, "unstaged", "a", [folder("a/sub", 2)])
     expect(result.refetch).toEqual([{ section: "unstaged", path: "a/sub" }])
+    // A listing that has not moved the parent asks nothing more.
+    expect(reconcileExpansions(result.next, [], [folder("a", 3)]).refetch).toEqual([])
   })
 })
 
@@ -191,5 +193,59 @@ describe("the flattened list", () => {
       expansions: exp,
     })
     expect(items.map((item) => item.kind)).toEqual(["header"])
+  })
+})
+
+// A folder's children are the truth for what is expanded under it: when they
+// settle, the folders expanded inside it are checked against the NEW children.
+describe("expanded folders inside a folder whose children settle", () => {
+  function nested(): Expansions {
+    let exp = expandFolder(EMPTY, "unstaged", folder("nm", 2, { fingerprint: "a" }))
+    exp = settleFolder(exp, "unstaged", "nm", [folder("nm/pkg", 2, { fingerprint: "p1" })])
+    exp = expandFolder(exp, "unstaged", folder("nm/pkg", 2, { fingerprint: "p1" }))
+    return settleFolder(exp, "unstaged", "nm/pkg", [file("nm/pkg/a"), file("nm/pkg/b")])
+  }
+
+  it("asks again for a sub-folder that grew, once its parent's new children say so", () => {
+    let exp = nested()
+    const listed = reconcileExpansions(exp, [], [folder("nm", 3, { fingerprint: "b" })])
+    // The parent is asked again; the sub-folder waits for the parent's answer.
+    expect(listed.refetch).toEqual([{ section: "unstaged", path: "nm" }])
+    exp = listed.next
+
+    const settled = settleFolderAndReconcile(exp, "unstaged", "nm", [
+      folder("nm/pkg", 3, { fingerprint: "p2" }),
+    ])
+    expect(settled.refetch).toEqual([{ section: "unstaged", path: "nm/pkg" }])
+    expect(settled.next.get(folderKey("unstaged", "nm/pkg"))).toMatchObject({
+      loading: true,
+      children: [file("nm/pkg/a"), file("nm/pkg/b")],
+    })
+  })
+
+  it("forgets a sub-folder that left its parent, so nothing hidden stays actionable", () => {
+    const exp = nested()
+    const settled = settleFolderAndReconcile(exp, "unstaged", "nm", [file("nm/top.js")])
+
+    expect(settled.next.has(folderKey("unstaged", "nm/pkg"))).toBe(false)
+    expect(settled.refetch).toEqual([])
+    expect(
+      loadedChildren(settled.next, "unstaged", [folder("nm", 1)]).map((f) => f.path),
+    ).toEqual(["nm/top.js"])
+
+    // Coming back later, it is a folded row again, not a stale expansion.
+    const back = settleFolderAndReconcile(settled.next, "unstaged", "nm", [
+      folder("nm/pkg", 2, { fingerprint: "p1" }),
+    ])
+    expect(back.next.has(folderKey("unstaged", "nm/pkg"))).toBe(false)
+  })
+
+  it("counts only children reachable through shown folders", () => {
+    // An expansion whose parent is not expanded is unreachable, whatever it holds.
+    let exp = expandFolder(EMPTY, "unstaged", folder("nm/pkg", 1))
+    exp = settleFolder(exp, "unstaged", "nm/pkg", [file("nm/pkg/a")])
+    expect(loadedChildren(exp, "unstaged", [folder("nm", 1)])).toEqual([])
+    // And a listing reconcile forgets it.
+    expect(reconcileExpansions(exp, [], [folder("nm", 1)]).next.size).toBe(0)
   })
 })

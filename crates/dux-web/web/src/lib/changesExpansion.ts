@@ -19,7 +19,7 @@ import {
   folderKey,
   reconcileExpansions,
   retryFolder,
-  settleFolder,
+  settleFolderAndReconcile,
   type Expansions,
 } from "./changesTree"
 import type { ChangesSection } from "./changesWindow"
@@ -81,7 +81,20 @@ function request(sessionId: string, section: ChangesSection, path: string): void
     (answer) => {
       if (inflight.get(id) !== controller) return
       inflight.delete(id)
-      publish(sessionId, settleFolder(expansionsFor(sessionId), section, path, answer.children))
+      // The folders expanded inside it are checked against these children:
+      // one that is gone is forgotten, one that moved is asked for again.
+      const current = expansionsFor(sessionId)
+      const { next, refetch } = settleFolderAndReconcile(
+        current,
+        section,
+        path,
+        answer.children,
+      )
+      for (const key of current.keys()) {
+        if (!next.has(key)) abortRequest(sessionId, key)
+      }
+      publish(sessionId, next)
+      for (const moved of refetch) request(sessionId, moved.section, moved.path)
     },
     (error: unknown) => {
       if (error instanceof ChangesFetchAborted || inflight.get(id) !== controller) return

@@ -106,8 +106,9 @@ import {
   type ChangesRowPart,
   type ChangesSection,
 } from "@/lib/changesWindow"
-import { isExpandable, type Expansions } from "@/lib/changesTree"
+import { folderKey, isExpandable, type Expansions } from "@/lib/changesTree"
 import {
+  expansionsFor,
   reconcileFolders,
   retryFolderChildren,
   toggleFolder,
@@ -1022,6 +1023,8 @@ interface ChangesListProps {
   filtering: boolean
   branchGit: boolean
   onToggle: (section: "staged" | "unstaged", path: string) => void
+  // Expand a folded folder row, or collapse it.
+  onToggleFolder: (section: "staged" | "unstaged", file: ChangedFileView) => void
 }
 
 function ChangesList({
@@ -1035,6 +1038,7 @@ function ChangesList({
   filtering,
   branchGit,
   onToggle,
+  onToggleFolder,
 }: ChangesListProps) {
   const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
   const hasMatches = filtered.staged.length > 0 || filtered.unstaged.length > 0
@@ -1053,12 +1057,12 @@ function ChangesList({
     [onToggle],
   )
   const expandStaged = useCallback(
-    (file: ChangedFileView) => toggleFolder(sessionId, "staged", file),
-    [sessionId],
+    (file: ChangedFileView) => onToggleFolder("staged", file),
+    [onToggleFolder],
   )
   const expandUnstaged = useCallback(
-    (file: ChangedFileView) => toggleFolder(sessionId, "unstaged", file),
-    [sessionId],
+    (file: ChangedFileView) => onToggleFolder("unstaged", file),
+    [onToggleFolder],
   )
   const [open, setOpen] = useState<Record<ChangesSection, boolean>>({
     staged: true,
@@ -1457,6 +1461,19 @@ export const ChangedFiles = memo(function ChangedFiles() {
     () => uncoveredPaths(controller.selected.unstaged),
     [controller.selected.unstaged],
   )
+  // Expand a folder, or collapse it and uncheck everything under it, which is
+  // no longer shown. Stable per agent, because every folder row holds it.
+  const { uncheckUnder } = controller
+  const toggleFolderRow = useCallback(
+    (section: "staged" | "unstaged", file: ChangedFileView) => {
+      if (!selectedSessionId) return
+      if (expansionsFor(selectedSessionId).has(folderKey(section, file.path))) {
+        uncheckUnder(section, file.path)
+      }
+      toggleFolder(selectedSessionId, section, file)
+    },
+    [selectedSessionId, uncheckUnder],
+  )
   // Every new listing reconciles the expanded folders: one that is no longer a
   // folded row is forgotten, and one whose row moved is asked for again,
   // quietly, keeping what is on screen until the answer lands.
@@ -1553,6 +1570,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
             filtering={filtering}
             branchGit={branchGit}
             onToggle={toggleOne}
+            onToggleFolder={toggleFolderRow}
           />
         </CardContent>
       </Card>

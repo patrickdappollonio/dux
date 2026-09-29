@@ -315,6 +315,94 @@ describe("expanding a folded folder", () => {
   })
 })
 
+describe("what is checked under an expanded folder", () => {
+  function bar() {
+    return within(screen.getByRole("toolbar", { name: "Actions for the selected files" }))
+  }
+
+  // "Select all" is every row shown, the rows inside expanded folders too.
+  it("Select all checks the rows inside expanded folders, and Select none clears them", async () => {
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("node_modules/"))
+    await answer(0, [file("node_modules/top.js")])
+    fireEvent.click(screen.getByLabelText("Select notes.md"))
+
+    fireEvent.click(bar().getByRole("button", { name: /Select all/ }))
+    const child = screen.getByLabelText("Select node_modules/top.js")
+    expect(child.getAttribute("aria-checked")).toBe("true")
+
+    fireEvent.click(bar().getByRole("button", { name: /Select none/ }))
+    expect(child.getAttribute("aria-checked")).toBe("false")
+  })
+
+  // A collapsed folder's rows are not shown, so they are not checked either.
+  it("collapsing a folder unchecks the rows under it", async () => {
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("node_modules/"))
+    await answer(0, [file("node_modules/top.js")])
+    fireEvent.click(screen.getByLabelText("Select node_modules/top.js"))
+    fireEvent.click(screen.getByLabelText("Select notes.md"))
+    expect(bar().getByRole("button", { name: /Stage 2/ })).toBeTruthy()
+
+    fireEvent.click(toggle("node_modules/"))
+    expect(bar().getByRole("button", { name: /Stage 1/ })).toBeTruthy()
+
+    fireEvent.click(toggle("node_modules/"))
+    await answer(1, [file("node_modules/top.js")])
+    expect(
+      screen.getByLabelText("Select node_modules/top.js").getAttribute("aria-checked"),
+    ).toBe("false")
+  })
+
+  // A sub-folder that left its parent takes its checked rows with it: nothing
+  // hidden is counted or sent.
+  it("drops a checked row inside a sub-folder that left its parent", async () => {
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("node_modules/"))
+    await answer(0, [folder("node_modules/pkg0", 1), file("node_modules/top.js")])
+    fireEvent.click(toggle("pkg0/"))
+    await answer(1, [file("node_modules/pkg0/a.js")])
+    fireEvent.click(screen.getByLabelText("Select node_modules/pkg0/a.js"))
+    fireEvent.click(screen.getByLabelText("Select notes.md"))
+
+    // The listing moves; the folder's new answer no longer holds pkg0.
+    mockState = {
+      ...mockState,
+      changes: slice([folder("node_modules", 1, "f2"), file("notes.md")], 2),
+    } as unknown as DuxState
+    publishMockState()
+    await answer(2, [file("node_modules/top.js")])
+
+    expect(screen.queryByText("a.js")).toBeNull()
+    fireEvent.click(bar().getByRole("button", { name: /Stage 1/ }))
+    await vi.waitFor(() => expect(stageMany).toHaveBeenCalledWith("s1", ["notes.md"]))
+  })
+
+  // A sub-folder that grew is asked for again once its parent's answer says so.
+  it("asks again for an expanded sub-folder that grew", async () => {
+    render(<ChangedFiles />)
+    fireEvent.click(toggle("node_modules/"))
+    await answer(0, [folder("node_modules/pkg0", 1, "p1")])
+    fireEvent.click(toggle("pkg0/"))
+    await answer(1, [file("node_modules/pkg0/a.js")])
+
+    mockState = {
+      ...mockState,
+      changes: slice([folder("node_modules", 2, "f2"), file("notes.md")], 2),
+    } as unknown as DuxState
+    publishMockState()
+    await answer(2, [folder("node_modules/pkg0", 2, "p2")])
+    expect(fetchFolderChildren).toHaveBeenLastCalledWith(
+      "s1",
+      "node_modules/pkg0",
+      "unstaged",
+      expect.any(AbortSignal),
+    )
+    await answer(3, [file("node_modules/pkg0/a.js"), file("node_modules/pkg0/b.js")])
+    expect(screen.getByText("b.js")).toBeTruthy()
+  })
+})
+
 // The whole journey a user takes: open a folder, open one inside it, check a
 // file there, stage it, and see the listing's answer fold everything back up.
 describe("a user expanding and staging inside a folder", () => {
