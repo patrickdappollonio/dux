@@ -423,15 +423,47 @@ pub(super) fn fold_added_directories(
         return staged;
     }
 
+    // A staged link to a repository (a gitlink, mode 160000) is not a file:
+    // it is counted apart, as the untracked side counts the repositories it
+    // does not enter. The folded roots are asked once, from the index.
+    let root_names: Vec<&str> = roots.keys().map(String::as_str).collect();
+    let links = staged_links(worktree, &root_names);
+    let mut contents_of: HashMap<String, crate::model::FolderContents> = roots
+        .iter()
+        .map(|(root, count)| {
+            (
+                root.clone(),
+                crate::model::FolderContents {
+                    file_count: *count,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    for (path, kind) in &links {
+        let Some(root) = ancestors(path).find(|ancestor| contents_of.contains_key(*ancestor))
+        else {
+            continue;
+        };
+        let contents = contents_of.get_mut(root).expect("found just above");
+        contents.file_count = contents.file_count.saturating_sub(1);
+        match kind {
+            UntrackedDirectoryKind::LinkedWorktree => contents.linked_worktrees += 1,
+            UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder => {
+                contents.nested_repositories += 1
+            }
+        }
+    }
+
     let mut folded = Vec::with_capacity(staged.len());
     let mut emitted: HashSet<String> = HashSet::new();
     for (file, root) in staged.into_iter().zip(root_of) {
         match root.filter(|root| roots.contains_key(root)) {
             Some(root) => {
                 if !emitted.contains(&root) {
-                    let file_count = roots[&root];
+                    let contents = contents_of.remove(&root).unwrap_or_default();
                     emitted.insert(root.clone());
-                    folded.push(folder_row(root, "A", file_count));
+                    folded.push(folder_row_with(root, "A", contents));
                 }
             }
             None => folded.push(file),
@@ -440,8 +472,57 @@ pub(super) fn fold_added_directories(
     folded
 }
 
-/// A folded folder row.
-fn folder_row(path: String, status: &str, file_count: usize) -> ChangedFile {
+/// The staged links to repositories (index mode 160000) under `dirs`, each
+/// told apart into a repository of its own or a worktree of this repository
+/// by reading files. One `ls-files --stage` over the folded folders; an answer
+/// git could not give is no links at all.
+fn staged_links(worktree: &Path, dirs: &[&str]) -> HashMap<String, UntrackedDirectoryKind> {
+    let mut links = HashMap::new();
+    if dirs.is_empty() {
+        return links;
+    }
+    let Ok(output) = Command::new("git")
+        .args([
+            "--literal-pathspecs",
+            "-C",
+            worktree.to_string_lossy().as_ref(),
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+        ])
+        .args(dirs)
+        .output()
+    else {
+        return links;
+    };
+    if !output.status.success() {
+        return links;
+    }
+    let mut common: Option<Option<PathBuf>> = None;
+    for record in output.stdout.split(|byte| *byte == 0) {
+        if !record.starts_with(b"160000 ") {
+            continue;
+        }
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            continue;
+        };
+        let Ok(path) = std::str::from_utf8(&record[tab + 1..]) else {
+            continue;
+        };
+        let common = common.get_or_insert_with(|| common_dir_of(worktree));
+        let kind = repository_kind(common.as_deref(), &worktree.join(path));
+        links.insert(path.to_string(), kind);
+    }
+    links
+}
+
+/// A folded folder row with what it holds.
+fn folder_row_with(
+    path: String,
+    status: &str,
+    contents: crate::model::FolderContents,
+) -> ChangedFile {
     ChangedFile {
         status: status.to_string(),
         path,
@@ -450,7 +531,7 @@ fn folder_row(path: String, status: &str, file_count: usize) -> ChangedFile {
         binary: false,
         diff_excluded: false,
         renamed_from: None,
-        kind: ChangedFileKind::directory(file_count),
+        kind: ChangedFileKind::Directory(contents),
     }
 }
 
@@ -487,6 +568,34 @@ pub fn untracked_directory_kind(worktree: &Path, rel: &str) -> Result<UntrackedD
         common_dir_of(worktree).as_deref(),
         &worktree.join(rel),
     ))
+}
+
+/// The repositories inside `dir` (not `dir` itself), each with what it is, as
+/// worktree-relative paths without a trailing slash. Found live from the same
+/// `ls-files --others` records a folder is counted from, and told apart by
+/// reading files only.
+pub(crate) fn repositories_inside(
+    worktree: &Path,
+    dir: &str,
+) -> Result<Vec<(String, UntrackedDirectoryKind)>> {
+    let dir = dir.trim_end_matches('/');
+    let raw = untracked_records(worktree, Some(dir))?;
+    let itself = format!("{dir}/");
+    let mut common: Option<Option<PathBuf>> = None;
+    let mut found = Vec::new();
+    for record in raw.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
+        if !record.ends_with(b"/") || record == itself.as_bytes() {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(record) else {
+            continue;
+        };
+        let rel = text.trim_end_matches('/').to_string();
+        let common = common.get_or_insert_with(|| common_dir_of(worktree));
+        let kind = repository_kind(common.as_deref(), &worktree.join(&rel));
+        found.push((rel, kind));
+    }
+    Ok(found)
 }
 
 /// A directory git reported as a repository of its own: a linked worktree of
@@ -767,9 +876,12 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
         ));
     }
 
+    let links = staged_links(worktree, &[dir]);
     let mut files: Vec<ChangedFile> = Vec::new();
-    let mut folders: Vec<(String, usize)> = Vec::new();
+    // Sub-folder name → what is inside it, in first-seen order.
+    let mut folders: Vec<(String, crate::model::FolderContents)> = Vec::new();
     let mut folder_index: HashMap<String, usize> = HashMap::new();
+    let mut entries = 0_usize;
     for entry in parse_status_porcelain_z(&output.stdout) {
         if matches!(entry.index_status, ' ' | '?') {
             continue;
@@ -777,14 +889,24 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
         let Some(rest) = entry.path.strip_prefix(&pathspec) else {
             continue;
         };
+        entries += 1;
+        let link = links.get(&entry.path).copied();
         let (child, deeper) = split_child(rest.as_bytes());
         let child = String::from_utf8_lossy(child).into_owned();
         if deeper {
             let slot = *folder_index.entry(child.clone()).or_insert_with(|| {
-                folders.push((child.clone(), 0));
+                folders.push((child.clone(), crate::model::FolderContents::default()));
                 folders.len() - 1
             });
-            folders[slot].1 += 1;
+            // A link to a repository is counted apart, never as a file.
+            let contents = &mut folders[slot].1;
+            match link {
+                Some(UntrackedDirectoryKind::LinkedWorktree) => contents.linked_worktrees += 1,
+                Some(UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder) => {
+                    contents.nested_repositories += 1
+                }
+                None => contents.file_count += 1,
+            }
         } else {
             files.push(ChangedFile {
                 status: entry.index_status.to_string(),
@@ -794,29 +916,29 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
                 binary: false,
                 diff_excluded: false,
                 renamed_from: rename_source(entry.index_status, &entry.renamed_from),
-                kind: ChangedFileKind::File,
+                kind: match link {
+                    Some(UntrackedDirectoryKind::LinkedWorktree) => ChangedFileKind::LinkedWorktree,
+                    Some(_) => ChangedFileKind::NestedRepository,
+                    None => ChangedFileKind::File,
+                },
             });
         }
     }
 
-    if !files.is_empty() {
-        let numstat = Command::new("git")
-            .args([
-                "--literal-pathspecs",
-                "-C",
-                wt.as_ref(),
-                "diff",
-                "--cached",
-                "--numstat",
-                "-z",
-                "--",
-                &pathspec,
-            ])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| parse_numstat(&out.stdout))
-            .unwrap_or_default();
+    // Line counts: every entry's when they fit the read budget, so the child
+    // folders carry their sums; past it, the files listed directly and none
+    // for the folders, whose blobs are left unread.
+    let sum_folders = entries <= UNTRACKED_STATS_MAX_FILES;
+    if !files.is_empty() || (sum_folders && !folders.is_empty()) {
+        let skip: Vec<String> = if sum_folders {
+            Vec::new()
+        } else {
+            folders
+                .iter()
+                .map(|(child, _)| format!("{pathspec}{child}"))
+                .collect()
+        };
+        let numstat = staged_numstat_in(worktree, dir, &skip);
         let attribute_unset = paths_excluded_from_diffs(wt.as_ref(), &countless_paths(&[&numstat]));
         let excluded = diff_excluded_rows(worktree, &attribute_unset, &numstat, ContentSide::Index);
         for file in &mut files {
@@ -824,14 +946,73 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
                 apply_stat(file, stat, &excluded);
             }
         }
+        if sum_folders {
+            let mut sums: HashMap<String, (usize, usize)> = HashMap::new();
+            for (path, stat) in &numstat {
+                let DiffStat::Text(additions, deletions) = stat else {
+                    continue;
+                };
+                let Some(rest) = path.strip_prefix(&pathspec) else {
+                    continue;
+                };
+                let (child, deeper) = split_child(rest.as_bytes());
+                if deeper {
+                    let sum = sums
+                        .entry(String::from_utf8_lossy(child).into_owned())
+                        .or_default();
+                    sum.0 += additions;
+                    sum.1 += deletions;
+                }
+            }
+            let rows: Vec<ChangedFile> = folders
+                .into_iter()
+                .map(|(child, contents)| {
+                    let (additions, deletions) = sums.get(&child).copied().unwrap_or_default();
+                    let mut row = folder_row_with(format!("{pathspec}{child}"), "A", contents);
+                    row.additions = additions;
+                    row.deletions = deletions;
+                    row
+                })
+                .collect();
+            files.extend(rows);
+            return Ok(files);
+        }
     }
 
     files.extend(
         folders
             .into_iter()
-            .map(|(child, count)| folder_row(format!("{pathspec}{child}"), "A", count)),
+            .map(|(child, contents)| folder_row_with(format!("{pathspec}{child}"), "A", contents)),
     );
     Ok(files)
+}
+
+/// Staged line counts under `dir`, leaving `skip` unread. Each spec carries its
+/// own `literal` magic, so a name like a glob is still only itself; past a few
+/// hundred folders to skip, nothing is skipped, which costs time only.
+fn staged_numstat_in(worktree: &Path, dir: &str, skip: &[String]) -> HashMap<String, DiffStat> {
+    const MAX_SKIPPED_FOLDERS: usize = 256;
+    let mut command = Command::new("git");
+    command
+        .args([
+            "-C",
+            worktree.to_string_lossy().as_ref(),
+            "diff",
+            "--cached",
+            "--numstat",
+            "-z",
+            "--",
+        ])
+        .arg(format!(":(literal){dir}/"));
+    if skip.len() <= MAX_SKIPPED_FOLDERS {
+        command.args(skip.iter().map(|path| format!(":(exclude,literal){path}")));
+    }
+    command
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| parse_numstat(&out.stdout))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1051,6 +1232,130 @@ mod tests {
                 ),
                 ("vendor/x.js".to_string(), "?".to_string(), file()),
             ]
+        );
+    }
+
+    /// A folder holding a repository of its own and a worktree of this
+    /// repository, next to one file.
+    fn folder_with_repositories() -> tempfile::TempDir {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "vendor/x.js", "x\n");
+        let nested = root.join("vendor/lib");
+        fs::create_dir_all(&nested).unwrap();
+        let git = git_in(&nested);
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        write(&nested, "own.txt", "own\n");
+        git(&["add", "own.txt"]);
+        git(&["commit", "-q", "-m", "own"]);
+        drop(git);
+        git_in(root)(&["worktree", "add", "-q", "-b", "side", "vendor/wt"]);
+        repo
+    }
+
+    fn index_modes(root: &Path) -> Vec<(String, String)> {
+        let out = test_support::git_command()
+            .args([
+                "-C",
+                root.to_string_lossy().as_ref(),
+                "ls-files",
+                "--stage",
+                "-z",
+            ])
+            .output()
+            .unwrap();
+        out.stdout
+            .split(|b| *b == 0)
+            .filter(|r| !r.is_empty())
+            .map(|r| {
+                let text = String::from_utf8_lossy(r);
+                let (meta, path) = text.split_once('\t').unwrap();
+                (
+                    path.to_string(),
+                    meta.split(' ').next().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Staging a folder stages exactly what its count covers, its files: the
+    /// repositories inside it are left out rather than recorded as links, and
+    /// the report says how many.
+    #[test]
+    fn staging_a_folder_leaves_its_repositories_out() {
+        let repo = folder_with_repositories();
+        let root = repo.path();
+
+        let report = stage_with_report(root, &["vendor".to_string()]).unwrap();
+
+        assert_eq!(
+            (report.left_out_repositories, report.left_out_worktrees),
+            (1, 1)
+        );
+        let modes = index_modes(root);
+        assert!(modes.iter().all(|(_, mode)| mode != "160000"), "{modes:?}");
+        assert!(modes.iter().any(|(path, _)| path == "vendor/x.js"));
+        stage_file(root, "vendor").unwrap();
+        assert!(index_modes(root).iter().all(|(_, mode)| mode != "160000"));
+    }
+
+    /// Staging a new module must not make its lines vanish from the staged
+    /// recap: a staged folder within the read budget carries its files' sums.
+    #[test]
+    fn a_staged_folder_carries_the_lines_of_its_files() {
+        let repo = repo();
+        let root = repo.path();
+        write(root, "app/a.rs", "1\n2\n");
+        write(root, "app/sub/b.rs", "1\n");
+        git_in(root)(&["add", "--", "app"]);
+
+        let (staged, _) = changed_files(root).unwrap();
+        let row = staged.iter().find(|f| f.path == "app").unwrap();
+        assert!(row.is_expandable());
+        assert_eq!((row.additions, row.deletions), (3, 0));
+
+        let children = changed_dir_children(root, "app", ChangesSide::Staged).unwrap();
+        let sub = children.iter().find(|f| f.path == "app/sub").unwrap();
+        assert_eq!(sub.additions, 1);
+    }
+
+    #[test]
+    fn a_staged_folder_over_the_budget_carries_no_line_counts() {
+        let repo = repo();
+        let root = repo.path();
+        for index in 0..=UNTRACKED_STATS_MAX_FILES {
+            write(root, &format!("big/f{index}.js"), "x\n");
+        }
+        git_in(root)(&["add", "--", "big"]);
+
+        let (staged, _) = changed_files(root).unwrap();
+        let row = staged.iter().find(|f| f.path == "big").unwrap();
+        assert_eq!(row.additions, 0);
+    }
+
+    /// Links already staged by hand are counted apart, never as files.
+    #[test]
+    fn a_staged_folder_counts_links_to_repositories_apart_from_files() {
+        let repo = folder_with_repositories();
+        let root = repo.path();
+        git_in(root)(&["add", "--", "vendor"]);
+
+        let (staged, _) = changed_files(root).unwrap();
+
+        let row = staged
+            .iter()
+            .find(|f| f.path == "vendor")
+            .expect("vendor row");
+        let contents = row.folder_contents().unwrap();
+        assert_eq!(
+            (
+                contents.file_count,
+                contents.nested_repositories,
+                contents.linked_worktrees
+            ),
+            (1, 1, 1)
         );
     }
 

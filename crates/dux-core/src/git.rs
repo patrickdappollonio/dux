@@ -2925,12 +2925,52 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     // tracked rows their line counts and nothing else; running the loop inside
     // the call's `Ok` would take the untracked files' in-process counts with it.
     let tracked_stats = unstaged_numstat(wt.as_ref());
-    let folded_staged: Vec<String> = staged
-        .iter()
-        .filter(|file| file.is_folder())
-        .map(|file| file.path.clone())
-        .collect();
-    let staged_stats = staged_numstat(wt.as_ref(), &folded_staged);
+    // A folder staged whole carries its files' line sums, read within the
+    // same budget the unstaged side reads under: numstat reads every blob it
+    // is not told to skip, so only the folders whose files fit what is left
+    // are read, in listing order, and the rest are skipped and carry no lines
+    // (a 30,000-file folder is exactly the read the skip exists to avoid).
+    let mut staged_budget = UNTRACKED_STATS_MAX_FILES;
+    let mut summed_folders: HashSet<String> = HashSet::new();
+    let mut skipped_folders: Vec<String> = Vec::new();
+    for file in staged.iter().filter(|file| file.is_folder()) {
+        let files = file.file_count();
+        if file.is_expandable() && files <= staged_budget {
+            staged_budget -= files;
+            summed_folders.insert(file.path.clone());
+        } else {
+            skipped_folders.push(file.path.clone());
+        }
+    }
+    let staged_stats = staged_numstat(wt.as_ref(), &skipped_folders);
+    if !summed_folders.is_empty() {
+        let mut sums: HashMap<&str, (usize, usize)> = HashMap::new();
+        for (path, stat) in &staged_stats {
+            let DiffStat::Text(additions, deletions) = stat else {
+                continue;
+            };
+            if let Some(owner) = path
+                .match_indices('/')
+                .map(|(index, _)| &path[..index])
+                .find(|ancestor| summed_folders.contains(*ancestor))
+            {
+                let sum = sums.entry(owner).or_default();
+                sum.0 += additions;
+                sum.1 += deletions;
+            }
+        }
+        let sums: HashMap<String, (usize, usize)> =
+            sums.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        for file in staged
+            .iter_mut()
+            .filter(|file| summed_folders.contains(&file.path))
+        {
+            if let Some((additions, deletions)) = sums.get(&file.path) {
+                file.additions = *additions;
+                file.deletions = *deletions;
+            }
+        }
+    }
 
     // git prints `-\t-` for a path the repository excludes from diffs in
     // .gitattributes exactly as it prints it for a real binary, so numstat
@@ -3659,7 +3699,77 @@ where
 /// An empty slice is refused: git reads "no pathspec" as "the whole index",
 /// which for [`unstage_files`] means unstaging everything and exiting 0.
 pub fn stage_files(worktree_path: &Path, file_paths: &[String]) -> Result<()> {
-    run_pathspec_batch(worktree_path, &["add"], file_paths, "git add")
+    stage_with_report(worktree_path, file_paths).map(|_| ())
+}
+
+/// What a stage left out of the index on purpose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StageReport {
+    /// Repositories of their own inside a staged folder.
+    pub left_out_repositories: usize,
+    /// Worktrees of this repository inside a staged folder.
+    pub left_out_worktrees: usize,
+}
+
+impl StageReport {
+    /// True when something was left out, which a surface has to say.
+    pub fn left_anything_out(&self) -> bool {
+        self.left_out_repositories + self.left_out_worktrees > 0
+    }
+}
+
+/// Stage `file_paths`, and say what was left out.
+///
+/// Staging a folder stages exactly what its count covers, its files: `git add`
+/// on a folder would otherwise record every repository inside it (a nested
+/// clone, a worktree of this repository) as a link, which is neither a file nor
+/// what the row promised. Those repositories are found live, from the same
+/// `ls-files --others` records the folder was counted from, and each is left
+/// out with an `exclude` pathspec. A path that is itself a repository keeps its
+/// old behavior (git records it as a link, and the surfaces say so), except a
+/// worktree of this repository, which is refused.
+pub fn stage_with_report(worktree_path: &Path, file_paths: &[String]) -> Result<StageReport> {
+    if file_paths.is_empty() {
+        return Err(anyhow!(
+            "git add was asked to act on no files; git would read that as the whole index"
+        ));
+    }
+    let mut report = StageReport::default();
+    let mut excludes: Vec<String> = Vec::new();
+    for path in file_paths {
+        refuse_unplain_path(path, "stage")?;
+        refuse_staging_a_linked_worktree(worktree_path, path)?;
+        let is_dir = fs::symlink_metadata(worktree_path.join(path)).is_ok_and(|meta| meta.is_dir());
+        if !is_dir {
+            continue;
+        }
+        for (inside, kind) in folding::repositories_inside(worktree_path, path)? {
+            match kind {
+                UntrackedDirectoryKind::LinkedWorktree => report.left_out_worktrees += 1,
+                UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder => {
+                    report.left_out_repositories += 1
+                }
+            }
+            excludes.push(inside);
+        }
+    }
+    if excludes.is_empty() {
+        run_pathspecs(worktree_path, &["add"], file_paths, true, "git add")?;
+        return Ok(report);
+    }
+    // Magic pathspecs, so no global literal flag: each path is `literal` on
+    // its own, which keeps a name like a glob to itself all the same.
+    let specs: Vec<String> = file_paths
+        .iter()
+        .map(|path| format!(":(literal){path}"))
+        .chain(
+            excludes
+                .iter()
+                .map(|path| format!(":(exclude,literal){path}")),
+        )
+        .collect();
+    run_pathspecs(worktree_path, &["add"], &specs, false, "git add")?;
+    Ok(report)
 }
 
 /// Unstage every named path in one git call. See [`stage_files`] for why the
@@ -3723,12 +3833,25 @@ fn run_pathspec_batch(
     }
     for path in file_paths {
         refuse_unplain_path(path, "act on")?;
-        if subcommand == ["add"] {
-            refuse_staging_a_linked_worktree(worktree_path, path)?;
-        }
     }
+    run_pathspecs(worktree_path, subcommand, file_paths, true, what)
+}
+
+/// Run one git command over pathspecs fed on stdin. `literal` adds the global
+/// `--literal-pathspecs`; without it each spec must carry its own magic.
+fn run_pathspecs(
+    worktree_path: &Path,
+    subcommand: &[&str],
+    file_paths: &[String],
+    literal: bool,
+    what: &str,
+) -> Result<()> {
     let wt = worktree_path.to_string_lossy();
-    let mut args: Vec<&str> = vec!["--literal-pathspecs", "-C", wt.as_ref()];
+    let mut args: Vec<&str> = Vec::new();
+    if literal {
+        args.push("--literal-pathspecs");
+    }
+    args.extend_from_slice(&["-C", wt.as_ref()]);
     args.extend_from_slice(subcommand);
     args.extend_from_slice(&["--pathspec-from-file=-", "--pathspec-file-nul"]);
     let mut child = Command::new("git")
@@ -3759,26 +3882,7 @@ fn run_pathspec_batch(
 }
 
 pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
-    refuse_unplain_path(file_path, "stage")?;
-    refuse_staging_a_linked_worktree(worktree_path, file_path)?;
-    let wt = worktree_path.to_string_lossy();
-    let output = Command::new("git")
-        .args([
-            "--literal-pathspecs",
-            "-C",
-            wt.as_ref(),
-            "add",
-            "--",
-            file_path,
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(())
+    stage_with_report(worktree_path, &[file_path.to_string()]).map(|_| ())
 }
 
 pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
