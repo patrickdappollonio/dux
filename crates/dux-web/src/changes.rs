@@ -899,6 +899,90 @@ mod tests {
         (handle, Arc::new(EventBus::new()), tmp, wt)
     }
 
+    /// An engine whose session `s1` points at an EXISTING worktree, for the
+    /// measurement below: the repository is built once outside the test so the
+    /// before and after numbers are taken against the very same files.
+    fn boot_session_at(
+        worktree: &std::path::Path,
+    ) -> (
+        EngineHandle,
+        Arc<EventBus>,
+        dux_core::test_scratch::ScratchDir,
+    ) {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        {
+            let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_project(&ProjectConfig {
+                    id: "p1".to_string(),
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("p1".to_string()),
+                    default_provider: None,
+                    leading_branch: None,
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: Default::default(),
+                })
+                .unwrap();
+            store
+                .create_session(&sample_session("s1", worktree.to_string_lossy().as_ref()))
+                .unwrap();
+        }
+        let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        (handle, Arc::new(EventBus::new()), tmp)
+    }
+
+    /// Measurement, not a check: run with `DUX_FOLD_BENCH_REPO` naming a
+    /// prepared repository and `--ignored --nocapture`. Prints the wall time of
+    /// the core listing and of a cold endpoint read, and the size of the JSON
+    /// the endpoint would answer with, once per run.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "measurement; needs DUX_FOLD_BENCH_REPO"]
+    async fn measure_changes_listing_against_a_prepared_repository() {
+        let Ok(repo) = std::env::var("DUX_FOLD_BENCH_REPO") else {
+            eprintln!("DUX_FOLD_BENCH_REPO is not set; nothing measured");
+            return;
+        };
+        let repo = std::path::PathBuf::from(repo);
+        let (engine, bus, _tmp) = boot_session_at(&repo);
+        for run in 1..=5 {
+            let started = Instant::now();
+            let (staged, unstaged) = dux_core::git::changed_files(&repo).unwrap();
+            let core_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+            let svc = ChangesService::new(engine.clone(), Arc::clone(&bus));
+            let started = Instant::now();
+            let resp = svc
+                .get("s1")
+                .await
+                .unwrap_or_else(|_| panic!("expected Ok"));
+            let body = serde_json::to_vec(&serde_json::json!({
+                "rev": resp.rev,
+                "staged": resp.staged,
+                "unstaged": resp.unstaged,
+            }))
+            .unwrap();
+            let endpoint_ms = started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "run {run}: core listing {core_ms:.1} ms ({} staged + {} unstaged rows); \
+                 endpoint {endpoint_ms:.1} ms, {} bytes of JSON",
+                staged.len(),
+                unstaged.len(),
+                body.len()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn get_returns_unstaged_change_and_increments_rev() {
         let (engine, bus, _tmp, _root) = boot();
