@@ -926,12 +926,14 @@ mod tests {
         assert_eq!(again.rev, resp.rev, "rev must not advance without a change");
     }
 
-    /// HUGE-CHANGES REPRO (failing until fixed): one untracked dependency
+    /// HUGE-CHANGES REPRO, ignored and still failing: one untracked dependency
     /// directory becomes one wire row PER FILE, because the sweep runs
     /// `--untracked-files=all` and nothing caps or folds the list. The user's
     /// `node_modules` was ~29k rows (3.9 MB of JSON in the preview repro,
-    /// 19.7 MB at 150k), and the browser mounts every row. The wire answer
-    /// must stay bounded however many files sit under one untracked directory.
+    /// 19.7 MB at 150k). The browser now windows the list, so the cost left is
+    /// the payload and its parse. Whether the answer should stay bounded by
+    /// folding untracked directories is an open decision; this test states the
+    /// bound it would have to meet.
     #[tokio::test]
     #[ignore = "awaits the untracked-folder folding decision"]
     async fn huge_changes_repro_untracked_directory_rows_are_bounded() {

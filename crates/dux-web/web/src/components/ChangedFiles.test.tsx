@@ -1327,13 +1327,13 @@ describe("the Changes pane header's Open editor button", () => {
   })
 })
 
-// HUGE-CHANGES REPRO (failing until fixed). An agent whose worktree held an
-// unignored node_modules (~29k untracked files) froze the whole browser tab on
-// selection. Two measured causes live in this pane: every changed file mounts
-// a full row (no windowing), and each row's base-ui Checkbox reads its hidden
-// input's `labels` after EVERY commit, which walks the whole document, so a
-// mount or re-render of n rows costs O(n^2). In the preview repro that lookup
-// alone took 1.2 s at 1000 rows, 4.8 s at 2000 and 13.2 s at 4000.
+// An agent whose worktree held an unignored node_modules (~29k untracked files)
+// once froze the whole browser tab on selection. Two measured causes lived in
+// this pane: every changed file mounted a full row (no windowing), and each
+// row's base-ui Checkbox read its hidden input's `labels` after EVERY commit,
+// which walks the whole document, so a mount or re-render of n rows cost
+// O(n^2). In the preview repro that lookup alone took 1.2 s at 1000 rows, 4.8 s
+// at 2000 and 13.2 s at 4000. These pin both fixes.
 describe("huge-changes repro: the pane with thousands of changed files", () => {
   function manyUntracked(count: number): Array<[string, string]> {
     return Array.from({ length: count }, (_, index): [string, string] => [

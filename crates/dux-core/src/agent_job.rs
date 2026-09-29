@@ -1304,7 +1304,7 @@ fn apply_pending_copy(
         CopyHeadCheck::Equal => match git::copy_uncommitted_changes(&copy.source, worktree) {
             Ok(summary) => {
                 if !summary.skipped_paths.is_empty() {
-                    logger::info(&format!(
+                    logger::warn(&format!(
                         "uncommitted-changes copy into {} skipped {} path(s) (submodules, embedded repositories, or special files): {}",
                         session.directory(),
                         summary.skipped_paths.len(),
@@ -3791,11 +3791,11 @@ mod tests {
         assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::LOUD);
     }
 
-    /// HUGE-CHANGES REPRO (failing until fixed): a checkout holding many
-    /// embedded repositories (the user's case was 33 nested agent worktrees
-    /// under an unignored `.claude/worktrees/`) produced a create toast that
-    /// listed every skipped path, 2152 characters in the preview repro. The
-    /// note must name a bounded number of paths and count the rest.
+    /// A checkout holding many embedded repositories (the user's case was 33
+    /// nested agent worktrees under an unignored `.claude/worktrees/`) once
+    /// produced a create toast that listed every skipped path, 2152 characters
+    /// in the preview repro. The note names a bounded number of paths and
+    /// counts the rest.
     #[test]
     fn huge_changes_repro_skipped_paths_note_is_bounded() {
         let repo = init_test_repo();
@@ -3813,10 +3813,22 @@ mod tests {
             std::fs::write(nested.join("a"), "x\n").unwrap();
         }
 
-        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, true));
+        let (run, logged) = crate::logger::capture_for_test(|| {
+            drive_create_job_run(repo.path(), new_project_request(repo.path(), false, true))
+        });
         assert!(run.failure.is_none(), "creation must succeed");
         let status = run.status_message.unwrap();
         assert!(status.contains("were not copied"), "{status}");
+        // The note promises dux.log lists every path, so the list is logged at
+        // warn, which the default and quieter log levels still write.
+        let listed = logged
+            .iter()
+            .find(|line| line.contains("skipped") && line.contains("agent-"))
+            .unwrap_or_else(|| panic!("no log line lists the skipped paths: {logged:?}"));
+        assert!(listed.starts_with("WARN "), "{listed}");
+        for index in 0..nested_count {
+            assert!(listed.contains(&format!("agent-{index:032x}")), "{listed}");
+        }
         let named = (0..nested_count)
             .filter(|index| status.contains(&format!("agent-{index:032x}")))
             .count();
