@@ -3284,6 +3284,23 @@ fn apply_unstaged_stats(
 /// there is counted as text: the accepted cost of not asking git. The file is
 /// streamed rather than read whole.
 fn untracked_file_stat(path: &Path) -> DiffStat {
+    // Only a regular file is opened. A symlink is counted the way git counts
+    // one: its content is the target path, one line (git adds no newline), and
+    // the file it names is never read. Anything else (a FIFO, a socket, a
+    // device) has no lines to count, and opening a FIFO to read would block
+    // the listing until something wrote to it.
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return DiffStat::Text(0, 0);
+    };
+    if meta.file_type().is_symlink() {
+        let lines = fs::read_link(path)
+            .map(|target| usize::from(!target.as_os_str().is_empty()))
+            .unwrap_or(0);
+        return DiffStat::Text(lines, 0);
+    }
+    if !meta.is_file() {
+        return DiffStat::Text(0, 0);
+    }
     let Ok(file) = fs::File::open(path) else {
         // Unreadable, or a dangling symlink, or gone between the status sweep
         // and now. Nothing to count and nothing to claim about it.
@@ -8692,6 +8709,46 @@ mod tests {
             diff.is_empty(),
             "diff should be empty when nothing is staged"
         );
+    }
+
+    /// An untracked symlink is counted the way git counts it once staged: the
+    /// link itself, its target path as one line, never the file it names.
+    #[test]
+    fn a_symlink_counts_as_git_counts_it_once_staged() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "untracked-link");
+        fs::write(wt.join("target.txt"), "one\ntwo\nthree\n").unwrap();
+        symlink("target.txt", wt.join("link")).unwrap();
+
+        let ours = untracked_file_stat(&wt.join("link"));
+
+        // What the changes panel shows once the link is staged: git diffs the
+        // link itself (its target path as one line), never the file it names.
+        worktree_git(&wt)(&["add", "--", "link"]);
+        let staged = staged_numstat(&wt.to_string_lossy(), &[]);
+        assert_eq!(Some(&ours), staged.get("link"));
+        assert_eq!(ours, DiffStat::Text(1, 0));
+    }
+
+    /// A FIFO in a folder is not a file to count: opening one to read blocks
+    /// until a writer appears, which would stall the whole listing.
+    #[test]
+    fn a_fifo_is_never_opened_for_counting() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(untracked_file_stat(&fifo));
+        });
+        let answer = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("counting a FIFO must not block");
+        assert_eq!(answer, DiffStat::Text(0, 0));
     }
 
     /// The in-process untracked counting has to answer exactly what the
