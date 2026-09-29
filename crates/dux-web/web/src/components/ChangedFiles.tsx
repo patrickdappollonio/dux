@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from "react"
+import { useId, useState, type ReactElement } from "react"
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -128,6 +128,13 @@ interface StatusSlotProps {
 // checkbox and shows the status word at once.
 function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProps) {
   const { label } = fileStatusMeta(status)
+  // The checkbox is named by an element it points at rather than by
+  // `aria-label`. Without an explicit `aria-labelledby`, base-ui hunts for a
+  // wrapping or sibling <label> after EVERY commit, and its last resort reads
+  // the hidden input's `labels`, which walks the whole document: once per row
+  // per render, so a long list cost O(n^2) and froze the tab. The spoken name
+  // is unchanged, "Select <path>".
+  const labelId = useId()
   // Same duration and easing as the row's trailing ellipsis wrapper, so both
   // things a hover reveals arrive together.
   const reveal = "transition-opacity duration-200 ease-out motion-reduce:transition-none"
@@ -163,10 +170,13 @@ function StatusSlot({ status, path, selected, onToggleSelected }: StatusSlotProp
         >
           <FileStatusIcon status={status} tooltip={false} />
         </span>
+        <span id={labelId} className="sr-only">
+          Select {path}
+        </span>
         <Checkbox
           checked={selected}
           onCheckedChange={() => onToggleSelected(path)}
-          aria-label={`Select ${path}`}
+          aria-labelledby={labelId}
           className={cn(
             reveal,
             "opacity-0 group-hover:opacity-100",
