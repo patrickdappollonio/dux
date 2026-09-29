@@ -29,6 +29,11 @@ import {
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
+import {
+  useWorkingCue,
+  WORKING_GLYPH_ANIMATION,
+  WORKING_GLYPH_CLASS,
+} from "@/hooks/use-working-cue"
 import type { AgentTabView, SessionView } from "@/lib/types"
 
 // The provider-tab strip at the top of the center pane, rendered by App only
@@ -150,6 +155,14 @@ function TabPill({
   // "this is the first tab" and "this is the only tab" are different facts and
   // only the second one refuses.
   const soleTab = session.tabs.length <= 1
+  // The same glyph cue as the sidebar: it finishes its bounce after a stop. No
+  // higher state takes the pill's icon over (its attention dot is a separate
+  // element beside it), so nothing cancels the settle.
+  const {
+    running: cueRunning,
+    attach: attachGlyph,
+    handlers: cueHandlers,
+  } = useWorkingCue<SVGSVGElement>(tab.working)
 
   function select() {
     selectTab(session.id, tab.id)
@@ -183,9 +196,12 @@ function TabPill({
       )}
     >
       <Bot
+        ref={attachGlyph}
+        {...cueHandlers}
         className={cn(
-          "size-3.5 shrink-0 motion-safe:transition-opacity motion-safe:duration-300",
-          tab.working && "motion-safe:animate-working-pulse",
+          "size-3.5 shrink-0",
+          WORKING_GLYPH_CLASS,
+          cueRunning && WORKING_GLYPH_ANIMATION,
         )}
       />
       {/* Cyan attention dot on the flagged tab's pill (a permission prompt or a

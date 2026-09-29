@@ -10,6 +10,7 @@ import {
   SIDEBAR_RESIZING_NO_TRANSITION,
 } from "@/lib/paneDivider"
 import type { DuxState } from "@/lib/store"
+import { fireAnimationIteration, fireAnimationStart } from "@/test/animationEvents"
 import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 
 // Control exactly what the store hands the component: override only `useDux`
@@ -1845,10 +1846,11 @@ describe("AppSidebar collapsed icon rail", () => {
 
     const rail = screen.getByTestId("collapsed-agent-rail")
     const buttons = rail.querySelectorAll("button")
-    // s1 is active + working: its Bot icon pulses, the same cue the row wears.
+    // s1 is active + working: its Bot icon bounces and pulses, the same cue
+    // the row wears.
     expect(
       buttons[0].querySelector("svg")?.getAttribute("class"),
-    ).toContain("motion-safe:animate-working-pulse")
+    ).toContain("motion-safe:animate-working-cue")
     // s2 needs attention: its icon wrapper carries the cyan blink.
     expect(
       buttons[1].querySelector("[aria-label='Needs attention']"),
@@ -1881,9 +1883,7 @@ describe("AppSidebar collapsed icon rail", () => {
 
     const rail = screen.getByTestId("collapsed-agent-rail")
     const icon = rail.querySelectorAll("button")[0].querySelector("svg")
-    expect(icon?.getAttribute("class")).not.toContain(
-      "motion-safe:animate-working-pulse",
-    )
+    expect(icon?.getAttribute("class")).not.toContain("animate-working")
     expect(icon?.parentElement?.getAttribute("class")).toContain(
       "motion-safe:animate-attention-pulse",
     )
@@ -2039,5 +2039,49 @@ describe("AppSidebar expanded agent row vitals tooltip", () => {
     expect(s1Tooltip?.textContent).toContain("Changes")
     expect(s1Tooltip?.textContent).toContain("2 files")
     expect(s2Tooltip?.textContent).not.toContain("Changes")
+  })
+})
+
+// USER-LOCKED. The collapsed rail's working agent icon bounces with the pulse
+// and finishes its bounce at rest, like the sidebar list. This guard is named by
+// CLAUDE.md's "Locked by the user" section. Do not edit, weaken or delete it, or
+// change what it pins, without the user's explicit request.
+describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (collapsed rail)", () => {
+  const LOCKED =
+    'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
+    "(the web working glyph bounces with the pulse, four per pulse, and finishes " +
+    "its bounce at rest). Do not change it without the user's explicit request."
+  const CUE = "motion-safe:animate-working-cue"
+
+  function railState(working: boolean): DuxState {
+    const spine = makeTwoProjectSpine() as unknown as {
+      sessions: { working: boolean }[]
+    }
+    spine.sessions[0].working = working
+    return makeState({
+      spine: spine as unknown as DuxState["spine"],
+      bootstrap: { title: "dux", dux_version: "v1", available_providers: ["claude"] },
+      createTabInFlight: [],
+    })
+  }
+
+  it("bounces the rail icon while working and lets it finish its bounce", () => {
+    mockState = railState(true)
+    const tree = () => (
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>
+    )
+    const { rerender } = render(tree())
+    const icon = () =>
+      screen.getByTestId("collapsed-agent-rail").querySelectorAll("button")[0].querySelector("svg")!
+    expect(icon().getAttribute("class"), LOCKED).toContain(CUE)
+    fireAnimationStart(icon(), "working-bounce")
+
+    mockState = railState(false)
+    rerender(tree())
+    expect(icon().getAttribute("class"), LOCKED).toContain(CUE)
+    fireAnimationIteration(icon(), "working-bounce")
+    expect(icon().getAttribute("class"), LOCKED).not.toContain(CUE)
   })
 })

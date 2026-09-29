@@ -33,3 +33,13 @@ export const fireAnimationIteration = (el: Element, animationName: string) =>
   fireAnimation("iteration", el, animationName)
 export const fireAnimationEnd = (el: Element, animationName: string) =>
   fireAnimation("end", el, animationName)
+
+// React has no handler prop for `animationcancel`, so the hook listens for it
+// natively under its one standard name.
+export function fireAnimationCancel(el: Element, animationName: string) {
+  const event = new Event("animationcancel", { bubbles: true })
+  Object.defineProperty(event, "animationName", { value: animationName })
+  act(() => {
+    el.dispatchEvent(event)
+  })
+}

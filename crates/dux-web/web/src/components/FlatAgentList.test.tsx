@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DragEndEvent } from "@dnd-kit/core"
 import { fireAnimationIteration, fireAnimationStart } from "@/test/animationEvents"
@@ -1754,10 +1754,6 @@ describe("FlatAgentList working cue", () => {
     expect(bob![1]).toContain("75% { transform: translateY(10%); }")
     // Transform only: the pulse owns opacity.
     expect(bob![1]).not.toContain("opacity")
-    // The settle's safety ceiling is two whole periods, so it can never cut a
-    // cycle that is still on its way to its boundary.
-    const row = readFileSync(`${process.cwd()}/src/components/FlatAgentList.tsx`, "utf8")
-    expect(row).toContain(`const WORKING_CUE_SETTLE_TIMEOUT_MS = 2 * ${periodMs}`)
     expect(css).toContain(
       `--animate-working-dots: working-dots ${period} steps(1, end) infinite;`,
     )
@@ -1834,14 +1830,14 @@ describe("FlatAgentList working cue", () => {
     expect(classes).not.toContain("working-bounce")
   })
 
-  // Stopping finishes the cycle in flight and rests exactly on its boundary:
-  // the glyph and the word hold the working cue until the pulse (which is also
-  // a bounce boundary) comes round, then both drop together.
-  it("settles a stopping agent row at the end of the current cycle", () => {
+  // The word is always the truth: it reads Idle the moment work stops. Only the
+  // glyph finishes its motion, holding the cue until the bounce in flight
+  // comes back to rest, and no longer.
+  it("switches the word at once and lets the glyph finish its bounce", () => {
     mockState = workingAlpha()
     const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
     const glyph = () => container.querySelector("svg.lucide-bot")!
-    fireAnimationStart(glyph(), "working-pulse")
+    fireAnimationStart(glyph(), "working-bounce")
 
     const stopped = makeState("name")
     mockState = {
@@ -1853,17 +1849,16 @@ describe("FlatAgentList working cue", () => {
       },
     } as DuxState
     rerender(<FlatAgentList handlers={handlers} />)
-    expect(glyph().getAttribute("class")).toContain(CUE)
-    expect(screen.getByText("Working").className).toContain(PULSE)
-
-    // A mid-pulse bounce boundary is not the resting frame of the whole cue.
-    fireAnimationIteration(glyph(), "working-bounce")
-    expect(glyph().getAttribute("class")).toContain(CUE)
-
-    fireAnimationIteration(glyph(), "working-pulse")
-    expect(glyph().getAttribute("class")).not.toContain(CUE)
     expect(screen.getByText("Idle")).toBeTruthy()
+    expect(screen.queryByText("Working")).toBeNull()
     expect(container.querySelectorAll(".working-dots")).toHaveLength(0)
+    expect(glyph().getAttribute("class")).toContain(CUE)
+
+    // The pulse's boundary is not what the glyph waits for; the bounce's is.
+    fireAnimationIteration(glyph(), "working-pulse")
+    expect(glyph().getAttribute("class")).toContain(CUE)
+    fireAnimationIteration(glyph(), "working-bounce")
+    expect(glyph().getAttribute("class")).not.toContain(CUE)
   })
 
   // Needs-you outranks working, and the pulse must never run inside the
@@ -1872,7 +1867,7 @@ describe("FlatAgentList working cue", () => {
     mockState = workingAlpha()
     const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
     const glyph = () => container.querySelector("svg.lucide-bot")!
-    fireAnimationStart(glyph(), "working-pulse")
+    fireAnimationStart(glyph(), "working-bounce")
 
     const base = makeState("name")
     mockState = {
@@ -1890,7 +1885,7 @@ describe("FlatAgentList working cue", () => {
     expect(screen.getByText("Needs you")).toBeTruthy()
   })
 
-  it("settles a stopping terminal row the same way", () => {
+  it("switches a stopping terminal row's word at once and lets its glyph finish", () => {
     const base = makeState("name")
     const withTerminal = (working: boolean) =>
       ({
@@ -1906,16 +1901,53 @@ describe("FlatAgentList working cue", () => {
     mockState = withTerminal(true)
     const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
     const glyph = () => container.querySelector("svg.lucide-square-terminal")!
-    fireAnimationStart(glyph(), "working-pulse")
+    fireAnimationStart(glyph(), "working-bounce")
 
     mockState = withTerminal(false)
     rerender(<FlatAgentList handlers={handlers} />)
-    expect(glyph().getAttribute("class")).toContain(CUE)
-    expect(screen.getByText("Running")).toBeTruthy()
-
-    fireAnimationIteration(glyph(), "working-pulse")
-    expect(glyph().getAttribute("class")).not.toContain(CUE)
     expect(screen.getByText("Idle")).toBeTruthy()
+    expect(screen.queryByText("Running")).toBeNull()
+    expect(glyph().getAttribute("class")).toContain(CUE)
+
+    fireAnimationIteration(glyph(), "working-bounce")
+    expect(glyph().getAttribute("class")).not.toContain(CUE)
+  })
+
+  // The exact stop, on a real row: the bounce is shortened to end with the
+  // iteration it is in, and the class leaves on the browser's finish.
+  it("ends a stopping row's bounce on its current iteration", async () => {
+    mockState = workingAlpha()
+    const { container, rerender } = render(<FlatAgentList handlers={handlers} />)
+    const glyph = container.querySelector("svg.lucide-bot")!
+    let finish!: () => void
+    const updateTiming = vi.fn()
+    const bounce = {
+      animationName: "working-bounce",
+      finished: new Promise<void>((resolve) => {
+        finish = resolve
+      }),
+      effect: { getComputedTiming: () => ({ currentIteration: 11 }), updateTiming },
+    }
+    Object.defineProperty(glyph, "getAnimations", {
+      configurable: true,
+      value: () => [bounce],
+    })
+    fireAnimationStart(glyph, "working-bounce")
+
+    const stopped = makeState("name")
+    mockState = {
+      ...stopped,
+      spine: {
+        ...stopped.spine,
+        sessions: [makeSession({ id: "alpha", title: "Alpha" })],
+        terminals: [],
+      },
+    } as DuxState
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(updateTiming).toHaveBeenCalledWith({ iterations: 12 })
+    expect(glyph.getAttribute("class")).toContain(CUE)
+    await act(async () => finish())
+    expect(glyph.getAttribute("class")).not.toContain(CUE)
   })
 })
 
@@ -1929,8 +1961,8 @@ describe("FlatAgentList working cue", () => {
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest", () => {
   const LOCKED =
     'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
-    "(the web working glyph bounces with the pulse, four per pulse, and settles " +
-    "at rest). Do not change it without the user's explicit request."
+    "(the web working glyph bounces with the pulse, four per pulse, and finishes " +
+    "its bounce at rest). Do not change it without the user's explicit request."
   const CUE = "motion-safe:animate-working-cue"
 
   it("keeps the bounce keyframes and four bounces per pulse", async () => {
@@ -1966,10 +1998,11 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest"
     const term = () => container.querySelector("svg.lucide-square-terminal")!
     for (const glyph of [bot(), term()]) {
       expect(glyph.getAttribute("class"), LOCKED).toContain(CUE)
-      fireAnimationStart(glyph, "working-pulse")
+      fireAnimationStart(glyph, "working-bounce")
     }
 
-    // Work stops: neither glyph may drop the bounce until its cycle is done.
+    // Work stops: neither glyph may drop the bounce until the bounce in flight
+    // is back at rest.
     mockState = stateWith(
       [makeSession({ id: "alpha", title: "Alpha" })],
       [makeTerminal({ id: "t-a", label: "bash", foreground_cmd: "vim" })],
@@ -1977,7 +2010,7 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest"
     rerender(<FlatAgentList handlers={handlers} />)
     for (const glyph of [bot(), term()]) {
       expect(glyph.getAttribute("class"), LOCKED).toContain(CUE)
-      fireAnimationIteration(glyph, "working-pulse")
+      fireAnimationIteration(glyph, "working-bounce")
       expect(glyph.getAttribute("class"), LOCKED).not.toContain(CUE)
     }
   })

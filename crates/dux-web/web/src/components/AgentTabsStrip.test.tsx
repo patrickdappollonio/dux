@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import { ONLY_TAB_CLOSE_REFUSAL } from "@/lib/agentTabs"
+import { fireAnimationIteration, fireAnimationStart } from "@/test/animationEvents"
 
 let mockState: DuxState
 const addTabMock = vi.fn()
@@ -228,5 +229,38 @@ describe("AgentTabsStrip phone height", () => {
     expect(wrapper!.className).toContain("group-hover/tab:max-w-8")
     expect(wrapper!.className).toContain("group-focus-within/tab:max-w-8")
     expect(wrapper!.className).toContain("has-[[data-popup-open]]:max-w-8")
+  })
+})
+
+// USER-LOCKED. A working tab's pill icon bounces with the pulse and finishes its
+// bounce at rest, like the sidebar list. This guard is named by CLAUDE.md's
+// "Locked by the user" section. Do not edit, weaken or delete it, or change
+// what it pins, without the user's explicit request.
+describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (agent tab strip)", () => {
+  const LOCKED =
+    'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
+    "(the web working glyph bounces with the pulse, four per pulse, and finishes " +
+    "its bounce at rest). Do not change it without the user's explicit request."
+  const CUE = "motion-safe:animate-working-cue"
+
+  function withWorking(working: boolean): SessionView {
+    const s = session()
+    s.tabs[1] = { ...s.tabs[1], working }
+    return s
+  }
+
+  it("bounces a working tab's icon and lets it finish its bounce", () => {
+    const { container, rerender } = render(
+      <AgentTabsStrip session={withWorking(true)} activeTabId="s1" maxTabs={20} />,
+    )
+    const icons = () => container.querySelectorAll("[role='tab'] svg.lucide-bot")
+    expect(icons()[0].getAttribute("class"), LOCKED).not.toContain(CUE)
+    expect(icons()[1].getAttribute("class"), LOCKED).toContain(CUE)
+    fireAnimationStart(icons()[1], "working-bounce")
+
+    rerender(<AgentTabsStrip session={withWorking(false)} activeTabId="s1" maxTabs={20} />)
+    expect(icons()[1].getAttribute("class"), LOCKED).toContain(CUE)
+    fireAnimationIteration(icons()[1], "working-bounce")
+    expect(icons()[1].getAttribute("class"), LOCKED).not.toContain(CUE)
   })
 })

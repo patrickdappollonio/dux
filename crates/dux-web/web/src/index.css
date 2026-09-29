@@ -167,17 +167,16 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        browser and the terminal UI pulse on one clock; a test pins them equal.
        Opacity only, so it rides the compositor, and the surfaces that carry it
        pair it with `motion-safe:transition-opacity` so a stop eases back to full
-       rather than freezing mid-dip (the sidebar rows go further and settle on
-       the cycle boundary, below). */
+       rather than freezing mid-dip. */
     --animate-working-pulse: working-pulse 1.6s ease-in-out infinite;
     /* The glyph's half of the cue: the same pulse plus a bounce, four bounces
        per pulse (WORKING_CUE_PERIOD_MS / 4), in ONE `animation` value so both
        start on the same frame and every pulse boundary is a bounce boundary.
-       That shared boundary is where a stop comes to rest: the row keeps the
-       class until the pulse's next `animationiteration`
-       (`useSettlingAnimation`), so the glyph lands at full opacity and exactly
-       at translateY(0) rather than freezing or snapping mid-bounce. The
-       bounce is a user-locked decision (CLAUDE.md, "Locked by the user"). */
+       A stop lets the bounce in flight finish (`useSettlingAnimation` ends it
+       with its current iteration), so the glyph rests exactly at
+       translateY(0), while the opacity eases back to full through the paired
+       transition. The bounce is a user-locked decision (CLAUDE.md, "Locked by
+       the user"). */
     --animate-working-cue: working-pulse 1.6s ease-in-out infinite, working-bounce 0.4s ease-in-out infinite;
     /* The ellipsis that runs after the state word: four states over the SAME
        period, one every ELLIPSIS_STEP_MS, held rather than tweened. It rides in

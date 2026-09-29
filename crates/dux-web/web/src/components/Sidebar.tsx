@@ -58,6 +58,11 @@ import {
 } from "@/lib/store"
 import type { ChangesSlice, SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
+import {
+  useWorkingCue,
+  WORKING_GLYPH_ANIMATION,
+  WORKING_GLYPH_CLASS,
+} from "@/hooks/use-working-cue"
 import type { SessionView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
@@ -80,6 +85,17 @@ function CollapsedAgentIcon({
     session.working,
     session.needs_attention,
     session.typing,
+  )
+  // The same glyph cue as the sidebar list's row: it finishes its bounce after
+  // a stop, and a higher state takes it over at once.
+  const {
+    running: cueRunning,
+    attach: attachGlyph,
+    handlers: cueHandlers,
+  } = useWorkingCue<SVGSVGElement>(
+    working,
+    !agentRowVisual(session.status, true, session.needs_attention, session.typing)
+      .working,
   )
   return (
     <SidebarMenuItem>
@@ -115,9 +131,12 @@ function CollapsedAgentIcon({
             )}
           >
             <Bot
+              ref={attachGlyph}
+              {...cueHandlers}
               className={cn(
-                "size-4.5! shrink-0 motion-safe:transition-opacity motion-safe:duration-300",
-                working && "motion-safe:animate-working-pulse",
+                "size-4.5! shrink-0",
+                WORKING_GLYPH_CLASS,
+                cueRunning && WORKING_GLYPH_ANIMATION,
               )}
             />
           </span>

@@ -31,7 +31,11 @@ import type { ComponentProps, CSSProperties, ReactNode } from "react"
 import { useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
-import { useSettlingAnimation } from "@/hooks/use-settling-animation"
+import {
+  useWorkingCue,
+  WORKING_GLYPH_ANIMATION,
+  WORKING_GLYPH_CLASS,
+} from "@/hooks/use-working-cue"
 import { PaneMenuBody } from "@/components/PaneMenu"
 import {
   quietTailManualChoice,
@@ -205,34 +209,6 @@ function RowStateWord({ word, working }: { word: StateWord; working: boolean }) 
   )
 }
 
-// The glyph's working cue, shared by both row kinds: the pulse plus four bounces
-// per pulse on the shared clock (`--animate-working-cue`). A stop is not a cut:
-// the row keeps the cue until the pulse's next cycle boundary, which is also a
-// bounce boundary, so the glyph comes to rest at full opacity and exactly at
-// its start position, and the word holds its working label until that same
-// frame so the two halves end together. The bounce is a user-locked decision
-// (CLAUDE.md, "Locked by the user").
-//
-// `cancel` is a higher state (typing, needs-you, a stopped session) taking the
-// glyph over: that is not a stop, the ladder's word must show at once, and the
-// pulse must never run inside the attention blink, so the cue drops there and
-// the transitions below ease it back.
-const WORKING_CUE_SETTLE_ON = "working-pulse"
-// A ceiling on the settle for an animation cancelled out from under it (the
-// row hidden mid-cycle), which fires no boundary: two full periods of
-// `dux_core::working_cue::WORKING_CUE_PERIOD_MS`, pinned by the timing test.
-const WORKING_CUE_SETTLE_TIMEOUT_MS = 2 * 1600
-const WORKING_GLYPH_CLASS =
-  "motion-safe:transition-[opacity,transform] motion-safe:duration-300"
-const WORKING_GLYPH_ANIMATION = "motion-safe:animate-working-cue"
-
-function useWorkingCue(working: boolean, cancel: boolean) {
-  return useSettlingAnimation(working, WORKING_CUE_SETTLE_ON, {
-    cancel,
-    timeoutMs: WORKING_CUE_SETTLE_TIMEOUT_MS,
-  })
-}
-
 // The typing cue: a blinking caret in the typing token, shared by both row kinds.
 // Motion-reduce drops the blink and rests the caret fully opaque.
 function TypingCaret() {
@@ -306,18 +282,19 @@ function AgentFlatRow({
     session.needs_attention,
     session.typing,
   )
-  // A higher state outranks working right now, so a stop is a hand-over rather
-  // than a settle: the ladder would not say "Working" even with the flag on.
-  const cue = useWorkingCue(
+  // The glyph finishes its bounce after a stop; a higher state outranking
+  // working is a hand-over instead, since the ladder would not say "Working"
+  // even with the flag on.
+  const {
+    running: cueRunning,
+    attach: attachGlyph,
+    handlers: cueHandlers,
+  } = useWorkingCue<SVGSVGElement>(
     working,
     !agentRowVisual(session.status, true, session.needs_attention, session.typing)
       .working,
   )
-  // While the cue settles, the word keeps its working label and dots so it
-  // ends on the same frame as the glyph.
-  const word = stateWord(
-    cue.running && !working ? { ...session, working: true } : session,
-  )
+  const word = stateWord(session)
   // Which thing this agent is IN: its project, or a standalone agent's folder.
   // Tagged so the row picks the glyph without re-deriving the agent kind.
   const location = workspaceLocation(session.workspace)
@@ -387,11 +364,12 @@ function AgentFlatRow({
               )}
             >
               <Bot
-                {...cue.handlers}
+                ref={attachGlyph}
+                {...cueHandlers}
                 className={cn(
                   "size-4.5 shrink-0",
                   WORKING_GLYPH_CLASS,
-                  cue.running && WORKING_GLYPH_ANIMATION,
+                  cueRunning && WORKING_GLYPH_ANIMATION,
                 )}
               />
             </span>
@@ -450,7 +428,7 @@ function AgentFlatRow({
                 {/* Keyed on the label so a state change (Working ⇄ Idle ⇄ Detached
                     …) remounts the span and replays the one-shot fade instead of
                     snapping the text. */}
-                <RowStateWord key={word.label} word={word} working={cue.running} />
+                <RowStateWord key={word.label} word={word} working={working} />
                 {/* No branch here, by decision: a drifted agent would put a
                     long mono branch inline on every row, noise, and worst on a
                     tablet. The branch's one home is the top bar's
@@ -555,10 +533,12 @@ function TerminalFlatRow({
   // The same working cue as the agent row, and only while streaming and NOT
   // typing (typing owns the caret) so the two read apart.
   const working = terminal.working && !terminal.typing
-  const cue = useWorkingCue(working, terminal.typing)
-  const word = terminalStateWord(
-    cue.running && !working ? { ...terminal, working: true } : terminal,
-  )
+  const {
+    running: cueRunning,
+    attach: attachGlyph,
+    handlers: cueHandlers,
+  } = useWorkingCue<SVGSVGElement>(working, terminal.typing)
+  const word = terminalStateWord(terminal)
 
   // Whether this row wears the standalone star instead of the owned-by arrow,
   // decided by the exhaustive owner matcher so a new owner kind must answer.
@@ -601,11 +581,12 @@ function TerminalFlatRow({
         className="flex min-w-0 flex-1 touch-manipulation items-start gap-2.5 py-2 pl-2 text-left max-md:min-h-10"
       >
         <SquareTerminal
-          {...cue.handlers}
+          ref={attachGlyph}
+          {...cueHandlers}
           className={cn(
             "mt-0.5 size-4 shrink-0 text-muted-foreground",
             WORKING_GLYPH_CLASS,
-            cue.running && WORKING_GLYPH_ANIMATION,
+            cueRunning && WORKING_GLYPH_ANIMATION,
           )}
         />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -636,7 +617,7 @@ function TerminalFlatRow({
               </span>
             )}
             <Dot className="text-muted-foreground" />
-            <RowStateWord key={word.label} word={word} working={cue.running} />
+            <RowStateWord key={word.label} word={word} working={working} />
           </RowLineTwo>
         </span>
       </button>
