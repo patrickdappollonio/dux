@@ -2,7 +2,7 @@ use super::changes_tree::ChangesRow;
 use super::components::BUTTON_HEIGHT;
 use super::components::ellipsis::{
     ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width, mark_cut_row,
-    pad_to_width, truncate_to_width,
+    min_end_cut_width, pad_to_width, truncate_to_width,
 };
 use super::components::pane_card::CardPlan;
 use super::components::wrap_lines::{char_display_width, display_width};
@@ -574,12 +574,37 @@ fn remote_viewers_segment(count: usize) -> Option<String> {
 }
 
 /// Assemble the agent row's second line (`<marker> project · State [· branch]
-/// [· trailing…]`) so it matches the web sidebar: the marker, the state word and
-/// every `trailing` segment are fixed and stay fully visible, while the project
-/// name and the branch truncate to share whatever width is left, mirroring the
-/// web's per-field flex-shrink rather than ellipsizing the whole line from the
-/// right, which would drop the tab count first. `marker` already includes the
-/// leading indent; `sep_style` styles the `" · "` separators.
+/// [· trailing…]`) so it matches the web sidebar: when everything fits it is
+/// shown whole, and otherwise the project name and the branch truncate to share
+/// whatever width is left, mirroring the web's per-field flex-shrink rather
+/// than ellipsizing the whole line from the right, which would drop the tab
+/// count first. `marker` already includes the leading indent; `style.sep`
+/// styles the `" · "` separators. Terminal rows use it too, with the owner's
+/// name (or a standalone terminal's directory) in the project name's place.
+///
+/// When the sidebar is too narrow for everything, space is handed out in this
+/// order, and whatever the order reaches last is what goes first:
+///
+/// 1. The marker and the state word. They are never given up (only the final
+///    safety net below cuts them, when the pane is narrower than they are):
+///    the word is the row's live truth, and the marker's glyph still says
+///    "project", "your folder" or "owned by" when nothing else fits.
+/// 2. The project name, at its narrowest useful cut: one whole grapheme
+///    cluster and the `…` (see [`min_end_cut_width`]), so `demo-api` reads
+///    `d…` and a wide or emoji first glyph keeps its full width. Below that
+///    the name is left out and the glyph stands alone, because a lone `…`
+///    names nothing.
+/// 3. The branch, at its own narrowest useful cut. It is identity too, but
+///    only a second name for the agent, and it leaves with its separator
+///    rather than leaving a dangling divider.
+/// 4. The `trailing` counts, whole and in order, so the last one goes first.
+///    They are counts rather than identity, and each is also said elsewhere
+///    (the tab strip, the center pane's caption); a count is never cut
+///    mid-word. A count is given up only for something above it that then
+///    fits, never for nothing.
+///
+/// Whatever is left over grows the name and the branch toward their natural
+/// widths in proportion, each keeping its minimum.
 ///
 /// `trailing` is the short fixed tail (the tab count, the remote-viewer count),
 /// each segment separated from the one before it. A list rather than one slot per
@@ -605,45 +630,64 @@ fn fit_agent_meta_line(
         highlight,
     } = style;
     let width = |s: &Span<'static>| s.content.as_ref().cell_width();
+    let min_cut = |s: &Span<'static>| {
+        u16::try_from(min_end_cut_width(s.content.as_ref())).unwrap_or(u16::MAX)
+    };
     let sep = || Span::styled(" · ", sep_style);
     const SEP_W: u16 = 3; // " · "
 
-    // Everything except the two truncatable fields is fixed: the marker, the
-    // name->word separator + word, the separator before the branch (its text is
-    // flexible, its separator is not), and the separator + tab count.
-    let mut fixed = width(&marker)
+    // Rung 1: the marker, the name->word separator and the word. The separator
+    // stays even when the name is left out, so the word never moves between
+    // a row that has a name and one that lost it.
+    let core = width(&marker)
         .saturating_add(SEP_W)
         .saturating_add(width(&word));
-    if branch.is_some() {
-        fixed = fixed.saturating_add(SEP_W);
-    }
-    for segment in &trailing {
-        fixed = fixed.saturating_add(SEP_W).saturating_add(width(segment));
-    }
-
-    let budget = total_w.saturating_sub(fixed);
     let name_nat = name.as_ref().map(width).unwrap_or(0);
     let branch_nat = branch.as_ref().map(width).unwrap_or(0);
+    let trailing_w: Vec<u16> = trailing
+        .iter()
+        .map(|segment| SEP_W.saturating_add(width(segment)))
+        .collect();
+    let everything = core
+        .saturating_add(name_nat)
+        .saturating_add(branch.as_ref().map_or(0, |_| SEP_W + branch_nat))
+        .saturating_add(trailing_w.iter().fold(0u16, |a, b| a.saturating_add(*b)));
 
-    // Share the flexible budget between the name and the branch, proportional to
-    // their natural widths (flex-shrink). No truncation when they already fit.
-    let (name_alloc, branch_alloc) = if name_nat + branch_nat <= budget {
-        (name_nat, branch_nat)
-    } else if budget == 0 {
-        (0, 0)
+    let (name, branch, kept_trailing, name_alloc, branch_alloc) = if everything <= total_w {
+        // Room for all of it: shown exactly as it always was.
+        (name, branch, trailing.len(), name_nat, branch_nat)
     } else {
-        let total_nat = u32::from(name_nat + branch_nat).max(1);
-        let mut n = (u32::from(budget) * u32::from(name_nat) / total_nat) as u16;
-        // Keep at least one cell for a present field when the other can spare it.
-        if name_nat > 0 && n == 0 && budget > 1 {
-            n = 1;
+        let avail = total_w.saturating_sub(core);
+        // Rung 2: the name at its narrowest useful cut, or not at all.
+        let name_min = name.as_ref().map(min_cut).unwrap_or(0);
+        let name = name.filter(|_| name_min <= avail);
+        let mut reserved = if name.is_some() { name_min } else { 0 };
+        // Rung 3: the branch at its narrowest useful cut, with its separator.
+        let branch_min = branch.as_ref().map(min_cut).unwrap_or(0);
+        let branch = branch.filter(|_| reserved + SEP_W + branch_min <= avail);
+        if branch.is_some() {
+            reserved += SEP_W + branch_min;
         }
-        let mut b = budget.saturating_sub(n);
-        if branch_nat > 0 && b == 0 && n > 1 {
-            n = budget - 1;
-            b = 1;
+        // Rung 4: the counts, whole, kept from the front while they fit.
+        let mut kept_trailing = 0;
+        for segment_w in &trailing_w {
+            if reserved.saturating_add(*segment_w) > avail {
+                break;
+            }
+            reserved += segment_w;
+            kept_trailing += 1;
         }
-        (n, b)
+        // What is left over, shared between the two names.
+        let fixed = core
+            + branch.as_ref().map_or(0, |_| SEP_W)
+            + trailing_w[..kept_trailing].iter().sum::<u16>();
+        let budget = total_w.saturating_sub(fixed);
+        let name_nat = name.as_ref().map(width).unwrap_or(0);
+        let branch_nat = branch.as_ref().map(width).unwrap_or(0);
+        let name_min = name.as_ref().map(min_cut).unwrap_or(0);
+        let branch_min = branch.as_ref().map(min_cut).unwrap_or(0);
+        let (n, b) = share_meta_budget(budget, (name_nat, name_min), (branch_nat, branch_min));
+        (name, branch, kept_trailing, n, b)
     };
 
     let mut out: Vec<Span<'static>> = vec![marker];
@@ -656,13 +700,40 @@ fn fit_agent_meta_line(
         out.push(sep());
         out.extend(ellipsize_field_highlighted(branch, branch_alloc, highlight));
     }
-    for segment in trailing {
+    for segment in trailing.into_iter().take(kept_trailing) {
         out.push(sep());
         out.push(segment);
     }
-    // Safety net: when even the fixed parts overflow a very narrow pane, ellipsize
-    // the whole line so nothing hard-clips mid-glyph at the right edge.
+    // Safety net: when even the marker and the word overflow a very narrow pane,
+    // ellipsize the whole line so nothing hard-clips mid-glyph at the right edge.
     ellipsize_spans(out, total_w)
+}
+
+/// Split `budget` columns between the meta line's two flexible fields, each
+/// given as `(natural width, narrowest useful cut)` with a width of zero for a
+/// field that is absent. Both fit whole when they can; otherwise each gets a
+/// share proportional to its natural width (flex-shrink), raised to its
+/// minimum, which the caller has already made sure the budget covers.
+fn share_meta_budget(budget: u16, name: (u16, u16), branch: (u16, u16)) -> (u16, u16) {
+    let (name_nat, name_min) = name;
+    let (branch_nat, branch_min) = branch;
+    if name_nat.saturating_add(branch_nat) <= budget {
+        return (name_nat, branch_nat);
+    }
+    let total_nat = u32::from(name_nat) + u32::from(branch_nat);
+    let share = u32::from(budget) * u32::from(name_nat) / total_nat.max(1);
+    let mut n = u16::try_from(share)
+        .unwrap_or(u16::MAX)
+        .max(name_min)
+        .min(name_nat);
+    let mut b = budget.saturating_sub(n).min(branch_nat);
+    if b < branch_min {
+        b = branch_min;
+        n = budget.saturating_sub(b).min(name_nat);
+    }
+    // A share the branch cannot use goes back to the name.
+    n = n.max(budget.saturating_sub(b).min(name_nat));
+    (n, b)
 }
 
 /// Column budget for the resource monitor table, computed from the inner content
@@ -1847,9 +1918,9 @@ impl App {
 
         // Line one: right-align the PR badge (name ellipsized to the space left
         // over) when there is one, else just ellipsize the name. Line two keeps
-        // the marker, state word, and tab count fully visible and truncates the
-        // project name and branch to fit (matching the web's per-field shrink),
-        // rather than ellipsizing the whole run and dropping the tab count first.
+        // the marker and state word fully visible and truncates the project name
+        // and branch to fit (matching the web's per-field shrink); when the pane
+        // is too narrow even for that, `fit_agent_meta_line` says what yields.
         let line1 = match pr_badge {
             Some(badge) => right_align_line(line1_left, vec![badge], text_width, 2),
             None => ellipsize_spans(line1_left, text_width),
@@ -11889,7 +11960,9 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
 ///
 /// Line two: an owner marker, the owner's display name, and the colored state
 /// word, through `fit_agent_meta_line` so the marker and word stay fixed while
-/// the owner name truncates char-safely. The wording matches the agent row.
+/// the owner name shortens by display width, down to one whole glyph and `…`
+/// and then to the marker alone, exactly as an agent row's project name does.
+/// The wording matches the agent row.
 ///
 /// A standalone terminal has no owner to mark, so its marker is the standalone
 /// star in the standalone identity tone, with the directory label wearing the
@@ -19359,6 +19432,183 @@ mod tests {
         let text = spans_text(&out);
         assert!(text.contains("Working"), "state word stays fixed: {text:?}");
         assert!(text.contains('…'), "a flexible field truncated: {text:?}");
+    }
+
+    // --- line two under a narrowing sidebar: the name shortens, never vanishes early ---
+
+    /// Line two of the first session's row rendered at `width`, read the way a
+    /// terminal shows it: a wide glyph covers the cell after it, so that cell is
+    /// stepped over rather than read as a space. Trailing blanks are trimmed.
+    fn narrow_line_two(app: &App, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::List;
+
+        let session = app.engine.sessions[0].clone();
+        let item = app.render_agent_row(&session, width);
+        let mut terminal = Terminal::new(TestBackend::new(width, 3)).expect("terminal");
+        terminal
+            .draw(|frame| frame.render_widget(List::new(vec![item]), frame.area()))
+            .expect("render row");
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        let mut x = 0u16;
+        while x < width {
+            let symbol = buf[(x, 1)].symbol().to_string();
+            let step = u16::try_from(display_width(&symbol)).unwrap_or(1).max(1);
+            out.push_str(&symbol);
+            x = x.saturating_add(step);
+        }
+        out.trim_end().to_string()
+    }
+
+    /// An idle agent row whose project is called `project`.
+    fn narrow_row_app(project: &str) -> App {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions[0].status = crate::model::SessionStatus::Active;
+        app.engine.projects[0].name = project.to_string();
+        app
+    }
+
+    /// The project row's line two as it should read, with `name` in the name's
+    /// place (empty when only the glyph is left) and `tail` after the word.
+    fn folder_line(name: &str, tail: &str) -> String {
+        format!("  {} {name} · Idle{tail}", crate::theme::PROJECT_GLYPH)
+    }
+
+    #[test]
+    fn a_narrowing_row_shortens_the_project_name_before_dropping_it() {
+        let app = narrow_row_app("demo-api");
+        // The fixed parts are the four-cell marker, the separator and "Idle":
+        // eleven cells, so nineteen hold the whole name.
+        for (width, name) in [
+            (40, "demo-api"),
+            (19, "demo-api"),
+            (18, "demo-a…"),
+            (14, "de…"),
+            (13, "d…"),
+            // One cell left: a lone mark names nothing, so only the glyph stays.
+            (12, ""),
+        ] {
+            assert_eq!(
+                narrow_line_two(&app, width),
+                folder_line(name, ""),
+                "at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_project_name_is_shortened_by_columns_never_split() {
+        let app = narrow_row_app("日本語");
+        for (width, name) in [
+            (17, "日本語"),
+            // Five columns: two whole glyphs and the mark.
+            (16, "日本…"),
+            // Four columns: a second glyph would need five, so the mark follows
+            // the first directly and the name is one column short of its share.
+            (15, "日…"),
+            (14, "日…"),
+            // Two columns cannot hold a two-column glyph and the mark.
+            (13, ""),
+        ] {
+            assert_eq!(
+                narrow_line_two(&app, width),
+                folder_line(name, ""),
+                "at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_emoji_project_name_keeps_its_first_grapheme_whole() {
+        for (project, kept) in [
+            ("🚀rocket", "🚀"),
+            ("👩\u{200d}👩\u{200d}👧 team", "👩\u{200d}👩\u{200d}👧"),
+        ] {
+            let app = narrow_row_app(project);
+            assert_eq!(
+                narrow_line_two(&app, 14),
+                folder_line(&format!("{kept}…"), ""),
+                "{project:?} at its minimum"
+            );
+            assert_eq!(
+                narrow_line_two(&app, 13),
+                folder_line("", ""),
+                "{project:?} below its minimum"
+            );
+        }
+    }
+
+    #[test]
+    fn the_project_name_outranks_the_tab_count_but_never_the_state_word() {
+        let seeded = |project: &str| {
+            let mut app = narrow_row_app(project);
+            let session_id = app.engine.sessions[0].id.clone();
+            seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
+            seed_render_tab(&mut app, &session_id, "tab-3", "claude", 2);
+            app
+        };
+        let app = seeded("demo-api");
+        // Room for everything: nothing changes.
+        assert_eq!(
+            narrow_line_two(&app, 40),
+            folder_line("demo-api", " · 3 tabs")
+        );
+        // Room for the name's minimum beside the count: both stay.
+        assert_eq!(narrow_line_two(&app, 22), folder_line("d…", " · 3 tabs"));
+        // No room for both: the count goes whole and the name takes the room.
+        assert_eq!(narrow_line_two(&app, 21), folder_line("demo-api", ""));
+        assert_eq!(narrow_line_two(&app, 20), folder_line("demo-api", ""));
+        // Too tight for either: the count goes whole rather than being cut
+        // mid-word, and the state word is still all there.
+        assert_eq!(narrow_line_two(&app, 12), folder_line("", ""));
+    }
+
+    #[test]
+    fn the_branch_yields_to_the_project_name_and_goes_whole() {
+        let mut app = narrow_row_app("demo-api");
+        app.engine.sessions[0].title = Some("Retry budget".to_string());
+        // Eleven fixed cells plus the branch's separator: both fields at their
+        // minimum need eighteen.
+        assert_eq!(narrow_line_two(&app, 18), folder_line("d…", " · a…"));
+        // One cell less and the branch leaves with its separator, rather than
+        // leaving a dangling divider or a lone mark.
+        assert_eq!(narrow_line_two(&app, 17), folder_line("demo-…", ""));
+    }
+
+    #[test]
+    fn a_standalone_agents_folder_label_shortens_the_same_way() {
+        let mut app = narrow_row_app("demo-api");
+        app.engine.sessions[0].workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/srv/notes-archive".to_string(),
+            });
+        app.engine.projects.clear();
+        let star = |name: &str| format!("  {} {name} · Idle", crate::theme::STANDALONE_GLYPH);
+        assert_eq!(narrow_line_two(&app, 40), star("/srv/notes-archive"));
+        assert_eq!(narrow_line_two(&app, 13), star("/…"));
+        assert_eq!(narrow_line_two(&app, 12), star(""));
+    }
+
+    #[test]
+    fn a_terminal_rows_owner_label_shortens_the_same_way() {
+        let theme = crate::theme::Theme::default_dark();
+        let line_two = |owner: &str, standalone: bool, width: u16| {
+            let (_, line2) = terminal_row_lines(
+                &theme, false, false, '◜', None, owner, standalone, width, 0, None,
+            );
+            line_text(&line2)
+        };
+        let star = crate::theme::STANDALONE_GLYPH;
+        assert_eq!(
+            line_two("~/notes", true, 40),
+            format!("  {star} ~/notes · Idle")
+        );
+        assert_eq!(line_two("~/notes", true, 13), format!("  {star} ~… · Idle"));
+        assert_eq!(line_two("~/notes", true, 12), format!("  {star}  · Idle"));
+        assert_eq!(line_two("demo-api", false, 13), "  ↳ d… · Idle");
+        assert_eq!(line_two("demo-api", false, 12), "  ↳  · Idle");
     }
 
     // --- fit_agent_meta_line search-hit highlighting ---

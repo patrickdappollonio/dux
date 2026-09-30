@@ -78,6 +78,19 @@ pub(crate) fn ellipsize_end(text: &str, max: usize) -> String {
     out
 }
 
+/// The fewest columns [`ellipsize_end`] can cut `text` to and still show some
+/// of it: its first grapheme cluster whole plus the `…`, or the whole text when
+/// that is no wider. Below this a cut shows the mark alone, which names
+/// nothing, so a caller that would rather drop the field asks this first.
+/// Measured by clusters, so a CJK glyph or an emoji sequence counts its full
+/// width. Zero for empty text.
+pub(crate) fn min_end_cut_width(text: &str) -> usize {
+    let Some((_, first)) = clusters(text).into_iter().next() else {
+        return 0;
+    };
+    display_width(text).min(first + display_width(ELLIPSIS))
+}
+
 /// `text` cut at its START to at most `max` columns, keeping the tail behind a
 /// leading `…`. For paths, whose leaf is the informative part.
 pub(crate) fn ellipsize_start(text: &str, max: usize) -> String {
@@ -194,6 +207,22 @@ mod tests {
         "\u{1f1ef}\u{1f1f5}",
         "\u{1f44d}\u{1f3fd}",
     ];
+
+    #[test]
+    fn the_narrowest_useful_cut_keeps_one_whole_cluster_and_the_mark() {
+        assert_eq!(min_end_cut_width(""), 0);
+        assert_eq!(min_end_cut_width("x"), 1, "a name that short is kept whole");
+        assert_eq!(min_end_cut_width("ab"), 2);
+        assert_eq!(min_end_cut_width("demo-api"), 2);
+        assert_eq!(ellipsize_end("demo-api", 2), "d\u{2026}");
+        assert_eq!(min_end_cut_width("日本語"), 3);
+        assert_eq!(ellipsize_end("日本語", 3), "日\u{2026}");
+        for glyph in SEQUENCES {
+            let text = format!("{glyph}tail");
+            assert_eq!(min_end_cut_width(&text), 3, "{glyph:?}");
+            assert_eq!(ellipsize_end(&text, 3), format!("{glyph}\u{2026}"));
+        }
+    }
 
     #[test]
     fn a_presentation_selector_is_measured_as_drawn() {
