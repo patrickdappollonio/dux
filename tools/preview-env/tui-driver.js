@@ -218,16 +218,13 @@ async function focusPane() {
 ///
 /// Two confirmations, each waited for by name rather than slept over: the
 /// palette command opens the provider chooser, and the chooser's own Enter is
-/// what creates the tab, which is seen as the new pill's ordinal in the tab
-/// strip. Not the sidebar row's "N tabs": a narrow sidebar gives that count up
-/// to keep the project name, so it is not on screen at every grid. The pane is
-/// then focused AND interactive, so the focus is aimed back at dux before the
-/// caller's next chord.
+/// what creates the tab. The pane is then focused AND interactive, so the focus
+/// is aimed back at dux before the caller's next chord.
 async function addTab(expectedCount) {
   await palette("new-agent-tab")
   await waitFor("New Tab Provider", 15000)
   sendKeys("Enter")
-  await waitFor(`│ ${expectedCount} │`, 30000)
+  await waitFor(`${expectedCount} tabs`, 30000)
   await focusSidebar()
 }
 

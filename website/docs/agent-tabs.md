@@ -104,10 +104,10 @@ keys have a visible address. A pill also reports what its own tab is up to, with
 same cues the agent list uses: a spinner while that tab's provider is working, and a
 blinking dot when it wants you. The pill you are looking at is the highlighted one.
 
-That is the terminal UI strip: each pill leads with its position number, and the first one
+That is the terminal UI strip: each pill leads with its position number, and the third one
 is highlighted because it is the tab on screen.
 
-![The terminal UI tab strip above an agent's terminal, three numbered pills for the same provider with the first one highlighted.](/screens/tui-tabs-strip-ordinals.png)
+![The terminal UI tab strip above an agent's terminal, three numbered pills for the same provider with the third one highlighted.](/screens/tui-tabs-strip-ordinals.png)
 
 > [!IMPORTANT]
 > Fullscreen gives every key to the agent verbatim and does not draw the strip at all.
