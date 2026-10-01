@@ -1,11 +1,10 @@
 // The tab strip above an agent's terminal: three tabs of the same provider,
-// numbered, with the one on screen highlighted.
-module.exports = async ({ addTab, createAgent, sendKeys, sleep }) => {
+// numbered, with the one on screen highlighted. Adding a tab puts it on
+// screen, so the third, the last one added, is the highlighted pill.
+module.exports = async ({ addTab, createAgent, sleep }) => {
   await createAgent(0, "retry-budget")
   await addTab(2)
   await addTab(3)
-  // Back to the first tab, which is the one the strip shows as active.
-  sendKeys("C-Left", "C-Left")
   await sleep(1200)
 }
 

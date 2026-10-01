@@ -622,10 +622,21 @@ impl MetaMarker {
     }
 }
 
+/// The counts at the end of an agent row's second line, each `None` when the row
+/// has none to show. Named fields rather than two adjacent `Option<Span>`
+/// parameters, which would be a swap the compiler cannot catch.
+#[derive(Default)]
+struct MetaCounts {
+    /// "3 tabs", present only for an agent with more than one tab.
+    tabs: Option<Span<'static>>,
+    /// "2 remote", present only while browsers have the agent open.
+    remote: Option<Span<'static>>,
+}
+
 /// Assemble the agent row's second line (`<marker> project · State [· branch]
-/// [· trailing…]`). Terminal rows use it too, with the owner's name (or a
-/// standalone terminal's directory) in the project name's place. `style.sep`
-/// styles the `" · "` separators.
+/// [· N tabs] [· N remote]`). Terminal rows use it too, with the owner's name
+/// (or a standalone terminal's directory) in the project name's place and no
+/// branch or counts. `style.sep` styles the `" · "` separators.
 ///
 /// When everything fits it is shown whole. When it does not, this is the
 /// order things give way in, first to last:
@@ -633,31 +644,42 @@ impl MetaMarker {
 /// 1. The branch shrinks, down to one whole grapheme cluster and the `…`.
 /// 2. The branch goes, whole, with its separator, rather than leaving a
 ///    dangling divider or a lone `…`.
-/// 3. The project name shrinks, down to one whole cluster and the `…` (see
+/// 3. The tab count goes, whole, with its separator; a count cut mid-word
+///    says nothing.
+/// 4. The project name shrinks, down to one whole cluster and the `…` (see
 ///    [`min_end_cut_width`]): `demo-api` reads `d…`, and a wide or emoji first
 ///    glyph keeps its full width.
-/// 4. The name goes, with its separator, because a lone `…` names nothing. A
+/// 5. The name goes, with its separator, because a lone `…` names nothing. A
 ///    marker that says something on its own stays in front of the word; one
 ///    that only points at the name goes with it (see [`MarkerAlone`]).
 ///
-/// The marker glyph, the state word and the `trailing` counts are never given
-/// up and never shortened: the word is the row's live state, the remote count
-/// is the row's standing "someone elsewhere has this open" signal, and a count
-/// cut mid-word says nothing. Only the whole-line safety net at the end cuts
-/// them, when the pane is narrower than they are on their own.
+/// So the tab count goes before the name drops below its minimum, and while
+/// there is room for the whole count and at least that minimum, both stay
+/// and the name is what shrinks.
 ///
-/// This is the web sidebar's rule: its tab count is `shrink-0` and its project
-/// tag is what truncates. The web has no branch on line two, and it lets the
-/// project name truncate all the way to nothing, where this drops a name below
-/// its narrowest useful cut along with its separator. A state change (Idle to
-/// Working is six cells wider) therefore moves only the name's length.
+/// The marker glyph, the state word and the remote count are never given up
+/// and never shortened: the word is the row's live state, and the remote count
+/// is the row's standing "someone elsewhere has this open" signal while dux
+/// serves. Only the whole-line safety net at the end cuts them, when the pane
+/// is narrower than they are on their own.
 ///
-/// `trailing` is the short fixed tail (the tab count, the remote-viewer count),
-/// each segment separated from the one before it. A list rather than one slot per
-/// fact: two adjacent `Option<Span>` parameters of the same type are a swap the
-/// compiler cannot catch. `name` is `None` when the marker is the whole label
-/// already (a removed project, a missing working copy), and the separator
-/// before the word then stays.
+/// The web sidebar keeps its tab count (`shrink-0`) and truncates its project
+/// tag instead. The terminal UI deliberately gives the tab count up first at
+/// narrow widths, because the tab strip above the terminal already shows the
+/// tabs (user decision, 2026-09-30: "Tab count is the least important part
+/// here"). The web also has no branch on line two, and lets its project name
+/// truncate all the way to nothing where this drops a name below its narrowest
+/// useful cut along with its separator.
+///
+/// A state change moves the word's width (Working and its dot slot are six
+/// cells wider than Idle). The remote count never moves with it. The tab count
+/// can: it is kept only while the name's minimum fits beside it, so it comes
+/// and goes across a band exactly as wide as the word grows, six columns, and
+/// no wider, because only the word changed.
+///
+/// `name` is `None` when the marker is the whole label already (a removed
+/// project, a missing working copy), and the separator before the word then
+/// stays.
 ///
 /// `style.highlight` is the live search query plus the match style: the project
 /// name and the branch are searched fields, so a hit inside either gets the
@@ -670,46 +692,48 @@ fn fit_agent_meta_line(
     name: Option<Span<'static>>,
     word: Span<'static>,
     branch: Option<Span<'static>>,
-    trailing: Vec<Span<'static>>,
+    counts: MetaCounts,
     style: MetaLineStyle<'_>,
 ) -> Vec<Span<'static>> {
     let MetaLineStyle {
         sep: sep_style,
         highlight,
     } = style;
+    let MetaCounts { tabs, remote } = counts;
     let width = |s: &Span<'static>| s.content.as_ref().cell_width();
     let min_cut = |s: &Span<'static>| {
         u16::try_from(min_end_cut_width(s.content.as_ref())).unwrap_or(u16::MAX)
     };
     let sep = || Span::styled(" · ", sep_style);
     const SEP_W: u16 = 3; // " · "
+    let with_sep = |s: &Span<'static>| SEP_W.saturating_add(width(s));
 
-    // Never given up: the marker, the word and every count with its separator.
-    // A marker with no name after it is a complete label, so its separator
-    // before the word is fixed too.
+    // Never given up: the marker, the word and the remote count. A marker with
+    // no name after it is a complete label, so its separator before the word
+    // is fixed too.
     let had_name = name.is_some();
     let fixed = width(&marker.span)
         .saturating_add(width(&word))
-        .saturating_add(if name.is_none() { SEP_W } else { 0 })
-        .saturating_add(
-            trailing
-                .iter()
-                .fold(0u16, |a, s| a.saturating_add(SEP_W + width(s))),
-        );
+        .saturating_add(if had_name { 0 } else { SEP_W })
+        .saturating_add(remote.as_ref().map_or(0, with_sep));
     let mut avail = total_w.saturating_sub(fixed);
 
-    // The name at its narrowest useful cut plus its separator, or not at all.
+    // Last to go: the name at its narrowest useful cut plus its separator.
     let name = name.filter(|n| min_cut(n).saturating_add(SEP_W) <= avail);
-    let name_nat = name.as_ref().map(width).unwrap_or(0);
+    let name_min = name.as_ref().map_or(0, min_cut);
+    let name_nat = name.as_ref().map_or(0, width);
     if name.is_some() {
         avail -= SEP_W;
     }
-    // The branch only while the name is whole beside it (or there is no name
-    // to keep): the branch gives way first. It keeps its own narrowest useful
-    // cut, or goes with its separator.
+    // Then the tab count, whole, beside at least the name's minimum. A name
+    // that went took the count with it: the count goes first.
+    let keeps_name = name.is_some() || !had_name;
+    let tabs = tabs.filter(|t| keeps_name && name_min.saturating_add(with_sep(t)) <= avail);
+    avail -= tabs.as_ref().map_or(0, with_sep);
+    // Then the branch, only while the name is whole beside it, at its own
+    // narrowest useful cut, or gone with its separator.
     let branch = branch.filter(|b| {
-        (name.is_some() || !had_name)
-            && name_nat.saturating_add(SEP_W).saturating_add(min_cut(b)) <= avail
+        keeps_name && name_nat.saturating_add(SEP_W).saturating_add(min_cut(b)) <= avail
     });
     let (name_alloc, branch_alloc) = match &branch {
         Some(b) => (name_nat, (avail - name_nat - SEP_W).min(width(b))),
@@ -734,13 +758,13 @@ fn fit_agent_meta_line(
         out.push(sep());
         out.extend(ellipsize_field_highlighted(branch, branch_alloc, highlight));
     }
-    for segment in trailing {
+    for segment in [tabs, remote].into_iter().flatten() {
         out.push(sep());
         out.push(segment);
     }
-    // Safety net: when even the marker, the word and the counts overflow a very
-    // narrow pane, ellipsize the whole line so nothing hard-clips mid-glyph at
-    // the right edge.
+    // Safety net: when even the marker, the word and the remote count overflow
+    // a very narrow pane, ellipsize the whole line so nothing hard-clips
+    // mid-glyph at the right edge.
     ellipsize_spans(out, total_w)
 }
 
@@ -1958,7 +1982,10 @@ impl App {
             name_span,
             Span::styled(word_text, Style::default().fg(word_color)),
             branch_span,
-            [tabs_span, remote_span].into_iter().flatten().collect(),
+            MetaCounts {
+                tabs: tabs_span,
+                remote: remote_span,
+            },
             MetaLineStyle {
                 sep: Style::default().fg(muted),
                 highlight: line2_highlight,
@@ -12088,7 +12115,7 @@ fn terminal_row_lines(
         )),
         Span::styled(word_text, Style::default().fg(word_color)),
         None,
-        Vec::new(),
+        MetaCounts::default(),
         MetaLineStyle {
             sep: Style::default().fg(muted),
             highlight,
@@ -19391,7 +19418,7 @@ mod tests {
             Some(Span::raw("proj".to_string())),
             Span::raw("Idle".to_string()),
             None,
-            Vec::new(),
+            MetaCounts::default(),
             MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
@@ -19412,7 +19439,10 @@ mod tests {
             Some(Span::raw("a-very-long-project-name".to_string())),
             Span::raw("Idle".to_string()),
             None,
-            vec![Span::raw("3 tabs".to_string())],
+            MetaCounts {
+                tabs: Some(Span::raw("3 tabs".to_string())),
+                remote: None,
+            },
             MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
@@ -19440,7 +19470,7 @@ mod tests {
             Some(Span::raw("longproject".to_string())),
             Span::raw("Working".to_string()),
             Some(Span::raw("feature/some-long-branch".to_string())),
-            Vec::new(),
+            MetaCounts::default(),
             MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
@@ -19575,43 +19605,191 @@ mod tests {
     }
 
     #[test]
-    fn the_tab_count_is_never_given_up_for_the_project_name() {
+    fn the_tab_count_goes_before_the_project_name_drops_below_its_minimum() {
         let app = with_three_tabs(narrow_row_app("demo-api"));
         assert_eq!(
             narrow_line_two(&app, 40),
             folder_line("demo-api", " · 3 tabs")
         );
+        // Room for the whole count and at least the name's minimum: both stay
+        // and the name shrinks.
+        assert_eq!(
+            narrow_line_two(&app, 27),
+            folder_line("demo-a…", " · 3 tabs")
+        );
         assert_eq!(narrow_line_two(&app, 22), folder_line("d…", " · 3 tabs"));
-        // Past the name's minimum the name goes, never the count.
-        assert_eq!(narrow_line_two(&app, 21), folder_line("", " · 3 tabs"));
-        assert_eq!(narrow_line_two(&app, 17), folder_line("", " · 3 tabs"));
+        // Not room for both: the count goes whole, and the name has the room.
+        assert_eq!(narrow_line_two(&app, 21), folder_line("demo-api", ""));
+        assert_eq!(narrow_line_two(&app, 17), folder_line("demo-…", ""));
+        assert_eq!(narrow_line_two(&app, 12), folder_line("", ""));
     }
 
-    /// Working is six cells wider than Idle once its dot slot is counted, so a
-    /// state change moves the NAME's length. It must never move the count: the
-    /// count is there in both states at every width that holds the glyph, the
-    /// longer word and the count.
+    /// The fitter on its own, with both counts and a name, Idle against
+    /// Working (six cells wider once its dot slot is counted).
+    fn fit_counts_line(width: u16, word: &str, branch: Option<&str>) -> String {
+        spans_text(&fit_agent_meta_line(
+            width,
+            MetaMarker::standing(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+            Some(Span::raw("demo-api".to_string())),
+            Span::raw(word.to_string()),
+            branch.map(|b| Span::raw(b.to_string())),
+            MetaCounts {
+                tabs: Some(Span::raw("3 tabs".to_string())),
+                remote: Some(Span::raw("1 remote".to_string())),
+            },
+            MetaLineStyle {
+                sep: Style::default(),
+                highlight: None,
+            },
+        ))
+    }
+
+    /// A state change never takes the remote count: it is there in both states
+    /// at every width that holds the glyph, the longer word and the count. The
+    /// tab count may come and go, and only across the six columns Working adds
+    /// over Idle: the band is as narrow as the word's growth allows.
     #[test]
-    fn a_state_change_shortens_the_name_and_never_takes_the_count() {
-        for width in 23..=27u16 {
-            let idle = with_three_tabs(narrow_row_app("demo-api"));
-            let mut working = with_three_tabs(narrow_row_app("demo-api"));
-            let slot = working.engine.sessions[0].slot_tab_id().to_string();
-            working.engine.pty_activity.insert(slot, Instant::now());
-            let idle_line = narrow_line_two(&idle, width);
-            let working_line = narrow_line_two(&working, width);
-            assert!(idle_line.contains("Idle"), "{width}: {idle_line}");
-            assert!(
-                working_line.contains(AGENT_WORKING_WORD),
-                "{width}: {working_line}"
-            );
-            for line in [&idle_line, &working_line] {
-                assert!(
-                    line.ends_with(" · 3 tabs"),
-                    "at width {width} the count must stay whole: {line:?}"
-                );
+    fn a_state_change_keeps_the_remote_count_and_moves_the_tab_count_in_one_band() {
+        let mut band = Vec::new();
+        for width in 19..=46u16 {
+            let idle = fit_counts_line(width, "Idle", None);
+            let working = fit_counts_line(width, "Working...", None);
+            if width >= 25 {
+                for line in [&idle, &working] {
+                    assert!(
+                        line.ends_with(" · 1 remote"),
+                        "at width {width} the remote count must stay whole: {line:?}"
+                    );
+                }
+            }
+            if idle.contains("3 tabs") != working.contains("3 tabs") {
+                band.push(width);
             }
         }
+        assert_eq!(band, (33..=38).collect::<Vec<u16>>());
+    }
+
+    #[test]
+    fn the_branch_and_the_tab_count_go_before_the_name_shrinks_past_its_minimum() {
+        let mut app = with_three_tabs(narrow_row_app("demo-api"));
+        app.engine.sessions[0].title = Some("Retry budget".to_string());
+        assert_eq!(
+            narrow_line_two(&app, 33),
+            folder_line("demo-api", " · a… · 3 tabs")
+        );
+        // The branch goes first, while the count stays.
+        assert_eq!(
+            narrow_line_two(&app, 32),
+            folder_line("demo-api", " · 3 tabs")
+        );
+        assert_eq!(
+            narrow_line_two(&app, 27),
+            folder_line("demo-a…", " · 3 tabs")
+        );
+        assert_eq!(narrow_line_two(&app, 22), folder_line("d…", " · 3 tabs"));
+        // Then the count, before the name drops below its minimum.
+        assert_eq!(narrow_line_two(&app, 21), folder_line("demo-api", ""));
+    }
+
+    /// Both counts, a branch and a name through the fitter itself, Idle and
+    /// Working. The glyph, the word and the remote count are never given up;
+    /// only the whole-line safety net cuts them, and only when they alone
+    /// overflow.
+    #[test]
+    fn the_remote_count_survives_every_width_with_a_branch_and_a_name() {
+        let glyph = crate::theme::PROJECT_GLYPH;
+        for (width, word, want) in [
+            (46, "Idle", "demo-api · Idle · age… · 3 tabs · 1 remote"),
+            (33, "Idle", "d… · Idle · 3 tabs · 1 remote"),
+            (28, "Idle", "demo-… · Idle · 1 remote"),
+            (24, "Idle", "d… · Idle · 1 remote"),
+            (20, "Idle", "Idle · 1 remote"),
+            (39, "Working...", "d… · Working... · 3 tabs · 1 remote"),
+            (34, "Working...", "demo-… · Working... · 1 remote"),
+            (28, "Working...", "Working... · 1 remote"),
+            (24, "Working...", "Working... · 1 remo…"),
+            (20, "Working...", "Working... · 1 …"),
+        ] {
+            assert_eq!(
+                fit_counts_line(width, word, Some("agent-branch")),
+                format!("  {glyph} {want}"),
+                "{word} at width {width}"
+            );
+        }
+    }
+
+    /// The sidebar's own line two in a whole 120-column frame, the grid the
+    /// tab-strip screenshot is taken at, found by the project marker and read
+    /// between the pane's borders.
+    fn sidebar_line_two_at_120(app: &mut App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        app.focus = FocusPane::Left;
+        app.rebuild_left_items();
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let line = (0..buf.area.height)
+            .map(|y| {
+                let mut out = String::new();
+                let mut x = 0u16;
+                while x < buf.area.width {
+                    let symbol = buf[(x, y)].symbol().to_string();
+                    let step = u16::try_from(display_width(&symbol)).unwrap_or(1).max(1);
+                    out.push_str(&symbol);
+                    x = x.saturating_add(step);
+                }
+                out
+            })
+            .find(|line| line.contains(crate::theme::PROJECT_GLYPH))
+            .expect("the agent row's line two is on screen");
+        line.split('│')
+            .find(|part| part.contains(crate::theme::PROJECT_GLYPH))
+            .expect("the sidebar segment")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn at_the_default_120_columns_a_three_tab_row_keeps_its_project_name() {
+        let mut app = with_three_tabs(narrow_row_app("demo-api"));
+        assert_eq!(
+            sidebar_line_two_at_120(&mut app),
+            format!("{} demo-api · Idle", crate::theme::PROJECT_GLYPH)
+        );
+    }
+
+    /// With a browser watching, the remote count is never given up, and at this
+    /// width it leaves no room for even the name's minimum.
+    #[test]
+    fn at_the_default_120_columns_a_watched_row_keeps_its_remote_count() {
+        let mut app = with_three_tabs(narrow_row_app("demo-api"));
+        let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
+        let client = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            std::path::Path::new("."),
+            24,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine
+            .providers
+            .insert(TabId::new(slot_tab.clone()), client);
+        let provider = app
+            .engine
+            .providers
+            .get(TabIdRef::new(&slot_tab))
+            .expect("the seeded provider");
+        let (_viewer, _rx) = provider.subscribe();
+        assert_eq!(
+            sidebar_line_two_at_120(&mut app),
+            format!("{} Idle · 1 remote", crate::theme::PROJECT_GLYPH)
+        );
     }
 
     #[test]
@@ -19632,65 +19810,6 @@ mod tests {
         // then does the name start to shrink.
         assert_eq!(narrow_line_two(&app, 23), folder_line("demo-api", ""));
         assert_eq!(narrow_line_two(&app, 18), folder_line("demo-a…", ""));
-    }
-
-    #[test]
-    fn the_branch_and_the_name_both_yield_to_the_counts() {
-        let mut app = with_three_tabs(narrow_row_app("demo-api"));
-        app.engine.sessions[0].title = Some("Retry budget".to_string());
-        assert_eq!(
-            narrow_line_two(&app, 33),
-            folder_line("demo-api", " · a… · 3 tabs")
-        );
-        assert_eq!(
-            narrow_line_two(&app, 32),
-            folder_line("demo-api", " · 3 tabs")
-        );
-        assert_eq!(narrow_line_two(&app, 22), folder_line("d…", " · 3 tabs"));
-        assert_eq!(narrow_line_two(&app, 21), folder_line("", " · 3 tabs"));
-    }
-
-    /// Both counts, a branch and a name through the fitter itself, Idle and
-    /// Working. The glyph, the word and the counts are never given up; only
-    /// the whole-line safety net cuts, and only when they alone overflow.
-    #[test]
-    fn the_counts_survive_every_width_with_a_branch_and_a_name() {
-        let glyph = crate::theme::PROJECT_GLYPH;
-        let fit = |width: u16, word: &str| {
-            spans_text(&fit_agent_meta_line(
-                width,
-                MetaMarker::standing(Span::raw(format!("  {glyph} "))),
-                Some(Span::raw("demo-api".to_string())),
-                Span::raw(word.to_string()),
-                Some(Span::raw("agent-branch".to_string())),
-                vec![
-                    Span::raw("3 tabs".to_string()),
-                    Span::raw("1 remote".to_string()),
-                ],
-                MetaLineStyle {
-                    sep: Style::default(),
-                    highlight: None,
-                },
-            ))
-        };
-        for (width, word, want) in [
-            (46, "Idle", "demo-api · Idle · age… · 3 tabs · 1 remote"),
-            (33, "Idle", "d… · Idle · 3 tabs · 1 remote"),
-            (28, "Idle", "Idle · 3 tabs · 1 remote"),
-            (24, "Idle", "Idle · 3 tabs · 1 r…"),
-            (20, "Idle", "Idle · 3 tabs ·…"),
-            (39, "Working...", "d… · Working... · 3 tabs · 1 remote"),
-            (34, "Working...", "Working... · 3 tabs · 1 remote"),
-            (28, "Working...", "Working... · 3 tabs · 1…"),
-            (24, "Working...", "Working... · 3 tabs…"),
-            (20, "Working...", "Working... · 3 …"),
-        ] {
-            assert_eq!(
-                fit(width, word),
-                format!("  {glyph} {want}"),
-                "{word} at width {width}"
-            );
-        }
     }
 
     #[test]
@@ -19757,7 +19876,7 @@ mod tests {
                 Some(Span::raw(project.to_string())),
                 Span::raw("Idle".to_string()),
                 Some(Span::raw(branch.to_string())),
-                Vec::new(),
+                MetaCounts::default(),
                 MetaLineStyle {
                     sep: Style::default(),
                     highlight: hl,
