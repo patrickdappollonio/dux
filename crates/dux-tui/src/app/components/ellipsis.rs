@@ -91,6 +91,28 @@ pub(crate) fn min_end_cut_width(text: &str) -> usize {
     display_width(text).min(first + display_width(ELLIPSIS))
 }
 
+/// The fewest columns [`ellipsize_start`] can cut a path to and still name
+/// something: the `…` and the last whole grapheme cluster of its last
+/// component, or the whole path when that is no wider. Measured on
+/// [`path_tail`], so a trailing slash is never the cluster kept. Zero for empty
+/// text.
+pub(crate) fn min_start_cut_width(text: &str) -> usize {
+    let tail = path_tail(text);
+    let Some((_, last)) = clusters(tail).into_iter().next_back() else {
+        return 0;
+    };
+    display_width(tail).min(last + display_width(ELLIPSIS))
+}
+
+/// `text` without the trailing slashes a path may carry, which are not the
+/// part that names the folder. A path that is only slashes is kept as it is.
+pub(crate) fn path_tail(text: &str) -> &str {
+    match text.trim_end_matches('/') {
+        "" => text,
+        trimmed => trimmed,
+    }
+}
+
 /// `text` cut at its START to at most `max` columns, keeping the tail behind a
 /// leading `…`. For paths, whose leaf is the informative part.
 pub(crate) fn ellipsize_start(text: &str, max: usize) -> String {
@@ -221,6 +243,29 @@ mod tests {
             let text = format!("{glyph}tail");
             assert_eq!(min_end_cut_width(&text), 3, "{glyph:?}");
             assert_eq!(ellipsize_end(&text, 3), format!("{glyph}\u{2026}"));
+        }
+    }
+
+    #[test]
+    fn the_narrowest_useful_path_cut_keeps_the_last_cluster_and_the_mark() {
+        assert_eq!(min_start_cut_width(""), 0);
+        assert_eq!(
+            min_start_cut_width("~"),
+            1,
+            "a path that short is kept whole"
+        );
+        assert_eq!(min_start_cut_width("~/notes"), 2);
+        assert_eq!(ellipsize_start("~/notes", 2), "\u{2026}s");
+        assert_eq!(min_start_cut_width("~/日本語"), 3);
+        assert_eq!(ellipsize_start("~/日本語", 3), "\u{2026}語");
+        // A trailing slash is not part of what names the folder.
+        assert_eq!(min_start_cut_width("~/work/demo/"), 2);
+        assert_eq!(path_tail("~/work/demo/"), "~/work/demo");
+        assert_eq!(path_tail("/"), "/");
+        for glyph in SEQUENCES {
+            let text = format!("~/x{glyph}");
+            assert_eq!(min_start_cut_width(&text), 3, "{glyph:?}");
+            assert_eq!(ellipsize_start(&text, 3), format!("\u{2026}{glyph}"));
         }
     }
 

@@ -1,8 +1,9 @@
 use super::changes_tree::ChangesRow;
 use super::components::BUTTON_HEIGHT;
 use super::components::ellipsis::{
-    ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width, mark_cut_row,
-    min_end_cut_width, pad_to_width, truncate_to_width,
+    ELLIPSIS, ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width,
+    mark_cut_row, min_end_cut_width, min_start_cut_width, pad_to_width, path_tail,
+    truncate_to_width,
 };
 use super::components::pane_card::CardPlan;
 use super::components::wrap_lines::{char_display_width, display_width};
@@ -519,30 +520,69 @@ struct MetaLineStyle<'q> {
     highlight: Option<(&'q str, Style)>,
 }
 
-/// Fit one flexible meta-line field into `alloc` cells and, when a live search
-/// query is supplied, overlay the match emphasis on the exact text that will
-/// render.
+/// Which end of a meta-line field a cut takes text from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FieldCut {
+    /// A name (a project, an owner, a branch): the head is what names it, so
+    /// the cut is at the end, `demo-…`.
+    End,
+    /// A path (a standalone folder, a terminal's spawn directory): the tail
+    /// names the folder, so the cut is at the start, `…/demo`, and a trailing
+    /// slash is not kept in place of it (see [`path_tail`]).
+    Start,
+}
+
+impl FieldCut {
+    /// The fewest columns a cut of `text` this way can take and still name
+    /// something: one whole cluster from the kept end, and the `…`.
+    fn min_width(self, text: &str) -> usize {
+        match self {
+            Self::End => min_end_cut_width(text),
+            Self::Start => min_start_cut_width(text),
+        }
+    }
+}
+
+/// Fit one flexible meta-line field into `alloc` cells, cut at the end `cut`
+/// names, and, when a live search query is supplied, overlay the match emphasis
+/// on the exact text that will render.
 ///
 /// The plain fit runs first, so characters and widths match the unhighlighted
 /// path, and the highlight is a pure styling split on top. `match_char_range` is
 /// recomputed against the fitted text rather than clamped from the full field,
-/// so a match the ellipsis swallowed highlights nothing. The trailing `…` is
-/// re-styled with the field's base style explicitly. All splitting is char-based,
-/// never byte offsets.
+/// so a match the ellipsis swallowed highlights nothing. The `…` is its own span
+/// in the field's base style, never part of a match. All splitting is
+/// char-based, never byte offsets.
 fn ellipsize_field_highlighted(
     field: Span<'static>,
     alloc: u16,
+    cut: FieldCut,
     highlight: Option<(&str, Style)>,
 ) -> Vec<Span<'static>> {
     let base_style = field.style;
-    let fitted = ellipsize_spans(vec![field], alloc);
+    let fitted = match cut {
+        FieldCut::End => ellipsize_spans(vec![field], alloc),
+        FieldCut::Start if display_width(field.content.as_ref()) <= usize::from(alloc) => {
+            vec![field]
+        }
+        FieldCut::Start => {
+            let kept = ellipsize_start(path_tail(field.content.as_ref()), usize::from(alloc));
+            match kept.strip_prefix(ELLIPSIS) {
+                Some(tail) => vec![
+                    Span::styled(ELLIPSIS, base_style),
+                    Span::styled(tail.to_string(), base_style),
+                ],
+                None => vec![Span::styled(kept, base_style)],
+            }
+        }
+    };
     let Some((query, match_style)) = highlight else {
         return fitted;
     };
     let mut out: Vec<Span<'static>> = Vec::new();
     for span in fitted {
-        if span.content.as_ref() == "…" {
-            out.push(Span::styled("…", base_style));
+        if span.content.as_ref() == ELLIPSIS {
+            out.push(Span::styled(ELLIPSIS, base_style));
             continue;
         }
         match dux_core::agent_search::match_char_range(span.content.as_ref(), query) {
@@ -573,51 +613,31 @@ fn remote_viewers_segment(count: usize) -> Option<String> {
     Some(format!("{count} remote"))
 }
 
-/// What a line-two marker becomes when the pane is too narrow for the name it
-/// introduces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MarkerAlone {
-    /// The glyph says something on its own ("a project", "your folder", "its
-    /// path is missing"), so it stays and the word follows it.
-    Stands,
-    /// The glyph only points at the name (`↳`, "owned by"), so it goes with
-    /// the name and the word takes the marker's indent: an arrow at nothing
-    /// is worse than no arrow.
-    Points,
-}
-
-/// A line-two marker: its span (leading indent included) and what it becomes
-/// when the name after it is left out.
+/// A line-two marker (leading indent included) and how the field after it is
+/// cut. Every marker stays when that field does not fit, because each says
+/// something on its own: the folder glyph "a project", the star "your folder",
+/// the warning "its path is missing", and the arrow "owned by", which keeps an
+/// owned terminal's row reading as owned and its word in the column the name
+/// would have started in.
 struct MetaMarker {
     span: Span<'static>,
-    alone: MarkerAlone,
+    cut: FieldCut,
 }
 
 impl MetaMarker {
-    fn standing(span: Span<'static>) -> Self {
+    /// A marker before a name, cut at its end.
+    fn name(span: Span<'static>) -> Self {
         Self {
             span,
-            alone: MarkerAlone::Stands,
+            cut: FieldCut::End,
         }
     }
 
-    fn pointing(span: Span<'static>) -> Self {
+    /// A marker before a path, cut at its start.
+    fn path(span: Span<'static>) -> Self {
         Self {
             span,
-            alone: MarkerAlone::Points,
-        }
-    }
-
-    /// The span to draw when the name is left out. A pointing marker keeps only
-    /// its leading indent, which is ASCII spaces, so the byte slice is safe.
-    fn without_name(self) -> Span<'static> {
-        match self.alone {
-            MarkerAlone::Stands => self.span,
-            MarkerAlone::Points => {
-                let text = self.span.content.as_ref();
-                let indent = text.len() - text.trim_start_matches(' ').len();
-                Span::styled(" ".repeat(indent), self.span.style)
-            }
+            cut: FieldCut::Start,
         }
     }
 }
@@ -646,22 +666,29 @@ struct MetaCounts {
 ///    dangling divider or a lone `…`.
 /// 3. The tab count goes, whole, with its separator; a count cut mid-word
 ///    says nothing.
-/// 4. The project name shrinks, down to one whole cluster and the `…` (see
-///    [`min_end_cut_width`]): `demo-api` reads `d…`, and a wide or emoji first
-///    glyph keeps its full width.
-/// 5. The name goes, with its separator, because a lone `…` names nothing. A
-///    marker that says something on its own stays in front of the word; one
-///    that only points at the name goes with it (see [`MarkerAlone`]).
+/// 4. The name shrinks, down to one whole cluster and the `…`. A name is cut
+///    at its end (`demo-api` reads `d…`); a path is cut at its start, keeping
+///    the tail that names the folder (`…/demo`, down to `…o`). A wide or emoji
+///    cluster keeps its full width (see [`FieldCut`]).
+/// 5. The name goes, with its separator, because a lone `…` names nothing.
+///    The marker stays in front of the word (see [`MetaMarker`]).
 ///
 /// So the tab count goes before the name drops below its minimum, and while
 /// there is room for the whole count and at least that minimum, both stay
 /// and the name is what shrinks.
 ///
-/// The marker glyph, the state word and the remote count are never given up
-/// and never shortened: the word is the row's live state, and the remote count
-/// is the row's standing "someone elsewhere has this open" signal while dux
-/// serves. Only the whole-line safety net at the end cuts them, when the pane
-/// is narrower than they are on their own.
+/// The marker glyph, the state word and the remote count's NUMBER are never
+/// given up: the word is the row's live state, and the remote count is the
+/// row's standing "someone elsewhere has this open" signal while dux serves.
+/// The remote count's word can be cut. When the glyph, the word and the whole
+/// count do not fit, the count is cut from its end and keeps its number,
+/// `1 …`. At the default 120-column layout, whose rows have 20 columns of
+/// text, that is every WORKING agent with a remote count (glyph 4, "Working"
+/// and its dot slot 10, separator 3, leaving 3 for "1 remote"), while an idle
+/// one shows the count whole. The number stays at any width that holds the
+/// glyph, the word, the separator, the digits and the mark; narrower than
+/// that the count shows the bare `…`, never part of a number, and the
+/// whole-line safety net at the end cuts whatever still overflows.
 ///
 /// The web sidebar keeps its tab count (`shrink-0`) and truncates its project
 /// tag instead. The terminal UI deliberately gives the tab count up first at
@@ -672,10 +699,10 @@ struct MetaCounts {
 /// useful cut along with its separator.
 ///
 /// A state change moves the word's width (Working and its dot slot are six
-/// cells wider than Idle). The remote count never moves with it. The tab count
-/// can: it is kept only while the name's minimum fits beside it, so it comes
-/// and goes across a band exactly as wide as the word grows, six columns, and
-/// no wider, because only the word changed.
+/// cells wider than Idle). The remote count keeps its place; only its word is
+/// cut, as above. The tab count can come and go: it is kept only while the
+/// name's minimum fits beside it, so it changes across a band exactly as wide
+/// as the word grows, six columns, and no wider, because only the word changed.
 ///
 /// `name` is `None` when the marker is the whole label already (a removed
 /// project, a missing working copy), and the separator before the word then
@@ -685,7 +712,9 @@ struct MetaCounts {
 /// name and the branch are searched fields, so a hit inside either gets the
 /// emphasis through `ellipsize_field_highlighted`, computed on the final fitted
 /// text. `None` means no filter, or a terminal row, whose fields the TUI search
-/// does not filter.
+/// does not filter. An accepted gap: a row the filter kept because its project
+/// name matched shows no emphasis at all once that name has been dropped, or
+/// cut past the match, for want of room.
 fn fit_agent_meta_line(
     total_w: u16,
     marker: MetaMarker,
@@ -700,27 +729,49 @@ fn fit_agent_meta_line(
         highlight,
     } = style;
     let MetaCounts { tabs, remote } = counts;
+    let MetaMarker {
+        span: marker,
+        cut: name_cut,
+    } = marker;
     let width = |s: &Span<'static>| s.content.as_ref().cell_width();
-    let min_cut = |s: &Span<'static>| {
-        u16::try_from(min_end_cut_width(s.content.as_ref())).unwrap_or(u16::MAX)
-    };
+    let cols = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    let name_min_cut = |s: &Span<'static>| cols(name_cut.min_width(s.content.as_ref()));
+    let branch_min_cut = |s: &Span<'static>| cols(FieldCut::End.min_width(s.content.as_ref()));
     let sep = || Span::styled(" · ", sep_style);
     const SEP_W: u16 = 3; // " · "
     let with_sep = |s: &Span<'static>| SEP_W.saturating_add(width(s));
 
-    // Never given up: the marker, the word and the remote count. A marker with
-    // no name after it is a complete label, so its separator before the word
-    // is fixed too.
+    // Never given up: the marker and the word. A marker with no name after it
+    // is a complete label, so its separator before the word is fixed too.
     let had_name = name.is_some();
-    let fixed = width(&marker.span)
+    let core = width(&marker)
         .saturating_add(width(&word))
-        .saturating_add(if had_name { 0 } else { SEP_W })
-        .saturating_add(remote.as_ref().map_or(0, with_sep));
-    let mut avail = total_w.saturating_sub(fixed);
+        .saturating_add(if had_name { 0 } else { SEP_W });
+    let remote_w = remote.as_ref().map_or(0, with_sep);
+
+    // The remote count does not fit whole: everything that gives way has gone,
+    // and the count is cut from its end, keeping its number.
+    if core.saturating_add(remote_w) > total_w {
+        let mut out = vec![marker];
+        if !had_name {
+            out.push(sep());
+        }
+        out.push(word);
+        let room = total_w.saturating_sub(core).saturating_sub(SEP_W);
+        if let Some(remote) = remote.and_then(|r| cut_remote_count(r, room)) {
+            out.push(sep());
+            out.push(remote);
+        }
+        // Safety net: when even the marker and the word overflow a very narrow
+        // pane, ellipsize the whole line so nothing hard-clips mid-glyph at the
+        // right edge.
+        return ellipsize_spans(out, total_w);
+    }
+    let mut avail = total_w - core - remote_w;
 
     // Last to go: the name at its narrowest useful cut plus its separator.
-    let name = name.filter(|n| min_cut(n).saturating_add(SEP_W) <= avail);
-    let name_min = name.as_ref().map_or(0, min_cut);
+    let name = name.filter(|n| name_min_cut(n).saturating_add(SEP_W) <= avail);
+    let name_min = name.as_ref().map_or(0, name_min_cut);
     let name_nat = name.as_ref().map_or(0, width);
     if name.is_some() {
         avail -= SEP_W;
@@ -733,39 +784,66 @@ fn fit_agent_meta_line(
     // Then the branch, only while the name is whole beside it, at its own
     // narrowest useful cut, or gone with its separator.
     let branch = branch.filter(|b| {
-        keeps_name && name_nat.saturating_add(SEP_W).saturating_add(min_cut(b)) <= avail
+        keeps_name
+            && name_nat
+                .saturating_add(SEP_W)
+                .saturating_add(branch_min_cut(b))
+                <= avail
     });
     let (name_alloc, branch_alloc) = match &branch {
         Some(b) => (name_nat, (avail - name_nat - SEP_W).min(width(b))),
         None => (name_nat.min(avail), 0),
     };
 
-    let mut out: Vec<Span<'static>> = Vec::new();
-    match name {
-        Some(name) => {
-            out.push(marker.span);
-            out.extend(ellipsize_field_highlighted(name, name_alloc, highlight));
-            out.push(sep());
-        }
-        None if !had_name => {
-            out.push(marker.span);
-            out.push(sep());
-        }
-        None => out.push(marker.without_name()),
+    let mut out: Vec<Span<'static>> = vec![marker];
+    if let Some(name) = name {
+        out.extend(ellipsize_field_highlighted(
+            name, name_alloc, name_cut, highlight,
+        ));
+        out.push(sep());
+    } else if !had_name {
+        out.push(sep());
     }
     out.push(word);
     if let Some(branch) = branch {
         out.push(sep());
-        out.extend(ellipsize_field_highlighted(branch, branch_alloc, highlight));
+        out.extend(ellipsize_field_highlighted(
+            branch,
+            branch_alloc,
+            FieldCut::End,
+            highlight,
+        ));
     }
     for segment in [tabs, remote].into_iter().flatten() {
         out.push(sep());
         out.push(segment);
     }
-    // Safety net: when even the marker, the word and the remote count overflow
-    // a very narrow pane, ellipsize the whole line so nothing hard-clips
-    // mid-glyph at the right edge.
+    // Everything above was fitted to `total_w`; the same safety net as the
+    // overflow arm keeps a miscount from ever hard-clipping at the edge.
     ellipsize_spans(out, total_w)
+}
+
+/// The remote count cut to `room` columns, or `None` when there is no room at
+/// all. The count's word is cut from its end and its number is kept whole
+/// (`1 …`, `12…`); with less room than the digits and the mark, it is the bare
+/// `…`, because part of a number reads as a different number.
+fn cut_remote_count(count: Span<'static>, room: u16) -> Option<Span<'static>> {
+    let text = count.content.as_ref();
+    let room = usize::from(room);
+    if room == 0 {
+        return None;
+    }
+    if display_width(text) <= room {
+        return Some(count);
+    }
+    // The digits are ASCII, so the byte index is a char boundary.
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let kept = if digits + display_width(ELLIPSIS) <= room {
+        ellipsize_end(text, room)
+    } else {
+        ELLIPSIS.to_string()
+    };
+    Some(Span::styled(kept, count.style))
 }
 
 /// Column budget for the resource monitor table, computed from the inner content
@@ -1753,47 +1831,48 @@ impl App {
         session: &AgentSession,
         project: Option<&Project>,
         muted: Color,
-    ) -> (Span<'static>, Option<Span<'static>>) {
+    ) -> (MetaMarker, Option<Span<'static>>) {
         match agent_row_owner_tag(
             session,
             project,
             self.engine.working_copy_missing(&session.id),
         ) {
             AgentRowOwnerTag::Project(ProjectTagKind::Healthy, project_name) => (
-                Span::styled(
+                MetaMarker::name(Span::styled(
                     format!("  {} ", crate::theme::PROJECT_GLYPH),
                     Style::default().fg(muted),
-                ),
+                )),
                 Some(Span::styled(project_name, Style::default().fg(muted))),
             ),
             AgentRowOwnerTag::Project(ProjectTagKind::PathMissing, project_name) => {
                 let color = self.theme.project_missing_fg;
                 (
-                    Span::styled("  ⚠ ", Style::default().fg(color)),
+                    MetaMarker::name(Span::styled("  ⚠ ", Style::default().fg(color))),
                     Some(Span::styled(project_name, Style::default().fg(color))),
                 )
             }
             AgentRowOwnerTag::Project(ProjectTagKind::Orphan, _) => (
-                Span::styled(
+                MetaMarker::name(Span::styled(
                     "  ⚠ removed project",
                     Style::default().fg(self.theme.project_missing_fg),
-                ),
+                )),
                 None,
             ),
             AgentRowOwnerTag::WorkingCopyMissing => (
-                Span::styled(
+                MetaMarker::name(Span::styled(
                     format!("  ⚠ {}", dux_core::working_copy::MISSING_WORKING_COPY_LABEL),
                     Style::default().fg(self.theme.project_missing_fg),
-                ),
+                )),
                 None,
             ),
             AgentRowOwnerTag::Folder { label } => {
                 let color = self.theme.standalone_location_fg;
+                // The label is a path, cut from its start.
                 (
-                    Span::styled(
+                    MetaMarker::path(Span::styled(
                         format!("  {} ", crate::theme::STANDALONE_GLYPH),
                         Style::default().fg(color),
-                    ),
+                    )),
                     Some(Span::styled(label, Style::default().fg(color))),
                 )
             }
@@ -1974,11 +2053,9 @@ impl App {
                 )
             })
         });
-        // Every owner marker says something on its own (a project, your folder,
-        // a missing path), so each stays when the name after it does not fit.
         let line2 = fit_agent_meta_line(
             text_width,
-            MetaMarker::standing(marker),
+            marker,
             name_span,
             Span::styled(word_text, Style::default().fg(word_color)),
             branch_span,
@@ -12098,13 +12175,13 @@ fn terminal_row_lines(
     } else {
         ("  ↳ ".to_string(), muted)
     };
-    // The star says "your folder" on its own, so it stays when the directory
-    // does not fit; the arrow only points at the owner, so it goes with it.
+    // A standalone terminal's label is its spawn directory, a path cut from its
+    // start; an owned terminal's is its owner's name, cut from its end.
     let marker_span = Span::styled(marker, Style::default().fg(marker_fg));
     let marker = if standalone {
-        MetaMarker::standing(marker_span)
+        MetaMarker::path(marker_span)
     } else {
-        MetaMarker::pointing(marker_span)
+        MetaMarker::name(marker_span)
     };
     let line2 = fit_agent_meta_line(
         text_width,
@@ -13874,9 +13951,11 @@ mod tests {
             app.theme.standalone_location_fg,
             "the standalone star must wear the standalone identity tone"
         );
-        // The folder path follows two cells after the glyph ("✷ /srv/notes").
+        // The folder path follows two cells after the glyph. This row is one
+        // column short of "✷ /srv/notes · Idle", so the path is cut from its
+        // start and reads "✷ …notes"; the mark wears the tone with it.
         let path_start = (hx + 2, hy);
-        assert_eq!(buf[path_start].symbol(), "/");
+        assert_eq!(buf[path_start].symbol(), "…");
         assert_eq!(
             buf[path_start].fg, app.theme.standalone_location_fg,
             "the folder path must wear the identity tone too"
@@ -19414,7 +19493,7 @@ mod tests {
     fn fit_agent_meta_line_fits_without_truncation() {
         let out = fit_agent_meta_line(
             80,
-            MetaMarker::standing(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+            MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
             Some(Span::raw("proj".to_string())),
             Span::raw("Idle".to_string()),
             None,
@@ -19435,7 +19514,7 @@ mod tests {
     fn fit_agent_meta_line_truncates_name_keeps_state_and_tabs() {
         let out = fit_agent_meta_line(
             30,
-            MetaMarker::standing(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+            MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
             Some(Span::raw("a-very-long-project-name".to_string())),
             Span::raw("Idle".to_string()),
             None,
@@ -19466,7 +19545,7 @@ mod tests {
     fn fit_agent_meta_line_shares_budget_between_name_and_branch() {
         let out = fit_agent_meta_line(
             34,
-            MetaMarker::standing(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+            MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
             Some(Span::raw("longproject".to_string())),
             Span::raw("Working".to_string()),
             Some(Span::raw("feature/some-long-branch".to_string())),
@@ -19629,7 +19708,7 @@ mod tests {
     fn fit_counts_line(width: u16, word: &str, branch: Option<&str>) -> String {
         spans_text(&fit_agent_meta_line(
             width,
-            MetaMarker::standing(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+            MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
             Some(Span::raw("demo-api".to_string())),
             Span::raw(word.to_string()),
             branch.map(|b| Span::raw(b.to_string())),
@@ -19692,11 +19771,11 @@ mod tests {
     }
 
     /// Both counts, a branch and a name through the fitter itself, Idle and
-    /// Working. The glyph, the word and the remote count are never given up;
-    /// only the whole-line safety net cuts them, and only when they alone
-    /// overflow.
+    /// Working. The glyph, the word and the remote count's number stay at every
+    /// width here; the count's word is what gets cut once the glyph, the word
+    /// and the whole count do not fit.
     #[test]
-    fn the_remote_count_survives_every_width_with_a_branch_and_a_name() {
+    fn the_remote_count_keeps_its_number_at_every_width_with_a_branch_and_a_name() {
         let glyph = crate::theme::PROJECT_GLYPH;
         for (width, word, want) in [
             (46, "Idle", "demo-api · Idle · age… · 3 tabs · 1 remote"),
@@ -19762,11 +19841,15 @@ mod tests {
         );
     }
 
-    /// With a browser watching, the remote count is never given up, and at this
-    /// width it leaves no room for even the name's minimum.
-    #[test]
-    fn at_the_default_120_columns_a_watched_row_keeps_its_remote_count() {
-        let mut app = with_three_tabs(narrow_row_app("demo-api"));
+    /// Seed a live provider on the first session's slot tab and open one
+    /// browser-style viewer on it, so its row carries "1 remote". The returned
+    /// subscription keeps the viewer alive.
+    fn watched_by_one(
+        app: &mut App,
+    ) -> (
+        dux_core::pty::PtyViewerGuard,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let client = PtyClient::spawn(
             "/bin/sh",
@@ -19785,7 +19868,72 @@ mod tests {
             .providers
             .get(TabIdRef::new(&slot_tab))
             .expect("the seeded provider");
-        let (_viewer, _rx) = provider.subscribe();
+        provider.subscribe()
+    }
+
+    /// A WORKING agent watched by a browser at the default layout: the glyph,
+    /// "Working" and its dots and the count's separator take seventeen of the
+    /// row's twenty columns, so the count's word is cut and its number stays.
+    #[test]
+    fn at_the_default_120_columns_a_watched_working_row_keeps_the_remote_number() {
+        let mut app = with_three_tabs(narrow_row_app("demo-api"));
+        let _viewer = watched_by_one(&mut app);
+        let slot = app.engine.sessions[0].slot_tab_id().to_string();
+        app.engine.pty_activity.insert(slot, Instant::now());
+        // Mid-way through the fourth dot step, so the slot reads "...".
+        app.start_time = Instant::now()
+            - Duration::from_millis(
+                3 * dux_core::working_cue::ELLIPSIS_STEP_MS
+                    + dux_core::working_cue::ELLIPSIS_STEP_MS / 2,
+            );
+        assert_eq!(
+            sidebar_line_two_at_120(&mut app),
+            format!("{} Working... · 1 …", crate::theme::PROJECT_GLYPH)
+        );
+    }
+
+    /// The cut never leaves part of a number: a two-digit count keeps both
+    /// digits whenever they and the mark fit, and shows the bare mark (never
+    /// "1…" for twelve) below that.
+    #[test]
+    fn a_cut_remote_count_never_shows_part_of_its_number() {
+        let fit = |width: u16| {
+            spans_text(&fit_agent_meta_line(
+                width,
+                MetaMarker::name(Span::raw(format!("  {} ", crate::theme::PROJECT_GLYPH))),
+                Some(Span::raw("demo-api".to_string())),
+                Span::raw("Working...".to_string()),
+                None,
+                MetaCounts {
+                    tabs: None,
+                    remote: Some(Span::raw("12 remote".to_string())),
+                },
+                MetaLineStyle {
+                    sep: Style::default(),
+                    highlight: None,
+                },
+            ))
+        };
+        // Glyph and indent 4, word 10, separator 3, digits 2, mark 1.
+        for width in 20..=40u16 {
+            let line = fit(width);
+            assert!(line.contains(" · 12"), "at width {width}: {line:?}");
+        }
+        for width in 12..20u16 {
+            let line = fit(width);
+            assert!(
+                !line.contains(" · 1"),
+                "at width {width} a partial number must not show: {line:?}"
+            );
+        }
+    }
+
+    /// With a browser watching, the remote count keeps its place, and at this
+    /// width it leaves no room for even the name's minimum.
+    #[test]
+    fn at_the_default_120_columns_a_watched_row_keeps_its_remote_count() {
+        let mut app = with_three_tabs(narrow_row_app("demo-api"));
+        let _viewer = watched_by_one(&mut app);
         assert_eq!(
             sidebar_line_two_at_120(&mut app),
             format!("{} Idle · 1 remote", crate::theme::PROJECT_GLYPH)
@@ -19825,7 +19973,9 @@ mod tests {
             narrow_line_two(&app, 40),
             format!("  {star} /srv/notes-archive · Idle")
         );
-        assert_eq!(narrow_line_two(&app, 13), format!("  {star} /… · Idle"));
+        // A path is cut from its start: the tail names the folder.
+        assert_eq!(narrow_line_two(&app, 15), format!("  {star} …ive · Idle"));
+        assert_eq!(narrow_line_two(&app, 13), format!("  {star} …e · Idle"));
         // The star still says "your folder" on its own, so it stays.
         assert_eq!(narrow_line_two(&app, 12), format!("  {star} Idle"));
     }
@@ -19844,12 +19994,23 @@ mod tests {
             line_two("~/notes", true, 40),
             format!("  {star} ~/notes · Idle")
         );
-        assert_eq!(line_two("~/notes", true, 13), format!("  {star} ~… · Idle"));
+        // A spawn directory is a path, cut from its start.
+        assert_eq!(line_two("~/notes", true, 13), format!("  {star} …s · Idle"));
+        assert_eq!(
+            line_two("~/work/demo", true, 17),
+            format!("  {star} …/demo · Idle")
+        );
+        // A trailing slash is not the informative part of a path.
+        assert_eq!(
+            line_two("~/work/demo/", true, 17),
+            format!("  {star} …/demo · Idle")
+        );
         assert_eq!(line_two("~/notes", true, 12), format!("  {star} Idle"));
+        // An owner's name is cut from its end, and the arrow stays when the
+        // name goes, so the row still reads as owned and the word keeps its
+        // column.
         assert_eq!(line_two("demo-api", false, 13), "  ↳ d… · Idle");
-        // The arrow means "owned by" and points at the name, so it goes with
-        // it: the word takes the indent rather than an arrow at nothing.
-        assert_eq!(line_two("demo-api", false, 12), "  Idle");
+        assert_eq!(line_two("demo-api", false, 12), "  ↳ Idle");
     }
 
     // --- fit_agent_meta_line search-hit highlighting ---
@@ -19872,7 +20033,7 @@ mod tests {
         let build = |hl: Option<(&str, Style)>| {
             fit_agent_meta_line(
                 total_w,
-                MetaMarker::standing(Span::raw("  ".to_string())),
+                MetaMarker::name(Span::raw("  ".to_string())),
                 Some(Span::raw(project.to_string())),
                 Span::raw("Idle".to_string()),
                 Some(Span::raw(branch.to_string())),
