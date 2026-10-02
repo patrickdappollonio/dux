@@ -169,7 +169,7 @@ fn run_tui_with_flip() -> Result<()> {
                     dux_web::ServerExit::ForceQuit => {
                         // The terminal is the shell's again (the screen was just
                         // dropped), so the reason lands on its own screen.
-                        eprintln!("{}", dux_web::FORCE_EXIT_MESSAGE);
+                        dux_web::print_force_message_once();
                         std::process::exit(130);
                     }
                     dux_web::ServerExit::ReturnToTui => {
@@ -247,19 +247,32 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     {
         Ok(plan) => plan,
         Err(e) => {
-            eprintln!("error: {e}");
+            // No log will ever open, so the detection warning goes to stderr
+            // ahead of the error rather than vanishing with the start.
+            let warning = undetected.map(|reason| {
+                dux_core::tailscale::undetected_warning(
+                    tailscale_mode,
+                    reason,
+                    "the configured host",
+                )
+            });
+            report_plan_failure(&mut std::io::stderr(), warning.as_deref(), &e.to_string());
             std::process::exit(1);
         }
     };
 
     // Worded once the plan says what is being served instead: on a loopback-only
-    // plan these are the flip's exact words for the same situation.
+    // plan these are the flip's exact words for the same situation. It opens the
+    // log, and reaches stderr too whenever stdout is not a terminal.
     if let Some(reason) = undetected {
-        startup_warnings.push(dux_core::tailscale::undetected_warning(
-            tailscale_mode,
-            reason,
-            serving_without_tailscale(&plan),
-        ));
+        startup_warnings.push(dux_web::StartupWarning {
+            text: dux_core::tailscale::undetected_warning(
+                tailscale_mode,
+                reason,
+                serving_without_tailscale(&plan),
+            ),
+            already_on_stderr: false,
+        });
     }
 
     // Loud warning when binding a non-loopback address: dux has no login gate, so
@@ -300,15 +313,30 @@ fn serving_without_tailscale(plan: &dux_core::config::ServerPlan) -> &'static st
 /// redirected stdout (`dux server > access.log`) or a start that fails while
 /// loading can never hide them; they also open the log itself, the same lines
 /// the flip's viewer would show.
+///
+/// Each prints to stderr exactly once: the log line is marked as already there,
+/// so neither the log's stderr echo nor a failed load prints it again.
 fn raise_security_alarms(
     alarms: &[String],
     stderr: &mut dyn std::io::Write,
-    startup_warnings: &mut Vec<String>,
+    startup_warnings: &mut Vec<dux_web::StartupWarning>,
 ) {
     for alarm in alarms {
         let _ = writeln!(stderr, "WARNING: {alarm}");
-        startup_warnings.push(alarm.clone());
+        startup_warnings.push(dux_web::StartupWarning {
+            text: alarm.clone(),
+            already_on_stderr: true,
+        });
     }
+}
+
+/// A start that failed while resolving what to bind: print the Tailscale
+/// warning it had (no log is going to carry it) and then the error.
+fn report_plan_failure(stderr: &mut dyn std::io::Write, warning: Option<&str>, error: &str) {
+    if let Some(warning) = warning {
+        let _ = writeln!(stderr, "WARNING: {warning}");
+    }
+    let _ = writeln!(stderr, "error: {error}");
 }
 
 /// The alarm for a listener beyond loopback (and beyond the machine's own
@@ -455,7 +483,10 @@ mod tests {
     #[test]
     fn the_security_alarm_goes_to_stderr_at_once_and_into_the_log() {
         let mut stderr = Vec::new();
-        let mut startup_warnings = vec!["Tailscale not detected.".to_string()];
+        let mut startup_warnings = vec![dux_web::StartupWarning {
+            text: "Tailscale not detected.".to_string(),
+            already_on_stderr: false,
+        }];
         raise_security_alarms(
             &[non_loopback_warning("0.0.0.0:3890".parse().unwrap())],
             &mut stderr,
@@ -472,7 +503,32 @@ mod tests {
             "only the alarm, not the other warnings"
         );
         assert_eq!(startup_warnings.len(), 2);
-        assert!(startup_warnings[1].starts_with("dux is binding 0.0.0.0:3890"));
+        assert!(
+            startup_warnings[1]
+                .text
+                .starts_with("dux is binding 0.0.0.0:3890")
+        );
+        assert!(
+            startup_warnings[1].already_on_stderr,
+            "so the log's stderr echo and a failed load leave it alone"
+        );
+        assert!(!startup_warnings[0].already_on_stderr);
+    }
+
+    /// A bad `--bind` ends the start before the log exists, so the Tailscale
+    /// warning would be swallowed: it goes to stderr ahead of the error.
+    #[test]
+    fn a_failed_plan_still_prints_the_tailscale_warning() {
+        let mut stderr = Vec::new();
+        report_plan_failure(
+            &mut stderr,
+            Some("Tailscale not detected (test)."),
+            "--bind expects an IP:port",
+        );
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "WARNING: Tailscale not detected (test).\nerror: --bind expects an IP:port\n"
+        );
     }
 
     #[test]

@@ -1134,12 +1134,22 @@ impl ServerConfig {
 }
 
 /// True when a config reload changed any `[server]` setting that only takes
-/// effect at startup, whether it is read when a listener binds or when the
-/// `dux server` console is built. The web surface warns on this whole set; the
-/// terminal UI warns on [`server_bind_settings_changed`] alone, because neither
-/// way of serving from inside the terminal UI builds a console.
+/// effect at startup: read when a listener binds, when the `dux server` console
+/// is built, or when the flip's log viewer is sized. The web surface warns on
+/// this set, each sentence only where it applies; the terminal UI warns on
+/// [`server_bind_settings_changed`] alone, because it reads the console and
+/// viewer settings afresh every time it starts serving.
 pub fn server_restart_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
-    server_bind_settings_changed(prev, next) || server_console_settings_changed(prev, next)
+    server_bind_settings_changed(prev, next)
+        || server_console_settings_changed(prev, next)
+        || server_log_viewer_settings_changed(prev, next)
+}
+
+/// True when a config reload changed a `[server]` setting read once, as the
+/// `start-web-server` flip sizes its log viewer: `log_viewer_lines`. Only a
+/// running flip owes a warning for it; the next flip reads the new value.
+pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+    prev.log_viewer_lines != next.log_viewer_lines
 }
 
 /// True when a config reload changed a `[server]` setting that is read once, as
@@ -1194,9 +1204,10 @@ pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) ->
 /// the `dux server` console is built.
 ///
 /// Separate from the bind set because only the standalone `dux server` process
-/// has a console: the terminal UI's flip and its background server both serve
-/// through a no-op console, so a `color` change means nothing to either and a
-/// restart warning on that surface would name a restart that changes nothing.
+/// prints its console to a terminal: the flip records the same lines into its
+/// themed viewer, which never reads `color`, and the background server's
+/// console is a no-op, so a `color` change means nothing to either and a
+/// restart warning there would name a restart that changes nothing.
 pub fn server_console_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
     prev.color != next.color
 }

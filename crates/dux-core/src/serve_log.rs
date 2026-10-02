@@ -186,6 +186,15 @@ impl LogLine {
         }
     }
 
+    /// The line's tone: the one its marker carries, or `None` for a line with no
+    /// marker (the banner header, an access line).
+    pub fn tone(&self) -> Option<LogTone> {
+        self.segments.iter().find_map(|segment| match segment.role {
+            LogRole::Marker(tone) => Some(tone),
+            _ => None,
+        })
+    }
+
     /// The rich spelling: what colored stdout prints without its escapes, and
     /// what the viewer shows.
     pub fn text(&self) -> String {

@@ -25,9 +25,9 @@
 
 use std::io::{IsTerminal, Write};
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 
 use dux_core::activity::ActivityRing;
 use dux_core::serve_log::{Banner, LogLine, LogTone};
@@ -157,17 +157,64 @@ struct ConsoleInner {
     /// but the flip's.
     capture: Option<ActivityRing>,
     clock: Clock,
+    /// Where warning and error lines are ALSO written, in their plain spelling:
+    /// stderr, for `dux server` when its stdout is not a terminal, so
+    /// `dux server > access.log` never hides one. `None` otherwise, when the log
+    /// line on the terminal is enough. Written synchronously: these lines are
+    /// rare, and the point of them is to land.
+    echo: Option<Mutex<Box<dyn Write + Send>>>,
 }
 
 impl Console {
-    /// A real console writing to stdout. `color` comes from [`detect`].
+    /// A real console writing to stdout. `color` comes from [`detect`]. When
+    /// stdout is not a terminal, warning and error lines also go to stderr.
     pub fn stdout(color: bool) -> Self {
-        Self::with_writer(
+        let mut console = Self::with_writer(
             color,
             Box::new(std::io::stdout()),
             WRITER_CHANNEL_BOUND,
             now_hms,
-        )
+        );
+        if !std::io::stdout().is_terminal() {
+            console.set_echo(Box::new(std::io::stderr()));
+        }
+        console
+    }
+
+    /// Echo warning and error lines to `writer`. Only while building: the
+    /// console is not shared yet.
+    fn set_echo(&mut self, writer: Box<dyn Write + Send>) {
+        if let Some(inner) = Arc::get_mut(&mut self.0) {
+            inner.echo = Some(Mutex::new(writer));
+        }
+    }
+
+    /// A buffer-backed console stamped at a fixed time whose stdout is or is not
+    /// a terminal, plus handles on what it printed to stdout and to stderr.
+    #[cfg(test)]
+    pub(crate) fn test_capture_echoing(
+        color: bool,
+        stdout_is_terminal: bool,
+    ) -> (Self, TestSink, SharedBuffer) {
+        let (mut console, sink) = Self::test_capture(color);
+        let stderr = SharedBuffer::new();
+        if !stdout_is_terminal {
+            console.set_echo(Box::new(stderr.clone()));
+        }
+        (console, sink, stderr)
+    }
+
+    /// Write a warning or error line to the echo, if there is one.
+    fn echo(&self, line: &LogLine) {
+        let Some(echo) = &self.0.echo else {
+            return;
+        };
+        if !matches!(line.tone(), Some(LogTone::Warn | LogTone::Error)) {
+            return;
+        }
+        let mut writer = echo.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = writeln!(writer, "{}", line.render(false));
+        let _ = writer.flush();
     }
 
     /// Build a writer-backed console over an owned writer: spawn the dedicated
@@ -187,6 +234,7 @@ impl Console {
             },
             capture: None,
             clock,
+            echo: None,
         }))
     }
 
@@ -197,6 +245,7 @@ impl Console {
             sink: Sink::Noop,
             capture: None,
             clock: now_hms,
+            echo: None,
         }))
     }
 
@@ -212,6 +261,7 @@ impl Console {
             sink: Sink::Noop,
             capture: Some(ring),
             clock,
+            echo: None,
         }))
     }
 
@@ -317,7 +367,7 @@ impl Console {
         };
         let drop_streak = dropped.load(Ordering::Relaxed);
         if drop_streak > 0 {
-            let warn = LogLine::event(
+            let warning = LogLine::event(
                 &(self.0.clock)(),
                 LogTone::Warn,
                 &format!(
@@ -327,12 +377,13 @@ impl Console {
                         "line"
                     )
                 ),
-            )
-            .render(self.0.color);
+            );
+            let warn = warning.render(self.0.color);
             // Only clear the streak if the warning itself made it through, so a
             // still-full channel keeps accumulating rather than losing the notice.
             if tx.try_send(WriterMsg::Line(warn)).is_ok() {
                 dropped.fetch_sub(drop_streak, Ordering::Relaxed);
+                self.echo(&warning);
             }
         }
         match tx.try_send(WriterMsg::Line(line)) {
@@ -348,8 +399,17 @@ impl Console {
     /// Send one line to every sink this console has. The one place a line
     /// leaves the console, which is what keeps the two surfaces identical.
     fn line(&self, line: LogLine) {
+        self.line_echoed(line, true);
+    }
+
+    /// [`Self::line`], with the stderr echo left out when the caller already
+    /// printed this line there.
+    fn line_echoed(&self, line: LogLine, echo: bool) {
         if self.is_active() {
             self.write_line(line.render(self.0.color));
+            if echo {
+                self.echo(&line);
+            }
         }
         if let Some(ring) = &self.0.capture {
             ring.push(line);
@@ -377,6 +437,19 @@ impl Console {
         self.emit(LogTone::Warn, message);
     }
 
+    /// A warning line the caller already printed to stderr itself (the
+    /// non-loopback alarm, printed before anything loads), so it is not echoed
+    /// there a second time.
+    pub fn warn_already_on_stderr(&self, message: &str) {
+        if !self.is_recording() {
+            return;
+        }
+        self.line_echoed(
+            LogLine::event(&(self.0.clock)(), LogTone::Warn, message),
+            false,
+        );
+    }
+
     /// An error line.
     pub fn error(&self, message: &str) {
         self.emit(LogTone::Error, message);
@@ -396,6 +469,7 @@ impl Console {
         if self.is_active() {
             for line in &lines {
                 self.write_line(line.render(self.0.color));
+                self.echo(line);
             }
         }
         if let Some(ring) = &self.0.capture {
@@ -507,7 +581,7 @@ impl TestSink {
 
 #[cfg(test)]
 #[derive(Clone)]
-struct SharedBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+pub(crate) struct SharedBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
 
 #[cfg(test)]
 impl SharedBuffer {
@@ -515,7 +589,7 @@ impl SharedBuffer {
         Self(Arc::new(std::sync::Mutex::new(Vec::new())))
     }
 
-    fn contents(&self) -> String {
+    pub(crate) fn contents(&self) -> String {
         String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
     }
 }
@@ -835,6 +909,73 @@ mod tests {
             done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
             "flush must return even though the writer never does"
         );
+    }
+
+    // ── Warnings when stdout is not a terminal ─────────────────────────────
+
+    fn banner_with_a_warning() -> Banner {
+        let mut banner = sample_banner();
+        banner.security_note = Some("Reachable on your network with NO login.".to_string());
+        banner
+    }
+
+    /// Everything a run warns about or fails at, plus ordinary lines.
+    fn warn_and_info(console: &Console) {
+        console.warn("Tailscale not detected.");
+        console.warn(&unknown_color_warning("rainbow"));
+        console.banner(&banner_with_a_warning());
+        console.info("Requesting 1 agent and 0 terminals to gracefully shut down.");
+        console.access("GET", "/", 200, 1);
+        console.warn("1 agent did not stop in time. Force-closing 1 agent.");
+        console.error("second interrupt received during shutdown.");
+    }
+
+    /// `dux server > access.log` must never hide a warning: with stdout not a
+    /// terminal, every warning and error line also goes to stderr, and
+    /// ordinary lines stay on stdout alone.
+    #[test]
+    fn with_stdout_redirected_warnings_and_errors_also_reach_stderr() {
+        let (console, sink, stderr) = Console::test_capture_echoing(false, false);
+        warn_and_info(&console);
+        let stdout = sink.contents();
+        let stderr = stderr.contents();
+        assert_eq!(
+            stderr,
+            "12:00:00 warn Tailscale not detected.\n\
+             12:00:00 warn [server] color = \"rainbow\" is not auto/always/never. Using \"auto\".\n\
+             \x20\x20warn Reachable on your network with NO login.\n\
+             12:00:00 warn 1 agent did not stop in time. Force-closing 1 agent.\n\
+             12:00:00 error second interrupt received during shutdown.\n"
+        );
+        assert!(stdout.contains("Requesting 1 agent"), "{stdout}");
+        assert!(!stderr.contains("Requesting"), "info stays off stderr");
+        assert!(!stderr.contains("GET /"), "the access log stays off stderr");
+        for line in stderr.lines() {
+            assert_eq!(stdout.matches(line).count(), 1, "once on stdout: {line}");
+            assert_eq!(stderr.matches(line).count(), 1, "once on stderr: {line}");
+        }
+    }
+
+    /// On a terminal the log line is enough: nothing goes to stderr.
+    #[test]
+    fn with_stdout_on_a_terminal_each_warning_prints_once() {
+        let (console, sink, stderr) = Console::test_capture_echoing(false, true);
+        warn_and_info(&console);
+        assert_eq!(stderr.contents(), "");
+        assert_eq!(
+            sink.contents().matches("Tailscale not detected.").count(),
+            1
+        );
+    }
+
+    /// The security alarm was already printed to stderr before anything loaded,
+    /// so its log line must not print it there a second time.
+    #[test]
+    fn a_warning_already_on_stderr_is_not_echoed_again() {
+        let (console, sink, stderr) = Console::test_capture_echoing(false, false);
+        console.warn_already_on_stderr("dux is binding 0.0.0.0:3890 with NO login gate.");
+        assert_eq!(stderr.contents(), "");
+        assert!(sink.contents().contains("warn dux is binding 0.0.0.0:3890"));
     }
 
     // ── Writer-thread: ordering + drop-on-full ──────────────────────────────

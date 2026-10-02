@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dux_core::config::{server_bind_settings_changed, server_console_settings_changed};
+use dux_core::config::{
+    server_bind_settings_changed, server_console_settings_changed,
+    server_log_viewer_settings_changed,
+};
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
@@ -447,16 +450,31 @@ fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::c
     }
 }
 
+/// Which way of serving a reload arrived at, because each owes a different set of
+/// restart sentences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServeSurface {
+    /// `dux server`: the only one whose console reads `[server] color`.
+    DuxServer,
+    /// The `start-web-server` flip: the only one with a log viewer, sized from
+    /// `log_viewer_lines` when it starts.
+    Flip,
+    /// The background server beside the terminal UI.
+    Background,
+}
+
 /// The warning a reload owes the user about `[server]` settings it could not make
-/// live, or `None` when nothing startup-bound moved. Two independent sentences,
-/// because the two sets are read at different moments. `background` picks the bind
-/// sentence's remedy; the console sentence never takes it, because only
-/// `dux server` builds a console.
+/// live, or `None` when nothing startup-bound moved. Independent sentences,
+/// because the sets are read at different moments. The background server's bind
+/// sentence names its own remedy. The console sentence names `dux server`, which
+/// alone prints the console to a terminal. The log viewer sentence is the
+/// flip's alone: anywhere else the next flip reads the new value anyway.
 fn server_restart_warning_copy(
     prev: &dux_core::config::ServerConfig,
     next: &dux_core::config::ServerConfig,
-    background: bool,
+    surface: ServeSurface,
 ) -> Option<String> {
+    let background = surface == ServeSurface::Background;
     let mut sentences: Vec<&str> = Vec::new();
     if server_bind_settings_changed(prev, next) {
         sentences.push(
@@ -472,6 +490,12 @@ fn server_restart_warning_copy(
         sentences.push(
             "The [server] color setting changed; the console that reads it is built by \
              `dux server`, so it applies the next time you start `dux server`.",
+        );
+    }
+    if surface == ServeSurface::Flip && server_log_viewer_settings_changed(prev, next) {
+        sentences.push(
+            "The [server] log_viewer_lines setting changed; the log viewer is sized when \
+             start-web-server starts, so it applies the next time you run it.",
         );
     }
     match sentences.is_empty() {
@@ -1796,7 +1820,11 @@ pub(crate) fn auto_reopen_agents_on_startup(engine: &mut Engine) -> usize {
 }
 
 pub fn spawn_engine_thread(engine: Engine) -> (EngineHandle, JoinHandle<()>) {
-    spawn_engine_thread_with_console(engine, crate::console::Console::noop())
+    spawn_engine_thread_with_console(
+        engine,
+        crate::console::Console::noop(),
+        Arc::new(crate::QuitForce::default()),
+    )
 }
 
 /// [`spawn_engine_thread`] for `dux server`, whose shutdown progress prints on
@@ -1804,6 +1832,7 @@ pub fn spawn_engine_thread(engine: Engine) -> (EngineHandle, JoinHandle<()>) {
 pub(crate) fn spawn_engine_thread_with_console(
     mut engine: Engine,
     console: crate::console::Console,
+    quit: Arc<crate::QuitForce>,
 ) -> (EngineHandle, JoinHandle<()>) {
     let (handle, ends) = build_actor_channels(&engine);
     spawn_global_workers(&mut engine);
@@ -1815,9 +1844,14 @@ pub(crate) fn spawn_engine_thread_with_console(
         // The dedicated thread never asks the loop to exit; the loop stops only
         // on the `Shutdown` request handled inline. The returned engine is
         // dropped here (thread end), exactly as the previous implementation did.
-        let _engine = run_engine_loop(engine, ends, ShutdownEcho::Console(console), || {
-            LoopControl::Continue
-        });
+        let surface = ServeSurface::DuxServer;
+        let _engine = run_engine_loop(
+            engine,
+            ends,
+            ShutdownEcho::Console(console, quit),
+            surface,
+            || LoopControl::Continue,
+        );
     });
 
     (handle, join)
@@ -2065,8 +2099,9 @@ pub(crate) struct DrainOutcome {
 /// UI that never asked, so a new sender needs a reason and a gate.
 #[derive(Clone)]
 pub(crate) enum ShutdownEcho {
-    /// `dux server`: the progress prints on its console.
-    Console(crate::console::Console),
+    /// `dux server`: the progress prints on its console, and a second stop
+    /// signal forces the quit through the shared state.
+    Console(crate::console::Console, Arc<crate::QuitForce>),
     Silent,
 }
 
@@ -2142,6 +2177,8 @@ pub(crate) struct EngineService {
     /// mutation performs). Drives the clobber-safe reconcile in `handle_request`.
     config_disk_ahead: bool,
     shutdown_echo: ShutdownEcho,
+    /// Which way of serving this loop runs for, for the reload's restart warning.
+    surface: ServeSurface,
     /// The serve's live Tailscale-mode handle, empty only when nothing is
     /// serving. Every serve fills it, background mode included; background mode
     /// simply does not run this loop, so its reload is the terminal UI's.
@@ -2191,6 +2228,7 @@ impl EngineService {
             tick_count: 0,
             config_disk_ahead: false,
             shutdown_echo,
+            surface: ServeSurface::DuxServer,
         }
     }
 
@@ -2351,8 +2389,11 @@ impl EngineService {
         let Some(config) = peek_apply_reloaded_config(reaction) else {
             return;
         };
-        let restart_warning =
-            server_restart_warning_copy(&engine.config.server, &config.server, true);
+        let restart_warning = server_restart_warning_copy(
+            &engine.config.server,
+            &config.server,
+            ServeSurface::Background,
+        );
         let _ = self.config_reload_tx.send(());
         // Says what has actually happened at this point, and no more. The
         // drainer has not adopted the config yet (the seam is pre-consume), so
@@ -2656,32 +2697,21 @@ impl EngineService {
                     // them to flush state, then mark agent sessions Detached.
                     // Handled here (not in `handle_request`) because it must stop
                     // the loop. `shutdown_ptys` logs the start/result to dux.log;
-                    // on the `dux server` path the console prints it too, as
-                    // timestamped lines, so an operator running it in the
-                    // foreground sees the shutdown progress. The flip runs its
-                    // own shutdown and prints the same lines into its viewer;
-                    // the background server stays silent.
-                    let echo = match &self.shutdown_echo {
-                        ShutdownEcho::Console(console) => Some(console.clone()),
-                        ShutdownEcho::Silent => None,
-                    };
-                    let agents = engine.providers.len();
-                    let terminals = engine.companion_terminals.len();
+                    // on the `dux server` path it runs through the one
+                    // wind-down the flip uses too, so the console prints the
+                    // same timestamped lines and a second stop signal cuts the
+                    // wait short the same way. The flip runs its own shutdown
+                    // after its loop; the background server stays silent.
                     let grace = dux_core::config::shutdown_grace(
                         engine.config.server.shutdown_timeout_seconds,
                     );
-                    if let Some(console) = &echo
-                        && agents + terminals > 0
-                    {
-                        console.info(&dux_core::engine::format_shutdown_start(
-                            agents, terminals, grace,
-                        ));
-                    }
-                    let report = engine.shutdown_ptys(grace);
-                    if let Some(console) = &echo
-                        && report.agents_total + report.terminals_total > 0
-                    {
-                        console.info(&dux_core::engine::format_shutdown_result(&report));
+                    match &self.shutdown_echo {
+                        ShutdownEcho::Console(console, quit) => {
+                            crate::wind_down_children(engine, console, grace, quit, |_| {});
+                        }
+                        ShutdownEcho::Silent => {
+                            engine.shutdown_ptys(grace);
+                        }
                     }
                     let _ = reply.send(());
                     stopped = true;
@@ -2731,9 +2761,11 @@ pub(crate) fn run_engine_loop(
     mut engine: Engine,
     ends: ActorLoopEnds,
     shutdown_echo: ShutdownEcho,
+    surface: ServeSurface,
     mut control: impl FnMut() -> LoopControl,
 ) -> Engine {
     let mut svc = EngineService::new(&engine, ends, shutdown_echo);
+    svc.surface = surface;
     loop {
         // Caller-driven exit (the flip's status screen asked to stop). Checked
         // before any work so an exit takes effect on the next tick. PTYs are
@@ -2774,7 +2806,7 @@ pub(crate) fn run_engine_loop(
                 // arm already holds both the running config (pre-swap) and the
                 // incoming one, keeps the detection next to the config-reload handler.
                 let restart_warning =
-                    server_restart_warning_copy(&engine.config.server, &config.server, false);
+                    server_restart_warning_copy(&engine.config.server, &config.server, svc.surface);
                 // The parsed MODE, never the raw string: the value is trimmed
                 // and case-insensitive, so a user who retyped "Auto" must not
                 // have their listener stopped and started for nothing.
@@ -5976,7 +6008,8 @@ mod tests {
         let mut next = prev.clone();
         next.color = "never".to_string();
 
-        let copy = server_restart_warning_copy(&prev, &next, false).expect("a warning");
+        let copy =
+            server_restart_warning_copy(&prev, &next, ServeSurface::DuxServer).expect("a warning");
         assert!(
             copy.contains("dux server"),
             "the console is built by that process alone: {copy}"
@@ -5994,7 +6027,8 @@ mod tests {
         next.color = "never".to_string();
         next.port += 1;
 
-        let copy = server_restart_warning_copy(&prev, &next, false).expect("a warning");
+        let copy =
+            server_restart_warning_copy(&prev, &next, ServeSurface::DuxServer).expect("a warning");
         assert!(copy.contains("listener binds"), "{copy}");
         assert!(copy.contains("dux server"), "{copy}");
     }
@@ -6007,13 +6041,34 @@ mod tests {
         let mut console = prev.clone();
         console.color = "never".to_string();
 
-        let bind_copy = server_restart_warning_copy(&prev, &bind, true).expect("a warning");
+        let bind_copy =
+            server_restart_warning_copy(&prev, &bind, ServeSurface::Background).expect("a warning");
         assert!(bind_copy.contains("stopping and starting"), "{bind_copy}");
-        let console_copy = server_restart_warning_copy(&prev, &console, true).expect("a warning");
+        let console_copy = server_restart_warning_copy(&prev, &console, ServeSurface::Background)
+            .expect("a warning");
         assert!(
             !console_copy.contains("stopping and starting"),
             "the background server has no console to rebuild: {console_copy}"
         );
+    }
+
+    /// The flip's log viewer is sized once, when the flip starts, so a reload
+    /// that changes `log_viewer_lines` while the flip serves owes the usual
+    /// warning; `dux server` and the background server have no viewer to warn
+    /// about.
+    #[test]
+    fn a_log_viewer_lines_change_is_a_restart_warning_in_the_flip_alone() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.log_viewer_lines = prev.log_viewer_lines + 1;
+        assert!(server_restart_settings_changed(&prev, &next));
+
+        let copy = server_restart_warning_copy(&prev, &next, ServeSurface::Flip)
+            .expect("the flip owes a warning");
+        assert!(copy.contains("log_viewer_lines"), "{copy}");
+        assert!(copy.contains("start-web-server"), "{copy}");
+        assert!(server_restart_warning_copy(&prev, &next, ServeSurface::DuxServer).is_none());
+        assert!(server_restart_warning_copy(&prev, &next, ServeSurface::Background).is_none());
     }
 
     #[test]
@@ -6021,7 +6076,7 @@ mod tests {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.access_log = !prev.access_log;
-        assert!(server_restart_warning_copy(&prev, &next, true).is_none());
+        assert!(server_restart_warning_copy(&prev, &next, ServeSurface::Background).is_none());
     }
 
     #[test]
@@ -7248,7 +7303,8 @@ mod tests {
     fn one_loop_iteration(engine: Engine) -> Engine {
         let (handle, ends) = build_actor_channels(&engine);
         let mut ran = false;
-        let engine = run_engine_loop(engine, ends, ShutdownEcho::Silent, move || {
+        let surface = ServeSurface::DuxServer;
+        let engine = run_engine_loop(engine, ends, ShutdownEcho::Silent, surface, move || {
             if ran {
                 LoopControl::Exit
             } else {

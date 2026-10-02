@@ -40,6 +40,9 @@ dux server
 
 It binds `127.0.0.1:3890` (loopback only) by default and prints a small vite-style
 banner: one row per bound address with its `http://…` URL, plus a reachability note.
+Every warning and error it prints also goes to stderr whenever stdout is not a terminal,
+so `dux server > access.log` never hides one; a non-loopback address's "no login"
+warning is printed to stderr the moment dux knows it, before anything else loads.
 After that it keeps a timestamped log going: browsers connecting and leaving, one line
 per request (the access log), your Tailscale address coming and going, and the shutdown
 when you stop it. Any warning about the start itself, a missing Tailscale for one, is
@@ -97,11 +100,13 @@ Your **agents keep running the entire time**: no relaunch, no lost conversations
 dux you already have starts serving in place. Your terminal turns into a themed dux
 status screen showing the serve URLs and a log viewer. The viewer shows exactly the log
 `dux server` prints, banner and access log included, so nothing you would see there is
-missing here. The banner and the warnings above it stay at the top of the panel; below
-them it keeps the last `log_viewer_lines` lines (2000 by default) for scrolling back with
-your scroll keys (the arrow keys, Page Up and Page Down, Home and End unless you rebound
-them; the `?` help lists them). While you are scrolled back, new lines do not move what
-you are reading, and the bottom of the panel says how many arrived below. Press `q` or
+missing here. The banner and the warnings above it are never dropped, and they stay at
+the top of the panel for as long as they fit in half of it; on a terminal too short for
+that they scroll with the rest instead of being cut off. Below them the viewer keeps the
+last `log_viewer_lines` lines (2000 by default), and it scrolls by line, by page, and to
+either end with the same scroll keys as the rest of dux; the in-app `?` help lists them
+under the web server screen. While you are scrolled back, new lines do not move what you
+are reading, and the bottom of the panel says how many arrived below. Press `q` or
 `Esc` there to drop back into the TUI with everything still running, which stops serving
 the web UI; you can flip again whenever you like. `Ctrl-c` quits dux entirely, winding
 your agents down exactly as `dux server` does, and a second `Ctrl-c` while it waits for
