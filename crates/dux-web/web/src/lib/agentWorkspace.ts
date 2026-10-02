@@ -128,15 +128,20 @@ export function supportsBranchGit(workspace: AgentWorkspaceWire): boolean {
 }
 
 /** Why the changes region is quiet, or `null` when it is not, which doubles as
- * "does the changes panel work here". Deliberately the only spelling of that
- * question: a second one is how the two answers drift. */
+ * "does the changes panel work here". Never an empty string: an empty or absent
+ * sentence answers `null`. Deliberately the only spelling of that question, and
+ * every caller compares against `null`: the pane's body and its menu both read
+ * it, and a second spelling is how the two answers drift. */
 export function changesQuietReason(
   workspace: AgentWorkspaceWire,
 ): string | null {
-  return matchWorkspace(workspace, {
-    managed: (w) => (w.worktree_missing ? (w.quiet_reason ?? null) : null),
+  const reason = matchWorkspace(workspace, {
+    managed: (w) => (w.worktree_missing ? w.quiet_reason : null),
     folder: (w) => (w.repo_status === "working_repo" ? null : w.quiet_reason),
   })
+  // An empty or absent sentence is no answer, the same as an older server
+  // that sends none, so it reads as "not quiet" for every caller at once.
+  return reason ? reason : null
 }
 
 const WORKING_COPY_GONE = "This working copy no longer exists on disk."
@@ -146,8 +151,9 @@ const FOLDER_GONE = "This folder no longer exists on disk."
  * where they exist) are greyed out, or `null` when they work. A short form of
  * the quiet sentence the pane's body shows, for a menu row's reason.
  *
- * Gated on `changesQuietReason` rather than re-deriving the verdict, so "is the
- * panel quiet" keeps exactly one spelling. */
+ * Non-null exactly when `changesQuietReason` is, because it asks that helper
+ * rather than re-deriving the verdict: the body and the menu cannot disagree
+ * about whether the pane is quiet, an empty sentence included. */
 export function changesGitBlockedReason(
   workspace: AgentWorkspaceWire,
 ): string | null {

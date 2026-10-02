@@ -334,3 +334,20 @@ describe("why an agent's directory cannot be opened in the editor", () => {
     expect(directoryGoneReason(managed)).toBeNull()
   })
 })
+
+// An empty sentence is no sentence: the pane's body and its menu read the one
+// verdict, so neither can call the pane quiet while the other does not.
+describe("an empty quiet sentence", () => {
+  it("counts as not quiet for both the body and the menu", () => {
+    const empty = folder("no_repo", "")
+    expect(changesQuietReason(empty)).toBeNull()
+    expect(changesGitBlockedReason(empty)).toBeNull()
+    const emptyManaged: AgentWorkspaceWire = {
+      ...managed,
+      worktree_missing: true,
+      quiet_reason: "",
+    }
+    expect(changesQuietReason(emptyManaged)).toBeNull()
+    expect(changesGitBlockedReason(emptyManaged)).toBeNull()
+  })
+})

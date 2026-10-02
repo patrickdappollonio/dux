@@ -48,9 +48,20 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener)
 }
 
+// A server render (the docs site pre-renders the Changes pane) has no page
+// lifetime to remember expansions over, so it sees nothing expanded. The
+// browser hydrates with the same answer, since the store starts empty.
+function serverSnapshot(): Expansions {
+  return NO_EXPANSIONS
+}
+
 // The expanded folders of one agent, re-rendering its reader when they move.
 export function useExpansions(sessionId: string): Expansions {
-  return useSyncExternalStore(subscribe, () => expansionsFor(sessionId))
+  return useSyncExternalStore(
+    subscribe,
+    () => expansionsFor(sessionId),
+    serverSnapshot,
+  )
 }
 
 function abortRequest(sessionId: string, key: string): void {

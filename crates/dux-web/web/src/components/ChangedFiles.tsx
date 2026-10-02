@@ -52,7 +52,9 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -903,65 +905,77 @@ function ChangesHeader({
             <EllipsisVertical />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            {blocked ? (
-              <p
-                id={reasonId}
-                className="max-w-64 px-1.5 py-1 text-xs text-muted-foreground"
+            {/* A real group, because the primitive's label part reads its
+              * group from context. The label is the reason, shown once, and
+              * every git item names it as its description. */}
+            <DropdownMenuGroup>
+              {blocked ? (
+                <DropdownMenuLabel id={reasonId} className="max-w-64">
+                  {gitBlocked}
+                </DropdownMenuLabel>
+              ) : null}
+              {/* Greyed out rather than absent while the pane is quiet: these
+                * are the pane's own git operations on the agent's directory,
+                * and they come back the moment it holds a repository again (a
+                * `git init`, a folder restored), so a disabled row is the
+                * truth. That is a different thing from the branch-identity
+                * features (push, pull, fork, pull requests, provenance), which
+                * a standalone agent never has whatever its folder holds and
+                * which therefore stay ABSENT for it rather than disabled, here
+                * and in every other menu.
+                *
+                * Refresh is greyed too, as the user asked, and nothing waits on
+                * it: the server refuses a refresh of a quiet pane anyway, and
+                * the folder is looked at again without one. While an agent is
+                * selected the web's changes service polls it (every 2s while
+                * anything runs, 10s otherwise) and every poll re-probes the
+                * folder, so a fixed install or a new repository brings the
+                * pane back on its own within that cadence. Reopening the pane
+                * or reselecting the agent asks too, which is what the quiet
+                * sentences' "reopen this panel" promises. */}
+              <DropdownMenuItem
+                onClick={() => openCommit(sessionId)}
+                disabled={blocked || stagedCount === 0}
+                aria-describedby={describedBy}
               >
-                {gitBlocked}
-              </p>
-            ) : null}
-            {/* Greyed out rather than absent while the pane is quiet: these
-              * are the pane's own git operations on the agent's directory,
-              * and they come back the moment it holds a repository again (a
-              * `git init`, a folder restored), so a disabled row is the truth.
-              * That is a different thing from the branch-identity features
-              * (push, pull, fork, pull requests, provenance), which a
-              * standalone agent never has whatever its folder holds and which
-              * therefore stay ABSENT for it rather than disabled, here and in
-              * every other menu. */}
-            <DropdownMenuItem
-              onClick={() => openCommit(sessionId)}
-              disabled={blocked || stagedCount === 0}
-              aria-describedby={describedBy}
-            >
-              <GitCommitVertical />
-              Commit…
-            </DropdownMenuItem>
-            {branchGit ? (
-              <>
-                <DropdownMenuItem
-                  onClick={() => runGit("push")}
-                  disabled={blocked}
-                  aria-describedby={describedBy}
-                >
-                  <ArrowUpFromLine />
-                  Push
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => runGit("pull")}
-                  disabled={blocked}
-                  aria-describedby={describedBy}
-                >
-                  <ArrowDownToLine />
-                  Pull
-                </DropdownMenuItem>
-              </>
-            ) : null}
-            <DropdownMenuItem
-              disabled={blocked}
-              aria-describedby={describedBy}
-              onClick={() => {
-                void forceRefreshChanges().catch((error) =>
-                  notifyError(
-                    error instanceof Error ? error.message : "refresh failed",
-                  ),
-                )
-              }}
-            >
-              <RefreshCw />
-              Refresh changes
-            </DropdownMenuItem>
+                <GitCommitVertical />
+                Commit…
+              </DropdownMenuItem>
+              {branchGit ? (
+                <>
+                  <DropdownMenuItem
+                    onClick={() => runGit("push")}
+                    disabled={blocked}
+                    aria-describedby={describedBy}
+                  >
+                    <ArrowUpFromLine />
+                    Push
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => runGit("pull")}
+                    disabled={blocked}
+                    aria-describedby={describedBy}
+                  >
+                    <ArrowDownToLine />
+                    Pull
+                  </DropdownMenuItem>
+                </>
+              ) : null}
+              <DropdownMenuItem
+                disabled={blocked}
+                aria-describedby={describedBy}
+                onClick={() => {
+                  void forceRefreshChanges().catch((error) =>
+                    notifyError(
+                      error instanceof Error ? error.message : "refresh failed",
+                    ),
+                  )
+                }}
+              >
+                <RefreshCw />
+                Refresh changes
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
             {!isMobile ? (
               <>
                 <DropdownMenuSeparator />
@@ -1831,7 +1845,7 @@ function changesBodyInstead(
   changes: ChangesSlice,
 ): ReactElement | null {
   const quietReason = session ? changesQuietReason(session.workspace) : null
-  if (quietReason) {
+  if (quietReason !== null) {
     const folder = session ? folderWorkspace(session.workspace) : null
     return (
       <Empty className={BODY_EMPTY}>
@@ -1943,12 +1957,20 @@ export const ChangedFiles = memo(function ChangedFiles() {
     reconcileFolders(selectedSessionId, liveSlice.staged, liveSlice.unstaged)
   }, [selectedSessionId, liveSlice])
 
+  const bodyInstead = selectedSessionId
+    ? changesBodyInstead(selectedSessionId, selectedSession, changes)
+    : null
+  // The discard confirm is keyed to the list it was opened over. When that
+  // list gives way to a quiet, loading or failed body, its target has gone
+  // from the screen and a confirm would only reach a refused write, so it
+  // closes, and stays closed when the list comes back.
+  const listReplaced = bodyInstead !== null
+  const { discarding: discardOpen, closeDiscard } = controller
+  useEffect(() => {
+    if (listReplaced && discardOpen) closeDiscard()
+  }, [listReplaced, discardOpen, closeDiscard])
+
   if (!selectedSessionId) return noSessionScreen()
-  const bodyInstead = changesBodyInstead(
-    selectedSessionId,
-    selectedSession,
-    changes,
-  )
 
   const workspace = selectedSession?.workspace
   const branchGit = workspace ? supportsBranchGit(workspace) : true
@@ -2025,24 +2047,26 @@ export const ChangedFiles = memo(function ChangedFiles() {
             />
           ) : null}
           {bodyInstead ? null : (
-          <ChangesList
-            expansions={expansions}
-            changed={changed}
-            filtered={filtered}
-            recap={recap}
-            selected={selected}
-            sessionId={sessionId}
-            query={query}
-            filtering={filtering}
-            branchGit={branchGit}
-            onToggle={toggleOne}
-            onToggleFolder={toggleFolderRow}
-          />
+            <ChangesList
+              expansions={expansions}
+              changed={changed}
+              filtered={filtered}
+              recap={recap}
+              selected={selected}
+              sessionId={sessionId}
+              query={query}
+              filtering={filtering}
+              branchGit={branchGit}
+              onToggle={toggleOne}
+              onToggleFolder={toggleFolderRow}
+            />
           )}
         </CardContent>
       </Card>
       <ConfirmDiscardFilesDialog
-        open={discarding}
+        // Never over a body that replaced the list, even for the one render
+        // before the effect above closes it.
+        open={discarding && !listReplaced}
         paths={discardPaths}
         unstaged={actionable.unstaged}
         onCancel={closeDiscardMany}

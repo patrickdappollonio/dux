@@ -7,6 +7,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react"
 
@@ -441,6 +442,27 @@ describe("the Changes pane header in a quiet state", () => {
       expect(toggleChangesPane).toHaveBeenCalledTimes(1)
     })
   }
+
+  // The reason line is the menu primitive's own label, inside a real group.
+  it("puts the reason in the menu's label part", async () => {
+    mockState = folderAt("no_repo", folderStates[0]!.sentence)
+    render(<ChangedFiles />)
+    const menu = await openMenu()
+    const reason = menu.getByText("This folder has no git repository.")
+    expect(reason.getAttribute("data-slot")).toBe("dropdown-menu-label")
+    expect(itemOf(menu, "Commit…").getAttribute("aria-describedby")).toBe(reason.id)
+  })
+
+  // One verdict for the body and the menu: an empty sentence is not quiet in
+  // either, so the list renders and the menu stays live together.
+  it("treats an empty quiet sentence as not quiet in the body and the menu alike", async () => {
+    mockState = folderAt("no_repo", "")
+    render(<ChangedFiles />)
+    expect(screen.queryByText("No changes to show")).toBeNull()
+    expect(screen.getByText("No changes")).toBeTruthy()
+    const menu = await openMenu()
+    expect(itemOf(menu, "Refresh changes").getAttribute("aria-disabled")).not.toBe("true")
+  })
 
   it("keeps the editor open to a folder that is there but has no repository", () => {
     mockState = folderAt("no_repo", folderStates[0]!.sentence)
@@ -1222,6 +1244,73 @@ describe("the multi-file discard confirm", () => {
     })
 
     expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  // The list it was asked about is gone from under it: confirming would only
+  // hit a refused write. It closes, and stays closed when the list returns.
+  it("closes itself when the working copy goes away while it is open", async () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Discard 1…" }))
+    expect(screen.getByRole("dialog")).toBeTruthy()
+
+    const listed = withFiles([], [["a.ts", "M"], ["gone.ts", "??"]])
+    mockState = {
+      ...listed,
+      spine: {
+        projects: [],
+        terminals: [],
+        sessions: [
+          {
+            id: "s1",
+            slot_tab_id: "s1",
+            title: "s1",
+            provider: "claude",
+            status: "active",
+            tabs: [],
+            workspace: {
+              kind: "managed",
+              project_id: "p1",
+              branch_name: "b",
+              initial_branch: "b",
+              branch_provenance: "created",
+              source_branch: "main",
+              worktree_path: "/wt",
+              worktree_missing: true,
+              quiet_reason: "The working copy at /wt no longer exists on disk.",
+            },
+          },
+        ],
+      },
+    } as unknown as DuxState
+    await act(async () => {
+      publishMockState()
+    })
+    // Closed: the popup may linger for its exit transition, so wait it out.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+
+    mockState = listed
+    await act(async () => {
+      publishMockState()
+    })
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(discardMany).not.toHaveBeenCalled()
+  })
+
+  it("closes itself when the listing goes back to loading", async () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    fireEvent.click(bar().getByRole("button", { name: "Discard 1…" }))
+    expect(screen.getByRole("dialog")).toBeTruthy()
+
+    mockState = {
+      ...mockState,
+      changes: { ...mockState.changes, phase: "loading" },
+    } as unknown as DuxState
+    await act(async () => {
+      publishMockState()
+    })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
   })
 
   // The ladder is one toast whose severity is the outcome: a partial run warns,

@@ -160,12 +160,16 @@ computer, in the editor's own tab on a phone), and the `⋯` menu with the rest:
   **Preferences** is the other way in, since hiding the pane takes this menu with it.
 
 The header stays in every state the pane can be in: while the changes load, when they
-fail to, and when the pane has nothing to show because the agent's folder has no
-repository or its directory is gone. In those quiet states **Commit…**, **Push**,
-**Pull** and **Refresh changes** stay in the menu greyed out, with a line at the top
-saying why, and come back on their own once the folder holds a repository again.
-**Hide Changes pane** and the **Open editor** button keep working, except that the
-editor button is greyed out too when the directory itself is gone.
+fail to, and when the pane has nothing to show because a standalone agent's folder has
+no repository or an agent's directory is gone. In those quiet states **Commit…** and
+**Refresh changes** stay in the menu greyed out, with a line at the top saying why, and
+come back on their own once the folder holds a repository again; there is nothing to
+press, because dux looks at the folder again within about ten seconds while the agent
+is selected. **Push** and **Pull** are greyed out the same way when a managed agent's
+working copy is gone; a [standalone agent](/docs/creating-agents) never has them, so
+they are absent from its menu rather than greyed out. **Hide Changes pane** and the
+**Open editor** button keep working, except that the editor button is greyed out too
+when the directory itself is gone.
 
 ## The PR banner
 

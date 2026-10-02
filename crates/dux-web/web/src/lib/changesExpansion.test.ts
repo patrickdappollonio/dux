@@ -143,3 +143,22 @@ describe("the expansion store", () => {
     expect(expansionsFor("s1").size).toBe(0)
   })
 })
+
+// The docs site pre-renders the Changes pane with no browser behind it, where
+// React asks the store for a server snapshot. There is no page lifetime to
+// remember expansions over on a server, so that snapshot is nothing expanded,
+// whatever this module happens to hold.
+describe("the expansion store on a server render", () => {
+  it("renders with nothing expanded instead of throwing", async () => {
+    const { createElement } = await import("react")
+    const { renderToString } = await import("react-dom/server")
+    const { useExpansions } = await import("./changesExpansion")
+    fetchFolderChildren.mockReturnValue(new Promise(() => {}))
+    toggleFolder("s1", "unstaged", folder("src", 2))
+    expect(expansionsFor("s1").size).toBe(1)
+    function Probe() {
+      return createElement("span", null, String(useExpansions("s1").size))
+    }
+    expect(renderToString(createElement(Probe))).toBe("<span>0</span>")
+  })
+})
