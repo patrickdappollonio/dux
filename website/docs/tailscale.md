@@ -67,7 +67,7 @@ a roaming laptop is several times a day. On `"auto"`:
 dux checks roughly every five seconds, which is not configurable. That interval is also the
 only debounce, so an interface that flaps faster than dux looks costs at most one bind or
 unbind. Every bind and unbind is written to `dux.log`, printed by `dux server`, listed in
-the flip's activity panel, and said on screen: the terminal UI's status line and the
+the flip's log viewer, and said on screen: the terminal UI's status line and the
 browser's toasts both name the address that arrived or went away, and both tell you when a
 bind keeps failing. On screen the news waits until the interface has stayed one way for a
 few seconds, so an interface that keeps flapping gets one message saying so and one more
@@ -107,7 +107,7 @@ you need a specific interface, start with `dux server`.
 
 The `tailscale` mode applies to all three the same way, watcher included. On `"auto"` a
 flipped server picks up your tailnet address while its status screen sits there and says so
-in the activity panel, and a background server does it while you work in the TUI.
+in its log viewer, and a background server does it while you work in the TUI.
 
 ### Changing the mode while dux is serving
 

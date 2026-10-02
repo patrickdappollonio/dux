@@ -41,6 +41,7 @@ fn run_tui_with_flip() -> Result<()> {
                 engine,
                 listeners,
                 urls,
+                startup,
             } => {
                 // Read before the engine and listeners move into
                 // `serve_with_engine`. The flip is LOCAL MODE, so the primary
@@ -48,6 +49,7 @@ fn run_tui_with_flip() -> Result<()> {
                 // the Tailscale leg bound, which is what the safety note reads.
                 let theme_name = engine.config.ui.theme.clone();
                 let paths = engine.paths.clone();
+                let keys = engine.config.keys.clone();
                 let tailscale = engine.config.server.tailscale_mode();
                 let tailnet_bound = urls.iter().any(|u| {
                     u.strip_prefix("http://")
@@ -70,10 +72,12 @@ fn run_tui_with_flip() -> Result<()> {
                     None
                 };
 
-                // The activity buffer is shared between the web console (the
-                // producer, wired in serve_with_engine) and the status screen
-                // (the consumer). Created here so both get the same handle.
-                let activity = dux_core::activity::ActivityRing::new();
+                // The log buffer is shared between the web console (the
+                // producer, wired in serve_with_engine) and the status screen's
+                // log viewer (the consumer). Created here so both get the same
+                // handle, sized by `[server] log_viewer_lines`.
+                let activity =
+                    dux_core::activity::ActivityRing::new(engine.config.server.log_viewer_lines);
 
                 // A failure here (no TTY, a raw-mode error) falls back to a plain
                 // line, because the server must still run. `screen` lives outside
@@ -88,6 +92,7 @@ fn run_tui_with_flip() -> Result<()> {
                         safety_note,
                         &theme_name,
                         &paths,
+                        &keys,
                         activity.clone(),
                     ) {
                         Ok(screen) => Some(screen),
@@ -106,6 +111,11 @@ fn run_tui_with_flip() -> Result<()> {
                     *engine,
                     listeners,
                     activity,
+                    startup,
+                    // A second stop signal mid-shutdown ends the process with no
+                    // destructor run, so the status screen's terminal state is
+                    // given back through this first.
+                    std::sync::Arc::new(dux_tui::restore_terminal),
                     || {
                         // With the screen up, its keys drive the exit; without it,
                         // only SIGINT/SIGTERM (handled inside serve) can stop us.
@@ -197,18 +207,15 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         config.server.tailscale_mode(),
         overrides.no_tailscale,
     );
+    // Warnings raised here print as the first lines of the server's log (the
+    // same timestamped warning lines the flip's viewer shows), ahead of any bind.
+    let mut startup_warnings = Vec::new();
+    let mut undetected = None;
     let tailscale_ip = if tailscale_mode.wants_tailscale() {
         match dux_core::tailscale::detect_ip() {
             Ok(ip) => Some(ip),
             Err(reason) => {
-                eprintln!(
-                    "WARNING: {}",
-                    dux_core::tailscale::undetected_warning(
-                        tailscale_mode,
-                        reason,
-                        "the configured host"
-                    )
-                );
+                undetected = Some(reason);
                 None
             }
         }
@@ -225,17 +232,22 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         }
     };
 
+    // Worded once the plan says what is being served instead: on a loopback-only
+    // plan these are the flip's exact words for the same situation.
+    if let Some(reason) = undetected {
+        startup_warnings.push(dux_core::tailscale::undetected_warning(
+            tailscale_mode,
+            reason,
+            serving_without_tailscale(&plan),
+        ));
+    }
+
     // Loud warning when binding a non-loopback address: dux has no login gate, so
     // anyone who can reach the address can control your agents and worktrees.
-    // Fires pre-bind (stderr) so it is visible even if a bind then fails.
+    // Printed before the bind so it is visible even if a bind then fails.
     let is_local = |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
     for plan_addr in plan.addrs.iter().filter(|p| !is_local(&p.addr())) {
-        eprintln!(
-            "WARNING: dux is binding {}, a non-loopback address, with NO login gate. Anyone \
-             who can reach this address can control your agents and worktrees. Only do this on \
-             a network you trust, or front dux with an upstream auth proxy.",
-            plan_addr.addr()
-        );
+        startup_warnings.push(non_loopback_warning(plan_addr.addr()));
     }
 
     dux_web::run_server(
@@ -245,6 +257,28 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         // ("vX.Y.Z" for release builds, "development" otherwise) so all three
         // surfaces always show the same thing.
         dux_core::display_version().to_string(),
+        startup_warnings,
+    )
+}
+
+/// What a serve without its Tailscale leg is serving on, as the "Tailscale not
+/// detected" warning names it. A loopback-only plan says "loopback", the word
+/// the in-app flip uses for the same situation, so the two logs match.
+fn serving_without_tailscale(plan: &dux_core::config::ServerPlan) -> &'static str {
+    if plan.addrs.iter().all(|a| a.addr().ip().is_loopback()) {
+        "loopback"
+    } else {
+        "the configured host"
+    }
+}
+
+/// The alarm for a listener beyond loopback (and beyond the machine's own
+/// Tailscale address): there is no login gate in front of it.
+fn non_loopback_warning(addr: std::net::SocketAddr) -> String {
+    format!(
+        "dux is binding {addr}, a non-loopback address, with NO login gate. Anyone who can \
+         reach this address can control your agents and worktrees. Only do this on a network \
+         you trust, or front dux with an upstream auth proxy."
     )
 }
 
@@ -374,6 +408,35 @@ mod tests {
             ParsedServerArgs::HelpRequested => "HelpRequested",
             ParsedServerArgs::Error(_) => "Error",
         }
+    }
+
+    #[test]
+    fn a_loopback_plan_is_called_loopback_as_the_flip_calls_it() {
+        let plan = |addrs: Vec<dux_core::config::PlanAddr>| dux_core::config::ServerPlan {
+            primary: addrs[0].addr(),
+            addrs,
+            tailscale: dux_core::config::TailscaleMode::Auto,
+            forced_no: false,
+        };
+        let loopback = plan(vec![dux_core::config::PlanAddr::required(
+            "127.0.0.1:3890".parse().unwrap(),
+        )]);
+        assert_eq!(serving_without_tailscale(&loopback), "loopback");
+        let wide = plan(vec![dux_core::config::PlanAddr::required(
+            "0.0.0.0:3890".parse().unwrap(),
+        )]);
+        assert_eq!(serving_without_tailscale(&wide), "the configured host");
+    }
+
+    #[test]
+    fn the_non_loopback_alarm_names_the_address_and_the_risk() {
+        let w = non_loopback_warning("0.0.0.0:3890".parse().unwrap());
+        assert!(w.starts_with("dux is binding 0.0.0.0:3890, a non-loopback address"));
+        assert!(w.contains("NO login gate"));
+        assert!(
+            !w.starts_with("WARNING:"),
+            "the log line carries its own warning glyph"
+        );
     }
 
     #[test]

@@ -35,9 +35,10 @@ use crate::pty_owners::PtySizeOwners;
 #[derive(Clone)]
 pub struct AppState {
     pub engine: EngineHandle,
-    /// The `dux server` terminal console. A real (stdout) console on the CLI
-    /// serve paths; a [`Console::noop`] for the TUI flip (which owns the
-    /// terminal) and every test that does not assert console output. WS handlers
+    /// The server's console. A real (stdout) console for `dux server`; a
+    /// capturing console for the TUI flip, whose status screen shows the same
+    /// lines; a [`Console::noop`] for the background server and every test that
+    /// does not assert console output. WS handlers
     /// emit life events through it; the access middleware reads it too.
     pub console: Console,
     /// The `[server]` settings a config reload can move on a listener that is
@@ -249,11 +250,11 @@ const WS_LIVENESS_PING_PERIOD: std::time::Duration = std::time::Duration::from_s
 #[derive(Clone)]
 pub struct RouterParams {
     /// The console handler events (and the access middleware) emit through.
-    /// Defaults to [`Console::noop`] so the flip and tests stay silent; the CLI
-    /// serve paths replace it with a real stdout console via [`with_console`].
+    /// Defaults to [`Console::noop`] so tests stay silent; `dux server` and the
+    /// flip replace it via [`with_console`].
     pub console: Console,
     /// Whether the per-request access log is on (`[server] access_log`). Off by
-    /// default; the CLI serve paths set it from config.
+    /// default; `dux server` and the flip set it from config.
     pub access_log: bool,
     /// Cap on concurrent EVENTS `/ws/events` connections
     /// (`[server] max_websocket_events_connections`). Defaults to
@@ -595,7 +596,7 @@ impl RouterParams {
 ///    not in the allowlist with `403`. Foreign-Host probes are rejected before
 ///    the access log runs, so they are never logged.
 /// 2. **Access log**: logs every request (method, path, status, latency) when
-///    the console is active and `access_log` is on. Sees the final status
+///    the console records and `access_log` is on. Sees the final status
 ///    produced by every inner layer, including the REST mutation check's 403.
 /// 3. **REST mutation origin check**: rejects cross-origin POST/PATCH/PUT/DELETE
 ///    requests (cross-site request forgery defense). A missing `Origin` (curl,
@@ -819,8 +820,8 @@ pub fn build_app(
         .layer(middleware::from_fn(rest_mutation_origin_check))
         // The access log is the OUTERMOST layer OF THIS inner app, so it sees the
         // final status every layer it wraps produced (including the mutation 403).
-        // It is gated inside on `access_log && console.is_active`, so the flip
-        // and disabled-console paths pay nothing. Stamped via
+        // It is gated inside on `access_log && console.is_recording`, so a
+        // disabled console pays nothing. Stamped via
         // `from_fn_with_state` so it reads the console/toggle off `AppState`.
         //
         // The host allowlist (see below) is applied OUTSIDE this layer, so
@@ -860,8 +861,9 @@ async fn access_log(State(state): State<AppState>, request: Request, next: Next)
 
 /// The shared access-log core. CONSOLE-ONLY (never `dux.log`: piping
 /// `dux server`'s stdout IS the access log). Skips `/healthz` so a health checker
-/// does not flood the log, and is gated on `access_log && console.is_active()` so
-/// the flip/disabled paths emit nothing.
+/// does not flood the log, and is gated on `access_log && console.is_recording()`
+/// so a disabled console emits nothing. The flip's capturing console records,
+/// so the flip's viewer carries the access log exactly as `dux server` prints it.
 ///
 /// The path is printed WITHOUT its query string. Query parameters can carry
 /// sensitive values (`GET /api/v1/sessions/<id>/files/raw?path=…` puts a
@@ -878,7 +880,7 @@ async fn log_request(
     // Check the cheap gates BEFORE allocating anything: a disabled access log or a
     // no-op console pays nothing per request. /healthz is intentionally never
     // logged (probe noise). Compared against the borrowed path, no allocation.
-    let log = access_log && console.is_active() && request.uri().path() != "/healthz";
+    let log = access_log && console.is_recording() && request.uri().path() != "/healthz";
     if !log {
         return next.run(request).await;
     }
@@ -4820,9 +4822,10 @@ mod tests {
         );
     }
 
-    /// A no-op console (the flip default) emits nothing even with `access_log`
-    /// nominally on: the middleware's `console.is_active()` gate short-circuits.
-    /// This is the flip zero-stdout regression guard at the middleware layer.
+    /// A no-op console (the background server's) emits nothing even with
+    /// `access_log` nominally on: the middleware's `console.is_recording()` gate
+    /// short-circuits.
+    /// This is the silent-console guard at the middleware layer.
     #[tokio::test]
     async fn access_log_noop_console_emits_nothing() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
@@ -5285,7 +5288,7 @@ mod tests {
     /// handler and every path out owes the decrement.
     #[test]
     fn a_panicking_socket_still_counts_its_client_out() {
-        let ring = dux_core::activity::ActivityRing::new();
+        let ring = dux_core::activity::ActivityRing::new(10);
         let console = Console::capture(ring.clone());
         let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
         console.client_connected(ip);

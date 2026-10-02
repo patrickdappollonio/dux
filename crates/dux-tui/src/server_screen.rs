@@ -5,12 +5,20 @@
 //! run, so the terminal is back in cooked mode. This screen owns the full
 //! raw/alt-screen/hidden-cursor lifecycle while serving and restores all of it
 //! in `Drop` (best-effort, errors ignored), so no exit path, a panic included,
-//! leaves the user with a wedged terminal.
+//! leaves the user with a wedged terminal. [`restore_terminal`] is the same
+//! restore, exposed for the one exit that runs no destructor: a second stop
+//! signal mid-shutdown, which ends the process outright.
+//!
+//! Its log viewer shows the server's console, the very lines `dux server`
+//! prints, drawn from their segments through the theme rather than reworded or
+//! filtered. The viewer scrolls back through the user's scroll bindings; while
+//! it is scrolled back, new lines do not move what is on screen, and the panel
+//! says how many arrived below.
 //!
 //! The binary drives it as the `serve_with_engine` tick closure: every engine
 //! loop iteration calls [`ServerStatusScreen::tick`], which polls keys without
-//! blocking and redraws when the displayed uptime second changes or a new
-//! activity event arrives, so the refresh cadence is wall-clock and event
+//! blocking and redraws when the displayed uptime second changes, a line
+//! arrives, or the view scrolls, so the refresh cadence is wall-clock and event
 //! driven rather than tick driven.
 //!
 //! dux-web never sees crossterm or ratatui: the tick closure is a generic
@@ -34,10 +42,14 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wr
 
 use crate::app::ASCII_LOGO;
 use crate::app::components::wrap_lines::display_width;
-use crate::app::components::{Hint, HintTone, fitted_hint_spans};
+use crate::app::components::{
+    Hint, HintTone, fitted_hint_spans, render_scroll_indicator, wrap_styled_lines,
+};
+use crate::keybindings::{Action, BindingScope, RuntimeBindings, server_screen_reaches};
 use crate::theme::Theme;
-use dux_core::activity::{ActivityEvent, ActivityRing, ActivitySnapshot, ActivityTone};
-use dux_core::config::DuxPaths;
+use dux_core::activity::ActivityRing;
+use dux_core::config::{DuxPaths, KeysConfig};
+use dux_core::serve_log::{LogLine, LogRole, LogTone};
 
 /// What the status screen asks the binary to do after a tick. The binary maps
 /// these straight onto `dux_web::ServerTick`.
@@ -50,10 +62,9 @@ pub enum ServerScreenTick {
     QuitProcess,
 }
 
-/// Semantic role for a rendered status line, mapped to concrete [`Theme`]
-/// fields when building ratatui spans. Keeping the content builder
-/// ([`header_lines`]) terminal-free and theme-free makes it unit-testable
-/// without a TTY or a loaded theme.
+/// Semantic role for a header line, mapped to concrete [`Theme`] fields when
+/// building ratatui spans. Keeping the content builder ([`header_lines`])
+/// terminal-free and theme-free makes it unit-testable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
     /// The "dux" wordmark, accent-styled and bold.
@@ -64,53 +75,139 @@ enum Role {
     Url,
     /// Muted secondary text (the uptime line).
     Muted,
-    /// The non-loopback security warning, warning-styled and bold.
+    /// The reachability warning, warning-styled and bold.
     Warning,
-    /// One activity-log row's message, styled by its captured tone.
-    Log(ActivityTone),
     /// Vertical spacer (empty line).
     Spacer,
 }
 
-/// A single rendered line: a sequence of `(text, role)` segments. Most lines
-/// are a single segment; an activity row pairs its timestamp with its message.
+/// A single header line: a sequence of `(text, role)` segments.
 type ScreenLine = Vec<(String, Role)>;
+
+/// Where the log view sits, in wrapped rows counted up from the newest line, so
+/// a line arriving at the bottom does not move a view that is scrolled back
+/// unless the view is told how many rows arrived.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct LogScroll {
+    /// Rows between the bottom of the view and the newest row. 0 follows.
+    offset: usize,
+    /// Lines that arrived below while scrolled back, for the "new lines" note.
+    unseen: usize,
+}
+
+impl LogScroll {
+    fn following(&self) -> bool {
+        self.offset == 0
+    }
+
+    /// Lines arrived. Following, the view moves with them; scrolled back, it
+    /// holds still by moving its offset up past the rows they took, and counts
+    /// them.
+    fn lines_arrived(&mut self, lines: usize, rows: usize) {
+        if !self.following() {
+            self.offset += rows;
+            self.unseen += lines;
+        }
+    }
+
+    fn page_up(&mut self, viewport: usize, total: usize) {
+        self.offset = (self.offset + page(viewport)).min(max_offset(viewport, total));
+    }
+
+    fn page_down(&mut self, viewport: usize) {
+        self.offset = self.offset.saturating_sub(page(viewport));
+        if self.following() {
+            self.unseen = 0;
+        }
+    }
+
+    fn top(&mut self, viewport: usize, total: usize) {
+        self.offset = max_offset(viewport, total);
+    }
+
+    fn bottom(&mut self) {
+        self.offset = 0;
+        self.unseen = 0;
+    }
+
+    /// Keep the offset inside what there is to show (lines dropped off the top
+    /// of the buffer, a resize). Returns the first row of the window.
+    fn clamp(&mut self, viewport: usize, total: usize) -> usize {
+        self.offset = self.offset.min(max_offset(viewport, total));
+        if self.following() {
+            self.unseen = 0;
+        }
+        total.saturating_sub(viewport).saturating_sub(self.offset)
+    }
+}
+
+/// One page is the viewport less a row of overlap, so a reader keeps their place.
+fn page(viewport: usize) -> usize {
+    viewport.saturating_sub(1).max(1)
+}
+
+fn max_offset(viewport: usize, total: usize) -> usize {
+    total.saturating_sub(viewport)
+}
+
+/// What a key does on this screen: leave it, scroll the log, or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenKey {
+    Exit(ExitKind),
+    Scroll(Action),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitKind {
+    ReturnToTui,
+    QuitProcess,
+}
 
 /// The interactive server status screen. Owns the terminal raw/alt-screen
 /// lifecycle for as long as it lives and restores everything in `Drop`.
 pub struct ServerStatusScreen {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     theme: Theme,
-    /// Every bound URL (loopback plus the Tailscale address in LOCAL MODE, or all
-    /// the FULL WEB MODE listeners). All are shown so the user can pick one.
+    bindings: RuntimeBindings,
+    /// Every bound URL, shown in the header so the user can pick one.
     urls: Vec<String>,
-    /// Operator-facing safety note, or None when the server is loopback-only.
+    /// Operator-facing reachability note, or None when the server is
+    /// loopback-only.
     safety_note: Option<String>,
     started: Instant,
-    /// Uptime second most recently drawn, so [`tick`] redraws only when the
-    /// visible value actually changes (wall-clock, not per engine-loop tick).
+    /// Uptime second most recently drawn, so [`Self::tick`] redraws only when
+    /// the visible value actually changes (wall-clock, not per engine-loop tick).
     last_drawn_secs: u64,
-    /// The shared activity buffer fed by the web console. Snapshotted each draw.
+    /// The shared line buffer fed by the web console.
     activity: ActivityRing,
-    /// Activity generation most recently drawn, so [`tick`] redraws when a new
-    /// event arrives (not only when the uptime second advances).
-    last_drawn_generation: u64,
+    /// The lines as of the last read, and the generation they were read at, so
+    /// a redraw for the uptime alone does not copy the buffer.
+    lines: Vec<LogLine>,
+    generation: u64,
+    connections: usize,
+    scroll: LogScroll,
+    /// The log pane's inner width and height at the last draw, for measuring
+    /// arriving lines and sizing a page.
+    log_width: usize,
+    log_rows: usize,
+    /// Set when the view changed (a scroll, a resize) so the next tick redraws.
+    dirty: bool,
     /// Shutdown-in-progress status (e.g. "Stopping 2 agents..."), shown on its
-    /// own muted line under the exit hints once teardown starts. `None` before
-    /// then, so the footer renders exactly as it does today.
+    /// own muted line under the exit hints once teardown starts.
     shutdown_message: Option<String>,
 }
 
 impl ServerStatusScreen {
-    /// Enter the alternate screen + raw mode + hide the cursor, load the theme,
-    /// and draw the first frame. The caller (binary) falls back to a plain
-    /// println if this returns `Err`: the server must still run even if the
-    /// status screen cannot be set up.
+    /// Enter the alternate screen + raw mode + hide the cursor, load the theme
+    /// and the key bindings, and draw the first frame. The caller (binary) falls
+    /// back to a plain line if this returns `Err`: the server must still run
+    /// even if the status screen cannot be set up.
     pub fn new(
         urls: &[String],
         safety_note: Option<String>,
         theme_name: &str,
         paths: &DuxPaths,
+        keys: &KeysConfig,
         activity: ActivityRing,
     ) -> Result<Self> {
         // The status screen has no status line and the TUI already surfaces the
@@ -118,51 +215,51 @@ impl ServerStatusScreen {
         let (theme, _warning) = crate::theme::load_or_fallback(theme_name, paths);
 
         // `Drop` only runs once `Self` is constructed, so a setup step that
-        // fails after raw mode is enabled must undo it by hand, or the caller's
-        // fallback println path inherits a raw-mode terminal. `enter_terminal`
+        // fails after raw mode is enabled must undo it by hand. `enter_terminal`
         // does that cleanup on error.
         let terminal = enter_terminal()?;
 
-        let started = Instant::now();
         let mut screen = Self {
             terminal,
             theme,
+            bindings: RuntimeBindings::from_keys_config(keys),
             urls: urls.to_vec(),
             safety_note,
-            started,
-            // Force the first `tick` redraw by seeding an impossible "last
-            // drawn" value; the initial frame is drawn explicitly below.
-            last_drawn_secs: u64::MAX,
+            started: Instant::now(),
+            last_drawn_secs: 0,
             activity,
-            last_drawn_generation: 0,
+            lines: Vec::new(),
+            generation: 0,
+            connections: 0,
+            scroll: LogScroll::default(),
+            log_width: 0,
+            log_rows: 0,
+            dirty: false,
             shutdown_message: None,
         };
-        let snapshot = screen.activity.snapshot(dux_core::activity::ACTIVITY_CAP);
-        screen.last_drawn_generation = snapshot.generation;
-        screen.draw(0, &snapshot)?;
-        screen.last_drawn_secs = 0;
+        screen.refresh_lines();
+        screen.draw(0)?;
         Ok(screen)
     }
 
-    /// Non-blocking poll: drain pending input, act on exit keys, and redraw on
-    /// resize or when the displayed uptime second advances. Returns the action
-    /// the binary should take. Rendering errors are swallowed: a failed redraw
-    /// must not crash the server or strand the user; the next tick retries.
+    /// Non-blocking poll: drain pending input, act on exit and scroll keys, and
+    /// redraw when something visible changed. Returns the action the binary
+    /// should take. Rendering errors are swallowed: a failed redraw must not
+    /// crash the server or strand the user; the next tick retries.
     pub fn tick(&mut self) -> ServerScreenTick {
-        // Drain every queued event without blocking so a burst of input (or a
-        // resize) is handled in one tick.
         while poll_event(Duration::ZERO).unwrap_or(false) {
             match read_event() {
-                Ok(Event::Key(key)) => {
-                    if let Some(action) = action_for_key(key) {
-                        return action;
+                Ok(Event::Key(key)) => match screen_key(key, &self.bindings) {
+                    Some(ScreenKey::Exit(ExitKind::ReturnToTui)) => {
+                        return ServerScreenTick::ReturnToTui;
                     }
-                }
-                Ok(Event::Resize(_, _)) => {
-                    // Force a redraw on the next step below regardless of the
-                    // uptime second by invalidating the cached value.
-                    self.last_drawn_secs = u64::MAX;
-                }
+                    Some(ScreenKey::Exit(ExitKind::QuitProcess)) => {
+                        return ServerScreenTick::QuitProcess;
+                    }
+                    Some(ScreenKey::Scroll(action)) => self.scroll_by(action),
+                    None => {}
+                },
+                Ok(Event::Resize(_, _)) => self.dirty = true,
                 Ok(_) => {}
                 // A read error shouldn't kill the server; ignore and continue.
                 Err(_) => break,
@@ -170,68 +267,90 @@ impl ServerStatusScreen {
         }
 
         let secs = self.started.elapsed().as_secs();
-        // Cheap pre-check first: `generation()` is a single lock-free atomic load.
-        // Only take the (locking, cloning) snapshot when a redraw is actually due,
-        // so an idle screen does not clone the ring on every ~50ms tick.
-        let generation = self.activity.generation();
-        if !needs_redraw(
-            secs,
-            self.last_drawn_secs,
-            generation,
-            self.last_drawn_generation,
-        ) {
+        // Cheap pre-check first: `generation()` is a single atomic load. Only
+        // copy the buffer when a line actually arrived.
+        if self.activity.generation() != self.generation {
+            self.refresh_lines();
+            self.dirty = true;
+        }
+        if self.activity.connections() != self.connections {
+            self.dirty = true;
+        }
+        if !self.dirty && secs == self.last_drawn_secs {
             return ServerScreenTick::Continue;
         }
-        let snapshot = self.activity.snapshot(dux_core::activity::ACTIVITY_CAP);
-        // Only advance the cached state on a successful draw; a failed render is
-        // then retried on the next tick instead of being silently skipped.
-        if self.draw(secs, &snapshot).is_ok() {
+        // Only clear the dirty state on a successful draw; a failed render is
+        // retried on the next tick instead of being silently skipped.
+        if self.draw(secs).is_ok() {
             self.last_drawn_secs = secs;
-            self.last_drawn_generation = snapshot.generation;
+            self.dirty = false;
         }
         ServerScreenTick::Continue
     }
 
-    /// Show a persistent shutdown status line under the exit hints, styled
-    /// muted like the uptime line, and redraw immediately. Rendered through
-    /// ratatui, never a raw `eprintln!`, which while the alt screen is active
-    /// lands wherever the cursor happens to sit.
-    /// Render errors are swallowed like `tick`'s redraw: the process is about
-    /// to exit either way and a failed final frame must not crash teardown.
+    /// Show a persistent shutdown status line under the exit hints and redraw
+    /// immediately, picking up the matching log line the console just recorded.
+    /// Render errors are swallowed: the process is about to exit either way.
     pub fn show_shutdown_message(&mut self, message: impl Into<String>) {
         self.shutdown_message = Some(message.into());
+        self.refresh_lines();
         let secs = self.started.elapsed().as_secs();
-        let snapshot = self.activity.snapshot(dux_core::activity::ACTIVITY_CAP);
-        let _ = self.draw(secs, &snapshot);
+        let _ = self.draw(secs);
     }
 
-    /// Draw one frame: the header (logo + status), the Activity panel, and the
-    /// footer hints. `snapshot` is taken by the caller so `tick` can compare the
-    /// generation without snapshotting twice.
-    fn draw(&mut self, uptime_secs: u64, snapshot: &ActivitySnapshot) -> Result<()> {
+    /// Read the buffer again and tell the scroll position how much arrived, so
+    /// a view that is scrolled back holds still.
+    fn refresh_lines(&mut self) {
+        let snapshot = self.activity.snapshot();
+        let arrived = usize::try_from(snapshot.generation.saturating_sub(self.generation))
+            .unwrap_or(usize::MAX)
+            .min(snapshot.lines.len());
+        if arrived > 0 && self.log_width > 0 {
+            let fresh = &snapshot.lines[snapshot.lines.len() - arrived..];
+            let rows = wrapped_log_rows(fresh, &self.theme, self.log_width).len();
+            self.scroll.lines_arrived(arrived, rows);
+        }
+        self.generation = snapshot.generation;
+        self.connections = snapshot.connections;
+        self.lines = snapshot.lines;
+    }
+
+    fn scroll_by(&mut self, action: Action) {
+        let total = wrapped_log_rows(&self.lines, &self.theme, self.log_width.max(1)).len();
+        let viewport = self.log_rows.max(1);
+        match action {
+            Action::ScrollPageUp => self.scroll.page_up(viewport, total),
+            Action::ScrollPageDown => self.scroll.page_down(viewport),
+            Action::ScrollToTop => self.scroll.top(viewport, total),
+            Action::ScrollToBottom => self.scroll.bottom(),
+            _ => return,
+        }
+        self.dirty = true;
+    }
+
+    /// Draw one frame: the header (logo + status), the log panel, and the
+    /// footer hints.
+    fn draw(&mut self, uptime_secs: u64) -> Result<()> {
         let theme = &self.theme;
         let header = header_lines(&self.urls, self.safety_note.as_deref(), uptime_secs);
         let shutdown_message = self.shutdown_message.as_deref();
+        let bindings = &self.bindings;
+        let lines = &self.lines;
+        let connections = self.connections;
+        let scroll = &mut self.scroll;
+        let mut measured = (self.log_width, self.log_rows);
         self.terminal.draw(|frame| {
             let area = frame.area();
-            // Pre-fill the whole frame with the theme background so the alt
-            // screen doesn't inherit the user's terminal default.
             frame.render_widget(Clear, area);
             let bg = Block::default().style(Style::default().bg(theme.app_bg));
             frame.render_widget(bg, area);
 
-            // Inset the whole screen so nothing is glued to the terminal edges:
-            // the logo gets top breathing room and the Activity panel's borders
-            // pull in from the left/right/bottom edges.
+            // Inset the whole screen so nothing is glued to the terminal edges.
             const V_MARGIN: u16 = 1;
             const H_MARGIN: u16 = 2;
 
-            // Vertical split: header (its content height), Activity (fills the
-            // rest, min 3 rows for a border + one line), footer (its rows + a
-            // one-row gap above for breathing room). Wrapping is measured against
-            // the inset width so the (wrapping) security warning isn't miscounted.
             let inner_width = area.width.saturating_sub(2 * H_MARGIN).max(1);
-            let footer = footer_lines(theme, shutdown_message, inner_width);
+            let footer = footer_lines(theme, bindings, shutdown_message, inner_width);
             let header_rows: u16 = header
                 .iter()
                 .map(|segs| wrapped_row_count(segs, inner_width))
@@ -249,7 +368,7 @@ impl ServerStatusScreen {
                 .split(area);
 
             // ── Header (centered, no border) ────────────────────────────────
-            let header_text: Vec<Line> = header.iter().map(|s| line_for(s, theme)).collect();
+            let header_text: Vec<Line> = header.iter().map(|s| header_line(s, theme)).collect();
             let header_para = Paragraph::new(header_text)
                 .alignment(Alignment::Center)
                 // chip-free: the serving screen's header is constant words and URLs.
@@ -257,36 +376,50 @@ impl ServerStatusScreen {
                 .style(Style::default().bg(theme.app_bg));
             frame.render_widget(header_para, chunks[0]);
 
-            // ── Activity panel (rounded, themed) ────────────────────────────
-            let count = snapshot.connections;
-            let count_label = format!(" {count} connected ");
-            let block = Block::default()
+            // ── Log panel (rounded, themed) ─────────────────────────────────
+            let mut block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.overlay_border))
                 .style(Style::default().bg(theme.app_bg))
                 .padding(Padding::horizontal(1))
                 .title(Line::from(Span::styled(
-                    " Activity ",
+                    " Log ",
                     Style::default()
                         .fg(theme.title_focused)
                         .add_modifier(Modifier::BOLD),
                 )))
                 .title(
                     Line::from(Span::styled(
-                        count_label,
+                        format!(" {connections} connected "),
                         Style::default().fg(theme.provider_label_fg),
                     ))
                     .right_aligned(),
                 );
-            // Visible rows = inner height (panel height minus the two borders).
-            let inner_rows = chunks[1].height.saturating_sub(2) as usize;
-            let log = activity_lines(&snapshot.events, inner_rows);
-            let log_text: Vec<Line> = log.iter().map(|s| line_for(s, theme)).collect();
-            let log_para = Paragraph::new(log_text)
-                .alignment(Alignment::Left)
-                .block(block);
-            frame.render_widget(log_para, chunks[1]);
+            let end_label = bindings
+                .labels_reaching(Action::ScrollToBottom, server_screen_reaches)
+                .into_iter()
+                .next();
+            if let Some(note) = scrolled_back_note(scroll, end_label.as_deref()) {
+                block = block.title_bottom(
+                    Line::from(Span::styled(
+                        format!(" {note} "),
+                        Style::default().fg(theme.title_focused),
+                    ))
+                    .right_aligned(),
+                );
+            }
+            let content = block.inner(chunks[1]);
+            let width = usize::from(content.width).max(1);
+            let viewport = usize::from(content.height);
+            let rows = wrapped_log_rows(lines, theme, width);
+            let total = rows.len();
+            let start = scroll.clamp(viewport, total);
+            let end = (start + viewport).min(total);
+            let visible: Vec<Line> = rows[start..end].to_vec();
+            frame.render_widget(Paragraph::new(visible).block(block), chunks[1]);
+            render_scroll_indicator(frame, chunks[1], content, start, viewport, total, theme);
+            measured = (width, viewport);
 
             // ── Footer hints (centered) ─────────────────────────────────────
             let footer_para = Paragraph::new(footer)
@@ -294,26 +427,33 @@ impl ServerStatusScreen {
                 .style(Style::default().bg(theme.app_bg));
             frame.render_widget(footer_para, chunks[2]);
         })?;
+        (self.log_width, self.log_rows) = measured;
         Ok(())
     }
 }
 
 impl Drop for ServerStatusScreen {
-    /// Restore the terminal unconditionally and best-effort: leave raw mode,
-    /// exit the alt screen, and show the cursor again. Errors are ignored
+    /// Restore the terminal unconditionally and best-effort. Errors are ignored
     /// because `Drop` cannot return them and a failed restore must not panic
     /// during unwinding.
     fn drop(&mut self) {
-        let _ = execute!(stdout(), terminal::LeaveAlternateScreen, cursor::Show);
-        let _ = terminal::disable_raw_mode();
-        let _ = stdout().flush();
+        restore_terminal();
     }
+}
+
+/// Give the terminal back to the shell: leave the alternate screen, show the
+/// cursor, leave raw mode. Best-effort and idempotent, so it is safe to call
+/// from the status screen's `Drop` and again from a forced exit that runs no
+/// destructor.
+pub fn restore_terminal() {
+    let _ = execute!(stdout(), terminal::LeaveAlternateScreen, cursor::Show);
+    let _ = terminal::disable_raw_mode();
+    let _ = stdout().flush();
 }
 
 /// Enable raw mode, enter the alternate screen, hide the cursor, and build the
 /// ratatui terminal. On any failure after raw mode is enabled, undo the partial
-/// setup before returning the error so the caller never inherits a raw-mode
-/// terminal (Drop can't help yet, since `Self` isn't constructed).
+/// setup before returning the error.
 fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     terminal::enable_raw_mode()?;
     if let Err(err) = execute!(stdout(), terminal::EnterAlternateScreen, cursor::Hide) {
@@ -330,16 +470,12 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     }
 }
 
-/// Rendered display width of a content line in columns, measured in display
-/// columns so wide and multi-byte text measures correctly.
+/// Rendered display width of a header line in columns.
 fn line_render_width(segments: &ScreenLine) -> usize {
     segments.iter().map(|(text, _)| display_width(text)).sum()
 }
 
-/// Estimate how many rows a content line occupies once wrapped to `inner_width`,
-/// so the box height accounts for the long warning line instead of clipping it.
-/// Uses rendered width (badges included) so multi-byte text and keycaps wrap
-/// correctly, and counts at least one row even for the empty spacer lines.
+/// Estimate how many rows a header line occupies once wrapped to `inner_width`.
 fn wrapped_row_count(segments: &ScreenLine, inner_width: u16) -> u16 {
     let width = inner_width.max(1) as usize;
     let chars = line_render_width(segments);
@@ -349,35 +485,64 @@ fn wrapped_row_count(segments: &ScreenLine, inner_width: u16) -> u16 {
     (chars.div_ceil(width)) as u16
 }
 
-/// Map a key event to a screen action, or `None` to keep serving.
-///
-/// These keys are not configurable bindings: the TUI keybinding system is not
-/// running in server mode, so naming them literally here and in the on-screen
-/// hints is correct. `q`/`Q` and `Esc` return to the TUI, `Ctrl-c` quits the
-/// process, everything else is ignored.
-fn action_for_key(key: KeyEvent) -> Option<ServerScreenTick> {
-    // Ignore key-release events so one press is one action on terminals that
-    // report them (kitty protocol). Repeats are not filtered: crossterm emits
-    // them only under enhancement flags this screen never enables.
+/// Map a key to what it does here. The return and quit keys are not bindings:
+/// the TUI keybinding system is not running in server mode, so `q`/`Q`/`Esc`
+/// return to the TUI and `Ctrl-c` quits, answered before the bindings are
+/// consulted. Everything else goes to the bindings, where the scroll actions
+/// live.
+fn screen_key(key: KeyEvent, bindings: &RuntimeBindings) -> Option<ScreenKey> {
+    if let Some(exit) = action_for_key(key) {
+        return Some(ScreenKey::Exit(exit));
+    }
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    match bindings.lookup(&key, BindingScope::ServerScreen) {
+        Some(
+            action @ (Action::ScrollPageUp
+            | Action::ScrollPageDown
+            | Action::ScrollToTop
+            | Action::ScrollToBottom),
+        ) => Some(ScreenKey::Scroll(action)),
+        _ => None,
+    }
+}
+
+/// The screen's own exit keys. Release events are ignored so one press is one
+/// action on terminals that report them (kitty protocol).
+fn action_for_key(key: KeyEvent) -> Option<ExitKind> {
     if key.kind == KeyEventKind::Release {
         return None;
     }
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(ServerScreenTick::QuitProcess)
+            Some(ExitKind::QuitProcess)
         }
-        KeyCode::Char('q') | KeyCode::Char('Q') => Some(ServerScreenTick::ReturnToTui),
-        KeyCode::Esc => Some(ServerScreenTick::ReturnToTui),
+        KeyCode::Char('q') | KeyCode::Char('Q') => Some(ExitKind::ReturnToTui),
+        KeyCode::Esc => Some(ExitKind::ReturnToTui),
         _ => None,
     }
 }
 
-/// Whether the status screen needs a redraw this tick: either the displayed
-/// uptime second advanced (wall-clock cadence) or a new activity event arrived
-/// (the generation changed). Pure so the redraw cadence is unit-testable without
-/// a terminal.
-fn needs_redraw(secs: u64, last_secs: u64, generation: u64, last_generation: u64) -> bool {
-    secs != last_secs || generation != last_generation
+/// The note on the log panel's bottom border while it is scrolled back: how
+/// many lines arrived below, and which key follows the log again. `None` while
+/// following, when there is nothing to say.
+fn scrolled_back_note(scroll: &LogScroll, end_label: Option<&str>) -> Option<String> {
+    if scroll.following() {
+        return None;
+    }
+    let head = if scroll.unseen > 0 {
+        format!(
+            "{} below",
+            dux_core::text::count_of(scroll.unseen, "new line")
+        )
+    } else {
+        "Scrolled back".to_string()
+    };
+    Some(match end_label {
+        Some(label) => format!("{head} · {label} for the latest"),
+        None => head,
+    })
 }
 
 /// Format an uptime as `M:SS` or `H:MM:SS` (e.g. `0:05`, `1:00:05`).
@@ -392,13 +557,7 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
-/// Build the header content (logo, heading, URLs, uptime, security line) as a
-/// pure, terminal-free, theme-free description: each line is a list of
-/// `(text, Role)` segments. The exit hints live in [`footer_lines`]; the
-/// activity log in [`activity_lines`].
-///
-/// When `safety_note` is Some, the server is reachable beyond loopback and the
-/// note is shown as a loud warning row. None means loopback-only (no note needed).
+/// Build the header content (logo, heading, URLs, uptime, reachability line).
 fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) -> Vec<ScreenLine> {
     let mut lines: Vec<ScreenLine> = Vec::new();
 
@@ -408,7 +567,6 @@ fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) ->
 
     lines.push(vec![(String::new(), Role::Spacer)]);
     lines.push(vec![("dux server running".to_string(), Role::Heading)]);
-    // One URL line per bound address (loopback + Tailscale in LOCAL MODE).
     for url in urls {
         lines.push(vec![(url.to_string(), Role::Url)]);
     }
@@ -425,18 +583,37 @@ fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) ->
     lines
 }
 
-/// The footer's rows, each fitted to `width` columns: the two exit hints
-/// (`<q>/<Esc>` return, `<Ctrl-c>` quit) through the app's one hint line, plus
-/// a muted shutdown status row once teardown has started.
+/// The footer's rows, each fitted to `width` columns: the log's scroll keys
+/// (read from the bindings, and only those that reach this screen), the two
+/// exit hints, and a muted shutdown status row once teardown has started.
 ///
-/// None of these keys is a binding: the TUI keybinding system is not running
-/// while the server screen is up, and [`action_for_key`] answers them itself,
-/// so they are named as they are.
-fn footer_lines(theme: &Theme, shutdown_message: Option<&str>, width: u16) -> Vec<Line<'static>> {
+/// The exit keys are not bindings: [`action_for_key`] answers them itself, so
+/// they are named as they are.
+fn footer_lines(
+    theme: &Theme,
+    bindings: &RuntimeBindings,
+    shutdown_message: Option<&str>,
+    width: u16,
+) -> Vec<Line<'static>> {
     let row = |hints: &[Hint]| {
         Line::from(fitted_hint_spans(theme, HintTone::Modal, hints, usize::from(width)).spans)
     };
+    let first = |action| {
+        bindings
+            .labels_reaching(action, server_screen_reaches)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    };
     let mut lines = vec![
+        row(&[
+            Hint::keys(
+                [first(Action::ScrollPageUp), first(Action::ScrollPageDown)],
+                "scroll the log",
+            ),
+            Hint::key(first(Action::ScrollToTop), "oldest"),
+            Hint::key(first(Action::ScrollToBottom), "latest"),
+        ]),
         row(&[Hint::fixed_keys(["q", "Esc"], "stop the server and return to dux").pinned()]),
         row(&[Hint::fixed("Ctrl-c", "quit dux entirely").pinned()]),
     ];
@@ -449,59 +626,21 @@ fn footer_lines(theme: &Theme, shutdown_message: Option<&str>, width: u16) -> Ve
     lines
 }
 
-/// Build the activity log rows: the last `max_rows` events, oldest first, each a
-/// muted `HH:MM:SS` timestamp segment followed by the toned message segment.
-fn activity_lines(events: &[ActivityEvent], max_rows: usize) -> Vec<ScreenLine> {
-    let start = events.len().saturating_sub(max_rows);
-    events[start..]
-        .iter()
-        .map(|e| {
-            vec![
-                (format!("{}  ", e.hms), Role::Muted),
-                (e.message.clone(), Role::Log(e.tone)),
-            ]
-        })
-        .collect()
-}
-
-/// Map a content line's `(text, Role)` segments onto themed ratatui spans.
-/// This is the only place that touches the [`Theme`]; the content builder above
-/// stays theme-free for testing.
-fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
+/// Map a header line's `(text, Role)` segments onto themed ratatui spans.
+fn header_line<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
     let mut spans: Vec<Span<'a>> = Vec::new();
     for (text, role) in segments {
         let style = match role {
-            // Wordmark: accent (the focused-title color), bold.
-            Role::Logo => Style::default()
+            Role::Logo | Role::Url => Style::default()
                 .fg(theme.title_focused)
                 .add_modifier(Modifier::BOLD),
-            // Heading: primary body text, bold.
             Role::Heading => Style::default()
                 .fg(theme.text_fg)
                 .add_modifier(Modifier::BOLD),
-            // URL: accent emphasis, bold.
-            Role::Url => Style::default()
-                .fg(theme.title_focused)
-                .add_modifier(Modifier::BOLD),
-            // Uptime: muted secondary text.
             Role::Muted => Style::default().fg(theme.provider_label_fg),
-            // Security warning: the dedicated warning color, bold.
             Role::Warning => Style::default()
                 .fg(theme.warning_fg)
                 .add_modifier(Modifier::BOLD),
-            // Activity-log message, colored by its captured tone through the
-            // semantic theme fields. `status_info_fg` is deliberately not used
-            // for Ok: it equals `provider_label_fg` in the default theme, which
-            // would make Ok and Info indistinguishable.
-            Role::Log(tone) => {
-                let fg = match tone {
-                    ActivityTone::Info => theme.provider_label_fg,
-                    ActivityTone::Ok => theme.diff_add,
-                    ActivityTone::Warn => theme.warning_fg,
-                    ActivityTone::Error => theme.status_error_fg,
-                };
-                Style::default().fg(fg)
-            }
             Role::Spacer => Style::default(),
         };
         spans.push(Span::styled(text.as_str(), style));
@@ -509,141 +648,324 @@ fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
     Line::from(spans)
 }
 
+/// The theme color a tone reads in. `status_info_fg` is deliberately not used
+/// for Ok: it equals `provider_label_fg` in the default theme, which would make
+/// Ok and a timestamp indistinguishable.
+fn tone_color(theme: &Theme, tone: LogTone) -> ratatui::style::Color {
+    match tone {
+        LogTone::Info => theme.title_focused,
+        LogTone::Ok => theme.diff_add,
+        LogTone::Warn => theme.warning_fg,
+        LogTone::Error => theme.status_error_fg,
+    }
+}
+
+/// Draw one server log line from its segments, with every segment's text
+/// exactly as `dux server` prints it (its rich spelling: the tone glyph, never
+/// color alone) and each role styled through the theme.
+fn log_line(line: &LogLine, theme: &Theme) -> Line<'static> {
+    let spans: Vec<Span<'static>> = line
+        .segments
+        .iter()
+        .map(|segment| {
+            let style = match segment.role {
+                LogRole::Timestamp | LogRole::Version => {
+                    Style::default().fg(theme.provider_label_fg)
+                }
+                LogRole::Marker(tone) => Style::default().fg(tone_color(theme, tone)),
+                LogRole::Message(LogTone::Warn | LogTone::Error) => {
+                    let tone = match segment.role {
+                        LogRole::Message(tone) => tone,
+                        _ => LogTone::Info,
+                    };
+                    Style::default().fg(tone_color(theme, tone))
+                }
+                LogRole::Message(_) | LogRole::Plain => Style::default().fg(theme.text_fg),
+                LogRole::Name => Style::default()
+                    .fg(theme.title_focused)
+                    .add_modifier(Modifier::BOLD),
+                LogRole::Label | LogRole::Method => Style::default()
+                    .fg(theme.text_fg)
+                    .add_modifier(Modifier::BOLD),
+                LogRole::Url => Style::default().fg(theme.title_focused),
+                LogRole::Status(code) => Style::default().fg(match code {
+                    200..=299 => theme.diff_add,
+                    300..=399 => theme.title_focused,
+                    400..=499 => theme.warning_fg,
+                    500..=599 => theme.status_error_fg,
+                    _ => theme.text_fg,
+                }),
+            };
+            Span::styled(segment.text.clone(), style)
+        })
+        .collect();
+    Line::from(spans)
+}
+
+/// Every log line drawn and wrapped to `width`, one entry per screen row, so
+/// scrolling counts real rows and a long line is shown whole.
+fn wrapped_log_rows(lines: &[LogLine], theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    let drawn: Vec<Line<'static>> = lines.iter().map(|line| log_line(line, theme)).collect();
+    wrap_styled_lines(&drawn, width)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // No terminal-touching tests live here: raw mode / alt screen in CI is a
-    // non-starter (there is no TTY). The terminal lifecycle is the thin shell
-    // in `new`/`draw`/`Drop`; only the pure helpers (`action_for_key`,
-    // `header_lines`, `format_uptime`) are unit-tested below.
+    use crate::keybindings::BINDING_DEFS;
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
     }
 
+    fn bindings() -> RuntimeBindings {
+        RuntimeBindings::new(
+            |action| {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            },
+            true,
+        )
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
     #[test]
     fn q_returns_to_tui() {
-        assert!(matches!(
+        assert_eq!(
             action_for_key(key(KeyCode::Char('q'), KeyModifiers::NONE)),
-            Some(ServerScreenTick::ReturnToTui)
-        ));
+            Some(ExitKind::ReturnToTui)
+        );
     }
 
     #[test]
     fn uppercase_q_returns_to_tui() {
-        // Shift-q arrives as Char('Q'); accept it too so a capslocked user
-        // isn't stuck.
-        assert!(matches!(
+        assert_eq!(
             action_for_key(key(KeyCode::Char('Q'), KeyModifiers::SHIFT)),
-            Some(ServerScreenTick::ReturnToTui)
-        ));
+            Some(ExitKind::ReturnToTui)
+        );
     }
 
     #[test]
     fn esc_returns_to_tui() {
-        assert!(matches!(
+        assert_eq!(
             action_for_key(key(KeyCode::Esc, KeyModifiers::NONE)),
-            Some(ServerScreenTick::ReturnToTui)
-        ));
+            Some(ExitKind::ReturnToTui)
+        );
     }
 
     #[test]
     fn ctrl_c_quits_process() {
-        assert!(matches!(
+        assert_eq!(
             action_for_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(ServerScreenTick::QuitProcess)
-        ));
+            Some(ExitKind::QuitProcess)
+        );
     }
 
     #[test]
     fn plain_c_is_ignored() {
-        // Only Ctrl-c quits; a bare 'c' must not.
         assert!(action_for_key(key(KeyCode::Char('c'), KeyModifiers::NONE)).is_none());
     }
 
     #[test]
-    fn other_keys_are_ignored() {
-        assert!(action_for_key(key(KeyCode::Char('x'), KeyModifiers::NONE)).is_none());
-        assert!(action_for_key(key(KeyCode::Enter, KeyModifiers::NONE)).is_none());
-        assert!(action_for_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL)).is_none());
-    }
-
-    #[test]
     fn key_release_is_ignored() {
-        // A release event for an exit key must not double-fire the action.
         let mut ev = key(KeyCode::Char('q'), KeyModifiers::NONE);
         ev.kind = KeyEventKind::Release;
-        assert!(action_for_key(ev).is_none());
+        assert!(screen_key(ev, &bindings()).is_none());
     }
 
     #[test]
-    fn uptime_formats_minutes_and_seconds() {
-        assert_eq!(format_uptime(0), "0:00");
-        assert_eq!(format_uptime(5), "0:05");
-        assert_eq!(format_uptime(42), "0:42");
-        assert_eq!(format_uptime(60), "1:00");
-        assert_eq!(format_uptime(125), "2:05");
+    fn the_scroll_keys_come_from_the_bindings() {
+        let b = bindings();
+        let press = |code| screen_key(key(code, KeyModifiers::NONE), &b);
+        assert_eq!(
+            press(KeyCode::PageUp),
+            Some(ScreenKey::Scroll(Action::ScrollPageUp))
+        );
+        assert_eq!(
+            press(KeyCode::PageDown),
+            Some(ScreenKey::Scroll(Action::ScrollPageDown))
+        );
+        assert_eq!(
+            press(KeyCode::Home),
+            Some(ScreenKey::Scroll(Action::ScrollToTop))
+        );
+        assert_eq!(
+            press(KeyCode::End),
+            Some(ScreenKey::Scroll(Action::ScrollToBottom))
+        );
+        assert_eq!(press(KeyCode::Char('x')), None);
     }
 
+    /// `q` is bound to "jump to latest" elsewhere, but here it is the way back to
+    /// dux, and the way back always wins.
     #[test]
-    fn uptime_formats_hours() {
-        assert_eq!(format_uptime(3600), "1:00:00");
-        assert_eq!(format_uptime(3605), "1:00:05");
-        assert_eq!(format_uptime(3661), "1:01:01");
-    }
-
-    #[test]
-    fn wrapped_row_count_handles_empty_short_and_long_lines() {
-        // Empty spacer still occupies one row.
+    fn q_leaves_the_screen_even_though_a_scroll_action_is_bound_to_it() {
         assert_eq!(
-            wrapped_row_count(&vec![(String::new(), Role::Spacer)], 10),
-            1
-        );
-        // A line that fits is one row.
-        assert_eq!(
-            wrapped_row_count(&vec![("hello".to_string(), Role::Heading)], 10),
-            1
-        );
-        // Exactly the width is still one row; one over needs two.
-        assert_eq!(
-            wrapped_row_count(&vec![("0123456789".to_string(), Role::Muted)], 10),
-            1
-        );
-        assert_eq!(
-            wrapped_row_count(&vec![("01234567890".to_string(), Role::Muted)], 10),
-            2
-        );
-        // Segments add up: `aaaaa` (5) + `bbbbbb` (6) = 11 → two rows at width 10.
-        assert_eq!(
-            wrapped_row_count(
-                &vec![
-                    ("aaaaa".to_string(), Role::Muted),
-                    ("bbbbbb".to_string(), Role::Muted),
-                ],
-                10
-            ),
-            2
+            screen_key(key(KeyCode::Char('q'), KeyModifiers::NONE), &bindings()),
+            Some(ScreenKey::Exit(ExitKind::ReturnToTui))
         );
     }
 
     #[test]
-    fn line_render_width_counts_display_columns() {
-        // `12:00:00  ` (10) + a wide glyph (2) + `ok` (2) = 14.
-        let line = vec![
-            ("12:00:00  ".to_string(), Role::Muted),
-            ("\u{5e45}ok".to_string(), Role::Log(ActivityTone::Info)),
-        ];
-        assert_eq!(line_render_width(&line), 14);
+    fn a_rebound_page_key_scrolls_here_too() {
+        let mut keys = KeysConfig::default();
+        keys.bindings
+            .insert("scroll_page_up".to_string(), vec!["ctrl-u".to_string()]);
+        let b = RuntimeBindings::from_keys_config(&keys);
+        assert_eq!(
+            screen_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL), &b),
+            Some(ScreenKey::Scroll(Action::ScrollPageUp))
+        );
+        assert_eq!(
+            screen_key(key(KeyCode::PageUp, KeyModifiers::NONE), &b),
+            None
+        );
     }
 
-    /// Wrap one URL in the `&[String]` shape `header_lines` expects.
+    // ── The scroll position ────────────────────────────────────────────────
+
+    #[test]
+    fn following_moves_with_new_lines() {
+        let mut scroll = LogScroll::default();
+        scroll.lines_arrived(3, 4);
+        assert!(scroll.following());
+        assert_eq!(scroll.clamp(10, 40), 30, "the window is the newest rows");
+    }
+
+    /// Scrolled back, a line arriving must not yank the view: the same rows stay
+    /// on screen, and the panel counts what arrived.
+    #[test]
+    fn scrolled_back_the_view_holds_still_and_counts_what_arrived() {
+        let mut scroll = LogScroll::default();
+        scroll.page_up(10, 40);
+        let before = scroll.clamp(10, 40);
+        assert_eq!(before, 21, "one page up, keeping a row of overlap");
+        // Two lines arrive, taking three rows.
+        scroll.lines_arrived(2, 3);
+        assert_eq!(scroll.clamp(10, 43), before, "the window did not move");
+        assert_eq!(scroll.unseen, 2);
+        assert_eq!(
+            scrolled_back_note(&scroll, Some("End")).as_deref(),
+            Some("2 new lines below · End for the latest")
+        );
+    }
+
+    #[test]
+    fn the_latest_key_follows_again_and_clears_the_count() {
+        let mut scroll = LogScroll::default();
+        scroll.page_up(10, 40);
+        scroll.lines_arrived(1, 1);
+        scroll.bottom();
+        assert!(scroll.following());
+        assert_eq!(scroll.unseen, 0);
+        assert_eq!(scrolled_back_note(&scroll, Some("End")), None);
+    }
+
+    #[test]
+    fn paging_down_to_the_bottom_follows_again() {
+        let mut scroll = LogScroll::default();
+        scroll.page_up(10, 40);
+        scroll.lines_arrived(1, 1);
+        scroll.page_down(10);
+        scroll.page_down(10);
+        assert!(scroll.following());
+        assert_eq!(scroll.unseen, 0);
+    }
+
+    #[test]
+    fn the_oldest_key_reaches_the_first_row_and_no_further() {
+        let mut scroll = LogScroll::default();
+        scroll.top(10, 40);
+        assert_eq!(scroll.clamp(10, 40), 0);
+        scroll.page_up(10, 40);
+        assert_eq!(scroll.clamp(10, 40), 0, "nothing above the oldest row");
+        assert_eq!(
+            scrolled_back_note(&scroll, Some("End")).as_deref(),
+            Some("Scrolled back · End for the latest")
+        );
+    }
+
+    #[test]
+    fn a_log_shorter_than_the_view_cannot_scroll() {
+        let mut scroll = LogScroll::default();
+        scroll.page_up(10, 4);
+        assert!(scroll.following());
+        assert_eq!(scroll.clamp(10, 4), 0);
+    }
+
+    // ── Drawing a log line ─────────────────────────────────────────────────
+
+    /// The viewer draws a line's text exactly as `dux server` prints it (its
+    /// rich spelling), and its tone reads in the glyph as well as the color.
+    #[test]
+    fn a_log_line_is_drawn_word_for_word_with_its_glyph() {
+        let theme = Theme::default_dark();
+        let line = LogLine::event("12:00:00", LogTone::Warn, "the Tailscale leg stopped");
+        let drawn = log_line(&line, &theme);
+        assert_eq!(line_text(&drawn), line.text());
+        let marker = drawn
+            .spans
+            .iter()
+            .find(|s| s.content == LogTone::Warn.glyph())
+            .expect("the warning glyph is drawn");
+        assert_eq!(marker.style.fg, Some(theme.warning_fg));
+        let stamp = &drawn.spans[0];
+        assert_eq!(stamp.content, "12:00:00");
+        assert_eq!(stamp.style.fg, Some(theme.provider_label_fg));
+    }
+
+    #[test]
+    fn an_access_line_colors_its_status_by_class_through_the_theme() {
+        let theme = Theme::default_dark();
+        for (code, color) in [
+            (200, theme.diff_add),
+            (304, theme.title_focused),
+            (404, theme.warning_fg),
+            (502, theme.status_error_fg),
+        ] {
+            let line = LogLine::access("12:00:00", "GET", "/x", code, 1);
+            let drawn = log_line(&line, &theme);
+            assert_eq!(line_text(&drawn), line.text());
+            let status = drawn
+                .spans
+                .iter()
+                .find(|s| s.content == code.to_string())
+                .unwrap();
+            assert_eq!(status.style.fg, Some(color));
+        }
+    }
+
+    /// A banner warning is longer than any terminal; the viewer wraps it rather
+    /// than cutting it off, so every word of it is on screen.
+    #[test]
+    fn a_long_line_wraps_instead_of_being_cut() {
+        let theme = Theme::default_dark();
+        let words = "word ".repeat(30);
+        let line = LogLine::event("12:00:00", LogTone::Warn, words.trim_end());
+        let rows = wrapped_log_rows(std::slice::from_ref(&line), &theme, 40);
+        assert!(rows.len() > 1);
+        let rejoined: String = rows.iter().map(line_text).collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            rejoined.split_whitespace().count(),
+            line.text().split_whitespace().count()
+        );
+    }
+
+    // ── Header and footer ──────────────────────────────────────────────────
+
     fn one(url: &str) -> Vec<String> {
         vec![url.to_string()]
     }
 
-    /// Collapse a `header_lines` result into the joined plain text of every
-    /// segment so content assertions don't care about segment boundaries.
     fn plain_text(lines: &[ScreenLine]) -> String {
         lines
             .iter()
@@ -658,27 +980,53 @@ mod tests {
     }
 
     #[test]
-    fn content_includes_url_and_heading_and_uptime() {
+    fn uptime_formats_minutes_and_seconds() {
+        assert_eq!(format_uptime(0), "0:00");
+        assert_eq!(format_uptime(5), "0:05");
+        assert_eq!(format_uptime(125), "2:05");
+    }
+
+    #[test]
+    fn uptime_formats_hours() {
+        assert_eq!(format_uptime(3600), "1:00:00");
+        assert_eq!(format_uptime(3661), "1:01:01");
+    }
+
+    #[test]
+    fn wrapped_row_count_handles_empty_short_and_long_lines() {
+        assert_eq!(
+            wrapped_row_count(&vec![(String::new(), Role::Spacer)], 10),
+            1
+        );
+        assert_eq!(
+            wrapped_row_count(&vec![("0123456789".to_string(), Role::Muted)], 10),
+            1
+        );
+        assert_eq!(
+            wrapped_row_count(&vec![("01234567890".to_string(), Role::Muted)], 10),
+            2
+        );
+    }
+
+    #[test]
+    fn content_includes_url_heading_uptime_and_wordmark() {
         let lines = header_lines(&one("http://127.0.0.1:8080"), None, 42);
         let text = plain_text(&lines);
         assert!(text.contains("dux server running"));
         assert!(text.contains("http://127.0.0.1:8080"));
         assert!(text.contains("up 0:42"));
+        assert_eq!(lines[0][0].1, Role::Logo);
+        assert_eq!(lines[0][0].0, ASCII_LOGO[0]);
+        assert!(!text.contains("return to dux"));
     }
 
     #[test]
     fn content_lists_all_bound_urls() {
-        // LOCAL MODE binds loopback + Tailscale; both URLs must be shown so the
-        // user can copy either.
         let urls = vec![
             "http://127.0.0.1:8080".to_string(),
             "http://100.101.102.103:8080".to_string(),
         ];
         let lines = header_lines(&urls, None, 0);
-        let text = plain_text(&lines);
-        assert!(text.contains("http://127.0.0.1:8080"));
-        assert!(text.contains("http://100.101.102.103:8080"));
-        // Each URL is its own Url-role line.
         assert_eq!(
             lines
                 .iter()
@@ -690,52 +1038,25 @@ mod tests {
     }
 
     #[test]
-    fn loopback_only_omits_the_warning() {
-        let lines = header_lines(&one("http://127.0.0.1:8080"), None, 0);
-        // No line should carry the Warning role when there is no safety note.
-        assert!(
-            !lines
-                .iter()
-                .flatten()
-                .any(|(_, role)| *role == Role::Warning)
-        );
+    fn the_safety_note_is_a_warning_row_only_when_there_is_one() {
+        let none = header_lines(&one("http://127.0.0.1:8080"), None, 0);
+        assert!(!none.iter().flatten().any(|(_, r)| *r == Role::Warning));
+        let some = header_lines(&one("http://127.0.0.1:8080"), Some("Reachable."), 0);
+        assert!(some.iter().flatten().any(|(_, r)| *r == Role::Warning));
     }
 
+    /// The footer names the scroll keys from the bindings and the exit keys the
+    /// screen answers itself, and every key it names does what it says.
     #[test]
-    fn non_loopback_shows_the_safety_note_as_warning() {
-        let note = "Listening beyond this machine with NO authentication. \
-                    Anyone on the network can control your agents.";
-        let lines = header_lines(&one("http://0.0.0.0:8080"), Some(note), 0);
-        let text = plain_text(&lines);
-        assert!(text.contains("NO authentication"));
-        assert!(text.contains("control your agents"));
-        assert!(
-            lines
-                .iter()
-                .flatten()
-                .any(|(_, role)| *role == Role::Warning)
-        );
-    }
-
-    fn line_text(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
-    }
-
-    /// The footer is the app's one hint line: its keys are named the way every
-    /// other hint names two keys that do one thing, its badges take the
-    /// screen's background, and every key it names does what it says in
-    /// `action_for_key` (none is a binding: the screen answers them itself).
-    #[test]
-    fn the_footer_is_the_shared_hint_line_and_its_keys_do_what_it_says() {
+    fn the_footer_names_keys_that_do_what_it_says() {
         let theme = Theme::default_dark();
-        let lines = footer_lines(&theme, None, 80);
+        let b = bindings();
+        let lines = footer_lines(&theme, &b, None, 100);
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(
             text,
             vec![
+                "<PageUp>/<PageDown> scroll the log  <Home> oldest  <End> latest".to_string(),
                 "<q>/<Esc> stop the server and return to dux".to_string(),
                 "<Ctrl-c> quit dux entirely".to_string(),
             ]
@@ -743,146 +1064,28 @@ mod tests {
         for span in lines.iter().flat_map(|line| &line.spans) {
             assert_eq!(span.style.bg, None, "{span:?} names a background");
         }
-        let press = |label: &str| match label {
-            "q" => key(KeyCode::Char('q'), KeyModifiers::NONE),
-            "Esc" => key(KeyCode::Esc, KeyModifiers::NONE),
-            "Ctrl-c" => key(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            other => panic!("the footer names {other:?}, which the screen does not answer"),
-        };
-        for label in ["q", "Esc"] {
-            assert!(matches!(
-                action_for_key(press(label)),
-                Some(ServerScreenTick::ReturnToTui)
-            ));
-        }
-        assert!(matches!(
-            action_for_key(press("Ctrl-c")),
-            Some(ServerScreenTick::QuitProcess)
-        ));
+        let press = |code| screen_key(key(code, KeyModifiers::NONE), &b);
+        assert_eq!(
+            press(KeyCode::End),
+            Some(ScreenKey::Scroll(Action::ScrollToBottom))
+        );
+        assert_eq!(
+            press(KeyCode::Esc),
+            Some(ScreenKey::Exit(ExitKind::ReturnToTui))
+        );
 
-        // A narrow screen fits each row to its width, marking what it left out.
-        let narrow = footer_lines(&theme, None, 30);
-        assert_eq!(line_text(&narrow[0]), "\u{2026}");
-        assert_eq!(line_text(&narrow[1]), "<Ctrl-c> quit dux entirely");
-    }
-
-    #[test]
-    fn the_footer_without_a_shutdown_message_has_no_extra_line() {
-        // No shutdown in progress: exactly the two exit-hint rows.
-        let lines = footer_lines(&Theme::default_dark(), None, 80);
-        assert_eq!(lines.len(), 2);
+        // A narrow screen drops the scroll hints before the way out.
+        let narrow = footer_lines(&theme, &b, None, 30);
+        assert_eq!(line_text(&narrow[2]), "<Ctrl-c> quit dux entirely");
     }
 
     #[test]
     fn the_footer_appends_the_shutdown_message_as_its_own_muted_line() {
-        // Owner-approved placement: the shutdown status renders on its own
-        // dedicated line, directly under the "Ctrl-c quit dux entirely" row,
-        // styled with the same muted color as the uptime line.
         let theme = Theme::default_dark();
-        let lines = footer_lines(&theme, Some("Stopping 2 agents..."), 80);
-        assert_eq!(lines.len(), 3, "the exit hints plus the shutdown line");
+        let lines = footer_lines(&theme, &bindings(), Some("Stopping 2 agents..."), 80);
+        assert_eq!(lines.len(), 4, "the hints plus the shutdown line");
         let last = lines.last().expect("shutdown line present");
         assert_eq!(line_text(last), "Stopping 2 agents...");
         assert_eq!(last.spans[0].style.fg, Some(theme.provider_label_fg));
-    }
-
-    #[test]
-    fn header_lines_have_no_exit_hints() {
-        // The exit hints moved to the footer: the header must not carry them.
-        let lines = header_lines(&one("http://127.0.0.1:8080"), None, 0);
-        let text = plain_text(&lines);
-        // Pin the header the function DID build: an empty header carries no
-        // exit hints either, and would pass every check below saying nothing.
-        assert!(
-            text.contains("dux server running") && text.contains("http://127.0.0.1:8080"),
-            "the header still renders its heading and URL: {text}"
-        );
-        assert!(!text.contains("return to dux"));
-        assert!(!text.contains("quit dux entirely"));
-    }
-
-    fn ev(hms: &str, msg: &str, tone: ActivityTone) -> ActivityEvent {
-        ActivityEvent {
-            hms: hms.to_string(),
-            tone,
-            message: msg.to_string(),
-        }
-    }
-
-    #[test]
-    fn activity_lines_map_each_tone_to_a_log_role() {
-        let events = vec![
-            ev(
-                "10:00:00",
-                "client connected from 10.0.0.5",
-                ActivityTone::Info,
-            ),
-            ev("10:00:01", "login ok for \"pat\"", ActivityTone::Ok),
-            ev("10:00:02", "login failed from 10.0.0.9", ActivityTone::Warn),
-            ev("10:00:03", "order failed", ActivityTone::Error),
-        ];
-        let lines = activity_lines(&events, 10);
-        assert_eq!(lines.len(), 4);
-        // Each row carries the timestamp (muted) and the toned message.
-        let roles: Vec<Role> = lines
-            .iter()
-            .map(|segs| {
-                segs.iter()
-                    .find(|(_, r)| matches!(r, Role::Log(_)))
-                    .unwrap()
-                    .1
-            })
-            .collect();
-        assert_eq!(
-            roles,
-            vec![
-                Role::Log(ActivityTone::Info),
-                Role::Log(ActivityTone::Ok),
-                Role::Log(ActivityTone::Warn),
-                Role::Log(ActivityTone::Error),
-            ]
-        );
-        assert!(plain_text(&lines).contains("client connected from 10.0.0.5"));
-        assert!(plain_text(&lines).contains("10:00:00"));
-    }
-
-    #[test]
-    fn activity_lines_show_only_the_last_max_rows() {
-        let events: Vec<ActivityEvent> = (0..20)
-            .map(|n| ev("10:00:00", &format!("event{n}"), ActivityTone::Info))
-            .collect();
-        let lines = activity_lines(&events, 5);
-        assert_eq!(lines.len(), 5, "only the last 5 events are rendered");
-        let text = plain_text(&lines);
-        assert!(text.contains("event15"));
-        assert!(text.contains("event19"));
-        assert!(!text.contains("event14"));
-    }
-
-    #[test]
-    fn activity_lines_empty_is_empty() {
-        assert!(activity_lines(&[], 10).is_empty());
-    }
-
-    #[test]
-    fn needs_redraw_fires_on_new_second_or_new_event() {
-        // Nothing changed → no redraw.
-        assert!(!needs_redraw(5, 5, 10, 10));
-        // The uptime second advanced → redraw (wall-clock cadence).
-        assert!(needs_redraw(6, 5, 10, 10));
-        // A new activity event arrived (generation advanced) → redraw.
-        assert!(needs_redraw(5, 5, 11, 10));
-        // Both changed → redraw.
-        assert!(needs_redraw(6, 5, 11, 10));
-    }
-
-    #[test]
-    fn content_includes_the_wordmark() {
-        // The first lines are the shared ASCII wordmark; assert one of its
-        // distinctive rows is present so a future logo-export break is caught.
-        let lines = header_lines(&one("http://127.0.0.1:8080"), None, 0);
-        assert!(lines.len() >= ASCII_LOGO.len());
-        assert_eq!(lines[0][0].1, Role::Logo);
-        assert_eq!(lines[0][0].0, ASCII_LOGO[0]);
     }
 }

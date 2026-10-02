@@ -24,6 +24,11 @@ pub enum BindingScope {
     Dialog,
     CommitInput,
     Help,
+    /// The `start-web-server` flip's status screen, whose log scrolls. Its own
+    /// return and quit keys (`q`/`Esc`, `Ctrl-c`) are answered before the
+    /// bindings are consulted, so a scroll binding on one of them never fires
+    /// there and is never advertised there.
+    ServerScreen,
 }
 
 impl BindingScope {
@@ -44,6 +49,7 @@ impl BindingScope {
         Self::Dialog,
         Self::CommitInput,
         Self::Help,
+        Self::ServerScreen,
     ];
 
     /// Human-readable scope name for error messages and diagnostics.
@@ -64,6 +70,7 @@ impl BindingScope {
             Self::Dialog => "Dialog",
             Self::CommitInput => "Commit input",
             Self::Help => "Help overlay",
+            Self::ServerScreen => SERVER_SCREEN_HELP_SECTION,
         }
     }
 }
@@ -702,6 +709,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Center,
             BindingScope::Interactive,
             BindingScope::Help,
+            BindingScope::ServerScreen,
         ],
         help: Some(HelpEntry {
             section: "Agent pane",
@@ -716,6 +724,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Center,
             BindingScope::Interactive,
             BindingScope::Help,
+            BindingScope::ServerScreen,
         ],
         help: Some(HelpEntry {
             section: "Agent pane",
@@ -750,6 +759,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Interactive,
             BindingScope::Center,
             BindingScope::Help,
+            BindingScope::ServerScreen,
         ],
         help: Some(HelpEntry {
             section: "Scrolling",
@@ -764,6 +774,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Interactive,
             BindingScope::Center,
             BindingScope::Help,
+            BindingScope::ServerScreen,
         ],
         help: Some(HelpEntry {
             section: "Scrolling",
@@ -1480,6 +1491,24 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
 ];
 
+/// The help section, and the scope's display name, for the `start-web-server`
+/// flip's status screen.
+pub const SERVER_SCREEN_HELP_SECTION: &str = "Web server screen";
+
+/// Whether a key reaches the server status screen's bindings: its own return
+/// and quit keys are answered first, so a binding on one of them never fires
+/// there. The one predicate the screen routes with and labels its hints with.
+pub fn server_screen_reaches(key: KeyCombination) -> bool {
+    let event: KeyEvent = key.into();
+    let ctrl_c =
+        event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL);
+    let quit_or_back = matches!(
+        event.code,
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')
+    );
+    !(ctrl_c || quit_or_back)
+}
+
 const HELP_SECTION_ORDER: &[&str] = &[
     "Global",
     "Projects pane",
@@ -1784,6 +1813,61 @@ impl RuntimeBindings {
             .unwrap_or_default()
     }
 
+    /// Display labels for every key of an action that satisfies `reachable`.
+    pub fn labels_reaching(
+        &self,
+        action: Action,
+        reachable: impl Fn(KeyCombination) -> bool,
+    ) -> Vec<String> {
+        self.bindings
+            .iter()
+            .find(|b| b.action == action)
+            .map(|b| {
+                b.keys
+                    .iter()
+                    .copied()
+                    .filter(|k| reachable(*k))
+                    .map(|k| self.format.to_string(k))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The server status screen's entries for the `?` help: its scroll keys,
+    /// read from the bindings and only those that reach the screen, then its own
+    /// return and quit keys, which are not bindings.
+    pub fn server_screen_help(&self) -> Vec<(String, &'static str)> {
+        let label = |action| {
+            self.labels_reaching(action, server_screen_reaches)
+                .join("/")
+        };
+        let first = |action| {
+            self.labels_reaching(action, server_screen_reaches)
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        };
+        let page = match (first(Action::ScrollPageUp), first(Action::ScrollPageDown)) {
+            (up, down) if !up.is_empty() && !down.is_empty() => format!("{up}/{down}"),
+            (up, down) => format!("{up}{down}"),
+        };
+        let mut entries = vec![
+            (page, "Scroll the server log a page up or down"),
+            (
+                label(Action::ScrollToTop),
+                "Jump to the oldest line of the server log",
+            ),
+            (
+                label(Action::ScrollToBottom),
+                "Jump to the latest line of the server log and follow it again",
+            ),
+        ];
+        entries.retain(|(label, _)| !label.is_empty());
+        entries.push(("q/Esc".to_string(), "Stop the web server and return to dux"));
+        entries.push(("Ctrl-c".to_string(), "Stop the web server and quit dux"));
+        entries
+    }
+
     /// First key combination of an action that satisfies `reachable`.
     ///
     /// A surface that routes some keys elsewhere before consulting the
@@ -1915,6 +1999,7 @@ impl RuntimeBindings {
                 }
             }
         }
+        sections.push((SERVER_SCREEN_HELP_SECTION, self.server_screen_help()));
         sections.retain(|(_, entries)| !entries.is_empty());
         sections
     }
@@ -3804,6 +3889,64 @@ mod tests {
         assert_eq!(
             bindings.lookup(&pgdn, BindingScope::Help),
             Some(Action::ScrollPageDown)
+        );
+    }
+
+    /// The web server status screen's log scrolls through the user's own
+    /// scroll bindings, and the `?` help lists them under its own section.
+    #[test]
+    fn the_server_screen_scrolls_through_the_bindings_and_its_help_says_so() {
+        let bindings = default_bindings();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key(KeyCode::PageUp), BindingScope::ServerScreen),
+            Some(Action::ScrollPageUp)
+        );
+        assert_eq!(
+            bindings.lookup(&key(KeyCode::PageDown), BindingScope::ServerScreen),
+            Some(Action::ScrollPageDown)
+        );
+        assert_eq!(
+            bindings.lookup(&key(KeyCode::Home), BindingScope::ServerScreen),
+            Some(Action::ScrollToTop)
+        );
+        assert_eq!(
+            bindings.lookup(&key(KeyCode::End), BindingScope::ServerScreen),
+            Some(Action::ScrollToBottom)
+        );
+        let sections = bindings.help_sections();
+        let (_, entries) = sections
+            .iter()
+            .find(|(name, _)| *name == SERVER_SCREEN_HELP_SECTION)
+            .expect("the help lists the server screen");
+        let labels: Vec<&str> = entries.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(labels.contains(&"PageUp/PageDown"), "{labels:?}");
+        assert!(labels.contains(&"Home"), "{labels:?}");
+        // `q` is the screen's own return key, so End is the one that reaches.
+        assert!(labels.contains(&"End"), "{labels:?}");
+    }
+
+    #[test]
+    fn a_rebound_scroll_key_moves_the_server_screen_and_its_help() {
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("scroll_page_up".to_string(), vec!["ctrl-u".to_string()]);
+        let bindings = RuntimeBindings::from_keys_config(&keys);
+        assert_eq!(
+            bindings.lookup(
+                &KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                BindingScope::ServerScreen
+            ),
+            Some(Action::ScrollPageUp)
+        );
+        let sections = bindings.help_sections();
+        let (_, entries) = sections
+            .iter()
+            .find(|(name, _)| *name == SERVER_SCREEN_HELP_SECTION)
+            .unwrap();
+        assert!(
+            entries.iter().any(|(l, _)| l == "Ctrl-u/PageDown"),
+            "{entries:?}"
         );
     }
 

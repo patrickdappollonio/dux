@@ -21,7 +21,7 @@ pub(crate) use config_saver::TuiConfigSurface;
 /// Server status screen shown by the binary while serving after a TUI↔server
 /// flip. Re-exported so `crates/dux/src/main.rs` can drive it as the
 /// `serve_with_engine` tick.
-pub use server_screen::{ServerScreenTick, ServerStatusScreen};
+pub use server_screen::{ServerScreenTick, ServerStatusScreen, restore_terminal};
 
 /// Register the fully-commented config renderer with `dux-core`, so that any
 /// surface which CREATES `config.toml` writes the documented template rather
@@ -53,6 +53,10 @@ pub enum TuiExit {
         engine: Box<Engine>,
         listeners: Vec<std::net::TcpListener>,
         urls: Vec<String>,
+        /// What the pre-flight learned (its warnings, the Tailscale bind
+        /// failures, whether an address was detected), so the server's log opens
+        /// with the same lines `dux server` prints.
+        startup: dux_core::serve_log::StartupNotes,
     },
 }
 
@@ -150,7 +154,11 @@ fn run_app(
     app.companion = Some(companion);
     match app.run()? {
         app::RunExit::Quit => Ok(TuiExit::Done),
-        app::RunExit::FlipToServer { listeners, urls } => {
+        app::RunExit::FlipToServer {
+            listeners,
+            urls,
+            startup,
+        } => {
             // Serving headless: `auto` identity now resolves to the forced
             // ghostty identity for agents launched under the server. Existing
             // PTYs keep their spawn-time env until relaunch.
@@ -163,6 +171,7 @@ fn run_app(
                 engine: Box::new(engine),
                 listeners,
                 urls,
+                startup,
             })
         }
     }

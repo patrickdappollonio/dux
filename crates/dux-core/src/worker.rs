@@ -706,6 +706,9 @@ pub enum WorkerEvent {
     ServerFlipPreflightReady {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
+        /// What the pre-flight learned, carried to the flip's log so it opens
+        /// with the same lines `dux server` prints.
+        startup: crate::serve_log::StartupNotes,
     },
     /// The background web server's bind pre-flight finished on a worker thread.
     ///

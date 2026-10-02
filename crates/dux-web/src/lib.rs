@@ -74,7 +74,7 @@ use dux_core::config::{DuxPaths, PlanAddr, ServerPlan, TailscaleMode, TailscaleM
 use dux_core::engine::Engine;
 use dux_core::tailscale::TailscaleUnavailable;
 
-use crate::console::{Banner, Console, ListenerRow};
+use crate::console::Console;
 use crate::engine_actor::LoopControl;
 use crate::serve_legs::{
     LegCommand, LegStatus, LegStep, ModeStep, ServeShutdown, StartupLeg, TailscaleModeControl,
@@ -82,6 +82,7 @@ use crate::serve_legs::{
     waiting_note, watch_tailscale_leg,
 };
 use crate::server::RouterParams;
+use dux_core::serve_log::{Banner, ListenerRow, StartupNotes};
 
 /// Boot the engine on its own thread and serve the web UI on every address in
 /// the plan (one axum task per listener, sharing the router/state). Blocking
@@ -90,12 +91,22 @@ use crate::server::RouterParams;
 /// `version` is the dux crate version the binary passes in (`CARGO_PKG_VERSION`)
 /// for the console banner header.
 ///
-/// This is the ONLY surface that owns the [`Console`]: it is built here from the
-/// engine's loaded `[server] color`/`access_log` and threaded into the serve
-/// paths. The TUI flip ([`serve_with_engine`]) NEVER constructs a real console:
-/// it keeps its themed status screen and must not print to stdout.
-pub fn run_server(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<()> {
-    run_plain_http(paths, plan, version)
+/// The stdout [`Console`] is built here from the engine's loaded
+/// `[server] color`/`access_log` and threaded into the serve paths. The TUI flip
+/// ([`serve_with_engine`]) builds a capturing console instead, because its
+/// status screen owns the terminal, and records the very same lines.
+///
+/// `startup_warnings` are the warnings the caller raised before anything was
+/// loaded (Tailscale detection, a non-loopback bind). They print as the first
+/// lines of the log, before any address is bound, so they are on screen even if
+/// a bind then fails.
+pub fn run_server(
+    paths: DuxPaths,
+    plan: ServerPlan,
+    version: String,
+    startup_warnings: Vec<String>,
+) -> Result<()> {
+    run_plain_http(paths, plan, version, startup_warnings)
 }
 
 /// Log a WARN when this binary has no web UI compiled in (built with
@@ -105,11 +116,10 @@ pub fn run_server(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
 /// different people who look in different places:
 /// - the served page itself (build.rs's notice page), for whoever opens a browser,
 ///   possibly on a phone, with no access to this terminal;
-/// - the `dux server` startup banner (a ⚠ row), for the operator who launched it
-///   and can rebuild;
-/// - `dux.log`, which is the ONLY one of the three the TUI flip path reaches: the
-///   flip keeps its themed status screen and must not print to stdout, so it has
-///   no banner to carry the row.
+/// - the startup banner (a ⚠ row), for the operator who launched it and can
+///   rebuild: `dux server`'s terminal, or the flip's log viewer, which shows the
+///   same banner;
+/// - `dux.log`.
 ///
 /// Called by both serve entry points so neither can forget it.
 ///
@@ -126,21 +136,21 @@ fn warn_if_ui_not_built() {
 /// Build the `dux server` console from the engine's loaded config: detect color
 /// from `[server] color` (warning on an unrecognized value, then honoring it as
 /// `auto`), construct a real stdout console, and read the `access_log` toggle.
-/// Returns `(console, access_log)`. Used by both CLI serve paths; the flip does
-/// NOT call this (it uses [`Console::noop`]).
+/// Returns `(console, access_log)`. An unrecognized color value is warned about
+/// on the console it built, as its first line. The flip does NOT call this: the
+/// setting governs `dux server`'s stdout only, and the flip's viewer is themed.
 fn build_console(config: &dux_core::config::Config) -> (Console, bool) {
     let setting = &config.server.color;
+    let color = crate::console::detect(setting);
+    let console = Console::stdout(color);
     if !crate::console::is_known_color_setting(setting) {
         dux_core::logger::warn(&format!(
             "[server] color = \"{setting}\" is not one of auto/always/never, so dux is treating \
              it as \"auto\". Fix [server] color in config.toml to silence this."
         ));
-        eprintln!(
-            "WARNING: [server] color = \"{setting}\" is not auto/always/never. Using \"auto\"."
-        );
+        console.warn(&crate::console::unknown_color_warning(setting));
     }
-    let color = crate::console::detect(setting);
-    (Console::stdout(color), config.server.access_log)
+    (console, config.server.access_log)
 }
 
 /// The warning shown when a BEST-EFFORT (Tailscale) listener cannot bind because
@@ -148,11 +158,7 @@ fn build_console(config: &dux_core::config::Config) -> (Console, bool) {
 /// BOTH remedies (stop the other process, or change the port). Emitted as a
 /// `dux.log` WARN line. Pure so it is unit-testable.
 fn tailscale_bind_warning(addr: SocketAddr, err: &std::io::Error) -> String {
-    format!(
-        "could not bind the Tailscale address {addr}: {err}. Something else is already \
-         listening there, so dux is serving on the remaining address(es) only. Stop that \
-         process or change [server].port to also serve on Tailscale."
-    )
+    dux_core::serve_log::tailscale_bind_warning(addr, err)
 }
 
 /// A successfully bound listener paired with its requested address (so the URL
@@ -283,6 +289,52 @@ fn plain_http_banner(
     }
 }
 
+/// The startup banner every serving mode prints, built from the legs that bound
+/// (each an `(addr, required)` pair). The one recipe `dux server` and the flip
+/// share, so the two print the same rows for the same situation: the bind
+/// warnings, the `auto` mode's waiting note, the reachability note and the
+/// missing-web-UI warning all come from here.
+///
+/// `tailscale_detected` is whether a Tailscale address was found before binding,
+/// which is what tells "the address would not bind" from "there is no address
+/// yet" when no Tailscale leg is in `bound`.
+pub(crate) fn serve_banner(
+    version: &str,
+    bound: &[(SocketAddr, bool)],
+    bind_warnings: &[String],
+    tailscale: TailscaleMode,
+    tailscale_detected: bool,
+) -> Banner {
+    let bound_plan_addrs: Vec<PlanAddr> = bound
+        .iter()
+        .map(|(addr, required)| {
+            if *required {
+                PlanAddr::required(*addr)
+            } else {
+                PlanAddr::best_effort(*addr)
+            }
+        })
+        .collect();
+    let leg_bound = bound
+        .iter()
+        .any(|(addr, required)| !required && !addr.ip().is_loopback());
+    let startup_leg = match (tailscale_detected, leg_bound) {
+        (_, true) => StartupLeg::Bound,
+        (true, false) => StartupLeg::BindFailed,
+        (false, false) => StartupLeg::Undetected,
+    };
+    let note = safety_note(&bound_plan_addrs, tailscale);
+    let mut warnings = bind_warnings.to_vec();
+    warnings.extend(waiting_note(tailscale, startup_leg));
+    plain_http_banner(
+        version,
+        bound,
+        &warnings,
+        note,
+        web_assets::ui_startup_warning(),
+    )
+}
+
 /// How far the server can be reached, classified from the BOUND legs (each an
 /// `(addr, required)` pair where `required` is true for explicit `--bind`
 /// public/LAN entries and false for best-effort Tailscale local-mode legs).
@@ -393,8 +445,13 @@ pub fn safety_note(addrs: &[PlanAddr], tailscale: TailscaleMode) -> Option<Strin
 /// startup bind, so a startup broadcast would reach zero receivers. `dux.log` and
 /// the startup banner are the delivery surfaces here; MID-RUN leg changes (the
 /// watcher's doing) go to `dux.log` and the console, which is this terminal for
-/// `dux server` and the flip status screen's activity panel for the flip.
-fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<()> {
+/// `dux server` and the status screen's log viewer for the flip.
+fn run_plain_http(
+    paths: DuxPaths,
+    plan: ServerPlan,
+    version: String,
+    startup_warnings: Vec<String>,
+) -> Result<()> {
     let ServerPlan {
         addrs,
         primary,
@@ -406,6 +463,14 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config);
+    // What the caller learned before anything was loaded prints first, ahead of
+    // the bind, so it is on screen even if a bind then fails.
+    for warning in &startup_warnings {
+        console.warn(warning);
+    }
+    // Held past the serve so the run's last lines (its shutdown) are flushed to
+    // the terminal before the process exits.
+    let exit_console = console.clone();
     // The router's whole `[server]` input, snapshotted before the engine moves
     // into the actor thread. One clone rather than a field-by-field capture, so
     // this path and the two in-app ones derive their router from the same
@@ -414,7 +479,7 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async move {
+    let result = runtime.block_on(async move {
         // Bind every address first, honoring the required/best-effort tags. A
         // failed REQUIRED bind aborts here (with the address logged + in the
         // error); a failed BEST-EFFORT (Tailscale) bind is dropped with a warning
@@ -427,49 +492,24 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         // bound listeners into (addr, required) pairs for the pure banner builder.
         let banner_legs: Vec<(SocketAddr, bool)> =
             bound.iter().map(|b| (b.addr, b.required)).collect();
-        let bound_plan_addrs: Vec<PlanAddr> = bound
-            .iter()
-            .map(|b| {
-                if b.required {
-                    PlanAddr::required(b.addr)
-                } else {
-                    PlanAddr::best_effort(b.addr)
-                }
-            })
-            .collect();
         let initial_tailscale_leg = bound
             .iter()
             .find(|b| !b.required && !b.addr.ip().is_loopback())
             .map(|b| b.addr);
-        // Detection outcome versus bind outcome: the PLAN carries the first (a
-        // best-effort address is only in it when an address was detected), `bound`
-        // carries the second. The note has to tell them apart, because "dux is
-        // waiting for the interface" is false when the interface is up and it was
-        // the bind that failed.
-        let startup_leg = match (
-            addrs.iter().any(|p| !p.is_required()),
-            initial_tailscale_leg,
-        ) {
-            (_, Some(_)) => StartupLeg::Bound,
-            (true, None) => StartupLeg::BindFailed,
-            (false, None) => StartupLeg::Undetected,
-        };
-        let note = safety_note(&bound_plan_addrs, tailscale);
-        // The third state the banner has to be able to say: on `auto` with no
-        // address yet, dux is not "without Tailscale", it is waiting for it.
-        let mut banner_warnings = bind_warnings.clone();
-        banner_warnings.extend(waiting_note(tailscale, startup_leg));
-        console.banner(&plain_http_banner(
+        // The PLAN says whether an address was detected (a best-effort address
+        // is only in it when one was); `bound` says whether it bound.
+        console.banner(&serve_banner(
             &version,
             &banner_legs,
-            &banner_warnings,
-            note,
-            web_assets::ui_startup_warning(),
+            &bind_warnings,
+            tailscale,
+            addrs.iter().any(|p| !p.is_required()),
         ));
 
         // Spawn the engine on its own std thread (it runs the synchronous engine
-        // loop, not a tokio task).
-        let (handle, _join) = engine_actor::spawn_engine_thread(engine);
+        // loop, not a tokio task). Its shutdown progress prints on this console.
+        let (handle, _join) =
+            engine_actor::spawn_engine_thread_with_console(engine, console.clone());
 
         // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
         // failure flips its watch and every serve task awaits it. It carries the
@@ -519,8 +559,9 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
         // down gracefully (the same trigger a first-listener failure uses).
         {
             let shutdown = shutdown.clone();
+            let force_exit = ForceExit::new(console.clone(), None);
             tokio::spawn(async move {
-                shutdown_signal().await;
+                shutdown_signal(force_exit).await;
                 shutdown.trigger();
             });
         }
@@ -583,7 +624,9 @@ fn run_plain_http(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<
             Some(e) => Err(e),
             None => Ok::<(), anyhow::Error>(()),
         }
-    })
+    });
+    exit_console.flush();
+    result
 }
 
 /// What the status-screen tick asks `serve_with_engine` to do after the current
@@ -1411,10 +1454,16 @@ fn router_params(
 
 /// Whether a serve owns the process's stop signals.
 pub(crate) enum SignalPolicy {
-    /// Install the tokio SIGINT/SIGTERM handler and trip this flag when one
+    /// Install the tokio SIGINT/SIGTERM handler and trip `flag` when one
     /// arrives. For a serve that is the only thing running: the flip, whose
-    /// status screen has taken the terminal over.
-    Adopt(Arc<AtomicBool>),
+    /// status screen has taken the terminal over. `restore_terminal` gives the
+    /// terminal back before a second signal forces the process out, because
+    /// that exit runs no destructor and would leave the status screen's raw
+    /// mode and alternate screen behind.
+    Adopt {
+        flag: Arc<AtomicBool>,
+        restore_terminal: Option<RestoreTerminal>,
+    },
     /// Install NOTHING. Another surface's handlers already own the process, and
     /// two sets of handlers for one signal is a race over who tears down what.
     /// The background server runs behind a live terminal UI whose own handlers
@@ -1646,9 +1695,13 @@ impl ServeCore {
         drop(handle);
 
         let installed_signal_handlers = match signals {
-            SignalPolicy::Adopt(flag) => {
+            SignalPolicy::Adopt {
+                flag,
+                restore_terminal,
+            } => {
+                let force_exit = ForceExit::new(console.clone(), restore_terminal);
                 runtime.spawn(async move {
-                    shutdown_signal().await;
+                    shutdown_signal(force_exit).await;
                     flag.store(true, Ordering::SeqCst);
                 });
                 true
@@ -1774,18 +1827,44 @@ impl ServeCore {
 /// printing it directly; the binary's implementation feeds it to the dux-tui
 /// status screen, which renders it on its own themed line rather than raw text
 /// landing wherever the cursor happens to sit.
+///
+/// The console log is the same one `dux server` prints: `startup` carries what
+/// the terminal UI's pre-flight learned (its warnings, the Tailscale bind
+/// failures, whether an address was detected), and those lines plus the banner
+/// open the log before anything is served. `restore_terminal` hands the terminal
+/// back if a second stop signal forces the process out mid-shutdown.
+#[allow(clippy::too_many_arguments)]
 pub fn serve_with_engine(
     mut engine: Engine,
     listeners: Vec<std::net::TcpListener>,
     activity: dux_core::activity::ActivityRing,
+    startup: StartupNotes,
+    restore_terminal: RestoreTerminal,
     mut on_tick: impl FnMut() -> ServerTick,
     mut on_shutdown_status: impl FnMut(&str),
 ) -> Result<(Engine, ServerExit)> {
     warn_if_ui_not_built();
     // The flip owns the terminal with its themed status screen, so this console
-    // writes NOTHING to stdout, but it captures every lifecycle event into the
-    // shared ring that drives the status screen's Activity panel.
+    // writes NOTHING to stdout; it records every line into the shared ring the
+    // status screen's log viewer draws, the same lines `dux server` prints.
     let console = Console::capture(activity);
+    for warning in &startup.warnings {
+        console.warn(warning);
+    }
+    // Both in-app serves are LOCAL MODE: the loopback leg is the required one
+    // and anything else is the best-effort Tailscale leg.
+    let legs: Vec<(SocketAddr, bool)> = listeners
+        .iter()
+        .filter_map(|l| l.local_addr().ok())
+        .map(|addr| (addr, addr.ip().is_loopback()))
+        .collect();
+    console.banner(&serve_banner(
+        dux_core::display_version(),
+        &legs,
+        &startup.bind_warnings,
+        engine.config.server.tailscale_mode(),
+        startup.tailscale_detected,
+    ));
     let (handle, ends) = engine_actor::build_actor_channels(&engine);
     engine_actor::spawn_global_workers(&mut engine);
 
@@ -1804,16 +1883,20 @@ pub fn serve_with_engine(
 
     // The flip has taken the terminal over with its own status screen, so it OWNS
     // the process's stop signals for as long as it serves.
+    let access_log = engine.config.server.access_log;
     let mut core = ServeCore::start(
         handle,
         listeners,
         &engine.config,
-        console,
-        // The capture console keeps the access log OFF (it is never wanted in the
-        // panel, and access() never reaches emit() to be captured anyway) while
-        // the WS handlers feed lifecycle events into the ring.
-        false,
-        SignalPolicy::Adopt(Arc::clone(&signal_quit)),
+        console.clone(),
+        // `[server] access_log` governs the flip exactly as it does `dux server`:
+        // the user decided (2026-10-02) that the two logs match completely, so
+        // the viewer carries the access log too.
+        access_log,
+        SignalPolicy::Adopt {
+            flag: Arc::clone(&signal_quit),
+            restore_terminal: Some(restore_terminal),
+        },
         // The flip has no terminal UI beside it (it took the terminal over), so
         // there is no second surface to announce ownership changes for, and nowhere
         // to show a connection count either.
@@ -1881,11 +1964,15 @@ pub fn serve_with_engine(
         if agents + terminals > 0 {
             let grace =
                 dux_core::config::shutdown_grace(engine.config.server.shutdown_timeout_seconds);
-            on_shutdown_status(&dux_core::engine::format_shutdown_start(
-                agents, terminals, grace,
-            ));
+            // Through the console first, so the log viewer carries the same
+            // timestamped lines `dux server` prints, then the status callback.
+            let start = dux_core::engine::format_shutdown_start(agents, terminals, grace);
+            console.info(&start);
+            on_shutdown_status(&start);
             let report = engine.shutdown_ptys(grace);
-            on_shutdown_status(&dux_core::engine::format_shutdown_result(&report));
+            let result = dux_core::engine::format_shutdown_result(&report);
+            console.info(&result);
+            on_shutdown_status(&result);
         }
     }
 
@@ -1925,7 +2012,7 @@ pub fn serve_with_engine(
 /// signal resolves this future (the caller then triggers a graceful shutdown)
 /// and also arms a watcher so a SECOND signal forces an immediate exit, rather
 /// than leaving the operator trapped if the graceful drain wedges.
-async fn shutdown_signal() {
+async fn shutdown_signal(force_exit: ForceExit) {
     // Install both handlers ONCE up front and reuse the same streams for the
     // first wait AND the second-signal force-quit watcher. Re-subscribing fresh
     // after the first signal fired would race: a rapid second signal could arrive
@@ -1935,8 +2022,13 @@ async fn shutdown_signal() {
     let mut interrupt = install_signal(
         tokio::signal::unix::SignalKind::interrupt(),
         "SIGINT (Ctrl-C)",
+        &force_exit.console,
     );
-    let mut terminate = install_signal(tokio::signal::unix::SignalKind::terminate(), "SIGTERM");
+    let mut terminate = install_signal(
+        tokio::signal::unix::SignalKind::terminate(),
+        "SIGTERM",
+        &force_exit.console,
+    );
 
     if interrupt.is_none() && terminate.is_none() {
         // Neither handler installed, so we can observe no stop signal. Park so this
@@ -1956,11 +2048,53 @@ async fn shutdown_signal() {
     // the conventional interrupted-exit code.
     tokio::spawn(async move {
         next_terminate_signal(&mut interrupt, &mut terminate).await;
-        let msg = "[server] second interrupt received during shutdown. Forcing immediate exit.";
-        dux_core::logger::error(msg);
-        eprintln!("{msg}");
-        std::process::exit(130);
+        force_exit.run(|code| std::process::exit(code));
     });
+}
+
+/// Hands the terminal back to the shell: the flip's status screen supplies it,
+/// `dux server` has nothing to restore.
+pub type RestoreTerminal = Arc<dyn Fn() + Send + Sync>;
+
+/// The line a second stop signal leaves on its way out.
+pub(crate) const FORCE_EXIT_MESSAGE: &str =
+    "second interrupt received during shutdown. Forcing immediate exit.";
+
+/// What a second stop signal does: say so on the console (the same line in both
+/// modes), make sure it is written, give the terminal back when a status screen
+/// had it, and only then exit with 130 (128 + SIGINT).
+///
+/// The order is the point. `std::process::exit` runs no destructor, so the flip's
+/// status screen would otherwise leave raw mode and the alternate screen behind,
+/// and a message printed before the restore would land on the alternate screen
+/// and vanish with it. After the restore it is printed to stderr, on the shell's
+/// own screen, because the viewer that would have shown it is gone.
+#[derive(Clone)]
+pub(crate) struct ForceExit {
+    console: Console,
+    restore_terminal: Option<RestoreTerminal>,
+}
+
+impl ForceExit {
+    pub(crate) fn new(console: Console, restore_terminal: Option<RestoreTerminal>) -> Self {
+        Self {
+            console,
+            restore_terminal,
+        }
+    }
+
+    /// Run the sequence, ending in `exit(130)`. `exit` is injected so a test can
+    /// watch the order without ending the test process.
+    pub(crate) fn run(&self, exit: impl FnOnce(i32)) {
+        dux_core::logger::error(&format!("[server] {FORCE_EXIT_MESSAGE}"));
+        self.console.error(FORCE_EXIT_MESSAGE);
+        self.console.flush();
+        if let Some(restore) = &self.restore_terminal {
+            restore();
+            eprintln!("{FORCE_EXIT_MESSAGE}");
+        }
+        exit(130);
+    }
 }
 
 /// Install a SIGINT/SIGTERM handler, returning the stream, or `None` (logged
@@ -1969,6 +2103,7 @@ async fn shutdown_signal() {
 fn install_signal(
     kind: tokio::signal::unix::SignalKind,
     label: &str,
+    console: &Console,
 ) -> Option<tokio::signal::unix::Signal> {
     match tokio::signal::unix::signal(kind) {
         Ok(sig) => Some(sig),
@@ -1982,7 +2117,9 @@ fn install_signal(
                  SIGTERM)."
             );
             dux_core::logger::error(&msg);
-            eprintln!("ERROR: {msg}");
+            // On the console rather than raw stderr: in the flip, stderr is
+            // the status screen's alternate screen.
+            console.error(&msg);
             None
         }
     }
@@ -2295,7 +2432,7 @@ mod tests {
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
         let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
         let _leg = shutdown.register_leg(ts);
-        let console = crate::console::Console::capture(dux_core::activity::ActivityRing::new());
+        let console = crate::console::Console::capture(dux_core::activity::ActivityRing::default());
         let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
         let mut streak = Some(ts);
         let mut tasks = tokio::task::JoinSet::new();
@@ -2330,7 +2467,7 @@ mod tests {
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
         let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
         let leg_lane = shutdown.register_leg(ts);
-        let console = crate::console::Console::capture(dux_core::activity::ActivityRing::new());
+        let console = crate::console::Console::capture(dux_core::activity::ActivityRing::default());
 
         // The leg's accept loop dies mid-run: exactly what `spawn_leg`'s
         // best-effort arm does, without the flakiness of forcing a real axum
@@ -2411,14 +2548,11 @@ mod tests {
     fn flip_console_captures_into_the_shared_ring() {
         // The flip path builds its console from the shared ring; a client-connect
         // event on that console must land in the ring the status screen reads.
-        let ring = dux_core::activity::ActivityRing::new();
+        let ring = dux_core::activity::ActivityRing::new(10);
         let console = crate::console::Console::capture(ring.clone());
         console.client_connected("10.0.0.7".parse().unwrap());
         assert_eq!(ring.connections(), 1);
-        assert_eq!(
-            ring.snapshot(dux_core::activity::ACTIVITY_CAP).events.len(),
-            1
-        );
+        assert_eq!(ring.snapshot().lines.len(), 1);
     }
 
     #[test]
@@ -2526,6 +2660,185 @@ mod tests {
             text.contains("could not bind the listen address")
                 && text.contains(&held_addr.to_string()),
             "the fatal error must name the busy required address: {text}"
+        );
+    }
+
+    // ── One log, two surfaces ──────────────────────────────────────────────
+
+    /// Everything a serve says over its life, in the order a run says it: the
+    /// warnings raised before binding, the banner, a client, its requests, a
+    /// Tailscale leg arriving and failing, and the shutdown. Driven through the
+    /// same calls `run_plain_http` and `serve_with_engine` make.
+    fn a_whole_run(console: &crate::console::Console) {
+        let notes = [
+            "Tailscale not detected (the tailscale CLI is not installed), so dux is serving on \
+             loopback only for now."
+                .to_string(),
+        ];
+        for warning in &notes {
+            console.warn(warning);
+        }
+        let bind_warning = tailscale_bind_warning(
+            addr("100.64.0.1:3890"),
+            &std::io::Error::new(std::io::ErrorKind::AddrInUse, "address already in use"),
+        );
+        console.banner(&super::serve_banner(
+            "v1.2.3",
+            &[(addr("127.0.0.1:3890"), true)],
+            &[bind_warning],
+            TailscaleMode::Auto,
+            true,
+        ));
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        console.client_connected(ip);
+        console.access("GET", "/api/v1/build", 200, 3);
+        console.access("GET", "/nope", 404, 1);
+        console.leg_changed("Tailscale address 100.64.0.1:3890 is serving again.");
+        console.bind_degraded("the Tailscale listener on 100.64.0.1:3890 stopped serving: gone");
+        console.client_disconnected(ip);
+        console.info(&dux_core::engine::format_shutdown_start(
+            1,
+            0,
+            std::time::Duration::from_secs(30),
+        ));
+        console.error(super::FORCE_EXIT_MESSAGE);
+    }
+
+    /// The user asked for the two logs to match completely: `dux server`'s stdout
+    /// (colors stripped) and the flip's viewer must hold the same lines, word for
+    /// word, for the same run.
+    #[test]
+    fn dux_server_and_the_flip_log_the_same_lines_for_the_same_run() {
+        let (stdout, sink) = crate::console::Console::test_capture(true);
+        let ring = dux_core::activity::ActivityRing::new(1000);
+        let flip = crate::console::Console::test_ring_capture(ring.clone());
+        a_whole_run(&stdout);
+        a_whole_run(&flip);
+
+        let printed: Vec<String> = sink
+            .contents()
+            .lines()
+            .map(crate::console::strip_ansi)
+            .collect();
+        let viewed: Vec<String> = ring
+            .snapshot()
+            .lines
+            .iter()
+            .map(dux_core::serve_log::LogLine::text)
+            .collect();
+        assert_eq!(printed, viewed);
+
+        // And the run really said everything it should: the startup warning,
+        // the banner with its bind-failure and waiting rows, the access log.
+        let joined = viewed.join("\n");
+        for expected in [
+            "12:00:00 \u{26a0} Tailscale not detected",
+            "dux v1.2.3  plain HTTP",
+            "  \u{279c} Local (loopback): http://127.0.0.1:3890",
+            "  \u{26a0} could not bind the Tailscale address 100.64.0.1:3890",
+            "  \u{26a0} Tailscale: the interface is here, but its address would not bind",
+            "12:00:00 GET /api/v1/build 200 3ms",
+            "12:00:00 \u{279c} client connected from 127.0.0.1",
+            "12:00:00 \u{279c} Requesting 1 agent and 0 terminals to gracefully shut down",
+            "12:00:00 \u{2717} second interrupt received during shutdown",
+        ] {
+            assert!(
+                joined.contains(expected),
+                "missing {expected:?} in:\n{joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_banner_waits_for_the_interface_when_no_address_was_detected() {
+        let banner = super::serve_banner(
+            "v1",
+            &[(addr("127.0.0.1:3890"), true)],
+            &[],
+            TailscaleMode::Auto,
+            false,
+        );
+        assert!(
+            banner
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("Tailscale: waiting for the interface")),
+            "{banner:?}"
+        );
+        assert_eq!(
+            banner.security_note.as_deref(),
+            Some(super::SAFETY_NOTE_TAILNET_WATCHED)
+        );
+    }
+
+    #[test]
+    fn the_banner_labels_a_bound_tailscale_leg_and_waits_for_nothing() {
+        let banner = super::serve_banner(
+            "v1",
+            &[
+                (addr("127.0.0.1:3890"), true),
+                (addr("100.64.0.1:3890"), false),
+            ],
+            &[],
+            TailscaleMode::Yes,
+            true,
+        );
+        let labels: Vec<&str> = banner.listeners.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, vec!["Local (loopback)", "Tailscale"]);
+        assert!(!banner.warnings.iter().any(|w| w.contains("waiting")));
+        assert_eq!(
+            banner.security_note.as_deref(),
+            Some(super::SAFETY_NOTE_TAILNET)
+        );
+    }
+
+    // ── A second stop signal ──────────────────────────────────────────────
+
+    /// In the flip, a second Ctrl-C mid-shutdown gives the terminal back BEFORE
+    /// the process exits (an exit runs no destructor, so nothing else would),
+    /// and logs the same line `dux server` prints.
+    #[test]
+    fn a_forced_exit_restores_the_terminal_before_exiting() {
+        let ring = dux_core::activity::ActivityRing::new(10);
+        let console = crate::console::Console::test_ring_capture(ring.clone());
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let restore: super::RestoreTerminal = {
+            let events = events.clone();
+            std::sync::Arc::new(move || events.lock().unwrap().push("restore".to_string()))
+        };
+        let force = super::ForceExit::new(console, Some(restore));
+        force.run(|code| events.lock().unwrap().push(format!("exit {code}")));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["restore".to_string(), "exit 130".to_string()]
+        );
+        let lines: Vec<String> = ring
+            .snapshot()
+            .lines
+            .iter()
+            .map(dux_core::serve_log::LogLine::text)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![format!("12:00:00 \u{2717} {}", super::FORCE_EXIT_MESSAGE)]
+        );
+    }
+
+    /// In `dux server`, the line is on stdout before the exit: the console is
+    /// flushed first, so the writer thread cannot lose it.
+    #[test]
+    fn a_forced_exit_flushes_the_console_before_exiting() {
+        let (console, sink) = crate::console::Console::test_capture(false);
+        let force = super::ForceExit::new(console, None);
+        let printed_at_exit = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        force.run(|_| {
+            // Read straight from the buffer, without the test's own barrier,
+            // so only the run's own flush can have put the line there.
+            *printed_at_exit.lock().unwrap() = sink.raw_contents();
+        });
+        assert_eq!(
+            *printed_at_exit.lock().unwrap(),
+            format!("12:00:00 error {}\n", super::FORCE_EXIT_MESSAGE)
         );
     }
 

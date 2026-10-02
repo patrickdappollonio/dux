@@ -141,7 +141,9 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
         let (returned_engine, exit) = serve_with_engine(
             engine,
             vec![listener],
-            dux_core::activity::ActivityRing::new(),
+            dux_core::activity::ActivityRing::default(),
+            dux_core::serve_log::StartupNotes::default(),
+            Arc::new(|| {}),
             || {
                 if stop_for_thread.load(Ordering::SeqCst) {
                     ServerTick::ReturnToTui
@@ -234,7 +236,9 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
         let (returned_engine, exit) = serve_with_engine(
             engine,
             vec![listener],
-            dux_core::activity::ActivityRing::new(),
+            dux_core::activity::ActivityRing::default(),
+            dux_core::serve_log::StartupNotes::default(),
+            Arc::new(|| {}),
             || {
                 if quit_for_thread.load(Ordering::SeqCst) {
                     ServerTick::QuitProcess
@@ -307,7 +311,9 @@ async fn quit_process_counts_a_reaped_child_whose_pty_is_still_open_as_shut_down
         let (returned_engine, exit) = serve_with_engine(
             engine,
             vec![listener],
-            dux_core::activity::ActivityRing::new(),
+            dux_core::activity::ActivityRing::default(),
+            dux_core::serve_log::StartupNotes::default(),
+            Arc::new(|| {}),
             || ServerTick::QuitProcess,
             |_message| {},
         )
@@ -367,7 +373,9 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
         let (returned_engine, exit) = serve_with_engine(
             engine,
             vec![listener],
-            dux_core::activity::ActivityRing::new(),
+            dux_core::activity::ActivityRing::default(),
+            dux_core::serve_log::StartupNotes::default(),
+            Arc::new(|| {}),
             || {
                 if stop_for_thread.load(Ordering::SeqCst) {
                     ServerTick::ReturnToTui
@@ -449,4 +457,117 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
     );
 
     serve_thread.join().expect("serve thread joined");
+}
+
+/// The flip's log viewer shows the log `dux server` prints. A user who flips the
+/// TUI into the server, opens it in a browser, and quits sees, in the viewer:
+/// the pre-flight's warning, the startup banner naming the loopback URL, the
+/// access log of the page's requests, the client connecting, and the shutdown.
+#[tokio::test]
+async fn the_flip_logs_what_dux_server_prints() {
+    let (mut engine, _tmp) = build_engine();
+    engine.config.server.access_log = true;
+    let (terminal_id, _label) = engine
+        .create_companion_terminal("s1", 24, 80)
+        .expect("create terminal");
+    let _ = terminal_id;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ring = dux_core::activity::ActivityRing::new(500);
+    let startup = dux_core::serve_log::StartupNotes {
+        warnings: vec!["Tailscale not detected (test), so dux is serving on loopback only.".into()],
+        bind_warnings: Vec::new(),
+        tailscale_detected: false,
+    };
+
+    let quit = Arc::new(AtomicBool::new(false));
+    let quit_for_thread = Arc::clone(&quit);
+    let ring_for_thread = ring.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let serve_thread = std::thread::spawn(move || {
+        let (_engine, _exit) = serve_with_engine(
+            engine,
+            vec![listener],
+            ring_for_thread,
+            startup,
+            Arc::new(|| {}),
+            || {
+                if quit_for_thread.load(Ordering::SeqCst) {
+                    ServerTick::QuitProcess
+                } else {
+                    ServerTick::Continue
+                }
+            },
+            |_message| {},
+        )
+        .expect("serve_with_engine");
+        done_tx.send(()).unwrap();
+    });
+
+    // A page's first request, then its events socket.
+    let body = reqwest_like_get(addr, "/api/v1/build").await;
+    assert!(body.starts_with("HTTP/1.1 200"), "{body}");
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .expect("connect");
+    let _ = tokio::time::timeout(Duration::from_secs(3), ws.next()).await;
+
+    quit.store(true, Ordering::SeqCst);
+    done_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("serve thread finished");
+    serve_thread.join().expect("serve thread joined");
+
+    let lines: Vec<String> = ring
+        .snapshot()
+        .lines
+        .iter()
+        .map(dux_core::serve_log::LogLine::text)
+        .collect();
+    let joined = lines.join("\n");
+    // Timestamps are wall-clock, so each line is matched after its stamp.
+    let stamped = |rest: &str| {
+        lines
+            .iter()
+            .any(|l| l.len() > 9 && l.as_bytes()[2] == b':' && l[9..].starts_with(rest))
+    };
+    assert!(
+        stamped("\u{26a0} Tailscale not detected (test)"),
+        "the pre-flight warning opens the log:\n{joined}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("dux ") && l.ends_with("  plain HTTP")),
+        "the banner header:\n{joined}"
+    );
+    assert!(
+        lines.contains(&format!("  \u{279c} Local (loopback): http://{addr}")),
+        "the banner names the URL:\n{joined}"
+    );
+    assert!(
+        stamped("GET /api/v1/build 200 "),
+        "the access log reaches the viewer:\n{joined}"
+    );
+    assert!(
+        stamped("\u{279c} client connected from 127.0.0.1"),
+        "the client connecting:\n{joined}"
+    );
+    assert!(
+        stamped("\u{279c} Requesting 0 agents and 1 terminal to gracefully shut down"),
+        "the shutdown progress:\n{joined}"
+    );
+}
+
+/// A bare HTTP/1.1 GET over a plain TCP socket, returning the raw response, so
+/// this suite needs no HTTP client dependency.
+async fn reqwest_like_get(addr: std::net::SocketAddr, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut out)).await;
+    String::from_utf8_lossy(&out).into_owned()
 }

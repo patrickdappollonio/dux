@@ -4556,10 +4556,19 @@ impl App {
             // Tailscale daemon both surface the same way (serving loopback-only).
             let result = match preflight_server_listeners(port, tailscale_ip) {
                 Ok((listeners, urls, bind_warnings)) => {
+                    // The flip's log opens with these, exactly as `dux server`
+                    // prints them: the detection warning as a line of its own,
+                    // the bind failures as banner rows.
+                    let startup = dux_core::serve_log::StartupNotes {
+                        warnings: detect_warning.iter().cloned().collect(),
+                        bind_warnings: bind_warnings.clone(),
+                        tailscale_detected: tailscale_ip.is_some(),
+                    };
                     let warning = combine_flip_warnings(detect_warning, bind_warnings);
                     let _ = tx.send(WorkerEvent::ServerFlipPreflightReady {
                         result: Ok((listeners, urls)),
                         warning,
+                        startup,
                     });
                     return;
                 }
@@ -4570,6 +4579,7 @@ impl App {
             let _ = tx.send(WorkerEvent::ServerFlipPreflightReady {
                 result,
                 warning: detect_warning,
+                startup: dux_core::serve_log::StartupNotes::default(),
             });
         });
     }
@@ -5225,6 +5235,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Err("could not start the web server: address in use".to_string()),
             warning: None,
+            startup: Default::default(),
         });
         assert!(
             !app.server_flip_preflight_pending,
@@ -5237,6 +5248,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url])),
             warning: None,
+            startup: Default::default(),
         });
         assert!(app.pending_server_flip.is_some());
         app.start_web_server();
@@ -5283,14 +5295,15 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url.clone()])),
             warning: None,
+            startup: Default::default(),
         });
 
-        let (listeners, urls) = app
+        let flip = app
             .pending_server_flip
             .as_ref()
             .expect("a successful pre-flight stashes the flip");
-        assert_eq!(listeners.len(), 1);
-        assert_eq!(urls, &vec![url.clone()]);
+        assert_eq!(flip.listeners.len(), 1);
+        assert_eq!(flip.urls, vec![url.clone()]);
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
         assert_eq!(
             app.status.message(),
@@ -5302,6 +5315,31 @@ mod tests {
         );
     }
 
+    /// The pre-flight's warnings and Tailscale facts ride with the flip, so the
+    /// server status screen's log opens with them exactly as `dux server` does.
+    #[test]
+    fn server_flip_preflight_carries_its_startup_notes_to_the_flip() {
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        stash_server_flip_op(&mut app);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let startup = dux_core::serve_log::StartupNotes {
+            warnings: vec!["Tailscale not detected (test).".to_string()],
+            bind_warnings: vec!["could not bind the Tailscale address".to_string()],
+            tailscale_detected: true,
+        };
+        app.apply_reaction(EventReaction::ServerFlipPreflightReady {
+            result: Ok((vec![listener], vec![url])),
+            warning: None,
+            startup: startup.clone(),
+        });
+        let flip = app
+            .pending_server_flip
+            .as_ref()
+            .expect("a successful pre-flight stashes the flip");
+        assert_eq!(flip.startup, startup);
+    }
+
     #[test]
     fn server_flip_preflight_ready_warning_shows_warning_status() {
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
@@ -5311,6 +5349,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url.clone()])),
             warning: Some("Tailscale not detected, serving on loopback only.".to_string()),
+            startup: Default::default(),
         });
         assert!(app.pending_server_flip.is_some());
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
@@ -5333,6 +5372,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Err("could not start the web server: address in use".to_string()),
             warning: None,
+            startup: Default::default(),
         });
         assert!(
             app.pending_server_flip.is_none(),

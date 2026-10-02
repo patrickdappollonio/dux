@@ -728,8 +728,12 @@ impl App {
                 self.apply_delete_terminal_view(*view);
             }
 
-            EventReaction::ServerFlipPreflightReady { result, warning } => {
-                self.apply_server_flip_preflight(result, warning);
+            EventReaction::ServerFlipPreflightReady {
+                result,
+                warning,
+                startup,
+            } => {
+                self.apply_server_flip_preflight(result, warning, startup);
             }
 
             EventReaction::BackgroundServerPreflightReady { result, warning } => {
@@ -899,11 +903,12 @@ impl App {
         &mut self,
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
+        startup: dux_core::serve_log::StartupNotes,
     ) {
         self.server_flip_preflight_pending = false;
         match result {
             Ok((listeners, urls)) => {
-                self.apply_server_flip_preflight_success(listeners, urls, warning)
+                self.apply_server_flip_preflight_success(listeners, urls, warning, startup)
             }
             Err(error) => {
                 if let Some(op) = self.pending_server_flip_op.take() {
@@ -921,6 +926,7 @@ impl App {
         listeners: Vec<std::net::TcpListener>,
         urls: Vec<String>,
         warning: Option<String>,
+        startup: dux_core::serve_log::StartupNotes,
     ) {
         let url_list = urls.join(", ");
         if let Some(warning) = warning {
@@ -938,7 +944,11 @@ impl App {
             ));
             self.apply_reaction(EventReaction::Status(progress));
         }
-        self.pending_server_flip = Some((listeners, urls));
+        self.pending_server_flip = Some(super::PendingServerFlip {
+            listeners,
+            urls,
+            startup,
+        });
     }
 
     fn apply_browser_entries(&mut self, dir: PathBuf, entries: Vec<BrowserEntry>) {

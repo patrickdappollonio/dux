@@ -519,8 +519,9 @@ impl LiveServerLimits {
         self.search_index_max_files.store(value, Ordering::Relaxed);
     }
 
-    /// Whether the per-request access log is on. The middleware still requires an
-    /// active console, so the flip and the noop-console paths emit nothing.
+    /// Whether the per-request access log is on. The middleware still requires a
+    /// console that records (`dux server`'s or the flip's), so a noop console
+    /// emits nothing.
     pub fn access_log(&self) -> bool {
         self.access_log.load(Ordering::Relaxed)
     }
@@ -1794,7 +1795,16 @@ pub(crate) fn auto_reopen_agents_on_startup(engine: &mut Engine) -> usize {
     launched
 }
 
-pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>) {
+pub fn spawn_engine_thread(engine: Engine) -> (EngineHandle, JoinHandle<()>) {
+    spawn_engine_thread_with_console(engine, crate::console::Console::noop())
+}
+
+/// [`spawn_engine_thread`] for `dux server`, whose shutdown progress prints on
+/// its console as timestamped lines, the same lines the flip's viewer shows.
+pub(crate) fn spawn_engine_thread_with_console(
+    mut engine: Engine,
+    console: crate::console::Console,
+) -> (EngineHandle, JoinHandle<()>) {
     let (handle, ends) = build_actor_channels(&engine);
     spawn_global_workers(&mut engine);
     // Startup auto-reopen: dispatched before the loop starts so the loop's very
@@ -1805,7 +1815,9 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
         // The dedicated thread never asks the loop to exit; the loop stops only
         // on the `Shutdown` request handled inline. The returned engine is
         // dropped here (thread end), exactly as the previous implementation did.
-        let _engine = run_engine_loop(engine, ends, ShutdownEcho::Stderr, || LoopControl::Continue);
+        let _engine = run_engine_loop(engine, ends, ShutdownEcho::Console(console), || {
+            LoopControl::Continue
+        });
     });
 
     (handle, join)
@@ -2037,12 +2049,13 @@ pub(crate) struct DrainOutcome {
     stopped: bool,
 }
 
-/// Whether the request drain may echo shutdown progress to stderr.
+/// Where the request drain prints shutdown progress, if anywhere.
 ///
 /// `dux server` owns its terminal and an operator running it in the foreground
-/// should see the agents winding down. Every other serve path shares the terminal
-/// with a themed dux-tui screen, where a raw line lands wherever the cursor
-/// happens to sit; those paths stay silent and rely on `dux.log`.
+/// should see the agents winding down, so it hands its console over. The flip
+/// prints the same lines through its own console from its own teardown, and the
+/// background server shares the terminal with the TUI; both pass `Silent` here
+/// and rely on `dux.log`.
 ///
 /// This flag is about PRINTING, not about the `Shutdown` request itself, which
 /// SIGTERMs every agent wherever it arrives. Only `EngineHandle::shutdown` sends
@@ -2050,9 +2063,10 @@ pub(crate) struct DrainOutcome {
 /// cannot receive one today. Worth knowing if that ever changes: on the
 /// background-server path a `Shutdown` would wind down the agents of a terminal
 /// UI that never asked, so a new sender needs a reason and a gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) enum ShutdownEcho {
-    Stderr,
+    /// `dux server`: the progress prints on its console.
+    Console(crate::console::Console),
     Silent,
 }
 
@@ -2642,26 +2656,32 @@ impl EngineService {
                     // them to flush state, then mark agent sessions Detached.
                     // Handled here (not in `handle_request`) because it must stop
                     // the loop. `shutdown_ptys` logs the start/result to dux.log;
-                    // on the `dux server` path we also echo to the console
-                    // (stderr) so an operator running it in the foreground sees
-                    // the shutdown progress, mirroring what the TUI prints on
-                    // quit. Every other path shares the terminal with a themed
-                    // dux-tui screen and stays silent.
-                    let echo = self.shutdown_echo == ShutdownEcho::Stderr;
+                    // on the `dux server` path the console prints it too, as
+                    // timestamped lines, so an operator running it in the
+                    // foreground sees the shutdown progress. The flip runs its
+                    // own shutdown and prints the same lines into its viewer;
+                    // the background server stays silent.
+                    let echo = match &self.shutdown_echo {
+                        ShutdownEcho::Console(console) => Some(console.clone()),
+                        ShutdownEcho::Silent => None,
+                    };
                     let agents = engine.providers.len();
                     let terminals = engine.companion_terminals.len();
                     let grace = dux_core::config::shutdown_grace(
                         engine.config.server.shutdown_timeout_seconds,
                     );
-                    if echo && agents + terminals > 0 {
-                        eprintln!(
-                            "{}",
-                            dux_core::engine::format_shutdown_start(agents, terminals, grace)
-                        );
+                    if let Some(console) = &echo
+                        && agents + terminals > 0
+                    {
+                        console.info(&dux_core::engine::format_shutdown_start(
+                            agents, terminals, grace,
+                        ));
                     }
                     let report = engine.shutdown_ptys(grace);
-                    if echo && report.agents_total + report.terminals_total > 0 {
-                        eprintln!("{}", dux_core::engine::format_shutdown_result(&report));
+                    if let Some(console) = &echo
+                        && report.agents_total + report.terminals_total > 0
+                    {
+                        console.info(&dux_core::engine::format_shutdown_result(&report));
                     }
                     let _ = reply.send(());
                     stopped = true;
@@ -7228,7 +7248,7 @@ mod tests {
     fn one_loop_iteration(engine: Engine) -> Engine {
         let (handle, ends) = build_actor_channels(&engine);
         let mut ran = false;
-        let engine = run_engine_loop(engine, ends, ShutdownEcho::Stderr, move || {
+        let engine = run_engine_loop(engine, ends, ShutdownEcho::Silent, move || {
             if ran {
                 LoopControl::Exit
             } else {

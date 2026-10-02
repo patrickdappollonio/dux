@@ -464,6 +464,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_string_array(doc, "server", "allowed_hosts", &config.server.allowed_hosts);
     patch_table_str(doc, "server", "color", &config.server.color);
     patch_table_bool(doc, "server", "access_log", config.server.access_log);
+    patch_table_usize(
+        doc,
+        "server",
+        "log_viewer_lines",
+        config.server.log_viewer_lines,
+    );
     patch_table_bool(
         doc,
         "server",
@@ -1780,6 +1786,44 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         let rendered = render_config_plain(&config);
         let parsed: Config = toml::from_str(&rendered).expect("re-parse");
         assert_eq!(parsed.server.search_index_max_files, 1234);
+    }
+
+    #[test]
+    fn log_viewer_lines_defaults_and_round_trips() {
+        let rendered = render_config_plain(&Config::default());
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(
+            parsed.server.log_viewer_lines,
+            crate::config::DEFAULT_LOG_VIEWER_LINES
+        );
+        let config = Config {
+            server: crate::config::ServerConfig {
+                log_viewer_lines: 321,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(parsed.server.log_viewer_lines, 321);
+    }
+
+    #[test]
+    fn log_viewer_lines_user_value_survives_patch() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[server]\nlog_viewer_lines = 777\n").expect("seed config");
+        let config = Config {
+            server: crate::config::ServerConfig {
+                log_viewer_lines: 4321,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+        let saved = fs::read_to_string(&path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
+        assert_eq!(parsed.server.log_viewer_lines, 4321, "saved:\n{saved}");
     }
 
     #[test]

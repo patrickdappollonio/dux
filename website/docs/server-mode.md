@@ -40,6 +40,10 @@ dux server
 
 It binds `127.0.0.1:3890` (loopback only) by default and prints a small vite-style
 banner: one row per bound address with its `http://…` URL, plus a reachability note.
+After that it keeps a timestamped log going: browsers connecting and leaving, one line
+per request (the access log), your Tailscale address coming and going, and the shutdown
+when you stop it. Any warning about the start itself, a missing Tailscale for one, is
+printed above the banner.
 The port is 3890 because that is how you spell "dux" on a phone keypad.
 
 The flags:
@@ -91,7 +95,12 @@ trigger it by accident.
 
 Your **agents keep running the entire time**: no relaunch, no lost conversations. The
 dux you already have starts serving in place. Your terminal turns into a themed dux
-status screen showing the serve URLs and an activity panel. Press `q` or `Esc` there to
+status screen showing the serve URLs and a log viewer. The viewer shows exactly the log
+`dux server` prints, banner and access log included, so nothing you would see there is
+missing here. It keeps the last `log_viewer_lines` lines (2000 by default) for scrolling
+back with your scroll keys (Page Up and Page Down, Home and End unless you rebound them;
+the `?` help lists them). While you are scrolled back, new lines do not move what you are
+reading, and the bottom of the panel says how many arrived below. Press `q` or `Esc` there to
 drop back into the TUI with everything still running, which stops serving the web UI;
 you can flip again whenever you like. `Ctrl-c` quits dux entirely.
 
@@ -269,7 +278,8 @@ The rest tune presentation and limits:
 | Key | Default | What it does |
 |---|---|---|
 | `color` | `"auto"` | Colored, vite-style console output for `dux server` (`auto`, `always`, `never`). Read at startup. |
-| `access_log` | `true` | Print a per-request access log line to the `dux server` console (never to `dux.log`, so pipe stdout to capture it). `/healthz` is always skipped. A config reload applies it. |
+| `access_log` | `true` | Log a per-request line to the server's console: `dux server`'s output and the flip's log viewer alike (never to `dux.log`, so pipe `dux server`'s stdout to capture it). `/healthz` is always skipped. Set `false` to silence it in both. A config reload applies it. |
+| `log_viewer_lines` | `2000` | How many lines the flip's log viewer keeps for scrolling back. `dux server` has no such cap, because its scrollback is your terminal's. Read when the flip starts. |
 | `title` | `"dux"` | Web-only instance name: the browser tab title and the wordmark in the projects pane. Set `"dux (prod)"` to tell tabs apart. |
 | `favicon` | `""` | Web-only favicon tint so several dux tabs are distinguishable. Empty keeps the yellow duck; otherwise a curated color (violet, blue, sky, cyan, teal, green, amber, orange, red, pink, rose). |
 | `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-c during the wait exits immediately. |

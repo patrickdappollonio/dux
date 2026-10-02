@@ -978,14 +978,27 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "access_log",
             comment: Some(CommentSource::Static(
-                "# Print a per-request access log line (method, path, status, latency) to\n\
-                 # the `dux server` console. The /healthz probe is always skipped so a\n\
-                 # health checker does not flood the log. This output is console-ONLY and\n\
-                 # never written to dux.log, so piping `dux server`'s stdout captures the\n\
-                 # access log. Set false to silence it.\n\
+                "# Log a per-request access line (method, path, status, latency) to the\n\
+                 # server's console: the terminal `dux server` prints to, and the log\n\
+                 # viewer of the in-app \"start web server\" flip, which shows the same\n\
+                 # lines. The /healthz probe is always skipped so a health checker does\n\
+                 # not flood the log. This output is console-ONLY and never written to\n\
+                 # dux.log, so piping `dux server`'s stdout captures the access log.\n\
+                 # Set false to silence it in both places.\n\
                  # A config reload applies this to a running server right away.",
             )),
             value_fn: |c| FieldValue::Bool(c.server.access_log),
+        },
+        ConfigEntry::Field {
+            key: "log_viewer_lines",
+            comment: Some(CommentSource::Static(
+                "# How many lines the in-app \"start web server\" flip keeps in its log\n\
+                 # viewer for scrolling back. The viewer shows the same lines `dux server`\n\
+                 # prints to its terminal; older lines are dropped once it holds this many.\n\
+                 # `dux server` itself has no such cap: its scrollback is your terminal's.\n\
+                 # Values below 1 are read as 1. Applies the next time the flip starts.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.log_viewer_lines),
         },
         ConfigEntry::Field {
             key: "serve_while_tui",
@@ -2580,6 +2593,7 @@ mod tests {
         assert!(!rendered.contains("dangerously_listen_http"));
         assert!(rendered.contains("color = \"auto\""));
         assert!(rendered.contains("access_log = true"));
+        assert!(rendered.contains("log_viewer_lines = 2000"));
         assert!(rendered.contains("serve_while_tui = false"));
         assert!(rendered.contains("max_websocket_events_connections = 32"));
         assert!(rendered.contains("max_websocket_agent_connections = 32"));

@@ -245,6 +245,11 @@ pub fn normalized_agent_tabs_max(configured: u16) -> u16 {
 /// a giant repo (e.g. a built `target/`) is acceptable. `0` disables the cap.
 pub const DEFAULT_SEARCH_INDEX_MAX_FILES: usize = 50_000;
 
+/// Default number of lines the `start-web-server` flip's log viewer keeps for
+/// scrolling back. The same lines `dux server` prints to its terminal, whose own
+/// scrollback is the host terminal's; this is the flip's equivalent.
+pub const DEFAULT_LOG_VIEWER_LINES: usize = 2000;
+
 /// Default visible-time wait, in seconds, for a terminal pane's screen to
 /// arrive after its socket opens, before the pane stops waiting and offers
 /// Reconnect. Consumed by the BROWSER, which is the only side that can see
@@ -899,11 +904,19 @@ pub struct ServerConfig {
     /// An unrecognized value is treated as `"auto"` with a warning. The TUI flip's
     /// status screen is unaffected: this only governs the `dux server` CLI.
     pub color: String,
-    /// Whether `dux server` prints a per-request access log line (method, path,
-    /// status, latency) to its console. The `/healthz` probe is always skipped.
+    /// Whether the server logs a per-request access line (method, path, status,
+    /// latency) to its console: `dux server`'s stdout, and the log viewer of the
+    /// `start-web-server` flip. The `/healthz` probe is always skipped.
     /// Default true. The access log is console-only (never written to `dux.log`),
-    /// so piping `dux server`'s stdout captures it.
+    /// so piping `dux server`'s stdout captures it, and the `start-web-server`
+    /// flip shows the same lines in its log viewer.
     pub access_log: bool,
+    /// How many lines the `start-web-server` flip's log viewer keeps for
+    /// scrolling back. Older lines are dropped once it is full. `dux server`
+    /// prints the same lines to its terminal, whose scrollback is the host
+    /// terminal's own, so this only sizes the flip's viewer. Values below 1 are
+    /// read as 1. Default 2000. Applies the next time the flip starts.
+    pub log_viewer_lines: usize,
     /// Whether dux serves the web UI in the BACKGROUND while the terminal UI
     /// keeps running, instead of only through the `start-web-server` flip (which
     /// replaces the TUI with the server and is unaffected by this setting).
@@ -2126,6 +2139,7 @@ impl Default for ServerConfig {
             allowed_hosts: Vec::new(),
             color: "auto".to_string(),
             access_log: true,
+            log_viewer_lines: DEFAULT_LOG_VIEWER_LINES,
             serve_while_tui: false,
             max_websocket_events_connections: DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
             max_websocket_agent_connections: DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,

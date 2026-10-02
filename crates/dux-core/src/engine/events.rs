@@ -375,6 +375,8 @@ pub enum EventReaction {
     ServerFlipPreflightReady {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
+        /// The pre-flight's warnings and Tailscale facts, for the flip's log.
+        startup: crate::serve_log::StartupNotes,
     },
     /// The BACKGROUND web server's bind pre-flight finished. Same shape and same
     /// pass-through as `ServerFlipPreflightReady`: the listeners are the App's,
@@ -3773,10 +3775,18 @@ impl Engine {
             WorkerEvent::StartupCommandLogContentLoaded { path, result } => {
                 EventReaction::StartupLogContentArrived { path, result }
             }
-            WorkerEvent::ServerFlipPreflightReady { result, warning } => {
+            WorkerEvent::ServerFlipPreflightReady {
+                result,
+                warning,
+                startup,
+            } => {
                 // No engine domain state to mutate: the listeners and the flip
                 // are TUI concerns. Hand them straight to the App.
-                EventReaction::ServerFlipPreflightReady { result, warning }
+                EventReaction::ServerFlipPreflightReady {
+                    result,
+                    warning,
+                    startup,
+                }
             }
             WorkerEvent::BackgroundServerPreflightReady { result, warning } => {
                 // Same story: the listeners belong to whoever asked to serve.

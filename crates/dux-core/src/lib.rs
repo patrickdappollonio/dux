@@ -58,6 +58,7 @@ pub mod resource_stats;
 pub mod row_state;
 pub mod scroll_hint;
 pub mod scroll_margins;
+pub mod serve_log;
 pub mod shell_quote;
 pub mod sidebar;
 pub mod startup;

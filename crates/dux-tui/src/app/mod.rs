@@ -603,7 +603,7 @@ pub struct App {
     /// can take over the same process (PTYs keep running). Populated by the
     /// `StartWebServer` palette action only after its (worker) pre-flight
     /// succeeds. LOCAL MODE may bind more than one address (loopback + Tailscale).
-    pub(crate) pending_server_flip: Option<(Vec<std::net::TcpListener>, Vec<String>)>,
+    pub(crate) pending_server_flip: Option<PendingServerFlip>,
     /// In-flight guard for the server-flip pre-flight. `start_web_server` spawns a
     /// worker that races to `bind` the LOCAL MODE ports; two quick invocations
     /// would both spawn workers and the second would hit a confusing EADDRINUSE.
@@ -1141,6 +1141,15 @@ pub enum PersistFinalOutcome {
     ConfigWriteFailed(String),
 }
 
+/// A flip whose pre-flight succeeded, waiting for the run loop to hand it over.
+pub(crate) struct PendingServerFlip {
+    pub(crate) listeners: Vec<std::net::TcpListener>,
+    pub(crate) urls: Vec<String>,
+    /// What the pre-flight learned, so the flip's log opens with the same lines
+    /// `dux server` prints.
+    pub(crate) startup: dux_core::serve_log::StartupNotes,
+}
+
 /// How [`App::run`] returned: a plain quit, or a request to flip the current
 /// process into the web server while keeping the live agents running.
 pub enum RunExit {
@@ -1148,6 +1157,7 @@ pub enum RunExit {
     FlipToServer {
         listeners: Vec<std::net::TcpListener>,
         urls: Vec<String>,
+        startup: dux_core::serve_log::StartupNotes,
     },
 }
 
@@ -4574,8 +4584,12 @@ impl App {
                 continue;
             }
 
-            if let Some((listeners, urls)) = self.pending_server_flip.take() {
-                return RunExit::FlipToServer { listeners, urls };
+            if let Some(flip) = self.pending_server_flip.take() {
+                return RunExit::FlipToServer {
+                    listeners: flip.listeners,
+                    urls: flip.urls,
+                    startup: flip.startup,
+                };
             }
             if self.poll_run_input() {
                 return RunExit::Quit;
@@ -7539,11 +7553,8 @@ fn preflight_server_listeners(
             }
             Err(err) => {
                 // Tailscale leg (best-effort): drop it, warn, serve loopback-only.
-                let warning = format!(
-                    "Could not bind the Tailscale address {addr}: {err}. Something else is \
-                     already listening there; serving on loopback only. Stop that process or \
-                     change [server] port to also serve on Tailscale."
-                );
+                // The same words `dux server` prints for the same failure.
+                let warning = dux_core::serve_log::tailscale_bind_warning(addr, &err);
                 dux_core::logger::warn(&format!("[server] {warning}"));
                 warnings.push(warning);
             }
@@ -8131,16 +8142,23 @@ mod tests {
             urls.iter().all(|u| u.contains("127.0.0.1")),
             "the URL list must exclude the failed Tailscale address: {urls:?}"
         );
-        // The warning names the busy address and the degrade-to-loopback outcome.
+        // The warning names the busy address in exactly the words `dux server`
+        // prints for the same failure, so the flip's log and `dux server`'s match.
         assert_eq!(warnings.len(), 1, "exactly one bind warning: {warnings:?}");
         assert!(
-            warnings[0].contains(&held_addr.to_string()),
+            warnings[0].starts_with(&format!(
+                "could not bind the Tailscale address {held_addr}: "
+            )),
             "the warning must name the busy Tailscale address: {}",
             warnings[0]
         );
         assert!(
-            warnings[0].to_lowercase().contains("loopback"),
-            "the warning must say it degraded to loopback: {}",
+            warnings[0].ends_with(
+                "Something else is already listening there, so dux is serving on the \
+                 remaining address(es) only. Stop that process or change [server].port to \
+                 also serve on Tailscale."
+            ),
+            "the warning must be dux server's wording: {}",
             warnings[0]
         );
     }
