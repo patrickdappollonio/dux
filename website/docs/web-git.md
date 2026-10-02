@@ -159,6 +159,14 @@ computer, in the editor's own tab on a phone), and the `⋯` menu with the rest:
   still see at a glance how much has moved, and the **Show the Changes pane** row in
   **Preferences** is the other way in, since hiding the pane takes this menu with it.
 
+The header stays in every state the pane can be in: while the changes load, when they
+fail to, and when the pane has nothing to show because the agent's folder has no
+repository or its directory is gone. In those quiet states **Commit…**, **Push**,
+**Pull** and **Refresh changes** stay in the menu greyed out, with a line at the top
+saying why, and come back on their own once the folder holds a repository again.
+**Hide Changes pane** and the **Open editor** button keep working, except that the
+editor button is greyed out too when the directory itself is gone.
+
 ## The PR banner
 
 When a session is tied to a GitHub pull request, a one-line strip shows the PR number, its

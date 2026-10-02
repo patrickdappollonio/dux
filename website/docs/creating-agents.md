@@ -525,6 +525,11 @@ When the folder is not a repository the panel is quiet, and it says which quiet 
 - The folder sits **inside** a repository rooted somewhere else.
 - dux could not consult git. Nothing is guessed and no change is written.
 
+A quiet panel keeps its header and its `⋯` menu, so you can still hide it or open the
+folder in the editor. Its git items stay in that menu greyed out with the reason, because
+they are the folder's own and come back once it is a repository. Pushing and pulling are
+not among them: they stay absent, as above.
+
 > [!WARNING]
 > The middle case is quiet on purpose. Git answers questions by walking up parent
 > directories, so showing changes there would show, stage and commit to that other

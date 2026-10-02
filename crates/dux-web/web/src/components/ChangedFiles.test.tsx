@@ -26,6 +26,8 @@ import { toastText } from "@/test/toastText"
 const forceRefreshChanges = vi.fn(() => Promise.resolve())
 const refreshChanges = vi.fn()
 const openEditor = vi.fn()
+const toggleChangesPane = vi.fn()
+const openCommit = vi.fn()
 
 let mockState: DuxState
 // The pane subscribes selectively and is memoized, so a new state reaches it
@@ -52,6 +54,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
     forceRefreshChanges: () => forceRefreshChanges(),
     refreshChanges: () => refreshChanges(),
     openEditor: (...args: unknown[]) => openEditor(...args),
+    toggleChangesPane: (...args: unknown[]) => toggleChangesPane(...args),
+    openCommit: (...args: unknown[]) => openCommit(...args),
   }
 })
 
@@ -183,6 +187,8 @@ beforeEach(() => {
   forceRefreshChanges.mockClear()
   refreshChanges.mockClear()
   openEditor.mockClear()
+  toggleChangesPane.mockClear()
+  openCommit.mockClear()
   stageMany.mockClear()
   unstageMany.mockClear()
   discardMany.mockClear()
@@ -309,6 +315,197 @@ describe("ChangedFiles for a standalone agent", () => {
     expect(menu.getByText("Commit…")).toBeTruthy()
     expect(menu.queryByText("Push")).toBeNull()
     expect(menu.queryByText("Pull")).toBeNull()
+  })
+})
+
+// A quiet pane is still a pane: its title and its ⋯ stay, so it can be hidden
+// and the editor reached, and the git items stay on screen greyed out with the
+// reason, because they come back once the folder has a repository.
+describe("the Changes pane header in a quiet state", () => {
+  function sessionWith(workspace: Record<string, unknown>): DuxState {
+    return {
+      selectedSessionId: "q1",
+      changes: { ...loadedChanges(), sessionId: "q1" },
+      spine: {
+        projects: [],
+        terminals: [],
+        sessions: [
+          {
+            id: "q1",
+            slot_tab_id: "q1",
+            title: "quiet",
+            provider: "claude",
+            status: "active",
+            tabs: [],
+            has_output: false,
+            working: false,
+            typing: false,
+            needs_attention: false,
+            created_at: "",
+            updated_at: "",
+            auto_reopen_enabled: false,
+            workspace,
+          },
+        ],
+      },
+    } as unknown as DuxState
+  }
+  const folderAt = (repo_status: string, quiet_reason: string) =>
+    sessionWith({
+      kind: "folder",
+      folder_path: "/home/someone/src",
+      folder_label: "~/src",
+      repo_status,
+      quiet_reason,
+    })
+  const missingWorkingCopy = () =>
+    sessionWith({
+      kind: "managed",
+      project_id: "p1",
+      branch_name: "feature/x",
+      initial_branch: "feature/x",
+      branch_provenance: "created",
+      source_branch: "main",
+      worktree_path: "/managed/wt",
+      worktree_missing: true,
+      quiet_reason: "The working copy at /managed/wt no longer exists on disk.",
+    })
+
+  const folderStates = [
+    {
+      status: "no_repo",
+      sentence: "This folder has no git repository, so there are no changes to show.",
+      reason: "This folder has no git repository.",
+    },
+    {
+      status: "inside_repo_rooted_elsewhere",
+      sentence: "This folder sits inside a repository rooted elsewhere, so dux shows no changes for it.",
+      reason: "This folder sits inside a repository rooted elsewhere.",
+    },
+    {
+      status: "indeterminate",
+      sentence: "dux could not consult git about this folder, so it cannot say whether it has changes.",
+      reason: "dux could not consult git about this folder.",
+    },
+    {
+      status: "unprobed",
+      sentence: "dux is still looking at this folder to see whether it is a git repository.",
+      reason: "dux is still looking at this folder.",
+    },
+    {
+      status: "missing",
+      sentence: "The folder ~/src no longer exists on disk.",
+      reason: "This folder no longer exists on disk.",
+    },
+  ]
+
+  async function openMenu() {
+    fireEvent.click(screen.getByLabelText("Changes actions"))
+    return within(await screen.findByRole("menu"))
+  }
+  const itemOf = (menu: ReturnType<typeof within>, text: string) =>
+    menu.getByText(text).closest('[role="menuitem"]') as HTMLElement
+  // A disabled item's reason is the element its aria-describedby names, so a
+  // screen reader hears why on the item itself.
+  const reasonOf = (item: HTMLElement) => {
+    const id = item.getAttribute("aria-describedby")
+    return id ? document.getElementById(id)?.textContent ?? null : null
+  }
+
+  for (const { status, sentence, reason } of folderStates) {
+    it(`keeps the title and the ⋯ above the quiet sentence (${status})`, () => {
+      mockState = folderAt(status, sentence)
+      render(<ChangedFiles />)
+      expect(screen.getByText("Changes")).toBeTruthy()
+      expect(screen.getByLabelText("Changes actions")).toBeTruthy()
+      expect(screen.getByText(sentence)).toBeTruthy()
+      expect(screen.getByText("~/src")).toBeTruthy()
+    })
+
+    it(`greys out the git items with the reason, and keeps Hide (${status})`, async () => {
+      mockState = folderAt(status, sentence)
+      render(<ChangedFiles />)
+      const menu = await openMenu()
+      for (const text of ["Commit…", "Refresh changes"]) {
+        const item = itemOf(menu, text)
+        expect(item.getAttribute("aria-disabled"), text).toBe("true")
+        expect(reasonOf(item), text).toBe(reason)
+      }
+      expect(menu.getByText(reason)).toBeTruthy()
+      // Branch identity stays absent for a standalone agent, quiet or not.
+      expect(menu.queryByText("Push")).toBeNull()
+      expect(menu.queryByText("Pull")).toBeNull()
+      const hide = itemOf(menu, "Hide Changes pane")
+      expect(hide.getAttribute("aria-disabled")).not.toBe("true")
+      fireEvent.click(hide)
+      expect(toggleChangesPane).toHaveBeenCalledTimes(1)
+    })
+  }
+
+  it("keeps the editor open to a folder that is there but has no repository", () => {
+    mockState = folderAt("no_repo", folderStates[0]!.sentence)
+    render(<ChangedFiles />)
+    const button = screen.getByLabelText("Open editor")
+    expect(button.hasAttribute("disabled")).toBe(false)
+    fireEvent.click(button)
+    expect(openEditor).toHaveBeenCalledWith({ kind: "agent", sessionId: "q1" })
+  })
+
+  it("greys out the editor, with the reason, once the folder is gone", () => {
+    mockState = folderAt("missing", folderStates[4]!.sentence)
+    render(<ChangedFiles />)
+    const button = screen.getByLabelText("Open editor")
+    expect(button.hasAttribute("disabled")).toBe(true)
+    const cell = button.closest("[data-slot=card-action]") as HTMLElement
+    expect(
+      within(cell)
+        .getAllByTestId("tooltip-content")
+        .some((node) => node.textContent === "This folder no longer exists on disk."),
+    ).toBe(true)
+  })
+
+  // A managed agent keeps its branch features, so its Push and Pull are on
+  // screen; with the working copy gone they are greyed out like the rest.
+  it("greys out Push and Pull too for a managed working copy that is gone", async () => {
+    mockState = missingWorkingCopy()
+    render(<ChangedFiles />)
+    expect(
+      screen.getByText("The working copy at /managed/wt no longer exists on disk."),
+    ).toBeTruthy()
+    const menu = await openMenu()
+    for (const text of ["Commit…", "Push", "Pull", "Refresh changes"]) {
+      const item = itemOf(menu, text)
+      expect(item.getAttribute("aria-disabled"), text).toBe("true")
+      expect(reasonOf(item), text).toBe("This working copy no longer exists on disk.")
+    }
+    expect(screen.getByLabelText("Open editor").hasAttribute("disabled")).toBe(true)
+  })
+
+  it("keeps the header while the changes load and when they fail to", () => {
+    mockState = {
+      selectedSessionId: "s1",
+      changes: { ...loadedChanges(), phase: "loading" },
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    expect(screen.getByText("Loading changes…")).toBeTruthy()
+    expect(screen.getByLabelText("Changes actions")).toBeTruthy()
+    cleanup()
+
+    mockState = {
+      selectedSessionId: "s1",
+      changes: { ...loadedChanges(), phase: "error", error: "git exploded" },
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    expect(screen.getByText("git exploded")).toBeTruthy()
+    expect(screen.getByLabelText("Changes actions")).toBeTruthy()
+  })
+
+  it("keeps the header over the ordinary no-changes state, with every item live", async () => {
+    render(<ChangedFiles />)
+    expect(screen.getByText("No changes")).toBeTruthy()
+    const menu = await openMenu()
+    expect(itemOf(menu, "Refresh changes").getAttribute("aria-disabled")).not.toBe("true")
+    expect(itemOf(menu, "Refresh changes").getAttribute("aria-describedby")).toBeNull()
   })
 })
 

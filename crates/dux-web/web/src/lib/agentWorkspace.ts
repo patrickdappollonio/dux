@@ -139,6 +139,54 @@ export function changesQuietReason(
   })
 }
 
+const WORKING_COPY_GONE = "This working copy no longer exists on disk."
+const FOLDER_GONE = "This folder no longer exists on disk."
+
+/** Why the Changes pane's own git items (commit, refresh, and push and pull
+ * where they exist) are greyed out, or `null` when they work. A short form of
+ * the quiet sentence the pane's body shows, for a menu row's reason.
+ *
+ * Gated on `changesQuietReason` rather than re-deriving the verdict, so "is the
+ * panel quiet" keeps exactly one spelling. */
+export function changesGitBlockedReason(
+  workspace: AgentWorkspaceWire,
+): string | null {
+  if (changesQuietReason(workspace) === null) return null
+  return matchWorkspace(workspace, {
+    managed: () => WORKING_COPY_GONE,
+    folder: (w) => {
+      switch (w.repo_status) {
+        case "working_repo":
+          return null
+        case "inside_repo_rooted_elsewhere":
+          return "This folder sits inside a repository rooted elsewhere."
+        case "no_repo":
+          return "This folder has no git repository."
+        case "indeterminate":
+          return "dux could not consult git about this folder."
+        case "unprobed":
+          return "dux is still looking at this folder."
+        case "missing":
+          return FOLDER_GONE
+        default:
+          return assertNever(w.repo_status)
+      }
+    },
+  })
+}
+
+/** Why the agent's directory cannot be opened in the editor, or `null` when it
+ * can. The editor is rooted at that directory and needs no repository, so the
+ * one thing that takes it away is the directory itself being gone. */
+export function directoryGoneReason(
+  workspace: AgentWorkspaceWire,
+): string | null {
+  return matchWorkspace(workspace, {
+    managed: (w) => (w.worktree_missing ? WORKING_COPY_GONE : null),
+    folder: (w) => (w.repo_status === "missing" ? FOLDER_GONE : null),
+  })
+}
+
 /** The one line the info panel shows when a managed agent's working copy is
  * gone. Pinned verbatim against `dux_core::working_copy`, which carries the twin
  * assertion, so a wording change fails on the side that changed. */

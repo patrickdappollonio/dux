@@ -709,24 +709,25 @@ function TerminalsSection({
         {/* One tap, no dialog: a standalone terminal has nothing to confirm
             (that is why its shared menu entry carries no trailing "…").
 
-            Variant: ghost, quieter than even the header's outline +, because
-            it lives inside a section divider whose whole row is muted chrome;
-            an outlined block here would outweigh the divider it decorates.
+            Look: exactly the Agents header's + (outline, its border and
+            background, the header's height token), through the one shared
+            class list, because the user asked for the two section creation
+            buttons to look the same (2026-10-02).
 
             Sizing: 28px square on desktop, the per-axis exemption from the
             40px floor. Its only neighbour on either axis is the collapse
             toggle 8px to its left, which expands a section and executes
-            nothing; on touch it takes the floor on both axes anyway. */}
+            nothing; on touch it takes the 40px floor on both axes. */}
         {/* Icon-only, so the tooltip and the accessible name are the only
             place the location can be said; they carry the same sentence the
             menu entries do. */}
         <SimpleTooltip content="New standalone terminal in your home folder">
           <Button
-            variant="ghost"
-            size="icon-sm"
+            variant="outline"
+            size="sm"
             aria-label="New standalone terminal in your home folder"
             onClick={() => createStandaloneTerminal()}
-            className="shrink-0 text-muted-foreground max-md:min-h-10 max-md:min-w-10"
+            className={SECTION_CREATE_SIZING}
           >
             <Plus />
           </Button>
@@ -870,6 +871,15 @@ const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manua
 // One height token for every control in the Agents header, set explicitly rather
 // than inherited, and lifted to the 40px floor where a finger is the pointer.
 const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10"
+
+// A section's own creation +, the Agents header's and the Terminals divider's
+// alike: an outline square at the header's height token, lifted to the 40px
+// floor on both axes where a finger is the pointer. `shrink-0` keeps the
+// divider's flex row from squeezing it.
+const SECTION_CREATE_SIZING = cn(
+  "w-7 shrink-0 px-0 max-md:min-w-10",
+  HEADER_CONTROL_SIZING,
+)
 
 // One counter pill for every section of the list: the count sits immediately
 // after the section word everywhere, and right edges carry controls only.
@@ -1157,10 +1167,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                   size="sm"
                   aria-label="New agent"
                   onClick={() => openNewAgentPicker("new")}
-                  className={cn(
-                    "w-7 px-0 max-md:min-w-10",
-                    HEADER_CONTROL_SIZING,
-                  )}
+                  className={SECTION_CREATE_SIZING}
                 >
                   <Plus />
                 </Button>

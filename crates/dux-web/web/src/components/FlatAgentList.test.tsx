@@ -1198,6 +1198,22 @@ describe("FlatAgentList Terminals divider", () => {
     expect((plus.parentElement as HTMLElement).className).toContain("gap-2")
   })
 
+  // The user asked for the two section creation buttons to look the same
+  // (2026-10-02): the same variant, border, background and size token as the
+  // Agents header's +, so the whole class list is one.
+  it("looks exactly like the Agents header's +", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    const terminalPlus = screen.getByRole("button", {
+      name: "New standalone terminal in your home folder",
+    })
+    const agentPlus = screen.getByRole("button", { name: "New agent" })
+    expect(terminalPlus.className).toBe(agentPlus.className)
+    expect(terminalPlus.className).toContain("border-border")
+    expect(terminalPlus.className).toContain("h-7")
+    expect(terminalPlus.className).toContain("max-md:min-h-10")
+    expect(terminalPlus.className).toContain("max-md:min-w-10")
+  })
+
   it("still collapses and expands, and the + does not toggle it", () => {
     render(<FlatAgentList handlers={handlers} />)
     const toggle = () => screen.getByText("Terminals").closest("button")!

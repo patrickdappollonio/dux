@@ -65,7 +65,9 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import {
+  changesGitBlockedReason,
   changesQuietReason,
+  directoryGoneReason,
   folderWorkspace,
   supportsBranchGit,
 } from "@/lib/agentWorkspace"
@@ -127,6 +129,15 @@ import {
   type ChangesBulkVerb,
   type ChangesBusyAction,
 } from "@/components/useChangedFilesController"
+
+// The header's recap while no list is on screen: nothing to sum.
+const NO_RECAP: ChangedFilesRecap = {
+  count: 0,
+  additions: 0,
+  deletions: 0,
+  binaryCount: 0,
+  diffExcludedCount: 0,
+}
 
 // One height for every control in the bulk bar; they differ in width only.
 const BULK_CONTROL = "h-9 max-md:h-11"
@@ -754,12 +765,18 @@ function GroupHeader({
 // acts, and the tenet would let it be quieter, but a ghost glyph beside an
 // outlined square read as a decoration rather than a control, so the two share
 // the header's one outline treatment.
+//
+// The editor needs the agent's directory and nothing else, so a quiet pane
+// keeps it live; only a directory that is gone greys it out, with `unavailable`
+// saying so through the shared tooltip on a focusable wrapper.
 function OpenEditorButton({
   sessionId,
   isMobile,
+  unavailable,
 }: {
   sessionId: string
   isMobile: boolean
+  unavailable: string | null
 }) {
   const root = agentRoot(sessionId)
   const label = "Open editor"
@@ -769,6 +786,17 @@ function OpenEditorButton({
     "aria-label": label,
     className: "max-md:size-11",
   } as const
+  if (unavailable !== null) {
+    // A plain disabled button on both form factors: a disabled anchor is not
+    // a thing, and there is no address worth keeping for a root that is gone.
+    return (
+      <ExplainedWhenIdle why={unavailable}>
+        <Button {...shared} disabled>
+          <FileCode2 />
+        </Button>
+      </ExplainedWhenIdle>
+    )
+  }
   return (
     <SimpleTooltip content={label}>
       {isMobile ? (
@@ -804,15 +832,32 @@ interface ChangesHeaderProps {
   recap: ChangedFilesRecap
   branchGit: boolean
   isMobile: boolean
+  // Why the pane's own git items are greyed out (the pane is quiet), or null
+  // when they work.
+  gitBlocked: string | null
+  // Why the editor cannot open the agent's directory, or null when it can.
+  editorBlocked: string | null
 }
 
+// The pane's one header, in every state an agent can put the pane in: loaded,
+// loading, failed, and every quiet one. A quiet pane is still a pane the user
+// may want to hide or open the editor from, so the title, the editor button and
+// the ⋯ never leave with the list.
 function ChangesHeader({
   sessionId,
   stagedCount,
   recap,
   branchGit,
   isMobile,
+  gitBlocked,
+  editorBlocked,
 }: ChangesHeaderProps) {
+  const reasonId = useId()
+  // Every git item carries the one reason line as its description, so a
+  // screen reader hears why on the item itself while sighted readers see it
+  // once at the head of the menu rather than repeated under each row.
+  const blocked = gitBlocked !== null
+  const describedBy = blocked ? reasonId : undefined
   const runGit = (operation: "push" | "pull") => {
     git[operation](sessionId).catch((error) =>
       notifyError(
@@ -839,7 +884,11 @@ function ChangesHeader({
       {/* The cell is a row of its own: `gap-2` is the misclick spacing between
         * the editor button and the `⋯`, adjacent icon squares of one size. */}
       <CardAction className="flex shrink-0 items-center gap-2 self-center">
-        <OpenEditorButton sessionId={sessionId} isMobile={isMobile} />
+        <OpenEditorButton
+          sessionId={sessionId}
+          isMobile={isMobile}
+          unavailable={editorBlocked}
+        />
         <DropdownMenu>
           <DropdownMenuTrigger
             render={
@@ -854,26 +903,54 @@ function ChangesHeader({
             <EllipsisVertical />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            {blocked ? (
+              <p
+                id={reasonId}
+                className="max-w-64 px-1.5 py-1 text-xs text-muted-foreground"
+              >
+                {gitBlocked}
+              </p>
+            ) : null}
+            {/* Greyed out rather than absent while the pane is quiet: these
+              * are the pane's own git operations on the agent's directory,
+              * and they come back the moment it holds a repository again (a
+              * `git init`, a folder restored), so a disabled row is the truth.
+              * That is a different thing from the branch-identity features
+              * (push, pull, fork, pull requests, provenance), which a
+              * standalone agent never has whatever its folder holds and which
+              * therefore stay ABSENT for it rather than disabled, here and in
+              * every other menu. */}
             <DropdownMenuItem
               onClick={() => openCommit(sessionId)}
-              disabled={stagedCount === 0}
+              disabled={blocked || stagedCount === 0}
+              aria-describedby={describedBy}
             >
               <GitCommitVertical />
               Commit…
             </DropdownMenuItem>
             {branchGit ? (
               <>
-                <DropdownMenuItem onClick={() => runGit("push")}>
+                <DropdownMenuItem
+                  onClick={() => runGit("push")}
+                  disabled={blocked}
+                  aria-describedby={describedBy}
+                >
                   <ArrowUpFromLine />
                   Push
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => runGit("pull")}>
+                <DropdownMenuItem
+                  onClick={() => runGit("pull")}
+                  disabled={blocked}
+                  aria-describedby={describedBy}
+                >
                   <ArrowDownToLine />
                   Pull
                 </DropdownMenuItem>
               </>
             ) : null}
             <DropdownMenuItem
+              disabled={blocked}
+              aria-describedby={describedBy}
               onClick={() => {
                 void forceRefreshChanges().catch((error) =>
                   notifyError(
@@ -937,9 +1014,11 @@ function ExplainedWhenIdle({
   children: React.ReactElement
 }) {
   if (why === null) return children
+  // The wrapper is what takes keyboard focus, so it wears the ring the
+  // disabled button inside it cannot.
   return (
     <SimpleTooltip content={why}>
-      <span tabIndex={0} className="inline-flex">
+      <span tabIndex={0} className={cn("inline-flex rounded-lg", FOCUS_RING)}>
         {children}
       </span>
     </SimpleTooltip>
@@ -1725,30 +1804,37 @@ function ChangesList({
   )
 }
 
-function unavailableChangesScreen(
-  sessionId: string | null,
+// The pane with no agent behind it: nothing to hide it from, no root to open an
+// editor at, so no header either.
+function noSessionScreen(): ReactElement {
+  return (
+    <Empty className="h-full border-0">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <MousePointerClick />
+        </EmptyMedia>
+        <EmptyTitle>No session selected</EmptyTitle>
+        <EmptyDescription>Select a session to see its changes.</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  )
+}
+
+// What stands in for the list under the pane's header while there is no list
+// to show: a quiet directory, the first load, or a failed one. Null once the
+// changes are loaded, which is when the list renders instead.
+const BODY_EMPTY = "min-h-0 flex-1 border-0"
+
+function changesBodyInstead(
+  sessionId: string,
   session: SessionView | undefined,
   changes: ChangesSlice,
 ): ReactElement | null {
-  if (!sessionId) {
-    return (
-      <Empty className="h-full border-0">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <MousePointerClick />
-          </EmptyMedia>
-          <EmptyTitle>No session selected</EmptyTitle>
-          <EmptyDescription>Select a session to see its changes.</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    )
-  }
-
   const quietReason = session ? changesQuietReason(session.workspace) : null
   if (quietReason) {
     const folder = session ? folderWorkspace(session.workspace) : null
     return (
-      <Empty className="h-full border-0">
+      <Empty className={BODY_EMPTY}>
         <EmptyHeader>
           <EmptyMedia variant="icon">
             <FolderOpen />
@@ -1769,7 +1855,7 @@ function unavailableChangesScreen(
   const phase = slice?.phase ?? "loading"
   if (phase === "loading" || phase === "idle") {
     return (
-      <Empty className="h-full border-0">
+      <Empty className={BODY_EMPTY}>
         <EmptyHeader>
           <EmptyMedia variant="icon">
             <Loader2 className="animate-spin" />
@@ -1783,7 +1869,7 @@ function unavailableChangesScreen(
   if (phase !== "error") return null
 
   return (
-    <Empty className="h-full border-0">
+    <Empty className={BODY_EMPTY}>
       <EmptyHeader>
         <EmptyMedia variant="icon">
           <TriangleAlert />
@@ -1857,17 +1943,17 @@ export const ChangedFiles = memo(function ChangedFiles() {
     reconcileFolders(selectedSessionId, liveSlice.staged, liveSlice.unstaged)
   }, [selectedSessionId, liveSlice])
 
-  const unavailable = unavailableChangesScreen(
+  if (!selectedSessionId) return noSessionScreen()
+  const bodyInstead = changesBodyInstead(
     selectedSessionId,
     selectedSession,
     changes,
   )
-  if (unavailable) return unavailable
-  if (!selectedSessionId) return null
 
-  const branchGit = selectedSession
-    ? supportsBranchGit(selectedSession.workspace)
-    : true
+  const workspace = selectedSession?.workspace
+  const branchGit = workspace ? supportsBranchGit(workspace) : true
+  const gitBlocked = workspace ? changesGitBlockedReason(workspace) : null
+  const editorBlocked = workspace ? directoryGoneReason(workspace) : null
   const {
     changed,
     actionable,
@@ -1899,13 +1985,18 @@ export const ChangedFiles = memo(function ChangedFiles() {
       <Card className="h-full rounded-none border-0 ring-0">
         <ChangesHeader
           sessionId={sessionId}
-          stagedCount={changed.staged.length}
-          recap={recap.all}
+          // With no list on screen there is nothing to commit or recap; a
+          // quiet directory's slice may still hold an older listing.
+          stagedCount={bodyInstead ? 0 : changed.staged.length}
+          recap={bodyInstead ? NO_RECAP : recap.all}
           branchGit={branchGit}
           isMobile={isMobile}
+          gitBlocked={gitBlocked}
+          editorBlocked={editorBlocked}
         />
         <CardContent className="flex min-h-0 flex-1 flex-col p-0">
-          {hasChanges ? (
+          {bodyInstead}
+          {!bodyInstead && hasChanges ? (
             <div className="border-b p-2">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -1920,7 +2011,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
               </div>
             </div>
           ) : null}
-          {anySelected ? (
+          {!bodyInstead && anySelected ? (
             <BulkToolbar
               selected={selected}
               counts={selectedCounts}
@@ -1933,6 +2024,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
               onClear={clearSelection}
             />
           ) : null}
+          {bodyInstead ? null : (
           <ChangesList
             expansions={expansions}
             changed={changed}
@@ -1946,6 +2038,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
             onToggle={toggleOne}
             onToggleFolder={toggleFolderRow}
           />
+          )}
         </CardContent>
       </Card>
       <ConfirmDiscardFilesDialog
