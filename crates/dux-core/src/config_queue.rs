@@ -113,7 +113,7 @@ impl ConfigWriteQueue {
         // load-then-add) so concurrent callers cannot overshoot the cap.
         if self
             .lazy_inflight
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n < LAZY_INFLIGHT_CAP).then_some(n + 1)
             })
             .is_err()
@@ -274,7 +274,7 @@ impl Drop for ConfigWriteQueue {
 /// panic-reset (`store(0)`) could otherwise race a send-failure rollback and wrap
 /// the counter to `usize::MAX`, latching the cap gate shut forever.
 fn decr_inflight(counter: &AtomicUsize) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
         Some(n.saturating_sub(1))
     });
 }

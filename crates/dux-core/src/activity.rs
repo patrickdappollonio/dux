@@ -101,7 +101,7 @@ impl ActivityRing {
         let _ = self
             .0
             .connections
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
                 Some(c.saturating_sub(1))
             });
     }
