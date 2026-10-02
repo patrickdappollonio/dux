@@ -25,9 +25,10 @@
 
 use std::io::{IsTerminal, Write};
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use dux_core::activity::ActivityRing;
 use dux_core::serve_log::{Banner, LogLine, LogTone};
@@ -98,40 +99,128 @@ pub fn detect(setting: &str) -> bool {
 /// blocked on a pipe nobody reads (`dux server | less`, stopped) would otherwise
 /// hold the exit, the force-exit hatch included, for as long as it stays blocked.
 /// A safety bound on an exit path rather than a preference, so not a setting.
-const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The bound on the writer channel. Emitters `try_send`, so a stalled stdout
 /// consumer drops lines rather than blocking the emitting tokio worker; sized for
 /// a momentary stall at a fixed, bounded cost.
 const WRITER_CHANNEL_BOUND: usize = 1024;
 
-/// A message handed to the writer thread.
+/// The bound on the stderr copy's queue. Warnings are rare, so a short queue
+/// that fills means stderr is stuck, and then the copy is dropped and counted
+/// rather than waited for.
+const ECHO_CHANNEL_BOUND: usize = 64;
+
+/// A message handed to a writer thread.
 enum WriterMsg {
     /// One already-formatted line to write + flush.
     Line(String),
     /// A barrier: the writer thread sends `()` back once it has processed every
     /// message queued before this one. [`Console::flush`] waits on it so the
-    /// last lines of a run (its shutdown) reach the terminal before the process
+    /// last lines of a run (its shutdown) reach their stream before the process
     /// exits.
     Sync(SyncSender<()>),
 }
 
-/// Where the console prints. Production hands lines to a dedicated writer THREAD
-/// over a bounded channel so a stalled stdout consumer can never park an emitting
-/// tokio worker on a blocking `write()`; tests inject an in-memory buffer.
+/// One output stream behind its own writer THREAD and bounded queue, so a
+/// stalled consumer can never park the thread that emitted a line on a blocking
+/// `write()`: a full queue drops the line and counts it instead, and the next
+/// line that fits is preceded by one note saying how many were lost. stdout has
+/// one; the stderr copy of warnings has its own, so neither can hold up the
+/// other or the emitter.
+struct LineWriter {
+    tx: SyncSender<WriterMsg>,
+    /// Lines dropped while the queue was full, awaiting the note. Relaxed: it
+    /// only gates a human-facing note, so exact ordering does not matter.
+    dropped: AtomicU64,
+    /// Whether this stream's lines carry color.
+    color: bool,
+    /// The stream, for its drop note.
+    name: &'static str,
+}
+
+impl LineWriter {
+    fn spawn(writer: Box<dyn Write + Send>, bound: usize, color: bool, name: &'static str) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterMsg>(bound);
+        std::thread::Builder::new()
+            .name(format!("dux-console-{name}"))
+            .spawn(move || writer_loop(writer, rx))
+            .expect("spawn console writer thread");
+        Self {
+            tx,
+            dropped: AtomicU64::new(0),
+            color,
+            name,
+        }
+    }
+
+    /// Queue `line` without blocking. After a drop streak, a note naming the
+    /// count goes first, once.
+    fn send(&self, line: &LogLine, clock: Clock) {
+        let drop_streak = self.dropped.load(Ordering::Relaxed);
+        if drop_streak > 0 {
+            let note = LogLine::event(
+                &clock(),
+                LogTone::Warn,
+                &format!(
+                    "console output fell behind: {} dropped (slow {} consumer)",
+                    dux_core::text::count_of(
+                        usize::try_from(drop_streak).unwrap_or(usize::MAX),
+                        "line"
+                    ),
+                    self.name
+                ),
+            );
+            // Clear the streak only once the note itself got through, so a
+            // still-full queue keeps counting rather than losing the notice.
+            if self
+                .tx
+                .try_send(WriterMsg::Line(note.render(self.color)))
+                .is_ok()
+            {
+                self.dropped.fetch_sub(drop_streak, Ordering::Relaxed);
+            }
+        }
+        match self.tx.try_send(WriterMsg::Line(line.render(self.color))) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            // The writer thread is gone (only on process teardown).
+            Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Wait, until `deadline` at the latest, for everything queued so far to be
+    /// written. The barrier waits for room in a full queue (a slow consumer is
+    /// still moving) and the acknowledgement has the same deadline (a stuck one
+    /// is not), so a consumer that never drains cannot hold the exit.
+    fn flush_by(&self, deadline: Instant) {
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let mut barrier = WriterMsg::Sync(ack_tx);
+        loop {
+            match self.tx.try_send(barrier) {
+                Ok(()) => break,
+                Err(TrySendError::Disconnected(_)) => return,
+                Err(TrySendError::Full(back)) => {
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    barrier = back;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+        let _ = ack_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
+}
+
+/// Where the console prints.
 enum Sink {
     /// Nothing printed: the flip and any disabled console.
     Noop,
-    /// The bounded sender to the writer thread. A full channel means a slow
-    /// consumer, so the line is dropped (accounted on `dropped`) instead of
-    /// blocking the runtime. The writer thread owns the actual writer.
-    Writer {
-        tx: SyncSender<WriterMsg>,
-        /// Lines dropped while the channel was full, awaiting a one-line warning
-        /// the next successful send emits. Relaxed: it only gates a human-facing
-        /// warning, so exact cross-thread ordering does not matter.
-        dropped: AtomicU64,
-    },
+    /// stdout, behind its writer thread.
+    Writer(LineWriter),
 }
 
 /// Where a line's timestamp comes from: the wall clock in production, a fixed
@@ -142,15 +231,14 @@ type Clock = fn() -> String;
 ///
 /// ## Shutdown
 ///
-/// The writer thread lives as long as any `Console` clone does: when the LAST
-/// one drops, the channel closes and the thread exits on its own. It is a plain
+/// A writer thread lives as long as any `Console` clone does: when the LAST one
+/// drops, its queue closes and the thread exits on its own. It is a plain
 /// `std::thread`, so a hard process exit simply tears it down; a caller that
 /// must not lose queued lines calls [`Console::flush`] first.
 #[derive(Clone)]
 pub struct Console(Arc<ConsoleInner>);
 
 struct ConsoleInner {
-    color: bool,
     sink: Sink,
     /// The flip's log viewer buffer. Every line is pushed here as well, and
     /// connect/disconnect move its connection counter. `None` for every console
@@ -158,24 +246,26 @@ struct ConsoleInner {
     capture: Option<ActivityRing>,
     clock: Clock,
     /// Where warning and error lines are ALSO written, in their plain spelling:
-    /// stderr, for `dux server` when its stdout is not a terminal, so
-    /// `dux server > access.log` never hides one. `None` otherwise, when the log
-    /// line on the terminal is enough. Written synchronously: these lines are
-    /// rare, and the point of them is to land.
-    echo: Option<Mutex<Box<dyn Write + Send>>>,
+    /// stderr, for `dux server` when its stdout went to a file or pipe while
+    /// stderr is still the terminal (see
+    /// [`dux_core::serve_log::StdStreams::echo_warnings`]), so
+    /// `dux server > access.log` never hides one. Behind its own writer thread,
+    /// so a stalled stderr never parks the emitter.
+    echo: Option<LineWriter>,
 }
 
 impl Console {
-    /// A real console writing to stdout. `color` comes from [`detect`]. When
-    /// stdout is not a terminal, warning and error lines also go to stderr.
-    pub fn stdout(color: bool) -> Self {
+    /// A real console writing to stdout. `color` comes from [`detect`];
+    /// warning and error lines also go to stderr when `streams` says they would
+    /// otherwise go unseen.
+    pub fn stdout(color: bool, streams: dux_core::serve_log::StdStreams) -> Self {
         let mut console = Self::with_writer(
             color,
             Box::new(std::io::stdout()),
             WRITER_CHANNEL_BOUND,
             now_hms,
         );
-        if !std::io::stdout().is_terminal() {
+        if streams.echo_warnings() {
             console.set_echo(Box::new(std::io::stderr()));
         }
         console
@@ -185,12 +275,24 @@ impl Console {
     /// console is not shared yet.
     fn set_echo(&mut self, writer: Box<dyn Write + Send>) {
         if let Some(inner) = Arc::get_mut(&mut self.0) {
-            inner.echo = Some(Mutex::new(writer));
+            inner.echo = Some(LineWriter::spawn(
+                writer,
+                ECHO_CHANNEL_BOUND,
+                false,
+                "stderr",
+            ));
         }
     }
 
-    /// A buffer-backed console stamped at a fixed time whose stdout is or is not
-    /// a terminal, plus handles on what it printed to stdout and to stderr.
+    /// This console, echoing its warnings to `writer`. Test-only.
+    #[cfg(test)]
+    pub(crate) fn with_test_echo(mut self, writer: Box<dyn Write + Send>) -> Self {
+        self.set_echo(writer);
+        self
+    }
+
+    /// A buffer-backed console stamped at a fixed time whose warnings are or are
+    /// not echoed, plus handles on what it printed to stdout and to stderr.
     #[cfg(test)]
     pub(crate) fn test_capture_echoing(
         color: bool,
@@ -204,34 +306,20 @@ impl Console {
         (console, sink, stderr)
     }
 
-    /// Write a warning or error line to the echo, if there is one.
+    /// Queue a warning or error line on the echo, if there is one. Never blocks.
     fn echo(&self, line: &LogLine) {
         let Some(echo) = &self.0.echo else {
             return;
         };
-        if !matches!(line.tone(), Some(LogTone::Warn | LogTone::Error)) {
-            return;
+        if matches!(line.tone(), Some(LogTone::Warn | LogTone::Error)) {
+            echo.send(line, self.0.clock);
         }
-        let mut writer = echo.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = writeln!(writer, "{}", line.render(false));
-        let _ = writer.flush();
     }
 
-    /// Build a writer-backed console over an owned writer: spawn the dedicated
-    /// writer thread (owns the writer; writes + flushes per line; exits when the
-    /// channel closes) and keep only the bounded sender + the drop counter.
+    /// Build a writer-backed console over an owned writer.
     fn with_writer(color: bool, writer: Box<dyn Write + Send>, bound: usize, clock: Clock) -> Self {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterMsg>(bound);
-        std::thread::Builder::new()
-            .name("dux-console-writer".to_string())
-            .spawn(move || writer_loop(writer, rx))
-            .expect("spawn console writer thread");
         Self(Arc::new(ConsoleInner {
-            color,
-            sink: Sink::Writer {
-                tx,
-                dropped: AtomicU64::new(0),
-            },
+            sink: Sink::Writer(LineWriter::spawn(writer, bound, color, "stdout")),
             capture: None,
             clock,
             echo: None,
@@ -241,7 +329,6 @@ impl Console {
     /// A no-op console: nothing printed, nothing captured.
     pub fn noop() -> Self {
         Self(Arc::new(ConsoleInner {
-            color: false,
             sink: Sink::Noop,
             capture: None,
             clock: now_hms,
@@ -257,7 +344,6 @@ impl Console {
 
     fn capture_with_clock(ring: ActivityRing, clock: Clock) -> Self {
         Self(Arc::new(ConsoleInner {
-            color: false,
             sink: Sink::Noop,
             capture: Some(ring),
             clock,
@@ -317,7 +403,7 @@ impl Console {
     #[cfg(test)]
     fn writer_tx(&self) -> SyncSender<WriterMsg> {
         match &self.0.sink {
-            Sink::Writer { tx, .. } => tx.clone(),
+            Sink::Writer(writer) => writer.tx.clone(),
             Sink::Noop => unreachable!("a writer console always has a sender"),
         }
     }
@@ -325,7 +411,7 @@ impl Console {
     #[cfg(test)]
     fn dropped_count(&self) -> u64 {
         match &self.0.sink {
-            Sink::Writer { dropped, .. } => dropped.load(Ordering::Relaxed),
+            Sink::Writer(writer) => writer.dropped.load(Ordering::Relaxed),
             Sink::Noop => 0,
         }
     }
@@ -341,58 +427,18 @@ impl Console {
         self.is_active() || self.0.capture.is_some()
     }
 
-    /// Wait, at most [`FLUSH_TIMEOUT`], until every line handed over so far has
-    /// been written. Called before the process exits so the last lines of a run
-    /// are not lost in the writer's queue. Bounded twice over: the barrier is
-    /// queued without blocking (a full queue means the writer is stuck, and
-    /// waiting would not help), and the wait for it has a deadline, so a stdout
-    /// nobody drains can never hold the exit. A no-op for a console that
-    /// prints nothing.
+    /// Wait, at most [`FLUSH_TIMEOUT`] in all, until every line handed over so
+    /// far has been written, to stdout and to the stderr copy alike. Called
+    /// before the process exits so the last lines of a run are not lost in a
+    /// queue. A slow consumer still gets them; one that never drains cannot hold
+    /// the exit. A no-op for a console that prints nothing.
     pub fn flush(&self) {
-        let Sink::Writer { tx, .. } = &self.0.sink else {
-            return;
-        };
-        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(1);
-        if tx.try_send(WriterMsg::Sync(ack_tx)).is_ok() {
-            let _ = ack_rx.recv_timeout(FLUSH_TIMEOUT);
+        let deadline = Instant::now() + FLUSH_TIMEOUT;
+        if let Sink::Writer(writer) = &self.0.sink {
+            writer.flush_by(deadline);
         }
-    }
-
-    /// Hand one formatted line to the writer thread. On a full channel the line
-    /// is dropped and counted; the next successful send emits one warning first,
-    /// so the gap is visible.
-    fn write_line(&self, line: String) {
-        let Sink::Writer { tx, dropped } = &self.0.sink else {
-            return;
-        };
-        let drop_streak = dropped.load(Ordering::Relaxed);
-        if drop_streak > 0 {
-            let warning = LogLine::event(
-                &(self.0.clock)(),
-                LogTone::Warn,
-                &format!(
-                    "console output fell behind: {} dropped (slow stdout consumer)",
-                    dux_core::text::count_of(
-                        usize::try_from(drop_streak).unwrap_or(usize::MAX),
-                        "line"
-                    )
-                ),
-            );
-            let warn = warning.render(self.0.color);
-            // Only clear the streak if the warning itself made it through, so a
-            // still-full channel keeps accumulating rather than losing the notice.
-            if tx.try_send(WriterMsg::Line(warn)).is_ok() {
-                dropped.fetch_sub(drop_streak, Ordering::Relaxed);
-                self.echo(&warning);
-            }
-        }
-        match tx.try_send(WriterMsg::Line(line)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                dropped.fetch_add(1, Ordering::Relaxed);
-            }
-            // The writer thread is gone (only on process teardown): nothing to do.
-            Err(TrySendError::Disconnected(_)) => {}
+        if let Some(echo) = &self.0.echo {
+            echo.flush_by(deadline);
         }
     }
 
@@ -402,11 +448,11 @@ impl Console {
         self.line_echoed(line, true);
     }
 
-    /// [`Self::line`], with the stderr echo left out when the caller already
+    /// [`Self::line`], with the stderr copy left out when the caller already
     /// printed this line there.
     fn line_echoed(&self, line: LogLine, echo: bool) {
-        if self.is_active() {
-            self.write_line(line.render(self.0.color));
+        if let Sink::Writer(writer) = &self.0.sink {
+            writer.send(&line, self.0.clock);
             if echo {
                 self.echo(&line);
             }
@@ -466,9 +512,9 @@ impl Console {
             return;
         }
         let lines = banner.lines();
-        if self.is_active() {
+        if let Sink::Writer(writer) = &self.0.sink {
             for line in &lines {
-                self.write_line(line.render(self.0.color));
+                writer.send(line, self.0.clock);
                 self.echo(line);
             }
         }
@@ -790,7 +836,7 @@ mod tests {
 
     #[test]
     fn stdout_console_is_active() {
-        assert!(Console::stdout(false).is_active());
+        assert!(Console::stdout(false, dux_core::serve_log::StdStreams::current()).is_active());
     }
 
     // ── The flip's capture console ─────────────────────────────────────────
@@ -937,6 +983,7 @@ mod tests {
     fn with_stdout_redirected_warnings_and_errors_also_reach_stderr() {
         let (console, sink, stderr) = Console::test_capture_echoing(false, false);
         warn_and_info(&console);
+        console.flush();
         let stdout = sink.contents();
         let stderr = stderr.contents();
         assert_eq!(
@@ -956,11 +1003,69 @@ mod tests {
         }
     }
 
+    /// A stderr nobody drains (a `2>&1` pipe that stopped reading) must not park
+    /// the thread that raised the warning: the echo has its own bounded,
+    /// non-blocking path, so even the force-exit line goes through.
+    #[test]
+    fn the_echo_never_blocks_the_line_that_raised_it() {
+        let (_release, gate) = std::sync::mpsc::channel::<()>();
+        let (entered, _entered_rx) = std::sync::mpsc::channel::<()>();
+        let stuck = GatedWriter {
+            buf: SharedBuffer::new(),
+            gate,
+            entered,
+        };
+        let (console, _sink) = Console::test_capture(false);
+        let console = console.with_test_echo(Box::new(stuck));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for n in 0..50 {
+                console.error(&format!("error {n}"));
+            }
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "raising warnings must not wait on stderr"
+        );
+    }
+
+    /// A slow but moving stdout still gets the run's last lines: the flush
+    /// waits (bounded) for room in the queue rather than giving up at once.
+    #[test]
+    fn flush_waits_for_a_slow_but_moving_consumer() {
+        struct Slow(SharedBuffer);
+        impl Write for Slow {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(30));
+                self.0.write(data)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = SharedBuffer::new();
+        let console = Console::test_capture_bounded(false, 2, Box::new(Slow(buf.clone())));
+        // The writer takes the first line and sits in its slow write; the next
+        // two fill the queue, so the flush's barrier has to wait for room.
+        console.info("shutdown line 0");
+        std::thread::sleep(Duration::from_millis(10));
+        console.info("shutdown line 1");
+        console.info("shutdown line 2");
+        console.flush();
+        assert!(
+            buf.contents().contains("shutdown line 2"),
+            "{}",
+            buf.contents()
+        );
+    }
+
     /// On a terminal the log line is enough: nothing goes to stderr.
     #[test]
     fn with_stdout_on_a_terminal_each_warning_prints_once() {
         let (console, sink, stderr) = Console::test_capture_echoing(false, true);
         warn_and_info(&console);
+        console.flush();
         assert_eq!(stderr.contents(), "");
         assert_eq!(
             sink.contents().matches("Tailscale not detected.").count(),
@@ -974,6 +1079,7 @@ mod tests {
     fn a_warning_already_on_stderr_is_not_echoed_again() {
         let (console, sink, stderr) = Console::test_capture_echoing(false, false);
         console.warn_already_on_stderr("dux is binding 0.0.0.0:3890 with NO login gate.");
+        console.flush();
         assert_eq!(stderr.contents(), "");
         assert!(sink.contents().contains("warn dux is binding 0.0.0.0:3890"));
     }

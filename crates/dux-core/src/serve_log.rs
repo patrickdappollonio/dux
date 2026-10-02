@@ -16,7 +16,9 @@
 //! redirected log stays ASCII.
 
 use std::fmt::Display;
+use std::io::IsTerminal;
 use std::net::SocketAddr;
+use std::os::fd::{AsFd, BorrowedFd};
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
@@ -305,6 +307,69 @@ pub struct StartupNotes {
     pub tailscale_detected: bool,
 }
 
+/// Where `dux server`'s stdout and stderr go, which decides where its warnings
+/// are printed so each lands once per place a person reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StdStreams {
+    pub stdout_is_terminal: bool,
+    pub stderr_is_terminal: bool,
+    /// Both name the same open file (device and inode), as with `> log 2>&1`,
+    /// `nohup`, or a service manager's one log stream.
+    pub same_file: bool,
+}
+
+impl StdStreams {
+    /// Read the two descriptors.
+    pub fn of(stdout: BorrowedFd<'_>, stderr: BorrowedFd<'_>) -> Self {
+        Self {
+            stdout_is_terminal: stdout.is_terminal(),
+            stderr_is_terminal: stderr.is_terminal(),
+            same_file: same_file(stdout, stderr),
+        }
+    }
+
+    /// The process's own stdout and stderr.
+    pub fn current() -> Self {
+        Self::of(std::io::stdout().as_fd(), std::io::stderr().as_fd())
+    }
+
+    /// Whether warning and error lines are also written to stderr: only when
+    /// stdout went somewhere a person is not reading (a file, a pipe) while
+    /// stderr is still the terminal, and the two are not one file. Anything
+    /// else would print the same line twice into one place: both to the
+    /// journal under a service manager, both into one file under `2>&1`.
+    ///
+    /// Accepted: `dux server | tee log` echoes, because stdout is a pipe and
+    /// stderr the terminal, so the terminal shows a warning twice (once through
+    /// `tee`, once on stderr).
+    pub fn echo_warnings(&self) -> bool {
+        !self.stdout_is_terminal && self.stderr_is_terminal && !self.same_file
+    }
+
+    /// Whether the no-login alarm is printed to stderr the moment it is known,
+    /// ahead of the log: whenever stdout is not a terminal and stderr is another
+    /// place, so a redirected or piped stdout cannot hide it. On an interactive
+    /// terminal the log line is enough (and a start that fails before the log
+    /// opens prints it then).
+    pub fn early_alarm_on_stderr(&self) -> bool {
+        !self.stdout_is_terminal && !self.same_file
+    }
+}
+
+/// Whether two descriptors are the same open file, by device and inode. An fd
+/// whose metadata cannot be read is taken as different.
+fn same_file(a: BorrowedFd<'_>, b: BorrowedFd<'_>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let id = |fd: BorrowedFd<'_>| {
+        fd.try_clone_to_owned()
+            .map(std::fs::File::from)
+            .and_then(|file| file.metadata())
+            .map(|meta| (meta.dev(), meta.ino()))
+            .ok()
+    };
+    matches!((id(a), id(b)), (Some(x), Some(y)) if x == y)
+}
+
 /// The warning shown when the best-effort Tailscale listener cannot bind
 /// because something else holds that address. Names the address, the cause and
 /// both remedies. One wording for every serving mode.
@@ -439,6 +504,62 @@ mod tests {
         for line in sample_banner().lines() {
             assert_eq!(strip_ansi(&line.render(true)), line.text());
         }
+    }
+
+    // ── Where stdout and stderr go ─────────────────────────────────────────
+
+    fn temp_file(name: &str) -> std::fs::File {
+        let dir = std::env::temp_dir().join(format!("dux-serve-log-{}-{name}", std::process::id()));
+        std::fs::File::create(dir).expect("temp file")
+    }
+
+    /// A real terminal: the master side of a pseudo-terminal answers isatty.
+    fn terminal() -> Box<dyn portable_pty::MasterPty + Send> {
+        portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .expect("a pty")
+            .master
+    }
+
+    fn fd_of(master: &dyn portable_pty::MasterPty) -> BorrowedFd<'_> {
+        let raw = master.as_raw_fd().expect("a pty fd");
+        // SAFETY: the master outlives the borrow, which ends with the test.
+        unsafe { BorrowedFd::borrow_raw(raw) }
+    }
+
+    #[test]
+    fn warnings_are_echoed_only_when_stdout_is_redirected_and_stderr_is_a_terminal() {
+        let tty = terminal();
+        let file = temp_file("echo-file");
+        let (reader, writer) = std::io::pipe().expect("a pipe");
+
+        // `dux server > access.log`: stdout a file, stderr the terminal.
+        assert!(StdStreams::of(file.as_fd(), fd_of(&*tty)).echo_warnings());
+        // `dux server | less`: stdout a pipe, stderr the terminal.
+        assert!(StdStreams::of(writer.as_fd(), fd_of(&*tty)).echo_warnings());
+        // Interactive: both the terminal. The log line is enough.
+        assert!(!StdStreams::of(fd_of(&*tty), fd_of(&*tty)).echo_warnings());
+        // `> log 2>&1`, nohup: both the same file.
+        assert!(!StdStreams::of(file.as_fd(), file.as_fd()).echo_warnings());
+        // systemd and friends: neither a terminal.
+        assert!(!StdStreams::of(writer.as_fd(), reader.as_fd()).echo_warnings());
+        assert!(!StdStreams::of(file.as_fd(), writer.as_fd()).echo_warnings());
+    }
+
+    /// The no-login alarm goes to stderr ahead of everything only when the log
+    /// line on stdout would not be seen there anyway: never on an interactive
+    /// terminal (the log line is enough), never into the very file stdout is.
+    #[test]
+    fn the_early_alarm_is_printed_only_when_stdout_is_elsewhere() {
+        let tty = terminal();
+        let file = temp_file("alarm-file");
+        let other = temp_file("alarm-other");
+        assert!(!StdStreams::of(fd_of(&*tty), fd_of(&*tty)).early_alarm_on_stderr());
+        assert!(StdStreams::of(file.as_fd(), fd_of(&*tty)).early_alarm_on_stderr());
+        assert!(StdStreams::of(file.as_fd(), other.as_fd()).early_alarm_on_stderr());
+        assert!(!StdStreams::of(file.as_fd(), file.as_fd()).early_alarm_on_stderr());
+        let dup = file.try_clone().expect("a second fd on the same file");
+        assert!(!StdStreams::of(file.as_fd(), dup.as_fd()).early_alarm_on_stderr());
     }
 
     #[test]

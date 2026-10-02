@@ -44,33 +44,11 @@ fn run_tui_with_flip() -> Result<()> {
                 startup,
             } => {
                 // Read before the engine and listeners move into
-                // `serve_with_engine`. The flip is LOCAL MODE, so the primary
-                // address is always loopback and a non-loopback URL means only that
-                // the Tailscale leg bound, which is what the safety note reads.
+                // `serve_with_engine`. The reachability note is the startup
+                // banner's, which the log viewer pins on top.
                 let theme_name = engine.config.ui.theme.clone();
                 let paths = engine.paths.clone();
                 let keys = engine.config.keys.clone();
-                let tailscale = engine.config.server.tailscale_mode();
-                let tailnet_bound = urls.iter().any(|u| {
-                    u.strip_prefix("http://")
-                        .and_then(|rest| rest.rsplit_once(':'))
-                        .map(|(host, _)| {
-                            let ip = host.trim_start_matches('[').trim_end_matches(']');
-                            ip != "127.0.0.1" && ip != "::1"
-                        })
-                        .unwrap_or(false)
-                });
-                // On the `auto` mode the Tailscale leg comes and goes while the
-                // status screen stays up, so the note has to cover the whole
-                // session rather than this instant. On `yes` and `no` what bound
-                // at the flip is what there will be.
-                let safety_note = if tailscale.watches_interface() {
-                    Some(dux_web::SAFETY_NOTE_TAILNET_WATCHED.to_string())
-                } else if tailnet_bound {
-                    Some(dux_web::SAFETY_NOTE_TAILNET.to_string())
-                } else {
-                    None
-                };
 
                 // The log buffer is shared between the web console (the
                 // producer, wired in serve_with_engine) and the status screen's
@@ -90,7 +68,6 @@ fn run_tui_with_flip() -> Result<()> {
                 let screen = std::cell::RefCell::new(
                     match dux_tui::ServerStatusScreen::new(
                         &urls,
-                        safety_note,
                         &theme_name,
                         &paths,
                         &keys,
@@ -168,9 +145,10 @@ fn run_tui_with_flip() -> Result<()> {
                     dux_web::ServerExit::QuitProcess => break,
                     dux_web::ServerExit::ForceQuit => {
                         // The terminal is the shell's again (the screen was just
-                        // dropped), so the reason lands on its own screen.
-                        dux_web::print_force_message_once();
-                        std::process::exit(130);
+                        // dropped), so the reason lands on its own screen; the
+                        // engine goes first so queued config writes land.
+                        dux_web::finish_forced_quit(engine, |code| std::process::exit(code));
+                        unreachable!("finish_forced_quit exits");
                     }
                     dux_web::ServerExit::ReturnToTui => {
                         next = dux_tui::resume_after_server(
@@ -285,7 +263,12 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         .filter(|p| !is_local(&p.addr()))
         .map(|p| non_loopback_warning(p.addr()))
         .collect();
-    raise_security_alarms(&alarms, &mut std::io::stderr(), &mut startup_warnings);
+    raise_security_alarms(
+        &alarms,
+        dux_core::serve_log::StdStreams::current(),
+        &mut std::io::stderr(),
+        &mut startup_warnings,
+    );
 
     dux_web::run_server(
         paths,
@@ -318,14 +301,18 @@ fn serving_without_tailscale(plan: &dux_core::config::ServerPlan) -> &'static st
 /// so neither the log's stderr echo nor a failed load prints it again.
 fn raise_security_alarms(
     alarms: &[String],
+    streams: dux_core::serve_log::StdStreams,
     stderr: &mut dyn std::io::Write,
     startup_warnings: &mut Vec<dux_web::StartupWarning>,
 ) {
+    let early = streams.early_alarm_on_stderr();
     for alarm in alarms {
-        let _ = writeln!(stderr, "WARNING: {alarm}");
+        if early {
+            let _ = writeln!(stderr, "WARNING: {alarm}");
+        }
         startup_warnings.push(dux_web::StartupWarning {
             text: alarm.clone(),
-            already_on_stderr: true,
+            already_on_stderr: early,
         });
     }
 }
@@ -487,8 +474,15 @@ mod tests {
             text: "Tailscale not detected.".to_string(),
             already_on_stderr: false,
         }];
+        // `dux server > access.log`: stdout a file, stderr the terminal.
+        let streams = dux_core::serve_log::StdStreams {
+            stdout_is_terminal: false,
+            stderr_is_terminal: true,
+            same_file: false,
+        };
         raise_security_alarms(
             &[non_loopback_warning("0.0.0.0:3890".parse().unwrap())],
+            streams,
             &mut stderr,
             &mut startup_warnings,
         );
@@ -513,6 +507,31 @@ mod tests {
             "so the log's stderr echo and a failed load leave it alone"
         );
         assert!(!startup_warnings[0].already_on_stderr);
+    }
+
+    /// On an interactive terminal the alarm is not printed early: the log line
+    /// on that same terminal says it, and saying it twice is noise.
+    #[test]
+    fn on_a_terminal_the_alarm_is_left_to_the_log_line() {
+        let streams = dux_core::serve_log::StdStreams {
+            stdout_is_terminal: true,
+            stderr_is_terminal: true,
+            same_file: false,
+        };
+        let mut stderr = Vec::new();
+        let mut startup_warnings = Vec::new();
+        raise_security_alarms(
+            &[non_loopback_warning("0.0.0.0:3890".parse().unwrap())],
+            streams,
+            &mut stderr,
+            &mut startup_warnings,
+        );
+        assert!(stderr.is_empty());
+        assert_eq!(startup_warnings.len(), 1);
+        assert!(
+            !startup_warnings[0].already_on_stderr,
+            "so a start that fails before the log prints it then"
+        );
     }
 
     /// A bad `--bind` ends the start before the log exists, so the Tailscale

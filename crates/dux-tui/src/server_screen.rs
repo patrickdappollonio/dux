@@ -77,8 +77,6 @@ enum Role {
     Url,
     /// Muted secondary text (the uptime line).
     Muted,
-    /// The reachability warning, warning-styled and bold.
-    Warning,
     /// Vertical spacer (empty line).
     Spacer,
 }
@@ -313,6 +311,21 @@ impl LogView {
         }
     }
 
+    /// How many whole lines of the bounded log lie entirely after scrolling row
+    /// `end`.
+    fn lines_below(&self, sticky: bool, end: usize) -> usize {
+        let mut rows_below = self.scroll_total(sticky).saturating_sub(end);
+        let mut lines = 0;
+        for rows in self.line_rows.iter().rev() {
+            if *rows > rows_below {
+                break;
+            }
+            rows_below -= rows;
+            lines += 1;
+        }
+        lines
+    }
+
     /// Clone the scrolling rows `start..end` for drawing, and nothing else.
     fn scroll_window(&self, sticky: bool, start: usize, end: usize) -> Vec<Line<'static>> {
         let pinned = if sticky { 0 } else { self.pinned_rows.len() };
@@ -383,9 +396,6 @@ pub struct ServerStatusScreen {
     bindings: RuntimeBindings,
     /// Every bound URL, shown in the header so the user can pick one.
     urls: Vec<String>,
-    /// Operator-facing reachability note, or None when the server is
-    /// loopback-only.
-    safety_note: Option<String>,
     started: Instant,
     /// Uptime second most recently drawn, so [`Self::tick`] redraws only when
     /// the visible value actually changes (wall-clock, not per engine-loop tick).
@@ -413,7 +423,6 @@ impl ServerStatusScreen {
     /// even if the status screen cannot be set up.
     pub fn new(
         urls: &[String],
-        safety_note: Option<String>,
         theme_name: &str,
         paths: &DuxPaths,
         keys: &KeysConfig,
@@ -434,7 +443,6 @@ impl ServerStatusScreen {
             theme,
             bindings: RuntimeBindings::from_keys_config(keys),
             urls: urls.to_vec(),
-            safety_note,
             started: Instant::now(),
             last_drawn_secs: 0,
             view: LogView::new(activity.capacity()),
@@ -533,7 +541,7 @@ impl ServerStatusScreen {
     /// footer hints. Nothing is drawn once the terminal has been handed back.
     fn draw(&mut self, uptime_secs: u64) -> Result<()> {
         let theme = &self.theme;
-        let header = header_lines(&self.urls, self.safety_note.as_deref(), uptime_secs);
+        let header = header_lines(&self.urls, uptime_secs);
         let shutdown_message = self.shutdown_message.as_deref();
         let bindings = &self.bindings;
         let view = &mut self.view;
@@ -612,7 +620,10 @@ impl ServerStatusScreen {
                         .labels_reaching(Action::ScrollToBottom, server_screen_reaches)
                         .into_iter()
                         .next();
-                    let (start, note) = place_log(scroll, viewport, total, end_label.as_deref());
+                    let (start, note) =
+                        place_log(scroll, viewport, total, end_label.as_deref(), |end| {
+                            view.lines_below(sticky, end)
+                        });
                     let block = match note {
                         Some(note) => block.title_bottom(
                             Line::from(Span::styled(
@@ -705,13 +716,20 @@ fn is_force_quit_key(key: KeyEvent) -> bool {
 /// Clamp the scroll position to what there is, and only then decide what the
 /// bottom border says, so the note describes the position actually drawn.
 /// Returns the first scrolling row to draw and the note, if any.
+///
+/// `lines_below` counts the lines after a given row; the new-lines count is
+/// capped at it, because a full buffer drops lines and more can have arrived
+/// than are still there to scroll to.
 fn place_log(
     scroll: &mut LogScroll,
     viewport: usize,
     total: usize,
     end_label: Option<&str>,
+    lines_below: impl Fn(usize) -> usize,
 ) -> (usize, Option<String>) {
     let start = scroll.clamp(viewport, total);
+    let end = (start + viewport).min(total);
+    scroll.unseen = scroll.unseen.min(lines_below(end));
     (start, scrolled_back_note(scroll, end_label))
 }
 
@@ -823,8 +841,12 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
-/// Build the header content (logo, heading, URLs, uptime, reachability line).
-fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) -> Vec<ScreenLine> {
+/// Build the header content (logo, heading, URLs, uptime). The reachability
+/// note is not here: the startup banner pinned on top of the log carries it,
+/// with its warning glyph, word for word as `dux server` prints it, and the
+/// header repeating it was the same sentence twice on one screen (and three
+/// rows the log could use on a short terminal).
+fn header_lines(urls: &[String], uptime_secs: u64) -> Vec<ScreenLine> {
     let mut lines: Vec<ScreenLine> = Vec::new();
 
     for logo_line in ASCII_LOGO {
@@ -840,11 +862,6 @@ fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) ->
         format!("up {}", format_uptime(uptime_secs)),
         Role::Muted,
     )]);
-
-    if let Some(note) = safety_note {
-        lines.push(vec![(String::new(), Role::Spacer)]);
-        lines.push(vec![(note.to_string(), Role::Warning)]);
-    }
 
     lines
 }
@@ -912,9 +929,6 @@ fn header_line<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
                 .fg(theme.text_fg)
                 .add_modifier(Modifier::BOLD),
             Role::Muted => Style::default().fg(theme.provider_label_fg),
-            Role::Warning => Style::default()
-                .fg(theme.warning_fg)
-                .add_modifier(Modifier::BOLD),
             Role::Spacer => Style::default(),
         };
         spans.push(Span::styled(text.as_str(), style));
@@ -1298,9 +1312,24 @@ mod tests {
         scroll.page_up(10, 40);
         assert!(!scroll.following());
         // The log is now shorter than the view.
-        let (start, note) = place_log(&mut scroll, 10, 4, Some("End"));
+        let (start, note) = place_log(&mut scroll, 10, 4, Some("End"), |_| 0);
         assert_eq!(start, 0);
         assert_eq!(note, None);
+    }
+
+    /// The count of new lines never claims more than are actually below the
+    /// view: a full buffer drops lines, so many more can have arrived than are
+    /// still there to scroll to.
+    #[test]
+    fn the_new_lines_count_is_capped_at_what_is_below() {
+        let mut scroll = LogScroll::default();
+        scroll.page_up(10, 40);
+        scroll.lines_arrived(50, 50);
+        let (_, note) = place_log(&mut scroll, 10, 40, Some("End"), |_| 3);
+        assert_eq!(
+            note.as_deref(),
+            Some("3 new lines below · End for the latest")
+        );
     }
 
     #[test]
@@ -1533,7 +1562,7 @@ mod tests {
 
     #[test]
     fn content_includes_url_heading_uptime_and_wordmark() {
-        let lines = header_lines(&one("http://127.0.0.1:8080"), None, 42);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), 42);
         let text = plain_text(&lines);
         assert!(text.contains("dux server running"));
         assert!(text.contains("http://127.0.0.1:8080"));
@@ -1549,7 +1578,7 @@ mod tests {
             "http://127.0.0.1:8080".to_string(),
             "http://100.101.102.103:8080".to_string(),
         ];
-        let lines = header_lines(&urls, None, 0);
+        let lines = header_lines(&urls, 0);
         assert_eq!(
             lines
                 .iter()
@@ -1561,11 +1590,14 @@ mod tests {
     }
 
     #[test]
-    fn the_safety_note_is_a_warning_row_only_when_there_is_one() {
-        let none = header_lines(&one("http://127.0.0.1:8080"), None, 0);
-        assert!(!none.iter().flatten().any(|(_, r)| *r == Role::Warning));
-        let some = header_lines(&one("http://127.0.0.1:8080"), Some("Reachable."), 0);
-        assert!(some.iter().flatten().any(|(_, r)| *r == Role::Warning));
+    fn the_header_leaves_the_reachability_note_to_the_pinned_banner() {
+        // The banner pinned on top of the log carries the note, with its
+        // warning glyph, exactly as `dux server` prints it; the header saying
+        // it again was the same sentence twice on one screen.
+        let lines = header_lines(&one("http://127.0.0.1:8080"), 0);
+        let text = plain_text(&lines);
+        assert!(!text.contains("Reachable"), "{text}");
+        assert!(text.contains("http://127.0.0.1:8080"));
     }
 
     /// The footer names the scroll keys from the bindings and the exit keys the

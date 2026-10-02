@@ -926,9 +926,11 @@ pub struct ServerConfig {
     /// scrolling back. Older lines are dropped once it is full. `dux server`
     /// prints the same lines to its terminal, whose scrollback is the host
     /// terminal's own, so this only sizes the flip's viewer. Read through
-    /// [`log_viewer_capacity`]: values below 1 are read as 1 and values above
-    /// [`LOG_VIEWER_LINES_MAX`] (20000) as 20000. Default 2000. Applies the next
-    /// time the flip starts.
+    /// [`log_viewer_capacity`]: 0 is read as 1 and values above
+    /// [`LOG_VIEWER_LINES_MAX`] (20000) as 20000. A negative value is not a valid
+    /// value for it, so loading resets this one setting to its default (2000)
+    /// with a warning in dux.log. Default 2000. Applies the next time the flip
+    /// starts.
     pub log_viewer_lines: usize,
     /// Whether dux serves the web UI in the BACKGROUND while the terminal UI
     /// keeps running, instead of only through the `start-web-server` flip (which
@@ -4214,6 +4216,18 @@ mod tests {
     #[test]
     fn expand_path_rejects_empty_braced_var_name() {
         assert!(expand_path("${}/foo").is_none());
+    }
+
+    /// What the docs promise for `log_viewer_lines`: 0 is read as 1 (by the
+    /// viewer), and a negative value is not a valid value at all, so that one
+    /// setting goes back to its default with a warning in dux.log while the rest
+    /// of `[server]` is kept.
+    #[test]
+    fn a_negative_log_viewer_lines_falls_back_to_its_default() {
+        let recovered = recover_config("[server]\nlog_viewer_lines = -5\nport = 4321\n");
+        assert_eq!(recovered.server.log_viewer_lines, DEFAULT_LOG_VIEWER_LINES);
+        assert_eq!(recovered.server.port, 4321);
+        assert_eq!(log_viewer_capacity(0), 1);
     }
 
     #[test]

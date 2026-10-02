@@ -40,9 +40,13 @@ dux server
 
 It binds `127.0.0.1:3890` (loopback only) by default and prints a small vite-style
 banner: one row per bound address with its `http://…` URL, plus a reachability note.
-Every warning and error it prints also goes to stderr whenever stdout is not a terminal,
-so `dux server > access.log` never hides one; a non-loopback address's "no login"
-warning is printed to stderr the moment dux knows it, before anything else loads.
+When stdout goes to a file or a pipe while stderr is still your terminal, every warning
+and error it prints also goes to stderr, so `dux server > access.log` never hides one.
+When both go to the same place (`> log 2>&1`, `nohup`, a service manager's journal) each
+line is written once. One accepted oddity: `dux server | tee log` shows a warning twice
+on your terminal, once through `tee` and once on stderr. A non-loopback address's "no
+login" warning goes to stderr the moment dux knows it, before anything else loads,
+whenever stdout is not your terminal; on an interactive terminal the log line says it.
 After that it keeps a timestamped log going: browsers connecting and leaving, one line
 per request (the access log), your Tailscale address coming and going, and the shutdown
 when you stop it. Any warning about the start itself, a missing Tailscale for one, is
@@ -73,7 +77,8 @@ server carries on.
 `Ctrl-c` (or a `SIGTERM`) starts a graceful shutdown. dux drains open connections and
 sends `SIGTERM` and `SIGHUP` to every running agent and terminal so each can save state,
 waiting up to `[server] shutdown_timeout_seconds` (30 seconds by default) before
-force-killing whatever is left. A second `Ctrl-c` during that wait exits immediately.
+force-killing whatever is left. A second `Ctrl-c` exits immediately: during that wait it
+first kills what is still running and logs what it killed, which takes a moment at most.
 
 Only one `dux server` (or `dux` TUI) can run against a given config directory. Both take
 the same single-instance lock, so a second one fails fast with an "already running"
@@ -100,9 +105,12 @@ Your **agents keep running the entire time**: no relaunch, no lost conversations
 dux you already have starts serving in place. Your terminal turns into a themed dux
 status screen showing the serve URLs and a log viewer. The viewer shows exactly the log
 `dux server` prints, banner and access log included, so nothing you would see there is
-missing here. The banner and the warnings above it are never dropped, and they stay at
-the top of the panel for as long as they fit in half of it; on a terminal too short for
-that they scroll with the rest instead of being cut off. Below them the viewer keeps the
+missing here, the reachability note included: it is the banner's last row rather than a
+line of its own in the header. The banner and the warnings above it are never dropped,
+and they stay at the top of the panel for as long as they fit in half of it; on a
+terminal too short for that they scroll with the rest instead of being cut off. Once the
+buffer is full and you have scrolled back to its oldest line, each new line pushes that
+oldest one out, so the view moves with it. Below them the viewer keeps the
 last `log_viewer_lines` lines (2000 by default), and it scrolls by line, by page, and to
 either end with the same scroll keys as the rest of dux; the in-app `?` help lists them
 under the web server screen. While you are scrolled back, new lines do not move what you
@@ -287,7 +295,7 @@ The rest tune presentation and limits:
 |---|---|---|
 | `color` | `"auto"` | Colored, vite-style console output for `dux server` (`auto`, `always`, `never`). Read at startup. |
 | `access_log` | `true` | Log a per-request line to the server's console: `dux server`'s output and the flip's log viewer alike (never to `dux.log`, so pipe `dux server`'s stdout to capture it). `/healthz` is always skipped. Set `false` to silence it in both. A config reload applies it. |
-| `log_viewer_lines` | `2000` | How many lines the flip's log viewer keeps for scrolling back, between 1 and 20000 (a value outside that range is read as the nearest end). The startup lines (the banner and its warnings) are kept on top of these and never dropped. `dux server` has no such cap, because its scrollback is your terminal's. Read when the flip starts. |
+| `log_viewer_lines` | `2000` | How many lines the flip's log viewer keeps for scrolling back, between 1 and 20000: 0 is read as 1 and anything above 20000 as 20000, while a negative value is not valid there, so dux uses the default instead and says so in `dux.log`. The startup lines (the banner and its warnings) are kept on top of these and never dropped. `dux server` has no such cap, because its scrollback is your terminal's. Read when the flip starts. |
 | `title` | `"dux"` | Web-only instance name: the browser tab title and the wordmark in the projects pane. Set `"dux (prod)"` to tell tabs apart. |
 | `favicon` | `""` | Web-only favicon tint so several dux tabs are distinguishable. Empty keeps the yellow duck; otherwise a curated color (violet, blue, sky, cyan, teal, green, amber, orange, red, pink, rose). |
 | `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-c during the wait stops waiting and exits at once, in `dux server` and in the flip alike. |

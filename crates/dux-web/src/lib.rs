@@ -153,7 +153,7 @@ fn warn_if_ui_not_built() {
 fn build_console(config: &dux_core::config::Config) -> (Console, bool) {
     let setting = &config.server.color;
     let color = crate::console::detect(setting);
-    let console = Console::stdout(color);
+    let console = Console::stdout(color, dux_core::serve_log::StdStreams::current());
     if !crate::console::is_known_color_setting(setting) {
         dux_core::logger::warn(&format!(
             "[server] color = \"{setting}\" is not one of auto/always/never, so dux is treating \
@@ -378,9 +378,8 @@ fn reachability(bound: &[(SocketAddr, bool)]) -> Reachability {
 }
 
 /// Safety note shown when the server is reachable on the tailnet (loopback
-/// primary + a best-effort Tailscale leg). Exported so the TUI flip path in
-/// `crates/dux/src/main.rs` can reference the same text without a separate
-/// copy.
+/// primary + a best-effort Tailscale leg), as the banner's reachability row in
+/// every serving mode.
 pub const SAFETY_NOTE_TAILNET: &str = "Reachable by other devices on your tailnet whenever this machine is connected to it \
      (no login). Set tailscale = \"no\" under [server] to serve without that address.";
 
@@ -2123,6 +2122,7 @@ pub(crate) fn wind_down_children(
         quit.settle();
         return None;
     }
+    quit.start();
     let start = dux_core::engine::format_shutdown_start(agents, terminals, grace);
     console.info(&start);
     status(&start);
@@ -2143,6 +2143,9 @@ pub(crate) fn wind_down_children(
 #[derive(Default)]
 pub(crate) struct QuitForce {
     requested: AtomicBool,
+    /// The wind-down is under way: only then is a forced exit worth a (bounded)
+    /// wait for the children to be killed.
+    started: AtomicBool,
     settled: AtomicBool,
 }
 
@@ -2167,6 +2170,14 @@ impl QuitForce {
         self.requested.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn start(&self) {
+        self.started.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_started(&self) -> bool {
+        self.started.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn settle(&self) {
         self.settled.store(true, Ordering::SeqCst);
     }
@@ -2182,6 +2193,16 @@ impl QuitForce {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+/// End the process after the flip's forced quit: drop the engine first, so the
+/// config writes still queued land on disk (the queue flushes, bounded, as it
+/// drops), then say why on the shell's screen and exit with 130. `exit` is
+/// injected so a test can watch it without ending the test process.
+pub fn finish_forced_quit(engine: Engine, exit: impl FnOnce(i32)) {
+    drop(engine);
+    print_force_message_once();
+    exit(130);
 }
 
 /// Prints the force line to stderr once per process, whichever of the flip's
@@ -2272,8 +2293,9 @@ pub const FORCE_EXIT_MESSAGE: &str =
 
 /// What a second stop signal does: force the quit (the same line in both modes,
 /// and the wait for the children cut short so they are killed), wait a bounded
-/// moment for that to settle, make sure the log is written, give the terminal
-/// back when a status screen had it, and only then exit with 130 (128 + SIGINT).
+/// moment for that to settle when a wind-down is under way (and not at all
+/// before one has started), make sure the log is written, give the terminal back
+/// when a status screen had it, and only then exit with 130 (128 + SIGINT).
 ///
 /// The order is the point. `std::process::exit` runs no destructor, so the flip's
 /// status screen would otherwise leave raw mode and the alternate screen behind,
@@ -2312,7 +2334,12 @@ impl ForceExit {
     /// watch the order without ending the test process.
     pub(crate) fn run(&self, exit: impl FnOnce(i32)) {
         self.quit.request(&self.console);
-        self.quit.wait_settled(self.settle_bound);
+        // Only a wind-down already under way is worth waiting for (it is
+        // killing the children and about to log what it did); before one has
+        // started there is nothing to wait for, and the exit is immediate.
+        if self.quit.is_started() {
+            self.quit.wait_settled(self.settle_bound);
+        }
         self.console.flush();
         if let Some(restore) = &self.restore_terminal {
             restore();
@@ -3217,6 +3244,8 @@ mod tests {
     fn a_forced_exit_does_not_wait_forever_for_the_children() {
         let (console, _sink) = crate::console::Console::test_capture(false);
         let quit = std::sync::Arc::new(super::QuitForce::default());
+        // The wind-down started and never finished.
+        quit.start();
         let force = super::ForceExit::new(console, None, quit)
             .with_settle_bound(std::time::Duration::from_millis(200));
         let started = std::time::Instant::now();
@@ -3224,6 +3253,51 @@ mod tests {
         force.run(|c| code = Some(c));
         assert_eq!(code, Some(130));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// "Forcing immediate exit" means it: a second Ctrl-c before anything is
+    /// being wound down does not sit out the settle bound.
+    #[test]
+    fn a_second_ctrl_c_before_the_wind_down_exits_at_once() {
+        let (console, _sink) = crate::console::Console::test_capture(false);
+        let quit = std::sync::Arc::new(super::QuitForce::default());
+        let force = super::ForceExit::new(console, None, quit)
+            .with_settle_bound(std::time::Duration::from_secs(10));
+        let started = std::time::Instant::now();
+        let mut code = None;
+        force.run(|c| code = Some(c));
+        assert_eq!(code, Some(130));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Exiting after a forced quit drops the engine first, so a config write
+    /// still queued (a lazy save) lands on disk rather than dying with the
+    /// process.
+    #[test]
+    fn a_forced_quit_lets_pending_config_writes_land() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        let engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        let mut config = engine.config.clone();
+        config.server.port = 4567;
+        engine.config_writer.save_lazy(config);
+        let mut code = None;
+        super::finish_forced_quit(engine, |c| code = Some(c));
+        assert_eq!(code, Some(130));
+        let saved = std::fs::read_to_string(&paths.config_path).expect("config written");
+        assert!(saved.contains("port = 4567"), "{saved}");
     }
 
     #[test]
