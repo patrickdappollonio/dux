@@ -530,6 +530,8 @@ folder in the editor. Its git items stay in that menu greyed out with the reason
 they are the folder's own and come back once it is a repository. Pushing and pulling are
 not among them: they stay absent, as above.
 
+![The Changes pane of a standalone agent whose folder has no git repository, its menu open: Commit and Refresh changes greyed out under a line saying the folder has no git repository, and Hide Changes pane still available.](/screens/changes-quiet-menu.png)
+
 > [!WARNING]
 > The middle case is quiet on purpose. Git answers questions by walking up parent
 > directories, so showing changes there would show, stage and commit to that other
