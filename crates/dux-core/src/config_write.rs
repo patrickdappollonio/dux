@@ -1809,6 +1809,17 @@ build = { text = \"cargo build\", surface = \"terminal\" }
     }
 
     #[test]
+    fn log_viewer_lines_is_read_within_its_documented_bounds() {
+        use crate::config::{LOG_VIEWER_LINES_MAX, log_viewer_capacity};
+        assert_eq!(log_viewer_capacity(0), 1);
+        assert_eq!(log_viewer_capacity(500), 500);
+        assert_eq!(
+            log_viewer_capacity(LOG_VIEWER_LINES_MAX + 1),
+            LOG_VIEWER_LINES_MAX
+        );
+    }
+
+    #[test]
     fn log_viewer_lines_user_value_survives_patch() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("config.toml");

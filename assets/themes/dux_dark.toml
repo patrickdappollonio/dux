@@ -131,6 +131,8 @@ ansi_darkgray = "#808080"
 "dux.scroll_indicator_fg"  = "#d2d2d2"
 "dux.scroll_indicator_bg"  = "#373737"
 "dux.warning_fg"           = "ansi_yellow"
+# Text that reports success (an OK line or a 2xx status in the server log).
+"dux.success_fg"           = "ansi_green"
 # Emphasis on the part of a row label the agent-list search matched.
 "dux.search_match_fg"      = "ansi_yellow"
 

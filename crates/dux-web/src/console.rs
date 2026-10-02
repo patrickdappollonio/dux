@@ -94,6 +94,12 @@ pub fn detect(setting: &str) -> bool {
 
 // ── Writer seam ────────────────────────────────────────────────────────────
 
+/// How long [`Console::flush`] waits for the writer before giving up. A writer
+/// blocked on a pipe nobody reads (`dux server | less`, stopped) would otherwise
+/// hold the exit, the force-exit hatch included, for as long as it stays blocked.
+/// A safety bound on an exit path rather than a preference, so not a setting.
+const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The bound on the writer channel. Emitters `try_send`, so a stalled stdout
 /// consumer drops lines rather than blocking the emitting tokio worker; sized for
 /// a momentary stall at a fixed, bounded cost.
@@ -231,6 +237,27 @@ impl Console {
         Self::capture_with_clock(ring, fixed_test_clock)
     }
 
+    /// A console whose writer is stuck for good, as on a pipe nobody reads.
+    #[cfg(test)]
+    pub(crate) fn test_stuck_writer() -> Self {
+        struct Stuck;
+        impl Write for Stuck {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                loop {
+                    std::thread::park();
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let console = Self::with_writer(false, Box::new(Stuck), 1, fixed_test_clock);
+        // One line wedges the writer, the next fills the queue behind it.
+        console.info("wedged");
+        console.info("queued");
+        console
+    }
+
     /// A writer-backed console with a custom channel bound and writer.
     #[cfg(test)]
     fn test_capture_bounded(color: bool, bound: usize, writer: Box<dyn Write + Send>) -> Self {
@@ -264,16 +291,20 @@ impl Console {
         self.is_active() || self.0.capture.is_some()
     }
 
-    /// Block until every line handed over so far has been written. A no-op for a
-    /// console that prints nothing. Called before the process exits so the
-    /// last lines of a run are not lost in the writer's queue.
+    /// Wait, at most [`FLUSH_TIMEOUT`], until every line handed over so far has
+    /// been written. Called before the process exits so the last lines of a run
+    /// are not lost in the writer's queue. Bounded twice over: the barrier is
+    /// queued without blocking (a full queue means the writer is stuck, and
+    /// waiting would not help), and the wait for it has a deadline, so a stdout
+    /// nobody drains can never hold the exit. A no-op for a console that
+    /// prints nothing.
     pub fn flush(&self) {
         let Sink::Writer { tx, .. } = &self.0.sink else {
             return;
         };
-        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(0);
-        if tx.send(WriterMsg::Sync(ack_tx)).is_ok() {
-            let _ = ack_rx.recv();
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        if tx.try_send(WriterMsg::Sync(ack_tx)).is_ok() {
+            let _ = ack_rx.recv_timeout(FLUSH_TIMEOUT);
         }
     }
 
@@ -353,12 +384,22 @@ impl Console {
 
     /// The post-bind startup banner: a header, one row per bound listener, then
     /// the warning rows and the reachability note.
+    ///
+    /// In the flip's buffer the banner, and every line logged before it (the
+    /// startup warnings), are pinned, so however busy the server gets they are
+    /// never evicted from the top of the viewer.
     pub fn banner(&self, banner: &Banner) {
         if !self.is_recording() {
             return;
         }
-        for line in banner.lines() {
-            self.line(line);
+        let lines = banner.lines();
+        if self.is_active() {
+            for line in &lines {
+                self.write_line(line.render(self.0.color));
+            }
+        }
+        if let Some(ring) = &self.0.capture {
+            ring.pin_startup(lines);
         }
     }
 
@@ -514,6 +555,7 @@ pub(crate) fn strip_ansi(s: &str) -> String {
 mod tests {
     use super::*;
     use dux_core::serve_log::ListenerRow;
+    use std::time::Duration;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -699,6 +741,29 @@ mod tests {
         );
     }
 
+    /// The startup (its warnings and the banner, reachability note included)
+    /// is pinned in the flip's buffer, so a busy server never evicts it.
+    #[test]
+    fn a_capture_console_pins_the_startup_lines() {
+        let ring = ActivityRing::new(2);
+        let console = Console::test_ring_capture(ring.clone());
+        console.warn("startup warning");
+        console.banner(&sample_banner());
+        for n in 0..5 {
+            console.info(&format!("event {n}"));
+        }
+        let pinned: Vec<String> = ring.pinned().iter().map(LogLine::text).collect();
+        assert_eq!(
+            pinned,
+            vec![
+                "12:00:00 \u{26a0} startup warning".to_string(),
+                "dux v0.1.0  plain HTTP".to_string(),
+                "  \u{279c} Local: http://127.0.0.1:8080".to_string(),
+            ]
+        );
+        assert_eq!(ring_texts(&ring).len(), 5, "three pinned plus the last two");
+    }
+
     #[test]
     fn capture_console_prints_nothing_but_records() {
         let ring = ActivityRing::new(10);
@@ -742,6 +807,34 @@ mod tests {
         }
         console.flush();
         assert!(sink.buf.contents().contains("line 49"));
+    }
+
+    /// A writer stuck on a full pipe (`dux server | less` that stopped reading)
+    /// must not hang a flush: the force-exit hatch flushes, and it has to exit.
+    #[test]
+    fn flush_gives_up_on_a_writer_that_never_returns() {
+        let (_release, gate) = std::sync::mpsc::channel::<()>();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let writer = GatedWriter {
+            buf: SharedBuffer::new(),
+            gate,
+            entered: entered_tx,
+        };
+        let console = Console::test_capture_bounded(false, 2, Box::new(writer));
+        console.info("stuck");
+        entered_rx.recv().expect("the writer is wedged in write");
+        // Fill the channel too, so even queueing the barrier would block.
+        console.info("queued 1");
+        console.info("queued 2");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            console.flush();
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "flush must return even though the writer never does"
+        );
     }
 
     // ── Writer-thread: ordering + drop-on-full ──────────────────────────────

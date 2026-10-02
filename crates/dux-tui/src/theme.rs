@@ -200,6 +200,10 @@ pub struct Theme {
     pub scroll_indicator_fg: Color,
     pub scroll_indicator_bg: Color,
     pub warning_fg: Color,
+    /// Text that reports something went well: an OK line in the server log, a
+    /// 2xx status in its access log. The theme's own success color, so a
+    /// success never borrows a diff color that happens to be green.
+    pub success_fg: Color,
     /// Emphasis for the search-matched substring of a row label (BOLD is added
     /// at the render site). A foreground, not a background: the framed-row
     /// selection tints the row while keeping each span's fg, so the emphasis
@@ -501,6 +505,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.scroll_indicator_fg", text_primary);
     theme.register_default_token("dux.scroll_indicator_bg", bg_active);
     theme.register_default_token("dux.warning_fg", warning);
+    theme.register_default_token("dux.success_fg", success);
     // Search-hit emphasis: the warning hue doubles as a find/highlight accent
     // (the conventional "search match" yellow) and is defined by every theme.
     theme.register_default_token("dux.search_match_fg", warning);
@@ -637,6 +642,7 @@ impl Theme {
             scroll_indicator_fg: pick("dux.scroll_indicator_fg"),
             scroll_indicator_bg: pick("dux.scroll_indicator_bg"),
             warning_fg: pick("dux.warning_fg"),
+            success_fg: pick("dux.success_fg"),
             search_match_fg: pick("dux.search_match_fg"),
             button_active_fg: pick("dux.button_active_fg"),
             button_confirm_border: pick("dux.button_confirm_border"),
@@ -1095,6 +1101,7 @@ mod tests {
             scroll_indicator_fg: Color::Rgb(210, 210, 210),
             scroll_indicator_bg: Color::Rgb(55, 55, 55),
             warning_fg: Color::Yellow,
+            success_fg: Color::Green,
             search_match_fg: Color::Yellow,
             button_active_fg: Color::White,
             button_confirm_border: Color::Cyan,
@@ -1203,6 +1210,7 @@ mod tests {
         assert_field!(scroll_indicator_fg);
         assert_field!(scroll_indicator_bg);
         assert_field!(warning_fg);
+        assert_field!(success_fg);
         assert_field!(search_match_fg);
         assert_field!(button_active_fg);
         assert_field!(button_confirm_border);
@@ -1309,6 +1317,9 @@ info = "info"
         )
         .expect("theme must parse");
 
+        // Success-toned text (an OK line in the server log) reads in the
+        // theme's own success color, not a borrowed diff color.
+        assert_eq!(theme.success_fg, Color::Rgb(1, 1, 1));
         assert_eq!(theme.pr_open_bg, Color::Rgb(35, 134, 54));
         assert_eq!(theme.pr_merged_bg, Color::Rgb(130, 80, 223));
         assert_eq!(theme.pr_closed_bg, Color::Rgb(110, 54, 48));

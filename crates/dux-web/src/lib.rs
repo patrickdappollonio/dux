@@ -459,7 +459,7 @@ fn run_plain_http(
         forced_no,
     } = plan;
     warn_if_ui_not_built();
-    let engine = bootstrap::bootstrap_engine(&paths)?;
+    let engine = bootstrap_or_report(&paths, &startup_warnings, &mut std::io::stderr())?;
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config);
@@ -629,6 +629,22 @@ fn run_plain_http(
     result
 }
 
+/// Load the engine for `dux server`, and when that fails, print the startup
+/// warnings to `err` before giving up: they were going to open the log, and a
+/// start that never gets as far as the log must not swallow them (the
+/// non-loopback alarm least of all).
+pub(crate) fn bootstrap_or_report(
+    paths: &DuxPaths,
+    startup_warnings: &[String],
+    err: &mut dyn std::io::Write,
+) -> Result<Engine> {
+    bootstrap::bootstrap_engine(paths).inspect_err(|_| {
+        for warning in startup_warnings {
+            let _ = writeln!(err, "WARNING: {warning}");
+        }
+    })
+}
+
 /// What the status-screen tick asks `serve_with_engine` to do after the current
 /// iteration. `Continue` keeps serving; `ReturnToTui` flips back to the TUI
 /// (server torn down, PTYs preserved); `QuitProcess` exits the whole process
@@ -644,7 +660,33 @@ pub enum ServerTick {
 pub enum ServerExit {
     ReturnToTui,
     QuitProcess,
+    /// A second Ctrl-c during the quit's shutdown wait cut it short: the
+    /// children were killed rather than waited for. The caller gives the
+    /// terminal back, says so, and exits with 130.
+    ForceQuit,
 }
+
+/// Waits up to the given time for the user's force-quit gesture (a second
+/// Ctrl-c) and says whether it came.
+pub type ForceQuitWatch = Box<dyn FnMut(Duration) -> bool + Send>;
+
+/// What the flip's status screen lends the serve, when it is on screen. Both are
+/// `None` without one (no TTY), and then there is nothing to restore and Ctrl-c
+/// is an ordinary signal.
+#[derive(Default)]
+pub struct FlipHooks {
+    /// Gives the terminal back before a second stop SIGNAL forces the process
+    /// out, because that exit runs no destructor.
+    pub restore_terminal: Option<RestoreTerminal>,
+    /// Watches for a second Ctrl-c KEY while the quit waits for the children:
+    /// the screen holds the terminal in raw mode, so Ctrl-c is a key there,
+    /// and nothing else reads keys during that wait.
+    pub force_quit_key: Option<ForceQuitWatch>,
+}
+
+/// How long one look for the force-quit key lasts, which is also how late the
+/// watcher notices that the wait is over.
+const FORCE_QUIT_LOOK: Duration = Duration::from_millis(100);
 
 /// Upper bound on how long the flip waits for the axum server task to finish
 /// after graceful shutdown is triggered. A wedged client connection must not be
@@ -1831,15 +1873,16 @@ impl ServeCore {
 /// The console log is the same one `dux server` prints: `startup` carries what
 /// the terminal UI's pre-flight learned (its warnings, the Tailscale bind
 /// failures, whether an address was detected), and those lines plus the banner
-/// open the log before anything is served. `restore_terminal` hands the terminal
-/// back if a second stop signal forces the process out mid-shutdown.
+/// open the log before anything is served. `hooks` are what the status screen
+/// lends when it is on screen: the terminal restore a forced exit runs, and the
+/// watch for a second Ctrl-c during the quit's shutdown wait.
 #[allow(clippy::too_many_arguments)]
 pub fn serve_with_engine(
     mut engine: Engine,
     listeners: Vec<std::net::TcpListener>,
     activity: dux_core::activity::ActivityRing,
     startup: StartupNotes,
-    restore_terminal: RestoreTerminal,
+    hooks: FlipHooks,
     mut on_tick: impl FnMut() -> ServerTick,
     mut on_shutdown_status: impl FnMut(&str),
 ) -> Result<(Engine, ServerExit)> {
@@ -1884,6 +1927,10 @@ pub fn serve_with_engine(
     // The flip has taken the terminal over with its own status screen, so it OWNS
     // the process's stop signals for as long as it serves.
     let access_log = engine.config.server.access_log;
+    let FlipHooks {
+        restore_terminal,
+        force_quit_key,
+    } = hooks;
     let mut core = ServeCore::start(
         handle,
         listeners,
@@ -1895,7 +1942,7 @@ pub fn serve_with_engine(
         access_log,
         SignalPolicy::Adopt {
             flag: Arc::clone(&signal_quit),
-            restore_terminal: Some(restore_terminal),
+            restore_terminal,
         },
         // The flip has no terminal UI beside it (it took the terminal over), so
         // there is no second surface to announce ownership changes for, and nowhere
@@ -1969,10 +2016,24 @@ pub fn serve_with_engine(
             let start = dux_core::engine::format_shutdown_start(agents, terminals, grace);
             console.info(&start);
             on_shutdown_status(&start);
-            let report = engine.shutdown_ptys(grace);
+            let forced = Arc::new(AtomicBool::new(false));
+            let waiting = Arc::new(AtomicBool::new(true));
+            let watcher = force_quit_key.map(|watch| {
+                spawn_force_quit_watcher(watch, Arc::clone(&forced), Arc::clone(&waiting))
+            });
+            let report = engine.shutdown_ptys_interruptible(grace, Some(&forced));
+            waiting.store(false, Ordering::SeqCst);
+            if let Some(watcher) = watcher {
+                let _ = watcher.join();
+            }
             let result = dux_core::engine::format_shutdown_result(&report);
             console.info(&result);
             on_shutdown_status(&result);
+            if forced.load(Ordering::SeqCst) {
+                dux_core::logger::error(&format!("[server] {FORCE_EXIT_MESSAGE}"));
+                console.error(FORCE_EXIT_MESSAGE);
+                exit = ServerExit::ForceQuit;
+            }
         }
     }
 
@@ -2052,12 +2113,30 @@ async fn shutdown_signal(force_exit: ForceExit) {
     });
 }
 
+/// Look for the force-quit key on its own thread while the quit waits for the
+/// children, and cut the wait short (`forced`) when it comes. Stops looking once
+/// `waiting` drops, within one look.
+fn spawn_force_quit_watcher(
+    mut watch: ForceQuitWatch,
+    forced: Arc<AtomicBool>,
+    waiting: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while waiting.load(Ordering::SeqCst) {
+            if watch(FORCE_QUIT_LOOK) {
+                forced.store(true, Ordering::SeqCst);
+                return;
+            }
+        }
+    })
+}
+
 /// Hands the terminal back to the shell: the flip's status screen supplies it,
 /// `dux server` has nothing to restore.
 pub type RestoreTerminal = Arc<dyn Fn() + Send + Sync>;
 
 /// The line a second stop signal leaves on its way out.
-pub(crate) const FORCE_EXIT_MESSAGE: &str =
+pub const FORCE_EXIT_MESSAGE: &str =
     "second interrupt received during shutdown. Forcing immediate exit.";
 
 /// What a second stop signal does: say so on the console (the same line in both
@@ -2158,7 +2237,7 @@ mod tests {
         Reachability, bind_plan_addrs, plain_http_banner, reachability, safety_note,
         tailscale_bind_warning,
     };
-    use dux_core::config::{PlanAddr, TailscaleMode};
+    use dux_core::config::{DuxPaths, PlanAddr, TailscaleMode};
     use dux_core::engine::Command;
 
     #[tokio::test]
@@ -2826,6 +2905,51 @@ mod tests {
 
     /// In `dux server`, the line is on stdout before the exit: the console is
     /// flushed first, so the writer thread cannot lose it.
+    /// The hatch has to exit even when stdout has stopped draining (`dux server
+    /// | less` that nobody is reading): its flush is bounded.
+    #[test]
+    fn a_forced_exit_exits_even_when_stdout_is_stuck() {
+        let console = crate::console::Console::test_stuck_writer();
+        let force = super::ForceExit::new(console, None);
+        let (exited_tx, exited_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            force.run(|code| {
+                let _ = exited_tx.send(code);
+            });
+        });
+        assert_eq!(
+            exited_rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(130)
+        );
+    }
+
+    /// A start that fails while loading still shows what it had to warn about
+    /// (the non-loopback alarm among them), on stderr.
+    #[test]
+    fn a_failed_bootstrap_still_prints_the_startup_warnings() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let file_root = tmp.path().join("not-a-dir");
+        std::fs::write(&file_root, "x").unwrap();
+        let paths = DuxPaths {
+            root: file_root.clone(),
+            config_path: file_root.join("config.toml"),
+            sessions_db_path: file_root.join("sessions.sqlite3"),
+            worktrees_root: file_root.join("worktrees"),
+            lock_path: file_root.join("dux.lock"),
+        };
+        let mut err = Vec::new();
+        let result = super::bootstrap_or_report(
+            &paths,
+            &["dux is binding 0.0.0.0:3890, a non-loopback address".to_string()],
+            &mut err,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "WARNING: dux is binding 0.0.0.0:3890, a non-loopback address\n"
+        );
+    }
+
     #[test]
     fn a_forced_exit_flushes_the_console_before_exiting() {
         let (console, sink) = crate::console::Console::test_capture(false);

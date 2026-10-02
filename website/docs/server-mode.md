@@ -97,12 +97,15 @@ Your **agents keep running the entire time**: no relaunch, no lost conversations
 dux you already have starts serving in place. Your terminal turns into a themed dux
 status screen showing the serve URLs and a log viewer. The viewer shows exactly the log
 `dux server` prints, banner and access log included, so nothing you would see there is
-missing here. It keeps the last `log_viewer_lines` lines (2000 by default) for scrolling
-back with your scroll keys (Page Up and Page Down, Home and End unless you rebound them;
-the `?` help lists them). While you are scrolled back, new lines do not move what you are
-reading, and the bottom of the panel says how many arrived below. Press `q` or `Esc` there to
-drop back into the TUI with everything still running, which stops serving the web UI;
-you can flip again whenever you like. `Ctrl-c` quits dux entirely.
+missing here. The banner and the warnings above it stay at the top of the panel; below
+them it keeps the last `log_viewer_lines` lines (2000 by default) for scrolling back with
+your scroll keys (the arrow keys, Page Up and Page Down, Home and End unless you rebound
+them; the `?` help lists them). While you are scrolled back, new lines do not move what
+you are reading, and the bottom of the panel says how many arrived below. Press `q` or
+`Esc` there to drop back into the TUI with everything still running, which stops serving
+the web UI; you can flip again whenever you like. `Ctrl-c` quits dux entirely, winding
+your agents down exactly as `dux server` does, and a second `Ctrl-c` while it waits for
+them stops waiting and quits at once.
 
 > [!IMPORTANT]
 > `dux server` honors your configured `[server] host` and `--bind`. The in-app flip
@@ -279,10 +282,10 @@ The rest tune presentation and limits:
 |---|---|---|
 | `color` | `"auto"` | Colored, vite-style console output for `dux server` (`auto`, `always`, `never`). Read at startup. |
 | `access_log` | `true` | Log a per-request line to the server's console: `dux server`'s output and the flip's log viewer alike (never to `dux.log`, so pipe `dux server`'s stdout to capture it). `/healthz` is always skipped. Set `false` to silence it in both. A config reload applies it. |
-| `log_viewer_lines` | `2000` | How many lines the flip's log viewer keeps for scrolling back. `dux server` has no such cap, because its scrollback is your terminal's. Read when the flip starts. |
+| `log_viewer_lines` | `2000` | How many lines the flip's log viewer keeps for scrolling back, between 1 and 20000 (a value outside that range is read as the nearest end). The startup lines (the banner and its warnings) are kept on top of these and never dropped. `dux server` has no such cap, because its scrollback is your terminal's. Read when the flip starts. |
 | `title` | `"dux"` | Web-only instance name: the browser tab title and the wordmark in the projects pane. Set `"dux (prod)"` to tell tabs apart. |
 | `favicon` | `""` | Web-only favicon tint so several dux tabs are distinguishable. Empty keeps the yellow duck; otherwise a curated color (violet, blue, sky, cyan, teal, green, amber, orange, red, pink, rose). |
-| `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-c during the wait exits immediately. |
+| `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-c during the wait stops waiting and exits at once, in `dux server` and in the flip alike. |
 | `max_websocket_events_connections` | `32` | Cap on the status/event sockets (one per browser tab). |
 | `max_websocket_agent_connections` | `32` | Cap on agent-PTY sockets. |
 | `max_websocket_terminal_connections` | `64` | Cap on companion-terminal PTY sockets. |

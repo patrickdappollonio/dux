@@ -996,7 +996,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # viewer for scrolling back. The viewer shows the same lines `dux server`\n\
                  # prints to its terminal; older lines are dropped once it holds this many.\n\
                  # `dux server` itself has no such cap: its scrollback is your terminal's.\n\
-                 # Values below 1 are read as 1. Applies the next time the flip starts.",
+                 # Values below 1 are read as 1, and values above 20000 as 20000.\n\
+                 # Applies the next time the flip starts.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.log_viewer_lines),
         },

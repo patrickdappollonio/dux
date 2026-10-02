@@ -1,39 +1,50 @@
 //! A bounded, thread-safe tail of the web server's console lines plus a live
 //! active-connection count. The web `Console` (the producer, on many tokio
 //! worker threads) pushes here; the flip's server status screen (the consumer,
-//! on the engine-loop thread) reads a [`ActivityRing::snapshot`] when it redraws
-//! and scrolls back through it.
+//! on the engine-loop thread) reads what arrived since it last looked
+//! ([`ActivityRing::lines_since`]) and scrolls back through its own copy.
 //!
 //! The lines are the very [`LogLine`]s `dux server` prints, so the two surfaces
 //! cannot word anything differently. The buffer keeps the most recent
-//! `capacity` lines (`[server] log_viewer_lines`) and drops the oldest.
+//! `capacity` lines (`[server] log_viewer_lines`) and drops the oldest, except
+//! the startup lines, which are pinned ([`ActivityRing::pin_startup`]) so a
+//! busy server cannot evict its own banner and reachability note.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::serve_log::LogLine;
 
-/// A point-in-time read of the ring: the line generation (for cheap "did
-/// anything change?" checks), the live connection count, and every retained
-/// line, oldest first.
+/// A point-in-time read of the whole log: the line generation, the live
+/// connection count, and every line in order (the pinned startup lines, then
+/// the retained rest, oldest first).
 #[derive(Clone, Debug)]
 pub struct ActivitySnapshot {
-    /// How many lines were ever pushed, dropped ones included. The difference
-    /// between two snapshots' generations is how many lines arrived between
-    /// them.
+    /// How many lines were ever pushed, dropped ones included.
     pub generation: u64,
     pub connections: usize,
     pub lines: Vec<LogLine>,
 }
 
+#[derive(Default)]
+struct Held {
+    /// The startup lines, never evicted.
+    pinned: Vec<LogLine>,
+    /// Everything after them, bounded by the capacity.
+    lines: VecDeque<LogLine>,
+}
+
 struct ActivityInner {
-    lines: Mutex<VecDeque<LogLine>>,
+    held: Mutex<Held>,
     capacity: usize,
     connections: AtomicUsize,
     /// Bumped on every push (including pushes that drop an older line), so a
     /// reader can detect new activity without copying the buffer.
     generation: AtomicU64,
+    /// Bumped whenever the pinned lines change, which also moves lines out of
+    /// the bounded part: a reader that sees it move reads everything again.
+    pin_version: AtomicU64,
 }
 
 /// A cheap-to-clone (`Arc`) shared handle to the line buffer.
@@ -47,40 +58,81 @@ impl Default for ActivityRing {
 }
 
 impl ActivityRing {
-    /// A ring holding at most `capacity` lines. A capacity below 1 is read as 1.
+    /// A ring holding at most `capacity` lines past the pinned ones, read
+    /// through [`crate::config::log_viewer_capacity`] (at least 1, at most
+    /// [`crate::config::LOG_VIEWER_LINES_MAX`]).
     pub fn new(capacity: usize) -> Self {
-        let capacity = capacity.max(1);
+        let capacity = crate::config::log_viewer_capacity(capacity);
         Self(Arc::new(ActivityInner {
-            lines: Mutex::new(VecDeque::with_capacity(capacity.min(4096))),
+            held: Mutex::new(Held {
+                pinned: Vec::new(),
+                lines: VecDeque::with_capacity(capacity.min(4096)),
+            }),
             capacity,
             connections: AtomicUsize::new(0),
             generation: AtomicU64::new(0),
+            pin_version: AtomicU64::new(0),
         }))
     }
 
-    /// The most lines this ring keeps.
+    /// The most lines this ring keeps past the pinned ones.
     pub fn capacity(&self) -> usize {
         self.0.capacity
     }
 
-    /// Append a line, dropping the oldest if the buffer is full, then bump the
-    /// generation, all while holding the lock so a concurrent
-    /// [`Self::snapshot`] cannot observe the new line with the old generation
-    /// and miss a redraw.
-    ///
     /// A poisoned lock is recovered rather than propagated: this is a lossy,
     /// display-only buffer, so one panic must not kill the activity subsystem.
-    pub fn push(&self, line: LogLine) {
-        let mut lines = self
-            .0
-            .lines
+    fn held(&self) -> MutexGuard<'_, Held> {
+        self.0
+            .held
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        lines.push_back(line);
-        while lines.len() > self.0.capacity {
-            lines.pop_front();
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Append a line, dropping the oldest unpinned one if the buffer is full,
+    /// then bump the generation, all under the lock so a concurrent reader
+    /// cannot see the new line with the old generation and miss a redraw.
+    pub fn push(&self, line: LogLine) {
+        let mut held = self.held();
+        held.lines.push_back(line);
+        while held.lines.len() > self.0.capacity {
+            held.lines.pop_front();
         }
         self.0.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Pin the startup: every line logged so far (the warnings raised before
+    /// binding) and then `banner`, so a full buffer never evicts them.
+    pub fn pin_startup(&self, banner: Vec<LogLine>) {
+        let mut held = self.held();
+        let earlier: Vec<LogLine> = held.lines.drain(..).collect();
+        held.pinned.extend(earlier);
+        held.pinned.extend(banner);
+        self.0.pin_version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The pinned startup lines.
+    pub fn pinned(&self) -> Vec<LogLine> {
+        self.held().pinned.clone()
+    }
+
+    /// Changes whenever the pinned lines do.
+    pub fn pin_version(&self) -> u64 {
+        self.0.pin_version.load(Ordering::Relaxed)
+    }
+
+    /// The unpinned lines pushed after generation `since` that are still held,
+    /// oldest first, plus the generation they bring the reader up to. Copies
+    /// only what is new, which is what keeps a reader's cost per line rather
+    /// than per buffer.
+    pub fn lines_since(&self, since: u64) -> (u64, Vec<LogLine>) {
+        let held = self.held();
+        let generation = self.0.generation.load(Ordering::Relaxed);
+        let arrived = usize::try_from(generation.saturating_sub(since))
+            .unwrap_or(usize::MAX)
+            .min(held.lines.len());
+        let start = held.lines.len() - arrived;
+        (generation, held.lines.range(start..).cloned().collect())
     }
 
     pub fn connection_opened(&self) {
@@ -106,22 +158,19 @@ impl ActivityRing {
         self.0.connections.load(Ordering::Relaxed)
     }
 
-    /// Snapshot every retained line plus the current count/generation.
-    ///
-    /// The generation is read while the lines lock is held, so it is always
-    /// coherent with the lines copied (see [`Self::push`]). The connection
-    /// counter is maintained outside that lock, so it is best-effort and may lead
-    /// or trail the lines by a frame.
+    /// The whole log, pinned lines first. Copies everything, so it is for tests
+    /// and one-off reads, never a per-frame path.
     pub fn snapshot(&self) -> ActivitySnapshot {
-        let lines = self
-            .0
-            .lines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let held = self.held();
         ActivitySnapshot {
             generation: self.0.generation.load(Ordering::Relaxed),
             connections: self.0.connections.load(Ordering::Relaxed),
-            lines: lines.iter().cloned().collect(),
+            lines: held
+                .pinned
+                .iter()
+                .chain(held.lines.iter())
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -133,6 +182,17 @@ mod tests {
 
     fn line(msg: &str) -> LogLine {
         LogLine::event("00:00:00", LogTone::Info, msg)
+    }
+
+    fn texts_of(lines: &[LogLine]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| {
+                l.text()
+                    .trim_start_matches("00:00:00 \u{279c} ")
+                    .to_string()
+            })
+            .collect()
     }
 
     fn texts(snap: &ActivitySnapshot) -> Vec<String> {
@@ -186,6 +246,54 @@ mod tests {
         ring.push(line("b"));
         assert_eq!(ring.capacity(), 1);
         assert_eq!(texts(&ring.snapshot()), vec!["b"]);
+    }
+
+    /// The startup lines (its warnings and the banner, with the reachability
+    /// note) are pinned: however much the server logs afterwards, a full buffer
+    /// never evicts them.
+    #[test]
+    fn pinned_startup_lines_survive_a_full_buffer() {
+        let ring = ActivityRing::new(3);
+        ring.push(line("startup warning"));
+        ring.pin_startup(vec![line("banner")]);
+        for n in 0..10 {
+            ring.push(line(&format!("event{n}")));
+        }
+        assert_eq!(texts_of(&ring.pinned()), vec!["startup warning", "banner"]);
+        assert_eq!(
+            texts(&ring.snapshot()),
+            vec!["startup warning", "banner", "event7", "event8", "event9"],
+            "a snapshot is the whole log in order: pinned lines, then the rest"
+        );
+    }
+
+    #[test]
+    fn lines_since_hands_over_only_what_arrived() {
+        let ring = ActivityRing::new(10);
+        ring.push(line("a"));
+        let seen = ring.generation();
+        ring.push(line("b"));
+        ring.push(line("c"));
+        let (generation, new) = ring.lines_since(seen);
+        assert_eq!(generation, 3);
+        assert_eq!(texts_of(&new), vec!["b", "c"]);
+        assert!(ring.lines_since(generation).1.is_empty());
+    }
+
+    #[test]
+    fn lines_since_hands_over_only_what_is_still_held() {
+        let ring = ActivityRing::new(2);
+        for n in 0..5 {
+            ring.push(line(&format!("l{n}")));
+        }
+        let (_, new) = ring.lines_since(0);
+        assert_eq!(texts_of(&new), vec!["l3", "l4"]);
+    }
+
+    #[test]
+    fn a_capacity_above_the_maximum_is_read_as_the_maximum() {
+        let ring = ActivityRing::new(usize::MAX);
+        assert_eq!(ring.capacity(), crate::config::LOG_VIEWER_LINES_MAX);
     }
 
     #[test]

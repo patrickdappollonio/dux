@@ -25,7 +25,9 @@
 //! `FnMut`, wired up by the binary (`crates/dux/src/main.rs`), the only crate
 //! that depends on both.
 
+use std::collections::VecDeque;
 use std::io::{Stdout, Write, stdout};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -35,7 +37,7 @@ use crossterm::event::{
 use crossterm::{cursor, execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
@@ -110,6 +112,17 @@ impl LogScroll {
         }
     }
 
+    fn line_up(&mut self, viewport: usize, total: usize) {
+        self.offset = (self.offset + 1).min(max_offset(viewport, total));
+    }
+
+    fn line_down(&mut self) {
+        self.offset = self.offset.saturating_sub(1);
+        if self.following() {
+            self.unseen = 0;
+        }
+    }
+
     fn page_up(&mut self, viewport: usize, total: usize) {
         self.offset = (self.offset + page(viewport)).min(max_offset(viewport, total));
     }
@@ -163,6 +176,205 @@ enum ExitKind {
     QuitProcess,
 }
 
+/// The viewer's own copy of the log, kept wrapped and ready to draw.
+///
+/// Built incrementally: each sync copies and wraps only the lines that arrived
+/// since the last one, and a line falling off the top of the buffer takes its
+/// rows with it, so a busy server costs the engine-loop thread per new line
+/// rather than per buffered line. Only a width change (or the startup lines
+/// being pinned) wraps everything again. Drawing clones only the rows in view.
+struct LogView {
+    capacity: usize,
+    /// The width the rows were wrapped at; 0 until the first draw measures it.
+    width: usize,
+    generation: u64,
+    pin_version: u64,
+    lines: VecDeque<LogLine>,
+    /// How many rows each line in `lines` wrapped to, so eviction drops exactly
+    /// its rows.
+    line_rows: VecDeque<usize>,
+    rows: VecDeque<Line<'static>>,
+    /// The pinned startup lines (warnings and banner) and their rows.
+    pinned: Vec<LogLine>,
+    pinned_rows: Vec<Line<'static>>,
+    /// Lines wrapped so far, so a test can see that a sync wraps only what is
+    /// new.
+    #[cfg(test)]
+    wrapped: usize,
+}
+
+/// What a sync brought in at the bottom of the log.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Arrived {
+    lines: usize,
+    rows: usize,
+}
+
+impl LogView {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            width: 0,
+            generation: 0,
+            pin_version: 0,
+            lines: VecDeque::new(),
+            line_rows: VecDeque::new(),
+            rows: VecDeque::new(),
+            pinned: Vec::new(),
+            pinned_rows: Vec::new(),
+            #[cfg(test)]
+            wrapped: 0,
+        }
+    }
+
+    fn wrap(&mut self, line: &LogLine, theme: &Theme) -> Vec<Line<'static>> {
+        #[cfg(test)]
+        {
+            self.wrapped += 1;
+        }
+        if self.width == 0 {
+            return Vec::new();
+        }
+        wrap_styled_lines(&[log_line(line, theme)], self.width)
+    }
+
+    /// Bring the copy up to date with `ring`. Copies only what arrived, unless
+    /// the startup lines were pinned since, which reshapes the whole log and
+    /// so is read whole (once, at startup).
+    fn sync(&mut self, ring: &ActivityRing, theme: &Theme) -> Arrived {
+        if ring.pin_version() != self.pin_version {
+            self.pin_version = ring.pin_version();
+            self.pinned = ring.pinned();
+            let (generation, lines) = ring.lines_since(0);
+            self.generation = generation;
+            self.lines = lines.into();
+            self.rewrap(theme);
+            return Arrived::default();
+        }
+        if ring.generation() == self.generation {
+            return Arrived::default();
+        }
+        let (generation, new) = ring.lines_since(self.generation);
+        self.generation = generation;
+        let mut arrived = Arrived::default();
+        for line in new {
+            let rows = self.wrap(&line, theme);
+            arrived.lines += 1;
+            arrived.rows += rows.len();
+            self.line_rows.push_back(rows.len());
+            self.rows.extend(rows);
+            self.lines.push_back(line);
+        }
+        while self.lines.len() > self.capacity {
+            self.lines.pop_front();
+            let gone = self.line_rows.pop_front().unwrap_or(0);
+            self.rows.drain(..gone.min(self.rows.len()));
+        }
+        arrived
+    }
+
+    /// Wrap everything again at `width` if it changed.
+    fn set_width(&mut self, width: usize, theme: &Theme) {
+        if width != self.width {
+            self.width = width;
+            self.rewrap(theme);
+        }
+    }
+
+    fn rewrap(&mut self, theme: &Theme) {
+        let lines: Vec<LogLine> = self.lines.iter().cloned().collect();
+        self.rows.clear();
+        self.line_rows.clear();
+        for line in &lines {
+            let rows = self.wrap(line, theme);
+            self.line_rows.push_back(rows.len());
+            self.rows.extend(rows);
+        }
+        let pinned = self.pinned.clone();
+        self.pinned_rows = pinned
+            .iter()
+            .flat_map(|line| self.wrap(line, theme))
+            .collect();
+    }
+
+    /// Whether the pinned startup stays on top while the rest scrolls: when it
+    /// fits in half the panel. A taller one scrolls with the log instead, so it
+    /// is never cut off on a small terminal (and still never evicted).
+    fn pinned_sticks(&self, panel_rows: usize) -> bool {
+        self.pinned_rows.len() <= panel_rows / 2
+    }
+
+    /// Rows that scroll, given whether the pinned startup sticks.
+    fn scroll_total(&self, sticky: bool) -> usize {
+        if sticky {
+            self.rows.len()
+        } else {
+            self.pinned_rows.len() + self.rows.len()
+        }
+    }
+
+    /// Clone the scrolling rows `start..end` for drawing, and nothing else.
+    fn scroll_window(&self, sticky: bool, start: usize, end: usize) -> Vec<Line<'static>> {
+        let pinned = if sticky { 0 } else { self.pinned_rows.len() };
+        (start..end)
+            .map(|i| {
+                if i < pinned {
+                    self.pinned_rows[i].clone()
+                } else {
+                    self.rows[i - pinned].clone()
+                }
+            })
+            .collect()
+    }
+}
+
+/// Where the status screen's terminal stands: held (drawing allowed) or handed
+/// back. A frame and a restore never overlap: drawing happens under the lock
+/// and only while held, and a restore takes the lock and marks the terminal
+/// released, so once a forced exit has given the terminal back no frame can
+/// land on the shell's screen behind it.
+struct TerminalGate {
+    released: Mutex<bool>,
+}
+
+impl TerminalGate {
+    const fn new() -> Self {
+        Self {
+            released: Mutex::new(true),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, bool> {
+        self.released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The screen took the terminal: frames may be drawn.
+    fn hold(&self) {
+        *self.lock() = false;
+    }
+
+    /// Run `restore` once, and stop any later frame.
+    fn release(&self, restore: impl FnOnce()) {
+        let mut released = self.lock();
+        if !*released {
+            restore();
+            *released = true;
+        }
+    }
+
+    /// Run `draw` only while the terminal is held. `None` when it was handed
+    /// back.
+    fn draw_while_held<R>(&self, draw: impl FnOnce() -> R) -> Option<R> {
+        let released = self.lock();
+        if *released { None } else { Some(draw()) }
+    }
+}
+
+/// The one gate: there is one terminal.
+static TERMINAL_GATE: TerminalGate = TerminalGate::new();
+
 /// The interactive server status screen. Owns the terminal raw/alt-screen
 /// lifecycle for as long as it lives and restores everything in `Drop`.
 pub struct ServerStatusScreen {
@@ -180,16 +392,13 @@ pub struct ServerStatusScreen {
     last_drawn_secs: u64,
     /// The shared line buffer fed by the web console.
     activity: ActivityRing,
-    /// The lines as of the last read, and the generation they were read at, so
-    /// a redraw for the uptime alone does not copy the buffer.
-    lines: Vec<LogLine>,
-    generation: u64,
+    view: LogView,
     connections: usize,
     scroll: LogScroll,
-    /// The log pane's inner width and height at the last draw, for measuring
-    /// arriving lines and sizing a page.
-    log_width: usize,
+    /// The scrolling area's height and whether the startup stuck on top, at the
+    /// last draw, for sizing a page between draws.
     log_rows: usize,
+    sticky: bool,
     /// Set when the view changed (a scroll, a resize) so the next tick redraws.
     dirty: bool,
     /// Shutdown-in-progress status (e.g. "Stopping 2 agents..."), shown on its
@@ -218,6 +427,7 @@ impl ServerStatusScreen {
         // fails after raw mode is enabled must undo it by hand. `enter_terminal`
         // does that cleanup on error.
         let terminal = enter_terminal()?;
+        TERMINAL_GATE.hold();
 
         let mut screen = Self {
             terminal,
@@ -227,17 +437,16 @@ impl ServerStatusScreen {
             safety_note,
             started: Instant::now(),
             last_drawn_secs: 0,
+            view: LogView::new(activity.capacity()),
             activity,
-            lines: Vec::new(),
-            generation: 0,
             connections: 0,
             scroll: LogScroll::default(),
-            log_width: 0,
             log_rows: 0,
+            sticky: true,
             dirty: false,
             shutdown_message: None,
         };
-        screen.refresh_lines();
+        screen.sync();
         screen.draw(0)?;
         Ok(screen)
     }
@@ -267,13 +476,11 @@ impl ServerStatusScreen {
         }
 
         let secs = self.started.elapsed().as_secs();
-        // Cheap pre-check first: `generation()` is a single atomic load. Only
-        // copy the buffer when a line actually arrived.
-        if self.activity.generation() != self.generation {
-            self.refresh_lines();
+        if self.sync() {
             self.dirty = true;
         }
         if self.activity.connections() != self.connections {
+            self.connections = self.activity.connections();
             self.dirty = true;
         }
         if !self.dirty && secs == self.last_drawn_secs {
@@ -293,32 +500,26 @@ impl ServerStatusScreen {
     /// Render errors are swallowed: the process is about to exit either way.
     pub fn show_shutdown_message(&mut self, message: impl Into<String>) {
         self.shutdown_message = Some(message.into());
-        self.refresh_lines();
+        self.sync();
         let secs = self.started.elapsed().as_secs();
         let _ = self.draw(secs);
     }
 
-    /// Read the buffer again and tell the scroll position how much arrived, so
-    /// a view that is scrolled back holds still.
-    fn refresh_lines(&mut self) {
-        let snapshot = self.activity.snapshot();
-        let arrived = usize::try_from(snapshot.generation.saturating_sub(self.generation))
-            .unwrap_or(usize::MAX)
-            .min(snapshot.lines.len());
-        if arrived > 0 && self.log_width > 0 {
-            let fresh = &snapshot.lines[snapshot.lines.len() - arrived..];
-            let rows = wrapped_log_rows(fresh, &self.theme, self.log_width).len();
-            self.scroll.lines_arrived(arrived, rows);
-        }
-        self.generation = snapshot.generation;
-        self.connections = snapshot.connections;
-        self.lines = snapshot.lines;
+    /// Bring the view up to date and tell the scroll position how much arrived,
+    /// so a view that is scrolled back holds still. Whether anything changed.
+    fn sync(&mut self) -> bool {
+        let before = (self.view.generation, self.view.pin_version);
+        let arrived = self.view.sync(&self.activity, &self.theme);
+        self.scroll.lines_arrived(arrived.lines, arrived.rows);
+        before != (self.view.generation, self.view.pin_version)
     }
 
     fn scroll_by(&mut self, action: Action) {
-        let total = wrapped_log_rows(&self.lines, &self.theme, self.log_width.max(1)).len();
+        let total = self.view.scroll_total(self.sticky);
         let viewport = self.log_rows.max(1);
         match action {
+            Action::ScrollLineUp => self.scroll.line_up(viewport, total),
+            Action::ScrollLineDown => self.scroll.line_down(),
             Action::ScrollPageUp => self.scroll.page_up(viewport, total),
             Action::ScrollPageDown => self.scroll.page_down(viewport),
             Action::ScrollToTop => self.scroll.top(viewport, total),
@@ -329,105 +530,138 @@ impl ServerStatusScreen {
     }
 
     /// Draw one frame: the header (logo + status), the log panel, and the
-    /// footer hints.
+    /// footer hints. Nothing is drawn once the terminal has been handed back.
     fn draw(&mut self, uptime_secs: u64) -> Result<()> {
         let theme = &self.theme;
         let header = header_lines(&self.urls, self.safety_note.as_deref(), uptime_secs);
         let shutdown_message = self.shutdown_message.as_deref();
         let bindings = &self.bindings;
-        let lines = &self.lines;
+        let view = &mut self.view;
         let connections = self.connections;
         let scroll = &mut self.scroll;
-        let mut measured = (self.log_width, self.log_rows);
-        self.terminal.draw(|frame| {
-            let area = frame.area();
-            frame.render_widget(Clear, area);
-            let bg = Block::default().style(Style::default().bg(theme.app_bg));
-            frame.render_widget(bg, area);
+        let terminal = &mut self.terminal;
+        let mut measured = (self.log_rows, self.sticky);
+        let drawn = TERMINAL_GATE.draw_while_held(|| {
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    frame.render_widget(Clear, area);
+                    let bg = Block::default().style(Style::default().bg(theme.app_bg));
+                    frame.render_widget(bg, area);
 
-            // Inset the whole screen so nothing is glued to the terminal edges.
-            const V_MARGIN: u16 = 1;
-            const H_MARGIN: u16 = 2;
+                    // Inset the whole screen so nothing is glued to the terminal edges.
+                    const V_MARGIN: u16 = 1;
+                    const H_MARGIN: u16 = 2;
 
-            let inner_width = area.width.saturating_sub(2 * H_MARGIN).max(1);
-            let footer = footer_lines(theme, bindings, shutdown_message, inner_width);
-            let header_rows: u16 = header
-                .iter()
-                .map(|segs| wrapped_row_count(segs, inner_width))
-                .sum();
-            let footer_rows = footer.len() as u16 + 1;
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .vertical_margin(V_MARGIN)
-                .horizontal_margin(H_MARGIN)
-                .constraints([
-                    Constraint::Length(header_rows),
-                    Constraint::Min(3),
-                    Constraint::Length(footer_rows),
-                ])
-                .split(area);
+                    let inner_width = area.width.saturating_sub(2 * H_MARGIN).max(1);
+                    let footer = footer_lines(theme, bindings, shutdown_message, inner_width);
+                    let header_rows: u16 = header
+                        .iter()
+                        .map(|segs| wrapped_row_count(segs, inner_width))
+                        .sum();
+                    let footer_rows = footer.len() as u16 + 1;
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .vertical_margin(V_MARGIN)
+                        .horizontal_margin(H_MARGIN)
+                        .constraints([
+                            Constraint::Length(header_rows),
+                            Constraint::Min(3),
+                            Constraint::Length(footer_rows),
+                        ])
+                        .split(area);
 
-            // ── Header (centered, no border) ────────────────────────────────
-            let header_text: Vec<Line> = header.iter().map(|s| header_line(s, theme)).collect();
-            let header_para = Paragraph::new(header_text)
-                .alignment(Alignment::Center)
-                // chip-free: the serving screen's header is constant words and URLs.
-                .wrap(Wrap { trim: false })
-                .style(Style::default().bg(theme.app_bg));
-            frame.render_widget(header_para, chunks[0]);
+                    // ── Header (centered, no border) ────────────────────────────
+                    let header_text: Vec<Line> =
+                        header.iter().map(|s| header_line(s, theme)).collect();
+                    let header_para = Paragraph::new(header_text)
+                        .alignment(Alignment::Center)
+                        // chip-free: the serving screen's header is constant words and URLs.
+                        .wrap(Wrap { trim: false })
+                        .style(Style::default().bg(theme.app_bg));
+                    frame.render_widget(header_para, chunks[0]);
 
-            // ── Log panel (rounded, themed) ─────────────────────────────────
-            let mut block = Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme.overlay_border))
-                .style(Style::default().bg(theme.app_bg))
-                .padding(Padding::horizontal(1))
-                .title(Line::from(Span::styled(
-                    " Log ",
-                    Style::default()
-                        .fg(theme.title_focused)
-                        .add_modifier(Modifier::BOLD),
-                )))
-                .title(
-                    Line::from(Span::styled(
-                        format!(" {connections} connected "),
-                        Style::default().fg(theme.provider_label_fg),
-                    ))
-                    .right_aligned(),
-                );
-            let end_label = bindings
-                .labels_reaching(Action::ScrollToBottom, server_screen_reaches)
-                .into_iter()
-                .next();
-            if let Some(note) = scrolled_back_note(scroll, end_label.as_deref()) {
-                block = block.title_bottom(
-                    Line::from(Span::styled(
-                        format!(" {note} "),
-                        Style::default().fg(theme.title_focused),
-                    ))
-                    .right_aligned(),
-                );
-            }
-            let content = block.inner(chunks[1]);
-            let width = usize::from(content.width).max(1);
-            let viewport = usize::from(content.height);
-            let rows = wrapped_log_rows(lines, theme, width);
-            let total = rows.len();
-            let start = scroll.clamp(viewport, total);
-            let end = (start + viewport).min(total);
-            let visible: Vec<Line> = rows[start..end].to_vec();
-            frame.render_widget(Paragraph::new(visible).block(block), chunks[1]);
-            render_scroll_indicator(frame, chunks[1], content, start, viewport, total, theme);
-            measured = (width, viewport);
+                    // ── Log panel (rounded, themed) ─────────────────────────────
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(theme.overlay_border))
+                        .style(Style::default().bg(theme.app_bg))
+                        .padding(Padding::horizontal(1))
+                        .title(Line::from(Span::styled(
+                            " Log ",
+                            Style::default()
+                                .fg(theme.title_focused)
+                                .add_modifier(Modifier::BOLD),
+                        )))
+                        .title(
+                            Line::from(Span::styled(
+                                format!(" {connections} connected "),
+                                Style::default().fg(theme.provider_label_fg),
+                            ))
+                            .right_aligned(),
+                        );
+                    let content = block.inner(chunks[1]);
+                    view.set_width(usize::from(content.width).max(1), theme);
+                    let panel_rows = usize::from(content.height);
+                    let sticky = view.pinned_sticks(panel_rows);
+                    let pinned_rows = if sticky { view.pinned_rows.len() } else { 0 };
+                    let viewport = panel_rows.saturating_sub(pinned_rows);
+                    let total = view.scroll_total(sticky);
+                    let end_label = bindings
+                        .labels_reaching(Action::ScrollToBottom, server_screen_reaches)
+                        .into_iter()
+                        .next();
+                    let (start, note) = place_log(scroll, viewport, total, end_label.as_deref());
+                    let block = match note {
+                        Some(note) => block.title_bottom(
+                            Line::from(Span::styled(
+                                format!(" {note} "),
+                                Style::default().fg(theme.title_focused),
+                            ))
+                            .right_aligned(),
+                        ),
+                        None => block,
+                    };
+                    frame.render_widget(block, chunks[1]);
+                    let pinned_area = Rect {
+                        height: pinned_rows as u16,
+                        ..content
+                    };
+                    frame.render_widget(Paragraph::new(view.pinned_rows.clone()), pinned_area);
+                    let scroll_area = Rect {
+                        y: content.y + pinned_rows as u16,
+                        height: viewport as u16,
+                        ..content
+                    };
+                    let end = (start + viewport).min(total);
+                    frame.render_widget(
+                        Paragraph::new(view.scroll_window(sticky, start, end)),
+                        scroll_area,
+                    );
+                    render_scroll_indicator(
+                        frame,
+                        chunks[1],
+                        scroll_area,
+                        start,
+                        viewport,
+                        total,
+                        theme,
+                    );
+                    measured = (viewport, sticky);
 
-            // ── Footer hints (centered) ─────────────────────────────────────
-            let footer_para = Paragraph::new(footer)
-                .alignment(Alignment::Center)
-                .style(Style::default().bg(theme.app_bg));
-            frame.render_widget(footer_para, chunks[2]);
-        })?;
-        (self.log_width, self.log_rows) = measured;
+                    // ── Footer hints (centered) ─────────────────────────────────
+                    let footer_para = Paragraph::new(footer)
+                        .alignment(Alignment::Center)
+                        .style(Style::default().bg(theme.app_bg));
+                    frame.render_widget(footer_para, chunks[2]);
+                })
+                .map(|_| ())
+        });
+        if let Some(result) = drawn {
+            result?;
+            (self.log_rows, self.sticky) = measured;
+        }
         Ok(())
     }
 }
@@ -442,13 +676,43 @@ impl Drop for ServerStatusScreen {
 }
 
 /// Give the terminal back to the shell: leave the alternate screen, show the
-/// cursor, leave raw mode. Best-effort and idempotent, so it is safe to call
+/// cursor, leave raw mode. Best-effort and done once, so it is safe to call
 /// from the status screen's `Drop` and again from a forced exit that runs no
-/// destructor.
+/// destructor, and no frame is drawn after it.
 pub fn restore_terminal() {
-    let _ = execute!(stdout(), terminal::LeaveAlternateScreen, cursor::Show);
-    let _ = terminal::disable_raw_mode();
-    let _ = stdout().flush();
+    TERMINAL_GATE.release(|| {
+        let _ = execute!(stdout(), terminal::LeaveAlternateScreen, cursor::Show);
+        let _ = terminal::disable_raw_mode();
+        let _ = stdout().flush();
+    });
+}
+
+/// Wait up to `timeout` for a key, and say whether it was the force-quit key
+/// (Ctrl-c). The flip's quit runs this while it waits for the children to
+/// stop, because the screen holds the terminal in raw mode, where Ctrl-c is a
+/// key and not a signal, and nothing else reads keys during that wait.
+pub fn wait_for_force_quit_key(timeout: Duration) -> bool {
+    if !poll_event(timeout).unwrap_or(false) {
+        return false;
+    }
+    matches!(read_event(), Ok(Event::Key(key)) if is_force_quit_key(key))
+}
+
+fn is_force_quit_key(key: KeyEvent) -> bool {
+    action_for_key(key) == Some(ExitKind::QuitProcess)
+}
+
+/// Clamp the scroll position to what there is, and only then decide what the
+/// bottom border says, so the note describes the position actually drawn.
+/// Returns the first scrolling row to draw and the note, if any.
+fn place_log(
+    scroll: &mut LogScroll,
+    viewport: usize,
+    total: usize,
+    end_label: Option<&str>,
+) -> (usize, Option<String>) {
+    let start = scroll.clamp(viewport, total);
+    (start, scrolled_back_note(scroll, end_label))
 }
 
 /// Enable raw mode, enter the alternate screen, hide the cursor, and build the
@@ -499,7 +763,9 @@ fn screen_key(key: KeyEvent, bindings: &RuntimeBindings) -> Option<ScreenKey> {
     }
     match bindings.lookup(&key, BindingScope::ServerScreen) {
         Some(
-            action @ (Action::ScrollPageUp
+            action @ (Action::ScrollLineUp
+            | Action::ScrollLineDown
+            | Action::ScrollPageUp
             | Action::ScrollPageDown
             | Action::ScrollToTop
             | Action::ScrollToBottom),
@@ -615,7 +881,15 @@ fn footer_lines(
             Hint::key(first(Action::ScrollToBottom), "latest"),
         ]),
         row(&[Hint::fixed_keys(["q", "Esc"], "stop the server and return to dux").pinned()]),
-        row(&[Hint::fixed("Ctrl-c", "quit dux entirely").pinned()]),
+        row(&[Hint::fixed(
+            "Ctrl-c",
+            if shutdown_message.is_some() {
+                "stop waiting and quit now"
+            } else {
+                "quit dux entirely"
+            },
+        )
+        .pinned()]),
     ];
     if let Some(message) = shutdown_message {
         lines.push(Line::from(Span::styled(
@@ -648,13 +922,11 @@ fn header_line<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
     Line::from(spans)
 }
 
-/// The theme color a tone reads in. `status_info_fg` is deliberately not used
-/// for Ok: it equals `provider_label_fg` in the default theme, which would make
-/// Ok and a timestamp indistinguishable.
+/// The theme color a tone reads in.
 fn tone_color(theme: &Theme, tone: LogTone) -> ratatui::style::Color {
     match tone {
         LogTone::Info => theme.title_focused,
-        LogTone::Ok => theme.diff_add,
+        LogTone::Ok => theme.success_fg,
         LogTone::Warn => theme.warning_fg,
         LogTone::Error => theme.status_error_fg,
     }
@@ -689,7 +961,7 @@ fn log_line(line: &LogLine, theme: &Theme) -> Line<'static> {
                     .add_modifier(Modifier::BOLD),
                 LogRole::Url => Style::default().fg(theme.title_focused),
                 LogRole::Status(code) => Style::default().fg(match code {
-                    200..=299 => theme.diff_add,
+                    200..=299 => theme.success_fg,
                     300..=399 => theme.title_focused,
                     400..=499 => theme.warning_fg,
                     500..=599 => theme.status_error_fg,
@@ -702,8 +974,10 @@ fn log_line(line: &LogLine, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Every log line drawn and wrapped to `width`, one entry per screen row, so
-/// scrolling counts real rows and a long line is shown whole.
+/// Every log line drawn and wrapped to `width`, one entry per screen row. The
+/// viewer no longer does this per frame ([`LogView`] wraps incrementally); it is
+/// kept for the tests and the benchmark that compare against it.
+#[cfg(test)]
 fn wrapped_log_rows(lines: &[LogLine], theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let drawn: Vec<Line<'static>> = lines.iter().map(|line| log_line(line, theme)).collect();
     wrap_styled_lines(&drawn, width)
@@ -815,6 +1089,22 @@ mod tests {
         );
     }
 
+    /// The log is a non-interactive view, so the line-scroll keys scroll it
+    /// unconditionally.
+    #[test]
+    fn the_line_scroll_keys_scroll_the_log() {
+        let b = bindings();
+        let press = |code| screen_key(key(code, KeyModifiers::NONE), &b);
+        assert_eq!(
+            press(KeyCode::Up),
+            Some(ScreenKey::Scroll(Action::ScrollLineUp))
+        );
+        assert_eq!(
+            press(KeyCode::Down),
+            Some(ScreenKey::Scroll(Action::ScrollLineDown))
+        );
+    }
+
     #[test]
     fn a_rebound_page_key_scrolls_here_too() {
         let mut keys = KeysConfig::default();
@@ -902,6 +1192,227 @@ mod tests {
         assert_eq!(scroll.clamp(10, 4), 0);
     }
 
+    // ── The incremental view ───────────────────────────────────────────────
+
+    fn event(msg: &str) -> LogLine {
+        LogLine::event("12:00:00", LogTone::Info, msg)
+    }
+
+    fn row_texts(view: &LogView, sticky: bool) -> Vec<String> {
+        let total = view.scroll_total(sticky);
+        view.scroll_window(sticky, 0, total)
+            .iter()
+            .map(line_text)
+            .collect()
+    }
+
+    /// A busy server must cost the viewer per new line, not per buffered line:
+    /// a sync wraps only what arrived.
+    #[test]
+    fn a_sync_wraps_only_the_lines_that_arrived() {
+        let theme = Theme::default_dark();
+        let ring = ActivityRing::new(100);
+        let mut view = LogView::new(ring.capacity());
+        view.set_width(40, &theme);
+        for n in 0..50 {
+            ring.push(event(&format!("line {n}")));
+        }
+        view.sync(&ring, &theme);
+        let before = view.wrapped;
+        ring.push(event(&"long ".repeat(20)));
+        let arrived = view.sync(&ring, &theme);
+        assert_eq!(view.wrapped - before, 1, "only the new line was wrapped");
+        assert_eq!(arrived.lines, 1);
+        assert!(arrived.rows > 1, "the long line wrapped to several rows");
+        assert_eq!(view.rows.len(), 50 + arrived.rows);
+        // Nothing new, nothing done.
+        let before = view.wrapped;
+        assert_eq!(view.sync(&ring, &theme), Arrived::default());
+        assert_eq!(view.wrapped, before);
+    }
+
+    #[test]
+    fn a_line_leaving_the_buffer_takes_its_rows_with_it() {
+        let theme = Theme::default_dark();
+        let ring = ActivityRing::new(3);
+        let mut view = LogView::new(ring.capacity());
+        view.set_width(80, &theme);
+        for n in 0..5 {
+            ring.push(event(&format!("line {n}")));
+            view.sync(&ring, &theme);
+        }
+        assert_eq!(
+            row_texts(&view, true),
+            vec![
+                "12:00:00 \u{279c} line 2".to_string(),
+                "12:00:00 \u{279c} line 3".to_string(),
+                "12:00:00 \u{279c} line 4".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_width_wraps_everything_again() {
+        let theme = Theme::default_dark();
+        let ring = ActivityRing::new(10);
+        let mut view = LogView::new(ring.capacity());
+        view.set_width(200, &theme);
+        ring.push(event(&"word ".repeat(30)));
+        view.sync(&ring, &theme);
+        assert_eq!(view.rows.len(), 1);
+        view.set_width(30, &theme);
+        assert!(view.rows.len() > 1);
+    }
+
+    /// The startup (its warnings and the banner with the reachability note)
+    /// sits on top of the log and is never evicted, however much follows.
+    #[test]
+    fn the_pinned_startup_stays_on_top_of_a_full_buffer() {
+        let theme = Theme::default_dark();
+        let ring = ActivityRing::new(2);
+        let mut view = LogView::new(ring.capacity());
+        view.set_width(80, &theme);
+        ring.pin_startup(vec![event("banner")]);
+        for n in 0..10 {
+            ring.push(event(&format!("line {n}")));
+            view.sync(&ring, &theme);
+        }
+        assert!(view.pinned_sticks(20));
+        assert_eq!(
+            view.pinned_rows.iter().map(line_text).collect::<Vec<_>>(),
+            vec!["12:00:00 \u{279c} banner".to_string()]
+        );
+        assert_eq!(row_texts(&view, true).len(), 2, "the bounded part scrolls");
+        // A panel too short to hold it on top scrolls it with the log instead,
+        // so nothing of it is cut off.
+        assert!(!view.pinned_sticks(1));
+        assert_eq!(row_texts(&view, false)[0], "12:00:00 \u{279c} banner");
+    }
+
+    /// The note on the border describes the position actually drawn: decided
+    /// after the clamp, so a log that shrank under a scrolled-back view does not
+    /// say "scrolled back" over a view that is following.
+    #[test]
+    fn the_note_is_decided_after_the_clamp() {
+        let mut scroll = LogScroll::default();
+        scroll.page_up(10, 40);
+        assert!(!scroll.following());
+        // The log is now shorter than the view.
+        let (start, note) = place_log(&mut scroll, 10, 4, Some("End"));
+        assert_eq!(start, 0);
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn a_line_key_moves_one_row() {
+        let mut scroll = LogScroll::default();
+        scroll.line_up(10, 40);
+        assert_eq!(scroll.clamp(10, 40), 29);
+        scroll.line_down();
+        assert!(scroll.following());
+    }
+
+    // ── The terminal gate ──────────────────────────────────────────────────
+
+    #[test]
+    fn no_frame_is_drawn_after_the_terminal_is_handed_back() {
+        let gate = TerminalGate::new();
+        gate.hold();
+        assert_eq!(gate.draw_while_held(|| 1), Some(1));
+        let mut restored = 0;
+        gate.release(|| restored += 1);
+        gate.release(|| restored += 1);
+        assert_eq!(restored, 1, "the terminal is restored once");
+        assert_eq!(gate.draw_while_held(|| 1), None, "and nothing draws after");
+    }
+
+    #[test]
+    fn only_ctrl_c_forces_the_quit_during_the_shutdown_wait() {
+        assert!(is_force_quit_key(key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_force_quit_key(key(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_force_quit_key(key(KeyCode::Esc, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn during_the_shutdown_the_footer_says_ctrl_c_stops_the_wait() {
+        let theme = Theme::default_dark();
+        let lines = footer_lines(&theme, &bindings(), Some("Requesting 1 agent"), 100);
+        assert_eq!(line_text(&lines[2]), "<Ctrl-c> stop waiting and quit now");
+    }
+
+    /// Measures one frame's log work (sync a new line, cut the visible window)
+    /// against the old per-frame approach (copy the whole buffer, wrap every
+    /// line). Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_log_frame() {
+        let theme = Theme::default_dark();
+        let frames = 50;
+        let viewport = 30;
+        let width = 110;
+        for size in [2000usize, dux_core::config::LOG_VIEWER_LINES_MAX] {
+            let line = |n: usize| {
+                LogLine::access(
+                    "12:00:00",
+                    "GET",
+                    &format!("/api/v1/sessions/s{n}/changes"),
+                    200,
+                    3,
+                )
+            };
+            let mut old_runs = Vec::new();
+            let mut new_runs = Vec::new();
+            for _ in 0..5 {
+                let ring = ActivityRing::new(size);
+                for n in 0..size {
+                    ring.push(line(n));
+                }
+                // The old frame: snapshot everything and wrap every line.
+                let started = Instant::now();
+                for n in 0..frames {
+                    ring.push(line(n));
+                    let snapshot = ring.snapshot();
+                    let rows = wrapped_log_rows(&snapshot.lines, &theme, width);
+                    let start = rows.len().saturating_sub(viewport);
+                    std::hint::black_box(rows[start..].to_vec());
+                }
+                old_runs.push(started.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+
+                let mut view = LogView::new(ring.capacity());
+                view.set_width(width, &theme);
+                view.sync(&ring, &theme);
+                let started = Instant::now();
+                for n in 0..frames {
+                    ring.push(line(n));
+                    view.sync(&ring, &theme);
+                    let total = view.scroll_total(true);
+                    let start = total.saturating_sub(viewport);
+                    std::hint::black_box(view.scroll_window(true, start, total));
+                }
+                new_runs.push(started.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+            }
+            let summary = |runs: &mut Vec<f64>| {
+                runs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                format!(
+                    "median {:.3} ms, worst {:.3} ms",
+                    runs[runs.len() / 2],
+                    runs[runs.len() - 1]
+                )
+            };
+            eprintln!(
+                "{size} lines: before {} | after {}",
+                summary(&mut old_runs),
+                summary(&mut new_runs)
+            );
+        }
+    }
+
     // ── Drawing a log line ─────────────────────────────────────────────────
 
     /// The viewer draws a line's text exactly as `dux server` prints it (its
@@ -924,10 +1435,22 @@ mod tests {
     }
 
     #[test]
+    fn an_ok_line_reads_in_the_themes_success_color() {
+        let theme = Theme::default_dark();
+        let drawn = log_line(&LogLine::event("t", LogTone::Ok, "fine"), &theme);
+        let marker = drawn
+            .spans
+            .iter()
+            .find(|s| s.content == LogTone::Ok.glyph())
+            .unwrap();
+        assert_eq!(marker.style.fg, Some(theme.success_fg));
+    }
+
+    #[test]
     fn an_access_line_colors_its_status_by_class_through_the_theme() {
         let theme = Theme::default_dark();
         for (code, color) in [
-            (200, theme.diff_add),
+            (200, theme.success_fg),
             (304, theme.title_focused),
             (404, theme.warning_fg),
             (502, theme.status_error_fg),

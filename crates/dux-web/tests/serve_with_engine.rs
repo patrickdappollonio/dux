@@ -143,7 +143,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
             vec![listener],
             dux_core::activity::ActivityRing::default(),
             dux_core::serve_log::StartupNotes::default(),
-            Arc::new(|| {}),
+            dux_web::FlipHooks::default(),
             || {
                 if stop_for_thread.load(Ordering::SeqCst) {
                     ServerTick::ReturnToTui
@@ -238,7 +238,7 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
             vec![listener],
             dux_core::activity::ActivityRing::default(),
             dux_core::serve_log::StartupNotes::default(),
-            Arc::new(|| {}),
+            dux_web::FlipHooks::default(),
             || {
                 if quit_for_thread.load(Ordering::SeqCst) {
                     ServerTick::QuitProcess
@@ -313,7 +313,7 @@ async fn quit_process_counts_a_reaped_child_whose_pty_is_still_open_as_shut_down
             vec![listener],
             dux_core::activity::ActivityRing::default(),
             dux_core::serve_log::StartupNotes::default(),
-            Arc::new(|| {}),
+            dux_web::FlipHooks::default(),
             || ServerTick::QuitProcess,
             |_message| {},
         )
@@ -375,7 +375,7 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
             vec![listener],
             dux_core::activity::ActivityRing::default(),
             dux_core::serve_log::StartupNotes::default(),
-            Arc::new(|| {}),
+            dux_web::FlipHooks::default(),
             || {
                 if stop_for_thread.load(Ordering::SeqCst) {
                     ServerTick::ReturnToTui
@@ -491,7 +491,7 @@ async fn the_flip_logs_what_dux_server_prints() {
             vec![listener],
             ring_for_thread,
             startup,
-            Arc::new(|| {}),
+            dux_web::FlipHooks::default(),
             || {
                 if quit_for_thread.load(Ordering::SeqCst) {
                     ServerTick::QuitProcess
@@ -570,4 +570,83 @@ async fn reqwest_like_get(addr: std::net::SocketAddr, path: &str) -> String {
     let mut out = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut out)).await;
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// In the flip the terminal is in raw mode, so Ctrl-c is a key, not a signal,
+/// and the status screen is not reading keys while the main thread waits out
+/// the shutdown grace. A second Ctrl-c pressed during that wait must still end
+/// it: the children are killed at once and the flip reports a forced quit, so
+/// the binary gives the terminal back and exits.
+#[tokio::test]
+async fn a_second_ctrl_c_during_the_shutdown_wait_forces_the_exit() {
+    let (mut engine, _tmp) = build_engine();
+    engine.config.server.shutdown_timeout_seconds = 60;
+    engine.config.terminal.command = "sh".to_string();
+    engine.config.terminal.args = vec![
+        "-c".to_string(),
+        "trap '' TERM HUP; exec sleep 120".to_string(),
+    ];
+    let (terminal_id, _label) = engine
+        .create_companion_terminal("s1", 24, 80)
+        .expect("create terminal");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ring = dux_core::activity::ActivityRing::new(100);
+
+    // The key arrives a short way into the wait: the first looks find nothing.
+    let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let looks_for_hook = Arc::clone(&looks);
+    let hooks = dux_web::FlipHooks {
+        restore_terminal: None,
+        force_quit_key: Some(Box::new(move |timeout| {
+            std::thread::sleep(timeout);
+            looks_for_hook.fetch_add(1, Ordering::SeqCst) >= 3
+        })),
+    };
+
+    let ring_for_thread = ring.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool, Duration)>();
+    let serve_thread = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let (returned_engine, exit) = serve_with_engine(
+            engine,
+            vec![listener],
+            ring_for_thread,
+            dux_core::serve_log::StartupNotes::default(),
+            hooks,
+            || ServerTick::QuitProcess,
+            |_message| {},
+        )
+        .expect("serve_with_engine");
+        let client = &returned_engine.companion_terminals[&terminal_id].client;
+        result_tx
+            .send((exit, child_is_shut_down(client), started.elapsed()))
+            .unwrap();
+    });
+
+    let (exit, shut_down, took) = result_rx
+        .recv_timeout(Duration::from_secs(40))
+        .expect("the forced quit must not wait out the 60 second grace");
+    assert!(
+        matches!(exit, ServerExit::ForceQuit),
+        "expected a forced quit"
+    );
+    assert!(took < Duration::from_secs(20), "took {took:?}");
+    assert!(shut_down, "the child that ignored SIGTERM is killed");
+    assert!(
+        looks.load(Ordering::SeqCst) >= 4,
+        "the key was looked for during the wait"
+    );
+    let lines: Vec<String> = ring
+        .snapshot()
+        .lines
+        .iter()
+        .map(dux_core::serve_log::LogLine::text)
+        .collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.ends_with(dux_web::FORCE_EXIT_MESSAGE)),
+        "the log says why it ended early: {lines:?}"
+    );
+    serve_thread.join().expect("serve thread joined");
 }

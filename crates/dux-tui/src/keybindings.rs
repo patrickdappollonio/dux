@@ -735,7 +735,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::ScrollLineUp,
         default_keys: &[key!(Up)],
-        scopes: &[BindingScope::Interactive, BindingScope::Center],
+        scopes: &[
+            BindingScope::Interactive,
+            BindingScope::Center,
+            BindingScope::ServerScreen,
+        ],
         help: Some(HelpEntry {
             section: "Scrolling",
             description: "Scroll up one line (in a typing pane, only while scrolled back)",
@@ -745,7 +749,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::ScrollLineDown,
         default_keys: &[key!(Down), key!(space)],
-        scopes: &[BindingScope::Interactive, BindingScope::Center],
+        scopes: &[
+            BindingScope::Interactive,
+            BindingScope::Center,
+            BindingScope::ServerScreen,
+        ],
         help: Some(HelpEntry {
             section: "Scrolling",
             description: "Scroll down one line (in a typing pane, only while scrolled back)",
@@ -1847,12 +1855,19 @@ impl RuntimeBindings {
                 .next()
                 .unwrap_or_default()
         };
-        let page = match (first(Action::ScrollPageUp), first(Action::ScrollPageDown)) {
+        let pair = |up: Action, down: Action| match (first(up), first(down)) {
             (up, down) if !up.is_empty() && !down.is_empty() => format!("{up}/{down}"),
             (up, down) => format!("{up}{down}"),
         };
         let mut entries = vec![
-            (page, "Scroll the server log a page up or down"),
+            (
+                pair(Action::ScrollLineUp, Action::ScrollLineDown),
+                "Scroll the server log a line up or down",
+            ),
+            (
+                pair(Action::ScrollPageUp, Action::ScrollPageDown),
+                "Scroll the server log a page up or down",
+            ),
             (
                 label(Action::ScrollToTop),
                 "Jump to the oldest line of the server log",
@@ -3911,6 +3926,14 @@ mod tests {
             Some(Action::ScrollToTop)
         );
         assert_eq!(
+            bindings.lookup(&key(KeyCode::Up), BindingScope::ServerScreen),
+            Some(Action::ScrollLineUp)
+        );
+        assert_eq!(
+            bindings.lookup(&key(KeyCode::Down), BindingScope::ServerScreen),
+            Some(Action::ScrollLineDown)
+        );
+        assert_eq!(
             bindings.lookup(&key(KeyCode::End), BindingScope::ServerScreen),
             Some(Action::ScrollToBottom)
         );
@@ -3922,6 +3945,7 @@ mod tests {
         let labels: Vec<&str> = entries.iter().map(|(l, _)| l.as_str()).collect();
         assert!(labels.contains(&"PageUp/PageDown"), "{labels:?}");
         assert!(labels.contains(&"Home"), "{labels:?}");
+        assert!(labels.contains(&"Up/Down"), "{labels:?}");
         // `q` is the screen's own return key, so End is the one that reaches.
         assert!(labels.contains(&"End"), "{labels:?}");
     }

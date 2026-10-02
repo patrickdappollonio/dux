@@ -76,8 +76,9 @@ fn run_tui_with_flip() -> Result<()> {
                 // producer, wired in serve_with_engine) and the status screen's
                 // log viewer (the consumer). Created here so both get the same
                 // handle, sized by `[server] log_viewer_lines`.
-                let activity =
-                    dux_core::activity::ActivityRing::new(engine.config.server.log_viewer_lines);
+                let activity = dux_core::activity::ActivityRing::new(
+                    dux_core::config::log_viewer_capacity(engine.config.server.log_viewer_lines),
+                );
 
                 // A failure here (no TTY, a raw-mode error) falls back to a plain
                 // line, because the server must still run. `screen` lives outside
@@ -107,15 +108,28 @@ fn run_tui_with_flip() -> Result<()> {
                     },
                 );
 
+                // Only a screen that actually took the terminal has anything to
+                // give back, or keys to read: without one (no TTY) there is no
+                // escape code to send and Ctrl-c is an ordinary signal.
+                let hooks = if screen.borrow().is_some() {
+                    dux_web::FlipHooks {
+                        // A second stop signal mid-shutdown ends the process with
+                        // no destructor run, so the terminal is given back first.
+                        restore_terminal: Some(std::sync::Arc::new(dux_tui::restore_terminal)),
+                        // The screen holds the terminal in raw mode, so a second
+                        // Ctrl-c during the shutdown wait is a key to watch for.
+                        force_quit_key: Some(Box::new(dux_tui::wait_for_force_quit_key)),
+                    }
+                } else {
+                    dux_web::FlipHooks::default()
+                };
+
                 let (engine, exit) = dux_web::serve_with_engine(
                     *engine,
                     listeners,
                     activity,
                     startup,
-                    // A second stop signal mid-shutdown ends the process with no
-                    // destructor run, so the status screen's terminal state is
-                    // given back through this first.
-                    std::sync::Arc::new(dux_tui::restore_terminal),
+                    hooks,
                     || {
                         // With the screen up, its keys drive the exit; without it,
                         // only SIGINT/SIGTERM (handled inside serve) can stop us.
@@ -152,6 +166,12 @@ fn run_tui_with_flip() -> Result<()> {
 
                 match exit {
                     dux_web::ServerExit::QuitProcess => break,
+                    dux_web::ServerExit::ForceQuit => {
+                        // The terminal is the shell's again (the screen was just
+                        // dropped), so the reason lands on its own screen.
+                        eprintln!("{}", dux_web::FORCE_EXIT_MESSAGE);
+                        std::process::exit(130);
+                    }
                     dux_web::ServerExit::ReturnToTui => {
                         next = dux_tui::resume_after_server(
                             Box::new(engine),
@@ -246,9 +266,13 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     // anyone who can reach the address can control your agents and worktrees.
     // Printed before the bind so it is visible even if a bind then fails.
     let is_local = |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
-    for plan_addr in plan.addrs.iter().filter(|p| !is_local(&p.addr())) {
-        startup_warnings.push(non_loopback_warning(plan_addr.addr()));
-    }
+    let alarms: Vec<String> = plan
+        .addrs
+        .iter()
+        .filter(|p| !is_local(&p.addr()))
+        .map(|p| non_loopback_warning(p.addr()))
+        .collect();
+    raise_security_alarms(&alarms, &mut std::io::stderr(), &mut startup_warnings);
 
     dux_web::run_server(
         paths,
@@ -269,6 +293,21 @@ fn serving_without_tailscale(plan: &dux_core::config::ServerPlan) -> &'static st
         "loopback"
     } else {
         "the configured host"
+    }
+}
+
+/// The "NO login" alarms go to stderr at once, before the engine loads, so a
+/// redirected stdout (`dux server > access.log`) or a start that fails while
+/// loading can never hide them; they also open the log itself, the same lines
+/// the flip's viewer would show.
+fn raise_security_alarms(
+    alarms: &[String],
+    stderr: &mut dyn std::io::Write,
+    startup_warnings: &mut Vec<String>,
+) {
+    for alarm in alarms {
+        let _ = writeln!(stderr, "WARNING: {alarm}");
+        startup_warnings.push(alarm.clone());
     }
 }
 
@@ -408,6 +447,32 @@ mod tests {
             ParsedServerArgs::HelpRequested => "HelpRequested",
             ParsedServerArgs::Error(_) => "Error",
         }
+    }
+
+    /// The "NO login" alarm reaches stderr at once, before anything is loaded,
+    /// so `dux server > access.log` still shows it and a failed start does not
+    /// swallow it. It also opens the log, where the flip's viewer shows it too.
+    #[test]
+    fn the_security_alarm_goes_to_stderr_at_once_and_into_the_log() {
+        let mut stderr = Vec::new();
+        let mut startup_warnings = vec!["Tailscale not detected.".to_string()];
+        raise_security_alarms(
+            &[non_loopback_warning("0.0.0.0:3890".parse().unwrap())],
+            &mut stderr,
+            &mut startup_warnings,
+        );
+        let printed = String::from_utf8(stderr).unwrap();
+        assert!(
+            printed.starts_with("WARNING: dux is binding 0.0.0.0:3890"),
+            "{printed}"
+        );
+        assert_eq!(
+            printed.lines().count(),
+            1,
+            "only the alarm, not the other warnings"
+        );
+        assert_eq!(startup_warnings.len(), 2);
+        assert!(startup_warnings[1].starts_with("dux is binding 0.0.0.0:3890"));
     }
 
     #[test]
