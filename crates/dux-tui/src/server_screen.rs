@@ -414,6 +414,9 @@ pub struct ServerStatusScreen {
     /// Shutdown-in-progress status (e.g. "Stopping 2 agents..."), shown on its
     /// own muted line under the exit hints once teardown starts.
     shutdown_message: Option<String>,
+    /// Whether the shutdown's wait is over: its first message is the start (the
+    /// wait begins), the next is the result (the wait has ended).
+    shutdown_done: bool,
 }
 
 impl ServerStatusScreen {
@@ -453,6 +456,7 @@ impl ServerStatusScreen {
             sticky: true,
             dirty: false,
             shutdown_message: None,
+            shutdown_done: false,
         };
         screen.sync();
         screen.draw(0)?;
@@ -507,6 +511,7 @@ impl ServerStatusScreen {
     /// immediately, picking up the matching log line the console just recorded.
     /// Render errors are swallowed: the process is about to exit either way.
     pub fn show_shutdown_message(&mut self, message: impl Into<String>) {
+        self.shutdown_done = self.shutdown_message.is_some();
         self.shutdown_message = Some(message.into());
         self.sync();
         let secs = self.started.elapsed().as_secs();
@@ -515,10 +520,14 @@ impl ServerStatusScreen {
 
     /// One turn of the quit's wait for the children, on the thread the screen
     /// lives on: read the keys (the terminal is in raw mode, so Ctrl-c is a key
-    /// here, not a signal), redraw after a resize or when the log moved, and
-    /// say whether a Ctrl-c asked to stop waiting and quit now.
+    /// here, not a signal), scroll the log on its scroll keys, redraw after a
+    /// resize, a scroll or when the log moved, and say whether a Ctrl-c asked to
+    /// stop waiting and quit now.
     pub fn shutdown_tick(&mut self) -> bool {
-        let turn = shutdown_turn(pending_events());
+        let turn = shutdown_turn(pending_events(), &self.bindings);
+        for action in &turn.scrolls {
+            self.scroll_by(*action);
+        }
         if turn.redraw || self.sync() {
             self.dirty = true;
         }
@@ -560,7 +569,11 @@ impl ServerStatusScreen {
     fn draw(&mut self, uptime_secs: u64) -> Result<()> {
         let theme = &self.theme;
         let header = header_lines(&self.urls, uptime_secs);
-        let shutdown_message = self.shutdown_message.as_deref();
+        let shutdown = match (self.shutdown_message.as_deref(), self.shutdown_done) {
+            (None, _) => ShutdownPhase::Serving,
+            (Some(message), false) => ShutdownPhase::Waiting(message),
+            (Some(message), true) => ShutdownPhase::Done(message),
+        };
         let bindings = &self.bindings;
         let view = &mut self.view;
         let connections = self.connections;
@@ -580,7 +593,7 @@ impl ServerStatusScreen {
                     const H_MARGIN: u16 = 2;
 
                     let inner_width = area.width.saturating_sub(2 * H_MARGIN).max(1);
-                    let footer = footer_lines(theme, bindings, shutdown_message, inner_width);
+                    let footer = footer_lines(theme, bindings, shutdown, inner_width);
                     let header_rows: u16 = header
                         .iter()
                         .map(|segs| wrapped_row_count(segs, inner_width))
@@ -717,22 +730,33 @@ pub fn restore_terminal() {
 }
 
 /// What one turn of the quit's shutdown wait made of the events it found.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct ShutdownTurn {
     /// A Ctrl-c key: stop waiting and quit now.
     force: bool,
     /// The terminal was resized: draw the viewer again.
     redraw: bool,
+    /// The log's scroll keys, in the order pressed: reading back through the
+    /// log works while the quit waits, exactly as before it.
+    scrolls: Vec<Action>,
 }
 
-/// Fold the events waiting for a shutdown turn. A read that fails ends the
-/// turn; the wait hands the screen another one on its next pass (every 50 ms),
-/// so a failing terminal never makes this spin.
-fn shutdown_turn(events: impl Iterator<Item = std::io::Result<Event>>) -> ShutdownTurn {
+/// Fold the events waiting for a shutdown turn. The return keys (`q`, `Esc`)
+/// mean "back to dux", which a quit under way has no use for, so they are
+/// ignored. A read that fails ends the turn; the wait hands the screen another
+/// one on its next pass (every 50 ms), so a failing terminal never spins this.
+fn shutdown_turn(
+    events: impl Iterator<Item = std::io::Result<Event>>,
+    bindings: &RuntimeBindings,
+) -> ShutdownTurn {
     let mut turn = ShutdownTurn::default();
     for event in events {
         match event {
-            Ok(Event::Key(key)) if is_force_quit_key(key) => turn.force = true,
+            Ok(Event::Key(key)) => match screen_key(key, bindings) {
+                Some(ScreenKey::Exit(ExitKind::QuitProcess)) => turn.force = true,
+                Some(ScreenKey::Scroll(action)) => turn.scrolls.push(action),
+                Some(ScreenKey::Exit(ExitKind::ReturnToTui)) | None => {}
+            },
             Ok(Event::Resize(_, _)) => turn.redraw = true,
             Ok(_) => {}
             Err(_) => break,
@@ -748,10 +772,6 @@ fn pending_events() -> impl Iterator<Item = std::io::Result<Event>> {
         Ok(false) => None,
         Err(err) => Some(Err(err)),
     })
-}
-
-fn is_force_quit_key(key: KeyEvent) -> bool {
-    action_for_key(key) == Some(ExitKind::QuitProcess)
 }
 
 /// Clamp the scroll position to what there is, and only then decide what the
@@ -913,10 +933,30 @@ fn header_lines(urls: &[String], uptime_secs: u64) -> Vec<ScreenLine> {
 ///
 /// The exit keys are not bindings: [`action_for_key`] answers them itself, so
 /// they are named as they are.
+/// Where the quit's shutdown stands, as the footer tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownPhase<'a> {
+    /// No quit under way.
+    Serving,
+    /// Waiting for the children to stop; the message says how many.
+    Waiting(&'a str),
+    /// The wait is over; the message says how it went.
+    Done(&'a str),
+}
+
+impl<'a> ShutdownPhase<'a> {
+    fn message(self) -> Option<&'a str> {
+        match self {
+            ShutdownPhase::Serving => None,
+            ShutdownPhase::Waiting(message) | ShutdownPhase::Done(message) => Some(message),
+        }
+    }
+}
+
 fn footer_lines(
     theme: &Theme,
     bindings: &RuntimeBindings,
-    shutdown_message: Option<&str>,
+    shutdown: ShutdownPhase<'_>,
     width: u16,
 ) -> Vec<Line<'static>> {
     let row = |hints: &[Hint]| {
@@ -941,15 +981,14 @@ fn footer_lines(
         row(&[Hint::fixed_keys(["q", "Esc"], "stop the server and return to dux").pinned()]),
         row(&[Hint::fixed(
             "Ctrl-c",
-            if shutdown_message.is_some() {
-                "stop waiting and quit now"
-            } else {
-                "quit dux entirely"
+            match shutdown {
+                ShutdownPhase::Waiting(_) => "stop waiting and quit now",
+                ShutdownPhase::Serving | ShutdownPhase::Done(_) => "quit dux entirely",
             },
         )
         .pinned()]),
     ];
-    if let Some(message) = shutdown_message {
+    if let Some(message) = shutdown.message() {
         lines.push(Line::from(Span::styled(
             message.to_string(),
             Style::default().fg(theme.provider_label_fg),
@@ -1403,19 +1442,21 @@ mod tests {
     fn a_shutdown_turn_forces_on_ctrl_c_and_redraws_on_resize() {
         let ctrl_c = Event::Key(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         let q = Event::Key(key(KeyCode::Char('q'), KeyModifiers::NONE));
-        let turn = |events: Vec<std::io::Result<Event>>| shutdown_turn(events.into_iter());
+        let b = bindings();
+        let turn = |events: Vec<std::io::Result<Event>>| shutdown_turn(events.into_iter(), &b);
         assert_eq!(
             turn(vec![Ok(Event::Resize(80, 24))]),
             ShutdownTurn {
-                force: false,
-                redraw: true
+                redraw: true,
+                ..ShutdownTurn::default()
             }
         );
+        // `q` means "back to dux", which a quit under way has no use for.
         assert_eq!(
             turn(vec![Ok(q), Ok(ctrl_c.clone())]),
             ShutdownTurn {
                 force: true,
-                redraw: false
+                ..ShutdownTurn::default()
             }
         );
         // A failed read ends the turn: what came after it waits for the next.
@@ -1425,23 +1466,45 @@ mod tests {
         );
     }
 
+    /// The log still scrolls while the quit waits: someone reading back through
+    /// it to see what happened keeps their keys.
     #[test]
-    fn only_ctrl_c_forces_the_quit_during_the_shutdown_wait() {
-        assert!(is_force_quit_key(key(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL
-        )));
-        assert!(!is_force_quit_key(key(
-            KeyCode::Char('q'),
-            KeyModifiers::NONE
-        )));
-        assert!(!is_force_quit_key(key(KeyCode::Esc, KeyModifiers::NONE)));
+    fn the_log_scrolls_during_the_shutdown_wait() {
+        let b = bindings();
+        let page_up = Event::Key(key(KeyCode::PageUp, KeyModifiers::NONE));
+        let end = Event::Key(key(KeyCode::End, KeyModifiers::NONE));
+        let turn = shutdown_turn(vec![Ok(page_up), Ok(end)].into_iter(), &b);
+        assert_eq!(
+            turn.scrolls,
+            vec![Action::ScrollPageUp, Action::ScrollToBottom]
+        );
+        assert!(!turn.force);
+    }
+
+    /// Once the wait is over (the result is in), Ctrl-c has nothing left to
+    /// stop waiting for, so the footer stops offering that.
+    #[test]
+    fn the_footer_drops_the_stop_waiting_hint_once_the_wait_ends() {
+        let theme = Theme::default_dark();
+        let lines = footer_lines(
+            &theme,
+            &bindings(),
+            ShutdownPhase::Done("All 1 agent exited."),
+            100,
+        );
+        assert_eq!(line_text(&lines[2]), "<Ctrl-c> quit dux entirely");
+        assert_eq!(line_text(&lines[3]), "All 1 agent exited.");
     }
 
     #[test]
     fn during_the_shutdown_the_footer_says_ctrl_c_stops_the_wait() {
         let theme = Theme::default_dark();
-        let lines = footer_lines(&theme, &bindings(), Some("Requesting 1 agent"), 100);
+        let lines = footer_lines(
+            &theme,
+            &bindings(),
+            ShutdownPhase::Waiting("Requesting 1 agent"),
+            100,
+        );
         assert_eq!(line_text(&lines[2]), "<Ctrl-c> stop waiting and quit now");
     }
 
@@ -1676,7 +1739,7 @@ mod tests {
     fn the_footer_names_keys_that_do_what_it_says() {
         let theme = Theme::default_dark();
         let b = bindings();
-        let lines = footer_lines(&theme, &b, None, 100);
+        let lines = footer_lines(&theme, &b, ShutdownPhase::Serving, 100);
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(
             text,
@@ -1700,14 +1763,19 @@ mod tests {
         );
 
         // A narrow screen drops the scroll hints before the way out.
-        let narrow = footer_lines(&theme, &b, None, 30);
+        let narrow = footer_lines(&theme, &b, ShutdownPhase::Serving, 30);
         assert_eq!(line_text(&narrow[2]), "<Ctrl-c> quit dux entirely");
     }
 
     #[test]
     fn the_footer_appends_the_shutdown_message_as_its_own_muted_line() {
         let theme = Theme::default_dark();
-        let lines = footer_lines(&theme, &bindings(), Some("Stopping 2 agents..."), 80);
+        let lines = footer_lines(
+            &theme,
+            &bindings(),
+            ShutdownPhase::Waiting("Stopping 2 agents..."),
+            80,
+        );
         assert_eq!(lines.len(), 4, "the hints plus the shutdown line");
         let last = lines.last().expect("shutdown line present");
         assert_eq!(line_text(last), "Stopping 2 agents...");

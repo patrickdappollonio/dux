@@ -2341,8 +2341,25 @@ async fn shutdown_signal(force_exit: ForceExit) {
     // the conventional interrupted-exit code.
     tokio::spawn(async move {
         next_terminate_signal(&mut interrupt, &mut terminate).await;
-        force_exit.run(|code| std::process::exit(code));
+        fire_force_exit(force_exit, |code| std::process::exit(code));
     });
+}
+
+/// Run a forced exit on a thread of its own. Its wait for the engine's owner
+/// sleeps, and parked on a runtime worker that sleep would hold up the owner's
+/// own way out, which tears that runtime down (in the flip, bounded at 2 s) and
+/// would then arrive late for the exit it was meant to take.
+pub(crate) fn fire_force_exit(force_exit: ForceExit, exit: impl FnOnce(i32) + Send + 'static) {
+    let spawned = std::thread::Builder::new()
+        .name("dux-force-exit".to_string())
+        .spawn(move || force_exit.run(exit));
+    if let Err(err) = spawned {
+        // No thread to be had: exit straight away rather than not at all.
+        dux_core::logger::error(&format!(
+            "[server] could not start the forced-exit thread ({err}); exiting now"
+        ));
+        std::process::exit(130);
+    }
 }
 
 /// Hands the terminal back to the shell: the flip's status screen supplies it,
@@ -2399,7 +2416,9 @@ impl ForceExit {
         // While a wind-down runs, it is killing the children; its owner then
         // drops the engine (landing queued config writes) and exits itself.
         // Leave the exit to it, waiting only up to the bound. Before a
-        // wind-down has started there is nothing to wait for.
+        // wind-down has started (with no agent or terminal running, one never
+        // starts) there is nothing to wait for and the exit is immediate, so
+        // queued config writes are not waited for then.
         if self.quit.is_started() {
             self.quit.wait_for_owner(self.settle_bound);
         }
@@ -3415,6 +3434,47 @@ mod tests {
         force.run(|c| events.lock().unwrap().push(format!("hatch exits {c}")));
         owner.join().unwrap();
         assert_eq!(*events.lock().unwrap(), vec!["owner exits 130".to_string()]);
+    }
+
+    /// The hatch waits for the owner on a thread of its own, never on a runtime
+    /// worker: in the flip the owner's way out tears that runtime down (bounded
+    /// at 2 s), and a worker parked in the hatch's wait would eat that budget
+    /// and leave the owner late.
+    #[test]
+    fn the_hatch_does_not_hold_the_runtime_while_it_waits() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (console, _sink) = crate::console::Console::test_capture(false);
+        let quit = std::sync::Arc::new(super::QuitForce::default());
+        quit.start();
+        let force = super::ForceExit::new(console, None, quit.clone())
+            .with_settle_bound(std::time::Duration::from_secs(5));
+        let (exited_tx, exited_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            super::fire_force_exit(force, move |code| {
+                let _ = exited_tx.send(code);
+            });
+        });
+        // Let the hatch get into its wait.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "the runtime tore down in {:?}",
+            started.elapsed()
+        );
+        // The owner gets there well inside the bound and takes the exit.
+        assert!(quit.claim_exit());
+        assert!(
+            exited_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_err(),
+            "the hatch saw the owner take the exit and did not exit too"
+        );
     }
 
     /// `dux server`'s owner side of that hand-over: after the engine thread

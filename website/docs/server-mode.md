@@ -83,8 +83,10 @@ server carries on.
 sends `SIGTERM` and `SIGHUP` to every running agent and terminal so each can save state,
 waiting up to `[server] shutdown_timeout_seconds` (30 seconds by default) before
 force-killing whatever is left. A second `Ctrl-c` stops waiting: dux kills whatever is
-still running, logs what it killed, and exits, which takes a moment at most. Before the
-wait has begun it exits at once.
+still running, logs what it killed, saves any settings change still queued, and exits,
+which takes a moment at most. With nothing running, or before the wait has begun, a
+second `Ctrl-c` exits at once, without waiting for a queued settings change to be
+saved.
 
 Only one `dux server` (or `dux` TUI) can run against a given config directory. Both take
 the same single-instance lock, so a second one fails fast with an "already running"
@@ -112,7 +114,9 @@ dux you already have starts serving in place. Your terminal turns into a themed 
 status screen showing the serve URLs and a log viewer. The viewer shows exactly the log
 `dux server` prints, banner and access log included, so nothing you would see there is
 missing here, the reachability note included: it is the banner's last row rather than a
-line of its own in the header. The banner and the warnings above it are never dropped,
+line of its own in the header. The one deliberate exception is the warning about an
+unrecognized `[server] color` value, which only `dux server` prints, because that
+setting only colors `dux server`'s own output. The banner and the warnings above it are never dropped,
 and they stay at the top of the panel for as long as they fit in half of it; on a
 terminal too short for that they scroll with the rest instead of being cut off. Once the
 buffer is full and you have scrolled back to its oldest line, each new line pushes that
