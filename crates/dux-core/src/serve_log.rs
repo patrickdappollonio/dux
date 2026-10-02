@@ -508,9 +508,9 @@ mod tests {
 
     // ── Where stdout and stderr go ─────────────────────────────────────────
 
-    fn temp_file(name: &str) -> std::fs::File {
-        let dir = std::env::temp_dir().join(format!("dux-serve-log-{}-{name}", std::process::id()));
-        std::fs::File::create(dir).expect("temp file")
+    /// A file of its own, removed by the system once the test drops it.
+    fn temp_file() -> std::fs::File {
+        tempfile::tempfile().expect("temp file")
     }
 
     /// A real terminal: the master side of a pseudo-terminal answers isatty.
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn warnings_are_echoed_only_when_stdout_is_redirected_and_stderr_is_a_terminal() {
         let tty = terminal();
-        let file = temp_file("echo-file");
+        let file = temp_file();
         let (reader, writer) = std::io::pipe().expect("a pipe");
 
         // `dux server > access.log`: stdout a file, stderr the terminal.
@@ -552,8 +552,8 @@ mod tests {
     #[test]
     fn the_early_alarm_is_printed_only_when_stdout_is_elsewhere() {
         let tty = terminal();
-        let file = temp_file("alarm-file");
-        let other = temp_file("alarm-other");
+        let file = temp_file();
+        let other = temp_file();
         assert!(!StdStreams::of(fd_of(&*tty), fd_of(&*tty)).early_alarm_on_stderr());
         assert!(StdStreams::of(file.as_fd(), fd_of(&*tty)).early_alarm_on_stderr());
         assert!(StdStreams::of(file.as_fd(), other.as_fd()).early_alarm_on_stderr());
