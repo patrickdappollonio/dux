@@ -93,9 +93,6 @@ fn run_tui_with_flip() -> Result<()> {
                         // A second stop signal mid-shutdown ends the process with
                         // no destructor run, so the terminal is given back first.
                         restore_terminal: Some(std::sync::Arc::new(dux_tui::restore_terminal)),
-                        // The screen holds the terminal in raw mode, so a second
-                        // Ctrl-c during the shutdown wait is a key to watch for.
-                        force_quit_key: Some(Box::new(dux_tui::wait_for_force_quit_key)),
                     }
                 } else {
                     dux_web::FlipHooks::default()
@@ -133,6 +130,15 @@ fn run_tui_with_flip() -> Result<()> {
                             None => eprintln!("{message}"),
                         }
                     },
+                    || {
+                        // The screen holds the terminal in raw mode, so a second
+                        // Ctrl-c during the shutdown wait is a key; it reads its
+                        // keys and redraws on each turn of the wait.
+                        match screen.borrow_mut().as_mut() {
+                            Some(screen) => screen.shutdown_tick(),
+                            None => false,
+                        }
+                    },
                 )?;
 
                 // Serving has stopped. Drop the status screen explicitly to
@@ -143,12 +149,18 @@ fn run_tui_with_flip() -> Result<()> {
 
                 match exit {
                     dux_web::ServerExit::QuitProcess => break,
-                    dux_web::ServerExit::ForceQuit => {
+                    dux_web::ServerExit::ForceQuit(handle) => {
                         // The terminal is the shell's again (the screen was just
                         // dropped), so the reason lands on its own screen; the
                         // engine goes first so queued config writes land.
-                        dux_web::finish_forced_quit(engine, |code| std::process::exit(code));
-                        unreachable!("finish_forced_quit exits");
+                        dux_web::finish_forced_quit(engine, &handle, |code| {
+                            std::process::exit(code)
+                        });
+                        // Still here: the signal hatch took the exit and is
+                        // ending the process; a second exit must not race it.
+                        loop {
+                            std::thread::park();
+                        }
                     }
                     dux_web::ServerExit::ReturnToTui => {
                         next = dux_tui::resume_after_server(

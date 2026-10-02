@@ -493,160 +493,235 @@ fn run_plain_http(
     // this path and the two in-app ones derive their router from the same
     // `router_params` recipe and a new limit cannot reach two of the three.
     let router_config = engine.config.clone();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let result = runtime.block_on(async move {
-        // Bind every address first, honoring the required/best-effort tags. A
-        // failed REQUIRED bind aborts here (with the address logged + in the
-        // error); a failed BEST-EFFORT (Tailscale) bind is dropped with a warning
-        // and the server proceeds on the rest. The best-effort warnings ride into
-        // the post-bind banner as ⚠ rows (and are already in dux.log).
-        let (bound, bind_warnings) = bind_plan_addrs(&addrs).await?;
+    // The engine thread's handle, kept so the run joins it (the engine drops and
+    // its queued config writes land) before the process ends.
+    let engine_thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+    flushing(&exit_console, || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let engine_thread_slot = Arc::clone(&engine_thread);
+        let quit_for_serve = Arc::clone(&quit);
+        let result = runtime.block_on(async move {
+            let quit = quit_for_serve;
+            // Bind every address first, honoring the required/best-effort tags. A
+            // failed REQUIRED bind aborts here (with the address logged + in the
+            // error); a failed BEST-EFFORT (Tailscale) bind is dropped with a warning
+            // and the server proceeds on the rest. The best-effort warnings ride into
+            // the post-bind banner as ⚠ rows (and are already in dux.log).
+            let (bound, bind_warnings) = bind_plan_addrs(&addrs).await?;
 
-        // Post-bind banner: built from what ACTUALLY bound, so it shows truth (no
-        // pre-bind hedging). Replaces main.rs's pre-bind URL println. Project the
-        // bound listeners into (addr, required) pairs for the pure banner builder.
-        let banner_legs: Vec<(SocketAddr, bool)> =
-            bound.iter().map(|b| (b.addr, b.required)).collect();
-        let initial_tailscale_leg = bound
-            .iter()
-            .find(|b| !b.required && !b.addr.ip().is_loopback())
-            .map(|b| b.addr);
-        // The PLAN says whether an address was detected (a best-effort address
-        // is only in it when one was); `bound` says whether it bound.
-        console.banner(&serve_banner(
-            &version,
-            &banner_legs,
-            &bind_warnings,
-            tailscale,
-            addrs.iter().any(|p| !p.is_required()),
-        ));
+            // Post-bind banner: built from what ACTUALLY bound, so it shows truth (no
+            // pre-bind hedging). Replaces main.rs's pre-bind URL println. Project the
+            // bound listeners into (addr, required) pairs for the pure banner builder.
+            let banner_legs: Vec<(SocketAddr, bool)> =
+                bound.iter().map(|b| (b.addr, b.required)).collect();
+            let initial_tailscale_leg = bound
+                .iter()
+                .find(|b| !b.required && !b.addr.ip().is_loopback())
+                .map(|b| b.addr);
+            // The PLAN says whether an address was detected (a best-effort address
+            // is only in it when one was); `bound` says whether it bound.
+            console.banner(&serve_banner(
+                &version,
+                &banner_legs,
+                &bind_warnings,
+                tailscale,
+                addrs.iter().any(|p| !p.is_required()),
+            ));
 
-        // Spawn the engine on its own std thread (it runs the synchronous engine
-        // loop, not a tokio task). Its shutdown progress prints on this console.
-        let (handle, _join) = engine_actor::spawn_engine_thread_with_console(
-            engine,
-            console.clone(),
-            Arc::clone(&quit),
-        );
-
-        // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
-        // failure flips its watch and every serve task awaits it. It carries the
-        // mode's watched-ness so a dying Tailscale leg can say truthfully whether
-        // anything is going to bind it again.
-        // The live-mode collaborators, created BEFORE the router so the Host
-        // guard can read the mode from the same cell the serve loop writes.
-        let (mode_control, mode_requests) = TailscaleModeControl::new(
-            tokio::runtime::Handle::current(),
-            Arc::new(AtomicBool::new(tailscale.watches_interface())),
-            Arc::new(AtomicBool::new(tailscale.wants_tailscale())),
-        );
-        handle.set_tailscale_mode_control(mode_control.clone());
-        let shutdown = ServeShutdown::new(mode_control.watched());
-        // Collect the IPs the server actually bound to (for the host allowlist).
-        // Uses the bound addresses captured above, BEFORE the listeners move into
-        // the serve tasks. Together with `server.allowed_hosts` from config this
-        // drives the DNS-rebinding guard; loopback is always allowed regardless.
-        let bound_ips: Vec<std::net::IpAddr> = bound.iter().map(|b| b.addr.ip()).collect();
-
-        // Build ONE app, clone the router across listeners (it is a cheap
-        // `Arc`-backed service). The console + access-log toggle ride into the
-        // router so the WS handlers and the access middleware emit to the terminal.
-        // The host allowlist is threaded in via `with_host_allowlist` so
-        // `build_app` can wrap the whole router with the guard as its outermost
-        // layer (outside the access log, so rejected probes are not logged).
-        let app = server::build_app(
-            handle.clone(),
-            axum::Router::new(),
-            router_params(
-                &router_config,
+            // Spawn the engine on its own std thread (it runs the synchronous engine
+            // loop, not a tokio task). Its shutdown progress prints on this console.
+            let (handle, join) = engine_actor::spawn_engine_thread_with_console(
+                engine,
                 console.clone(),
-                access_log,
-                bound_ips,
-                BackgroundHooks::default(),
-            )
-            // `router_params` derives rule 5 from the CONFIGURED mode; this run
-            // serves under the EFFECTIVE one, so `--no-tailscale` would otherwise
-            // leave the guard admitting tailnet literals. The live cell is what
-            // the guard actually reads, and it starts from the effective mode.
-            .with_tailscale_host_literals(tailscale.wants_tailscale())
-            .with_live_tailscale_host_literals(mode_control.host_literals())
-            .with_tailscale_mode_control(mode_control.clone(), forced_no),
-        );
+                Arc::clone(&quit),
+            );
+            *engine_thread_slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(join);
 
-        // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
-        // down gracefully (the same trigger a first-listener failure uses).
-        {
-            let shutdown = shutdown.clone();
-            let force_exit = ForceExit::new(console.clone(), None, Arc::clone(&quit));
-            tokio::spawn(async move {
-                shutdown_signal(force_exit).await;
-                shutdown.trigger();
-            });
-        }
+            // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
+            // failure flips its watch and every serve task awaits it. It carries the
+            // mode's watched-ness so a dying Tailscale leg can say truthfully whether
+            // anything is going to bind it again.
+            // The live-mode collaborators, created BEFORE the router so the Host
+            // guard can read the mode from the same cell the serve loop writes.
+            let (mode_control, mode_requests) = TailscaleModeControl::new(
+                tokio::runtime::Handle::current(),
+                Arc::new(AtomicBool::new(tailscale.watches_interface())),
+                Arc::new(AtomicBool::new(tailscale.wants_tailscale())),
+            );
+            handle.set_tailscale_mode_control(mode_control.clone());
+            let shutdown = ServeShutdown::new(mode_control.watched());
+            // Collect the IPs the server actually bound to (for the host allowlist).
+            // Uses the bound addresses captured above, BEFORE the listeners move into
+            // the serve tasks. Together with `server.allowed_hosts` from config this
+            // drives the DNS-rebinding guard; loopback is always allowed regardless.
+            let bound_ips: Vec<std::net::IpAddr> = bound.iter().map(|b| b.addr.ip()).collect();
 
-        // Serve every BOUND address, each on its own leg (its own stop lane), so
-        // the Tailscale leg can be added and dropped later without disturbing the
-        // required one.
-        //
-        // The leg's news goes to the surfaces as well as to the console: the
-        // console is this process's terminal, and a browser reaching dux over
-        // the tailnet is exactly the client that loses the address.
-        let leg_status = LegStatus::new(handle.clone());
-        let mut tasks = tokio::task::JoinSet::new();
-        for BoundListener {
-            listener,
-            addr,
-            required,
-        } in bound
-        {
-            spawn_leg(
-                &mut tasks,
-                app.clone(),
+            // Build ONE app, clone the router across listeners (it is a cheap
+            // `Arc`-backed service). The console + access-log toggle ride into the
+            // router so the WS handlers and the access middleware emit to the terminal.
+            // The host allowlist is threaded in via `with_host_allowlist` so
+            // `build_app` can wrap the whole router with the guard as its outermost
+            // layer (outside the access log, so rejected probes are not logged).
+            let app = server::build_app(
+                handle.clone(),
+                axum::Router::new(),
+                router_params(
+                    &router_config,
+                    console.clone(),
+                    access_log,
+                    bound_ips,
+                    BackgroundHooks::default(),
+                )
+                // `router_params` derives rule 5 from the CONFIGURED mode; this run
+                // serves under the EFFECTIVE one, so `--no-tailscale` would otherwise
+                // leave the guard admitting tailnet literals. The live cell is what
+                // the guard actually reads, and it starts from the effective mode.
+                .with_tailscale_host_literals(tailscale.wants_tailscale())
+                .with_live_tailscale_host_literals(mode_control.host_literals())
+                .with_tailscale_mode_control(mode_control.clone(), forced_no),
+            );
+
+            // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
+            // down gracefully (the same trigger a first-listener failure uses).
+            {
+                let shutdown = shutdown.clone();
+                let force_exit = ForceExit::new(console.clone(), None, Arc::clone(&quit));
+                tokio::spawn(async move {
+                    shutdown_signal(force_exit).await;
+                    shutdown.trigger();
+                });
+            }
+
+            // Serve every BOUND address, each on its own leg (its own stop lane), so
+            // the Tailscale leg can be added and dropped later without disturbing the
+            // required one.
+            //
+            // The leg's news goes to the surfaces as well as to the console: the
+            // console is this process's terminal, and a browser reaching dux over
+            // the tailnet is exactly the client that loses the address.
+            let leg_status = LegStatus::new(handle.clone());
+            let mut tasks = tokio::task::JoinSet::new();
+            for BoundListener {
                 listener,
                 addr,
                 required,
-                &shutdown,
-                console.clone(),
-                leg_status.clone(),
+            } in bound
+            {
+                spawn_leg(
+                    &mut tasks,
+                    app.clone(),
+                    listener,
+                    addr,
+                    required,
+                    &shutdown,
+                    console.clone(),
+                    leg_status.clone(),
+                );
+            }
+
+            // On `auto`, watch the Tailscale interface for the rest of the run.
+            let mut tailscale_loop = TailscaleLoop::new(
+                tailscale,
+                forced_no,
+                Some(primary),
+                initial_tailscale_leg,
+                &mode_control,
+                Arc::new(dux_core::tailscale::detect_ip),
             );
-        }
+            let leg_commands = tailscale_loop.take_leg_receiver();
+            tailscale_loop.start_watcher_if_wanted();
 
-        // On `auto`, watch the Tailscale interface for the rest of the run.
-        let mut tailscale_loop = TailscaleLoop::new(
-            tailscale,
-            forced_no,
-            Some(primary),
-            initial_tailscale_leg,
-            &mode_control,
-            Arc::new(dux_core::tailscale::detect_ip),
-        );
-        let leg_commands = tailscale_loop.take_leg_receiver();
-        tailscale_loop.start_watcher_if_wanted();
-
-        run_serve_loop(
-            tasks,
-            shutdown.clone(),
-            leg_commands,
-            mode_requests,
-            app,
-            console.clone(),
-            leg_status,
-            tailscale_loop,
-        )
-        .await;
-        // SIGTERM the agents (they save state for a later resume), mark their
-        // sessions Detached, then exit; Drop hard-kills any straggler.
-        shutdown.trigger();
-        handle.shutdown().await;
-        match shutdown.take_error() {
-            Some(e) => Err(e),
-            None => Ok::<(), anyhow::Error>(()),
+            run_serve_loop(
+                tasks,
+                shutdown.clone(),
+                leg_commands,
+                mode_requests,
+                app,
+                console.clone(),
+                leg_status,
+                tailscale_loop,
+            )
+            .await;
+            // SIGTERM the agents (they save state for a later resume), mark their
+            // sessions Detached, then exit; Drop hard-kills any straggler.
+            shutdown.trigger();
+            handle.shutdown().await;
+            match shutdown.take_error() {
+                Some(e) => Err(e),
+                None => Ok::<(), anyhow::Error>(()),
+            }
+        });
+        let join = engine_thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(join) = join {
+            match finish_engine_thread(join, &quit, &exit_console, FORCE_SETTLE_BOUND) {
+                OwnerExit::Normal => {}
+                // A second signal forced the quit and this thread took the exit:
+                // the engine is dropped and the log flushed, so it can go.
+                OwnerExit::Forced => std::process::exit(130),
+                // The hatch took the exit because this thread was late; it is
+                // exiting now, and a second exit must not race it.
+                OwnerExit::HatchExiting => loop {
+                    std::thread::park();
+                },
+            }
         }
-    });
-    exit_console.flush();
+        result
+    })
+}
+
+/// Run `body`, then flush `console` (bounded) whichever way it returned, so the
+/// lines logged before an early failure still reach their stream.
+pub(crate) fn flushing<T>(console: &Console, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    let result = body();
+    console.flush();
     result
+}
+
+/// How the engine's owner ends a `dux server` run, once the serve is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerExit {
+    /// No forced quit: return normally.
+    Normal,
+    /// A forced quit, and this thread took the exit: exit 130.
+    Forced,
+    /// A forced quit, and the signal hatch took the exit first: it is exiting,
+    /// so this thread must not call exit again.
+    HatchExiting,
+}
+
+/// Join the engine thread, which drops the engine and so lands its queued
+/// config writes, waiting at most `bound` for it; flush the log; then say how
+/// the run ends. The owner side of the hand-over a second stop signal makes:
+/// the hatch leaves the exit to whoever drops the engine, unless that takes
+/// longer than the bound.
+pub(crate) fn finish_engine_thread(
+    join: std::thread::JoinHandle<()>,
+    quit: &QuitForce,
+    console: &Console,
+    bound: Duration,
+) -> OwnerExit {
+    let deadline = std::time::Instant::now() + bound;
+    while !join.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if join.is_finished() {
+        let _ = join.join();
+    }
+    console.flush();
+    if !quit.is_requested() {
+        OwnerExit::Normal
+    } else if quit.claim_exit() {
+        OwnerExit::Forced
+    } else {
+        OwnerExit::HatchExiting
+    }
 }
 
 /// Load the engine for `dux server`, and when that fails, print the startup
@@ -682,13 +757,15 @@ pub enum ServerExit {
     QuitProcess,
     /// A second Ctrl-c during the quit's shutdown wait cut it short: the
     /// children were killed rather than waited for. The caller gives the
-    /// terminal back, says so, and exits with 130.
-    ForceQuit,
+    /// terminal back and hands the handle to [`finish_forced_quit`], which
+    /// drops the engine and exits with 130 unless the signal hatch already did.
+    ForceQuit(ForceQuitHandle),
 }
 
-/// Waits up to the given time for the user's force-quit gesture (a second
-/// Ctrl-c) and says whether it came.
-pub type ForceQuitWatch = Box<dyn FnMut(Duration) -> bool + Send>;
+/// The flip's forced quit, carried to the binary so it and the signal hatch
+/// agree on which of them exits.
+#[derive(Clone, Default)]
+pub struct ForceQuitHandle(pub(crate) Arc<QuitForce>);
 
 /// What the flip's status screen lends the serve, when it is on screen. Both are
 /// `None` without one (no TTY), and then there is nothing to restore and Ctrl-c
@@ -698,15 +775,7 @@ pub struct FlipHooks {
     /// Gives the terminal back before a second stop SIGNAL forces the process
     /// out, because that exit runs no destructor.
     pub restore_terminal: Option<RestoreTerminal>,
-    /// Watches for a second Ctrl-c KEY while the quit waits for the children:
-    /// the screen holds the terminal in raw mode, so Ctrl-c is a key there,
-    /// and nothing else reads keys during that wait.
-    pub force_quit_key: Option<ForceQuitWatch>,
 }
-
-/// How long one look for the force-quit key lasts, which is also how late the
-/// watcher notices that the wait is over.
-const FORCE_QUIT_LOOK: Duration = Duration::from_millis(100);
 
 /// Upper bound on how long the flip waits for the axum server task to finish
 /// after graceful shutdown is triggered. A wedged client connection must not be
@@ -1896,8 +1965,11 @@ impl ServeCore {
 /// the terminal UI's pre-flight learned (its warnings, the Tailscale bind
 /// failures, whether an address was detected), and those lines plus the banner
 /// open the log before anything is served. `hooks` are what the status screen
-/// lends when it is on screen: the terminal restore a forced exit runs, and the
-/// watch for a second Ctrl-c during the quit's shutdown wait.
+/// lends when it is on screen: the terminal restore a forced exit runs.
+/// `on_shutdown_wait` gets a turn on this thread on every pass of the quit's
+/// wait for the children: the status screen reads its keys and redraws there,
+/// and answers true when a second Ctrl-c key asks to stop waiting (the screen
+/// holds the terminal in raw mode, so Ctrl-c is a key, not a signal).
 #[allow(clippy::too_many_arguments)]
 pub fn serve_with_engine(
     mut engine: Engine,
@@ -1907,6 +1979,7 @@ pub fn serve_with_engine(
     hooks: FlipHooks,
     mut on_tick: impl FnMut() -> ServerTick,
     mut on_shutdown_status: impl FnMut(&str),
+    mut on_shutdown_wait: impl FnMut() -> bool,
 ) -> Result<(Engine, ServerExit)> {
     warn_if_ui_not_built();
     // The flip owns the terminal with its themed status screen, so this console
@@ -1949,10 +2022,7 @@ pub fn serve_with_engine(
     // The flip has taken the terminal over with its own status screen, so it OWNS
     // the process's stop signals for as long as it serves.
     let access_log = engine.config.server.access_log;
-    let FlipHooks {
-        restore_terminal,
-        force_quit_key,
-    } = hooks;
+    let FlipHooks { restore_terminal } = hooks;
     // Shared by the second-signal hatch and the quit's wait, so either way of
     // forcing the quit kills the children and logs the same lines.
     let quit = Arc::new(QuitForce::default());
@@ -2035,24 +2105,23 @@ pub fn serve_with_engine(
         // operator behind a child that ignores SIGTERM. Tearing the runtime down
         // first would kill that watcher and remove the escape hatch.
         let grace = dux_core::config::shutdown_grace(engine.config.server.shutdown_timeout_seconds);
-        let waiting = Arc::new(AtomicBool::new(true));
-        let watcher = force_quit_key.map(|watch| {
-            spawn_force_quit_watcher(
-                watch,
-                Arc::clone(&quit),
-                console.clone(),
-                Arc::clone(&waiting),
-            )
-        });
         // The one wind-down `dux server` runs too, so the viewer carries the
-        // lines `dux server` prints; the status callback gets them as well.
-        wind_down_children(&mut engine, &console, grace, &quit, &mut on_shutdown_status);
-        waiting.store(false, Ordering::SeqCst);
-        if let Some(watcher) = watcher {
-            let _ = watcher.join();
-        }
+        // lines `dux server` prints; the status callback gets them as well,
+        // and the status screen gets a turn on every pass of the wait.
+        wind_down_children(
+            &mut engine,
+            &console,
+            grace,
+            &quit,
+            &mut on_shutdown_status,
+            || {
+                if on_shutdown_wait() {
+                    quit.request(&console);
+                }
+            },
+        );
         if quit.is_requested() {
-            exit = ServerExit::ForceQuit;
+            exit = ServerExit::ForceQuit(ForceQuitHandle(Arc::clone(&quit)));
         }
     }
 
@@ -2091,11 +2160,11 @@ pub fn serve_with_engine(
 /// force line, and the failure goes to `dux.log`.
 fn flip_outcome(exit: ServerExit, serve_error: Option<anyhow::Error>) -> Result<ServerExit> {
     match (exit, serve_error) {
-        (ServerExit::ForceQuit, Some(err)) => {
+        (ServerExit::ForceQuit(handle), Some(err)) => {
             dux_core::logger::error(&format!(
                 "[server] the web server also failed while being forced to quit: {err:#}"
             ));
-            Ok(ServerExit::ForceQuit)
+            Ok(ServerExit::ForceQuit(handle))
         }
         (_, Some(err)) => Err(err),
         (exit, None) => Ok(exit),
@@ -2107,46 +2176,49 @@ fn flip_outcome(exit: ServerExit, serve_error: Option<anyhow::Error>) -> Result<
 /// then kill what is left. Logs the start, and the result as a warning when
 /// something had to be force-closed, through `console` and `status`; a forced
 /// quit's own line lands between them, at the moment it was asked for. Marks
-/// `quit` settled either way, so a forced exit waiting on it can go. `None`
-/// when there was nothing to wind down.
+/// `quit` started, so a second signal knows there is an owner to hand the exit
+/// to. `on_wait` gets a turn on every pass of the wait. `None` when there was
+/// nothing to wind down.
 pub(crate) fn wind_down_children(
     engine: &mut Engine,
     console: &Console,
     grace: Duration,
     quit: &QuitForce,
     mut status: impl FnMut(&str),
+    on_wait: impl FnMut(),
 ) -> Option<dux_core::engine::ShutdownReport> {
     let agents = engine.providers.len();
     let terminals = engine.companion_terminals.len();
     if agents + terminals == 0 {
-        quit.settle();
         return None;
     }
     quit.start();
     let start = dux_core::engine::format_shutdown_start(agents, terminals, grace);
-    console.info(&start);
+    console.progress(&start);
     status(&start);
-    let report = engine.shutdown_ptys_interruptible(grace, Some(&quit.requested));
+    let report = engine.shutdown_ptys_waiting(grace, Some(&quit.requested), on_wait);
     let result = dux_core::engine::format_shutdown_result(&report);
     if report.timed_out {
         console.warn(&result);
     } else {
-        console.info(&result);
+        console.progress(&result);
     }
     status(&result);
-    quit.settle();
     Some(report)
 }
 
 /// A quit being forced: asked for by a second Ctrl-c (a signal anywhere, a key
-/// in the flip), and settled once the children are wound down.
+/// in the flip), and ended by exactly one thread.
 #[derive(Default)]
 pub(crate) struct QuitForce {
     requested: AtomicBool,
     /// The wind-down is under way: only then is a forced exit worth a (bounded)
     /// wait for the children to be killed.
     started: AtomicBool,
-    settled: AtomicBool,
+    /// Taken by whichever thread ends the process for a forced quit (the
+    /// engine's owner, or the signal hatch when the owner is late), so exactly
+    /// one calls exit.
+    exit_claimed: AtomicBool,
 }
 
 impl QuitForce {
@@ -2178,18 +2250,21 @@ impl QuitForce {
         self.started.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn settle(&self) {
-        self.settled.store(true, Ordering::SeqCst);
+    /// Take the right to end the process. True for exactly one caller.
+    pub(crate) fn claim_exit(&self) -> bool {
+        self.exit_claimed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
-    pub(crate) fn is_settled(&self) -> bool {
-        self.settled.load(Ordering::SeqCst)
+    fn is_exit_claimed(&self) -> bool {
+        self.exit_claimed.load(Ordering::SeqCst)
     }
 
-    /// Wait for the wind-down to settle, at most `bound`.
-    fn wait_settled(&self, bound: Duration) {
+    /// Wait, at most `bound`, for the engine's owner to take the exit.
+    fn wait_for_owner(&self, bound: Duration) {
         let deadline = std::time::Instant::now() + bound;
-        while !self.is_settled() && std::time::Instant::now() < deadline {
+        while !self.is_exit_claimed() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -2199,10 +2274,16 @@ impl QuitForce {
 /// config writes still queued land on disk (the queue flushes, bounded, as it
 /// drops), then say why on the shell's screen and exit with 130. `exit` is
 /// injected so a test can watch it without ending the test process.
-pub fn finish_forced_quit(engine: Engine, exit: impl FnOnce(i32)) {
+///
+/// When the signal hatch already took the exit (this thread was late), the
+/// engine is still dropped but exit is not called: the hatch is exiting, and the
+/// caller must not end the process a second time.
+pub fn finish_forced_quit(engine: Engine, handle: &ForceQuitHandle, exit: impl FnOnce(i32)) {
     drop(engine);
-    print_force_message_once();
-    exit(130);
+    if handle.0.claim_exit() {
+        print_force_message_once();
+        exit(130);
+    }
 }
 
 /// Prints the force line to stderr once per process, whichever of the flip's
@@ -2264,32 +2345,13 @@ async fn shutdown_signal(force_exit: ForceExit) {
     });
 }
 
-/// Look for the force-quit key on its own thread while the quit waits for the
-/// children, and force the quit when it comes (which cuts the wait short and
-/// logs the force line). Stops looking once `waiting` drops, within one look.
-fn spawn_force_quit_watcher(
-    mut watch: ForceQuitWatch,
-    quit: Arc<QuitForce>,
-    console: Console,
-    waiting: Arc<AtomicBool>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        while waiting.load(Ordering::SeqCst) {
-            if watch(FORCE_QUIT_LOOK) {
-                quit.request(&console);
-                return;
-            }
-        }
-    })
-}
-
 /// Hands the terminal back to the shell: the flip's status screen supplies it,
 /// `dux server` has nothing to restore.
 pub type RestoreTerminal = Arc<dyn Fn() + Send + Sync>;
 
 /// The line a second stop signal leaves on its way out.
-pub const FORCE_EXIT_MESSAGE: &str =
-    "second interrupt received during shutdown. Forcing immediate exit.";
+pub const FORCE_EXIT_MESSAGE: &str = "second interrupt received during shutdown: stopping \
+     whatever is still running, then exiting.";
 
 /// What a second stop signal does: force the quit (the same line in both modes,
 /// and the wait for the children cut short so they are killed), wait a bounded
@@ -2334,11 +2396,16 @@ impl ForceExit {
     /// watch the order without ending the test process.
     pub(crate) fn run(&self, exit: impl FnOnce(i32)) {
         self.quit.request(&self.console);
-        // Only a wind-down already under way is worth waiting for (it is
-        // killing the children and about to log what it did); before one has
-        // started there is nothing to wait for, and the exit is immediate.
+        // While a wind-down runs, it is killing the children; its owner then
+        // drops the engine (landing queued config writes) and exits itself.
+        // Leave the exit to it, waiting only up to the bound. Before a
+        // wind-down has started there is nothing to wait for.
         if self.quit.is_started() {
-            self.quit.wait_settled(self.settle_bound);
+            self.quit.wait_for_owner(self.settle_bound);
+        }
+        if !self.quit.claim_exit() {
+            // The owner took it and is exiting: one exit, not two.
+            return;
         }
         self.console.flush();
         if let Some(restore) = &self.restore_terminal {
@@ -3140,11 +3207,9 @@ mod tests {
         );
     }
 
-    /// A quit force that has already settled, so a forced exit does not wait.
+    /// A quit force with no wind-down under way, so a forced exit does not wait.
     fn settled_quit() -> std::sync::Arc<super::QuitForce> {
-        let quit = std::sync::Arc::new(super::QuitForce::default());
-        quit.settle();
-        quit
+        std::sync::Arc::new(super::QuitForce::default())
     }
 
     /// Both modes wind their children down through one function, so a forced
@@ -3193,11 +3258,11 @@ mod tests {
             std::time::Duration::from_secs(60),
             &quit,
             |_| {},
+            || {},
         )
         .expect("there was a child to wind down");
         assert!(started.elapsed() < std::time::Duration::from_secs(20));
         assert!(report.timed_out, "{report:?}");
-        assert!(quit.is_settled());
         let lines: Vec<String> = ring
             .snapshot()
             .lines
@@ -3222,8 +3287,11 @@ mod tests {
     #[test]
     fn a_forced_quit_wins_over_a_serve_error() {
         assert!(matches!(
-            super::flip_outcome(super::ServerExit::ForceQuit, Some(anyhow::anyhow!("boom"))),
-            Ok(super::ServerExit::ForceQuit)
+            super::flip_outcome(
+                super::ServerExit::ForceQuit(super::ForceQuitHandle::default()),
+                Some(anyhow::anyhow!("boom"))
+            ),
+            Ok(super::ServerExit::ForceQuit(_))
         ));
         assert!(
             super::flip_outcome(
@@ -3255,7 +3323,7 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
-    /// "Forcing immediate exit" means it: a second Ctrl-c before anything is
+    /// A second Ctrl-c before anything is
     /// being wound down does not sit out the settle bound.
     #[test]
     fn a_second_ctrl_c_before_the_wind_down_exits_at_once() {
@@ -3294,10 +3362,119 @@ mod tests {
         config.server.port = 4567;
         engine.config_writer.save_lazy(config);
         let mut code = None;
-        super::finish_forced_quit(engine, |c| code = Some(c));
+        let handle = super::ForceQuitHandle::default();
+        super::finish_forced_quit(engine, &handle, |c| code = Some(c));
         assert_eq!(code, Some(130));
         let saved = std::fs::read_to_string(&paths.config_path).expect("config written");
         assert!(saved.contains("port = 4567"), "{saved}");
+    }
+
+    /// When the signal hatch already took the exit (the owner was too slow),
+    /// the owner still drops the engine but never calls exit a second time.
+    #[test]
+    fn the_flip_owner_leaves_the_exit_to_a_hatch_that_took_it() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        let engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        let handle = super::ForceQuitHandle::default();
+        assert!(handle.0.claim_exit(), "the hatch claims first");
+        let mut code = None;
+        super::finish_forced_quit(engine, &handle, |c| code = Some(c));
+        assert_eq!(code, None, "only one thread exits");
+    }
+
+    /// A second stop signal while the wind-down runs hands the exit to the
+    /// engine's owner, which drops the engine (flushing config writes) and
+    /// exits 130; the hatch exits only if the owner does not get there in time.
+    #[test]
+    fn a_second_signal_during_the_wind_down_hands_the_exit_to_the_owner() {
+        let (console, _sink) = crate::console::Console::test_capture(false);
+        let quit = std::sync::Arc::new(super::QuitForce::default());
+        quit.start();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let owner = {
+            let quit = quit.clone();
+            let events = events.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if quit.claim_exit() {
+                    events.lock().unwrap().push("owner exits 130".to_string());
+                }
+            })
+        };
+        let force = super::ForceExit::new(console, None, quit)
+            .with_settle_bound(std::time::Duration::from_secs(5));
+        force.run(|c| events.lock().unwrap().push(format!("hatch exits {c}")));
+        owner.join().unwrap();
+        assert_eq!(*events.lock().unwrap(), vec!["owner exits 130".to_string()]);
+    }
+
+    /// `dux server`'s owner side of that hand-over: after the engine thread
+    /// has run the forced wind-down it is joined (so the engine is dropped and
+    /// its queued config writes land) before the process exits 130.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dux_server_drops_its_engine_before_a_forced_exit() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        let engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        let mut config = engine.config.clone();
+        config.server.port = 4568;
+        engine.config_writer.save_lazy(config);
+        let (console, _sink) = crate::console::Console::test_capture(false);
+        let quit = std::sync::Arc::new(super::QuitForce::default());
+        let (handle, join) = crate::engine_actor::spawn_engine_thread_with_console(
+            engine,
+            console.clone(),
+            quit.clone(),
+        );
+        quit.request(&console);
+        handle.shutdown().await;
+        drop(handle);
+        let outcome = tokio::task::spawn_blocking({
+            let quit = quit.clone();
+            move || {
+                super::finish_engine_thread(
+                    join,
+                    &quit,
+                    &console,
+                    std::time::Duration::from_secs(5),
+                )
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome, super::OwnerExit::Forced);
+        let saved = std::fs::read_to_string(&paths.config_path).expect("config written");
+        assert!(saved.contains("port = 4568"), "{saved}");
+    }
+
+    /// Lines logged before an early failure (the runtime refusing to build)
+    /// still reach stdout: the flush covers every way out.
+    #[test]
+    fn an_early_failure_still_flushes_what_was_logged() {
+        let (console, sink) = crate::console::Console::test_capture(false);
+        let result: anyhow::Result<()> = super::flushing(&console, || {
+            console.warn("a startup warning");
+            Err(anyhow::anyhow!("the runtime would not build"))
+        });
+        assert!(result.is_err());
+        assert!(sink.raw_contents().contains("a startup warning"));
     }
 
     #[test]

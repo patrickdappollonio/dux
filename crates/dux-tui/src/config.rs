@@ -1134,7 +1134,8 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # waits for agents and companion terminals to exit after SIGTERM on\n\
                  # shutdown, before force-killing (SIGKILL) any stragglers. Set to 0 to\n\
                  # skip the wait and force-kill immediately; values above 600 are clamped.\n\
-                 # A second Ctrl-c/SIGTERM during the wait forces an immediate exit.\n\
+                 # A second Ctrl-c/SIGTERM during the wait stops it: what is still running is\n\
+                 # killed at once and dux exits.\n\
                  # The TUI quit path uses the top-level shutdown_timeout_seconds instead.",
             )),
             value_fn: |c| FieldValue::U16(c.server.shutdown_timeout_seconds),

@@ -41,12 +41,17 @@ dux server
 It binds `127.0.0.1:3890` (loopback only) by default and prints a small vite-style
 banner: one row per bound address with its `http://…` URL, plus a reachability note.
 When stdout goes to a file or a pipe while stderr is still your terminal, every warning
-and error it prints also goes to stderr, so `dux server > access.log` never hides one.
-When both go to the same place (`> log 2>&1`, `nohup`, a service manager's journal) each
-line is written once. One accepted oddity: `dux server | tee log` shows a warning twice
-on your terminal, once through `tee` and once on stderr. A non-loopback address's "no
-login" warning goes to stderr the moment dux knows it, before anything else loads,
-whenever stdout is not your terminal; on an interactive terminal the log line says it.
+and error it prints, and the shutdown's progress, also goes to stderr, so
+`dux server > access.log` never hides a warning or leaves your terminal silent while it
+stops. When both go to the same place (`> log 2>&1`, `nohup`, a service manager's
+journal) each line is written once. A non-loopback address's "no login" warning goes to
+stderr the moment dux knows it, before anything else loads, whenever stdout is not your
+terminal; on an interactive terminal the log line says it.
+
+Two accepted oddities: `dux server | tee log` shows a warning twice on your terminal,
+once through `tee` and once on stderr; and where stdout and stderr are two separate
+pipes that something merges later (a container runtime, supervisord), the "no login"
+warning can land twice in the merged log.
 After that it keeps a timestamped log going: browsers connecting and leaving, one line
 per request (the access log), your Tailscale address coming and going, and the shutdown
 when you stop it. Any warning about the start itself, a missing Tailscale for one, is
@@ -77,8 +82,9 @@ server carries on.
 `Ctrl-c` (or a `SIGTERM`) starts a graceful shutdown. dux drains open connections and
 sends `SIGTERM` and `SIGHUP` to every running agent and terminal so each can save state,
 waiting up to `[server] shutdown_timeout_seconds` (30 seconds by default) before
-force-killing whatever is left. A second `Ctrl-c` exits immediately: during that wait it
-first kills what is still running and logs what it killed, which takes a moment at most.
+force-killing whatever is left. A second `Ctrl-c` stops waiting: dux kills whatever is
+still running, logs what it killed, and exits, which takes a moment at most. Before the
+wait has begun it exits at once.
 
 Only one `dux server` (or `dux` TUI) can run against a given config directory. Both take
 the same single-instance lock, so a second one fails fast with an "already running"
@@ -298,7 +304,7 @@ The rest tune presentation and limits:
 | `log_viewer_lines` | `2000` | How many lines the flip's log viewer keeps for scrolling back, between 1 and 20000: 0 is read as 1 and anything above 20000 as 20000, while a negative value is not valid there, so dux uses the default instead and says so in `dux.log`. The startup lines (the banner and its warnings) are kept on top of these and never dropped. `dux server` has no such cap, because its scrollback is your terminal's. Read when the flip starts. |
 | `title` | `"dux"` | Web-only instance name: the browser tab title and the wordmark in the projects pane. Set `"dux (prod)"` to tell tabs apart. |
 | `favicon` | `""` | Web-only favicon tint so several dux tabs are distinguishable. Empty keeps the yellow duck; otherwise a curated color (violet, blue, sky, cyan, teal, green, amber, orange, red, pink, rose). |
-| `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-c during the wait stops waiting and exits at once, in `dux server` and in the flip alike. |
+| `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-c during the wait stops it, kills what is still running and exits, in `dux server` and in the flip alike. |
 | `max_websocket_events_connections` | `32` | Cap on the status/event sockets (one per browser tab). |
 | `max_websocket_agent_connections` | `32` | Cap on agent-PTY sockets. |
 | `max_websocket_terminal_connections` | `64` | Cap on companion-terminal PTY sockets. |

@@ -1694,6 +1694,19 @@ impl Engine {
         grace: std::time::Duration,
         abort: Option<&AtomicBool>,
     ) -> ShutdownReport {
+        self.shutdown_ptys_waiting(grace, abort, || {})
+    }
+
+    /// [`Self::shutdown_ptys_interruptible`], handing `on_wait` a turn on every
+    /// pass of the grace wait, on the waiting thread. The flip's status screen
+    /// lives on that thread, so this is where it reads keys (a second Ctrl-c
+    /// sets `abort`) and redraws after a resize while the children stop.
+    pub fn shutdown_ptys_waiting(
+        &mut self,
+        grace: std::time::Duration,
+        abort: Option<&AtomicBool>,
+        mut on_wait: impl FnMut(),
+    ) -> ShutdownReport {
         let totals = ShutdownTotals {
             agents: self.providers.len(),
             terminals: self.companion_terminals.len(),
@@ -1710,7 +1723,7 @@ impl Engine {
         self.terminate_shutdown_ptys();
 
         let start = Instant::now();
-        self.wait_for_shutdown_ptys(start, grace, abort);
+        self.wait_for_shutdown_ptys(start, grace, abort, &mut on_wait);
         let tally = self.force_shutdown_survivors();
         let report = totals.report(tally, start.elapsed());
         crate::logger::info(&format_shutdown_result(&report));
@@ -1733,6 +1746,7 @@ impl Engine {
         start: Instant,
         grace: Duration,
         abort: Option<&AtomicBool>,
+        on_wait: &mut dyn FnMut(),
     ) {
         let deadline = start + grace;
         if grace.is_zero() || shutdown_aborted(abort) {
@@ -1744,6 +1758,10 @@ impl Engine {
                 || Instant::now() >= deadline
                 || shutdown_aborted(abort)
             {
+                break;
+            }
+            on_wait();
+            if shutdown_aborted(abort) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -4957,6 +4975,49 @@ mod tests {
             );
             sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The caller that waits is the one that can read keys and redraw (the
+    /// flip's status screen lives on that thread), so the wait hands it a turn
+    /// on every pass; the turn can end the wait by forcing the quit.
+    #[test]
+    fn the_shutdown_wait_gives_its_caller_a_turn_on_every_pass() {
+        let (mut engine, _tmp) = test_engine();
+
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.providers.insert(
+            TabId::new("s1-slot"),
+            spawn_sigterm_ignorer(worktree.path()),
+        );
+        wait_until_ready(&engine, "s1-slot");
+
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        let mut turns = 0;
+        let report = engine.shutdown_ptys_waiting(Duration::from_secs(30), Some(&abort), || {
+            turns += 1;
+            if turns == 4 {
+                abort.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        assert_eq!(turns, 4, "a turn per pass until the turn forced the quit");
+        assert!(report.timed_out);
+        assert!(
+            report.elapsed < Duration::from_secs(5),
+            "{:?}",
+            report.elapsed
+        );
     }
 
     #[test]

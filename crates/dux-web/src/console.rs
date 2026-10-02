@@ -416,7 +416,8 @@ impl Console {
         }
     }
 
-    /// Whether this console prints to a terminal.
+    /// Whether this console prints to stdout (a terminal, a file or a pipe, as
+    /// `dux server`'s does), rather than nowhere or only into the flip's viewer.
     pub fn is_active(&self) -> bool {
         !matches!(self.0.sink, Sink::Noop)
     }
@@ -476,6 +477,26 @@ impl Console {
     /// An informational line (the shutdown progress, for one).
     pub fn info(&self, message: &str) {
         self.emit(LogTone::Info, message);
+    }
+
+    /// A progress line: the shutdown starting and how it went. Informational,
+    /// but echoed to stderr like a warning when stdout is redirected, because a
+    /// shutdown can wait out its whole grace and a terminal that shows nothing
+    /// for that long reads as a hang.
+    pub fn progress(&self, message: &str) {
+        if !self.is_recording() {
+            return;
+        }
+        let line = LogLine::event(&(self.0.clock)(), LogTone::Info, message);
+        if let Sink::Writer(writer) = &self.0.sink {
+            writer.send(&line, self.0.clock);
+            if let Some(echo) = &self.0.echo {
+                echo.send(&line, self.0.clock);
+            }
+        }
+        if let Some(ring) = &self.0.capture {
+            ring.push(line);
+        }
     }
 
     /// A warning line (a startup warning, for one).
@@ -970,15 +991,17 @@ mod tests {
         console.warn("Tailscale not detected.");
         console.warn(&unknown_color_warning("rainbow"));
         console.banner(&banner_with_a_warning());
-        console.info("Requesting 1 agent and 0 terminals to gracefully shut down.");
+        console.info("client connected from 127.0.0.1");
+        console.progress("Requesting 1 agent and 0 terminals to gracefully shut down.");
         console.access("GET", "/", 200, 1);
         console.warn("1 agent did not stop in time. Force-closing 1 agent.");
         console.error("second interrupt received during shutdown.");
     }
 
-    /// `dux server > access.log` must never hide a warning: with stdout not a
-    /// terminal, every warning and error line also goes to stderr, and
-    /// ordinary lines stay on stdout alone.
+    /// `dux server > access.log` must never hide a warning, nor leave the
+    /// terminal silent while the shutdown waits: with stdout not a terminal,
+    /// every warning and error line, and the shutdown's progress, also goes to
+    /// stderr, and ordinary lines stay on stdout alone.
     #[test]
     fn with_stdout_redirected_warnings_and_errors_also_reach_stderr() {
         let (console, sink, stderr) = Console::test_capture_echoing(false, false);
@@ -991,11 +1014,15 @@ mod tests {
             "12:00:00 warn Tailscale not detected.\n\
              12:00:00 warn [server] color = \"rainbow\" is not auto/always/never. Using \"auto\".\n\
              \x20\x20warn Reachable on your network with NO login.\n\
+             12:00:00 info Requesting 1 agent and 0 terminals to gracefully shut down.\n\
              12:00:00 warn 1 agent did not stop in time. Force-closing 1 agent.\n\
              12:00:00 error second interrupt received during shutdown.\n"
         );
-        assert!(stdout.contains("Requesting 1 agent"), "{stdout}");
-        assert!(!stderr.contains("Requesting"), "info stays off stderr");
+        assert!(stdout.contains("client connected"), "{stdout}");
+        assert!(
+            !stderr.contains("client connected"),
+            "info stays off stderr"
+        );
         assert!(!stderr.contains("GET /"), "the access log stays off stderr");
         for line in stderr.lines() {
             assert_eq!(stdout.matches(line).count(), 1, "once on stdout: {line}");

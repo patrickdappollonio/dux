@@ -513,6 +513,24 @@ impl ServerStatusScreen {
         let _ = self.draw(secs);
     }
 
+    /// One turn of the quit's wait for the children, on the thread the screen
+    /// lives on: read the keys (the terminal is in raw mode, so Ctrl-c is a key
+    /// here, not a signal), redraw after a resize or when the log moved, and
+    /// say whether a Ctrl-c asked to stop waiting and quit now.
+    pub fn shutdown_tick(&mut self) -> bool {
+        let turn = shutdown_turn(pending_events());
+        if turn.redraw || self.sync() {
+            self.dirty = true;
+        }
+        if self.dirty {
+            let secs = self.started.elapsed().as_secs();
+            if self.draw(secs).is_ok() {
+                self.dirty = false;
+            }
+        }
+        turn.force
+    }
+
     /// Bring the view up to date and tell the scroll position how much arrived,
     /// so a view that is scrolled back holds still. Whether anything changed.
     fn sync(&mut self) -> bool {
@@ -698,15 +716,38 @@ pub fn restore_terminal() {
     });
 }
 
-/// Wait up to `timeout` for a key, and say whether it was the force-quit key
-/// (Ctrl-c). The flip's quit runs this while it waits for the children to
-/// stop, because the screen holds the terminal in raw mode, where Ctrl-c is a
-/// key and not a signal, and nothing else reads keys during that wait.
-pub fn wait_for_force_quit_key(timeout: Duration) -> bool {
-    if !poll_event(timeout).unwrap_or(false) {
-        return false;
+/// What one turn of the quit's shutdown wait made of the events it found.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ShutdownTurn {
+    /// A Ctrl-c key: stop waiting and quit now.
+    force: bool,
+    /// The terminal was resized: draw the viewer again.
+    redraw: bool,
+}
+
+/// Fold the events waiting for a shutdown turn. A read that fails ends the
+/// turn; the wait hands the screen another one on its next pass (every 50 ms),
+/// so a failing terminal never makes this spin.
+fn shutdown_turn(events: impl Iterator<Item = std::io::Result<Event>>) -> ShutdownTurn {
+    let mut turn = ShutdownTurn::default();
+    for event in events {
+        match event {
+            Ok(Event::Key(key)) if is_force_quit_key(key) => turn.force = true,
+            Ok(Event::Resize(_, _)) => turn.redraw = true,
+            Ok(_) => {}
+            Err(_) => break,
+        }
     }
-    matches!(read_event(), Ok(Event::Key(key)) if is_force_quit_key(key))
+    turn
+}
+
+/// The events already waiting, without blocking. A failed poll ends the list.
+fn pending_events() -> impl Iterator<Item = std::io::Result<Event>> {
+    std::iter::from_fn(|| match poll_event(Duration::ZERO) {
+        Ok(true) => Some(read_event()),
+        Ok(false) => None,
+        Err(err) => Some(Err(err)),
+    })
 }
 
 fn is_force_quit_key(key: KeyEvent) -> bool {
@@ -1353,6 +1394,35 @@ mod tests {
         gate.release(|| restored += 1);
         assert_eq!(restored, 1, "the terminal is restored once");
         assert_eq!(gate.draw_while_held(|| 1), None, "and nothing draws after");
+    }
+
+    /// What a turn of the shutdown wait makes of the events waiting for it: a
+    /// Ctrl-c key forces the quit, a resize redraws the viewer (it is not
+    /// swallowed), and a read that fails ends the turn rather than spinning.
+    #[test]
+    fn a_shutdown_turn_forces_on_ctrl_c_and_redraws_on_resize() {
+        let ctrl_c = Event::Key(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let q = Event::Key(key(KeyCode::Char('q'), KeyModifiers::NONE));
+        let turn = |events: Vec<std::io::Result<Event>>| shutdown_turn(events.into_iter());
+        assert_eq!(
+            turn(vec![Ok(Event::Resize(80, 24))]),
+            ShutdownTurn {
+                force: false,
+                redraw: true
+            }
+        );
+        assert_eq!(
+            turn(vec![Ok(q), Ok(ctrl_c.clone())]),
+            ShutdownTurn {
+                force: true,
+                redraw: false
+            }
+        );
+        // A failed read ends the turn: what came after it waits for the next.
+        assert_eq!(
+            turn(vec![Err(std::io::Error::other("tty gone")), Ok(ctrl_c)]),
+            ShutdownTurn::default()
+        );
     }
 
     #[test]

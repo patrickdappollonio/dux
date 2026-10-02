@@ -21,9 +21,7 @@ pub(crate) use config_saver::TuiConfigSurface;
 /// Server status screen shown by the binary while serving after a TUI↔server
 /// flip. Re-exported so `crates/dux/src/main.rs` can drive it as the
 /// `serve_with_engine` tick.
-pub use server_screen::{
-    ServerScreenTick, ServerStatusScreen, restore_terminal, wait_for_force_quit_key,
-};
+pub use server_screen::{ServerScreenTick, ServerStatusScreen, restore_terminal};
 
 /// Register the fully-commented config renderer with `dux-core`, so that any
 /// surface which CREATES `config.toml` writes the documented template rather

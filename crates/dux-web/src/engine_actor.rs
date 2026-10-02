@@ -2707,7 +2707,7 @@ impl EngineService {
                     );
                     match &self.shutdown_echo {
                         ShutdownEcho::Console(console, quit) => {
-                            crate::wind_down_children(engine, console, grace, quit, |_| {});
+                            crate::wind_down_children(engine, console, grace, quit, |_| {}, || {});
                         }
                         ShutdownEcho::Silent => {
                             engine.shutdown_ptys(grace);
