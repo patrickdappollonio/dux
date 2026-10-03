@@ -1,6 +1,7 @@
 // The start-web-server flip's status screen on a tailnet where `tailscale serve`
-// already points at dux: the same two QR codes `dux server` prints, side by
-// side between the URLs and the Activity panel.
+// already points at dux: the header lists the MagicDNS and HTTPS URLs, and the
+// log shows the same rows and the same two QR codes `dux server` prints. Tall
+// enough that the whole block fits the log without scrolling.
 //
 // There is no tailnet in the capture container, so the Tailscale CLI is a
 // stand-in answering with an obviously fake machine and tailnet, in the shapes
@@ -56,5 +57,5 @@ module.exports.expectText = [
 
 module.exports.file = "tui-flip-qr-codes.png"
 module.exports.cols = 160
-module.exports.rows = 45
+module.exports.rows = 56
 module.exports.theme = "dux_dark"

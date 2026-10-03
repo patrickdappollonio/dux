@@ -1,6 +1,6 @@
 // `dux server` on a tailnet where `tailscale serve` already points at it: the
-// banner lists the MagicDNS and HTTPS URLs beside the listeners, and the two QR
-// codes sit side by side under it, the Tailscale IP on the left and the HTTPS
+// MagicDNS and HTTPS rows follow the banner's listeners, and the two QR codes
+// sit side by side under them, the Tailscale IP on the left and the HTTPS
 // name on the right.
 //
 // There is no tailnet in the capture container, so the Tailscale CLI is a

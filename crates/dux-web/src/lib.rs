@@ -1239,6 +1239,13 @@ impl TailscaleLoop {
             }
             self.last_rows = rows;
         }
+        // No codes before the first look lands. A serve that cannot wait for it
+        // (the flip, the background server) turns here first with the IP alone,
+        // and printing that code means a second set a moment later when the
+        // name arrives; every request answers "checking" until then anyway.
+        if self.funnel_lockout.get() == crate::host_guard::FunnelLockout::Checking {
+            return;
+        }
         let magic_dns = urls.magic_dns().map(str::to_string);
         let pair: Vec<String> = urls.ip.into_iter().chain(magic_dns).collect();
         if self.last_qr.as_ref() == Some(&pair) {
@@ -5059,6 +5066,58 @@ mod live_tailscale_mode_tests {
             .filter(|t| t.contains("Scan to open dux"))
             .count();
         assert_eq!(captions, 2, "a fresh pair of codes for the new name");
+        h.finish().await;
+    }
+
+    /// The flip cannot wait for its first look before serving, so the loop
+    /// turns while that look is still out. No QR code is printed until it lands:
+    /// a code for the Tailscale IP alone, superseded a moment later by the
+    /// pair, is a second set of codes for one serve, and every request answers
+    /// "checking" until then anyway.
+    #[tokio::test]
+    async fn no_qr_code_is_printed_until_the_first_look_lands() {
+        let (_primary, primary_addr) = primary_listener();
+        let ring = dux_core::activity::ActivityRing::new(2000);
+        let console = Console::capture(ring.clone());
+        console.set_qr_codes(true);
+        let opened = Arc::new(AtomicBool::new(false));
+        let gate = Arc::clone(&opened);
+        let identify: crate::IdentityProbe = Arc::new(move || {
+            while !gate.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(named(
+                "demo-box.example-tailnet.ts.net",
+                &[("https://demo-box.example-tailnet.ts.net", false)],
+            ))
+        });
+        let leg: SocketAddr = format!("100.101.102.103:{}", primary_addr.port())
+            .parse()
+            .unwrap();
+        let h = Harness::start_inner(
+            TailscaleMode::Auto,
+            false,
+            Some(primary_addr),
+            Some(leg),
+            Arc::new(move || Ok(leg.ip())),
+            Some(identify),
+            console,
+        );
+        tokio::time::sleep(FAST_LOOK * 10).await;
+        let early: Vec<String> = ring_texts(&ring)
+            .into_iter()
+            .filter(|t| t.contains("Scan to open dux"))
+            .collect();
+        assert!(early.is_empty(), "codes before the first look: {early:?}");
+
+        opened.store(true, Ordering::SeqCst);
+        until_ring_says(&ring, &["Scan to open dux from your phone:"]).await;
+        tokio::time::sleep(FAST_LOOK * 5).await;
+        let captions = ring_texts(&ring)
+            .iter()
+            .filter(|t| t.contains("Scan to open dux"))
+            .count();
+        assert_eq!(captions, 1, "one set of codes, the pair");
         h.finish().await;
     }
 

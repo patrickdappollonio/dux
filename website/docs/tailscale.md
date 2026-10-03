@@ -278,12 +278,12 @@ show two QR codes, so a phone on your tailnet opens dux by pointing its camera a
 screen: the Tailscale IP address on the left, and the MagicDNS name on the right, which is
 the `https://` URL when `tailscale serve` points at dux. Each code has its URL printed
 under it. They sit side by side when the window is wide enough and stack when it is not,
-and they appear again whenever those addresses change, so a rename or a new serve route
-gets a fresh pair.
+and they appear once dux's first look at Tailscale has answered, then again whenever
+those addresses change, so a rename or a new serve route gets a fresh pair.
 
-![The dux server console: the banner lists the loopback, Tailscale, MagicDNS and HTTPS addresses, and two QR codes sit side by side under it, one for http://100.101.102.103:3890 and one for https://demo-box.example-tailnet.ts.net.](/screens/server-qr-codes.png)
+![The dux server console: the banner lists the loopback and Tailscale addresses, the MagicDNS and HTTPS rows follow, and two QR codes sit side by side under them, one for http://100.101.102.103:3890 and one for https://demo-box.example-tailnet.ts.net.](/screens/server-qr-codes.png)
 
-![The start-web-server flip's status screen: the dux logo, then every address dux answers on including http://demo-box.example-tailnet.ts.net:3890 and https://demo-box.example-tailnet.ts.net, the same two QR codes side by side with their URLs under them, and the Activity panel below.](/screens/tui-flip-qr-codes.png)
+![The start-web-server flip's status screen: the dux logo, then every address dux answers on including http://demo-box.example-tailnet.ts.net:3890 and https://demo-box.example-tailnet.ts.net, and below it the Log panel with the same banner, MagicDNS and HTTPS rows and two QR codes side by side that dux server prints.](/screens/tui-flip-qr-codes.png)
 
 `dux server` prints them only when its output is a terminal, so a log piped to a file stays
 clean. The background server (`serve_while_tui`) never shows them, because the terminal UI
