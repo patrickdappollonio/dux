@@ -1,0 +1,16 @@
+{
+  "TCP": {
+    "8443": {
+      "HTTPS": true
+    }
+  },
+  "Web": {
+    "demo-box.example-tailnet.ts.net:8443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:3890"
+        }
+      }
+    }
+  }
+}

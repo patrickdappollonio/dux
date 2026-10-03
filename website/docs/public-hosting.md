@@ -361,7 +361,7 @@ proxy_read_timeout 1h;      # or an idle agent's socket is closed under you
 ### `403 this dux server does not serve the requested host`
 
 The Host allowlist. The proxy is forwarding a `Host` that dux does not accept, almost
-always your public hostname before you added it to `allowed_hosts`. Add it and restart dux: the host allowlist is built when the listener starts, so a config reload alone will not pick it up.
+always your public hostname before you added it to `allowed_hosts`. Add it and run **Reload config**: the running server answers by the new list with no restart.
 
 ### `403 cross-origin WebSocket upgrade rejected`, or `cross-origin request rejected` on a write
 

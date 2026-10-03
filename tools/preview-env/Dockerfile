@@ -18,8 +18,9 @@ FROM ${BASE_IMAGE}
 # tmux provides a fixed terminal grid for TUI captures. `which` is required, not
 # incidental: dux probes for the gh CLI by running `which gh`, and the base image
 # does not ship it, so without this every GitHub feature reports gh as missing
-# however it was installed. Clean the package cache.
-RUN pacman -Syu --noconfirm git nodejs npm ca-certificates tmux which \
+# however it was installed. `iproute2` lets a TUI capture give the container's
+# loopback a stand-in Tailscale address. Clean the package cache.
+RUN pacman -Syu --noconfirm git nodejs npm ca-certificates tmux which iproute2 \
     && pacman -Scc --noconfirm
 
 # The two default resume-capable providers, installed exactly as a user would

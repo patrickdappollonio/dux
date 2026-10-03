@@ -470,6 +470,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "log_viewer_lines",
         config.server.log_viewer_lines,
     );
+    patch_table_bool(doc, "server", "qr_codes", config.server.qr_codes);
     patch_table_bool(
         doc,
         "server",
@@ -3064,6 +3065,7 @@ unknown_key = \"untouched\"
         config.server.allowed_hosts = vec!["box.tailnet.ts.net".to_string()];
         config.server.color = "never".to_string();
         config.server.access_log = false;
+        config.server.qr_codes = false;
         config.server.max_websocket_events_connections = 42;
         config.server.max_websocket_agent_connections = 43;
         config.server.max_websocket_terminal_connections = 44;
@@ -3083,6 +3085,7 @@ unknown_key = \"untouched\"
         );
         assert_eq!(parsed.server.color, "never");
         assert!(!parsed.server.access_log);
+        assert!(!parsed.server.qr_codes);
         assert_eq!(parsed.server.max_websocket_events_connections, 42);
         assert_eq!(parsed.server.max_websocket_agent_connections, 43);
         assert_eq!(parsed.server.max_websocket_terminal_connections, 44);

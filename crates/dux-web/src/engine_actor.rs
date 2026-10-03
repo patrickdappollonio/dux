@@ -10,10 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dux_core::config::{
-    server_bind_settings_changed, server_console_settings_changed,
-    server_log_viewer_settings_changed,
-};
+use dux_core::config::{server_bind_settings_changed, server_log_viewer_settings_changed};
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
@@ -486,7 +483,7 @@ fn server_restart_warning_copy(
                 .push("With the background server, stopping and starting it again is the restart.");
         }
     }
-    if server_console_settings_changed(prev, next) {
+    if prev.color != next.color {
         sentences.push(
             "The [server] color setting changed; the console that reads it is built by \
              `dux server`, so it applies the next time you start `dux server`.",
@@ -496,6 +493,14 @@ fn server_restart_warning_copy(
         sentences.push(
             "The [server] log_viewer_lines setting changed; the log viewer is sized when \
              start-web-server starts, so it applies the next time you run it.",
+        );
+    }
+    // Not in background mode: that serve never draws QR codes.
+    if prev.qr_codes != next.qr_codes && !background {
+        sentences.push(
+            "The [server] qr_codes setting changed; it is read when `dux server` or the \
+             start-web-server flip starts serving, so it applies the next time one of them \
+             starts.",
         );
     }
     match sentences.is_empty() {
@@ -531,9 +536,22 @@ pub struct LiveServerLimits {
     access_log: AtomicBool,
     pty_send_timeout_seconds: AtomicUsize,
     heartbeat_deadline_seconds: AtomicUsize,
+    /// `[server] allowed_hosts`, which the Host guard reads per request, so a
+    /// reload that edits the list applies to the running listener.
+    allowed_hosts: crate::host_guard::LiveHostNames,
 }
 
 impl LiveServerLimits {
+    /// The Host guard's configured-hosts set. Shared, not copied: the guard
+    /// holds this same set and sees every later [`Self::set_allowed_hosts`].
+    pub fn allowed_hosts(&self) -> crate::host_guard::LiveHostNames {
+        self.allowed_hosts.clone()
+    }
+
+    pub fn set_allowed_hosts(&self, hosts: &[String]) {
+        self.allowed_hosts.replace(hosts);
+    }
+
     /// Cap on the editor's file-search flat walk. `0` disables the cap.
     pub fn search_index_max_files(&self) -> usize {
         self.search_index_max_files.load(Ordering::Relaxed)
@@ -588,6 +606,7 @@ impl LiveServerLimits {
         self.set_access_log(server.access_log);
         self.set_pty_send_timeout_seconds(server.pty_send_timeout_seconds as usize);
         self.set_heartbeat_deadline_seconds(server.heartbeat_deadline_seconds as usize);
+        self.set_allowed_hosts(&server.allowed_hosts);
     }
 }
 
@@ -3970,15 +3989,22 @@ fn write_raw_config_on_engine(
 ) -> Result<(), String> {
     let parsed = dux_core::config::validate_config_str(content)
         .map_err(|e| format!("config.toml is not valid: {e}"))?;
-    // The web editor must not silently weaken the server perimeter: [server]
-    // host/allowed_hosts only take effect at restart, so a change here would
-    // persist unreviewed. Reject perimeter edits.
-    if parsed.server.host != engine.config.server.host
-        || parsed.server.allowed_hosts != engine.config.server.allowed_hosts
-    {
+    // The web editor must not silently weaken the server perimeter, so both
+    // halves of it stay a terminal-side edit. `host` binds once and needs a
+    // restart; `allowed_hosts` is read live by the Host guard and a reload
+    // applies it, so its refusal names the reload rather than a restart nobody
+    // needs.
+    if parsed.server.host != engine.config.server.host {
         return Err(
-            "Server host/allowed_hosts cannot be changed from the web editor; \
-             edit config.toml directly and restart."
+            "Server host cannot be changed from the web editor; edit config.toml directly \
+             and restart."
+                .to_string(),
+        );
+    }
+    if parsed.server.allowed_hosts != engine.config.server.allowed_hosts {
+        return Err(
+            "Server allowed_hosts cannot be changed from the web editor; edit config.toml \
+             directly and run Reload config, which applies it to the running server."
                 .to_string(),
         );
     }
@@ -5926,11 +5952,42 @@ mod tests {
     }
 
     #[test]
-    fn restart_drift_detects_allowed_hosts_change() {
+    fn a_qr_codes_change_says_it_applies_when_either_serving_mode_next_starts() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.qr_codes = false;
+        let copy =
+            server_restart_warning_copy(&prev, &next, ServeSurface::DuxServer).expect("a warning");
+        assert!(copy.contains("qr_codes"), "{copy}");
+        assert!(copy.contains("dux server"), "{copy}");
+        assert!(copy.contains("start-web-server"), "{copy}");
+        assert!(
+            !copy.contains("color"),
+            "only the setting that changed is named: {copy}"
+        );
+        assert_eq!(
+            server_restart_warning_copy(&prev, &next, ServeSurface::Background),
+            None,
+            "the background server never draws QR codes, so it has nothing to say"
+        );
+    }
+
+    #[test]
+    fn restart_drift_ignores_allowed_hosts_because_a_reload_applies_it() {
+        // The Host guard reads the list from the live limits a reload rewrites,
+        // so a restart warning here would send the user to restart for nothing.
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.allowed_hosts.push("box.tailnet.ts.net".to_string());
-        assert!(server_restart_settings_changed(&prev, &next));
+        assert!(!server_restart_settings_changed(&prev, &next));
+        assert_eq!(
+            server_restart_warning_copy(&prev, &next, ServeSurface::DuxServer),
+            None
+        );
+        assert_eq!(
+            server_restart_warning_copy(&prev, &next, ServeSurface::Background),
+            None
+        );
     }
 
     #[test]
@@ -6893,6 +6950,63 @@ mod tests {
         assert!(
             await_start_dir(&handle, dir_b.path().to_string_lossy().as_ref()).await,
             "reload must apply the saved config"
+        );
+    }
+
+    /// The user journey for `allowed_hosts`: edit config.toml by hand, run
+    /// "Reload config", and the running Host guard answers by the new list. The
+    /// guard holds the very set the live limits hand out, so reading the set is
+    /// reading what the guard reads.
+    #[tokio::test]
+    async fn a_config_reload_hands_allowed_hosts_to_the_running_guard() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let guard_set = handle.live_limits().allowed_hosts();
+
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nallowed_hosts = [\"Box.Example.com:443\"]\n",
+        )
+        .expect("edit config.toml by hand");
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("reload");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while guard_set.snapshot() != vec!["box.example.com".to_string()] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the reload never reached the guard's set: {:?}",
+                guard_set.snapshot()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The web editor still leaves the perimeter to the terminal, but the
+    /// refusal must not send anyone to restart for a list a reload applies.
+    #[tokio::test]
+    async fn the_web_editor_refuses_an_allowed_hosts_edit_and_names_reload_not_restart() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let refusal = handle
+            .write_raw_config("[server]\nallowed_hosts = [\"box.example.com\"]\n".to_string())
+            .await
+            .expect_err("an allowed_hosts edit from the browser is refused");
+        assert!(refusal.contains("allowed_hosts"), "{refusal}");
+        assert!(refusal.to_lowercase().contains("reload"), "{refusal}");
+        assert!(!refusal.contains("restart"), "{refusal}");
+
+        let refusal = handle
+            .write_raw_config("[server]\nhost = \"0.0.0.0\"\n".to_string())
+            .await
+            .expect_err("a host edit from the browser is refused");
+        assert!(
+            refusal.contains("restart"),
+            "host still needs a restart: {refusal}"
         );
     }
 

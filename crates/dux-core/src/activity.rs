@@ -45,6 +45,14 @@ struct ActivityInner {
     /// Bumped whenever the pinned lines change, which also moves lines out of
     /// the bounded part: a reader that sees it move reads everything again.
     pin_version: AtomicU64,
+    /// Every URL the serve can be opened at right now: its listeners, then this
+    /// machine's MagicDNS URL and `tailscale serve` routes. Empty until the
+    /// serve publishes them, which the status screen reads as "show the
+    /// addresses captured at start".
+    serve_urls: Mutex<Vec<String>>,
+    /// Bumped when [`Self::serve_urls`] changes. Its own counter, because the
+    /// line generation is what counts lines for [`ActivityRing::lines_since`].
+    urls_version: AtomicU64,
 }
 
 /// A cheap-to-clone (`Arc`) shared handle to the line buffer.
@@ -72,6 +80,8 @@ impl ActivityRing {
             connections: AtomicUsize::new(0),
             generation: AtomicU64::new(0),
             pin_version: AtomicU64::new(0),
+            serve_urls: Mutex::new(Vec::new()),
+            urls_version: AtomicU64::new(0),
         }))
     }
 
@@ -133,6 +143,33 @@ impl ActivityRing {
             .min(held.lines.len());
         let start = held.lines.len() - arrived;
         (generation, held.lines.range(start..).cloned().collect())
+    }
+
+    /// Replace the serve's live URL list. The same list again is no change.
+    pub fn set_serve_urls(&self, urls: Vec<String>) {
+        let mut slot = self
+            .0
+            .serve_urls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *slot != urls {
+            *slot = urls;
+            self.0.urls_version.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The serve's live URL list, empty until the serve has published one.
+    pub fn serve_urls(&self) -> Vec<String> {
+        self.0
+            .serve_urls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Moves whenever [`Self::serve_urls`] changes.
+    pub fn urls_version(&self) -> u64 {
+        self.0.urls_version.load(Ordering::Relaxed)
     }
 
     pub fn connection_opened(&self) {
@@ -213,6 +250,28 @@ mod tests {
         assert!(snap.lines.is_empty());
         assert_eq!(snap.connections, 0);
         assert_eq!(snap.generation, 0);
+    }
+
+    #[test]
+    fn the_live_url_list_has_its_own_version_and_never_moves_the_line_count() {
+        let ring = ActivityRing::new(10);
+        assert!(ring.serve_urls().is_empty());
+        let before = (ring.generation(), ring.urls_version());
+        let urls = vec!["http://127.0.0.1:3890".to_string()];
+        ring.set_serve_urls(urls.clone());
+        assert_eq!(ring.serve_urls(), urls);
+        assert_eq!(
+            ring.generation(),
+            before.0,
+            "lines_since counts lines by it"
+        );
+        assert_eq!(ring.urls_version(), before.1 + 1);
+        ring.set_serve_urls(urls);
+        assert_eq!(
+            ring.urls_version(),
+            before.1 + 1,
+            "the same list is no change"
+        );
     }
 
     #[test]

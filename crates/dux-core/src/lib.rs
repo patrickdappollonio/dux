@@ -52,6 +52,7 @@ pub mod prose;
 pub mod provider;
 pub mod pty;
 pub mod pty_owners;
+pub mod qr;
 pub mod quiet_tail;
 pub mod release_notes;
 pub mod resource_stats;

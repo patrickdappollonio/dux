@@ -194,7 +194,15 @@ copy it to a throwaway `*.tmp.js` file and use the supplied `createAgent`,
 `config` export for a setting no dialog can reach and the optional `expectText`
 export, which refuses the capture unless those strings are on the screen it
 captured (a throwaway may leave it off and is told on stderr that nothing
-checked what it captured). Throwaway scripts are ignored
+checked what it captured). Two more optional exports change what runs:
+`launch = "server"` starts `dux server` in the captured terminal instead of the
+terminal UI (and skips adding the demo projects, which only the TUI needs), and
+`tailscale = { ip, status, serve }` puts a stand-in `tailscale` CLI on dux's PATH
+that answers `ip`, `status --json --peers=false` and `serve status --json` with
+those values, and adds `ip` to the container's loopback so the Tailscale listener
+really binds (the capture service is granted `NET_ADMIN` for exactly this, inside
+its own disposable network namespace). Use an obviously fake machine and tailnet,
+never a real one. Throwaway scripts are ignored
 by Git, matching the web screenshot workflow; the journeys behind the docs
 screenshots are not throwaways and live under `screens/scenes`.
 

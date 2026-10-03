@@ -31,7 +31,7 @@ use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use dux_core::activity::ActivityRing;
-use dux_core::serve_log::{Banner, LogLine, LogTone};
+use dux_core::serve_log::{Banner, ListenerRow, LogLine, LogTone};
 
 // ── Detection ──────────────────────────────────────────────────────────────
 
@@ -252,7 +252,17 @@ struct ConsoleInner {
     /// `dux server > access.log` never hides one. Behind its own writer thread,
     /// so a stalled stderr never parks the emitter.
     echo: Option<LineWriter>,
+    /// Whether [`Console::qr_codes`] shows anything. Off until a serve path that
+    /// wants the codes turns it on, from `[server] qr_codes`.
+    qr_codes: std::sync::atomic::AtomicBool,
+    /// The width the codes are laid out in. Zero asks the terminal each time,
+    /// which is the production setting; tests pin a width.
+    qr_columns: std::sync::atomic::AtomicUsize,
 }
+
+/// Columns the flip's log viewer takes from the terminal around its text: the
+/// screen's side margins, the panel's border and its padding.
+const VIEWER_CHROME: usize = 8;
 
 impl Console {
     /// A real console writing to stdout. `color` comes from [`detect`];
@@ -323,6 +333,8 @@ impl Console {
             capture: None,
             clock,
             echo: None,
+            qr_codes: std::sync::atomic::AtomicBool::new(false),
+            qr_columns: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
 
@@ -333,6 +345,8 @@ impl Console {
             capture: None,
             clock: now_hms,
             echo: None,
+            qr_codes: std::sync::atomic::AtomicBool::new(false),
+            qr_columns: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
 
@@ -348,6 +362,8 @@ impl Console {
             capture: Some(ring),
             clock,
             echo: None,
+            qr_codes: std::sync::atomic::AtomicBool::new(false),
+            qr_columns: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
 
@@ -544,6 +560,68 @@ impl Console {
         }
     }
 
+    /// Turn the QR codes on or off for this console, from `[server] qr_codes`.
+    /// `dux server` passes the setting AND whether stdout is a terminal, so a
+    /// piped log is never filled with blocks.
+    pub fn set_qr_codes(&self, enabled: bool) {
+        self.0
+            .qr_codes
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Lay the codes out in exactly `columns` columns instead of asking the
+    /// terminal. Test-only.
+    #[cfg(test)]
+    pub(crate) fn set_qr_columns(&self, columns: usize) {
+        self.0
+            .qr_columns
+            .store(columns, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// QR codes for `urls` (the Tailscale IP URL, then the MagicDNS one), as
+    /// log lines built by [`dux_core::serve_log::qr_lines`], so `dux server`
+    /// prints them and the flip's viewer shows them identically. Laid out for
+    /// the terminal's width (less the viewer's chrome for the flip's console).
+    /// Nothing when the codes are off or there is nothing to show.
+    pub fn qr_codes(&self, urls: &[String]) {
+        if !self.0.qr_codes.load(std::sync::atomic::Ordering::Relaxed)
+            || urls.is_empty()
+            || !self.is_recording()
+        {
+            return;
+        }
+        let columns = match self.0.qr_columns.load(std::sync::atomic::Ordering::Relaxed) {
+            0 if self.is_active() => terminal_columns(),
+            0 => terminal_columns().saturating_sub(VIEWER_CHROME),
+            pinned => pinned,
+        };
+        for line in dux_core::serve_log::qr_lines(&(self.0.clock)(), urls, columns) {
+            self.line(line);
+        }
+    }
+
+    /// Listener rows for addresses that became known after the banner (this
+    /// machine's MagicDNS URL, a `tailscale serve` route), drawn exactly like
+    /// the banner's own rows on both surfaces.
+    pub fn tailnet_rows(&self, rows: &[ListenerRow]) {
+        if !self.is_recording() {
+            return;
+        }
+        for line in dux_core::serve_log::listener_lines(rows) {
+            self.line(line);
+        }
+    }
+
+    /// Hand the serve's live URL list to the flip's ring, which its header
+    /// lists, so the header follows the Tailscale leg and this machine's name.
+    /// Any other console does nothing: `dux server` prints its banner once and
+    /// the rows above say what changed.
+    pub fn serve_urls(&self, urls: &[String]) {
+        if let Some(ring) = &self.0.capture {
+            ring.set_serve_urls(urls.to_vec());
+        }
+    }
+
     pub fn client_connected(&self, ip: IpAddr) {
         if let Some(ring) = &self.0.capture {
             ring.connection_opened();
@@ -671,6 +749,21 @@ impl Write for SharedBuffer {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// The terminal's width in columns: asked of stdout, then `COLUMNS`, then the
+/// classic 80.
+fn terminal_columns() -> usize {
+    if let Ok(size) = rustix::termios::tcgetwinsize(std::io::stdout())
+        && size.ws_col > 0
+    {
+        return usize::from(size.ws_col);
+    }
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|columns| *columns > 0)
+        .unwrap_or(80)
 }
 
 /// Strip ANSI escapes, for tests comparing a colored console with the viewer.
@@ -938,6 +1031,79 @@ mod tests {
         }
         let printed: Vec<String> = sink.contents().lines().map(strip_ansi).collect();
         assert_eq!(printed, ring_texts(&ring));
+    }
+
+    const QR_IP: &str = "http://100.101.102.103:3890";
+    const QR_NAME: &str = "https://demo-box.example-tailnet.ts.net";
+
+    /// The QR codes and the tailnet address rows reach `dux server`'s output
+    /// and the flip's viewer as the same lines.
+    #[test]
+    fn qr_codes_and_tailnet_rows_reach_both_surfaces_as_the_same_lines() {
+        let (stdout, sink) = Console::test_capture(true);
+        let ring = ActivityRing::new(200);
+        let capture = Console::test_ring_capture(ring.clone());
+        let rows = vec![dux_core::serve_log::ListenerRow {
+            label: "Tailscale (HTTPS, tailscale serve)".to_string(),
+            url: QR_NAME.to_string(),
+        }];
+        for console in [&stdout, &capture] {
+            console.set_qr_codes(true);
+            console.set_qr_columns(120);
+            console.tailnet_rows(&rows);
+            console.qr_codes(&[QR_IP.to_string(), QR_NAME.to_string()]);
+        }
+        let printed: Vec<String> = sink.contents().lines().map(strip_ansi).collect();
+        assert_eq!(printed, ring_texts(&ring));
+        assert!(
+            printed
+                .iter()
+                .any(|l| l.contains("Tailscale (HTTPS, tailscale serve)"))
+        );
+        assert!(printed.iter().any(|l| l.contains('█') || l.contains('▀')));
+    }
+
+    #[test]
+    fn qr_codes_switched_off_or_with_nothing_to_show_print_nothing() {
+        let (console, sink) = Console::test_capture(false);
+        console.set_qr_columns(120);
+        console.qr_codes(&[QR_IP.to_string()]);
+        assert_eq!(sink.contents(), "", "off unless a serve path turns it on");
+        console.set_qr_codes(true);
+        console.qr_codes(&[]);
+        assert_eq!(sink.contents(), "", "no address, no code");
+    }
+
+    #[test]
+    fn qr_codes_stack_on_a_narrow_terminal() {
+        let (console, sink) = Console::test_capture(false);
+        console.set_qr_codes(true);
+        console.set_qr_columns(60);
+        console.qr_codes(&[QR_IP.to_string(), QR_NAME.to_string()]);
+        let out = sink.contents();
+        let ip_row = out
+            .lines()
+            .position(|l| l.contains(QR_IP))
+            .expect("IP label");
+        let name_row = out
+            .lines()
+            .position(|l| l.contains(QR_NAME))
+            .expect("name label");
+        assert!(name_row > ip_row + 1, "{out}");
+        assert!(out.lines().all(|line| line.chars().count() <= 60), "{out}");
+    }
+
+    /// The flip's header lists the serve's live URLs from the ring. Not gated
+    /// by `qr_codes`, and not printed on stdout, whose banner is printed once.
+    #[test]
+    fn the_live_url_list_goes_to_the_flips_ring_only() {
+        let urls = vec![QR_IP.to_string(), QR_NAME.to_string()];
+        let ring = ActivityRing::new(10);
+        Console::test_ring_capture(ring.clone()).serve_urls(&urls);
+        assert_eq!(ring.serve_urls(), urls);
+        let (stdout, sink) = Console::test_capture(false);
+        stdout.serve_urls(&urls);
+        assert_eq!(sink.contents(), "");
     }
 
     #[test]

@@ -360,6 +360,9 @@ mod tests {
     #[test]
     fn a_toggle_cycle_stops_serving_and_starts_a_fresh_app() {
         let (mut engine, _tmp) = engine_in_tempdir();
+        // Not a test about Tailscale: on any other mode every request waits on
+        // the first Funnel check, which would consult this machine's real CLI.
+        engine.config.server.tailscale = "no".to_string();
 
         let (listener, first_addr) = loopback_listener();
         let server = BackgroundServer::start(

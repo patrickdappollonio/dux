@@ -79,6 +79,12 @@ services:
       - ${DUX_TUI_JOURNEY:-./tui-journey.example.js}:/journey.js:ro
     tmpfs:
       - /capture
+    # Lets a journey's stand-in Tailscale address be added to this container's
+    # own loopback interface, so dux's Tailscale listener really binds (see
+    # standInTailscale in tui-driver.js). The capture container is disposable
+    # and has a network namespace of its own, so nothing outside it is touched.
+    cap_add:
+      - NET_ADMIN
 
 volumes:
   dux-data:

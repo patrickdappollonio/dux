@@ -15,6 +15,9 @@ futures-util.workspace = true
 uuid.workspace = true
 # Wall-clock `HH:MM:SS` timestamps for the vite-style server console (console.rs).
 chrono.workspace = true
+# The terminal's width, so the `dux server` console lays its QR codes out side
+# by side only when they fit (console.rs). Already in the tree through dux-core.
+rustix.workspace = true
 # `interpolate-folder-path` is REQUIRED, not a nicety: web_assets.rs embeds
 # `$OUT_DIR/ui`, the staged copy build.rs writes, and rust-embed only expands an
 # environment variable in `folder` when this feature is on (the expansion is

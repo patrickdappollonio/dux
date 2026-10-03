@@ -41,5 +41,13 @@ uuid.workspace = true
 walkdir = "2"
 alacritty_terminal = "0.26.0"
 ureq = "3.3.0"
+# Encodes the tailnet addresses `dux server` and the start-web-server flip show
+# as QR codes (dux_core::qr). Default features off: they pull in the `image`
+# crate for raster output, and dux draws the codes as text itself.
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
+# Decodes the QR codes dux_core::qr draws, so the tests prove a phone could read
+# them rather than only that the drawing did not change. Default features off:
+# the tests hand it greyscale pixels directly, with no image crate.
+rqrr = { version = "0.11", default-features = false }

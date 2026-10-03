@@ -56,6 +56,10 @@ After that it keeps a timestamped log going: browsers connecting and leaving, on
 per request (the access log), your Tailscale address coming and going, and the shutdown
 when you stop it. Any warning about the start itself, a missing Tailscale for one, is
 printed above the banner.
+On a tailnet the banner also lists this machine's MagicDNS URL and, when
+`tailscale serve` points at dux, its `https://` URL, and two QR codes follow it so a
+phone can open dux from the screen (see
+[QR codes for your phone](/docs/tailscale#qr-codes-for-your-phone)).
 The port is 3890 because that is how you spell "dux" on a phone keypad.
 
 The flags:
@@ -111,7 +115,9 @@ trigger it by accident.
 
 Your **agents keep running the entire time**: no relaunch, no lost conversations. The
 dux you already have starts serving in place. Your terminal turns into a themed dux
-status screen showing the serve URLs and a log viewer. The viewer shows exactly the log
+status screen showing the serve URLs (your MagicDNS and `tailscale serve` URLs included,
+kept current while it runs), the same tailnet QR codes `dux server` prints, and a log
+viewer. The viewer shows exactly the log
 `dux server` prints, banner and access log included, so nothing you would see there is
 missing here, the reachability note included: it is the banner's last row rather than a
 line of its own in the header. The one deliberate exception is the warning about an
@@ -261,8 +267,12 @@ authentication:
   site cannot ride your session.
 
 A Tailscale `100.x` IP is allowed automatically, whether or not that leg is bound at the
-moment. A MagicDNS name like `box.tailnet.ts.net` is not an IP literal, so if you reach
-dux by that name you must add it to `allowed_hosts` or the host guard answers `403`.
+moment, and so is this machine's own MagicDNS name (`box.your-tailnet.ts.net`), on any
+port, unless `tailscale = "no"`. dux reads that name from Tailscale and follows it if the
+tailnet is renamed. Every other name, another machine's on the same tailnet included,
+needs an `allowed_hosts` entry or the host guard answers `403`. See
+[Your MagicDNS name just works](/docs/tailscale#your-magicdns-name-just-works) and
+[HTTPS with `tailscale serve`](/docs/tailscale#https-with-tailscale-serve).
 
 ## The `[server]` config keys
 
@@ -295,7 +305,8 @@ tailscale = "auto"
 serve_while_tui = false
 
 # Extra Host header values to accept when a request is not same-origin. List a
-# reverse-proxy hostname or a tailnet MagicDNS name here so it is not rejected.
+# reverse-proxy hostname here so it is not rejected. This machine's own MagicDNS
+# name needs no entry while tailscale is not "no". A config reload applies it.
 allowed_hosts = []
 ```
 
@@ -306,6 +317,7 @@ The rest tune presentation and limits:
 | `color` | `"auto"` | Colored, vite-style console output for `dux server` (`auto`, `always`, `never`). Read at startup. |
 | `access_log` | `true` | Log a per-request line to the server's console: `dux server`'s output and the flip's log viewer alike (never to `dux.log`, so pipe `dux server`'s stdout to capture it). `/healthz` is always skipped. Set `false` to silence it in both. A config reload applies it. |
 | `log_viewer_lines` | `2000` | How many lines the flip's log viewer keeps for scrolling back, between 1 and 20000: 0 is read as 1 and anything above 20000 as 20000, while a negative value is not valid there, so dux uses the default instead and says so in `dux.log`. The startup lines (the banner and its warnings) are kept on top of these and never dropped. `dux server` has no such cap, because its scrollback is your terminal's. Read when the flip starts. |
+| `qr_codes` | `true` | Show QR codes for this machine's Tailscale IP and MagicDNS URLs (the `https://` one when `tailscale serve` points at dux) in `dux server` and on the start-web-server flip's status screen, side by side or stacked to fit, each with its URL under it. `dux server` prints them only when its output is a terminal; the background server never shows them. Read when a server starts. |
 | `title` | `"dux"` | Web-only instance name: the browser tab title and the wordmark in the projects pane. Set `"dux (prod)"` to tell tabs apart. |
 | `favicon` | `""` | Web-only favicon tint so several dux tabs are distinguishable. Empty keeps the yellow duck; otherwise a curated color (violet, blue, sky, cyan, teal, green, amber, orange, red, pink, rose). |
 | `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-c during the wait stops it, kills what is still running and exits, in `dux server` and in the flip alike. |
@@ -330,7 +342,7 @@ The rest tune presentation and limits:
 
 > [!IMPORTANT]
 > Most of these are read once, when serving starts, so changing them needs a **server
-> restart**, not just a config reload: `host`, `port`, `allowed_hosts`,
+> restart**, not just a config reload: `host`, `port`,
 > both `file_drop_*` keys, every connection cap, and the two `*_max_concurrency`
 > limits. A config reload says so for all of them, on either surface: the browser
 > and the terminal app each warn you.
@@ -338,10 +350,11 @@ The rest tune presentation and limits:
 > `color` is read once too, but only by `dux server`, which is the only way of
 > serving that prints a console. A reload that changes it says so in the browser
 > and tells you it applies the next time you start `dux server`; the terminal app
-> stays quiet, because nothing it can start reads the setting.
+> stays quiet, because nothing it can start reads the setting. `qr_codes` is the same,
+> read when `dux server` or the start-web-server flip starts serving.
 >
-> The exceptions are `access_log`, `search_index_max_files`, `pty_send_timeout_seconds`
-> and the seven browser timing settings (`replay_wait_seconds`,
+> The exceptions are `allowed_hosts`, `access_log`, `search_index_max_files`,
+> `pty_send_timeout_seconds` and the seven browser timing settings (`replay_wait_seconds`,
 > `reconnect_backoff_cap_seconds`, `reconnect_attempts`,
 > `reconnect_attempt_timeout_seconds`, `changes_request_timeout_seconds`,
 > `heartbeat_seconds` and `heartbeat_deadline_seconds`), which a reload applies to a
@@ -398,6 +411,7 @@ You do not need shell access to the machine to change settings:
 - [Agents from the browser](/docs/web-agents): create, fork, adopt, and manage agents
   and their provider tabs.
 - [Reaching dux over Tailscale](/docs/tailscale): how the tailnet address is found and
-  bound, why a MagicDNS name needs `allowed_hosts`, and what plain HTTP costs you.
+  bound, how dux answers to your MagicDNS name, HTTPS with `tailscale serve`, the QR
+  codes, and what plain HTTP costs you.
 - [Hosting dux behind a login](/docs/public-hosting): a reverse proxy plus
   `oauth2-proxy` with GitHub in one Compose file.

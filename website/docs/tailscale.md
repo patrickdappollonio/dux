@@ -1,6 +1,6 @@
 ---
 title: Reaching dux over Tailscale
-description: How dux finds and binds your Tailscale address, why a MagicDNS name needs allowed_hosts, what plain HTTP costs you in the browser, how to put Tailscale's HTTPS proxy in front, and the caveats before you open your agents to a tailnet.
+description: How dux finds and binds your Tailscale address, answers to your MagicDNS name, picks up tailscale serve for HTTPS and shows QR codes for your phone, what plain HTTP costs you in the browser, what to check when the name does not resolve, and the caveats before you open your agents to a tailnet.
 group: Web UI
 order: 65
 ---
@@ -117,11 +117,13 @@ Tailscale address** row in the Preferences dialog. Both save the value to
 `config.toml` **and** apply it to the listener that is serving right now, and both
 tell you what actually happened rather than just "saved".
 
-- Choosing **`"no"`** stops the interface watcher and drops the Tailscale listener.
+- Choosing **`"no"`** stops the interface watcher, drops the Tailscale listener, and
+  stops dux answering to this machine's MagicDNS name.
   Anything connected over your tailnet loses its connection, including the browser
   tab you clicked in. That is allowed on purpose, and the row says so: reopen dux on
   its other address.
-- Choosing **`"yes"`** looks for the address right then. If nothing is found you get
+- Choosing **`"yes"`** looks for the address, and reads the MagicDNS name and any
+  `tailscale serve` route, right then. If no address is found you get
   a warning rather than an error, and the value still saves.
 - Choosing **`"auto"`** starts the watcher and probes immediately, so you see the
   outcome now instead of up to five seconds later.
@@ -132,35 +134,180 @@ listener starts, and the message says so. A run started with `dux server
 outranks the file; the value still saves for the next run. Editing the file and
 running `reload-config` is live too, and takes the same path.
 
-## The MagicDNS gotcha
+## Your MagicDNS name just works
 
-> [!IMPORTANT]
-> The raw `100.x` address works with no configuration. A **MagicDNS hostname works too, but
-> returns `403` until you allow it.**
+Unless the mode is `"no"`, dux asks Tailscale for this machine's own MagicDNS name and
+answers to it on any port, so `http://box.your-tailnet.ts.net:3890` opens dux with no
+configuration at all. The `dux server` banner lists that URL beside the listener
+addresses, and so do the addresses the terminal UI shows while it serves.
 
-dux runs a Host-header allowlist in front of everything, which is what stops a malicious web
-page from DNS-rebinding your browser into your server. It accepts `localhost` and any
-loopback address, a Host that is an IP literal it actually bound, and, unless the mode is
-`"no"`, any IP literal inside Tailscale's own ranges. So `http://100.101.102.103:3890` just
-works, and it keeps working even while the Tailscale leg is down.
+- **Only this machine's name.** Another machine on the same tailnet, a subdomain of this
+  name, or any other `.ts.net` name still gets a plain `403` reading *"this dux server
+  does not serve the requested host"*.
+- **It follows a rename.** dux reads the name again every five seconds or so, on `"yes"`
+  as well as `"auto"`, so renaming the machine or the whole tailnet moves it with no
+  restart: the new name starts working and the old one stops.
+- **Only a name Tailscale assigned.** The name must sit under your tailnet's `.ts.net`
+  domain. A tailnet run by another control server, such as Headscale, uses a domain its
+  operator chose, and that name goes in `allowed_hosts` like any other.
+- **It fails closed.** If a look at Tailscale fails, dux stops answering to the name until
+  the next look succeeds, a few seconds later at most.
+- **`"no"` turns it off** along with the Tailscale listener.
 
-A MagicDNS name like `box.tailnet.ts.net` is a hostname, never something dux bound, so it
-fails the check and you get a plain `403` reading *"this dux server does not serve the
-requested host"*. Say the name out loud once:
+> [!NOTE]
+> This is safe for the same reason the `100.x` addresses are. The host guard exists to stop
+> a web page you visit from pointing a name it controls at your machine. Your MagicDNS name
+> is handed out by your tailnet's administrator, and no web page can claim it. It is safe
+> only while the name stays on your tailnet, which is why Funnel turns it off (see the
+> caveats below).
+
+dux runs a Host-header allowlist in front of everything, and it also accepts `localhost`,
+any loopback address, an IP literal dux actually bound, and, unless the mode is `"no"`,
+any IP literal inside Tailscale's own ranges. So `http://100.101.102.103:3890` works too,
+even while the Tailscale listener is down.
+
+Any other name, such as a reverse proxy's hostname, goes in `allowed_hosts`:
 
 ```toml
 [server]
-allowed_hosts = ["box.tailnet.ts.net"]
+allowed_hosts = ["dux.example.com"]
 ```
 
 Hostnames only, no scheme and no port. Entries are matched case-insensitively and the port
-is ignored, so one entry covers every port. A trailing dot is stripped, so
-`box.tailnet.ts.net.` matches the same entry. There is no wildcard: `"*"` is a literal
-hostname and matches nothing.
+is ignored, so one entry covers every port. A trailing dot is stripped. There is no
+wildcard: `"*"` is a literal hostname and matches nothing. Edit the file and run
+**Reload config**, and the running server answers by the new list with no restart.
 
 dux's other browser defense, a same-origin check on socket upgrades and write requests,
 needs nothing from you here: a browser sitting at your tailnet URL sends a matching `Origin`
 and `Host`.
+
+## HTTPS with `tailscale serve`
+
+Tailscale can put a real certificate in front of dux, which buys back the clipboard and
+notification features [plain HTTP costs you](#plain-http-costs-you-a-few-browser-features),
+because `https://box.your-tailnet.ts.net` is a secure context and a plain tailnet address is
+not. dux needs no TLS setup of its own.
+
+1. In the Tailscale admin console, under **DNS**, make sure **MagicDNS** is on and turn on
+   **HTTPS Certificates**.
+2. Point Tailscale at dux's port, on the machine dux runs on:
+
+   ```bash
+   tailscale serve --bg 3890
+   ```
+
+3. Open `https://box.your-tailnet.ts.net` on any device on your tailnet.
+
+dux notices the route by itself, within about five seconds, and from then on
+lists the `https://` URL with its other addresses: in the `dux server` banner, in the
+addresses the terminal UI shows, and in the QR codes below. Both the terminal UI's status
+line and the browser's toasts say when a route to dux appears or goes away.
+
+> [!IMPORTANT]
+> **dux never runs `tailscale serve` for you.** It is a lasting change to the machine that
+> may need an administrator and fails outright where HTTPS certificates are off, so it is
+> yours to make. When MagicDNS is on and nothing serves dux yet, dux prints the exact
+> command once, as a tip, and leaves it there.
+
+> [!NOTE]
+> The first HTTPS visit can take around 30 seconds while Tailscale gets the certificate
+> issued. That happens once; later visits are immediate.
+
+What counts as a route to dux: one at the root (`/`) that forwards to dux's port on this
+machine (`127.0.0.1`, `localhost` or `[::1]`), which is exactly what
+`tailscale serve --bg <port>` sets up. A route mounted under a path, such as
+`--set-path /dux`, does not work, because dux's pages load everything from the root.
+`tailscale serve status` lists what is configured, and `tailscale serve --https=443 off`
+removes the route again (`tailscale serve reset` removes every route on the machine).
+
+`tailscale serve` keeps the name and the `https` origin when it forwards a request, and it
+carries WebSockets, so every terminal and the live change feed work through it as they do
+over the plain address.
+
+The plain Tailscale address keeps serving alongside the HTTPS one. To make HTTPS the only
+way in from the tailnet, run with `tailscale = "no"` (or `dux server --no-tailscale`) and
+list the name in `allowed_hosts`: `"no"` also stops dux answering to its name by itself,
+and the explicit entry is what lets the HTTPS route through.
+
+### QR codes for your phone
+
+`dux server` and the [start-web-server flip](/docs/server-mode#flip-a-running-tui-into-the-browser)
+show two QR codes, so a phone on your tailnet opens dux by pointing its camera at the
+screen: the Tailscale IP address on the left, and the MagicDNS name on the right, which is
+the `https://` URL when `tailscale serve` points at dux. Each code has its URL printed
+under it. They sit side by side when the window is wide enough and stack when it is not,
+and they appear again whenever those addresses change, so a rename or a new serve route
+gets a fresh pair.
+
+![The dux server console: the banner lists the loopback, Tailscale, MagicDNS and HTTPS addresses, and two QR codes sit side by side under it, one for http://100.101.102.103:3890 and one for https://demo-box.example-tailnet.ts.net.](/screens/server-qr-codes.png)
+
+![The start-web-server flip's status screen: the dux logo, then every address dux answers on including http://demo-box.example-tailnet.ts.net:3890 and https://demo-box.example-tailnet.ts.net, the same two QR codes side by side with their URLs under them, and the Activity panel below.](/screens/tui-flip-qr-codes.png)
+
+`dux server` prints them only when its output is a terminal, so a log piped to a file stays
+clean. The background server (`serve_while_tui`) never shows them, because the terminal UI
+stays on screen. Set `qr_codes = false` under `[server]` to hide them everywhere; the
+setting is read when a server starts.
+
+## When the name does not answer
+
+Work down this list; each check tells you which side the problem is on.
+
+**MagicDNS is off for the tailnet.** `tailscale dns status` says MagicDNS is disabled
+tailnet-wide. Turn it on in the admin console under **DNS**. Until then no `.ts.net` name
+resolves, and dux offers no name URL or QR code for one.
+
+**HTTPS certificates are off.** `tailscale serve` cannot get a certificate, and the
+`CertDomains` list in `tailscale status --json` is empty. Turn on **HTTPS Certificates** in
+the admin console under **DNS**.
+
+**This device is not using Tailscale DNS.** Common on Linux, where it can be switched off.
+`tailscale dns status` should report Tailscale DNS as enabled; turn it on with:
+
+```bash
+sudo tailscale set --accept-dns=true
+```
+
+(In the Tailscale app it is the **Use Tailscale DNS** setting.) On Linux with
+systemd-resolved, `resolvectl status tailscale0` should then list `100.100.100.100` as a DNS
+server.
+
+**You use a custom resolver such as NextDNS.** That works when you set it as the tailnet's
+global nameserver in the admin console: Tailscale's own resolver answers `.ts.net` names
+itself and forwards everything else to yours. A device that skips Tailscale DNS and talks to
+the custom resolver directly does not resolve `.ts.net` names at all.
+
+**Telling "the name exists" from "this device cannot see it".** Ask both resolvers:
+
+```bash
+getent hosts box.your-tailnet.ts.net                   # what this device resolves
+dig +short box.your-tailnet.ts.net @100.100.100.100    # what Tailscale itself answers
+```
+
+If Tailscale answers and the device does not, the device is not using Tailscale DNS (see
+above). If neither answers, the name is wrong or MagicDNS is off: `tailscale status` shows
+every machine's exact name.
+
+**The tailnet was renamed.** The tailnet's name is the middle part of every MagicDNS name,
+so all of them change with it, certificate included. dux follows on its own, but bookmarks
+and codes you scanned earlier point at the old name: scan again. If the old answer lingers
+in a DNS cache, flush it (`resolvectl flush-caches` on Linux with systemd-resolved).
+
+**A `403` reading *"this dux server does not serve the requested host"*.** The mode is
+`"no"`, the name belongs to another machine, dux has not read the name yet (on `"auto"` it
+does within seconds of starting), the last look at Tailscale failed, or a Tailscale Funnel
+route is on (see the caveats below).
+
+**Every page answers `503`.** The page says which of three things it is. *Checking*: dux has
+just started and its first look at Tailscale has not answered yet; wait a moment. *Could not
+confirm*: the `tailscale` command failed, did not answer, or could not reach its daemon,
+so dux cannot tell whether a Funnel publishes it; fix `tailscaled` first (`tailscale
+status` shows what it says). Setting `tailscale = "no"` also gets you in, but it turns off
+dux's Funnel protection, so keep it as a last resort. *A Funnel is publishing dux*: turn it
+off (see the caveats below).
+
+**The first HTTPS visit hangs.** Give it about 30 seconds: that is the certificate being
+issued, once.
 
 ## Plain HTTP costs you a few browser features
 
@@ -194,9 +341,8 @@ to the editor on the machine you are sitting at, is disabled on any tailnet addr
 a host check, not a certificate one.
 
 > [!TIP]
-> If those tradeoffs bother you, terminate TLS in a reverse proxy in front of dux and add its
-> hostname to `allowed_hosts`. Tailscale ships one, and
-> [the recipe is below](#putting-the-tailscale-https-proxy-in-front).
+> If those tradeoffs bother you, put Tailscale's own HTTPS in front of dux:
+> [one command, and dux picks it up by itself](#https-with-tailscale-serve).
 
 ## Caveats worth knowing
 
@@ -222,60 +368,35 @@ to reach this machine at 2am from a phone, disable key expiry for it in the Tail
 console.
 
 > [!CAUTION]
-> **Do not use Tailscale Funnel for this.** Funnel publishes a service to the anonymous
-> public internet, and dux has no login. dux offers no support for it.
+> **dux is not meant to be exposed through Tailscale Funnel.** Funnel publishes a service to
+> the anonymous public internet, and dux has no login. What dux does about it:
+>
+> - **It refuses every request that Tailscale marks as having come through Funnel**, on every
+>   mode. Tailscale 1.72 and later mark them.
+> - **While a Funnel on this machine forwards to dux's port, it refuses every request** on
+>   every address, with a page saying why, until that Funnel is gone. That covers raw
+>   connections and older Tailscale versions, which carry no mark and can claim to be
+>   `localhost`. It also stops answering to this machine's name while any Funnel is on.
+> - **It refuses everything until it has checked, and whenever it cannot check.** Unless the
+>   mode is `"no"`, every request answers "checking" until dux's first look at Tailscale
+>   lands, a moment after it starts. Whenever a look fails, did not answer, or cannot reach the
+>   daemon, dux refuses everything with a page saying it could not confirm that no Funnel
+>   publishes it, until a look succeeds. Fix `tailscaled` first; `tailscale = "no"` also gets
+>   you in, but it turns off this protection. dux looks for the `tailscale` command on your
+>   `PATH` and where Tailscale's macOS apps put it. Only when it finds none, or none can reach
+>   a daemon, AND this machine has no Tailscale address at all, does dux conclude that nothing
+>   can publish it and serve.
+>
+> Each of these says so in a warning, and a failed check never lifts one. Turn the Funnel off
+> (`tailscale funnel status` lists it) and dux goes back to normal by itself.
 
-## Putting the Tailscale HTTPS proxy in front
-
-Tailscale can terminate HTTPS for a local service, which buys back the clipboard and
-notification features above, because `https://box.tailnet.ts.net` is a secure context and a
-plain tailnet IP is not. dux needs no TLS setup of its own.
-
-Serve dux on loopback, then point the proxy at that port:
-
-```bash
-dux server --bind 127.0.0.1:3890
-tailscale serve --bg 3890
-```
-
-Then allow the node's MagicDNS name:
-
-```toml
-[server]
-allowed_hosts = ["box.tailnet.ts.net"]
-```
-
-Open `https://box.tailnet.ts.net` and you are done. The socket URLs are derived from the
-page, so they become `wss://` on their own.
-
-The Tailscale leg is still added on top of your `--bind` address, so dux is also answering
-plain HTTP directly on `100.x:3890` alongside the proxied URL. To make the HTTPS path the
-only way in, add `--no-tailscale` to the `dux server` line and let the proxy own the tailnet
-side.
-
-> [!NOTE]
-> The plain address is the path the maintainer uses daily. This proxy path is documented from
-> dux's behaviour rather than from a tested recipe.
-
-If it does not work, check two things.
-
-**Does the proxy pass WebSockets through?** Every terminal rides a WebSocket, and so does the
-change feed that tells the page when anything moved, so without them dux is unusable rather
-than degraded. Nothing returns an error you can see: the page loads, looks right, and then
-nothing is live, with the in-app *Reconnecting…* overlay sitting there.
-
-**What `Host` and `Origin` does the proxy send?** The host allowlist tests `Host` on every
-request, and a same-origin check compares the `Origin`'s host and port against `Host` on
-every WebSocket upgrade and every write request. A proxy that forwards the original `Host`
-satisfies both, once that hostname is in `allowed_hosts`. A proxy that rewrites `Host` to its
-backend target (`127.0.0.1:3890`) passes the allowlist, since loopback is always allowed, and
-then fails the origin check, because the browser still sends the external name as `Origin`.
-Preserving the original `Host` is the fix; adding a rewritten one to `allowed_hosts` only
-silences the first check.
-
-The response body of a `403` says which check fired: *"this dux server does not serve the
-requested host"* is the allowlist, and *"cross-origin WebSocket upgrade rejected"* (or
-*"cross-origin request rejected"* on a write) is the same-origin check.
+> [!WARNING]
+> Know the limits. dux looks every few seconds, so a Funnel switched on while dux runs is
+> refused at the next look; with Tailscale 1.72 or later, a web Funnel is refused at once by
+> its mark. dux only sees **this machine's** Funnels: another machine on your tailnet
+> funnelling to this one's Tailscale address is invisible to it. On `"no"` dux does not
+> consult Tailscale at all, so only the mark is checked, and switching to `"no"` lifts a
+> refusal, with a warning that says so.
 
 ## Where to go next
 

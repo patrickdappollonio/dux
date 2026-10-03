@@ -949,12 +949,18 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Extra Host header values to accept on NON-same-origin requests. dux\n\
                  # always serves on host:port and accepts same-origin requests; list any\n\
-                 # additional hostnames a reverse proxy or tailnet name forwards under\n\
-                 # so the host guard does not reject them. Hostnames only, no scheme or\n\
-                 # port. Examples:\n\
-                 #   allowed_hosts = [\"box.tailnet.ts.net\"]\n\
+                 # additional hostnames a reverse proxy forwards under so the host\n\
+                 # guard does not reject them. Hostnames only, no scheme or port.\n\
+                 # Examples:\n\
                  #   allowed_hosts = [\"dux.example.com\"]\n\
-                 # Leave empty for a plain loopback or proxy-fronted deployment.",
+                 #   allowed_hosts = [\"dux.example.com\", \"dux.lan\"]\n\
+                 # THIS machine's own Tailscale MagicDNS name (box.your-tailnet.ts.net)\n\
+                 # needs no entry: while tailscale is not \"no\", dux reads it from the\n\
+                 # tailscale CLI, accepts it on any port (so `tailscale serve` works),\n\
+                 # and follows it if the tailnet is renamed. Every other ts.net name is\n\
+                 # still refused unless you list it here.\n\
+                 # Leave empty for a plain loopback or proxy-fronted deployment.\n\
+                 # A config reload applies this to a running server right away.",
             )),
             value_fn: |c| FieldValue::StrList(c.server.allowed_hosts.clone()),
         },
@@ -1002,6 +1008,23 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # Applies the next time the flip starts.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.log_viewer_lines),
+        },
+        ConfigEntry::Field {
+            key: "qr_codes",
+            comment: Some(CommentSource::Static(
+                "# Show QR codes for this machine's tailnet addresses, so a phone can\n\
+                 # open dux by pointing its camera at the screen: one for the Tailscale\n\
+                 # IP and one for the MagicDNS name (the https URL when `tailscale\n\
+                 # serve` points at dux), side by side when the window is wide enough\n\
+                 # and stacked when it is not, each with its URL under it.\n\
+                 # They appear in `dux server` (only when its output is a terminal, so\n\
+                 # piped logs stay clean) and in the start-web-server flip, when the\n\
+                 # server starts and again whenever those addresses appear or change.\n\
+                 # The background server (serve_while_tui) never shows them, because\n\
+                 # the TUI stays on screen. Set false to hide them.\n\
+                 # Read when a server starts, so a change applies the next time one does.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.server.qr_codes),
         },
         ConfigEntry::Field {
             key: "serve_while_tui",
@@ -2598,6 +2621,7 @@ mod tests {
         assert!(rendered.contains("color = \"auto\""));
         assert!(rendered.contains("access_log = true"));
         assert!(rendered.contains("log_viewer_lines = 2000"));
+        assert!(rendered.contains("qr_codes = true"));
         assert!(rendered.contains("serve_while_tui = false"));
         assert!(rendered.contains("max_websocket_events_connections = 32"));
         assert!(rendered.contains("max_websocket_agent_connections = 32"));

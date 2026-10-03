@@ -26,6 +26,17 @@ const fixture = journey.fixture || "steady"
 // (a serving port, a set of macros, a theme) does not have to type it into a
 // dialog first. Takes the rendered config text and returns the text to write.
 const patchConfig = journey.config || ((text) => text)
+// What runs in the captured terminal: the terminal UI (the default), or
+// `dux server`, whose console is what a journey shooting the server's own
+// output wants on screen.
+const launch = journey.launch || "tui"
+if (!["tui", "server"].includes(launch)) fail(`journey.launch must be "tui" or "server", not ${launch}`, 64)
+// An optional stand-in for the Tailscale CLI, so a journey can show dux on a
+// tailnet in a container that has none. See standInTailscale below.
+const tailscale = journey.tailscale || null
+// Not under /capture: that is a tmpfs, which Docker mounts noexec, so a script
+// written there cannot run. The container's own layer is disposable too.
+const standInBin = "/opt/dux-stand-in/bin"
 
 function readInteger(name, fallback, minimum) {
   const value = Number(process.env[name] || fallback)
@@ -121,6 +132,39 @@ function seedLooseWorktree(project, branch) {
   fs.mkdirSync(path.dirname(at), { recursive: true })
   git(repo, "worktree", "add", "-q", "-b", branch, at, "HEAD")
   fs.appendFileSync(path.join(at, "README.md"), "\nA note left in this worktree.\n")
+}
+
+/// Put a stand-in `tailscale` on the PATH dux is started with, answering the
+/// three questions dux asks (`ip`, `status --json --peers=false` and
+/// `serve status --json`) with the journey's answers and failing anything else,
+/// and give the container's loopback interface the address it reports, so the
+/// Tailscale listener really binds. The capture container is disposable and has
+/// its own network namespace, which is the only reason that second step is
+/// acceptable; it needs the NET_ADMIN capability compose grants the capture
+/// service.
+function standInTailscale() {
+  if (!tailscale) return
+  const { ip, status, serve } = tailscale
+  if (!ip || !status || !serve) fail("journey.tailscale needs ip, status and serve", 64)
+  const dir = "/capture/tailscale"
+  fs.mkdirSync(dir, { recursive: true })
+  fs.mkdirSync(standInBin, { recursive: true })
+  fs.writeFileSync(path.join(dir, "status.json"), status)
+  fs.writeFileSync(path.join(dir, "serve.json"), serve)
+  const script = path.join(standInBin, "tailscale")
+  fs.writeFileSync(
+    script,
+    `#!/bin/sh
+case "$*" in
+  "ip") echo ${ip} ;;
+  "status --json --peers=false") cat ${dir}/status.json ;;
+  "serve status --json") cat ${dir}/serve.json ;;
+  *) echo "the stand-in tailscale only answers what dux asks" >&2; exit 1 ;;
+esac
+`,
+  )
+  fs.chmodSync(script, 0o755)
+  run("ip", ["addr", "add", `${ip}/32`, "dev", "lo"])
 }
 
 function tmux(...args) {
@@ -340,13 +384,18 @@ async function selectAgent(name, maxRows = 24) {
 
 async function main() {
   seedState()
+  standInTailscale()
+  const searchPath = tailscale ? `${standInBin}:${process.env.PATH}` : process.env.PATH
+  const command = launch === "server" ? "dux server" : "dux"
   tmux(
     "new-session", "-d", "-c", "/", "-x", String(cols), "-y", String(rows), "-s", session,
-    `env DUX_HOME='${duxHome}' DUX_FAKE_FIXTURE='${fixture}' TERM=xterm-256color COLORTERM=truecolor dux`,
+    `env DUX_HOME='${duxHome}' DUX_FAKE_FIXTURE='${fixture}' PATH='${searchPath}' TERM=xterm-256color COLORTERM=truecolor ${command}`,
   )
-  await waitFor("Press a to add a project")
-  await addProject("/capture/repos/demo-api", "demo-api")
-  await addProject("/capture/repos/demo-web", "demo-web")
+  if (launch === "tui") {
+    await waitFor("Press a to add a project")
+    await addProject("/capture/repos/demo-api", "demo-api")
+    await addProject("/capture/repos/demo-web", "demo-web")
+  }
   await journey({
     addTab,
     captureText,

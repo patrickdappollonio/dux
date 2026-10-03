@@ -161,6 +161,9 @@ fn serve(
 ) -> (BackgroundServer, std::net::SocketAddr) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
     let addr = listener.local_addr().expect("bound address");
+    // Not a test about Tailscale: on any other mode every request waits on the
+    // first Funnel check, which would consult this machine's real CLI.
+    engine.config.server.tailscale = "no".to_string();
     let server = BackgroundServer::start(
         engine,
         vec![listener],

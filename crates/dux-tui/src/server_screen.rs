@@ -396,6 +396,9 @@ pub struct ServerStatusScreen {
     bindings: RuntimeBindings,
     /// Every bound URL, shown in the header so the user can pick one.
     urls: Vec<String>,
+    /// The live URL list version last drawn, so the header redraws when the
+    /// serve publishes a new list.
+    urls_version: u64,
     started: Instant,
     /// Uptime second most recently drawn, so [`Self::tick`] redraws only when
     /// the visible value actually changes (wall-clock, not per engine-loop tick).
@@ -446,6 +449,7 @@ impl ServerStatusScreen {
             theme,
             bindings: RuntimeBindings::from_keys_config(keys),
             urls: urls.to_vec(),
+            urls_version: 0,
             started: Instant::now(),
             last_drawn_secs: 0,
             view: LogView::new(activity.capacity()),
@@ -546,7 +550,12 @@ impl ServerStatusScreen {
         let before = (self.view.generation, self.view.pin_version);
         let arrived = self.view.sync(&self.activity, &self.theme);
         self.scroll.lines_arrived(arrived.lines, arrived.rows);
-        before != (self.view.generation, self.view.pin_version)
+        // The header's URL list moves on its own counter (a rename, the
+        // Tailscale leg coming and going), not with the log's lines.
+        let urls_version = self.activity.urls_version();
+        let urls_moved = urls_version != self.urls_version;
+        self.urls_version = urls_version;
+        urls_moved || before != (self.view.generation, self.view.pin_version)
     }
 
     fn scroll_by(&mut self, action: Action) {
@@ -568,7 +577,8 @@ impl ServerStatusScreen {
     /// footer hints. Nothing is drawn once the terminal has been handed back.
     fn draw(&mut self, uptime_secs: u64) -> Result<()> {
         let theme = &self.theme;
-        let header = header_lines(&self.urls, uptime_secs);
+        let urls = header_urls(&self.activity.serve_urls(), &self.urls);
+        let header = header_lines(&urls, uptime_secs);
         let shutdown = match (self.shutdown_message.as_deref(), self.shutdown_done) {
             (None, _) => ShutdownPhase::Serving,
             (Some(message), false) => ShutdownPhase::Waiting(message),
@@ -1026,6 +1036,28 @@ fn tone_color(theme: &Theme, tone: LogTone) -> ratatui::style::Color {
     }
 }
 
+/// A QR code's rich spelling is dark modules drawn on light (it is the same
+/// text `dux server` prints black on white), so the darker of the theme's text
+/// and background is the ink and the lighter is the paper.
+fn qr_style(theme: &Theme) -> Style {
+    if theme.background_is_lighter_than_text() {
+        Style::default().fg(theme.text_fg).bg(theme.app_bg)
+    } else {
+        Style::default().fg(theme.app_bg).bg(theme.text_fg)
+    }
+}
+
+/// The URLs the header lists: the serve's live list once it has published one
+/// (its listeners, this machine's MagicDNS URL, any `tailscale serve` route),
+/// and the addresses captured as the flip started until then.
+fn header_urls(live: &[String], captured: &[String]) -> Vec<String> {
+    if live.is_empty() {
+        captured.to_vec()
+    } else {
+        live.to_vec()
+    }
+}
+
 /// Draw one server log line from its segments, with every segment's text
 /// exactly as `dux server` prints it (its rich spelling: the tone glyph, never
 /// color alone) and each role styled through the theme.
@@ -1054,6 +1086,7 @@ fn log_line(line: &LogLine, theme: &Theme) -> Line<'static> {
                     .fg(theme.text_fg)
                     .add_modifier(Modifier::BOLD),
                 LogRole::Url => Style::default().fg(theme.title_focused),
+                LogRole::QrCode => qr_style(theme),
                 LogRole::Status(code) => Style::default().fg(match code {
                     200..=299 => theme.success_fg,
                     300..=399 => theme.title_focused,
@@ -1104,6 +1137,47 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn a_qr_code_is_drawn_dark_on_light_in_the_themes_own_colors() {
+        let theme = Theme::default_dark();
+        let lines = dux_core::serve_log::qr_lines(
+            "12:00:00",
+            &["http://100.101.102.103:3890".to_string()],
+            120,
+        );
+        let row = lines
+            .iter()
+            .find(|line| line.text().contains('█'))
+            .expect("a row with modules on it");
+        let drawn = log_line(row, &theme);
+        let code = drawn
+            .spans
+            .iter()
+            .find(|span| span.content.contains('█') || span.content.contains('▀'))
+            .expect("a code row");
+        // The dark theme's background is the darker of its two colors, so it
+        // is the ink and the text color is the paper.
+        assert_eq!(code.style.fg, Some(theme.app_bg));
+        assert_eq!(code.style.bg, Some(theme.text_fg));
+        assert_eq!(
+            line_text(&drawn),
+            row.text(),
+            "the same characters dux server prints in color"
+        );
+    }
+
+    #[test]
+    fn the_header_lists_the_live_urls_once_the_serve_has_published_them() {
+        let captured = vec!["http://127.0.0.1:3890".to_string()];
+        assert_eq!(header_urls(&[], &captured), captured, "nothing live yet");
+        let live = vec![
+            "http://127.0.0.1:3890".to_string(),
+            "http://100.101.102.103:3890".to_string(),
+            "https://demo-box.example-tailnet.ts.net".to_string(),
+        ];
+        assert_eq!(header_urls(&live, &captured), live);
     }
 
     #[test]

@@ -27,6 +27,13 @@ const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
+/// Black on bright white, for a QR code: the one place the log picks a
+/// background, because a code must be dark on light whatever the terminal's own
+/// colors are, and no scanner is obliged to read one the other way round.
+const QR_COLORS: &str = "\x1b[30;107m";
+
+/// Indent of every QR row, matching the banner's listener rows.
+pub const QR_INDENT: &str = "  ";
 
 /// How a log line reads at a glance: the glyph it carries and the color a
 /// surface paints it.
@@ -91,6 +98,11 @@ pub enum LogRole {
     Method,
     /// An access line's status code, styled by its class.
     Status(u16),
+    /// Part of a QR code. Its rich spelling is drawn dark on light (stdout in
+    /// color forces black on bright white, the flip's viewer uses the darker
+    /// and the lighter of its theme's text and background); its plain spelling
+    /// is drawn for a dark terminal with no colors at all.
+    QrCode,
     /// Spacing, separators and anything else with no meaning of its own.
     Plain,
 }
@@ -135,6 +147,7 @@ impl LogSegment {
             LogRole::Label | LogRole::Method => Some(BOLD),
             LogRole::Url => Some(CYAN),
             LogRole::Status(code) => status_ansi(code),
+            LogRole::QrCode => Some(QR_COLORS),
             LogRole::Message(_) | LogRole::Plain => None,
         }
     }
@@ -265,18 +278,7 @@ impl Banner {
                 LogSegment::plain(format!("  {}", self.mode)),
             ],
         }];
-        for row in &self.listeners {
-            out.push(LogLine {
-                segments: vec![
-                    LogSegment::plain("  "),
-                    LogSegment::marker(LogTone::Info, "->"),
-                    LogSegment::plain(" "),
-                    LogSegment::new(row.label.clone(), LogRole::Label),
-                    LogSegment::plain(": "),
-                    LogSegment::new(row.url.clone(), LogRole::Url),
-                ],
-            });
-        }
+        out.extend(listener_lines(&self.listeners));
         for note in self.warnings.iter().chain(self.security_note.iter()) {
             out.push(LogLine {
                 segments: vec![
@@ -289,6 +291,63 @@ impl Banner {
         }
         out
     }
+}
+
+/// Listener rows as the banner draws them, for addresses that become known after
+/// the banner was printed (this machine's MagicDNS name, a `tailscale serve`
+/// route), so they read exactly like the rows above them.
+pub fn listener_lines(rows: &[ListenerRow]) -> Vec<LogLine> {
+    rows.iter()
+        .map(|row| LogLine {
+            segments: vec![
+                LogSegment::plain("  "),
+                LogSegment::marker(LogTone::Info, "->"),
+                LogSegment::plain(" "),
+                LogSegment::new(row.label.clone(), LogRole::Label),
+                LogSegment::plain(": "),
+                LogSegment::new(row.url.clone(), LogRole::Url),
+            ],
+        })
+        .collect()
+}
+
+/// QR codes for `urls` (the Tailscale IP URL, then the MagicDNS one), laid out
+/// by [`crate::qr::layout`] in `columns` columns, side by side when they fit and
+/// stacked when they do not, each with its URL under it, after a caption.
+/// Empty when there is nothing to draw.
+///
+/// Each code segment carries both spellings: the rich one drawn dark on light,
+/// and the plain one drawn for a dark terminal, so stdout with color off still
+/// shows a code a camera reads.
+pub fn qr_lines(hms: &str, urls: &[String], columns: usize) -> Vec<LogLine> {
+    let refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+    let available = columns.saturating_sub(QR_INDENT.len());
+    let dark = crate::qr::layout(&refs, available, crate::qr::Polarity::DarkModulesFilled);
+    let light = crate::qr::layout(&refs, available, crate::qr::Polarity::LightModulesFilled);
+    if dark.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![LogLine::event(
+        hms,
+        LogTone::Info,
+        "Scan to open dux from your phone:",
+    )];
+    for (dark_row, light_row) in dark.iter().zip(&light) {
+        let mut segments = vec![LogSegment::plain(QR_INDENT)];
+        for (dark_seg, light_seg) in dark_row.iter().zip(light_row) {
+            segments.push(match (dark_seg, light_seg) {
+                (crate::qr::Segment::Code(rich), crate::qr::Segment::Code(plain)) => LogSegment {
+                    text: rich.clone(),
+                    plain: Some(plain.clone()),
+                    role: LogRole::QrCode,
+                },
+                (other, _) if other.text().trim().is_empty() => LogSegment::plain(other.text()),
+                (other, _) => LogSegment::new(other.text(), LogRole::Url),
+            });
+        }
+        out.push(LogLine { segments });
+    }
+    out
 }
 
 /// What a serve learned before it bound: warnings to print first, the
@@ -413,6 +472,100 @@ mod tests {
             warnings: vec!["Tailscale: waiting for the interface (auto).".to_string()],
             security_note: Some("Reachable by other devices on your tailnet.".to_string()),
         }
+    }
+
+    // ── QR codes and tailnet rows ──────────────────────────────────────────
+
+    const QR_IP: &str = "http://100.101.102.103:3890";
+    const QR_NAME: &str = "https://demo-box.example-tailnet.ts.net";
+
+    #[test]
+    fn a_qr_block_is_a_caption_then_the_shared_layout_in_both_spellings() {
+        let urls = [QR_IP.to_string(), QR_NAME.to_string()];
+        let lines = qr_lines("12:00:00", &urls, 120);
+        assert_eq!(
+            lines[0].text(),
+            format!(
+                "12:00:00 {} Scan to open dux from your phone:",
+                LogTone::Info.glyph()
+            )
+        );
+        let refs = [QR_IP, QR_NAME];
+        let dark = crate::qr::layout(
+            &refs,
+            120 - QR_INDENT.len(),
+            crate::qr::Polarity::DarkModulesFilled,
+        );
+        let light = crate::qr::layout(
+            &refs,
+            120 - QR_INDENT.len(),
+            crate::qr::Polarity::LightModulesFilled,
+        );
+        let rows = &lines[1..];
+        assert_eq!(rows.len(), dark.len());
+        for ((line, dark), light) in rows.iter().zip(&dark).zip(&light) {
+            let codes: Vec<&LogSegment> = line
+                .segments
+                .iter()
+                .filter(|s| s.role == LogRole::QrCode)
+                .collect();
+            let dark_codes: Vec<&str> = dark
+                .iter()
+                .filter_map(|s| match s {
+                    crate::qr::Segment::Code(c) => Some(c.as_str()),
+                    crate::qr::Segment::Text(_) => None,
+                })
+                .collect();
+            let light_codes: Vec<&str> = light
+                .iter()
+                .filter_map(|s| match s {
+                    crate::qr::Segment::Code(c) => Some(c.as_str()),
+                    crate::qr::Segment::Text(_) => None,
+                })
+                .collect();
+            assert_eq!(
+                codes.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+                dark_codes,
+                "the rich spelling is drawn dark on light"
+            );
+            assert_eq!(
+                codes
+                    .iter()
+                    .map(|s| s.plain.as_deref().unwrap_or(&s.text))
+                    .collect::<Vec<_>>(),
+                light_codes,
+                "the plain spelling is drawn for a dark terminal"
+            );
+        }
+        let labels = lines.last().unwrap();
+        assert!(labels.text().contains(QR_IP) && labels.text().contains(QR_NAME));
+        assert!(labels.segments.iter().any(|s| s.role == LogRole::Url));
+        assert!(qr_lines("12:00:00", &[], 120).is_empty());
+    }
+
+    #[test]
+    fn a_qr_code_renders_black_on_white_in_color_and_plain_without() {
+        let lines = qr_lines("12:00:00", &[QR_IP.to_string()], 120);
+        let colored = lines[1].render(true);
+        assert!(colored.contains("\x1b[30;107m"), "{colored:?}");
+        let plain = lines[1].render(false);
+        assert!(!plain.contains('\x1b'), "{plain:?}");
+    }
+
+    #[test]
+    fn tailnet_rows_read_like_the_banners_listener_rows() {
+        let row = ListenerRow {
+            label: "Tailscale (MagicDNS)".to_string(),
+            url: "http://demo-box.example-tailnet.ts.net:3890".to_string(),
+        };
+        let banner = Banner {
+            listeners: vec![row.clone()],
+            ..sample_banner()
+        };
+        assert_eq!(
+            listener_lines(std::slice::from_ref(&row))[0],
+            banner.lines()[1]
+        );
     }
 
     #[test]

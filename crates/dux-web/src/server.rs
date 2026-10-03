@@ -333,6 +333,14 @@ pub struct RouterParams {
     /// while dux serves moves the guard with the listener. `None` in tests and on
     /// any path with no live mode control.
     pub live_tailscale_host_literals: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The set the serve loop writes this machine's own MagicDNS name into, when
+    /// a serve is behind this router. The Host guard admits that one name while
+    /// the Tailscale mode is not `no` (rule 6). `None` admits no tailnet name.
+    pub live_own_magicdns_name: Option<crate::host_guard::LiveHostNames>,
+    /// The serve's Funnel-lockout cell: while it is set, the Host guard refuses
+    /// every request (a raw TCP Funnel forwards to dux's port). `None` in tests
+    /// and on any path with no serve loop behind it.
+    pub live_funnel_lockout: Option<crate::host_guard::FunnelLockoutCell>,
     /// The handle the Tailscale-mode route changes `[server] tailscale` through
     /// while dux serves. `None` on any path with no serve loop behind it, and in
     /// tests.
@@ -394,6 +402,8 @@ impl RouterParams {
             configured_hosts: Vec::new(),
             tailscale_host_literals: false,
             live_tailscale_host_literals: None,
+            live_own_magicdns_name: None,
+            live_funnel_lockout: None,
             tailscale_mode_control: None,
             tailscale_forced_no: false,
             create_await_timeout: None,
@@ -582,6 +592,20 @@ impl RouterParams {
         self.live_tailscale_host_literals = Some(cell);
         self
     }
+
+    /// Let the Host guard admit this machine's own MagicDNS name from the set the
+    /// serve loop keeps up to date, so a tailnet rename applies with no restart.
+    pub fn with_live_own_magicdns_name(mut self, names: crate::host_guard::LiveHostNames) -> Self {
+        self.live_own_magicdns_name = Some(names);
+        self
+    }
+
+    /// Let the Host guard refuse every request while the serve's Funnel-lockout
+    /// cell is set.
+    pub fn with_live_funnel_lockout(mut self, cell: crate::host_guard::FunnelLockoutCell) -> Self {
+        self.live_funnel_lockout = Some(cell);
+        self
+    }
 }
 
 /// Build the dux web router. dux is trusted-local: there is no login gate, so
@@ -703,9 +727,11 @@ pub fn build_app(
     // engine's config because a serve path or a test may pass either.
     let live_limits = engine.live_limits();
     live_limits.set_access_log(params.access_log);
+    live_limits.set_allowed_hosts(&params.configured_hosts);
     live_limits.set_search_index_max_files(params.search_index_max_files);
     live_limits.set_pty_send_timeout_seconds(params.pty_send_timeout_seconds as usize);
     live_limits.set_heartbeat_deadline_seconds(params.heartbeat_deadline_seconds as usize);
+    let guard_allowed_hosts = live_limits.allowed_hosts();
     let state = AppState {
         engine,
         console: params.console,
@@ -832,16 +858,34 @@ pub fn build_app(
     // Host allowlist (DNS-rebinding defense): outermost layer so it runs before
     // the access log. Active when bound_ips is non-empty; tests that do not
     // exercise the host guard leave bound_ips empty, keeping the guard off.
-    if !params.bound_ips.is_empty() || !params.configured_hosts.is_empty() {
-        crate::host_guard::host_allowlist_layer(
-            router,
-            params.bound_ips,
-            params.configured_hosts,
+    // Installed on every router: the Funnel lockout and the Funnel marker hold
+    // whatever was recorded about the bound addresses. The Host rules need a
+    // bound address to mean anything, and every serve path passes its own; a
+    // router built with neither bound addresses nor configured hosts (the
+    // in-crate test routers) skips the Host rules alone.
+    let host_rules = !params.bound_ips.is_empty() || !params.configured_hosts.is_empty();
+    {
+        // Rule 4 reads the live limits' set rather than the list handed in, so
+        // a config reload rewrites `allowed_hosts` under this router.
+        let mut allowlist = crate::host_guard::HostAllowlist::new(
+            &params.bound_ips,
+            &[],
             params.tailscale_host_literals,
-            params.live_tailscale_host_literals,
         )
-    } else {
-        router
+        .with_live_configured_hosts(guard_allowed_hosts);
+        if let Some(cell) = params.live_tailscale_host_literals {
+            allowlist = allowlist.with_live_tailscale_literals(cell);
+        }
+        if let Some(names) = params.live_own_magicdns_name {
+            allowlist = allowlist.with_live_own_magicdns_name(names);
+        }
+        if let Some(cell) = params.live_funnel_lockout {
+            allowlist = allowlist.with_funnel_lockout(cell);
+        }
+        if !host_rules {
+            allowlist = allowlist.without_host_rules();
+        }
+        crate::host_guard::host_allowlist_layer(router, allowlist)
     }
 }
 
@@ -908,8 +952,11 @@ async fn log_request(
 // controlled hostname at this server's IP (the browser then sends a matching
 // Origin/Host pair). The host allowlist (see `host_guard::host_allowlist_layer`)
 // runs AHEAD of the whole app on every serve path and pins the accepted `Host`
-// values to loopback, the addresses dux actually bound, and any configured
-// `allowed_hosts`, returning 403 for a mismatched Host and closing that gap. This
+// values to loopback, the addresses dux actually bound, this machine's own
+// MagicDNS name, and any configured `allowed_hosts`, returning 403 for a
+// mismatched Host and closing that gap. A `tailscale serve` route forwards the
+// Host and the `https` Origin unchanged, so the authority comparison below holds
+// for it as it does for a direct request. This
 // same-origin check remains the WS-specific defense layered on top.
 fn same_origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
@@ -5936,6 +5983,295 @@ mod tests {
             served.status(),
             StatusCode::OK,
             "the same router must serve it once the mode wants Tailscale"
+        );
+    }
+
+    fn host_probe(
+        method: &str,
+        host: &str,
+        origin: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder()
+            .method(method)
+            .uri("/healthz")
+            .header("Host", host);
+        if let Some(origin) = origin {
+            builder = builder.header("Origin", origin);
+        }
+        builder.body(axum::body::Body::empty()).unwrap()
+    }
+
+    /// Rule 6 end to end, on one router for the whole journey: this machine's
+    /// own MagicDNS name is served, a sibling on the same tailnet is not, a
+    /// tailnet rename moves the allowed name under the running router, and a
+    /// mode change to `no` closes it with the literals.
+    #[tokio::test]
+    async fn host_guard_serves_this_machines_own_magicdns_name_and_follows_a_rename() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let handle = test_engine_handle(tmp.path());
+        let literals = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let own_name =
+            crate::host_guard::LiveHostNames::new(&["demo-box.old-tailnet.ts.net".to_string()]);
+        let app = build_app(
+            handle,
+            Router::new(),
+            RouterParams::plain_http()
+                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
+                .with_live_tailscale_host_literals(Arc::clone(&literals))
+                .with_live_own_magicdns_name(own_name.clone()),
+        );
+        let status = |host: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(host_probe("GET", host, None))
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        assert_eq!(
+            status("demo-box.old-tailnet.ts.net:3890").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("laptop.old-tailnet.ts.net:3890").await,
+            StatusCode::FORBIDDEN,
+            "another machine's name on the same tailnet is still refused"
+        );
+
+        own_name.replace(&["demo-box.example-tailnet.ts.net".to_string()]);
+        assert_eq!(
+            status("demo-box.example-tailnet.ts.net:3890").await,
+            StatusCode::OK,
+            "the renamed tailnet's name is served with no restart"
+        );
+        assert_eq!(
+            status("demo-box.old-tailnet.ts.net:3890").await,
+            StatusCode::FORBIDDEN,
+            "and the old name is not"
+        );
+
+        literals.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            status("demo-box.example-tailnet.ts.net:3890").await,
+            StatusCode::FORBIDDEN,
+            "tailscale = \"no\" refuses the tailnet name with the tailnet literals"
+        );
+    }
+
+    /// A request that came through Tailscale Funnel is refused whatever its
+    /// Host, so the moment between a Funnel being switched on and the watcher's
+    /// next look is not a window into dux. Tailscale's serve proxy marks every
+    /// Funnel request with `Tailscale-Funnel-Request: ?1` and strips any copy a
+    /// client sent, so the marker cannot be forged in or out from the tailnet.
+    #[tokio::test]
+    async fn a_request_that_came_through_funnel_is_refused_whatever_its_host() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let handle = test_engine_handle(tmp.path());
+        let own_name =
+            crate::host_guard::LiveHostNames::new(&["demo-box.example-tailnet.ts.net".to_string()]);
+        let app = build_app(
+            handle,
+            Router::new(),
+            RouterParams::plain_http()
+                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
+                .with_live_own_magicdns_name(own_name),
+        );
+        for host in [
+            "demo-box.example-tailnet.ts.net",
+            "127.0.0.1:3890",
+            "localhost",
+        ] {
+            let request = axum::http::Request::builder()
+                .uri("/healthz")
+                .header("Host", host)
+                .header("Tailscale-Funnel-Request", "?1")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let answer = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(answer.status(), StatusCode::FORBIDDEN, "{host}");
+            let body = axum::body::to_bytes(answer.into_body(), 4096)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains("Funnel"),
+                "the refusal says why"
+            );
+        }
+        // The same request from the tailnet, without the marker, is served.
+        let tailnet = axum::http::Request::builder()
+            .uri("/healthz")
+            .header("Host", "demo-box.example-tailnet.ts.net")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(tailnet).await.unwrap().status(), StatusCode::OK);
+    }
+
+    /// A raw TCP Funnel to dux's port carries no marker and can claim any Host,
+    /// so while one stands dux refuses every request on every listener, and
+    /// serves again the moment it goes.
+    #[tokio::test]
+    async fn every_request_is_refused_while_the_funnel_state_is_not_known_to_be_clear() {
+        use crate::host_guard::{FunnelLockout, FunnelLockoutCell};
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let handle = test_engine_handle(tmp.path());
+        let lockout = FunnelLockoutCell::new(FunnelLockout::Funnel);
+        let app = build_app(
+            handle,
+            Router::new(),
+            RouterParams::plain_http()
+                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
+                .with_live_funnel_lockout(lockout.clone()),
+        );
+        let probe = |host: &'static str| {
+            axum::http::Request::builder()
+                .uri("/healthz")
+                .header("Host", host)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        // Each refusing state says its own why, on every Host a request through
+        // Funnel could claim.
+        for (state, says) in [
+            (FunnelLockout::Funnel, "no login"),
+            (FunnelLockout::Checking, "checking"),
+            (FunnelLockout::Unconfirmed, "tailscale = \"no\""),
+        ] {
+            lockout.set(state);
+            for host in ["localhost", "127.0.0.1:3890", "100.101.102.103:3890"] {
+                let answer = app.clone().oneshot(probe(host)).await.unwrap();
+                assert_eq!(
+                    answer.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{state:?} {host}"
+                );
+                let body = axum::body::to_bytes(answer.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let body = String::from_utf8_lossy(&body);
+                assert!(
+                    body.contains("Funnel") && body.contains(says),
+                    "{state:?}: {body}"
+                );
+            }
+        }
+        lockout.set(FunnelLockout::Open);
+        assert_eq!(
+            app.oneshot(probe("localhost")).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
+    /// The guard is installed on every router, so the Funnel lockout and the
+    /// marker check hold even for a serve with no bound address recorded.
+    #[tokio::test]
+    async fn the_guard_runs_even_with_no_bound_address_or_configured_host() {
+        use crate::host_guard::{FunnelLockout, FunnelLockoutCell};
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let handle = test_engine_handle(tmp.path());
+        let app = build_app(
+            handle,
+            Router::new(),
+            RouterParams::plain_http()
+                .with_live_funnel_lockout(FunnelLockoutCell::new(FunnelLockout::Funnel)),
+        );
+        let request = axum::http::Request::builder()
+            .uri("/healthz")
+            .header("Host", "localhost")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// What `tailscale serve` hands dux, measured: the Host and the Origin both
+    /// keep the public name and the serve port, the Origin's scheme is https, and
+    /// the proxy adds forwarding headers. A mutation from that page must pass
+    /// both the Host guard and the same-origin check.
+    #[tokio::test]
+    async fn a_mutation_relayed_by_tailscale_serve_passes_the_host_guard_and_the_origin_check() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let handle = test_engine_handle(tmp.path());
+        let own_name =
+            crate::host_guard::LiveHostNames::new(&["demo-box.example.ts.net".to_string()]);
+        let app = build_app(
+            handle,
+            Router::new().route("/probe-mutation", axum::routing::post(|| async { "ok" })),
+            RouterParams::plain_http()
+                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
+                .with_live_own_magicdns_name(own_name),
+        );
+        let relayed = axum::http::Request::builder()
+            .method("POST")
+            .uri("/probe-mutation")
+            .header("Host", "demo-box.example.ts.net:8443")
+            .header("Origin", "https://demo-box.example.ts.net:8443")
+            .header("X-Forwarded-Host", "demo-box.example.ts.net:8443")
+            .header("X-Forwarded-Proto", "https")
+            .header("X-Forwarded-For", "100.101.102.104")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let answer = app.clone().oneshot(relayed).await.unwrap();
+        assert_eq!(answer.status(), StatusCode::OK);
+
+        // A page on another tailnet name posting at dux is still cross-origin.
+        let foreign = axum::http::Request::builder()
+            .method("POST")
+            .uri("/probe-mutation")
+            .header("Host", "demo-box.example.ts.net:8443")
+            .header("Origin", "https://laptop.example.ts.net:8443")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(foreign).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// `[server] allowed_hosts` follows a config reload: the actor's reload arm
+    /// (and the terminal UI's, through the companion seam) write the reloaded
+    /// section into the live limits, and the router built before the reload
+    /// answers by the new list.
+    #[tokio::test]
+    async fn a_reloaded_allowed_hosts_list_applies_to_the_running_router() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let handle = test_engine_handle(tmp.path());
+        let limits = handle.live_limits();
+        let app = build_app(
+            handle,
+            Router::new(),
+            RouterParams::plain_http().with_host_allowlist(
+                vec!["127.0.0.1".parse().unwrap()],
+                vec!["old.example.com".to_string()],
+                false,
+            ),
+        );
+        let status = |host: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(host_probe("GET", host, None))
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(status("old.example.com").await, StatusCode::OK);
+        assert_eq!(status("new.example.com").await, StatusCode::FORBIDDEN);
+
+        let reloaded = dux_core::config::ServerConfig {
+            allowed_hosts: vec!["new.example.com".to_string()],
+            ..Default::default()
+        };
+        limits.store_from(&reloaded);
+
+        assert_eq!(status("new.example.com").await, StatusCode::OK);
+        assert_eq!(
+            status("old.example.com").await,
+            StatusCode::FORBIDDEN,
+            "a name taken out of the list stops being served at once"
         );
     }
 

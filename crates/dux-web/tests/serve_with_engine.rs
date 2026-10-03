@@ -88,6 +88,9 @@ fn build_engine() -> (Engine, dux_core::test_scratch::ScratchDir) {
     }
     let mut engine = bootstrap_engine(&paths).unwrap();
     dux_core::test_provider::defuse_config(&mut engine.config);
+    // Not tests about Tailscale: on any other mode every request waits on the
+    // first Funnel check, which would consult this machine's real CLI.
+    engine.config.server.tailscale = "no".to_string();
     engine.config.providers.commands.insert(
         "claude".to_string(),
         ProviderCommandConfig {

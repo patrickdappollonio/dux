@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use dux_core::config::{TailscaleMode, TailscaleModeOutcome};
-use dux_core::tailscale::TailscaleUnavailable;
+use dux_core::tailscale::{TailscaleIdentity, TailscaleUnavailable};
 
 /// How often the watcher asks whether the Tailscale address is there. A constant
 /// rather than a setting: an implementation cadence, well inside the time a person
@@ -409,6 +409,17 @@ impl LegStatus {
         self.lock().deadline()
     }
 
+    /// Say something about this machine's tailnet NAME (a rename, a serve route,
+    /// Funnel). Posted at once on its own key: these are not interface flaps, so
+    /// nothing here is held for a dwell.
+    pub(crate) fn identity_news(&self, tone: dux_core::statusline::StatusTone, message: &str) {
+        self.post(dux_core::engine::StatusUpdate::keyed(
+            TAILSCALE_IDENTITY_KEY,
+            tone,
+            message,
+        ));
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, LegCoalescer> {
         self.coalescer
             .lock()
@@ -478,9 +489,9 @@ pub(crate) async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>
 
 // ── The Tailscale watcher ──────────────────────────────────────────────────
 
-/// What the watcher asks the serve loop to do. One command per detect period at
-/// most, except a genuine address CHANGE, which is an unbind and a bind of the
-/// same leg and is sent as both.
+/// What the watcher asks the serve loop to do with the LEG. One command per
+/// detect period at most, except a genuine address CHANGE, which is an unbind and
+/// a bind of the same leg and is sent as both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegCommand {
     /// The Tailscale interface is there at this address: bind and serve it,
@@ -489,6 +500,23 @@ pub(crate) enum LegCommand {
     /// This Tailscale address is gone: stop that listener. Live sockets on it die
     /// with the listener, and the browser's ordinary reconnect is the recovery.
     Unbind(SocketAddr),
+}
+
+/// Everything the watcher tells the serve loop: a leg command, or a new
+/// identity, sent only when it differs from the one the loop already holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WatchEvent {
+    Leg(LegCommand),
+    /// This machine's name on the tailnet, or the `tailscale serve` routes that
+    /// end at dux, changed: a first look, a tailnet rename, a serve route added
+    /// or removed. The serve loop moves the Host guard and the shown URLs.
+    Identity(TailscaleIdentity),
+    /// A look at the identity FAILED, and why. The serve loop stops admitting
+    /// the name until a look succeeds again (the look that failed is the one
+    /// that would have seen a Funnel switched on), and the reason decides the
+    /// Funnel lockout: no CLI or no daemon means nothing can be published, while
+    /// a CLI that fails leaves it unknown.
+    IdentityFailed(TailscaleUnavailable),
 }
 
 /// The step one detect period implies, given what is bound now and what was just
@@ -555,6 +583,10 @@ pub(crate) enum ModeStep {
     StartWatcher { probe_now: bool },
     /// Accept (or stop accepting) Tailscale IP literals in the Host guard.
     SetHostLiterals(bool),
+    /// Let go of this machine's tailnet name: the Host guard stops admitting it
+    /// and no surface offers a URL built on it. A later mode that wants
+    /// Tailscale reads it afresh.
+    ForgetIdentity,
     /// This run was started with `--no-tailscale`, so nothing is done to the
     /// listeners.
     Refuse,
@@ -579,7 +611,9 @@ pub(crate) fn plan_mode_change(
     // `StartWatcher` replaces the watcher it finds, so a plan that ends in one
     // needs no stop of its own; two stops would mint two generations and leave
     // the new watcher's commands looking stale.
-    if prev.watches_interface() && !matches!(next, TailscaleMode::Auto) {
+    // Every mode but `no` runs a watcher (`yes` one for the name alone), so any
+    // of them leaving for a mode other than `auto` stops it.
+    if prev.wants_tailscale() && !matches!(next, TailscaleMode::Auto) {
         steps.push(ModeStep::StopWatcher);
     }
     match next {
@@ -588,6 +622,7 @@ pub(crate) fn plan_mode_change(
                 steps.push(ModeStep::Unbind(addr));
             }
             steps.push(ModeStep::SetHostLiterals(false));
+            steps.push(ModeStep::ForgetIdentity);
         }
         TailscaleMode::Yes => {
             steps.push(ModeStep::SetHostLiterals(true));
@@ -601,60 +636,115 @@ pub(crate) fn plan_mode_change(
     steps
 }
 
-/// Run the watch loop: poll the detector, compare against what is bound, emit at
-/// most one transition per period, and stop when `stop` says serving is over.
+/// Everything the watch loop is handed: where the leg would listen, how often to
+/// look, the two probes, the two answers the serve loop currently holds, and the
+/// two ways back to it.
 ///
 /// Every collaborator is injected so the whole loop is testable with no Tailscale
-/// binary, no sockets and no clock: `detect` is the probe, `bound` reports what
-/// the serve loop currently has bound (so a FAILED bind is retried next period
-/// rather than being lost), `emit` hands a command to the serve loop and returns
-/// false when nobody is listening any more, and `stop` ends the loop.
+/// binary, no sockets and no clock: `detect` is the address probe and `identify`
+/// the name probe, `bound` and `known_identity` report what the serve loop holds
+/// (so a FAILED bind is retried next period rather than being lost, and an
+/// identity is only sent when it differs), `emit` hands a command to the serve
+/// loop and returns false when nobody is listening any more, and `stop` ends the
+/// loop.
+pub(crate) struct Watch<'a> {
+    pub(crate) primary: SocketAddr,
+    pub(crate) period: Duration,
+    /// Whether the loop starts by probing or by SLEEPING. A watcher started at
+    /// serve time sleeps: the startup bind answered the same question a moment
+    /// ago. A watcher started by a live switch to `auto` probes, because the
+    /// gesture that started it needs an outcome to report.
+    pub(crate) probe_first: bool,
+    /// Whether this watcher looks for the ADDRESS at all. `auto` does; `yes`
+    /// looked once and does not, but it still watches the NAME for as long as
+    /// the Host guard may admit it, because a Funnel switched on later has to
+    /// be noticed whatever the address rule says.
+    pub(crate) addresses: bool,
+    pub(crate) detect: &'a dyn Fn() -> Result<IpAddr, TailscaleUnavailable>,
+    pub(crate) identify: &'a dyn Fn() -> Result<TailscaleIdentity, TailscaleUnavailable>,
+    pub(crate) bound: &'a dyn Fn() -> Option<SocketAddr>,
+    pub(crate) known_identity: &'a dyn Fn() -> Option<TailscaleIdentity>,
+    pub(crate) emit: &'a dyn Fn(WatchEvent) -> bool,
+    pub(crate) stop: &'a dyn Fn() -> bool,
+}
+
+/// Run the watch loop: poll the detectors, compare against what the serve loop
+/// holds, emit at most one transition per period, and stop when `stop` says
+/// serving is over.
 ///
-/// `probe_first` decides whether the loop starts by probing or by SLEEPING. A
-/// watcher started at serve time sleeps: the startup bind answered the same
-/// question a moment ago. A watcher started by a live switch to `auto` probes,
-/// because the gesture that started it needs an outcome to report.
+/// An identity the serve loop does not have yet is looked up BEFORE the first
+/// park even on a watcher that otherwise sleeps first: the address was answered
+/// by the startup bind, the name was not, and a browser on the MagicDNS name
+/// must not be refused for a whole period because of it.
 ///
-/// `stop` is consulted again after the probe and before the emit: a detection
+/// `stop` is consulted again after each probe and before its emit: a detection
 /// can take seconds, and a watcher stopped during one must not hand the serve
 /// loop a command for the mode it just left.
-pub(crate) fn watch_tailscale_leg(
-    primary: SocketAddr,
-    period: Duration,
-    probe_first: bool,
-    detect: &dyn Fn() -> Result<IpAddr, TailscaleUnavailable>,
-    bound: &dyn Fn() -> Option<SocketAddr>,
-    emit: &dyn Fn(LegCommand) -> bool,
-    stop: &dyn Fn() -> bool,
-) {
-    let mut immediate = probe_first;
+pub(crate) fn watch_tailscale(w: &Watch<'_>) {
+    let mut immediate = w.probe_first;
+    if !immediate && (w.known_identity)().is_none() && !identity_step(w) {
+        return;
+    }
     loop {
         if immediate {
             immediate = false;
-            if stop() {
+            if (w.stop)() {
                 return;
             }
-        } else if !park(period, stop) {
+        } else if !park(w.period, w.stop) {
             return;
         }
-        let desired = desired_leg(primary, detect());
-        let step = plan_leg_step(bound(), desired);
-        if stop() {
+        if !w.addresses {
+            if !identity_step(w) {
+                return;
+            }
+            continue;
+        }
+        let desired = desired_leg(w.primary, (w.detect)());
+        let step = plan_leg_step((w.bound)(), desired);
+        if (w.stop)() {
             return;
         }
         let sent = match step {
             LegStep::Nothing => true,
-            LegStep::Bind(addr) => emit(LegCommand::Bind(addr)),
-            LegStep::Unbind(addr) => emit(LegCommand::Unbind(addr)),
+            LegStep::Bind(addr) => (w.emit)(WatchEvent::Leg(LegCommand::Bind(addr))),
+            LegStep::Unbind(addr) => (w.emit)(WatchEvent::Leg(LegCommand::Unbind(addr))),
             LegStep::Rebind { old, new } => {
-                emit(LegCommand::Unbind(old)) && emit(LegCommand::Bind(new))
+                (w.emit)(WatchEvent::Leg(LegCommand::Unbind(old)))
+                    && (w.emit)(WatchEvent::Leg(LegCommand::Bind(new)))
             }
         };
-        if !sent {
-            // The serve loop is gone; there is nobody left to tell.
+        if !sent || !identity_step(w) {
+            // Stopped, or the serve loop is gone; there is nobody left to tell.
             return;
         }
     }
+}
+
+/// One look at the identity. Answers false when the watcher should end.
+///
+/// A look that failed after one had succeeded is reported as
+/// [`WatchEvent::IdentityFailed`], so the name stops being admitted until a look
+/// succeeds again. Failing closed costs a tailnet browser the name for one
+/// period when the daemon hiccups; failing open would keep admitting a name
+/// whose Funnel state nobody could read.
+fn identity_step(w: &Watch<'_>) -> bool {
+    let identity = match (w.identify)() {
+        Ok(identity) => identity,
+        Err(reason) => {
+            if (w.stop)() {
+                return false;
+            }
+            return (w.emit)(WatchEvent::IdentityFailed(reason));
+        }
+    };
+    if (w.stop)() {
+        return false;
+    }
+    if (w.known_identity)().as_ref() == Some(&identity) {
+        return true;
+    }
+    (w.emit)(WatchEvent::Identity(identity))
 }
 
 /// Sleep for `period` in slices, returning false as soon as `stop` says to end.
@@ -671,6 +761,330 @@ fn park(period: Duration, stop: &dyn Fn() -> bool) -> bool {
         }
         std::thread::sleep(remaining.min(WATCH_SLICE));
     }
+}
+
+// ── What the identity means ─────────────────────────────────────────────
+
+/// The keyed-status key news about this machine's tailnet NAME is reported
+/// under: a rename, a `tailscale serve` route arriving or leaving, Funnel.
+///
+/// Its own key rather than [`TAILSCALE_LEG_KEY`], because the leg key is
+/// coalesced against a flapping interface and a rename is not a flap.
+pub(crate) const TAILSCALE_IDENTITY_KEY: &str = "tailscale-identity";
+
+/// The name the Host guard admits for this identity: this machine's MagicDNS
+/// name, only when Tailscale assigned it (under the tailnet's `.ts.net`
+/// suffix), and never while Funnel is switched on for ANYTHING on this machine.
+///
+/// Funnel withdraws the name so dux does not offer one a Funnel is using. That
+/// is not what keeps a Funnel out: Tailscale's serve proxy forwards the public
+/// client's own Host, so a request through Funnel can claim `localhost` and
+/// never needs this name. The Funnel marker and the Funnel lockout in the Host
+/// guard are the protections (see `host_guard`). The check is any Funnel at
+/// all, whatever it forwards to. A name from another control server sits in a
+/// domain its operator chose, so it goes through `allowed_hosts` instead.
+pub(crate) fn admitted_own_name(identity: &TailscaleIdentity) -> Option<String> {
+    if identity.funnel {
+        return None;
+    }
+    identity
+        .status
+        .tailscale_assigned_name()
+        .map(str::to_string)
+}
+
+/// The tailnet addresses dux can be opened at, beyond the listener addresses
+/// themselves.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TailnetUrls {
+    /// `http://<tailscale ip>:<port>`, when dux is listening on a Tailscale
+    /// address.
+    pub(crate) ip: Option<String>,
+    /// `http://<magicdns name>:<port>`, when the name resolves to an address dux
+    /// is listening on.
+    pub(crate) name: Option<String>,
+    /// The `tailscale serve` URLs that end at dux.
+    pub(crate) serve: Vec<String>,
+}
+
+impl TailnetUrls {
+    /// The MagicDNS URL worth handing a phone: the HTTPS serve route when there
+    /// is one, otherwise the plain name.
+    pub(crate) fn magic_dns(&self) -> Option<&str> {
+        self.serve
+            .first()
+            .map(String::as_str)
+            .or(self.name.as_deref())
+    }
+
+    /// The URLs to show beside the listener addresses: the plain name, then the
+    /// serve routes.
+    pub(crate) fn extra(&self) -> Vec<String> {
+        self.name.iter().chain(self.serve.iter()).cloned().collect()
+    }
+}
+
+/// Work out the tailnet URLs from the legs dux is serving right now, the
+/// identity the watcher last read, and whether the mode wants Tailscale at all.
+///
+/// - `ip`: the first leg on a Tailscale address.
+/// - `name`: the MagicDNS name, when the mode wants Tailscale, MagicDNS is on,
+///   the Host guard admits the name, and some leg listens where the name
+///   resolves (a Tailscale address, or every address).
+/// - `serve`: the serve routes, under the same mode and guard conditions but
+///   regardless of the legs, because `tailscale serve` proxies to loopback.
+pub(crate) fn tailnet_urls(
+    legs: &[SocketAddr],
+    identity: Option<&TailscaleIdentity>,
+    tailscale_wanted: bool,
+) -> TailnetUrls {
+    let on_tailscale = |addr: &&SocketAddr| match addr.ip() {
+        IpAddr::V4(v4) => dux_core::tailscale::is_tailscale_cgnat(v4),
+        IpAddr::V6(v6) => dux_core::tailscale::is_tailscale_ipv6(v6),
+    };
+    let ip = legs
+        .iter()
+        .find(on_tailscale)
+        .map(|addr| format!("http://{addr}"));
+    let admitted = identity
+        .filter(|_| tailscale_wanted)
+        .and_then(|identity| admitted_own_name(identity).map(|name| (identity, name)));
+    let Some((identity, name)) = admitted else {
+        return TailnetUrls {
+            ip,
+            ..TailnetUrls::default()
+        };
+    };
+    let name = legs
+        .iter()
+        .find(|addr| addr.ip().is_unspecified() || on_tailscale(addr))
+        .filter(|_| identity.status.magic_dns_enabled)
+        .map(|addr| format!("http://{name}:{}", addr.port()));
+    TailnetUrls {
+        ip,
+        name,
+        serve: identity
+            .serve
+            .iter()
+            .map(|route| route.url.clone())
+            .collect(),
+    }
+}
+
+/// The one-time tip that `tailscale serve` would give dux an HTTPS address,
+/// when MagicDNS is on and no serve route ends at dux yet.
+///
+/// The tip names the exact command and says that dux never runs it: serving is
+/// a persistent change to the machine, and the choice belongs to whoever owns
+/// it. Where HTTPS certificates are off for the tailnet, the tip says to switch
+/// them on first, because the command fails without them.
+pub(crate) fn serve_hint(identity: &TailscaleIdentity, port: u16) -> Option<String> {
+    if !identity.status.magic_dns_enabled || !identity.serve.is_empty() || identity.funnel {
+        return None;
+    }
+    let name = identity.status.dns_name.as_deref()?;
+    let certificates = if identity.status.cert_domains.is_empty() {
+        " HTTPS certificates are off for this tailnet, so switch them on in the Tailscale \
+         admin console (DNS, HTTPS Certificates) first."
+    } else {
+        ""
+    };
+    Some(format!(
+        "Tip: `tailscale serve --bg {port}` would also put dux at https://{name} with a real \
+         certificate, for every device on your tailnet. dux never runs it for you.{certificates}"
+    ))
+}
+
+/// The sentences one identity change is worth, in order, each with its tone.
+///
+/// A first look says nothing but a Funnel warning: whatever the first look
+/// found is what dux starts with, and the startup banner (or the URL list) is
+/// where that is said. After that: a rename, each serve route that arrived or
+/// left, and Funnel switching on or off.
+pub(crate) fn identity_news(
+    previous: Option<&TailscaleIdentity>,
+    next: &TailscaleIdentity,
+) -> Vec<(dux_core::statusline::StatusTone, String)> {
+    use dux_core::statusline::StatusTone;
+    let mut news = Vec::new();
+    // A Funnel that forwards to dux's port is the lockout's news (see
+    // `lockout_news`), said once there; this only speaks for a Funnel elsewhere,
+    // which withdraws the name and nothing more.
+    let name_funnel = |id: &TailscaleIdentity| id.funnel && !id.funnel_to_dux;
+    let funnel_before = previous.is_some_and(name_funnel);
+    let funnel_now = name_funnel(next);
+    let admitted_before = previous.and_then(admitted_own_name);
+    let admitted_now = admitted_own_name(next);
+    if funnel_now && !funnel_before {
+        let name = next
+            .status
+            .tailscale_assigned_name()
+            .unwrap_or("this machine's tailnet name");
+        news.push((
+            StatusTone::Warning,
+            format!(
+                "A Tailscale Funnel route on this machine publishes it to the public internet, \
+                 and dux has no login, so dux stopped answering to {name}. Turn the Funnel \
+                 route off (`tailscale funnel status` lists it) and dux answers to {name} \
+                 again by itself."
+            ),
+        ));
+    }
+    let Some(previous) = previous else {
+        return news;
+    };
+    if funnel_before
+        && !next.funnel
+        && let Some(name) = admitted_now.as_deref()
+    {
+        news.push((
+            StatusTone::Info,
+            format!("The Tailscale Funnel route is off, so dux answers to {name} again."),
+        ));
+    }
+
+    // Said from what the Host guard ADMITS, not from what Tailscale reports: a
+    // name dux never answered to (a Headscale domain, a name under Funnel) is
+    // nobody's news.
+    match (admitted_before.as_deref(), admitted_now.as_deref()) {
+        (Some(old), Some(new)) if old != new => news.push((
+            StatusTone::Info,
+            format!(
+                "This machine's tailnet name changed from {old} to {new} (the tailnet or the \
+                 machine was renamed). dux now answers to {new} and no longer to {old}."
+            ),
+        )),
+        (Some(old), None) if !next.funnel => news.push((
+            StatusTone::Info,
+            format!(
+                "Tailscale no longer reports {old} as this machine's name (logged out, renamed \
+                 outside the tailnet's domain, or MagicDNS off), so dux stopped answering to it."
+            ),
+        )),
+        _ => {}
+    }
+    if !next.funnel {
+        // Measured against EVERY route the previous look had, Funnel or not: a
+        // route that only stopped being published is not a new one, and the
+        // Funnel sentence above already said what changed about it.
+        let before: Vec<&str> = served_urls(previous);
+        let before_any: Vec<&str> = previous.serve.iter().map(|r| r.url.as_str()).collect();
+        let after: Vec<&str> = served_urls(next);
+        for url in after.iter().filter(|url| !before_any.contains(url)) {
+            news.push((
+                StatusTone::Info,
+                format!(
+                    "tailscale serve now forwards {url} to dux: open it from any device on your \
+                     tailnet. The first visit can take about 30 seconds while Tailscale issues \
+                     the certificate."
+                ),
+            ));
+        }
+        for url in before.iter().filter(|url| !after.contains(url)) {
+            news.push((
+                StatusTone::Info,
+                format!(
+                    "{url} no longer reaches dux: its tailscale serve route was removed or now \
+                     points somewhere else."
+                ),
+            ));
+        }
+    }
+    news
+}
+
+/// Why the lockout moved, for the one case where that changes the sentence: a
+/// lift to open after a look that SAW no Funnel, against one made because this
+/// machine has no Tailscale address at all (nothing was confirmed then).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Because {
+    Look,
+    NoTailscaleHere,
+}
+
+/// Where a FAILED look leaves the lockout. A failure never lifts a refusal:
+/// an unknown answer refuses everything (from open too, not only before the
+/// first look), and a Funnel already seen stays refused. The one exception is a
+/// missing CLI or an unreachable daemon, which the probe only reports when this
+/// machine has no Tailscale address at all (otherwise it reports
+/// [`TailscaleUnavailable::Unverifiable`]): nothing can publish dux then.
+pub(crate) fn lockout_after_failure(
+    current: crate::host_guard::FunnelLockout,
+    reason: &TailscaleUnavailable,
+) -> crate::host_guard::FunnelLockout {
+    use crate::host_guard::FunnelLockout::{Funnel, Open, Unconfirmed};
+    match reason {
+        TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonUnreachable => Open,
+        TailscaleUnavailable::CommandFailed
+        | TailscaleUnavailable::NoAddress
+        | TailscaleUnavailable::Unverifiable => match current {
+            Funnel => Funnel,
+            _ => Unconfirmed,
+        },
+    }
+}
+
+/// What one change of the Funnel lockout is worth saying, if anything. Quiet
+/// when the first look finds nothing (the expected outcome) or nothing changed.
+pub(crate) fn lockout_news(
+    before: crate::host_guard::FunnelLockout,
+    after: crate::host_guard::FunnelLockout,
+    because: Because,
+) -> Option<(dux_core::statusline::StatusTone, String)> {
+    use crate::host_guard::FunnelLockout::{Checking, Funnel, Open, Unconfirmed};
+    use dux_core::statusline::StatusTone;
+    if before == after {
+        return None;
+    }
+    match (before, after) {
+        (_, Funnel) => Some((
+            StatusTone::Warning,
+            "A Tailscale Funnel forwards connections from the public internet to dux's port, \
+             and dux has no login, so dux is refusing every request until that Funnel is \
+             turned off (`tailscale funnel status` lists it)."
+                .to_string(),
+        )),
+        (_, Unconfirmed) => Some((
+            StatusTone::Warning,
+            "dux could not confirm that no Tailscale Funnel publishes it to the public internet \
+             (the tailscale CLI failed, did not answer, or cannot reach its daemon), and dux has \
+             no login, so it refuses every request until it can. Fix tailscaled on this machine first (`tailscale status` shows what it says). As a last resort, [server] tailscale = \"no\" stops dux consulting Tailscale, which also turns off this Funnel protection."
+                .to_string(),
+        )),
+        (Funnel | Unconfirmed, Open) => Some((
+            StatusTone::Info,
+            match because {
+                Because::Look => "dux confirmed that no Tailscale Funnel publishes it, and \
+                                  serves requests again."
+                    .to_string(),
+                Because::NoTailscaleHere => "This machine has no Tailscale address any more, \
+                                             so nothing can publish dux through Funnel; dux \
+                                             serves requests again."
+                    .to_string(),
+            },
+        )),
+        (Checking, Open) | (Open | Checking | Unconfirmed | Funnel, Checking) => None,
+        (Open, Open) => None,
+    }
+}
+
+/// What dux says when a switch to `tailscale = "no"` lifts a refusal: an
+/// explicit choice, but one that serves whatever a Funnel publishes.
+pub(crate) fn lockout_lifted_by_no() -> String {
+    "[server] tailscale is now \"no\", so dux no longer checks for Tailscale Funnel and serves \
+     every request again, including any a Funnel publishes from the public internet with no \
+     login. Turn the Funnel off, or set tailscale back to \"auto\"."
+        .to_string()
+}
+
+/// The URLs of the serve routes to dux that stay on the tailnet.
+fn served_urls(identity: &TailscaleIdentity) -> Vec<&str> {
+    identity
+        .serve
+        .iter()
+        .filter(|route| !route.funnel)
+        .map(|route| route.url.as_str())
+        .collect()
 }
 
 // ── The live mode lane ───────────────────────────────────────────
@@ -719,7 +1133,21 @@ pub struct TailscaleModeControl {
     /// Whether the Host guard accepts Tailscale IP literals. The serve loop is
     /// its only writer; the guard reads it per request.
     host_literals: Arc<AtomicBool>,
+    /// The identity the Tailscale watcher last read. The serve loop is its only
+    /// writer; the URL lists every surface shows read it.
+    identity: IdentityCell,
+    /// The MagicDNS name the Host guard admits (rule 6). The serve loop is its
+    /// only writer; the guard reads it per request.
+    own_name: crate::host_guard::LiveHostNames,
+    /// Whether the Host guard serves at all, as far as Funnel goes. Starts
+    /// CHECKING on every mode but `no`, so nothing is served before the first
+    /// look at Tailscale lands. The serve loop is its only writer.
+    funnel_lockout: crate::host_guard::FunnelLockoutCell,
 }
+
+/// The identity a serve currently holds, shared between the serve loop that
+/// writes it and the surfaces that read the URLs it implies.
+pub(crate) type IdentityCell = Arc<std::sync::Mutex<Option<TailscaleIdentity>>>;
 
 impl TailscaleModeControl {
     /// Build the control and the receiving end the serve loop owns.
@@ -729,12 +1157,21 @@ impl TailscaleModeControl {
         host_literals: Arc<AtomicBool>,
     ) -> (Self, tokio::sync::mpsc::Receiver<ModeRequest>) {
         let (tx, rx) = tokio::sync::mpsc::channel(MODE_REQUEST_QUEUE);
+        let funnel_lockout =
+            crate::host_guard::FunnelLockoutCell::new(if host_literals.load(Ordering::SeqCst) {
+                crate::host_guard::FunnelLockout::Checking
+            } else {
+                crate::host_guard::FunnelLockout::Open
+            });
         (
             Self {
                 tx,
                 runtime,
                 watched,
                 host_literals,
+                identity: IdentityCell::default(),
+                own_name: crate::host_guard::LiveHostNames::default(),
+                funnel_lockout,
             },
             rx,
         )
@@ -743,6 +1180,38 @@ impl TailscaleModeControl {
     /// The cell the Host guard reads rule 5 from.
     pub fn host_literals(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.host_literals)
+    }
+
+    /// The set the Host guard reads rule 6 (this machine's own MagicDNS name)
+    /// from.
+    pub fn own_magicdns_name(&self) -> crate::host_guard::LiveHostNames {
+        self.own_name.clone()
+    }
+
+    /// The cell the Host guard reads to refuse every request while a Tailscale
+    /// Funnel forwards raw TCP to dux's port.
+    pub fn funnel_lockout(&self) -> crate::host_guard::FunnelLockoutCell {
+        self.funnel_lockout.clone()
+    }
+
+    /// The identity the serve loop holds, for the URL lists.
+    pub(crate) fn identity(&self) -> IdentityCell {
+        Arc::clone(&self.identity)
+    }
+
+    /// The tailnet URLs this serve can be opened at right now, beyond the
+    /// listener addresses, given the legs it is serving.
+    pub(crate) fn tailnet_urls(&self, legs: &[SocketAddr]) -> TailnetUrls {
+        let identity = self
+            .identity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        tailnet_urls(
+            legs,
+            identity.as_ref(),
+            self.host_literals.load(Ordering::SeqCst),
+        )
     }
 
     /// The cell [`ServeShutdown`] reads to say whether anything will bind the
@@ -840,6 +1309,34 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// The watch loop with the identity probe answering nothing, for the tests
+    /// that are about the address leg alone.
+    fn watch_legs_only(
+        primary: SocketAddr,
+        period: Duration,
+        probe_first: bool,
+        detect: &dyn Fn() -> Result<IpAddr, TailscaleUnavailable>,
+        bound: &dyn Fn() -> Option<SocketAddr>,
+        emit: &dyn Fn(LegCommand) -> bool,
+        stop: &dyn Fn() -> bool,
+    ) {
+        watch_tailscale(&Watch {
+            primary,
+            period,
+            probe_first,
+            addresses: true,
+            detect,
+            identify: &|| Err(TailscaleUnavailable::CommandMissing),
+            bound,
+            known_identity: &|| None,
+            emit: &|event| match event {
+                WatchEvent::Leg(command) => emit(command),
+                WatchEvent::Identity(_) | WatchEvent::IdentityFailed(_) => true,
+            },
+            stop,
+        });
+    }
+
     // ── The pure step decision ────────────────────────────────────────────
 
     #[test]
@@ -919,7 +1416,7 @@ mod tests {
         }
 
         fn run(&self, primary: SocketAddr) -> Vec<LegCommand> {
-            watch_tailscale_leg(
+            watch_legs_only(
                 primary,
                 Duration::ZERO,
                 false,
@@ -1034,7 +1531,7 @@ mod tests {
         // The serve loop has gone (teardown): the watcher must return rather than
         // keep probing a dead server forever.
         let calls = Mutex::new(0usize);
-        watch_tailscale_leg(
+        watch_legs_only(
             addr("127.0.0.1:8080"),
             Duration::ZERO,
             false,
@@ -1070,7 +1567,7 @@ mod tests {
     fn a_probe_slower_than_the_period_never_overlaps_the_next_one() {
         let inside = std::sync::atomic::AtomicBool::new(false);
         let calls = Mutex::new(0usize);
-        watch_tailscale_leg(
+        watch_legs_only(
             addr("127.0.0.1:8080"),
             Duration::from_millis(5),
             true,
@@ -1098,7 +1595,7 @@ mod tests {
     #[test]
     fn the_stop_flag_ends_the_watcher_before_it_probes() {
         let calls = Mutex::new(0usize);
-        watch_tailscale_leg(
+        watch_legs_only(
             addr("127.0.0.1:8080"),
             Duration::ZERO,
             false,
@@ -1111,6 +1608,620 @@ mod tests {
             &|| true,
         );
         assert_eq!(*calls.lock().unwrap(), 0, "a stopped watcher never probes");
+    }
+
+    // ── The identity look ─────────────────────────────────────────────────
+
+    fn identity(name: &str, serve: &[(&str, bool)]) -> TailscaleIdentity {
+        TailscaleIdentity {
+            status: dux_core::tailscale::SelfStatus {
+                dns_name: Some(name.to_string()),
+                magic_dns_enabled: true,
+                magic_dns_suffix: name.split_once('.').map(|(_, s)| s.to_string()),
+                cert_domains: vec![name.to_string()],
+            },
+            serve: serve
+                .iter()
+                .map(|(url, funnel)| dux_core::tailscale::ServeRoute {
+                    url: url.to_string(),
+                    funnel: *funnel,
+                })
+                .collect(),
+            funnel: serve.iter().any(|(_, funnel)| *funnel),
+            funnel_to_dux: false,
+        }
+    }
+
+    /// A machine whose Funnel forwards raw TCP to dux's port.
+    fn tcp_funnelled(name: &str) -> TailscaleIdentity {
+        TailscaleIdentity {
+            funnel: true,
+            funnel_to_dux: true,
+            ..identity(name, &[])
+        }
+    }
+
+    fn headscale(host: &str) -> TailscaleIdentity {
+        let mut id = identity(&format!("{host}.vpn.example.com"), &[]);
+        id.status.magic_dns_suffix = Some("vpn.example.com".to_string());
+        id
+    }
+
+    /// A machine with Funnel on for something that is NOT a route dux shows:
+    /// a TCP forward, another port, a route through the Tailscale address.
+    fn funnelled_elsewhere(name: &str) -> TailscaleIdentity {
+        TailscaleIdentity {
+            funnel: true,
+            ..identity(name, &[])
+        }
+    }
+
+    /// Runs the real watch loop over a scripted identity probe, with the address
+    /// probe steady and already bound, and a `known` cell the emit writes the
+    /// way the serve loop would.
+    fn run_identity_script(
+        script: Vec<Result<TailscaleIdentity, TailscaleUnavailable>>,
+    ) -> Vec<WatchEvent> {
+        let periods = script.len();
+        let script = Mutex::new(script);
+        let looks = Mutex::new(0usize);
+        let known: Mutex<Option<TailscaleIdentity>> = Mutex::new(None);
+        let sent = Mutex::new(Vec::new());
+        let leg = addr("100.64.0.5:8080");
+        watch_tailscale(&Watch {
+            primary: addr("127.0.0.1:8080"),
+            period: Duration::ZERO,
+            probe_first: false,
+            addresses: true,
+            detect: &|| Ok(ip("100.64.0.5")),
+            identify: &|| {
+                *looks.lock().unwrap() += 1;
+                let mut script = script.lock().unwrap();
+                if script.is_empty() {
+                    Err(TailscaleUnavailable::CommandFailed)
+                } else {
+                    script.remove(0)
+                }
+            },
+            bound: &|| Some(leg),
+            known_identity: &|| known.lock().unwrap().clone(),
+            emit: &|cmd| {
+                // What the serve loop does: hold an identity it is sent, and
+                // treat it as unknown again once a look failed.
+                match &cmd {
+                    WatchEvent::Identity(id) => *known.lock().unwrap() = Some(id.clone()),
+                    WatchEvent::IdentityFailed(_) => *known.lock().unwrap() = None,
+                    WatchEvent::Leg(_) => {}
+                }
+                sent.lock().unwrap().push(cmd);
+                true
+            },
+            stop: &|| *looks.lock().unwrap() > periods,
+        });
+        sent.into_inner().unwrap()
+    }
+
+    #[test]
+    fn a_new_identity_is_sent_once_and_then_the_watcher_is_quiet() {
+        let a = identity("box.tail.ts.net", &[]);
+        assert_eq!(
+            run_identity_script(vec![Ok(a.clone()), Ok(a.clone()), Ok(a.clone())]),
+            vec![WatchEvent::Identity(a)]
+        );
+    }
+
+    #[test]
+    fn a_tailnet_rename_is_sent_on_the_look_that_sees_it() {
+        let before = identity("demo-box.old-tailnet.ts.net", &[]);
+        let after = identity("demo-box.example-tailnet.ts.net", &[]);
+        assert_eq!(
+            run_identity_script(vec![Ok(before.clone()), Ok(after.clone())]),
+            vec![WatchEvent::Identity(before), WatchEvent::Identity(after)]
+        );
+    }
+
+    #[test]
+    fn a_serve_route_arriving_is_an_identity_change_too() {
+        let plain = identity("box.tail.ts.net", &[]);
+        let served = identity("box.tail.ts.net", &[("https://box.tail.ts.net", false)]);
+        assert_eq!(
+            run_identity_script(vec![Ok(plain.clone()), Ok(served.clone())]),
+            vec![WatchEvent::Identity(plain), WatchEvent::Identity(served)]
+        );
+    }
+
+    #[test]
+    fn an_unknown_identity_is_looked_up_before_the_first_park() {
+        // A watcher started with the serve parks before its first ADDRESS look,
+        // because the startup bind answered that; the name it has never read.
+        // An hour-long period proves the look did not wait for the park.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let sent = Mutex::new(Vec::new());
+            let looked = AtomicBool::new(false);
+            watch_tailscale(&Watch {
+                primary: addr("127.0.0.1:8080"),
+                period: Duration::from_secs(3600),
+                probe_first: false,
+                addresses: true,
+                detect: &|| Ok(ip("100.64.0.5")),
+                identify: &|| {
+                    looked.store(true, Ordering::SeqCst);
+                    Ok(identity("box.tail.ts.net", &[]))
+                },
+                bound: &|| None,
+                known_identity: &|| None,
+                emit: &|cmd| {
+                    sent.lock().unwrap().push(cmd);
+                    true
+                },
+                stop: &|| looked.load(Ordering::SeqCst) && !sent.lock().unwrap().is_empty(),
+            });
+            let _ = tx.send(sent.into_inner().unwrap());
+        });
+        let sent = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the identity must be looked up before the hour-long park");
+        assert_eq!(
+            sent,
+            vec![WatchEvent::Identity(identity("box.tail.ts.net", &[]))]
+        );
+    }
+
+    #[test]
+    fn a_watcher_stopped_during_the_identity_look_sends_nothing() {
+        let stopped = AtomicBool::new(false);
+        let sent = Mutex::new(Vec::new());
+        watch_tailscale(&Watch {
+            primary: addr("127.0.0.1:8080"),
+            period: Duration::ZERO,
+            probe_first: false,
+            addresses: true,
+            detect: &|| Err(TailscaleUnavailable::NoAddress),
+            identify: &|| {
+                stopped.store(true, Ordering::SeqCst);
+                Ok(identity("box.tail.ts.net", &[]))
+            },
+            bound: &|| None,
+            known_identity: &|| None,
+            emit: &|cmd| {
+                sent.lock().unwrap().push(cmd);
+                true
+            },
+            stop: &|| stopped.load(Ordering::SeqCst),
+        });
+        assert!(sent.lock().unwrap().is_empty());
+    }
+
+    // ── What the identity means ───────────────────────────────────────────
+
+    #[test]
+    fn the_guard_admits_the_name_unless_funnel_publishes_a_route_to_dux() {
+        assert_eq!(
+            admitted_own_name(&identity("box.tail.ts.net", &[])).as_deref(),
+            Some("box.tail.ts.net")
+        );
+        assert_eq!(
+            admitted_own_name(&identity(
+                "box.tail.ts.net",
+                &[("https://box.tail.ts.net", false)]
+            ))
+            .as_deref(),
+            Some("box.tail.ts.net")
+        );
+        assert_eq!(
+            admitted_own_name(&identity(
+                "box.tail.ts.net",
+                &[("https://box.tail.ts.net", true)]
+            )),
+            None,
+            "a public, login-free dux is never something rule 6 hands out"
+        );
+        let mut nameless = identity("box.tail.ts.net", &[]);
+        nameless.status.dns_name = None;
+        assert_eq!(admitted_own_name(&nameless), None);
+    }
+
+    #[test]
+    fn the_name_url_needs_a_listener_the_name_resolves_to() {
+        let id = identity("box.tail.ts.net", &[]);
+        let loopback = addr("127.0.0.1:3890");
+        let leg = addr("100.64.0.5:3890");
+
+        let urls = tailnet_urls(&[loopback, leg], Some(&id), true);
+        assert_eq!(urls.ip.as_deref(), Some("http://100.64.0.5:3890"));
+        assert_eq!(urls.name.as_deref(), Some("http://box.tail.ts.net:3890"));
+        assert_eq!(urls.magic_dns(), Some("http://box.tail.ts.net:3890"));
+        assert_eq!(
+            urls.extra(),
+            vec!["http://box.tail.ts.net:3890".to_string()]
+        );
+
+        // Loopback only (the leg is away): the name resolves to an address
+        // nothing is listening on, so it is not offered.
+        let urls = tailnet_urls(&[loopback], Some(&id), true);
+        assert_eq!(urls, TailnetUrls::default());
+
+        // A wildcard listener covers the Tailscale address too.
+        let urls = tailnet_urls(&[addr("0.0.0.0:3890")], Some(&id), true);
+        assert_eq!(urls.name.as_deref(), Some("http://box.tail.ts.net:3890"));
+        assert_eq!(urls.ip, None, "no Tailscale address is known from the legs");
+    }
+
+    #[test]
+    fn a_serve_route_is_offered_even_with_the_leg_away_and_wins_the_qr_code() {
+        // `tailscale serve` proxies to loopback, so it reaches dux whatever the
+        // Tailscale leg is doing.
+        let id = identity("box.tail.ts.net", &[("https://box.tail.ts.net", false)]);
+        let urls = tailnet_urls(&[addr("127.0.0.1:3890")], Some(&id), true);
+        assert_eq!(urls.serve, vec!["https://box.tail.ts.net".to_string()]);
+        assert_eq!(urls.magic_dns(), Some("https://box.tail.ts.net"));
+
+        let urls = tailnet_urls(
+            &[addr("127.0.0.1:3890"), addr("100.64.0.5:3890")],
+            Some(&id),
+            true,
+        );
+        assert_eq!(urls.magic_dns(), Some("https://box.tail.ts.net"));
+        assert_eq!(
+            urls.extra(),
+            vec![
+                "http://box.tail.ts.net:3890".to_string(),
+                "https://box.tail.ts.net".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_name_url_is_offered_when_the_mode_is_no_magicdns_is_off_or_funnel_is_on() {
+        let legs = [addr("127.0.0.1:3890"), addr("100.64.0.5:3890")];
+        let id = identity("box.tail.ts.net", &[("https://box.tail.ts.net", false)]);
+
+        let urls = tailnet_urls(&legs, Some(&id), false);
+        assert_eq!((urls.name, urls.serve), (None, vec![]), "mode no");
+
+        let mut off = id.clone();
+        off.status.magic_dns_enabled = false;
+        let urls = tailnet_urls(&legs, Some(&off), true);
+        assert_eq!(
+            urls.name, None,
+            "the name does not resolve with MagicDNS off"
+        );
+
+        let funnelled = identity("box.tail.ts.net", &[("https://box.tail.ts.net", true)]);
+        let urls = tailnet_urls(&legs, Some(&funnelled), true);
+        assert_eq!(
+            (urls.name, urls.serve),
+            (None, vec![]),
+            "the guard refuses the name, so no URL that uses it is offered"
+        );
+
+        let urls = tailnet_urls(&legs, None, true);
+        assert_eq!(urls.ip.as_deref(), Some("http://100.64.0.5:3890"));
+        assert_eq!(urls.name, None, "nothing read yet");
+    }
+
+    #[test]
+    fn the_serve_hint_names_the_command_and_only_when_it_would_help() {
+        let hint = serve_hint(&identity("box.tail.ts.net", &[]), 3890).expect("no route yet");
+        assert!(hint.contains("tailscale serve --bg 3890"), "{hint}");
+        assert!(hint.contains("https://box.tail.ts.net"), "{hint}");
+        assert_eq!(
+            serve_hint(
+                &identity("box.tail.ts.net", &[("https://box.tail.ts.net", false)]),
+                3890
+            ),
+            None,
+            "a route already ends at dux"
+        );
+        let mut off = identity("box.tail.ts.net", &[]);
+        off.status.magic_dns_enabled = false;
+        assert_eq!(serve_hint(&off, 3890), None, "MagicDNS is off");
+        let mut no_certs = identity("box.tail.ts.net", &[]);
+        no_certs.status.cert_domains.clear();
+        let hint = serve_hint(&no_certs, 3890).expect("still worth saying");
+        assert!(
+            hint.contains("HTTPS certificates"),
+            "names what to switch on first: {hint}"
+        );
+    }
+
+    #[test]
+    fn identity_news_says_a_rename_a_route_and_funnel_and_nothing_on_a_first_look() {
+        use dux_core::statusline::StatusTone;
+        let first = identity("demo-box.old-tailnet.ts.net", &[]);
+        assert!(
+            identity_news(None, &first).is_empty(),
+            "the banner already said it"
+        );
+
+        let renamed = identity("demo-box.example-tailnet.ts.net", &[]);
+        let news = identity_news(Some(&first), &renamed);
+        assert_eq!(news.len(), 1, "{news:?}");
+        assert_eq!(news[0].0, StatusTone::Info);
+        assert!(
+            news[0].1.contains("demo-box.example-tailnet.ts.net"),
+            "{news:?}"
+        );
+        assert!(
+            news[0].1.contains("demo-box.old-tailnet.ts.net"),
+            "{news:?}"
+        );
+
+        let served = identity(
+            "demo-box.example-tailnet.ts.net",
+            &[("https://demo-box.example-tailnet.ts.net", false)],
+        );
+        let news = identity_news(Some(&renamed), &served);
+        assert_eq!(news.len(), 1, "{news:?}");
+        assert!(
+            news[0]
+                .1
+                .contains("https://demo-box.example-tailnet.ts.net"),
+            "{news:?}"
+        );
+        let news = identity_news(Some(&served), &renamed);
+        assert_eq!(news.len(), 1, "a route leaving is said too: {news:?}");
+        assert!(news[0].1.contains("no longer"), "{news:?}");
+
+        let funnelled = identity(
+            "demo-box.example-tailnet.ts.net",
+            &[("https://demo-box.example-tailnet.ts.net", true)],
+        );
+        let news = identity_news(Some(&served), &funnelled);
+        assert_eq!(news.len(), 1, "{news:?}");
+        assert_eq!(news[0].0, StatusTone::Warning);
+        assert!(news[0].1.contains("Funnel"), "{news:?}");
+        assert!(news[0].1.contains("no login"), "says why: {news:?}");
+        assert!(news[0].1.contains("off"), "says how to stop it: {news:?}");
+        assert!(
+            !news[0].1.contains("allowed_hosts"),
+            "never offers a way to keep Funnel working: {news:?}"
+        );
+        let news = identity_news(Some(&funnelled), &served);
+        assert_eq!(news.len(), 1, "{news:?}");
+        assert_eq!(
+            news[0].0,
+            StatusTone::Info,
+            "Funnel going away is good news"
+        );
+    }
+
+    #[test]
+    fn funnel_on_a_route_dux_does_not_show_still_withdraws_the_name_and_warns() {
+        let elsewhere = funnelled_elsewhere("box.tail.ts.net");
+        assert_eq!(admitted_own_name(&elsewhere), None);
+        let news = identity_news(Some(&identity("box.tail.ts.net", &[])), &elsewhere);
+        assert_eq!(news.len(), 1, "{news:?}");
+        assert_eq!(news[0].0, dux_core::statusline::StatusTone::Warning);
+        assert!(!news[0].1.contains("allowed_hosts"), "{news:?}");
+        assert_eq!(
+            serve_hint(&elsewhere, 3890),
+            None,
+            "no tip about serving while Funnel is on"
+        );
+    }
+
+    #[test]
+    fn every_change_of_the_lockout_is_said_once_with_why_and_the_way_out() {
+        use crate::host_guard::FunnelLockout::{Checking, Funnel, Open, Unconfirmed};
+        use dux_core::statusline::StatusTone;
+        let look = Because::Look;
+        assert_eq!(
+            lockout_news(Checking, Open, look),
+            None,
+            "the expected outcome is quiet"
+        );
+        assert_eq!(lockout_news(Open, Open, look), None);
+        assert_eq!(lockout_news(Funnel, Funnel, look), None);
+
+        for before in [Checking, Open] {
+            let (tone, text) = lockout_news(before, Unconfirmed, look).expect("refusing is news");
+            assert_eq!(tone, StatusTone::Warning);
+            assert!(text.contains("could not confirm"), "{text}");
+            let fix = text.find("tailscaled").expect("names tailscaled");
+            let no = text.find("tailscale = \"no\"").expect("names the way out");
+            assert!(fix < no, "fixing tailscaled comes first: {text}");
+            assert!(text.contains("turns off"), "says what `no` costs: {text}");
+        }
+
+        for before in [Open, Checking, Unconfirmed] {
+            let (tone, text) = lockout_news(before, Funnel, look).expect("a Funnel is news");
+            assert_eq!(tone, StatusTone::Warning);
+            assert!(text.contains("every request"), "{text}");
+            assert!(text.contains("no login"), "{text}");
+            assert!(text.contains("tailscale funnel status"), "{text}");
+            assert!(!text.contains("allowed_hosts"), "{text}");
+        }
+
+        for before in [Funnel, Unconfirmed] {
+            let (tone, text) = lockout_news(before, Open, look).expect("lifting is news");
+            assert_eq!(tone, StatusTone::Info);
+            assert!(text.contains("confirmed"), "a look did confirm it: {text}");
+            assert!(text.contains("serves requests again"), "{text}");
+
+            let (_, text) =
+                lockout_news(before, Open, Because::NoTailscaleHere).expect("lifting is news");
+            assert!(
+                !text.contains("confirmed"),
+                "nothing was confirmed when there is no Tailscale to ask: {text}"
+            );
+            assert!(text.contains("no Tailscale address"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_failed_look_never_lifts_a_refusal_and_refuses_while_unknown() {
+        use crate::host_guard::FunnelLockout::{Checking, Funnel, Open, Unconfirmed};
+        use TailscaleUnavailable::{
+            CommandFailed, CommandMissing, DaemonUnreachable, NoAddress, Unverifiable,
+        };
+        // Unknown: whatever was known, a Funnel stays refused and anything else
+        // refuses until a look succeeds.
+        for reason in [CommandFailed, NoAddress, Unverifiable] {
+            assert_eq!(
+                lockout_after_failure(Checking, &reason),
+                Unconfirmed,
+                "{reason:?}"
+            );
+            assert_eq!(
+                lockout_after_failure(Open, &reason),
+                Unconfirmed,
+                "{reason:?}"
+            );
+            assert_eq!(
+                lockout_after_failure(Unconfirmed, &reason),
+                Unconfirmed,
+                "{reason:?}"
+            );
+            assert_eq!(lockout_after_failure(Funnel, &reason), Funnel, "{reason:?}");
+        }
+        // No CLI or no reachable daemon only reaches here when this machine has
+        // no Tailscale address (the probe turns it into Unverifiable otherwise):
+        // nothing can publish dux, from any state.
+        for reason in [CommandMissing, DaemonUnreachable] {
+            for before in [Checking, Open, Unconfirmed, Funnel] {
+                assert_eq!(
+                    lockout_after_failure(before, &reason),
+                    Open,
+                    "{before:?} {reason:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_funnel_to_dux_is_the_lockouts_news_not_the_names() {
+        // One sentence for one event: the lockout says it, the name news does not
+        // say it again.
+        let plain = identity("box.tail.ts.net", &[]);
+        assert!(identity_news(Some(&plain), &tcp_funnelled("box.tail.ts.net")).is_empty());
+        assert!(identity_news(Some(&tcp_funnelled("box.tail.ts.net")), &plain).is_empty());
+    }
+
+    #[test]
+    fn switching_to_no_says_out_loud_that_it_lifted_a_refusal() {
+        let text = lockout_lifted_by_no();
+        assert!(text.contains("no longer checks"), "{text}");
+        assert!(text.contains("Funnel"), "{text}");
+        assert!(text.contains("no login"), "{text}");
+    }
+
+    #[test]
+    fn the_news_follows_the_name_dux_admits_not_the_one_tailscale_reports() {
+        // A Headscale rename: dux never answered to either name.
+        assert!(identity_news(Some(&headscale("box")), &headscale("box2")).is_empty());
+        // A Headscale name going away: dux never answered to it.
+        let mut gone = headscale("box");
+        gone.status.dns_name = None;
+        assert!(identity_news(Some(&headscale("box")), &gone).is_empty());
+        // A rename under Funnel: dux answers to neither, and only Funnel is news.
+        let before = identity("box.old-tailnet.ts.net", &[]);
+        let after = funnelled_elsewhere("box.example-tailnet.ts.net");
+        let news = identity_news(Some(&before), &after);
+        assert_eq!(news.len(), 1, "{news:?}");
+        assert!(news[0].1.contains("Funnel"), "{news:?}");
+        assert!(!news[0].1.contains("now answers"), "{news:?}");
+    }
+
+    #[test]
+    fn a_name_tailscale_did_not_assign_is_never_admitted_by_itself() {
+        let mut headscale = identity("box.vpn.example.com", &[]);
+        headscale.status.magic_dns_suffix = Some("vpn.example.com".to_string());
+        assert_eq!(admitted_own_name(&headscale), None);
+        let mut no_suffix = identity("box.tail.ts.net", &[]);
+        no_suffix.status.magic_dns_suffix = None;
+        assert_eq!(admitted_own_name(&no_suffix), None);
+    }
+
+    #[test]
+    fn a_failed_look_after_a_good_one_withdraws_the_name() {
+        // Fail closed: the guard must not keep admitting a name on an answer
+        // that may be out of date, because the look that failed is the one that
+        // would have seen a Funnel switched on.
+        let a = identity("box.tail.ts.net", &[]);
+        assert_eq!(
+            run_identity_script(vec![
+                Ok(a.clone()),
+                Err(TailscaleUnavailable::CommandFailed),
+                Ok(a.clone()),
+            ]),
+            vec![
+                WatchEvent::Identity(a.clone()),
+                WatchEvent::IdentityFailed(TailscaleUnavailable::CommandFailed),
+                WatchEvent::Identity(a),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_failed_look_is_reported_with_its_reason() {
+        // The serve loop tells "nothing could publish dux" (no CLI, no daemon)
+        // from "dux could not find out", so every failure goes back with why.
+        assert_eq!(
+            run_identity_script(vec![
+                Err(TailscaleUnavailable::CommandFailed),
+                Err(TailscaleUnavailable::DaemonUnreachable),
+            ]),
+            vec![
+                WatchEvent::IdentityFailed(TailscaleUnavailable::CommandFailed),
+                WatchEvent::IdentityFailed(TailscaleUnavailable::DaemonUnreachable),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_watcher_for_the_name_alone_never_looks_for_the_address() {
+        // On `yes` the address is looked up once and never again, but the name
+        // is watched for as long as the guard can admit it, so a Funnel switched
+        // on later is noticed.
+        let detected = std::sync::atomic::AtomicUsize::new(0);
+        let looks = std::sync::atomic::AtomicUsize::new(0);
+        let sent = Mutex::new(Vec::new());
+        watch_tailscale(&Watch {
+            primary: addr("127.0.0.1:8080"),
+            period: Duration::ZERO,
+            probe_first: false,
+            addresses: false,
+            detect: &|| {
+                detected.fetch_add(1, Ordering::SeqCst);
+                Ok(ip("100.64.0.5"))
+            },
+            identify: &|| {
+                let n = looks.fetch_add(1, Ordering::SeqCst);
+                Ok(if n == 0 {
+                    identity("box.tail.ts.net", &[])
+                } else {
+                    funnelled_elsewhere("box.tail.ts.net")
+                })
+            },
+            bound: &|| None,
+            known_identity: &|| match sent.lock().unwrap().last() {
+                Some(WatchEvent::Identity(id)) => Some(id.clone()),
+                _ => None,
+            },
+            emit: &|event| {
+                sent.lock().unwrap().push(event);
+                true
+            },
+            stop: &|| looks.load(Ordering::SeqCst) >= 3,
+        });
+        assert_eq!(detected.load(Ordering::SeqCst), 0, "no address look at all");
+        assert_eq!(
+            sent.into_inner().unwrap(),
+            vec![
+                WatchEvent::Identity(identity("box.tail.ts.net", &[])),
+                WatchEvent::Identity(funnelled_elsewhere("box.tail.ts.net")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_first_look_that_finds_funnel_warns_at_once() {
+        let funnelled = identity("box.tail.ts.net", &[("https://box.tail.ts.net", true)]);
+        let news = identity_news(None, &funnelled);
+        assert_eq!(news.len(), 1, "{news:?}");
+        assert_eq!(news[0].0, dux_core::statusline::StatusTone::Warning);
     }
 
     // ── A live mode change ────────────────────────────────────────────────
@@ -1128,16 +2239,22 @@ mod tests {
                 ModeStep::StopWatcher,
                 ModeStep::Unbind(ts),
                 ModeStep::SetHostLiterals(false),
+                ModeStep::ForgetIdentity,
             ]
         );
         assert_eq!(
             plan_mode_change(Yes, No, Some(ts), false),
-            vec![ModeStep::Unbind(ts), ModeStep::SetHostLiterals(false)],
-            "nothing was watching, so there is no watcher to stop"
+            vec![
+                ModeStep::StopWatcher,
+                ModeStep::Unbind(ts),
+                ModeStep::SetHostLiterals(false),
+                ModeStep::ForgetIdentity,
+            ],
+            "yes watches the name, so that watcher stops too"
         );
         assert_eq!(
             plan_mode_change(No, No, None, false),
-            vec![ModeStep::SetHostLiterals(false)]
+            vec![ModeStep::SetHostLiterals(false), ModeStep::ForgetIdentity]
         );
 
         // → yes: a one-shot detection, with the literals opened first so a
@@ -1186,7 +2303,11 @@ mod tests {
         // looked up again, which is the only thing "yes" does.
         assert_eq!(
             plan_mode_change(Yes, Yes, None, false),
-            vec![ModeStep::SetHostLiterals(true), ModeStep::DetectAndBind]
+            vec![
+                ModeStep::StopWatcher,
+                ModeStep::SetHostLiterals(true),
+                ModeStep::DetectAndBind,
+            ]
         );
     }
 
@@ -1204,7 +2325,7 @@ mod tests {
         // ordinary plan runs, and on a forced-no run it has nothing to undo.
         assert_eq!(
             plan_mode_change(No, No, None, true),
-            vec![ModeStep::SetHostLiterals(false)]
+            vec![ModeStep::SetHostLiterals(false), ModeStep::ForgetIdentity]
         );
     }
 
@@ -1218,7 +2339,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let calls = Mutex::new(0usize);
-            watch_tailscale_leg(
+            watch_legs_only(
                 addr("127.0.0.1:8080"),
                 Duration::from_secs(3600),
                 true,
@@ -1247,7 +2368,7 @@ mod tests {
         // dropped. The stop flag is checked again after the probe.
         let stopped = AtomicBool::new(false);
         let sent = Mutex::new(Vec::new());
-        watch_tailscale_leg(
+        watch_legs_only(
             addr("127.0.0.1:8080"),
             Duration::ZERO,
             true,

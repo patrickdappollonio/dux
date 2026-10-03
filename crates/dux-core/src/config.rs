@@ -906,8 +906,10 @@ pub struct ServerConfig {
     /// Extra `Host` header values to accept when the request is NOT same-origin.
     /// dux is trusted-local: it always serves on `host:port` (loopback by default)
     /// and accepts same-origin requests. List any additional hostnames a reverse
-    /// proxy or tailnet name forwards under (e.g. `box.tailnet.ts.net`) so those
-    /// requests are not rejected by the host guard. Empty by default.
+    /// proxy forwards under (e.g. `dux.example.com`) so those requests are not
+    /// rejected by the host guard. This machine's own MagicDNS name needs no entry
+    /// while `tailscale` is not `"no"`: the guard admits it by itself. A config
+    /// reload applies a change to a running server. Empty by default.
     pub allowed_hosts: Vec<String>,
     /// Colored, vite-style console output for `dux server`. One of `"auto"`
     /// (default: color only when stdout is a terminal, `NO_COLOR` is unset, and
@@ -932,6 +934,15 @@ pub struct ServerConfig {
     /// with a warning in dux.log. Default 2000. Applies the next time the flip
     /// starts.
     pub log_viewer_lines: usize,
+    /// Whether `dux server` and the start-web-server flip show QR codes for
+    /// this machine's tailnet addresses (its Tailscale IP and its MagicDNS
+    /// name, the `tailscale serve` HTTPS URL when one ends at dux), so a phone
+    /// can open dux by pointing its camera. Shown when the serve starts and
+    /// again whenever those addresses become known or change. `dux server`
+    /// prints them only when its output is a terminal; the background server
+    /// never shows them, because the terminal UI stays on screen. Read when a
+    /// serve starts. Default true.
+    pub qr_codes: bool,
     /// Whether dux serves the web UI in the BACKGROUND while the terminal UI
     /// keeps running, instead of only through the `start-web-server` flip (which
     /// replaces the TUI with the server and is unaffected by this setting).
@@ -1165,6 +1176,8 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
 ///
 /// - `access_log` and `search_index_max_files`: the routes read these off shared
 ///   cells a reload writes, so the change has already taken effect.
+/// - `allowed_hosts`: the Host guard reads the list from the same live cells, so
+///   a reload that edits it applies to the running listener.
 /// - The `tailscale` mode: a live switch. A reload hands the new mode to the
 ///   running serve, which stops or starts the watcher, binds or drops the leg, and
 ///   moves the Host guard's Tailscale-literal rule with it.
@@ -1185,7 +1198,6 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
 pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
     prev.host != next.host
         || prev.port != next.port
-        || prev.allowed_hosts != next.allowed_hosts
         || prev.max_websocket_events_connections != next.max_websocket_events_connections
         || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
         || prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections
@@ -1210,8 +1222,12 @@ pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) ->
 /// themed viewer, which never reads `color`, and the background server's
 /// console is a no-op, so a `color` change means nothing to either and a
 /// restart warning there would name a restart that changes nothing.
+///
+/// `qr_codes` is in this set too: the codes are drawn by the `dux server`
+/// console and by the flip's status screen, both of which read it as the serve
+/// starts, and neither one is a listener.
 pub fn server_console_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
-    prev.color != next.color
+    prev.color != next.color || prev.qr_codes != next.qr_codes
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2166,6 +2182,7 @@ impl Default for ServerConfig {
             color: "auto".to_string(),
             access_log: true,
             log_viewer_lines: DEFAULT_LOG_VIEWER_LINES,
+            qr_codes: true,
             serve_while_tui: false,
             max_websocket_events_connections: DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
             max_websocket_agent_connections: DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
@@ -5553,12 +5570,27 @@ mod server_restart_split_tests {
         let prev = server();
         let mut next = prev.clone();
         next.port += 1;
-        next.allowed_hosts.push("example.test".to_string());
+        next.host = "0.0.0.0".to_string();
         next.max_websocket_tabs_per_agent += 1;
         next.tree_list_max_concurrency += 1;
 
         assert!(server_bind_settings_changed(&prev, &next));
         assert!(!server_console_settings_changed(&prev, &next));
+        assert!(server_restart_settings_changed(&prev, &next));
+    }
+
+    /// The QR codes are drawn by the `dux server` console and the flip's status
+    /// screen, both read once as the serve starts, so a change is a console
+    /// change: a restart applies it and no listener needs rebinding.
+    #[test]
+    fn a_qr_codes_change_is_a_console_setting_change() {
+        let prev = server();
+        assert!(prev.qr_codes, "on by default");
+        let mut next = prev.clone();
+        next.qr_codes = false;
+
+        assert!(!server_bind_settings_changed(&prev, &next));
+        assert!(server_console_settings_changed(&prev, &next));
         assert!(server_restart_settings_changed(&prev, &next));
     }
 

@@ -583,6 +583,23 @@ fn into_ratatui(color: OpalineColor) -> Color {
 }
 
 impl Theme {
+    /// Whether the app background is lighter than the body text, which is what
+    /// decides how a QR code is drawn in the theme's own two colors: the darker
+    /// of them must be the code's dark modules. A color with no RGB behind it
+    /// (the terminal's own default) cannot be measured, and counts as the dark
+    /// background most terminals have.
+    pub fn background_is_lighter_than_text(&self) -> bool {
+        let luma = |color: Color| {
+            blendable_rgb(color).map(|(r, g, b)| {
+                0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
+            })
+        };
+        match (luma(self.app_bg), luma(self.text_fg)) {
+            (Some(bg), Some(text)) => bg > text,
+            _ => false,
+        }
+    }
+
     /// Build a [`Theme`] from a fully-resolved Opaline theme. Every field is
     /// looked up via the `dux.<field>` namespace; defaults are injected by
     /// [`register_dux_defaults`] before this is called, so missing tokens fall
@@ -1614,6 +1631,32 @@ info = "info"
             assert!(
                 !chip.add_modifier.contains(Modifier::BOLD),
                 "theme {id}: a chip is never bold"
+            );
+        }
+    }
+
+    /// The flip's status screen draws QR codes in the theme's body text on its
+    /// background. A phone reads them only if the two stand apart, and only if
+    /// the darker of the two is drawn as the dark modules, in every theme.
+    #[test]
+    fn every_loadable_theme_can_draw_a_readable_qr_code() {
+        let (_tmp, paths) = scratch_paths();
+        for listing in &discover_available(&paths) {
+            let id = &listing.id;
+            let theme =
+                load(id, &paths).unwrap_or_else(|err| panic!("theme {id} failed to load: {err}"));
+            if blendable_rgb(theme.app_bg).is_none() || blendable_rgb(theme.text_fg).is_none() {
+                continue;
+            }
+            assert!(
+                contrast(theme.app_bg, theme.text_fg) >= 3.0,
+                "theme {id}: a QR code in its text on its background has only {:.2}:1",
+                contrast(theme.app_bg, theme.text_fg)
+            );
+            assert_eq!(
+                theme.background_is_lighter_than_text(),
+                relative_luminance(theme.app_bg) > relative_luminance(theme.text_fg),
+                "theme {id}: the polarity must follow which color is darker"
             );
         }
     }
