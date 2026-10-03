@@ -994,33 +994,40 @@ pub(crate) fn identity_news(
 }
 
 /// Why the lockout moved, for the one case where that changes the sentence: a
-/// lift to open after a look that SAW no Funnel, against one made because this
-/// machine has no Tailscale address at all (nothing was confirmed then).
+/// lift to open after a look that SAW no Funnel, against one made because
+/// Tailscale is not running here at all, or not installed (nothing was
+/// confirmed then).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Because {
     Look,
     NoTailscaleHere,
 }
 
-/// Where a FAILED look leaves the lockout. A failure never lifts a refusal:
-/// an unknown answer refuses everything (from open too, not only before the
-/// first look), and a Funnel already seen stays refused. The one exception is a
-/// missing CLI or an unreachable daemon, which the probe only reports when this
-/// machine has no Tailscale address at all (otherwise it reports
-/// [`TailscaleUnavailable::Unverifiable`]): nothing can publish dux then.
+/// Where a FAILED look leaves the lockout.
+///
+/// - A Funnel already seen stays refused through anything that is not a look
+///   that SEES it gone: a daemon outage, a CLI that fails. Only a successful
+///   look lifts it.
+/// - An unknown answer (the CLI failed, timed out, could not reach a daemon, or
+///   is missing while Tailscale is evidently here) refuses everything, from
+///   open too, not only before the first look.
+/// - An answer: no Tailscale here at all, or a daemon the CLI says is not
+///   running, with nothing else of Tailscale on the machine (the probe reports
+///   these only then). Nothing can publish dux, so it serves.
 pub(crate) fn lockout_after_failure(
     current: crate::host_guard::FunnelLockout,
     reason: &TailscaleUnavailable,
 ) -> crate::host_guard::FunnelLockout {
     use crate::host_guard::FunnelLockout::{Funnel, Open, Unconfirmed};
+    if current == Funnel {
+        return Funnel;
+    }
     match reason {
-        TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonUnreachable => Open,
+        TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonStopped => Open,
         TailscaleUnavailable::CommandFailed
         | TailscaleUnavailable::NoAddress
-        | TailscaleUnavailable::Unverifiable => match current {
-            Funnel => Funnel,
-            _ => Unconfirmed,
-        },
+        | TailscaleUnavailable::Unverifiable
+        | TailscaleUnavailable::DaemonUnreachable => Unconfirmed,
     }
 }
 
@@ -1057,9 +1064,9 @@ pub(crate) fn lockout_news(
                 Because::Look => "dux confirmed that no Tailscale Funnel publishes it, and \
                                   serves requests again."
                     .to_string(),
-                Because::NoTailscaleHere => "This machine has no Tailscale address any more, \
-                                             so nothing can publish dux through Funnel; dux \
-                                             serves requests again."
+                Because::NoTailscaleHere => "Tailscale is not running on this machine (or \
+                                             not installed), so nothing can publish dux \
+                                             through Funnel; dux serves requests again."
                     .to_string(),
             },
         )),
@@ -1619,6 +1626,7 @@ mod tests {
                 magic_dns_enabled: true,
                 magic_dns_suffix: name.split_once('.').map(|(_, s)| s.to_string()),
                 cert_domains: vec![name.to_string()],
+                tailscale_ips: Vec::new(),
             },
             serve: serve
                 .iter()
@@ -2046,7 +2054,7 @@ mod tests {
                 !text.contains("confirmed"),
                 "nothing was confirmed when there is no Tailscale to ask: {text}"
             );
-            assert!(text.contains("no Tailscale address"), "{text}");
+            assert!(text.contains("not running on this machine"), "{text}");
         }
     }
 
@@ -2054,39 +2062,38 @@ mod tests {
     fn a_failed_look_never_lifts_a_refusal_and_refuses_while_unknown() {
         use crate::host_guard::FunnelLockout::{Checking, Funnel, Open, Unconfirmed};
         use TailscaleUnavailable::{
-            CommandFailed, CommandMissing, DaemonUnreachable, NoAddress, Unverifiable,
+            CommandFailed, CommandMissing, DaemonStopped, DaemonUnreachable, NoAddress,
+            Unverifiable,
         };
-        // Unknown: whatever was known, a Funnel stays refused and anything else
-        // refuses until a look succeeds.
-        for reason in [CommandFailed, NoAddress, Unverifiable] {
-            assert_eq!(
-                lockout_after_failure(Checking, &reason),
-                Unconfirmed,
-                "{reason:?}"
-            );
-            assert_eq!(
-                lockout_after_failure(Open, &reason),
-                Unconfirmed,
-                "{reason:?}"
-            );
-            assert_eq!(
-                lockout_after_failure(Unconfirmed, &reason),
-                Unconfirmed,
-                "{reason:?}"
-            );
+        // Unknown: a Funnel stays refused, anything else refuses until a look
+        // succeeds.
+        for reason in [CommandFailed, NoAddress, Unverifiable, DaemonUnreachable] {
+            for before in [Checking, Open, Unconfirmed] {
+                assert_eq!(
+                    lockout_after_failure(before, &reason),
+                    Unconfirmed,
+                    "{before:?} {reason:?}"
+                );
+            }
             assert_eq!(lockout_after_failure(Funnel, &reason), Funnel, "{reason:?}");
         }
-        // No CLI or no reachable daemon only reaches here when this machine has
-        // no Tailscale address (the probe turns it into Unverifiable otherwise):
-        // nothing can publish dux, from any state.
-        for reason in [CommandMissing, DaemonUnreachable] {
-            for before in [Checking, Open, Unconfirmed, Funnel] {
+        // An answer: no Tailscale here at all, or a daemon that is definitely
+        // stopped (the probe only reports these when nothing else of Tailscale
+        // is here). Nothing can publish dux, so it serves, except that a Funnel
+        // already seen is only lifted by a look that SEES it gone.
+        for reason in [CommandMissing, DaemonStopped] {
+            for before in [Checking, Open, Unconfirmed] {
                 assert_eq!(
                     lockout_after_failure(before, &reason),
                     Open,
                     "{before:?} {reason:?}"
                 );
             }
+            assert_eq!(
+                lockout_after_failure(Funnel, &reason),
+                Funnel,
+                "a Funnel survives a daemon outage: {reason:?}"
+            );
         }
     }
 

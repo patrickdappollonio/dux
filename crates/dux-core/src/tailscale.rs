@@ -42,9 +42,14 @@ pub enum TailscaleUnavailable {
     CommandFailed,
     /// The CLI ran and succeeded but emitted no address we could parse.
     NoAddress,
-    /// The CLI ran and said it could not reach the Tailscale daemon at all (any
-    /// dial error: no daemon, a permission, a wrong socket).
+    /// The CLI ran and said it could not reach the Tailscale daemon, in words
+    /// that do not prove it stopped (a socket it cannot use, a process it
+    /// found). Unknown.
     DaemonUnreachable,
+    /// The CLI ran and said, in its own words for it, that no daemon is running
+    /// (see [`daemon_stopped_message`]). Funnel needs a running daemon, so this
+    /// is an answer: nothing is published.
+    DaemonStopped,
     /// The CLI is missing or cannot reach its daemon, yet this machine HAS a
     /// Tailscale address, so a daemon is running that nothing here can ask
     /// about its Funnels. Unknown, never "no Funnel".
@@ -61,6 +66,7 @@ impl TailscaleUnavailable {
             }
             Self::NoAddress => "the tailscale CLI returned no usable address",
             Self::DaemonUnreachable => "the tailscale CLI could not reach the Tailscale daemon",
+            Self::DaemonStopped => "the Tailscale daemon is not running",
             Self::Unverifiable => {
                 "this machine has a Tailscale address, but the tailscale CLI is missing or \
                  cannot reach the daemon"
@@ -148,35 +154,47 @@ fn first_cli_answer<T>(
     last
 }
 
-/// Every address on this machine's network interfaces, read with
-/// `getifaddrs`. Empty when they cannot be read.
-pub fn interface_addresses() -> Vec<IpAddr> {
+/// Every address on this machine's network interfaces with the interface's
+/// name, read with `getifaddrs`. Empty when they cannot be read.
+pub fn interfaces() -> Vec<(String, IpAddr)> {
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: `getifaddrs` fills `list` with a linked list it allocated, which
     // is walked read-only below and handed back to `freeifaddrs` exactly once.
     if unsafe { libc::getifaddrs(&mut list) } != 0 {
         return Vec::new();
     }
-    let mut addrs = Vec::new();
+    let mut found = Vec::new();
     let mut cursor = list;
     while !cursor.is_null() {
         // SAFETY: `cursor` is a node of the list `getifaddrs` returned and has
-        // not been freed; `ifa_addr` is null or points at a sockaddr whose
-        // family field says which concrete type it is.
+        // not been freed; `ifa_name` is a NUL-terminated string it owns, and
+        // `ifa_addr` is null or points at a sockaddr whose family field says
+        // which concrete type it is.
         unsafe {
             let entry = &*cursor;
             let sockaddr = entry.ifa_addr;
+            let name = if entry.ifa_name.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(entry.ifa_name)
+                    .to_string_lossy()
+                    .into_owned()
+            };
             if !sockaddr.is_null() {
                 match i32::from((*sockaddr).sa_family) {
                     libc::AF_INET => {
                         let v4 = &*(sockaddr as *const libc::sockaddr_in);
-                        addrs.push(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(
-                            v4.sin_addr.s_addr,
-                        ))));
+                        found.push((
+                            name,
+                            IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(v4.sin_addr.s_addr))),
+                        ));
                     }
                     libc::AF_INET6 => {
                         let v6 = &*(sockaddr as *const libc::sockaddr_in6);
-                        addrs.push(IpAddr::V6(std::net::Ipv6Addr::from(v6.sin6_addr.s6_addr)));
+                        found.push((
+                            name,
+                            IpAddr::V6(std::net::Ipv6Addr::from(v6.sin6_addr.s6_addr)),
+                        ));
                     }
                     _ => {}
                 }
@@ -186,21 +204,115 @@ pub fn interface_addresses() -> Vec<IpAddr> {
     }
     // SAFETY: `list` came from a successful `getifaddrs` and is freed once.
     unsafe { libc::freeifaddrs(list) };
-    addrs
+    found
 }
 
-/// Whether any of `addrs` is a Tailscale address (100.64.0.0/10 or
-/// fd7a:115c:a1e0::/48).
-pub fn has_tailscale_address(addrs: &[IpAddr]) -> bool {
-    addrs.iter().any(|ip| match ip {
-        IpAddr::V4(v4) => is_tailscale_cgnat(*v4),
-        IpAddr::V6(v6) => is_tailscale_ipv6(*v6),
+/// Whether one of `ifaces` holds a Tailscale address on TAILSCALE's own
+/// interface: one named `tailscale*` (Linux's `tailscale0`), or any interface
+/// (a macOS `utun`, a custom tun name) carrying an address Tailscale itself
+/// reported in `known`. A bare 100.64.0.0/10 address is not enough: Cloudflare
+/// WARP (100.96.0.0/12) and NetBird use the same block.
+pub fn owned_tailscale_address(ifaces: &[(String, IpAddr)], known: &[IpAddr]) -> bool {
+    ifaces.iter().any(|(name, ip)| {
+        let in_range = match ip {
+            IpAddr::V4(v4) => is_tailscale_cgnat(*v4),
+            IpAddr::V6(v6) => is_tailscale_ipv6(*v6),
+        };
+        in_range && (name.starts_with("tailscale") || known.contains(ip))
     })
 }
 
-/// Whether this machine has a Tailscale address on any interface right now.
-pub fn machine_has_tailscale_address() -> bool {
-    has_tailscale_address(&interface_addresses())
+/// Where a `tailscaled` keeps its LocalAPI socket by default (Tailscale's
+/// `paths.DefaultTailscaledSocket` and the official container image), checked
+/// so a daemon running in userspace networking, which has no interface, is
+/// still seen. `$TS_SOCKET` is checked as well.
+pub const SOCKET_PATHS: &[&str] = &[
+    "/var/run/tailscale/tailscaled.sock",
+    "/run/tailscale/tailscaled.sock",
+    "/var/run/tailscaled.socket",
+    "/tmp/tailscaled.sock",
+    "/var/packages/Tailscale/var/tailscaled.sock",
+    "/var/packages/Tailscale/etc/tailscaled.sock",
+    "/tmp/tailscale/tailscaled.sock",
+    "/perm/tailscaled/tailscaled.sock",
+];
+
+/// The process names the Tailscale CLI itself looks for when it cannot reach
+/// the daemon (cmd/tailscale/cli/diag.go): `tailscaled`, and the macOS app's
+/// `IPNExtension`.
+pub const PROCESS_NAMES: &[&str] = &["tailscaled", "IPNExtension"];
+
+/// Whether a `tailscaled` is detectable without the CLI: its socket exists at a
+/// known path or at `$TS_SOCKET`, or a process with its name is running.
+pub fn tailscaled_detectable(
+    exists: &dyn Fn(&std::path::Path) -> bool,
+    ts_socket: Option<String>,
+    process_running: bool,
+) -> bool {
+    process_running
+        || SOCKET_PATHS
+            .iter()
+            .any(|path| exists(std::path::Path::new(path)))
+        || ts_socket
+            .filter(|path| !path.is_empty())
+            .is_some_and(|path| exists(std::path::Path::new(&path)))
+}
+
+/// Whether a process named like a Tailscale daemon is running right now.
+fn tailscaled_process_running() -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    system.processes().values().any(|process| {
+        let name = process.name().to_string_lossy();
+        PROCESS_NAMES.iter().any(|wanted| name == *wanted)
+    })
+}
+
+/// What this machine shows of Tailscale without asking the CLI, read only when
+/// the CLI could not answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LocalEvidence {
+    /// A Tailscale address on Tailscale's own interface.
+    pub owned_address: bool,
+    /// A `tailscaled` socket or process.
+    pub daemon_detectable: bool,
+}
+
+/// The addresses the last successful look reported for this machine, so a
+/// later look that fails can still tell Tailscale's `utun` from another VPN's.
+static KNOWN_TAILSCALE_IPS: std::sync::Mutex<Vec<IpAddr>> = std::sync::Mutex::new(Vec::new());
+
+/// Read this machine's [`LocalEvidence`].
+pub fn local_evidence() -> LocalEvidence {
+    let known = KNOWN_TAILSCALE_IPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    LocalEvidence {
+        owned_address: owned_tailscale_address(&interfaces(), &known),
+        daemon_detectable: tailscaled_detectable(
+            &|path| path.exists(),
+            std::env::var("TS_SOCKET").ok(),
+            tailscaled_process_running(),
+        ),
+    }
+}
+
+/// Whether the CLI's error is one of its own words for a daemon that is not
+/// running. `tailscale status` prints these only when it found no `tailscaled`
+/// (or macOS `IPNExtension`) process AND no socket (cmd/tailscale/cli/diag.go,
+/// `fixTailscaledConnectErrorImpl`); every other connect failure (a socket it
+/// cannot use, a process it found) is not proof of anything.
+pub fn daemon_stopped_message(stderr: &str) -> bool {
+    let text = stderr.to_ascii_lowercase();
+    [
+        "failed to connect to local tailscaled; it doesn't appear to be running",
+        "failed to connect to local tailscale service; is tailscale running?",
+        "failed to connect to local tailscaled process; it doesn't appear to be running",
+    ]
+    .iter()
+    .any(|wording| text.contains(wording))
 }
 
 /// Hard wall-clock cap on one `tailscale ip` call.
@@ -273,6 +385,9 @@ pub struct SelfStatus {
     /// The names Tailscale can issue an HTTPS certificate for. Empty when HTTPS
     /// certificates are switched off for the tailnet.
     pub cert_domains: Vec<String>,
+    /// This machine's Tailscale addresses (`Self.TailscaleIPs`), which is how a
+    /// later failed look tells Tailscale's interface from another VPN's.
+    pub tailscale_ips: Vec<IpAddr>,
 }
 
 /// One `tailscale serve` route that ends at dux.
@@ -304,35 +419,43 @@ pub struct TailscaleIdentity {
 /// end at `dux_port`. Bounded exactly like [`detect_ip`]; see
 /// [`detect_identity_with`].
 pub fn detect_identity(dux_port: u16) -> Result<TailscaleIdentity, TailscaleUnavailable> {
-    detect_identity_checked(
-        CLI_CANDIDATES,
-        DETECT_TIMEOUT,
-        dux_port,
-        &machine_has_tailscale_address,
-    )
+    let look = detect_identity_checked(CLI_CANDIDATES, DETECT_TIMEOUT, dux_port, &local_evidence);
+    if let Ok(identity) = &look {
+        *KNOWN_TAILSCALE_IPS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            identity.status.tailscale_ips.clone();
+    }
+    look
 }
 
-/// [`detect_identity`] over a list of candidate programs, with the question
-/// "does this machine have a Tailscale address" injected.
+/// [`detect_identity`] over a list of candidate programs, with this machine's
+/// [`LocalEvidence`] injected (read only when the CLI could not answer).
 ///
-/// A CLI that is missing everywhere, or that cannot reach a daemon, only means
-/// "no Funnel is possible" when this machine has NO Tailscale address: then no
-/// daemon is up, and nothing can publish anything. With an address present, a
-/// daemon IS running that dux cannot ask, so the answer is
+/// The strict rule: dux serves only on an ANSWER. A CLI that is missing
+/// everywhere is an answer ("no Tailscale here") only when nothing of Tailscale
+/// is here: no address on Tailscale's own interface and no daemon socket or
+/// process. A daemon the CLI says is not running is an answer ("no Funnel")
+/// only on the same terms. Anything else is
 /// [`TailscaleUnavailable::Unverifiable`].
 pub fn detect_identity_checked(
     programs: &[&str],
     timeout: std::time::Duration,
     dux_port: u16,
-    has_tailscale_address: &dyn Fn() -> bool,
+    evidence: &dyn Fn() -> LocalEvidence,
 ) -> Result<TailscaleIdentity, TailscaleUnavailable> {
     match first_cli_answer(programs, |program| {
         detect_identity_with(program, timeout, dux_port)
     }) {
-        Err(TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonUnreachable)
-            if has_tailscale_address() =>
-        {
-            Err(TailscaleUnavailable::Unverifiable)
+        Err(
+            reason @ (TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonStopped),
+        ) => {
+            let here = evidence();
+            if here.owned_address || here.daemon_detectable {
+                Err(TailscaleUnavailable::Unverifiable)
+            } else {
+                Err(reason)
+            }
         }
         other => other,
     }
@@ -413,6 +536,11 @@ fn run_cli_raw(
     let shown = args.join(" ");
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
+    // The macOS app's bundled executable runs as the CLI only when it thinks it
+    // is in a shell, or when this is set (Tailscale's macOS CLI docs). Set on
+    // every call, so it never opens or focuses the app; every other CLI
+    // ignores it.
+    cmd.env("TAILSCALE_BE_CLI", "1");
     let output = match crate::bounded_command::run_command_with_timeout(
         cmd,
         timeout,
@@ -441,9 +569,11 @@ fn run_cli_raw(
         ));
         // The CLI's own words for a daemon whose socket cannot be dialled
         // (client/local/local.go): "Failed to connect to local Tailscale daemon".
-        let kind = if stderr
+        let kind = if daemon_stopped_message(&stderr) {
+            TailscaleUnavailable::DaemonStopped
+        } else if stderr
             .to_ascii_lowercase()
-            .contains("failed to connect to local tailscale daemon")
+            .contains("failed to connect to local tailscale")
         {
             TailscaleUnavailable::DaemonUnreachable
         } else {
@@ -502,9 +632,10 @@ fn any_target_to_port(value: &serde_json::Value, dux_port: u16) -> bool {
     match value {
         serde_json::Value::Object(map) => map.iter().any(|(key, inner)| {
             let names_dux = (key == "TCPForward" || key == "Proxy")
-                && inner
-                    .as_str()
-                    .is_some_and(|target| target_port(target) == Some(dux_port));
+                && inner.as_str().is_some_and(|target| {
+                    // A port that cannot be read counts as dux's: conservative.
+                    target_port(target).is_none_or(|port| port == dux_port)
+                });
             names_dux || any_target_to_port(inner, dux_port)
         }),
         serde_json::Value::Array(items) => {
@@ -514,15 +645,17 @@ fn any_target_to_port(value: &serde_json::Value, dux_port: u16) -> bool {
     }
 }
 
-/// The port a forward or proxy target names: `host:port`, `scheme://host:port/path`,
-/// a bare port, or, with no port at all, the scheme's default (`http` 80,
-/// `https` 443).
+/// The port a forward or proxy target names: `host:port`, `scheme://host:port`
+/// with any path, query or fragment after it, a bare port, or, with no port at
+/// all, the scheme's default (`http` 80, `https` 443). `None` when the port
+/// cannot be read (a service name, say), which the Funnel check counts as dux:
+/// it cannot prove the target is anything else.
 fn target_port(target: &str) -> Option<u16> {
     let (scheme, rest) = match target.split_once("://") {
         Some((scheme, rest)) => (Some(scheme), rest),
         None => (None, target),
     };
-    let authority = rest.split('/').next().unwrap_or(rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let authority = authority
         .rsplit_once(']')
         .map_or(authority, |(_, after)| after);
@@ -604,11 +737,24 @@ pub fn parse_status_json(text: &str) -> Option<SelfStatus> {
                 .collect()
         })
         .unwrap_or_default();
+    let tailscale_ips = root
+        .get("Self")
+        .and_then(|s| s.get("TailscaleIPs"))
+        .or_else(|| root.get("TailscaleIPs"))
+        .and_then(|v| v.as_array())
+        .map(|ips| {
+            ips.iter()
+                .filter_map(|ip| ip.as_str())
+                .filter_map(|ip| ip.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
     Some(SelfStatus {
         dns_name,
         magic_dns_enabled,
         magic_dns_suffix,
         cert_domains,
+        tailscale_ips,
     })
 }
 
@@ -1504,31 +1650,99 @@ mod identity_tests {
         assert_eq!(parse_funnel_to_port(&tailnet_only, 3890), Some(false));
     }
 
+    /// The exact words `tailscale status` prints (cmd/tailscale/cli/diag.go,
+    /// `fixTailscaledConnectErrorImpl`) when it found no `tailscaled` (or macOS
+    /// `IPNExtension`) process AND no socket: a daemon that is not running.
+    const STOPPED: &[&str] = &[
+        "failed to connect to local tailscaled; it doesn't appear to be running (sudo systemctl start tailscaled ?)",
+        "failed to connect to local tailscaled; it doesn't appear to be running",
+        "failed to connect to local Tailscale service; is Tailscale running?",
+        "failed to connect to local tailscaled process; it doesn't appear to be running",
+    ];
+
+    /// What it prints when the daemon may well be there: a socket it cannot
+    /// use, a process it found, or no way to look.
+    const NOT_STOPPED: &[&str] = &[
+        "failed to connect to local tailscaled (no tailscaled process found): dial unix /var/run/tailscale/tailscaled.sock: connect: permission denied",
+        "failed to connect to local tailscaled (which appears to be running as /usr/sbin/tailscaled, pid 412). Got error: dial unix /var/run/tailscale/tailscaled.sock: connect: connection refused",
+        "failed to connect to local Tailscaled process and failed to enumerate processes while looking for it",
+        "Failed to connect to local Tailscale daemon for /localapi/v0/status; not running? Error: dial unix /var/run/tailscale/tailscaled.sock: connect: no such file or directory",
+    ];
+
     #[test]
-    fn a_daemon_that_is_not_running_is_told_apart_from_a_failing_cli() {
-        // What the CLI says when its socket is not there.
-        let cli = super::tests::StandIn::new(
-            "daemon-down",
-            "if [ \"$1\" = \"status\" ]; then echo 'Failed to connect to local Tailscale \
-             daemon for /localapi/v0/status; not running? Error: dial unix: connect: no such \
-             file or directory' >&2; exit 1; fi",
-        );
-        assert_eq!(
-            detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890),
-            Err(TailscaleUnavailable::DaemonUnreachable)
-        );
-        let failing = super::tests::StandIn::new(
-            "cli-fails",
-            "if [ \"$1\" = \"status\" ]; then echo 'some other error' >&2; exit 1; fi",
-        );
-        assert_eq!(
-            detect_identity_with(failing.program(), DETECT_TIMEOUT, 3890),
-            Err(TailscaleUnavailable::CommandFailed)
-        );
+    fn only_the_clis_own_stopped_wordings_mean_a_stopped_daemon() {
+        for text in STOPPED {
+            assert!(daemon_stopped_message(text), "{text}");
+            assert!(
+                daemon_stopped_message(&format!("{text}\n")),
+                "with a newline: {text}"
+            );
+        }
+        for text in NOT_STOPPED {
+            assert!(!daemon_stopped_message(text), "{text}");
+        }
     }
 
-    // ── Funnel and a forward split across configs ───────────────────────────
+    fn stopped_cli(name: &str, text: &str) -> super::tests::StandIn {
+        super::tests::StandIn::new(
+            name,
+            &format!("if [ \"$1\" = \"status\" ]; then\ncat >&2 <<'EOF'\n{text}\nEOF\nexit 1\nfi"),
+        )
+    }
 
+    fn nothing_here() -> LocalEvidence {
+        LocalEvidence::default()
+    }
+
+    #[test]
+    fn a_stopped_daemon_is_an_answer_unless_tailscale_still_owns_an_address() {
+        for (n, text) in STOPPED.iter().enumerate() {
+            let cli = stopped_cli(&format!("stopped-{n}"), text);
+            assert_eq!(
+                detect_identity_checked(&[cli.program()], DETECT_TIMEOUT, 3890, &nothing_here),
+                Err(TailscaleUnavailable::DaemonStopped),
+                "{text}"
+            );
+            assert_eq!(
+                detect_identity_checked(&[cli.program()], DETECT_TIMEOUT, 3890, &|| {
+                    LocalEvidence {
+                        owned_address: true,
+                        daemon_detectable: false,
+                    }
+                }),
+                Err(TailscaleUnavailable::Unverifiable),
+                "a Tailscale-owned address says a daemon is up after all: {text}"
+            );
+        }
+        for (n, text) in NOT_STOPPED.iter().enumerate() {
+            let cli = stopped_cli(&format!("not-stopped-{n}"), text);
+            let got =
+                detect_identity_checked(&[cli.program()], DETECT_TIMEOUT, 3890, &nothing_here);
+            assert!(
+                matches!(
+                    got,
+                    Err(TailscaleUnavailable::DaemonUnreachable
+                        | TailscaleUnavailable::CommandFailed)
+                ),
+                "not proof of a stopped daemon, so not an answer: {text} gave {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_call_asks_the_macos_app_to_run_as_the_cli() {
+        // Tailscale's macOS CLI docs: TAILSCALE_BE_CLI=1 forces CLI operation,
+        // so the bundled executable never opens or focuses the app.
+        let cli = super::tests::StandIn::new(
+            "be-cli",
+            &format!(
+                "if [ \"$TAILSCALE_BE_CLI\" != 1 ]; then exit 9; fi; \
+                 if [ \"$1\" = \"status\" ]; then printf '%s' '{STATUS}'; \
+                 else printf '%s' '{SERVE}'; fi"
+            ),
+        );
+        assert!(detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890).is_ok());
+    }
     #[test]
     fn a_funnel_and_a_forward_to_dux_lock_out_wherever_each_one_sits() {
         // Tailscale pairs an AllowFunnel from the top level or any foreground
@@ -1639,7 +1853,7 @@ mod identity_tests {
             &["dux-no-such-tailscale-1a2b", cli.program()],
             DETECT_TIMEOUT,
             3890,
-            &|| panic!("a CLI was found, so the interfaces are never asked"),
+            &|| -> LocalEvidence { panic!("a CLI was found, so nothing else is asked") },
         )
         .unwrap();
         assert_eq!(
@@ -1654,60 +1868,154 @@ mod identity_tests {
     }
 
     #[test]
-    fn no_cli_means_no_funnel_only_when_this_machine_has_no_tailscale_address() {
+    fn no_cli_means_no_funnel_only_when_nothing_of_tailscale_is_here() {
         let missing = ["dux-no-such-tailscale-3c4d"];
         assert_eq!(
-            detect_identity_checked(&missing, DETECT_TIMEOUT, 3890, &|| false),
+            detect_identity_checked(&missing, DETECT_TIMEOUT, 3890, &nothing_here),
             Err(TailscaleUnavailable::CommandMissing)
         );
-        assert_eq!(
-            detect_identity_checked(&missing, DETECT_TIMEOUT, 3890, &|| true),
-            Err(TailscaleUnavailable::Unverifiable),
-            "a Tailscale address with no way to ask about its Funnels is unknown"
-        );
-        let unreachable = super::tests::StandIn::new(
-            "dial-error",
-            "if [ \"$1\" = \"status\" ]; then echo 'Failed to connect to local Tailscale \
-             daemon for /localapi/v0/status; not running? Error: dial unix: permission denied' \
-             >&2; exit 1; fi",
-        );
-        assert_eq!(
-            detect_identity_checked(&[unreachable.program()], DETECT_TIMEOUT, 3890, &|| false),
-            Err(TailscaleUnavailable::DaemonUnreachable)
-        );
-        assert_eq!(
-            detect_identity_checked(&[unreachable.program()], DETECT_TIMEOUT, 3890, &|| true),
-            Err(TailscaleUnavailable::Unverifiable),
-            "a dial error is not proof the daemon is gone (a permission, a wrong socket)"
-        );
+        for evidence in [
+            LocalEvidence {
+                owned_address: true,
+                daemon_detectable: false,
+            },
+            // Userspace networking: no interface at all, but a daemon is there.
+            LocalEvidence {
+                owned_address: false,
+                daemon_detectable: true,
+            },
+        ] {
+            assert_eq!(
+                detect_identity_checked(&missing, DETECT_TIMEOUT, 3890, &|| evidence),
+                Err(TailscaleUnavailable::Unverifiable),
+                "{evidence:?}"
+            );
+        }
+    }
+    fn iface(name: &str, ip: &str) -> (String, IpAddr) {
+        (name.to_string(), ip.parse().unwrap())
     }
 
     #[test]
-    fn a_tailscale_address_is_recognised_in_either_range_and_nothing_else() {
-        let ips =
-            |list: &[&str]| -> Vec<IpAddr> { list.iter().map(|s| s.parse().unwrap()).collect() };
-        assert!(has_tailscale_address(&ips(&[
-            "127.0.0.1",
-            "100.101.102.103"
-        ])));
-        assert!(has_tailscale_address(&ips(&["fd7a:115c:a1e0::1"])));
-        assert!(!has_tailscale_address(&ips(&[
-            "127.0.0.1",
-            "192.168.1.5",
-            "fe80::1"
-        ])));
-        assert!(!has_tailscale_address(&[]));
+    fn only_an_address_on_tailscales_own_interface_counts_not_another_vpns() {
+        let known: Vec<IpAddr> = vec!["100.101.102.103".parse().unwrap()];
+        // Tailscale's own interface on Linux.
+        assert!(owned_tailscale_address(
+            &[iface("tailscale0", "100.101.102.103")],
+            &[]
+        ));
+        assert!(owned_tailscale_address(
+            &[iface("tailscale0", "fd7a:115c:a1e0::1")],
+            &[]
+        ));
+        // macOS (or a custom tun name): a utun whose address Tailscale reported.
+        assert!(owned_tailscale_address(
+            &[iface("utun4", "100.101.102.103")],
+            &known
+        ));
+        // Other VPNs in the same CGNAT block: Cloudflare WARP (100.96.0.0/12)
+        // and NetBird.
+        assert!(!owned_tailscale_address(
+            &[
+                iface("CloudflareWARP", "100.96.0.2"),
+                iface("utun3", "100.96.0.2")
+            ],
+            &known
+        ));
+        assert!(!owned_tailscale_address(
+            &[iface("wt0", "100.64.0.5")],
+            &known
+        ));
+        // A tailscale-named interface with an address outside Tailscale's ranges.
+        assert!(!owned_tailscale_address(
+            &[iface("tailscale0", "192.168.1.5")],
+            &[]
+        ));
+        assert!(!owned_tailscale_address(&[], &known));
     }
 
     #[test]
-    fn this_machines_interface_addresses_can_be_read() {
-        let addrs = interface_addresses();
+    fn a_daemon_is_detectable_by_its_socket_or_its_process() {
+        let none = |_: &std::path::Path| false;
+        assert!(!tailscaled_detectable(&none, None, false));
         assert!(
-            addrs.iter().any(|ip| ip.is_loopback()),
-            "every machine dux runs on has a loopback address: {addrs:?}"
+            tailscaled_detectable(&none, None, true),
+            "a running tailscaled"
+        );
+        for path in SOCKET_PATHS {
+            let at = |p: &std::path::Path| p == std::path::Path::new(path);
+            assert!(tailscaled_detectable(&at, None, false), "{path}");
+        }
+        let custom = |p: &std::path::Path| p == std::path::Path::new("/srv/ts/sock");
+        assert!(
+            tailscaled_detectable(&custom, Some("/srv/ts/sock".into()), false),
+            "$TS_SOCKET"
+        );
+        assert!(SOCKET_PATHS.contains(&"/var/run/tailscale/tailscaled.sock"));
+        assert!(SOCKET_PATHS.contains(&"/run/tailscale/tailscaled.sock"));
+        assert!(
+            SOCKET_PATHS.contains(&"/var/run/tailscaled.socket"),
+            "macOS"
+        );
+        assert!(
+            SOCKET_PATHS.contains(&"/tmp/tailscaled.sock"),
+            "the official image"
+        );
+        assert!(PROCESS_NAMES.contains(&"tailscaled"));
+        assert!(PROCESS_NAMES.contains(&"IPNExtension"), "macOS");
+    }
+
+    #[test]
+    fn a_successful_look_remembers_this_machines_tailscale_addresses() {
+        let status = parse_status_json(STATUS).unwrap();
+        assert_eq!(
+            status.tailscale_ips,
+            vec![
+                "100.101.102.103".parse::<IpAddr>().unwrap(),
+                "fd7a:115c:a1e0::1234:5678".parse().unwrap()
+            ]
+        );
+    }
+    #[test]
+    fn this_machines_interfaces_can_be_read_with_their_names() {
+        let ifaces = interfaces();
+        assert!(
+            ifaces
+                .iter()
+                .any(|(name, ip)| ip.is_loopback() && !name.is_empty()),
+            "every machine dux runs on has a named loopback interface: {ifaces:?}"
         );
     }
 
+    #[test]
+    fn a_target_with_a_path_query_or_a_named_port_is_read_conservatively() {
+        let at = |proxy: &str| {
+            format!(
+                "{{\"AllowFunnel\": {{\"h:443\": true}}, \"Web\": {{\"h:443\": {{\"Handlers\": \
+                 {{\"/\": {{\"Proxy\": \"{proxy}\"}}}}}}}}}}"
+            )
+        };
+        for proxy in [
+            "http://127.0.0.1:3890/sub?x=1",
+            "http://127.0.0.1:3890?x=1",
+            "http://127.0.0.1:3890#frag",
+            "127.0.0.1:3890?x",
+            "tcp://127.0.0.1:3890",
+            // A port written by name cannot be checked here, so it counts.
+            "http://127.0.0.1:http-alt",
+            "localhost:dux",
+        ] {
+            assert_eq!(
+                parse_funnel_to_port(&at(proxy), 3890),
+                Some(true),
+                "{proxy}"
+            );
+        }
+        assert_eq!(
+            parse_funnel_to_port(&at("http://127.0.0.1:22/x?y"), 3890),
+            Some(false)
+        );
+    }
     #[test]
     fn a_funnelled_tcp_forward_in_a_foreground_session_counts() {
         let text = "{\"Foreground\": {\"s1\": {\"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:3890\"}}, \
@@ -1735,6 +2043,7 @@ mod identity_tests {
             magic_dns_enabled: true,
             magic_dns_suffix: suffix.map(str::to_string),
             cert_domains: Vec::new(),
+            tailscale_ips: Vec::new(),
         }
     }
 

@@ -4451,6 +4451,7 @@ mod live_tailscale_mode_tests {
                 magic_dns_enabled: true,
                 magic_dns_suffix: name.split_once('.').map(|(_, suffix)| suffix.to_string()),
                 cert_domains: vec![name.to_string()],
+                tailscale_ips: Vec::new(),
             },
             serve: serve
                 .iter()
@@ -4565,9 +4566,11 @@ mod live_tailscale_mode_tests {
     #[tokio::test]
     async fn no_tailscale_cli_or_no_daemon_means_no_funnel_and_nothing_is_refused() {
         use axum::http::StatusCode;
+        // The two answers: no Tailscale here at all, and a daemon the CLI says
+        // is not running. A daemon it merely cannot reach is not one of them.
         for reason in [
             TailscaleUnavailable::CommandMissing,
-            TailscaleUnavailable::DaemonUnreachable,
+            TailscaleUnavailable::DaemonStopped,
         ] {
             let tmp = dux_core::test_scratch::ScratchDir::new();
             let (_primary, primary_addr) = primary_listener();
@@ -4692,6 +4695,41 @@ mod live_tailscale_mode_tests {
             said.iter().any(|m| m.contains("no longer checks")),
             "{said:?}"
         );
+        h.finish().await;
+    }
+
+    /// Once a Funnel to dux has been seen, only a look that SEES it gone lifts
+    /// the refusal: a daemon that stops (so nothing can be checked) keeps it.
+    #[tokio::test]
+    async fn a_funnel_lockout_outlives_a_daemon_outage_until_a_look_sees_it_gone() {
+        use axum::http::StatusCode;
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let (_primary, primary_addr) = primary_listener();
+        let (identify, slot) = scripted_identity(tcp_funnelled("box.tail.ts.net"));
+        let h = Harness::start_with_identity(
+            TailscaleMode::Auto,
+            Some(primary_addr),
+            Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
+            identify,
+        );
+        let app = router_over(&h, tmp.path());
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while h.control.funnel_lockout().get() != crate::host_guard::FunnelLockout::Funnel {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the Funnel was never seen"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        *slot.lock().unwrap() = Err(TailscaleUnavailable::DaemonStopped);
+        tokio::time::sleep(FAST_LOOK * 10).await;
+        assert_eq!(
+            status_for(&app, "localhost").await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the daemon stopped, but nothing has seen the Funnel go"
+        );
+        *slot.lock().unwrap() = Ok(named("box.tail.ts.net", &[]));
+        until_status(&app, "localhost", StatusCode::OK).await;
         h.finish().await;
     }
 
