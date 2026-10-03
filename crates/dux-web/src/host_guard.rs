@@ -204,25 +204,6 @@ pub enum FunnelLockout {
 }
 
 impl FunnelLockout {
-    fn code(self) -> u8 {
-        match self {
-            Self::Open => 0,
-            Self::Checking => 1,
-            Self::Unconfirmed => 2,
-            Self::Funnel => 3,
-        }
-    }
-
-    fn from_code(code: u8) -> Self {
-        match code {
-            0 => Self::Open,
-            1 => Self::Checking,
-            2 => Self::Unconfirmed,
-            // Anything else is a bug; refuse rather than serve.
-            _ => Self::Funnel,
-        }
-    }
-
     /// The body of the `503` this state answers with, or `None` when it serves.
     fn refusal(self) -> Option<&'static str> {
         match self {
@@ -247,25 +228,60 @@ impl FunnelLockout {
 }
 
 /// The lockout state a serve's loop writes and its Host guard reads. Cloning
-/// shares it.
+/// shares it. It is a watch channel rather than a bare atomic because a socket
+/// opened while dux served is not stopped by the guard, which only sees new
+/// requests: every long-lived socket loop subscribes and closes itself the
+/// moment the state leaves [`FunnelLockout::Open`].
 #[derive(Clone, Debug)]
-pub struct FunnelLockoutCell(Arc<std::sync::atomic::AtomicU8>);
+pub struct FunnelLockoutCell(Arc<tokio::sync::watch::Sender<FunnelLockout>>);
 
 impl FunnelLockoutCell {
     pub fn new(state: FunnelLockout) -> Self {
-        Self(Arc::new(std::sync::atomic::AtomicU8::new(state.code())))
+        Self(Arc::new(tokio::sync::watch::Sender::new(state)))
     }
 
     pub fn get(&self) -> FunnelLockout {
-        FunnelLockout::from_code(self.0.load(std::sync::atomic::Ordering::SeqCst))
+        *self.0.borrow()
     }
 
-    /// Set the state, answering with the one it replaced.
+    /// Set the state, answering with the one it replaced. Every subscriber is
+    /// woken, receivers or not.
     pub fn set(&self, state: FunnelLockout) -> FunnelLockout {
-        FunnelLockout::from_code(
-            self.0
-                .swap(state.code(), std::sync::atomic::Ordering::SeqCst),
-        )
+        self.0.send_replace(state)
+    }
+
+    /// A handle that resolves [`FunnelLockoutWatch::engaged`] once the state
+    /// is anything but Open.
+    pub fn watch(&self) -> FunnelLockoutWatch {
+        FunnelLockoutWatch(Some(self.0.subscribe()))
+    }
+}
+
+/// What a long-lived socket holds to learn that dux stopped serving. A serve
+/// with no lockout (Tailscale off) holds [`FunnelLockoutWatch::never`].
+#[derive(Debug)]
+pub struct FunnelLockoutWatch(Option<tokio::sync::watch::Receiver<FunnelLockout>>);
+
+impl FunnelLockoutWatch {
+    /// A watch that never engages.
+    pub fn never() -> Self {
+        Self(None)
+    }
+
+    /// Resolves once the lockout is anything but Open, at once when it already
+    /// is. Never resolves for [`FunnelLockoutWatch::never`]; a dropped cell
+    /// leaves the last state standing, so it never resolves on that alone.
+    pub async fn engaged(&mut self) {
+        let Some(rx) = self.0.as_mut() else {
+            return std::future::pending().await;
+        };
+        if rx
+            .wait_for(|state| *state != FunnelLockout::Open)
+            .await
+            .is_err()
+        {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -607,6 +623,49 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
+
+    // ── FunnelLockoutWatch ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_lockout_watch_engages_on_any_state_but_open_and_never_without_a_cell() {
+        let quick = Duration::from_millis(50);
+        let cell = FunnelLockoutCell::new(FunnelLockout::Open);
+        let mut watch = cell.watch();
+        assert!(
+            tokio::time::timeout(quick, watch.engaged()).await.is_err(),
+            "Open serves"
+        );
+        for state in [
+            FunnelLockout::Checking,
+            FunnelLockout::Unconfirmed,
+            FunnelLockout::Funnel,
+        ] {
+            cell.set(FunnelLockout::Open);
+            let mut watch = cell.watch();
+            cell.set(state);
+            assert!(
+                tokio::time::timeout(quick, watch.engaged()).await.is_ok(),
+                "{state:?}"
+            );
+            // Already engaged when subscribed: at once.
+            assert!(
+                tokio::time::timeout(quick, cell.watch().engaged())
+                    .await
+                    .is_ok(),
+                "{state:?}"
+            );
+        }
+        assert!(
+            tokio::time::timeout(quick, FunnelLockoutWatch::never().engaged())
+                .await
+                .is_err()
+        );
+        // A dropped cell leaves the last state standing rather than engaging.
+        let cell = FunnelLockoutCell::new(FunnelLockout::Open);
+        let mut watch = cell.watch();
+        drop(cell);
+        assert!(tokio::time::timeout(quick, watch.engaged()).await.is_err());
+    }
 
     // ── strip_host_port ───────────────────────────────────────────────────
 

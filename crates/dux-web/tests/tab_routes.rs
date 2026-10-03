@@ -53,6 +53,13 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
 async fn boot_with_tab_per_agent(
     tab_per_agent: u32,
 ) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
+    boot_tuned(tab_per_agent, |params| params).await
+}
+
+async fn boot_tuned(
+    tab_per_agent: u32,
+    tune: impl FnOnce(RouterParams) -> RouterParams,
+) -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let root = tmp.path().to_path_buf();
     let wt1 = root.join("wt1");
@@ -108,7 +115,7 @@ async fn boot_with_tab_per_agent(
         dux_core::config::DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS,
         tab_per_agent,
     );
-    let app = build_app(handle, Router::<AppState>::new(), params);
+    let app = build_app(handle, Router::<AppState>::new(), tune(params));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -943,6 +950,61 @@ async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
         reconnected,
         "deleting a tab must free its per-agent socket sub-quota slot"
     );
+}
+
+/// A socket opened while dux served must not outlive the moment dux stops
+/// serving: when the Funnel lockout leaves Open (a Funnel to dux appears, or
+/// dux can no longer confirm there is none), every established socket, the
+/// events stream and every PTY alike, is closed, and a new one is refused.
+#[tokio::test]
+async fn every_established_socket_closes_when_the_funnel_lockout_engages() {
+    use dux_web::host_guard::{FunnelLockout, FunnelLockoutCell};
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn closes<S>(ws: &mut S, what: &str)
+    where
+        S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await {
+                Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => return,
+                _ => continue,
+            }
+        }
+        panic!("the {what} socket stayed open under the Funnel lockout");
+    }
+
+    for locked in [FunnelLockout::Funnel, FunnelLockout::Unconfirmed] {
+        let lockout = FunnelLockoutCell::new(FunnelLockout::Open);
+        let cell = lockout.clone();
+        let (addr, _tmp) = boot_tuned(
+            dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
+            move |params| params.with_live_funnel_lockout(cell),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let tab = create_extra_tab(&client, addr, "s1").await;
+
+        let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+            .await
+            .expect("connect the events socket");
+        let (mut pty, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/tabs/{tab}/pty"))
+                .await
+                .expect("connect the tab's pty socket");
+
+        lockout.set(locked);
+        closes(&mut events, "events").await;
+        closes(&mut pty, "pty").await;
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+                .await
+                .is_err(),
+            "{locked:?}: a new socket must be refused too"
+        );
+    }
 }
 
 // The ASYNC launch-failure path, as opposed to the synchronous 400 for an

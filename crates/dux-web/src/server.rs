@@ -152,9 +152,23 @@ pub struct AppState {
     /// [`crate::rest_common::FROM_PR_CREATE_AWAIT_TIMEOUT`]; a test sets a short
     /// window so the deferred reply is exercised without waiting out the real one.
     pub create_await_timeout: Option<std::time::Duration>,
+    /// The serve's Funnel lockout, so every long-lived socket can close itself
+    /// the moment dux stops serving (the Host guard refuses new requests, but
+    /// a socket already upgraded never passes it again). `None` when nothing
+    /// consults Tailscale.
+    pub funnel_lockout: Option<crate::host_guard::FunnelLockoutCell>,
 }
 
 impl AppState {
+    /// What a long-lived socket holds to learn that dux stopped serving.
+    pub fn funnel_lockout_watch(&self) -> crate::host_guard::FunnelLockoutWatch {
+        self.funnel_lockout
+            .as_ref()
+            .map_or_else(crate::host_guard::FunnelLockoutWatch::never, |cell| {
+                cell.watch()
+            })
+    }
+
     /// Whether some OTHER connection currently holds input on `pty_id`, so the
     /// file-drop route can refuse a read-only viewer's drop instead of saving a file
     /// it cannot paste. A COURTESY, not the protection: only the websocket's own
@@ -794,6 +808,7 @@ pub fn build_app(
         first_load,
         tailscale_mode: params.tailscale_mode_control.clone(),
         tailscale_forced_no: params.tailscale_forced_no,
+        funnel_lockout: params.live_funnel_lockout.clone(),
     };
 
     // Every route is served plainly (trusted-local: no login gate). `extra_gated`
@@ -1293,6 +1308,7 @@ fn upgrade_pty_socket(
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let live_limits = Arc::clone(&state.live_limits);
+    let lockout = state.funnel_lockout_watch();
     let user_agent = captured_user_agent(headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -1309,6 +1325,7 @@ fn upgrade_pty_socket(
                 connections,
                 user_agent,
                 live_limits,
+                lockout,
             )
         })
         .into_response()
@@ -1673,6 +1690,7 @@ async fn ws_tab_pty_upgrade(
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let live_limits = Arc::clone(&state.live_limits);
+    let lockout = state.funnel_lockout_watch();
     let peer_ip = peer.ip();
     let user_agent = captured_user_agent(&headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
@@ -1693,6 +1711,7 @@ async fn ws_tab_pty_upgrade(
                 connections,
                 user_agent,
                 live_limits,
+                lockout,
             )
             .await
         })
@@ -1735,6 +1754,8 @@ async fn handle_pty_socket(
     // socket rather than frozen at bind, so a config reload retimes the next
     // connection.
     live_limits: Arc<crate::engine_actor::LiveServerLimits>,
+    // Ends the socket the moment dux stops serving under the Funnel lockout.
+    lockout: crate::host_guard::FunnelLockoutWatch,
 ) {
     console.client_connected(peer_ip);
     // Register this PTY socket as a live connection (its class depends on which PTY
@@ -1942,7 +1963,7 @@ async fn handle_pty_socket(
             user_agent: user_agent.as_deref(),
             live_limits: &live_limits,
         }
-        .run(stream, rx, grid_changes, handshake_grid_seq)
+        .run(stream, rx, grid_changes, handshake_grid_seq, lockout)
         .await;
     }
 
@@ -1973,6 +1994,7 @@ impl AttachedPtySocket<'_> {
         rx: std::sync::mpsc::Receiver<Vec<u8>>,
         mut grid_changes: tokio::sync::broadcast::Receiver<crate::pty_sizes::PtyGridChange>,
         mut last_grid_seq: u64,
+        mut lockout: crate::host_guard::FunnelLockoutWatch,
     ) {
         let mut pty_forwarder =
             spawn_pty_forwarder(Arc::clone(self.sink), rx, self.engine.shutdown_flag());
@@ -1988,6 +2010,7 @@ impl AttachedPtySocket<'_> {
                     self.handle_grid_change(change, &mut last_grid_seq).await
                 }
                 _ = &mut pty_forwarder => self.close_after_forwarder_end().await,
+                () = lockout.engaged() => self.close_under_lockout().await,
                 next = stream.next() => match next {
                     Some(Ok(message)) => self.handle_client_message(message).await,
                     _ => PtyLoopAction::Break,
@@ -2017,6 +2040,16 @@ impl AttachedPtySocket<'_> {
     /// The forwarder has ended, so no more PTY bytes can arrive on this socket.
     /// Close with the code that tells the client whether to reconnect: the server
     /// shutting down is a different answer from the provider going away.
+    /// dux stopped serving (a Funnel to it, or no way to confirm there is
+    /// none), so a socket opened before must not keep driving this PTY. A plain
+    /// close, like a shutdown: the client's ordinary reconnect then meets the
+    /// guard's refusal and says why.
+    async fn close_under_lockout(&self) -> PtyLoopAction {
+        let mut guard = self.sink.lock().await;
+        let _ = guard.send(Message::Close(None)).await;
+        PtyLoopAction::Break
+    }
+
     async fn close_after_forwarder_end(&self) -> PtyLoopAction {
         let shutting_down = self
             .engine
@@ -2658,6 +2691,7 @@ async fn ws_events_upgrade(
     let bus = Arc::clone(&state.event_bus);
     let changes = Arc::clone(&state.changes);
     let connections = Arc::clone(&state.connections);
+    let lockout = state.funnel_lockout_watch();
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -2670,6 +2704,7 @@ async fn ws_events_upgrade(
                 peer_ip,
                 permit,
                 connections,
+                lockout,
             )
         })
         .into_response()
@@ -2694,6 +2729,8 @@ async fn handle_events_socket(
     peer_ip: std::net::IpAddr,
     _permit: tokio::sync::OwnedSemaphorePermit,
     connections: Arc<crate::rest_common::ConnectionRegistry>,
+    // Ends the socket the moment dux stops serving under the Funnel lockout.
+    lockout: crate::host_guard::FunnelLockoutWatch,
 ) {
     console.client_connected(peer_ip);
     // A server-assigned random id correlating REST actions with the statuses they
@@ -2807,6 +2844,7 @@ async fn handle_events_socket(
         connection_id,
         connections,
         peer_ip,
+        lockout,
     };
     let _ = connection.run().await;
     drop(connection);
@@ -2830,10 +2868,13 @@ struct EventsSocketLoop {
     /// has gone can fall back to a broadcast instead of reaching nobody.
     connections: Arc<crate::rest_common::ConnectionRegistry>,
     peer_ip: IpAddr,
+    lockout: crate::host_guard::FunnelLockoutWatch,
 }
 
 enum EventsLoopInput {
     Ping,
+    /// dux stopped serving under the Funnel lockout.
+    LockedOut,
     Workspace(Result<(), tokio::sync::watch::error::RecvError>),
     Resource(Result<Event, tokio::sync::broadcast::error::RecvError>),
     Status(Result<WireStatus, tokio::sync::broadcast::error::RecvError>),
@@ -2845,6 +2886,17 @@ impl EventsLoopInput {
     async fn apply(self, connection: &mut EventsSocketLoop) -> Result<(), ()> {
         match self {
             Self::Ping => send_ping(&connection.sink).await,
+            Self::LockedOut => {
+                // A plain close, like a shutdown: the reconnect meets the
+                // guard's refusal, which says why.
+                let _ = connection
+                    .sink
+                    .lock()
+                    .await
+                    .send(Message::Close(None))
+                    .await;
+                Err(())
+            }
             Self::Workspace(changed) => connection.handle_workspace_change(changed).await,
             Self::Resource(event) => connection.handle_resource_event(event).await,
             Self::Status(status) => connection.handle_status(status).await,
@@ -2862,6 +2914,7 @@ impl EventsSocketLoop {
         loop {
             let input = tokio::select! {
                 _ = ping.tick() => EventsLoopInput::Ping,
+                () = self.lockout.engaged() => EventsLoopInput::LockedOut,
                 changed = self.workspace_rx.changed(), if self.workspace_alive => {
                     EventsLoopInput::Workspace(changed)
                 }
