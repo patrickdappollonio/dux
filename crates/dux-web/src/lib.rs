@@ -673,6 +673,7 @@ fn run_plain_http(
             }
             let leg_commands = tailscale_loop.take_leg_receiver();
             tailscale_loop.start_watcher_if_wanted();
+            tailscale_loop.say_not_checking(&console);
             tailscale_loop.say_serve_hint_once(&console);
 
             run_serve_loop(
@@ -1199,6 +1200,17 @@ impl TailscaleLoop {
         let before = self.funnel_lockout.set(next);
         if let Some((tone, message)) = crate::serve_legs::lockout_news(before, next, because) {
             say(tone, &message, console, status);
+        }
+    }
+
+    /// Say once, at start, that this serve does not consult Tailscale and what
+    /// that costs. Both serves call it right after building their loop; a live
+    /// switch to `no` says its own sentence.
+    pub(crate) fn say_not_checking(&self, console: &Console) {
+        if self.forced_no || !self.mode.wants_tailscale() {
+            let message = crate::serve_legs::not_checking_tailscale(self.forced_no);
+            dux_core::logger::warn(&format!("[server] {message}"));
+            console.bind_degraded(&message);
         }
     }
 
@@ -2274,6 +2286,7 @@ impl ServeCore {
                 None,
             );
             tailscale_loop.start_watcher_if_wanted();
+            tailscale_loop.say_not_checking(&console);
             tailscale_loop
         };
         let leg_commands = tailscale_loop.take_leg_receiver();
@@ -5316,6 +5329,47 @@ mod live_tailscale_mode_tests {
             crate::host_guard::FunnelLockout::Open,
             "a warning, never a lock"
         );
+    }
+
+    /// With Tailscale checks off, the start says once what that costs: no
+    /// Funnel is noticed, and there is no login. Both serves call this right
+    /// after building their loop.
+    #[tokio::test]
+    async fn a_serve_that_does_not_check_tailscale_says_so_at_start() {
+        let (control, _mode_rx) = TailscaleModeControl::new(
+            tokio::runtime::Handle::current(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        for (mode, forced_no, says) in [
+            (TailscaleMode::No, false, Some("tailscale = \"no\"")),
+            (TailscaleMode::Auto, true, Some("--no-tailscale")),
+            (TailscaleMode::Yes, true, Some("--no-tailscale")),
+            (TailscaleMode::Auto, false, None),
+            (TailscaleMode::Yes, false, None),
+        ] {
+            let ring = dux_core::activity::ActivityRing::new(100);
+            let console = Console::capture(ring.clone());
+            let ts = TailscaleLoop::new(
+                mode,
+                forced_no,
+                None,
+                None,
+                &control,
+                Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
+            );
+            ts.say_not_checking(&console);
+            let texts = ring_texts(&ring);
+            match says {
+                Some(why) => {
+                    assert_eq!(texts.len(), 1, "{mode:?} {forced_no}: {texts:#?}");
+                    for needle in ["not checking Tailscale", why, "Funnel", "no login"] {
+                        assert!(texts[0].contains(needle), "{needle}: {}", texts[0]);
+                    }
+                }
+                None => assert!(texts.is_empty(), "{mode:?}: {texts:#?}"),
+            }
+        }
     }
 
     /// The flip's header URL list follows the serve live: the MagicDNS URL (the

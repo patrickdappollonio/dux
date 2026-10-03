@@ -24,6 +24,7 @@ portable-pty = "0.9"
 rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
 libc.workspace = true
 rustix.workspace = true
+socket2.workspace = true
 serde.workspace = true
 # `preserve_order` is load-bearing: `[macros]` and `[providers]` are
 # order-meaningful flattened IndexMaps, and without it `toml::from_str` hands

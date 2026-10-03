@@ -90,11 +90,13 @@ answer. dux runs the `tailscale` command, looking for it on your `PATH`, in
 command line tool, never opening the app). What happens next is one of three things.
 
 **dux serves, because nothing can publish it.** An ordinary answer from Tailscale that
-shows no Funnel to dux is the usual one, and so is a node that is down (`tailscale down`),
-logged out, or waiting for an administrator's approval: none of those can publish anything,
-whatever its serve settings still say. Two more answers count, and both only when nothing of
-Tailscale is on this machine at all: no address on Tailscale's own network interface, no
-Tailscale daemon socket, and no running `tailscaled` or Tailscale macOS app.
+shows no Funnel to dux is the usual one. A node that is down (`tailscale down`), logged out,
+or waiting for an administrator's approval publishes nothing, so it serves too, unless its
+saved settings still Funnel dux's port: `tailscale up` brings those straight back, so that
+one stays refused while the node is down. Two more answers count, and both only when nothing
+of Tailscale is on this machine at all: no address on Tailscale's own network interface, no
+Tailscale daemon answering on its socket (a socket file left behind by a daemon that is gone
+does not count), and no running `tailscaled` or Tailscale macOS app.
 
 - The `tailscale` command is not in any of those places.
 - The `tailscale` command says, in its own words, that the daemon is not running.
@@ -109,9 +111,12 @@ dux could not confirm that no Funnel publishes it, and the log says why:
   resources), timed out (dux caps each call at a few seconds and kills it), or could not
   reach a daemon that may well be there;
 - the command answered with nothing dux could read;
-- the command is missing or says the daemon is down, yet something of Tailscale is here:
-  an address on its interface, a daemon socket, or a running `tailscaled` or Tailscale
-  macOS app.
+- the command says the daemon is down, yet something of Tailscale is here: an address on
+  its interface, a daemon answering on its socket, or a running `tailscaled` or Tailscale
+  macOS app;
+- the command is not in any of the places dux looks, yet something of Tailscale is here.
+  The page then says so, names those places, and says to put the command in one of them
+  or set `tailscale = "no"`.
 
 **A Funnel already seen stays refused** through all of it. Once dux has seen a Funnel to its
 port, a daemon that stops or a command that fails changes nothing; only a look that shows the
@@ -126,13 +131,14 @@ How to get out, in order:
 3. **Set `tailscale = "no"`** (or pass `--no-tailscale`) when you do not want dux consulting
    Tailscale at all. That turns off the Funnel checks above too: only Tailscale's own mark on
    Funnel traffic is still refused, so keep it for machines where you know no Funnel points
-   at dux.
+   at dux. dux says so once at start, in both `dux server` and the start-web-server flip:
+   it is not checking Tailscale, will not notice a Funnel publishing it, and has no login.
 
 > [!IMPORTANT]
 > **Userspace networking.** A `tailscaled` started with `--tun=userspace-networking` (the
 > default in Tailscale's container image) has no network interface. When it runs where dux
 > can see it, on the same machine or in the same container, dux still spots it by its
-> socket (`/var/run/tailscale/tailscaled.sock`, `/run/tailscale/tailscaled.sock`,
+> answering socket (`/var/run/tailscale/tailscaled.sock`, `/run/tailscale/tailscaled.sock`,
 > `/var/run/tailscaled.socket`, `/tmp/tailscaled.sock`, or the path in `$TS_SOCKET`) or by
 > its process, and refuses until it can ask. Make the `tailscale` command available to dux
 > and able to reach that daemon (it looks for the socket at
@@ -359,10 +365,13 @@ in a DNS cache, flush it (`resolvectl flush-caches` on Linux with systemd-resolv
 does within seconds of starting), the last look at Tailscale failed, or a Tailscale Funnel
 route is on (see the caveats below).
 
-**Every page answers `503`.** The page says which of three things it is. *Checking*: dux has
+**Every page answers `503`.** The page says which of four things it is. *Checking*: dux has
 just started and its first look at Tailscale has not answered yet; wait a moment. *Could not
 confirm*: dux could not ask Tailscale whether a Funnel publishes it; see
 [When Tailscale isn't there](#when-tailscale-isnt-there) for every cause and the way out.
+*Cannot find the tailscale command*: Tailscale is running but its command is not where dux
+looks; put it on your `PATH`, in `/usr/local/bin`, or in the macOS app's usual place, or set
+`tailscale = "no"`.
 *A Funnel is publishing dux*: turn it off (see the caveats below). A browser tab that was
 already open loses its connection the moment any of these starts, and reconnects once dux
 serves again.
@@ -461,9 +470,16 @@ console.
 > Know the limits. dux looks every few seconds, so a Funnel switched on while dux runs is
 > refused at the next look; with Tailscale 1.72 or later, a web Funnel is refused at once by
 > its mark. dux only sees **this machine's** Funnels: another machine on your tailnet
-> funnelling to this one's Tailscale address is invisible to it. On `"no"` dux does not
-> consult Tailscale at all, so only the mark is checked, and switching to `"no"` lifts a
-> refusal, with a warning that says so.
+> funnelling to this one's Tailscale address is invisible to it. It also only sees the
+> Tailscale its `tailscale` command reaches by default: a second `tailscaled` running with a
+> socket of its own, or a program with Tailscale built into it (tools built on Tailscale's
+> `tsnet` library), is invisible to it, and so is a Funnel either one publishes. Running one
+> of those in front of dux is a setup you chose, and dux cannot protect it. A Funnel is
+> paired with the port it is for, as Tailscale pairs it: a Funnel for one port does not
+> count against dux served on another, and is only warned about. A node that is
+> down with a Funnel to dux still saved stays refused, so `tailscale up` opens no window. On
+> `"no"` dux does not consult Tailscale at all, so only the mark is checked, and switching
+> to `"no"` lifts a refusal, with a warning that says so.
 
 ## Where to go next
 

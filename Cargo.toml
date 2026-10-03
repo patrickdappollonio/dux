@@ -29,6 +29,7 @@ flate2 = "1"
 sysinfo = "0.35"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "signal"] }
 libc = "0.2"
+socket2 = "0.6"
 url = "2.5"
 percent-encoding = "2.3"
 axum = { version = "0.8", features = ["ws"] }

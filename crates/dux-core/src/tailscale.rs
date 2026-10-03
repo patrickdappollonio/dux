@@ -50,11 +50,11 @@ pub enum TailscaleUnavailable {
     /// (see [`daemon_stopped_message`]). Funnel needs a running daemon, so this
     /// is an answer: nothing is published.
     DaemonStopped,
-    /// The CLI is missing or says its daemon is not running, yet something of
-    /// Tailscale is here: an address on Tailscale's own interface, a daemon
-    /// socket, or a running `tailscaled` (userspace networking has no
+    /// The CLI is missing everywhere dux looks, yet something of Tailscale is
+    /// here: an address on Tailscale's own interface, a daemon socket that
+    /// answers, or a running `tailscaled` (userspace networking has no
     /// interface at all). A daemon may be up that nothing here can ask about
-    /// its Funnels. Unknown, never "no Funnel".
+    /// its Funnels. Unknown, never "no Funnel"; the way out is the CLI.
     Unverifiable,
 }
 
@@ -71,8 +71,7 @@ impl TailscaleUnavailable {
             Self::DaemonStopped => "the Tailscale daemon is not running",
             Self::Unverifiable => {
                 "Tailscale is on this machine (an address on its interface, a daemon socket, \
-                 or a running Tailscale daemon), but the tailscale CLI is missing or cannot \
-                 ask it"
+                 or a running Tailscale daemon), but the tailscale CLI is not where dux looks"
             }
         }
     }
@@ -327,20 +326,50 @@ fn cli_on_disk(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
     }
 }
 
-/// Whether a `tailscaled` is detectable without the CLI: its socket exists at a
-/// known path or at `$TS_SOCKET`, or a process with its name is running.
+/// Whether a `tailscaled` is detectable without the CLI: its socket answers
+/// (see [`socket_answers`]) at a known path or at `$TS_SOCKET`, or a
+/// process with its name is running.
 pub fn tailscaled_detectable(
-    exists: &dyn Fn(&std::path::Path) -> bool,
+    answers: &dyn Fn(&std::path::Path) -> bool,
     ts_socket: Option<String>,
     process_running: bool,
 ) -> bool {
     process_running
         || SOCKET_PATHS
             .iter()
-            .any(|path| exists(std::path::Path::new(path)))
+            .any(|path| answers(std::path::Path::new(path)))
         || ts_socket
             .filter(|path| !path.is_empty())
-            .is_some_and(|path| exists(std::path::Path::new(&path)))
+            .is_some_and(|path| answers(std::path::Path::new(&path)))
+}
+
+/// How long a daemon socket gets to accept a connection before it is counted
+/// anyway. A local socket answers at once or refuses at once; this only bounds
+/// a listener too busy to say either.
+pub const SOCKET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Whether a daemon answers on the socket at `path`: a bounded, non-blocking
+/// connect. A file left behind by a daemon that is gone refuses the connection
+/// and is not evidence, or it would keep dux refusing forever. A listener too
+/// busy to take the connection, or one this user may not connect to, is
+/// counted: something is there, and dux cannot ask it.
+fn socket_answers(path: &std::path::Path) -> bool {
+    let Ok(address) = socket2::SockAddr::unix(path) else {
+        return false;
+    };
+    let Ok(socket) = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+    else {
+        return false;
+    };
+    match socket.connect_timeout(&address, SOCKET_PROBE_TIMEOUT) {
+        Ok(()) => true,
+        Err(err) => matches!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::PermissionDenied
+        ),
+    }
 }
 
 /// Whether a process named like a Tailscale daemon is running right now.
@@ -376,7 +405,7 @@ pub fn local_evidence() -> LocalEvidence {
         .clone();
     evidence_from(
         owned_tailscale_address(&interfaces(), &known),
-        &|path| path.exists(),
+        &socket_answers,
         std::env::var("TS_SOCKET").ok(),
         &|| {
             PROCESS_SCAN
@@ -393,7 +422,7 @@ pub fn local_evidence() -> LocalEvidence {
 /// ends the reading.
 fn evidence_from(
     owned_address: bool,
-    exists: &dyn Fn(&std::path::Path) -> bool,
+    answers: &dyn Fn(&std::path::Path) -> bool,
     ts_socket: Option<String>,
     process_running: &dyn Fn() -> bool,
 ) -> LocalEvidence {
@@ -403,7 +432,7 @@ fn evidence_from(
             daemon_detectable: false,
         };
     }
-    let daemon_detectable = tailscaled_detectable(exists, ts_socket, false) || process_running();
+    let daemon_detectable = tailscaled_detectable(answers, ts_socket, false) || process_running();
     LocalEvidence {
         owned_address: false,
         daemon_detectable,
@@ -562,10 +591,13 @@ pub fn detect_identity_checked(
             reason @ (TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonStopped),
         ) => {
             let here = evidence();
-            if here.owned_address || here.daemon_detectable {
+            if !(here.owned_address || here.daemon_detectable) {
+                Err(reason)
+            } else if reason == TailscaleUnavailable::CommandMissing {
                 Err(TailscaleUnavailable::Unverifiable)
             } else {
-                Err(reason)
+                // The CLI says stopped, yet a daemon shows: one it cannot reach.
+                Err(TailscaleUnavailable::DaemonUnreachable)
             }
         }
         other => other,
@@ -594,16 +626,8 @@ pub fn detect_identity_with(
         }
         other => other.map_err(|failure| failure.kind)?,
     };
-    let cannot_serve = backend_cannot_serve(&status);
+    let down = backend_cannot_serve(&status);
     let status = parse_status_json(&status).ok_or(TailscaleUnavailable::NoAddress)?;
-    if cannot_serve {
-        return Ok(TailscaleIdentity {
-            status,
-            serve: Vec::new(),
-            funnel: false,
-            funnel_to_dux: false,
-        });
-    }
     // A CLI built without `serve` (`ts_omit_serve`) has a daemon that cannot
     // serve, so it has no Funnel to report; any other failure stays one.
     let serve = match run_cli_raw(program, &["serve", "status", "--json"], timeout) {
@@ -622,6 +646,18 @@ pub fn detect_identity_with(
     let funnel_to_dux =
         parse_funnel_to_port(&serve, dux_port).ok_or(TailscaleUnavailable::NoAddress)?;
     let serve = parse_serve_status_json(&serve, dux_port).ok_or(TailscaleUnavailable::NoAddress)?;
+    if down {
+        // A node that is down publishes nothing now, but its saved config is
+        // what `tailscale up` brings back: a Funnel to dux keeps the lockout,
+        // and nothing else is reported (no Funnel to withdraw a name for, no
+        // route to show).
+        return Ok(TailscaleIdentity {
+            status,
+            serve: Vec::new(),
+            funnel: false,
+            funnel_to_dux,
+        });
+    }
     Ok(TailscaleIdentity {
         status,
         serve,
@@ -630,13 +666,13 @@ pub fn detect_identity_with(
     })
 }
 
-/// Whether `tailscale status --json` reports a node that cannot publish anything,
-/// whatever its serve configuration still says: `tailscale down` (`Stopped`),
-/// logged out (`NeedsLogin`), or waiting on an administrator's approval
-/// (`NeedsMachineAuth`). Each needs a person to act before the node rejoins the
-/// tailnet, and Funnel traffic arrives over the tailnet. `Starting` and
-/// `NoState` are a daemon on its way up and may be serving within moments, so
-/// the serve configuration still decides for them, as for `Running`.
+/// Whether `tailscale status --json` reports a node that publishes nothing right
+/// now: `tailscale down` (`Stopped`), logged out (`NeedsLogin`), or waiting on
+/// an administrator's approval (`NeedsMachineAuth`). Each needs a person to act
+/// before the node rejoins the tailnet, and Funnel traffic arrives over the
+/// tailnet. Its saved serve configuration still decides the Funnel lockout,
+/// because that is what comes back with it. `Starting` and `NoState` are a
+/// daemon on its way up, read exactly like `Running`.
 fn backend_cannot_serve(status: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(status)
         .ok()
@@ -758,11 +794,23 @@ pub fn parse_serve_funnel(text: &str) -> Option<bool> {
     Some(any_funnel(&value))
 }
 
-/// Whether a Funnel publishes anything that forwards to `dux_port`, on a port
-/// some `AllowFunnel` entry of the same config switches on: a `TCP` entry with a
-/// `TCPForward` (TLS-terminated or not), or a `Web` handler (any path) whose
-/// `Proxy` names dux's port. Checked at the top level and in every foreground
-/// session. `None` when the text is not a JSON object.
+/// Whether a Funnel publishes anything that forwards to `dux_port`. Paired the
+/// way Tailscale pairs them (ipn/serve.go): each `host:port` an `AllowFunnel`
+/// switches on, at the top level or in any foreground session
+/// (`HasFunnelForTarget`), with the handler Tailscale would use for that same
+/// `host:port`: a foreground session's before the top level's (`FindTCP`,
+/// `FindWeb`). It counts when that handler is a `TCPForward` (TLS-terminated
+/// or not) or a `Web` handler (any path) whose `Proxy` names dux's port. A
+/// Funnel for another port, even one with a forward to dux elsewhere in the
+/// config, publishes nothing of dux. `None` when the text is not a JSON
+/// object.
+///
+/// Where Tailscale's order is not knowable it errs toward counting: every
+/// foreground session's handler for the port counts, since Go walks that map
+/// in no fixed order; an `AllowFunnel` key whose port cannot be read pairs
+/// with every handler; and an `AllowFunnel` outside the top level and the
+/// foreground sessions (a shape this code does not know) falls back to "any
+/// Funnel and any forward to dux".
 ///
 /// Any target host counts, not only loopback: a forward to this machine's
 /// Tailscale address, a LAN address or the wildcard reaches dux just the same,
@@ -776,8 +824,83 @@ pub fn parse_serve_funnel(text: &str) -> Option<bool> {
 /// Host they like. So dux refuses everything while either stands.
 pub fn parse_funnel_to_port(text: &str, dux_port: u16) -> Option<bool> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    value.as_object()?;
-    Some(any_funnel(&value) && any_target_to_port(&value, dux_port))
+    let top = value.as_object()?;
+    let foreground: Vec<&serde_json::Map<String, serde_json::Value>> = top
+        .get("Foreground")
+        .and_then(|sessions| sessions.as_object())
+        .map(|sessions| sessions.values().filter_map(|s| s.as_object()).collect())
+        .unwrap_or_default();
+    let configs: Vec<&serde_json::Map<String, serde_json::Value>> = std::iter::once(top)
+        .chain(foreground.iter().copied())
+        .collect();
+    let targets: Vec<&str> = configs
+        .iter()
+        .filter_map(|config| config.get("AllowFunnel").and_then(|a| a.as_object()))
+        .flat_map(|allowed| {
+            allowed
+                .iter()
+                .filter(|(_, on)| on.as_bool() == Some(true))
+                .map(|(host_port, _)| host_port.as_str())
+        })
+        .collect();
+    if targets.is_empty() {
+        // A Funnel switched on somewhere this code does not know: the
+        // conservative reading.
+        return Some(any_funnel(&value) && any_target_to_port(&value, dux_port));
+    }
+    Some(targets.iter().any(|target| {
+        let Some(port) = target
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse::<u16>().ok())
+        else {
+            return any_target_to_port(&value, dux_port);
+        };
+        let names_dux = |target: Option<&str>| {
+            target.is_some_and(|target| target_port(target).is_none_or(|p| p == dux_port))
+        };
+        // The handler for this port: every foreground session's, else the
+        // top level's.
+        let handler_of = |config: &serde_json::Map<String, serde_json::Value>| {
+            config
+                .get("TCP")
+                .and_then(|tcp| tcp.get(port.to_string()))
+                .cloned()
+        };
+        let web_of = |config: &serde_json::Map<String, serde_json::Value>| {
+            config
+                .get("Web")
+                .and_then(|web| web.as_object())
+                .and_then(|web| {
+                    web.iter()
+                        .find(|(key, _)| key.eq_ignore_ascii_case(target))
+                        .map(|(_, handlers)| handlers.clone())
+                })
+        };
+        let preferred = |of: &dyn Fn(
+            &serde_json::Map<String, serde_json::Value>,
+        ) -> Option<serde_json::Value>| {
+            let in_foreground: Vec<serde_json::Value> =
+                foreground.iter().filter_map(|config| of(config)).collect();
+            if in_foreground.is_empty() {
+                of(top).into_iter().collect()
+            } else {
+                in_foreground
+            }
+        };
+        let tcp_to_dux = preferred(&handler_of)
+            .iter()
+            .any(|handler| names_dux(handler.get("TCPForward").and_then(|t| t.as_str())));
+        let web_to_dux = preferred(&web_of).iter().any(|web| {
+            web.get("Handlers")
+                .and_then(|handlers| handlers.as_object())
+                .is_some_and(|handlers| {
+                    handlers
+                        .values()
+                        .any(|handler| names_dux(handler.get("Proxy").and_then(|p| p.as_str())))
+                })
+        });
+        tcp_to_dux || web_to_dux
+    }))
 }
 
 /// Whether any `TCPForward` or `Proxy` anywhere in the document names
@@ -1330,7 +1453,7 @@ mod cost_measurement {
         stats(
             "sockets",
             time(30, || {
-                let _ = tailscaled_detectable(&|path| path.exists(), None, false);
+                let _ = tailscaled_detectable(&socket_answers, None, false);
             }),
         );
         stats(
@@ -1357,7 +1480,7 @@ mod cost_measurement {
                 let _ = evidence_from(
                     false,
                     &|path| {
-                        let _ = path.exists();
+                        let _ = socket_answers(path);
                         false
                     },
                     None,
@@ -1843,9 +1966,12 @@ mod identity_tests {
         assert_eq!(parse_funnel_to_port(tailnet_only, 3890), Some(false));
         let other_port_funnelled = "{\"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:3890\"}}, \
                                     \"AllowFunnel\": {\"h:8443\": true}}";
-        // Deliberately conservative: a Funnel on any port with a forward to dux
-        // on any port locks out, because Tailscale pairs them across configs.
-        assert_eq!(parse_funnel_to_port(other_port_funnelled, 3890), Some(true));
+        // Tailscale pairs a Funnel with the handler for its OWN host:port, so a
+        // Funnel on 8443 with dux served on 443 publishes nothing of dux.
+        assert_eq!(
+            parse_funnel_to_port(other_port_funnelled, 3890),
+            Some(false)
+        );
         // A web route through Funnel to dux counts as well: the proxy forwards
         // the client's own Host, and an older daemon sends no Funnel marker.
         let web = "{\"TCP\": {\"443\": {\"HTTPS\": true}}, \"Web\": {\"h:443\": {\"Handlers\": \
@@ -1954,8 +2080,9 @@ mod identity_tests {
                         daemon_detectable: false,
                     }
                 }),
-                Err(TailscaleUnavailable::Unverifiable),
-                "a Tailscale-owned address says a daemon is up after all: {text}"
+                Err(TailscaleUnavailable::DaemonUnreachable),
+                "a Tailscale-owned address says a daemon is up after all, one the CLI \
+                 cannot reach: {text}"
             );
         }
         for (n, text) in NOT_STOPPED.iter().enumerate() {
@@ -2005,16 +2132,31 @@ mod identity_tests {
     const STALE_FUNNEL: &str = r#"{"TCP": {"443": {"TCPForward": "127.0.0.1:3890"}}, "AllowFunnel": {"box.tail.ts.net:443": true}}"#;
 
     #[test]
-    fn a_node_that_is_down_or_logged_out_publishes_nothing_whatever_its_serve_config_says() {
+    fn a_node_that_is_down_keeps_a_saved_funnel_to_dux_and_nothing_else() {
+        // A saved Funnel to dux is live again the moment `tailscale up` runs,
+        // so a node that is down keeps that lockout. Anything else it saved
+        // publishes nothing while it is down: no name to withdraw, no route to
+        // show.
+        let elsewhere = STALE_FUNNEL.replace("127.0.0.1:3890", "127.0.0.1:8080");
         for state in ["Stopped", "NeedsLogin", "NeedsMachineAuth"] {
             let status = format!(
                 r#"{{"BackendState": "{state}", "Self": {{"DNSName": "box.tail.ts.net."}}}}"#
             );
-            let cli = cli_with(&format!("down-{state}"), &status, STALE_FUNNEL);
-            let look = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890)
-                .unwrap_or_else(|err| panic!("{state}: {err:?}"));
-            assert!(!look.funnel && !look.funnel_to_dux, "{state}");
-            assert!(look.serve.is_empty(), "{state}");
+            for (n, (serve, to_dux)) in [
+                (STALE_FUNNEL, true),
+                (elsewhere.as_str(), false),
+                ("{}", false),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let cli = cli_with(&format!("down-{state}-{n}"), &status, serve);
+                let look = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890)
+                    .unwrap_or_else(|err| panic!("{state}: {err:?}"));
+                assert_eq!(look.funnel_to_dux, to_dux, "{state} {serve}");
+                assert!(!look.funnel, "{state} {serve}");
+                assert!(look.serve.is_empty(), "{state} {serve}");
+            }
         }
         // Starting, or a daemon that has not settled, may be serving any moment:
         // the serve config still decides.
@@ -2127,8 +2269,9 @@ mod identity_tests {
     #[test]
     fn a_funnel_and_a_forward_to_dux_lock_out_wherever_each_one_sits() {
         // Tailscale pairs an AllowFunnel from the top level or any foreground
-        // session with a handler from any of them, so the two halves can live
-        // apart. `--tcp 443 off` leaves the top-level AllowFunnel behind.
+        // session with the handler for the SAME host:port from any of them, so
+        // the two halves can live apart. `--tcp 443 off` leaves the top-level
+        // AllowFunnel behind.
         let shapes = [
             // Top-level AllowFunnel, foreground TCP forward to dux.
             "{\"AllowFunnel\": {\"h:443\": true}, \"Foreground\": {\"s\": \
@@ -2136,8 +2279,6 @@ mod identity_tests {
             // Foreground AllowFunnel, top-level web proxy to dux.
             "{\"Web\": {\"h:443\": {\"Handlers\": {\"/\": {\"Proxy\": \"http://127.0.0.1:3890\"}}}}, \
              \"Foreground\": {\"s\": {\"AllowFunnel\": {\"h:443\": true}}}}",
-            // Funnel on one port, the forward to dux on another.
-            "{\"AllowFunnel\": {\"h:443\": true}, \"TCP\": {\"8443\": {\"TCPForward\": \"127.0.0.1:3890\"}}}",
             // Two foreground sessions, one half each.
             "{\"Foreground\": {\"a\": {\"AllowFunnel\": {\"h:443\": true}}, \
              \"b\": {\"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:3890\"}}}}}",
@@ -2151,6 +2292,55 @@ mod identity_tests {
         let not_dux = "{\"AllowFunnel\": {\"h:443\": true}, \
                        \"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:22\"}}}";
         assert_eq!(parse_funnel_to_port(not_dux, 3890), Some(false));
+    }
+
+    /// The review's case, measured from a real setup's shape: a blog published
+    /// through Funnel on 443, and dux served to the tailnet only on 8443.
+    /// Funnel traffic reaches the 443 handler alone, so dux serves.
+    #[test]
+    fn a_funnel_on_one_port_does_not_pair_with_dux_served_on_another() {
+        let blog_and_dux = r#"{
+            "TCP": {"443": {"HTTPS": true}, "8443": {"HTTPS": true}},
+            "Web": {
+                "demo-box.example-tailnet.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8080"}}},
+                "demo-box.example-tailnet.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3890"}}}
+            },
+            "AllowFunnel": {"demo-box.example-tailnet.ts.net:443": true}
+        }"#;
+        assert_eq!(parse_funnel_to_port(blog_and_dux, 3890), Some(false));
+        assert_eq!(
+            parse_serve_funnel(blog_and_dux),
+            Some(true),
+            "the name is still withdrawn"
+        );
+        // Funnel on 8443 instead: that one reaches dux.
+        let dux_funnelled = blog_and_dux.replace(
+            "\"AllowFunnel\": {\"demo-box.example-tailnet.ts.net:443\"",
+            "\"AllowFunnel\": {\"demo-box.example-tailnet.ts.net:8443\"",
+        );
+        assert_eq!(parse_funnel_to_port(&dux_funnelled, 3890), Some(true));
+        // A raw TCP forward on another port is not paired either.
+        let tcp_elsewhere = "{\"AllowFunnel\": {\"h:443\": true}, \"TCP\": {\"443\": \
+             {\"TCPForward\": \"127.0.0.1:8080\"}, \"8443\": {\"TCPForward\": \"127.0.0.1:3890\"}}}";
+        assert_eq!(parse_funnel_to_port(tcp_elsewhere, 3890), Some(false));
+    }
+
+    /// For one host:port Tailscale uses a foreground session's handler before
+    /// the top level's (`FindTCP`, `FindWeb`).
+    #[test]
+    fn a_foreground_handler_for_the_funnelled_port_is_the_one_that_counts() {
+        let fg_dux = "{\"AllowFunnel\": {\"h:443\": true}, \
+             \"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:8080\"}}, \
+             \"Foreground\": {\"s\": {\"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:3890\"}}}}}";
+        assert_eq!(parse_funnel_to_port(fg_dux, 3890), Some(true));
+        let fg_elsewhere = "{\"AllowFunnel\": {\"h:443\": true}, \
+             \"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:3890\"}}, \
+             \"Foreground\": {\"s\": {\"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:8080\"}}}}}";
+        assert_eq!(parse_funnel_to_port(fg_elsewhere, 3890), Some(false));
+        // An AllowFunnel key whose port cannot be read pairs with everything.
+        let odd_key = "{\"AllowFunnel\": {\"h\": true}, \
+             \"TCP\": {\"8443\": {\"TCPForward\": \"127.0.0.1:3890\"}}}";
+        assert_eq!(parse_funnel_to_port(odd_key, 3890), Some(true));
     }
 
     #[test]
@@ -2313,6 +2503,31 @@ mod identity_tests {
             &[]
         ));
         assert!(!owned_tailscale_address(&[], &known));
+    }
+
+    /// A socket file a crashed or removed daemon left behind is not a daemon:
+    /// only one something answers on counts, or a leftover would keep dux
+    /// refusing forever.
+    #[test]
+    fn only_a_socket_that_answers_counts_as_a_daemon() {
+        let dir = crate::test_scratch::ScratchDir::new();
+        let live = dir.path().join("live.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        assert!(socket_answers(&live), "a listening daemon");
+
+        let stale = dir.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        assert!(stale.exists(), "the file outlives its listener");
+        assert!(!socket_answers(&stale), "a leftover socket file");
+
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "").unwrap();
+        assert!(!socket_answers(&plain), "not a socket at all");
+        assert!(!socket_answers(&dir.path().join("missing.sock")));
+
+        let started = std::time::Instant::now();
+        let _ = socket_answers(&stale);
+        assert!(started.elapsed() < SOCKET_PROBE_TIMEOUT * 4, "bounded");
     }
 
     #[test]

@@ -1031,15 +1031,15 @@ pub(crate) fn lockout_after_failure(
     current: crate::host_guard::FunnelLockout,
     reason: &TailscaleUnavailable,
 ) -> crate::host_guard::FunnelLockout {
-    use crate::host_guard::FunnelLockout::{Funnel, Open, Unconfirmed};
+    use crate::host_guard::FunnelLockout::{CliNotFound, Funnel, Open, Unconfirmed};
     if current == Funnel {
         return Funnel;
     }
     match reason {
         TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonStopped => Open,
+        TailscaleUnavailable::Unverifiable => CliNotFound,
         TailscaleUnavailable::CommandFailed
         | TailscaleUnavailable::NoAddress
-        | TailscaleUnavailable::Unverifiable
         | TailscaleUnavailable::DaemonUnreachable => Unconfirmed,
     }
 }
@@ -1051,7 +1051,7 @@ pub(crate) fn lockout_news(
     after: crate::host_guard::FunnelLockout,
     because: Because,
 ) -> Option<(dux_core::statusline::StatusTone, String)> {
-    use crate::host_guard::FunnelLockout::{Checking, Funnel, Open, Unconfirmed};
+    use crate::host_guard::FunnelLockout::{Checking, CliNotFound, Funnel, Open, Unconfirmed};
     use dux_core::statusline::StatusTone;
     if before == after {
         return None;
@@ -1071,7 +1071,11 @@ pub(crate) fn lockout_news(
              no login, so it refuses every request until it can. Fix tailscaled on this machine first (`tailscale status` shows what it says). As a last resort, [server] tailscale = \"no\" stops dux consulting Tailscale, which also turns off this Funnel protection."
                 .to_string(),
         )),
-        (Funnel | Unconfirmed, Open) => Some((
+        (_, CliNotFound) => Some((
+            StatusTone::Warning,
+            crate::host_guard::CLI_NOT_FOUND_REFUSAL.to_string(),
+        )),
+        (Funnel | Unconfirmed | CliNotFound, Open) => Some((
             StatusTone::Info,
             match because {
                 Because::Look => "dux confirmed that no Tailscale Funnel publishes it, and \
@@ -1083,9 +1087,26 @@ pub(crate) fn lockout_news(
                     .to_string(),
             },
         )),
-        (Checking, Open) | (Open | Checking | Unconfirmed | Funnel, Checking) => None,
+        (Checking, Open) | (Open | Checking | Unconfirmed | CliNotFound | Funnel, Checking) => {
+            None
+        }
         (Open, Open) => None,
     }
+}
+
+/// What a serve that does not consult Tailscale says once at start: what that
+/// choice costs, because the Funnel checks are what it turns off.
+pub(crate) fn not_checking_tailscale(forced_no: bool) -> String {
+    let why = if forced_no {
+        "--no-tailscale"
+    } else {
+        "[server] tailscale = \"no\""
+    };
+    format!(
+        "dux is not checking Tailscale ({why}), so it will not notice a Tailscale Funnel \
+         publishing it to the public internet, and dux has no login. Keep this port private to \
+         your own network."
+    )
 }
 
 /// What dux says when a switch to `tailscale = "no"` lifts a refusal: an
@@ -2083,11 +2104,10 @@ mod tests {
         use crate::host_guard::FunnelLockout::{Checking, Funnel, Open, Unconfirmed};
         use TailscaleUnavailable::{
             CommandFailed, CommandMissing, DaemonStopped, DaemonUnreachable, NoAddress,
-            Unverifiable,
         };
         // Unknown: a Funnel stays refused, anything else refuses until a look
         // succeeds.
-        for reason in [CommandFailed, NoAddress, Unverifiable, DaemonUnreachable] {
+        for reason in [CommandFailed, NoAddress, DaemonUnreachable] {
             for before in [Checking, Open, Unconfirmed] {
                 assert_eq!(
                     lockout_after_failure(before, &reason),
@@ -2115,6 +2135,44 @@ mod tests {
                 "a Funnel survives a daemon outage: {reason:?}"
             );
         }
+    }
+
+    /// A CLI that is missing while Tailscale is evidently here is its own
+    /// refusal, because its way out is not fixing tailscaled: it is putting the
+    /// command where dux looks.
+    #[test]
+    fn a_missing_cli_with_tailscale_here_refuses_with_its_own_way_out() {
+        use crate::host_guard::FunnelLockout::{Checking, CliNotFound, Funnel, Open, Unconfirmed};
+        for before in [Checking, Open, Unconfirmed, CliNotFound] {
+            assert_eq!(
+                lockout_after_failure(before, &TailscaleUnavailable::Unverifiable),
+                CliNotFound,
+                "{before:?}"
+            );
+        }
+        assert_eq!(
+            lockout_after_failure(Funnel, &TailscaleUnavailable::Unverifiable),
+            Funnel
+        );
+        let (tone, text) =
+            lockout_news(Open, CliNotFound, Because::NoTailscaleHere).expect("refusing is news");
+        assert_eq!(tone, dux_core::statusline::StatusTone::Warning);
+        let refusal = CliNotFound.refusal().expect("it refuses");
+        for body in [text.as_str(), refusal] {
+            for needle in [
+                "PATH",
+                "/usr/local/bin",
+                "/Applications/Tailscale.app",
+                "tailscale = \"no\"",
+                "turns off",
+                "no login",
+            ] {
+                assert!(body.contains(needle), "{needle}: {body}");
+            }
+            assert!(!body.contains("tailscale status"), "{body}");
+        }
+        assert!(lockout_news(CliNotFound, Open, Because::Look).is_some());
+        assert!(lockout_news(Unconfirmed, CliNotFound, Because::Look).is_some());
     }
 
     #[test]

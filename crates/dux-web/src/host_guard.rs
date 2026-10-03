@@ -74,11 +74,14 @@
 //!   Funnel to dux has been seen, NOTHING but a successful look that shows it
 //!   gone lifts the refusal: not a daemon outage, not a missing CLI. A
 //!   successful look at a node that is down, logged out or awaiting approval
-//!   is one that shows no Funnel, whatever its serve configuration still says.
+//!   shows no Funnel unless its saved configuration still Funnels dux, which
+//!   `tailscale up` would bring straight back. A CLI missing while Tailscale is
+//!   evidently here is its own refusal ([`FunnelLockout::CliNotFound`]), whose
+//!   way out is the CLI rather than tailscaled.
 //!   Two answers serve without a successful look, both only while nothing of
 //!   Tailscale is on this machine (no Tailscale-range address on Tailscale's
 //!   own interface or on an address its last status reported, so another
-//!   CGNAT VPN does not count; no daemon socket; no `tailscaled` or macOS
+//!   CGNAT VPN does not count; no daemon socket that answers; no `tailscaled` or macOS
 //!   network-extension process): no CLI anywhere dux looks (a CLI it could not
 //!   run for any other reason is a failure), and a CLI that says in its own
 //!   words that no daemon is running. Nothing can publish dux then, as far as
@@ -88,11 +91,13 @@
 //!   relay); it withdraws the name and warns. The moment the state
 //!   leaves Open, every socket already upgraded closes itself (see
 //!   [`FunnelLockoutWatch`]), because a socket never passes this guard again.
-//!   Funnel and its handler are paired however the serve configuration splits
-//!   them (any `AllowFunnel` anywhere with any forward or proxy to dux's port
-//!   anywhere), because Tailscale pairs them across the top level and its
-//!   foreground sessions. A target's path, query and fragment are ignored, and
-//!   a port written by name, or one dux cannot read, counts as dux's.
+//!   Funnel and its handler are paired the way Tailscale pairs them: each
+//!   `host:port` an `AllowFunnel` switches on, at the top level or in any
+//!   foreground session, with the handler for that same `host:port` (a
+//!   foreground session's before the top level's), so a Funnel for another
+//!   port never pairs with dux served on this one. A target's path, query and
+//!   fragment are ignored, and a port written by name, or one dux cannot read,
+//!   counts as dux's.
 //!
 //! Limits, stated plainly: the lockout is read every watch period, so a Funnel
 //! switched on mid-run is refused at the next look, while an HTTP Funnel through
@@ -215,13 +220,27 @@ pub enum FunnelLockout {
     /// The Tailscale CLI is there but failed or did not answer, so nobody knows
     /// whether a Funnel publishes dux.
     Unconfirmed,
+    /// Tailscale is evidently on this machine but its CLI is not where dux
+    /// looks, so nobody knows whether a Funnel publishes dux. Its own state
+    /// because its way out is the CLI, not tailscaled.
+    CliNotFound,
     /// A Funnel forwards to dux's port.
     Funnel,
 }
 
+/// Why [`FunnelLockout::CliNotFound`] refuses, and the way out. Shared by the
+/// `503` body and the warning, so both name the same places.
+pub const CLI_NOT_FOUND_REFUSAL: &str = "Tailscale is running on this machine, but dux cannot \
+     find the tailscale command to ask it whether a Tailscale Funnel publishes this server to \
+     the public internet, and dux has no login, so it refuses every request until it can. dux \
+     looks for the command on your PATH, in /usr/local/bin, and in \
+     /Applications/Tailscale.app/Contents/MacOS/Tailscale: put it in one of those places. Or \
+     set [server] tailscale = \"no\" to stop dux consulting Tailscale, which also turns off \
+     this Funnel protection.";
+
 impl FunnelLockout {
     /// The body of the `503` this state answers with, or `None` when it serves.
-    fn refusal(self) -> Option<&'static str> {
+    pub(crate) fn refusal(self) -> Option<&'static str> {
         match self {
             Self::Open => None,
             Self::Checking => Some(
@@ -234,6 +253,7 @@ impl FunnelLockout {
                  public internet (the tailscale CLI failed, did not answer, or cannot reach its \
                  daemon), and dux has no login, so it refuses every request until it can. Fix tailscaled on this machine first (`tailscale status` shows what it says). As a last resort, [server] tailscale = \"no\" stops dux consulting Tailscale, which also turns off this Funnel protection.",
             ),
+            Self::CliNotFound => Some(CLI_NOT_FOUND_REFUSAL),
             Self::Funnel => Some(
                 "A Tailscale Funnel is publishing this dux server to the public internet, and \
                  dux has no login, so it refuses every request until that Funnel is turned off. \

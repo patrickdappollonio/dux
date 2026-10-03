@@ -555,6 +555,14 @@ async fn the_flip_logs_what_dux_server_prints() {
         "the banner names the URL:\n{joined}"
     );
     assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("dux is not checking Tailscale")
+                && l.contains("tailscale = \"no\"")
+                && l.contains("no login")),
+        "tailscale = \"no\" says once what it costs:\n{joined}"
+    );
+    assert!(
         stamped("GET /api/v1/build 200 "),
         "the access log reaches the viewer:\n{joined}"
     );
