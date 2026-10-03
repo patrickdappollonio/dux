@@ -343,16 +343,13 @@ pub fn tailscaled_detectable(
             .is_some_and(|path| answers(std::path::Path::new(&path)))
 }
 
-/// How long a daemon socket gets to accept a connection before it is counted
-/// anyway. A local socket answers at once or refuses at once; this only bounds
-/// a listener too busy to say either.
-pub const SOCKET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// Whether a daemon answers on the socket at `path`: a bounded, non-blocking
-/// connect. A file left behind by a daemon that is gone refuses the connection
-/// and is not evidence, or it would keep dux refusing forever. A listener too
-/// busy to take the connection, or one this user may not connect to, is
-/// counted: something is there, and dux cannot ask it.
+/// Whether a daemon answers on the socket at `path`: one non-blocking
+/// connect, which a local socket answers at once, so it needs no timeout. Only
+/// "refused" (a file left behind by a daemon that is gone, or not a socket at
+/// all) and "not found" mean nobody is there; counting the leftover would keep
+/// dux refusing forever. Everything else counts as something there that dux
+/// cannot ask: connected, a full accept queue (`EAGAIN`), a connect still in
+/// progress, a permission refused, and any other error.
 fn socket_answers(path: &std::path::Path) -> bool {
     let Ok(address) = socket2::SockAddr::unix(path) else {
         return false;
@@ -361,13 +358,15 @@ fn socket_answers(path: &std::path::Path) -> bool {
     else {
         return false;
     };
-    match socket.connect_timeout(&address, SOCKET_PROBE_TIMEOUT) {
+    if socket.set_nonblocking(true).is_err() {
+        // Cannot ask without risking a wait: count it, as for any doubt.
+        return true;
+    }
+    match socket.connect(&address) {
         Ok(()) => true,
-        Err(err) => matches!(
-            err.kind(),
-            std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::TimedOut
-                | std::io::ErrorKind::PermissionDenied
+        Err(err) => !matches!(
+            err.raw_os_error(),
+            Some(libc::ECONNREFUSED | libc::ENOENT | libc::ENOTDIR)
         ),
     }
 }
@@ -553,6 +552,9 @@ pub struct TailscaleIdentity {
     /// Whether a Funnel publishes something that forwards to dux's port: a raw
     /// TCP forward or a web handler. See [`parse_funnel_to_port`].
     pub funnel_to_dux: bool,
+    /// Whether the node is down (`Stopped`, `NeedsLogin`, `NeedsMachineAuth`),
+    /// so a saved Funnel to dux comes back only once it is brought up.
+    pub node_down: bool,
 }
 
 /// Ask the `tailscale` CLI for this machine's name and the serve routes that
@@ -656,6 +658,7 @@ pub fn detect_identity_with(
             serve: Vec::new(),
             funnel: false,
             funnel_to_dux,
+            node_down: true,
         });
     }
     Ok(TailscaleIdentity {
@@ -663,6 +666,7 @@ pub fn detect_identity_with(
         serve,
         funnel,
         funnel_to_dux,
+        node_down: false,
     })
 }
 
@@ -808,9 +812,11 @@ pub fn parse_serve_funnel(text: &str) -> Option<bool> {
 /// Where Tailscale's order is not knowable it errs toward counting: every
 /// foreground session's handler for the port counts, since Go walks that map
 /// in no fixed order; an `AllowFunnel` key whose port cannot be read pairs
-/// with every handler; and an `AllowFunnel` outside the top level and the
-/// foreground sessions (a shape this code does not know) falls back to "any
-/// Funnel and any forward to dux".
+/// with every handler; and when no `AllowFunnel` at the top level or in a
+/// foreground session switches anything on, yet one somewhere else in the
+/// document does (a shape this code does not know), the answer falls back to
+/// "any Funnel and any forward to dux". A target on a Unix socket (`unix:`) is
+/// never dux, which only listens on TCP.
 ///
 /// Any target host counts, not only loopback: a forward to this machine's
 /// Tailscale address, a LAN address or the wildcard reaches dux just the same,
@@ -856,7 +862,7 @@ pub fn parse_funnel_to_port(text: &str, dux_port: u16) -> Option<bool> {
             return any_target_to_port(&value, dux_port);
         };
         let names_dux = |target: Option<&str>| {
-            target.is_some_and(|target| target_port(target).is_none_or(|p| p == dux_port))
+            target.is_some_and(|target| target_reaches_port(target, dux_port))
         };
         // The handler for this port: every foreground session's, else the
         // top level's.
@@ -911,7 +917,7 @@ fn any_target_to_port(value: &serde_json::Value, dux_port: u16) -> bool {
             let names_dux = (key == "TCPForward" || key == "Proxy")
                 && inner.as_str().is_some_and(|target| {
                     // A port that cannot be read counts as dux's: conservative.
-                    target_port(target).is_none_or(|port| port == dux_port)
+                    target_reaches_port(target, dux_port)
                 });
             names_dux || any_target_to_port(inner, dux_port)
         }),
@@ -920,6 +926,19 @@ fn any_target_to_port(value: &serde_json::Value, dux_port: u16) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether a forward or proxy target may reach `dux_port`: a TCP target on
+/// that port, or one whose port cannot be read (conservative). A `unix:`
+/// target is never dux, which listens on TCP only.
+fn target_reaches_port(target: &str, dux_port: u16) -> bool {
+    if target
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("unix:"))
+    {
+        return false;
+    }
+    target_port(target).is_none_or(|port| port == dux_port)
 }
 
 /// The port a forward or proxy target names: `host:port`, `scheme://host:port`
@@ -2154,6 +2173,7 @@ mod identity_tests {
                 let look = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890)
                     .unwrap_or_else(|err| panic!("{state}: {err:?}"));
                 assert_eq!(look.funnel_to_dux, to_dux, "{state} {serve}");
+                assert!(look.node_down, "{state} {serve}");
                 assert!(!look.funnel, "{state} {serve}");
                 assert!(look.serve.is_empty(), "{state} {serve}");
             }
@@ -2167,6 +2187,7 @@ mod identity_tests {
             let cli = cli_with(&format!("up-{state}"), &status, STALE_FUNNEL);
             let look = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890).unwrap();
             assert!(look.funnel_to_dux, "{state}");
+            assert!(!look.node_down, "{state}");
         }
     }
 
@@ -2341,6 +2362,40 @@ mod identity_tests {
         let odd_key = "{\"AllowFunnel\": {\"h\": true}, \
              \"TCP\": {\"8443\": {\"TCPForward\": \"127.0.0.1:3890\"}}}";
         assert_eq!(parse_funnel_to_port(odd_key, 3890), Some(true));
+    }
+
+    /// dux never listens on a Unix socket, so a Funnel publishing another app
+    /// through one is not dux, while a TCP port dux cannot read still counts.
+    #[test]
+    fn a_unix_socket_target_is_never_dux() {
+        let tcp = |target: &str| {
+            format!(
+                "{{\"AllowFunnel\": {{\"h:443\": true}}, \"TCP\": {{\"443\": \
+                 {{\"TCPForward\": \"{target}\"}}}}}}"
+            )
+        };
+        let web = |proxy: &str| {
+            format!(
+                "{{\"AllowFunnel\": {{\"h:443\": true}}, \"Web\": {{\"h:443\": {{\"Handlers\": \
+                 {{\"/\": {{\"Proxy\": \"{proxy}\"}}}}}}}}}}"
+            )
+        };
+        for target in ["unix:/run/app.sock", "unix:///run/app.sock"] {
+            assert_eq!(
+                parse_funnel_to_port(&tcp(target), 3890),
+                Some(false),
+                "{target}"
+            );
+            assert_eq!(
+                parse_funnel_to_port(&web(target), 3890),
+                Some(false),
+                "{target}"
+            );
+        }
+        assert_eq!(
+            parse_funnel_to_port(&tcp("localhost:dux"), 3890),
+            Some(true)
+        );
     }
 
     #[test]
@@ -2527,7 +2582,42 @@ mod identity_tests {
 
         let started = std::time::Instant::now();
         let _ = socket_answers(&stale);
-        assert!(started.elapsed() < SOCKET_PROBE_TIMEOUT * 4, "bounded");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "bounded"
+        );
+    }
+
+    /// A daemon too busy to take another connection is still a daemon: with
+    /// its accept queue full, a non-blocking connect is refused for now
+    /// (`EAGAIN`), not for good.
+    #[test]
+    fn a_daemon_whose_accept_queue_is_full_still_counts() {
+        let dir = crate::test_scratch::ScratchDir::new();
+        let path = dir.path().join("busy.sock");
+        let listener =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        listener
+            .bind(&socket2::SockAddr::unix(&path).unwrap())
+            .unwrap();
+        listener.listen(0).unwrap();
+        // Fill the queue: nobody accepts, so connections pile up until the
+        // next one would have to wait.
+        let mut held = Vec::new();
+        loop {
+            let client =
+                socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+            client.set_nonblocking(true).unwrap();
+            match client.connect(&socket2::SockAddr::unix(&path).unwrap()) {
+                Ok(()) => held.push(client),
+                Err(_) => break,
+            }
+            assert!(held.len() < 1024, "the queue never filled");
+        }
+        assert!(
+            socket_answers(&path),
+            "a full queue is a busy daemon, not none"
+        );
     }
 
     #[test]

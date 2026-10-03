@@ -93,7 +93,9 @@ command line tool, never opening the app). What happens next is one of three thi
 shows no Funnel to dux is the usual one. A node that is down (`tailscale down`), logged out,
 or waiting for an administrator's approval publishes nothing, so it serves too, unless its
 saved settings still Funnel dux's port: `tailscale up` brings those straight back, so that
-one stays refused while the node is down. Two more answers count, and both only when nothing
+one stays refused while the node is down. A node that is down cannot turn a Funnel off, so
+the way out is `tailscale up` first (dux keeps refusing meanwhile), then turning the Funnel
+off; the page says so. Two more answers count, and both only when nothing
 of Tailscale is on this machine at all: no address on Tailscale's own network interface, no
 Tailscale daemon answering on its socket (a socket file left behind by a daemon that is gone
 does not count), and no running `tailscaled` or Tailscale macOS app.
@@ -131,8 +133,10 @@ How to get out, in order:
 3. **Set `tailscale = "no"`** (or pass `--no-tailscale`) when you do not want dux consulting
    Tailscale at all. That turns off the Funnel checks above too: only Tailscale's own mark on
    Funnel traffic is still refused, so keep it for machines where you know no Funnel points
-   at dux. dux says so once at start, in both `dux server` and the start-web-server flip:
-   it is not checking Tailscale, will not notice a Funnel publishing it, and has no login.
+   at dux. dux says so once at start, whichever way it serves: it is not checking
+   Tailscale, will not notice a Funnel publishing it, and has no login. `dux server` and the
+   start-web-server flip print that in their log; the background server, which has no log
+   on screen, writes it to `dux.log`.
 
 > [!IMPORTANT]
 > **Userspace networking.** A `tailscaled` started with `--tun=userspace-networking` (the
@@ -365,14 +369,16 @@ in a DNS cache, flush it (`resolvectl flush-caches` on Linux with systemd-resolv
 does within seconds of starting), the last look at Tailscale failed, or a Tailscale Funnel
 route is on (see the caveats below).
 
-**Every page answers `503`.** The page says which of four things it is. *Checking*: dux has
+**Every page answers `503`.** The page says which of five things it is. *Checking*: dux has
 just started and its first look at Tailscale has not answered yet; wait a moment. *Could not
 confirm*: dux could not ask Tailscale whether a Funnel publishes it; see
 [When Tailscale isn't there](#when-tailscale-isnt-there) for every cause and the way out.
 *Cannot find the tailscale command*: Tailscale is running but its command is not where dux
 looks; put it on your `PATH`, in `/usr/local/bin`, or in the macOS app's usual place, or set
 `tailscale = "no"`.
-*A Funnel is publishing dux*: turn it off (see the caveats below). A browser tab that was
+*A Funnel is publishing dux*: turn it off (see the caveats below). *Tailscale is down but
+its saved settings Funnel dux*: bring Tailscale up with `tailscale up`, then turn the Funnel
+off; dux keeps refusing until it sees the Funnel gone. A browser tab that was
 already open loses its connection the moment any of these starts, and reconnects once dux
 serves again.
 
@@ -476,7 +482,8 @@ console.
 > `tsnet` library), is invisible to it, and so is a Funnel either one publishes. Running one
 > of those in front of dux is a setup you chose, and dux cannot protect it. A Funnel is
 > paired with the port it is for, as Tailscale pairs it: a Funnel for one port does not
-> count against dux served on another, and is only warned about. A node that is
+> count against dux served on another, and is only warned about. A Funnel to a program on a
+> Unix socket is never dux, which listens only on a TCP port. A node that is
 > down with a Funnel to dux still saved stays refused, so `tailscale up` opens no window. On
 > `"no"` dux does not consult Tailscale at all, so only the mark is checked, and switching
 > to `"no"` lifts a refusal, with a warning that says so.

@@ -6201,6 +6201,8 @@ mod tests {
             (FunnelLockout::Funnel, "no login"),
             (FunnelLockout::Checking, "checking"),
             (FunnelLockout::Unconfirmed, "tailscale = \"no\""),
+            (FunnelLockout::CliNotFound, "/usr/local/bin"),
+            (FunnelLockout::FunnelSaved, "tailscale up"),
         ] {
             lockout.set(state);
             for host in ["localhost", "127.0.0.1:3890", "100.101.102.103:3890"] {

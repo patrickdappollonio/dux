@@ -1031,9 +1031,9 @@ pub(crate) fn lockout_after_failure(
     current: crate::host_guard::FunnelLockout,
     reason: &TailscaleUnavailable,
 ) -> crate::host_guard::FunnelLockout {
-    use crate::host_guard::FunnelLockout::{CliNotFound, Funnel, Open, Unconfirmed};
-    if current == Funnel {
-        return Funnel;
+    use crate::host_guard::FunnelLockout::{CliNotFound, Funnel, FunnelSaved, Open, Unconfirmed};
+    if matches!(current, Funnel | FunnelSaved) {
+        return current;
     }
     match reason {
         TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonStopped => Open,
@@ -1044,6 +1044,17 @@ pub(crate) fn lockout_after_failure(
     }
 }
 
+/// Where a SUCCESSFUL look leaves the lockout: refused while a Funnel publishes
+/// dux, with its own way out when the node is down and the Funnel only saved.
+pub(crate) fn lockout_after_look(identity: &TailscaleIdentity) -> crate::host_guard::FunnelLockout {
+    use crate::host_guard::FunnelLockout::{Funnel, FunnelSaved, Open};
+    match (identity.funnel_to_dux, identity.node_down) {
+        (true, true) => FunnelSaved,
+        (true, false) => Funnel,
+        (false, _) => Open,
+    }
+}
+
 /// What one change of the Funnel lockout is worth saying, if anything. Quiet
 /// when the first look finds nothing (the expected outcome) or nothing changed.
 pub(crate) fn lockout_news(
@@ -1051,7 +1062,9 @@ pub(crate) fn lockout_news(
     after: crate::host_guard::FunnelLockout,
     because: Because,
 ) -> Option<(dux_core::statusline::StatusTone, String)> {
-    use crate::host_guard::FunnelLockout::{Checking, CliNotFound, Funnel, Open, Unconfirmed};
+    use crate::host_guard::FunnelLockout::{
+        Checking, CliNotFound, Funnel, FunnelSaved, Open, Unconfirmed,
+    };
     use dux_core::statusline::StatusTone;
     if before == after {
         return None;
@@ -1071,11 +1084,15 @@ pub(crate) fn lockout_news(
              no login, so it refuses every request until it can. Fix tailscaled on this machine first (`tailscale status` shows what it says). As a last resort, [server] tailscale = \"no\" stops dux consulting Tailscale, which also turns off this Funnel protection."
                 .to_string(),
         )),
+        (_, FunnelSaved) => Some((
+            StatusTone::Warning,
+            crate::host_guard::FUNNEL_SAVED_REFUSAL.to_string(),
+        )),
         (_, CliNotFound) => Some((
             StatusTone::Warning,
             crate::host_guard::CLI_NOT_FOUND_REFUSAL.to_string(),
         )),
-        (Funnel | Unconfirmed | CliNotFound, Open) => Some((
+        (Funnel | FunnelSaved | Unconfirmed | CliNotFound, Open) => Some((
             StatusTone::Info,
             match because {
                 Because::Look => "dux confirmed that no Tailscale Funnel publishes it, and \
@@ -1087,9 +1104,8 @@ pub(crate) fn lockout_news(
                     .to_string(),
             },
         )),
-        (Checking, Open) | (Open | Checking | Unconfirmed | CliNotFound | Funnel, Checking) => {
-            None
-        }
+        (Checking, Open)
+        | (Open | Checking | Unconfirmed | CliNotFound | Funnel | FunnelSaved, Checking) => None,
         (Open, Open) => None,
     }
 }
@@ -1671,6 +1687,7 @@ mod tests {
                 .collect(),
             funnel: serve.iter().any(|(_, funnel)| *funnel),
             funnel_to_dux: false,
+            node_down: false,
         }
     }
 
@@ -2173,6 +2190,59 @@ mod tests {
         }
         assert!(lockout_news(CliNotFound, Open, Because::Look).is_some());
         assert!(lockout_news(Unconfirmed, CliNotFound, Because::Look).is_some());
+    }
+
+    /// A node that is down cannot run `tailscale funnel ... off` (it needs the
+    /// tailnet), so a saved Funnel to dux refuses with its own way out:
+    /// `tailscale up` first, then the Funnel off, then `no` as a last resort.
+    #[test]
+    fn a_saved_funnel_on_a_node_that_is_down_says_to_bring_it_up_first() {
+        use crate::host_guard::FunnelLockout::{Checking, Funnel, FunnelSaved, Open, Unconfirmed};
+        let down = TailscaleIdentity {
+            node_down: true,
+            ..tcp_funnelled("box.tail.ts.net")
+        };
+        assert_eq!(lockout_after_look(&down), FunnelSaved);
+        assert_eq!(
+            lockout_after_look(&tcp_funnelled("box.tail.ts.net")),
+            Funnel
+        );
+        let down_clear = TailscaleIdentity {
+            node_down: true,
+            ..identity("box.tail.ts.net", &[])
+        };
+        assert_eq!(lockout_after_look(&down_clear), Open);
+        // It survives anything short of a look that shows the Funnel gone.
+        for reason in [
+            TailscaleUnavailable::CommandMissing,
+            TailscaleUnavailable::DaemonStopped,
+            TailscaleUnavailable::CommandFailed,
+            TailscaleUnavailable::Unverifiable,
+        ] {
+            assert_eq!(lockout_after_failure(FunnelSaved, &reason), FunnelSaved);
+        }
+        let (tone, news) = lockout_news(Open, FunnelSaved, Because::Look).expect("news");
+        assert_eq!(tone, dux_core::statusline::StatusTone::Warning);
+        let refusal = FunnelSaved.refusal().expect("it refuses");
+        for body in [news.as_str(), refusal] {
+            let up = body.find("tailscale up").expect("names tailscale up");
+            let off = body
+                .find("tailscale funnel")
+                .expect("names turning the Funnel off");
+            let no = body
+                .find("tailscale = \"no\"")
+                .expect("names the last resort");
+            assert!(up < off && off < no, "{body}");
+            assert!(
+                body.contains("no login") && body.contains("turns off"),
+                "{body}"
+            );
+        }
+        for before in [Checking, Open, Unconfirmed, Funnel] {
+            assert!(lockout_news(before, FunnelSaved, Because::Look).is_some());
+        }
+        assert!(lockout_news(FunnelSaved, Open, Because::Look).is_some());
+        assert!(lockout_news(FunnelSaved, Checking, Because::Look).is_none());
     }
 
     #[test]

@@ -75,7 +75,9 @@
 //!   gone lifts the refusal: not a daemon outage, not a missing CLI. A
 //!   successful look at a node that is down, logged out or awaiting approval
 //!   shows no Funnel unless its saved configuration still Funnels dux, which
-//!   `tailscale up` would bring straight back. A CLI missing while Tailscale is
+//!   `tailscale up` would bring straight back ([`FunnelLockout::FunnelSaved`],
+//!   whose way out starts with `tailscale up`, since a node that is down
+//!   cannot turn a Funnel off). A CLI missing while Tailscale is
 //!   evidently here is its own refusal ([`FunnelLockout::CliNotFound`]), whose
 //!   way out is the CLI rather than tailscaled.
 //!   Two answers serve without a successful look, both only while nothing of
@@ -226,7 +228,22 @@ pub enum FunnelLockout {
     CliNotFound,
     /// A Funnel forwards to dux's port.
     Funnel,
+    /// The node is down, but its saved configuration Funnels dux's port, which
+    /// comes back the moment it is brought up. Its own state because a node
+    /// that is down cannot turn a Funnel off: the way out starts with
+    /// `tailscale up`.
+    FunnelSaved,
 }
+
+/// Why [`FunnelLockout::FunnelSaved`] refuses, and the way out, in the order
+/// it works. Shared by the `503` body and the warning.
+pub const FUNNEL_SAVED_REFUSAL: &str = "Tailscale is down on this machine, but its saved \
+     settings Funnel this dux server to the public internet, and Tailscale brings that Funnel \
+     back the moment it is up again. dux has no login, so it refuses every request until a look \
+     at Tailscale shows that Funnel gone. Bring Tailscale up (`tailscale up`; dux keeps \
+     refusing meanwhile), then turn the Funnel off (`tailscale funnel status` lists it). As a \
+     last resort, [server] tailscale = \"no\" stops dux consulting Tailscale, which also turns \
+     off this Funnel protection.";
 
 /// Why [`FunnelLockout::CliNotFound`] refuses, and the way out. Shared by the
 /// `503` body and the warning, so both name the same places.
@@ -254,6 +271,7 @@ impl FunnelLockout {
                  daemon), and dux has no login, so it refuses every request until it can. Fix tailscaled on this machine first (`tailscale status` shows what it says). As a last resort, [server] tailscale = \"no\" stops dux consulting Tailscale, which also turns off this Funnel protection.",
             ),
             Self::CliNotFound => Some(CLI_NOT_FOUND_REFUSAL),
+            Self::FunnelSaved => Some(FUNNEL_SAVED_REFUSAL),
             Self::Funnel => Some(
                 "A Tailscale Funnel is publishing this dux server to the public internet, and \
                  dux has no login, so it refuses every request until that Funnel is turned off. \
@@ -674,7 +692,9 @@ mod tests {
         for state in [
             FunnelLockout::Checking,
             FunnelLockout::Unconfirmed,
+            FunnelLockout::CliNotFound,
             FunnelLockout::Funnel,
+            FunnelLockout::FunnelSaved,
         ] {
             cell.set(FunnelLockout::Open);
             let mut watch = cell.watch();

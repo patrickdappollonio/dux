@@ -1124,11 +1124,7 @@ impl TailscaleLoop {
         self.first_look_landed = true;
         let previous = self.hold_identity(Some(identity.clone()));
         self.settle_lockout(
-            if identity.funnel_to_dux {
-                crate::host_guard::FunnelLockout::Funnel
-            } else {
-                crate::host_guard::FunnelLockout::Open
-            },
+            crate::serve_legs::lockout_after_look(&identity),
             crate::serve_legs::Because::Look,
             console,
             status,
@@ -4542,6 +4538,7 @@ mod live_tailscale_mode_tests {
                 .collect(),
             funnel: serve.iter().any(|(_, funnel)| *funnel),
             funnel_to_dux: false,
+            node_down: false,
         }
     }
 
