@@ -11,6 +11,7 @@ pub mod agent_job;
 pub mod agent_search;
 pub mod agent_tabs;
 pub mod attention;
+pub mod auth;
 pub mod background_serve;
 pub mod base_branch;
 pub mod bidi;

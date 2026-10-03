@@ -46,6 +46,13 @@ ureq = "3.3.0"
 # as QR codes (dux_core::qr). Default features off: they pull in the `image`
 # crate for raster output, and dux draws the codes as text itself.
 qrcode = { version = "0.14", default-features = false }
+# The web login's password hashing (dux_core::auth): Argon2id, PHC strings.
+argon2 = { version = "0.6", features = ["zeroize"] }
+# Password strength estimation for the login's minimum checks (dux_core::auth).
+# Default features off: the builder is only for custom dictionaries.
+zxcvbn = { version = "3.1", default-features = false }
+# Wipes a typed password from memory when the buffer holding it is dropped.
+zeroize = "1.9"
 
 [dev-dependencies]
 # Decodes the QR codes dux_core::qr draws, so the tests prove a phone could read
