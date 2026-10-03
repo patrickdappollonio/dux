@@ -81,7 +81,11 @@
 //!   CGNAT VPN does not count; no daemon socket; no `tailscaled` or macOS
 //!   network-extension process): no CLI anywhere dux looks (a CLI it could not
 //!   run for any other reason is a failure), and a CLI that says in its own
-//!   words that no daemon is running. Nothing can publish dux then. The moment the state
+//!   words that no daemon is running. Nothing can publish dux then, as far as
+//!   dux can see: inside a container a Tailscale outside it is invisible, so
+//!   there dux serves and warns once at start (`CONTAINER_WARNING`). A Funnel
+//!   to another port is never locked for either (it may be the operator's own
+//!   relay); it withdraws the name and warns. The moment the state
 //!   leaves Open, every socket already upgraded closes itself (see
 //!   [`FunnelLockoutWatch`]), because a socket never passes this guard again.
 //!   Funnel and its handler are paired however the serve configuration splits

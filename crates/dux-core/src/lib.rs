@@ -23,6 +23,7 @@ pub mod config_queue;
 pub mod config_reload_status;
 pub mod config_sync;
 pub mod config_write;
+pub mod container;
 pub mod device_label;
 pub mod diff;
 pub mod editor;

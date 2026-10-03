@@ -250,6 +250,14 @@ Where dux binds:
 - **A background listener lasts as long as dux does.** `serve_while_tui = true` means a
   server runs for the whole time your terminal UI is open.
 
+> [!WARNING]
+> **In a container, dux cannot see a Tailscale outside it.** A Tailscale on the host or in
+> a sidecar container is invisible from inside dux's container, so when dux runs in one and
+> sees no Tailscale, it serves and prints a warning once at start: it cannot tell whether
+> something outside publishes its port, it has no login, and anything that can reach the
+> port can drive your terminals. Keep that port private to your own network. See
+> [When Tailscale isn't there](/docs/tailscale#when-tailscale-isnt-there).
+
 > [!CAUTION]
 > **Anything wider is on you.** Binding a LAN or public address (say
 > `--bind 0.0.0.0:3890`) puts your agents and worktrees in reach of anyone who can hit

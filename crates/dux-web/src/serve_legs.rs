@@ -924,9 +924,11 @@ pub(crate) fn identity_news(
             StatusTone::Warning,
             format!(
                 "A Tailscale Funnel route on this machine publishes it to the public internet, \
-                 and dux has no login, so dux stopped answering to {name}. Turn the Funnel \
-                 route off (`tailscale funnel status` lists it) and dux answers to {name} \
-                 again by itself."
+                 and dux has no login, so dux stopped answering to {name}. That Funnel does \
+                 not forward to dux's port, but dux cannot tell whether it reaches dux through \
+                 another program on this machine; if it does, anyone on the internet can drive your \
+                 terminals. Turn the Funnel route off (`tailscale funnel status` lists it) and \
+                 dux answers to {name} again by itself."
             ),
         ));
     }
@@ -1002,6 +1004,17 @@ pub(crate) enum Because {
     Look,
     NoTailscaleHere,
 }
+
+/// Said once at start when dux runs inside a container and its checks find no
+/// Tailscale there. dux serves: a Tailscale outside the container is invisible
+/// from in here, and publishing a containerised dux through one is a setup the
+/// operator chose, so this says what dux cannot know and what that means rather
+/// than refusing.
+pub(crate) const CONTAINER_WARNING: &str = "dux is running inside a container and sees no \
+     Tailscale here. It cannot see a Tailscale outside this container, so it cannot tell \
+     whether something outside publishes this port, and dux has no login: anything that can \
+     reach this port can drive your terminals. Keep the port private to your own network; dux \
+     is not meant to be exposed publicly.";
 
 /// Where a FAILED look leaves the lockout.
 ///
@@ -2003,6 +2016,13 @@ mod tests {
         assert_eq!(news.len(), 1, "{news:?}");
         assert_eq!(news[0].0, dux_core::statusline::StatusTone::Warning);
         assert!(!news[0].1.contains("allowed_hosts"), "{news:?}");
+        // dux does not lock for it (it may be the operator's own relay), so the
+        // warning says plainly what dux cannot know and what that means.
+        assert!(
+            news[0].1.contains("cannot tell whether") && news[0].1.contains("another program"),
+            "{news:?}"
+        );
+        assert!(news[0].1.contains("no login"), "{news:?}");
         assert_eq!(
             serve_hint(&elsewhere, 3890),
             None,

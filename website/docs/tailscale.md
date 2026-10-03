@@ -129,20 +129,30 @@ How to get out, in order:
    at dux.
 
 > [!IMPORTANT]
-> **Userspace networking and sidecars.** A `tailscaled` started with
-> `--tun=userspace-networking` (the default in Tailscale's container image) has no network
-> interface, and in a sidecar setup the `tailscale` command may live in another container.
-> dux still spots the daemon by its socket (`/var/run/tailscale/tailscaled.sock`,
-> `/run/tailscale/tailscaled.sock`, `/var/run/tailscaled.socket`, `/tmp/tailscaled.sock`,
-> or the path in `$TS_SOCKET`) or by its process, and refuses until it can ask. Make the
-> `tailscale` command available to dux and able to reach that daemon: it looks for the
-> socket at `/var/run/tailscale/tailscaled.sock`, so mount or link the sidecar's socket
-> there. Or, when no Funnel can reach dux there, set `tailscale = "no"`.
+> **Userspace networking.** A `tailscaled` started with `--tun=userspace-networking` (the
+> default in Tailscale's container image) has no network interface. When it runs where dux
+> can see it, on the same machine or in the same container, dux still spots it by its
+> socket (`/var/run/tailscale/tailscaled.sock`, `/run/tailscale/tailscaled.sock`,
+> `/var/run/tailscaled.socket`, `/tmp/tailscaled.sock`, or the path in `$TS_SOCKET`) or by
+> its process, and refuses until it can ask. Make the `tailscale` command available to dux
+> and able to reach that daemon (it looks for the socket at
+> `/var/run/tailscale/tailscaled.sock`), or, when no Funnel can reach dux there, set
+> `tailscale = "no"`.
 >
 > Looking through the running processes costs far more than everything else dux checks,
 > so once it has found no daemon that way it looks again at most once a minute. A daemon
 > with no interface and no socket at one of those paths can therefore take up to a minute
 > to be noticed; the socket and the interface are checked on every look.
+
+> [!WARNING]
+> **Inside a container, dux cannot see a Tailscale outside it.** A Tailscale on the host,
+> or in a sidecar container that does not share dux's files and processes, is invisible
+> from inside dux's container, so there dux cannot tell whether something outside publishes
+> its port. When dux runs in a container and sees no Tailscale, it serves as usual and
+> says so once at start, in a warning: dux has no login, and anything that can reach that
+> port can drive your terminals. Keep the port private to your own network. Publishing a
+> containerised dux through Funnel or any other public route is a setup dux cannot see or
+> protect; dux is not meant to be exposed publicly.
 
 On `"auto"` dux keeps looking every few seconds and follows whatever it finds; on `"yes"`
 it looks for the address once but keeps checking for a Funnel the same way.
@@ -428,6 +438,9 @@ console.
 >   every address, with a page saying why, until that Funnel is gone. That covers raw
 >   connections and older Tailscale versions, which carry no mark and can claim to be
 >   `localhost`. It also stops answering to this machine's name while any Funnel is on.
+> - **A Funnel to another port is not refused**, because it may be a relay you set up on
+>   purpose, but dux warns: it cannot tell whether that Funnel reaches it through another
+>   program, and it has no login.
 > - **It refuses everything until it has checked, and whenever it cannot check.** Unless the
 >   mode is `"no"`, every request answers "checking" until dux's first look at Tailscale
 >   lands, a moment after it starts. Whenever dux cannot confirm that no Funnel publishes it,

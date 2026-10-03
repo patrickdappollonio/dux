@@ -966,6 +966,12 @@ pub(crate) struct TailscaleLoop {
     /// Whether the Host guard serves at all, as far as Funnel goes. Written
     /// only here, from what each look at Tailscale found.
     funnel_lockout: crate::host_guard::FunnelLockoutCell,
+    /// Whether dux runs inside a container, where a Tailscale outside it is
+    /// invisible. Read once; injected by tests.
+    in_container: bool,
+    /// Whether any look has landed yet, so the container warning is said at
+    /// start or not at all.
+    first_look_landed: bool,
     /// Test-only: refuse to start watcher threads, standing in for a system
     /// that cannot spawn one.
     #[cfg(test)]
@@ -1024,9 +1030,20 @@ impl TailscaleLoop {
             identity_confirmed: Arc::new(AtomicBool::new(false)),
             watch_period: WATCH_PERIOD,
             funnel_lockout: control.funnel_lockout(),
+            // Unit tests default to a plain host, so a suite run inside a
+            // container is not told about it by every test.
+            in_container: !cfg!(test) && dux_core::container::running_in_container(),
+            first_look_landed: false,
             #[cfg(test)]
             refuse_watcher_threads: false,
         }
+    }
+
+    /// Say whether dux runs inside a container, instead of asking the system.
+    #[cfg(test)]
+    pub(crate) fn in_container(mut self, in_container: bool) -> Self {
+        self.in_container = in_container;
+        self
     }
 
     /// Fail every watcher start, as a system that cannot spawn a thread would.
@@ -1103,6 +1120,7 @@ impl TailscaleLoop {
         console: &Console,
         status: &LegStatus,
     ) {
+        self.first_look_landed = true;
         let previous = self.hold_identity(Some(identity.clone()));
         self.settle_lockout(
             if identity.funnel_to_dux {
@@ -1126,6 +1144,7 @@ impl TailscaleLoop {
     /// it unknown, which refuses on a serve that never got an answer and keeps
     /// whatever an earlier answer decided (a Funnel stays refused).
     fn look_failed(&mut self, reason: TailscaleUnavailable, console: &Console, status: &LegStatus) {
+        let first_look = !std::mem::replace(&mut self.first_look_landed, true);
         if self.identity_confirmed.load(Ordering::SeqCst) {
             self.identity_lost();
         }
@@ -1136,6 +1155,23 @@ impl TailscaleLoop {
             console,
             status,
         );
+        // Inside a container, "no Tailscale here" says nothing about a
+        // Tailscale outside it. dux serves anyway (that setup is the
+        // operator's), and says so once, at start.
+        if first_look
+            && self.in_container
+            && matches!(
+                reason,
+                TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonStopped
+            )
+        {
+            say(
+                dux_core::statusline::StatusTone::Warning,
+                crate::serve_legs::CONTAINER_WARNING,
+                console,
+                status,
+            );
+        }
     }
 
     /// Adopt the outcome of a look the serve path ran itself (`dux server`'s
@@ -4325,6 +4361,27 @@ mod live_tailscale_mode_tests {
                 identify,
                 console,
                 FAST_LOOK,
+                false,
+            )
+        }
+
+        /// A harness whose loop reads names through `identify`, prints to
+        /// `console`, and believes dux runs in a container or not.
+        fn start_in_container(
+            identify: crate::IdentityProbe,
+            console: Console,
+            in_container: bool,
+        ) -> Self {
+            Self::start_inner_every(
+                TailscaleMode::Auto,
+                false,
+                None,
+                None,
+                Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
+                Some(identify),
+                console,
+                FAST_LOOK,
+                in_container,
             )
         }
 
@@ -4338,6 +4395,7 @@ mod live_tailscale_mode_tests {
             identify: Option<crate::IdentityProbe>,
             console: Console,
             period: Duration,
+            in_container: bool,
         ) -> Self {
             let (control, mode_rx) = TailscaleModeControl::new(
                 tokio::runtime::Handle::current(),
@@ -4351,7 +4409,8 @@ mod live_tailscale_mode_tests {
                 let _ = shutdown.register_leg(addr);
             }
             let mut ts =
-                TailscaleLoop::new(mode, forced_no, primary, initial_leg, &control, detect);
+                TailscaleLoop::new(mode, forced_no, primary, initial_leg, &control, detect)
+                    .in_container(in_container);
             if let Some(identify) = identify {
                 ts = ts.with_identity(identify, None).with_watch_period(period);
             }
@@ -4414,6 +4473,7 @@ mod live_tailscale_mode_tests {
                 Some(identify),
                 Console::noop(),
                 period,
+                false,
             )
         }
 
@@ -4479,6 +4539,42 @@ mod live_tailscale_mode_tests {
             funnel_to_dux: true,
             ..named(name, &[])
         }
+    }
+
+    /// A Funnel this machine has to ANOTHER port may be the operator's own
+    /// relay to dux, and that deliberate setup is theirs: dux keeps serving,
+    /// withdraws its MagicDNS name and warns, but does not lock.
+    #[tokio::test]
+    async fn a_funnel_to_another_port_withdraws_the_name_but_never_locks() {
+        use axum::http::StatusCode;
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let (_primary, primary_addr) = primary_listener();
+        let elsewhere = TailscaleIdentity {
+            funnel: true,
+            funnel_to_dux: false,
+            ..named("box.tail.ts.net", &[])
+        };
+        let (identify, _slot) = scripted_identity(elsewhere);
+        let h = Harness::start_with_identity(
+            TailscaleMode::Auto,
+            Some(primary_addr),
+            Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
+            identify,
+        );
+        let app = router_over(&h, tmp.path());
+        until_status(&app, "localhost", StatusCode::OK).await;
+        tokio::time::sleep(FAST_LOOK * 10).await;
+        assert_eq!(
+            h.control.funnel_lockout().get(),
+            crate::host_guard::FunnelLockout::Open
+        );
+        assert_eq!(status_for(&app, "localhost").await, StatusCode::OK);
+        assert_eq!(
+            status_for(&app, "box.tail.ts.net").await,
+            StatusCode::FORBIDDEN,
+            "the name stays withdrawn while any Funnel is on"
+        );
+        h.finish().await;
     }
 
     #[tokio::test]
@@ -5119,6 +5215,107 @@ mod live_tailscale_mode_tests {
             .count();
         assert_eq!(captions, 1, "one set of codes, the pair");
         h.finish().await;
+    }
+
+    fn container_warnings(ring: &dux_core::activity::ActivityRing) -> usize {
+        ring_texts(ring)
+            .iter()
+            .filter(|t| t.contains("inside a container"))
+            .count()
+    }
+
+    /// Inside a container dux cannot see a Tailscale outside it, so when its
+    /// checks find none it serves (that setup is the operator's own) and says
+    /// once, at start, what that means. The flip and the background serve take
+    /// their first look on the watcher.
+    #[tokio::test]
+    async fn a_container_with_no_tailscale_in_sight_serves_and_warns_once_at_start() {
+        for (reason, in_container, warned) in [
+            (TailscaleUnavailable::CommandMissing, true, 1),
+            (TailscaleUnavailable::DaemonStopped, true, 1),
+            (TailscaleUnavailable::CommandMissing, false, 0),
+        ] {
+            let ring = dux_core::activity::ActivityRing::new(2000);
+            let console = Console::capture(ring.clone());
+            let answer = reason.clone();
+            let probe: crate::IdentityProbe = Arc::new(move || Err(answer.clone()));
+            let h = Harness::start_in_container(probe, console, in_container);
+            let deadline = tokio::time::Instant::now() + WAIT;
+            while h.control.funnel_lockout().get() != crate::host_guard::FunnelLockout::Open {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{reason:?} never served"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // Several more looks, all saying the same: still said once.
+            tokio::time::sleep(FAST_LOOK * 10).await;
+            assert_eq!(
+                container_warnings(&ring),
+                warned,
+                "{reason:?} in_container={in_container}: {:#?}",
+                ring_texts(&ring)
+            );
+            h.finish().await;
+        }
+    }
+
+    /// A container where Tailscale IS in sight is checked like anywhere else
+    /// and says nothing about being in a container.
+    #[tokio::test]
+    async fn a_container_that_sees_tailscale_says_nothing_about_it() {
+        let ring = dux_core::activity::ActivityRing::new(2000);
+        let console = Console::capture(ring.clone());
+        let (identify, _slot) = scripted_identity(named("box.tail.ts.net", &[]));
+        let h = Harness::start_in_container(identify, console, true);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while h.control.funnel_lockout().get() != crate::host_guard::FunnelLockout::Open {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(FAST_LOOK * 5).await;
+        assert_eq!(container_warnings(&ring), 0);
+        h.finish().await;
+    }
+
+    /// `dux server` takes its first look itself, before the watcher: the same
+    /// warning, through the same console line.
+    #[tokio::test]
+    async fn dux_servers_startup_look_warns_about_the_container_the_same_way() {
+        let ring = dux_core::activity::ActivityRing::new(2000);
+        let console = Console::capture(ring.clone());
+        let (control, _mode_rx) = TailscaleModeControl::new(
+            tokio::runtime::Handle::current(),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(true)),
+        );
+        let mut ts = TailscaleLoop::new(
+            TailscaleMode::Auto,
+            false,
+            None,
+            None,
+            &control,
+            Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
+        )
+        .in_container(true);
+        ts.apply_look(
+            Err(TailscaleUnavailable::CommandMissing),
+            &console,
+            &LegStatus::default(),
+        );
+        assert_eq!(container_warnings(&ring), 1, "{:#?}", ring_texts(&ring));
+        let text = ring_texts(&ring)
+            .into_iter()
+            .find(|t| t.contains("inside a container"))
+            .unwrap();
+        for needle in ["no login", "outside this container", "terminals", "private"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        assert_eq!(
+            control.funnel_lockout().get(),
+            crate::host_guard::FunnelLockout::Open,
+            "a warning, never a lock"
+        );
     }
 
     /// The flip's header URL list follows the serve live: the MagicDNS URL (the
