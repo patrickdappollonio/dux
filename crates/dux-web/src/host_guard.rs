@@ -72,13 +72,16 @@
 //!   Tailscale lands, and any look that fails, times out or cannot reach the
 //!   daemon refuses until a look succeeds, after an open state too. Once a
 //!   Funnel to dux has been seen, NOTHING but a successful look that shows it
-//!   gone lifts the refusal: not a daemon outage, not a missing CLI. Two
-//!   answers serve without a successful look, both only while nothing of
+//!   gone lifts the refusal: not a daemon outage, not a missing CLI. A
+//!   successful look at a node that is down, logged out or awaiting approval
+//!   is one that shows no Funnel, whatever its serve configuration still says.
+//!   Two answers serve without a successful look, both only while nothing of
 //!   Tailscale is on this machine (no Tailscale-range address on Tailscale's
 //!   own interface or on an address its last status reported, so another
-//!   CGNAT VPN does not count; no daemon socket; no `tailscaled` process): no
-//!   CLI anywhere dux looks, and a CLI that says in its own words that no
-//!   daemon is running. Nothing can publish dux then. The moment the state
+//!   CGNAT VPN does not count; no daemon socket; no `tailscaled` or macOS
+//!   network-extension process): no CLI anywhere dux looks (a CLI it could not
+//!   run for any other reason is a failure), and a CLI that says in its own
+//!   words that no daemon is running. Nothing can publish dux then. The moment the state
 //!   leaves Open, every socket already upgraded closes itself (see
 //!   [`FunnelLockoutWatch`]), because a socket never passes this guard again.
 //!   Funnel and its handler are paired however the serve configuration splits

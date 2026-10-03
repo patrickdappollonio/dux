@@ -30,8 +30,13 @@ pub enum CommandOutcome {
     Completed(Output),
     /// The wall-clock cap elapsed first. The child has been killed and reaped.
     TimedOut,
-    /// The child could not be spawned, or waiting on it failed.
+    /// The child could not be spawned for any reason but its program being
+    /// absent (a permission refused, a resource exhausted, a pipe that could not
+    /// be made), or waiting on it failed.
     Failed(String),
+    /// The program is not there: spawning it failed with "not found". The one
+    /// launch error that says something about what is installed.
+    NotFound(String),
 }
 
 /// Run `cmd` with piped stdout/stderr drained on threads and a hard wall-clock
@@ -60,6 +65,9 @@ pub fn run_command_with_timeout(
         .spawn()
     {
         Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return CommandOutcome::NotFound(err.to_string());
+        }
         Err(err) => return CommandOutcome::Failed(err.to_string()),
     };
 
@@ -146,6 +154,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_program_that_is_not_there_is_told_apart_as_not_found() {
+        let missing = Command::new("/nonexistent/dux/no-such-program");
+        assert!(matches!(
+            run_command_with_timeout(missing, Duration::from_secs(5), DEFAULT_READER_DRAIN, "t"),
+            CommandOutcome::NotFound(_)
+        ));
+        // A file that is there but cannot be executed is a failure, not absent.
+        let dir = crate::test_scratch::ScratchDir::new();
+        let plain = dir.path().join("not-executable");
+        std::fs::write(&plain, "#!/bin/sh\n").unwrap();
+        let outcome = run_command_with_timeout(
+            Command::new(&plain),
+            Duration::from_secs(5),
+            DEFAULT_READER_DRAIN,
+            "t",
+        );
+        assert!(matches!(outcome, CommandOutcome::Failed(_)), "{outcome:?}");
+    }
+
+    #[test]
     fn a_completed_command_returns_its_output() {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "printf hello; printf oops >&2"]);
@@ -213,8 +241,8 @@ mod tests {
         let outcome =
             run_command_with_timeout(cmd, Duration::from_secs(5), DEFAULT_READER_DRAIN, "nope");
         assert!(
-            matches!(outcome, CommandOutcome::Failed(_)),
-            "a spawn failure is Failed, never TimedOut: {outcome:?}"
+            matches!(outcome, CommandOutcome::NotFound(_)),
+            "a missing program is NotFound, never TimedOut: {outcome:?}"
         );
     }
 }

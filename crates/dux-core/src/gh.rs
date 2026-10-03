@@ -1192,7 +1192,8 @@ fn run_command_with_timeout(cmd: std::process::Command, timeout: Duration) -> Gh
             GhCallOutcome::Completed(output)
         }
         crate::bounded_command::CommandOutcome::TimedOut => GhCallOutcome::TimedOut,
-        crate::bounded_command::CommandOutcome::Failed(msg) => GhCallOutcome::Failed(msg),
+        crate::bounded_command::CommandOutcome::Failed(msg)
+        | crate::bounded_command::CommandOutcome::NotFound(msg) => GhCallOutcome::Failed(msg),
     }
 }
 

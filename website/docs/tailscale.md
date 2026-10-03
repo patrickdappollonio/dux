@@ -89,9 +89,12 @@ answer. dux runs the `tailscale` command, looking for it on your `PATH`, in
 `/usr/local/bin`, and inside the macOS app (`/Applications/Tailscale.app`, always as the
 command line tool, never opening the app). What happens next is one of three things.
 
-**dux serves, because nothing can publish it.** Two answers count, and both only when
-nothing of Tailscale is on this machine at all: no address on Tailscale's own network
-interface, no Tailscale daemon socket, and no running `tailscaled`.
+**dux serves, because nothing can publish it.** An ordinary answer from Tailscale that
+shows no Funnel to dux is the usual one, and so is a node that is down (`tailscale down`),
+logged out, or waiting for an administrator's approval: none of those can publish anything,
+whatever its serve settings still say. Two more answers count, and both only when nothing of
+Tailscale is on this machine at all: no address on Tailscale's own network interface, no
+Tailscale daemon socket, and no running `tailscaled` or Tailscale macOS app.
 
 - The `tailscale` command is not in any of those places.
 - The `tailscale` command says, in its own words, that the daemon is not running.
@@ -102,11 +105,13 @@ not Tailscale and do not count.
 **dux refuses every request, because it cannot confirm.** Every page answers `503` saying
 dux could not confirm that no Funnel publishes it, and the log says why:
 
-- the command failed, timed out (dux caps each call at a few seconds and kills it), or
-  could not reach a daemon that may well be there;
+- the command failed, could not be run (a permission refused, the system out of
+  resources), timed out (dux caps each call at a few seconds and kills it), or could not
+  reach a daemon that may well be there;
 - the command answered with nothing dux could read;
 - the command is missing or says the daemon is down, yet something of Tailscale is here:
-  an address on its interface, a daemon socket, or a running `tailscaled`.
+  an address on its interface, a daemon socket, or a running `tailscaled` or Tailscale
+  macOS app.
 
 **A Funnel already seen stays refused** through all of it. Once dux has seen a Funnel to its
 port, a daemon that stops or a command that fails changes nothing; only a look that shows the
@@ -133,6 +138,11 @@ How to get out, in order:
 > `tailscale` command available to dux and able to reach that daemon: it looks for the
 > socket at `/var/run/tailscale/tailscaled.sock`, so mount or link the sidecar's socket
 > there. Or, when no Funnel can reach dux there, set `tailscale = "no"`.
+>
+> Looking through the running processes costs far more than everything else dux checks,
+> so once it has found no daemon that way it looks again at most once a minute. A daemon
+> with no interface and no socket at one of those paths can therefore take up to a minute
+> to be noticed; the socket and the interface are checked on every look.
 
 On `"auto"` dux keeps looking every few seconds and follows whatever it finds; on `"yes"`
 it looks for the address once but keeps checking for a Funnel the same way.

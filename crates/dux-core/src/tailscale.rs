@@ -71,7 +71,8 @@ impl TailscaleUnavailable {
             Self::DaemonStopped => "the Tailscale daemon is not running",
             Self::Unverifiable => {
                 "Tailscale is on this machine (an address on its interface, a daemon socket, \
-                 or a running tailscaled), but the tailscale CLI is missing or cannot ask it"
+                 or a running Tailscale daemon), but the tailscale CLI is missing or cannot \
+                 ask it"
             }
         }
     }
@@ -121,8 +122,8 @@ pub fn undetected_warning(
 ///
 /// Returns `Ok(addr)` with the preferred address, or `Err(reason)` when no
 /// address is available. This NEVER blocks serving: the caller treats `Err` as
-/// "serve loopback only" and warns. The CLI call follows the `gh`-availability
-/// precedent: any failure to spawn maps to `CommandMissing`, a non-zero exit to
+/// "serve loopback only" and warns. A CLI that is not there maps to
+/// `CommandMissing`, any other launch failure, a timeout or a non-zero exit to
 /// `CommandFailed`, and unparseable output to `NoAddress`.
 pub fn detect_ip() -> Result<IpAddr, TailscaleUnavailable> {
     first_cli_answer(CLI_CANDIDATES, |program| {
@@ -147,7 +148,11 @@ fn first_cli_answer<T>(
     ask: impl Fn(&str) -> Result<T, TailscaleUnavailable>,
 ) -> Result<T, TailscaleUnavailable> {
     let mut last = Err(TailscaleUnavailable::CommandMissing);
+    let path = std::env::var_os("PATH");
     for program in programs {
+        if !cli_on_disk(program, path.as_deref()) {
+            continue;
+        }
         last = ask(program);
         if !matches!(last, Err(TailscaleUnavailable::CommandMissing)) {
             return last;
@@ -239,10 +244,88 @@ pub const SOCKET_PATHS: &[&str] = &[
     "/perm/tailscaled/tailscaled.sock",
 ];
 
-/// The process names the Tailscale CLI itself looks for when it cannot reach
-/// the daemon (cmd/tailscale/cli/diag.go): `tailscaled`, and the macOS app's
-/// `IPNExtension`.
-pub const PROCESS_NAMES: &[&str] = &["tailscaled", "IPNExtension"];
+/// The process names of a running Tailscale daemon: `tailscaled`, the name
+/// the CLI itself looks for on macOS (`IPNExtension`, cmd/tailscale/cli/diag.go),
+/// and the network extensions of the macOS Standalone and App Store apps, whose
+/// executables are named after their bundle ids (version/prop.go,
+/// `macsysExtBundleId` and `appStoreExtBundleId`). The apps' CLI cannot always
+/// reach a running app, and a running extension must read as "cannot check",
+/// never as "stopped".
+pub const PROCESS_NAMES: &[&str] = &[
+    "tailscaled",
+    "IPNExtension",
+    "io.tailscale.ipn.macsys.network-extension",
+    "io.tailscale.ipn.macos.network-extension",
+];
+
+/// The shortest name a process table cuts a long name to: Linux keeps 15
+/// bytes of `comm`, macOS 16 of `p_comm`.
+const SHORTEST_CUT_PROCESS_NAME: usize = 15;
+
+/// Whether a process table's `name` is one of [`PROCESS_NAMES`], or one of
+/// them cut short by the table. A cut prefix can match an unrelated process
+/// that happens to share it; that only ever refuses more.
+fn is_tailscale_process_name(name: &str) -> bool {
+    PROCESS_NAMES.iter().any(|wanted| {
+        name == *wanted
+            || (name.len() >= SHORTEST_CUT_PROCESS_NAME
+                && name.len() < wanted.len()
+                && wanted.starts_with(name))
+    })
+}
+
+/// How long a process table that showed no Tailscale daemon is trusted before
+/// it is read again. Reading it is by far the dearest part of a look on a
+/// machine without Tailscale (tens of milliseconds, against well under one for
+/// the interfaces and sockets), and a look runs every few seconds for the
+/// whole serve. Every cheaper signal (the CLI on disk, an address on
+/// Tailscale's interface, a daemon socket) is still read every look, so only a
+/// daemon with no socket at a known path and no interface (userspace
+/// networking with a custom socket) waits up to this long to be seen.
+pub const PROCESS_RESCAN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The last process-table reading, so an empty one is reused for
+/// [`PROCESS_RESCAN`]. A table that showed a daemon is read again every time,
+/// so its going is noticed at once.
+#[derive(Debug, Default)]
+struct ProcessScanCache {
+    empty_at: Option<std::time::Instant>,
+}
+
+impl ProcessScanCache {
+    const fn new() -> Self {
+        Self { empty_at: None }
+    }
+
+    fn running(&mut self, now: std::time::Instant, scan: impl FnOnce() -> bool) -> bool {
+        if self
+            .empty_at
+            .is_some_and(|at| now.saturating_duration_since(at) < PROCESS_RESCAN)
+        {
+            return false;
+        }
+        let running = scan();
+        self.empty_at = (!running).then_some(now);
+        running
+    }
+}
+
+static PROCESS_SCAN: std::sync::Mutex<ProcessScanCache> =
+    std::sync::Mutex::new(ProcessScanCache::new());
+
+/// Whether `program` could be on disk: a path that exists, or a bare name found
+/// in one of `path`'s directories. With no `PATH` to search, `true`: the system
+/// is asked by running it instead. A look on a machine without Tailscale then
+/// costs a few `stat`s rather than a spawn per candidate.
+fn cli_on_disk(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    if program.contains('/') {
+        return std::path::Path::new(program).exists();
+    }
+    match path {
+        Some(path) => std::env::split_paths(path).any(|dir| dir.join(program).exists()),
+        None => true,
+    }
+}
 
 /// Whether a `tailscaled` is detectable without the CLI: its socket exists at a
 /// known path or at `$TS_SOCKET`, or a process with its name is running.
@@ -265,10 +348,10 @@ fn tailscaled_process_running() -> bool {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     let mut system = System::new();
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    system.processes().values().any(|process| {
-        let name = process.name().to_string_lossy();
-        PROCESS_NAMES.iter().any(|wanted| name == *wanted)
-    })
+    system
+        .processes()
+        .values()
+        .any(|process| is_tailscale_process_name(&process.name().to_string_lossy()))
 }
 
 /// What this machine shows of Tailscale without asking the CLI, read only when
@@ -291,13 +374,39 @@ pub fn local_evidence() -> LocalEvidence {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
+    evidence_from(
+        owned_tailscale_address(&interfaces(), &known),
+        &|path| path.exists(),
+        std::env::var("TS_SOCKET").ok(),
+        &|| {
+            PROCESS_SCAN
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .running(std::time::Instant::now(), tailscaled_process_running)
+        },
+    )
+}
+
+/// [`LocalEvidence`] from the cheapest signal that answers: an owned address,
+/// then a daemon socket, and the process table only when neither does. Only
+/// "something of Tailscale is here" matters to the caller, so the first yes
+/// ends the reading.
+fn evidence_from(
+    owned_address: bool,
+    exists: &dyn Fn(&std::path::Path) -> bool,
+    ts_socket: Option<String>,
+    process_running: &dyn Fn() -> bool,
+) -> LocalEvidence {
+    if owned_address {
+        return LocalEvidence {
+            owned_address: true,
+            daemon_detectable: false,
+        };
+    }
+    let daemon_detectable = tailscaled_detectable(exists, ts_socket, false) || process_running();
     LocalEvidence {
-        owned_address: owned_tailscale_address(&interfaces(), &known),
-        daemon_detectable: tailscaled_detectable(
-            &|path| path.exists(),
-            std::env::var("TS_SOCKET").ok(),
-            tailscaled_process_running(),
-        ),
+        owned_address: false,
+        daemon_detectable,
     }
 }
 
@@ -485,13 +594,29 @@ pub fn detect_identity_with(
         }
         other => other.map_err(|failure| failure.kind)?,
     };
+    let cannot_serve = backend_cannot_serve(&status);
     let status = parse_status_json(&status).ok_or(TailscaleUnavailable::NoAddress)?;
+    if cannot_serve {
+        return Ok(TailscaleIdentity {
+            status,
+            serve: Vec::new(),
+            funnel: false,
+            funnel_to_dux: false,
+        });
+    }
     // A CLI built without `serve` (`ts_omit_serve`) has a daemon that cannot
     // serve, so it has no Funnel to report; any other failure stays one.
     let serve = match run_cli_raw(program, &["serve", "status", "--json"], timeout) {
         Ok(serve) => serve,
         Err(failure) if failure.stderr.contains("unknown subcommand") => "{}".to_string(),
         Err(failure) => return Err(failure.kind),
+    };
+    // `serve status --json` marshals a nil config, which is what a node that
+    // never served has, as `null`.
+    let serve = if serve.trim() == "null" {
+        "{}".to_string()
+    } else {
+        serve
     };
     let funnel = parse_serve_funnel(&serve).ok_or(TailscaleUnavailable::NoAddress)?;
     let funnel_to_dux =
@@ -505,8 +630,28 @@ pub fn detect_identity_with(
     })
 }
 
-/// Run one bounded `tailscale` CLI call and hand back its stdout. A spawn
-/// failure is a missing CLI, a timeout or a non-zero exit is a failure.
+/// Whether `tailscale status --json` reports a node that cannot publish anything,
+/// whatever its serve configuration still says: `tailscale down` (`Stopped`),
+/// logged out (`NeedsLogin`), or waiting on an administrator's approval
+/// (`NeedsMachineAuth`). Each needs a person to act before the node rejoins the
+/// tailnet, and Funnel traffic arrives over the tailnet. `Starting` and
+/// `NoState` are a daemon on its way up and may be serving within moments, so
+/// the serve configuration still decides for them, as for `Running`.
+fn backend_cannot_serve(status: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(status)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("BackendState")
+                .and_then(|state| state.as_str())
+                .map(|state| matches!(state, "Stopped" | "NeedsLogin" | "NeedsMachineAuth"))
+        })
+        .unwrap_or(false)
+}
+
+/// Run one bounded `tailscale` CLI call and hand back its stdout. A program
+/// that is not there is a missing CLI; any other launch failure, a timeout or a
+/// non-zero exit is a failure.
 fn run_cli(
     program: &str,
     args: &[&str],
@@ -556,11 +701,18 @@ fn run_cli_raw(
             ));
             return Err(TailscaleUnavailable::CommandFailed.into());
         }
+        // Only "not found" says the CLI is absent. A permission refused, a
+        // resource exhausted or a failed wait says nothing about what is
+        // installed, so it is a failure: dux cannot check.
+        crate::bounded_command::CommandOutcome::NotFound(err) => {
+            logger::debug(&format!("[tailscale] `{program}` is not there: {err}"));
+            return Err(TailscaleUnavailable::CommandMissing.into());
+        }
         crate::bounded_command::CommandOutcome::Failed(err) => {
             logger::debug(&format!(
                 "[tailscale] could not run `{program} {shown}`: {err}"
             ));
-            return Err(TailscaleUnavailable::CommandMissing.into());
+            return Err(TailscaleUnavailable::CommandFailed.into());
         }
     };
     if !output.status.success() {
@@ -1022,7 +1174,7 @@ mod tests {
             // Another test thread forking a child while the write handle above
             // was open copies that handle into its child until its exec closes
             // it, and executing the script inside that window fails with
-            // "text file busy", which the probe reports as a missing command.
+            // "text file busy", which the probe reports as a failure.
             // Wait until the script actually runs before handing it out.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
@@ -1127,6 +1279,96 @@ mod tests {
             TailscaleUnavailable::NoAddress
                 .reason()
                 .contains("no usable address")
+        );
+    }
+}
+
+#[cfg(test)]
+mod cost_measurement {
+    use super::*;
+
+    fn stats(label: &str, mut samples: Vec<std::time::Duration>) {
+        samples.sort();
+        let median = samples[samples.len() / 2];
+        let worst = *samples.last().unwrap();
+        eprintln!(
+            "{label}: median {median:?}, worst {worst:?} over {} runs",
+            samples.len()
+        );
+    }
+
+    fn time(runs: usize, mut f: impl FnMut()) -> Vec<std::time::Duration> {
+        (0..runs)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                f();
+                started.elapsed()
+            })
+            .collect()
+    }
+
+    /// What one watch period costs on a machine with no Tailscale, piece by
+    /// piece. A measurement, not a check: run it by hand with `--ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_one_period_without_tailscale() {
+        let missing = [
+            "dux-no-such-tailscale-cost",
+            "/nonexistent/dux/bin/tailscale",
+            "/nonexistent/dux/Tailscale.app/Contents/MacOS/Tailscale",
+        ];
+        stats(
+            "CLI candidates",
+            time(30, || {
+                let _ = first_cli_answer(&missing, |program| {
+                    detect_identity_with(program, DETECT_TIMEOUT, 3890)
+                });
+            }),
+        );
+        stats("interfaces", time(30, || drop(interfaces())));
+        stats(
+            "sockets",
+            time(30, || {
+                let _ = tailscaled_detectable(&|path| path.exists(), None, false);
+            }),
+        );
+        stats(
+            "process scan",
+            time(30, || {
+                let _ = tailscaled_process_running();
+            }),
+        );
+        // A whole period's evidence on a machine where nothing of Tailscale is
+        // found: the real scan runs, but reports nothing, as it would there.
+        // Twelve periods of five seconds: one scan, then eleven reuses.
+        let cache = std::cell::RefCell::new(ProcessScanCache::new());
+        let start = std::time::Instant::now();
+        let mut period = 0u64;
+        stats(
+            "evidence, one period (12 periods: 1 scan + 11 reused)",
+            time(12, || {
+                let now = start + std::time::Duration::from_secs(5 * period);
+                period += 1;
+                // The interfaces and sockets are read for their cost; what
+                // this machine has of Tailscale is set aside, as it would be
+                // absent there.
+                drop(interfaces());
+                let _ = evidence_from(
+                    false,
+                    &|path| {
+                        let _ = path.exists();
+                        false
+                    },
+                    None,
+                    &|| {
+                        cache.borrow_mut().running(now, || {
+                            let _ = tailscaled_process_running();
+                            false
+                        })
+                    },
+                );
+            }),
         );
     }
 }
@@ -1729,6 +1971,143 @@ mod identity_tests {
                 "not proof of a stopped daemon, so not an answer: {text} gave {got:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_cli_that_is_there_but_cannot_run_is_a_failure_not_a_missing_cli() {
+        let dir = crate::test_scratch::ScratchDir::new();
+        let plain = dir.path().join("tailscale");
+        std::fs::write(&plain, "#!/bin/sh\n").unwrap();
+        let plain = plain.to_str().unwrap();
+        assert_eq!(
+            detect_identity_checked(
+                &[plain, "dux-no-such-tailscale-9f1e"],
+                DETECT_TIMEOUT,
+                3890,
+                &nothing_here
+            ),
+            Err(TailscaleUnavailable::CommandFailed),
+            "EACCES is not proof that Tailscale is absent, and it ends the search"
+        );
+    }
+
+    fn cli_with(name: &str, status: &str, serve: &str) -> super::tests::StandIn {
+        super::tests::StandIn::new(
+            name,
+            &format!(
+                "if [ \"$1\" = \"status\" ]; then printf '%s' '{status}'; \
+                 else printf '%s' '{serve}'; fi"
+            ),
+        )
+    }
+
+    /// A stale Funnel to dux left in the serve config.
+    const STALE_FUNNEL: &str = r#"{"TCP": {"443": {"TCPForward": "127.0.0.1:3890"}}, "AllowFunnel": {"box.tail.ts.net:443": true}}"#;
+
+    #[test]
+    fn a_node_that_is_down_or_logged_out_publishes_nothing_whatever_its_serve_config_says() {
+        for state in ["Stopped", "NeedsLogin", "NeedsMachineAuth"] {
+            let status = format!(
+                r#"{{"BackendState": "{state}", "Self": {{"DNSName": "box.tail.ts.net."}}}}"#
+            );
+            let cli = cli_with(&format!("down-{state}"), &status, STALE_FUNNEL);
+            let look = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890)
+                .unwrap_or_else(|err| panic!("{state}: {err:?}"));
+            assert!(!look.funnel && !look.funnel_to_dux, "{state}");
+            assert!(look.serve.is_empty(), "{state}");
+        }
+        // Starting, or a daemon that has not settled, may be serving any moment:
+        // the serve config still decides.
+        for state in ["Starting", "NoState", "Running"] {
+            let status = format!(
+                r#"{{"BackendState": "{state}", "Self": {{"DNSName": "box.tail.ts.net."}}}}"#
+            );
+            let cli = cli_with(&format!("up-{state}"), &status, STALE_FUNNEL);
+            let look = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890).unwrap();
+            assert!(look.funnel_to_dux, "{state}");
+        }
+    }
+
+    #[test]
+    fn a_serve_config_printed_as_null_is_an_empty_one() {
+        let cli = cli_with("null-serve", STATUS, "null");
+        let look = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890)
+            .expect("`serve status --json` prints null for no config at all");
+        assert!(!look.funnel && !look.funnel_to_dux && look.serve.is_empty());
+    }
+
+    #[test]
+    fn the_macos_network_extensions_count_as_a_running_daemon() {
+        // version/prop.go: the Standalone (macsys) and App Store extensions'
+        // bundle ids, which are their executables' names.
+        for name in [
+            "tailscaled",
+            "IPNExtension",
+            "io.tailscale.ipn.macsys.network-extension",
+            "io.tailscale.ipn.macos.network-extension",
+            // Process tables cut names short: Linux at 15 bytes, macOS at 16.
+            "io.tailscale.ip",
+            "io.tailscale.ipn",
+        ] {
+            assert!(is_tailscale_process_name(name), "{name}");
+        }
+        for name in ["tailscale", "Tailscale", "io.tailscale", "sshd", ""] {
+            assert!(!is_tailscale_process_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_cli_that_is_on_no_path_is_missing_without_being_run() {
+        let dir = crate::test_scratch::ScratchDir::new();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = std::ffi::OsString::from(bin.as_os_str());
+        assert!(!cli_on_disk("tailscale", Some(&path)));
+        assert!(!cli_on_disk("/nonexistent/dux/tailscale", Some(&path)));
+        std::fs::write(bin.join("tailscale"), "").unwrap();
+        assert!(cli_on_disk("tailscale", Some(&path)));
+        assert!(cli_on_disk(bin.join("tailscale").to_str().unwrap(), None));
+        // No PATH at all: dux cannot tell, so it asks the system by running it.
+        assert!(cli_on_disk("tailscale", None));
+    }
+
+    #[test]
+    fn a_process_table_that_showed_no_daemon_is_read_again_only_after_a_minute() {
+        let mut cache = ProcessScanCache::default();
+        let start = std::time::Instant::now();
+        let scans = std::cell::Cell::new(0);
+        let scan = |found: bool| {
+            let scans = &scans;
+            move || {
+                scans.set(scans.get() + 1);
+                found
+            }
+        };
+        assert!(!cache.running(start, scan(false)));
+        assert!(!cache.running(start + std::time::Duration::from_secs(5), scan(true)));
+        assert_eq!(scans.get(), 1, "a recent empty scan is reused");
+        assert!(cache.running(start + PROCESS_RESCAN, scan(true)));
+        assert_eq!(scans.get(), 2, "read again once the minute is up");
+        // A daemon seen is read again every time, so its going is noticed.
+        assert!(!cache.running(start + PROCESS_RESCAN, scan(false)));
+        assert_eq!(scans.get(), 3);
+        assert_eq!(PROCESS_RESCAN, std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn the_process_table_is_not_read_when_an_address_or_socket_already_answers() {
+        let scanned = std::cell::Cell::new(false);
+        let scan = || {
+            scanned.set(true);
+            false
+        };
+        let evidence = evidence_from(true, &|_| false, None, &scan);
+        assert!(evidence.owned_address && !scanned.get());
+        let evidence = evidence_from(false, &|_| true, None, &scan);
+        assert!(evidence.daemon_detectable && !scanned.get());
+        let evidence = evidence_from(false, &|_| false, None, &scan);
+        assert_eq!(evidence, LocalEvidence::default());
+        assert!(scanned.get());
     }
 
     #[test]

@@ -2004,13 +2004,21 @@ impl AttachedPtySocket<'_> {
         loop {
             // Handle each received value inside its selected branch. A combined
             // receive-and-handle future could consume a value and then be cancelled.
+            // Biased, with the lockout first: once dux stops serving, no queued
+            // keystroke may reach the PTY and no further frame may be sent.
             let action = tokio::select! {
+                biased;
+                () = lockout.engaged() => {
+                    // The forwarder writes output on its own task, so it is
+                    // stopped before the close rather than after the loop.
+                    pty_forwarder.abort();
+                    self.close_under_lockout().await
+                }
                 _ = ping.tick() => self.send_liveness_ping().await,
                 change = grid_changes.recv() => {
                     self.handle_grid_change(change, &mut last_grid_seq).await
                 }
                 _ = &mut pty_forwarder => self.close_after_forwarder_end().await,
-                () = lockout.engaged() => self.close_under_lockout().await,
                 next = stream.next() => match next {
                     Some(Ok(message)) => self.handle_client_message(message).await,
                     _ => PtyLoopAction::Break,
@@ -2038,8 +2046,6 @@ impl AttachedPtySocket<'_> {
     }
 
     /// The forwarder has ended, so no more PTY bytes can arrive on this socket.
-    /// Close with the code that tells the client whether to reconnect: the server
-    /// shutting down is a different answer from the provider going away.
     /// dux stopped serving (a Funnel to it, or no way to confirm there is
     /// none), so a socket opened before must not keep driving this PTY. A plain
     /// close, like a shutdown: the client's ordinary reconnect then meets the
@@ -2050,6 +2056,8 @@ impl AttachedPtySocket<'_> {
         PtyLoopAction::Break
     }
 
+    /// Close with the code that tells the client whether to reconnect: the server
+    /// shutting down is a different answer from the provider going away.
     async fn close_after_forwarder_end(&self) -> PtyLoopAction {
         let shutting_down = self
             .engine
@@ -2912,9 +2920,12 @@ impl EventsSocketLoop {
         ping.tick().await;
 
         loop {
+            // Biased, with the lockout first: once dux stops serving, no queued
+            // frame is sent and no queued client message is acted on.
             let input = tokio::select! {
-                _ = ping.tick() => EventsLoopInput::Ping,
+                biased;
                 () = self.lockout.engaged() => EventsLoopInput::LockedOut,
+                _ = ping.tick() => EventsLoopInput::Ping,
                 changed = self.workspace_rx.changed(), if self.workspace_alive => {
                     EventsLoopInput::Workspace(changed)
                 }
