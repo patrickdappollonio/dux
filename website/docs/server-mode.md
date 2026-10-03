@@ -293,8 +293,10 @@ port = 3890
 # reach it. "auto" (the default) binds it whenever the interface exists and keeps
 # watching, so the listener comes and goes with your tailnet connection; "yes"
 # binds it once and then stops looking; "no" never binds it. If the
-# tailscale CLI is missing or the daemon is down, dux warns and serves the
-# configured host only.
+# tailscale CLI is missing or the daemon is down, dux warns and keeps
+# listening. Unless this is "no", dux also refuses every request while a
+# Tailscale Funnel forwards to it, or while Tailscale is on this machine but
+# dux cannot ask it; "no" turns those checks off.
 tailscale = "auto"
 
 # Serve the web UI in the background while the terminal UI keeps running, on

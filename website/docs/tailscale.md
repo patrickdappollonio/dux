@@ -27,7 +27,9 @@ tailscale = "auto"   # or "yes", or "no"
   [it follows the interface](#it-follows-the-interface).
 - **`"yes"`** looks exactly once and never again by itself. If Tailscale is not up at
   that moment, dux serves your configured host only until you change the mode.
-- **`"no"`** never binds it and never runs the detection at all.
+- **`"no"`** never binds it and never runs the detection at all, which also turns off
+  dux's checks for a Funnel publishing it (see
+  [When Tailscale isn't there](#when-tailscale-isnt-there)).
 
 `dux server --no-tailscale` forces `"no"` for a single run.
 
@@ -81,20 +83,59 @@ once it settles, rather than a new one every time it moves.
 
 ### When Tailscale isn't there
 
-Nothing breaks. Detection failing is a warning, never fatal, and dux serves your configured
-host regardless. Three distinct cases, and the warning names which one you hit:
+Unless the mode is `"no"`, dux asks Tailscale on every look whether a Funnel publishes it
+(see [the caution below](#caveats-worth-knowing)), and it serves only when it gets an
+answer. dux runs the `tailscale` command, looking for it on your `PATH`, in
+`/usr/local/bin`, and inside the macOS app (`/Applications/Tailscale.app`, always as the
+command line tool, never opening the app). What happens next is one of three things.
 
-- the `tailscale` CLI is not installed or not on `PATH`
-- the CLI ran and failed, which is what a stopped daemon or a logged-out node looks like
-- the CLI ran fine and returned nothing dux could use
+**dux serves, because nothing can publish it.** Two answers count, and both only when
+nothing of Tailscale is on this machine at all: no address on Tailscale's own network
+interface, no Tailscale daemon socket, and no running `tailscaled`.
 
-A fourth folds into the second: if the daemon stops answering entirely, dux's call is capped
-at a few seconds, killed, and reported as a failure rather than hanging.
+- The `tailscale` command is not in any of those places.
+- The `tailscale` command says, in its own words, that the daemon is not running.
 
-The warning also says what happens next, which differs by mode: on `"auto"` it is a "not
-yet" and dux keeps looking, while on `"yes"` it is settled for the rest of the run. If you
-do not use Tailscale, set `tailscale = "no"` (or pass `--no-tailscale`) and the warning goes
-with it.
+Other VPNs that hand out addresses in the same `100.x` range (Cloudflare WARP, NetBird) are
+not Tailscale and do not count.
+
+**dux refuses every request, because it cannot confirm.** Every page answers `503` saying
+dux could not confirm that no Funnel publishes it, and the log says why:
+
+- the command failed, timed out (dux caps each call at a few seconds and kills it), or
+  could not reach a daemon that may well be there;
+- the command answered with nothing dux could read;
+- the command is missing or says the daemon is down, yet something of Tailscale is here:
+  an address on its interface, a daemon socket, or a running `tailscaled`.
+
+**A Funnel already seen stays refused** through all of it. Once dux has seen a Funnel to its
+port, a daemon that stops or a command that fails changes nothing; only a look that shows the
+Funnel gone brings dux back.
+
+How to get out, in order:
+
+1. **Fix `tailscaled`.** `tailscale status` on the machine dux runs on says what is wrong.
+   Every look that succeeds lifts the refusal by itself.
+2. **Put the `tailscale` command where dux looks**, typically on `PATH`, when the daemon is
+   running but dux cannot find its command.
+3. **Set `tailscale = "no"`** (or pass `--no-tailscale`) when you do not want dux consulting
+   Tailscale at all. That turns off the Funnel checks above too: only Tailscale's own mark on
+   Funnel traffic is still refused, so keep it for machines where you know no Funnel points
+   at dux.
+
+> [!IMPORTANT]
+> **Userspace networking and sidecars.** A `tailscaled` started with
+> `--tun=userspace-networking` (the default in Tailscale's container image) has no network
+> interface, and in a sidecar setup the `tailscale` command may live in another container.
+> dux still spots the daemon by its socket (`/var/run/tailscale/tailscaled.sock`,
+> `/run/tailscale/tailscaled.sock`, `/var/run/tailscaled.socket`, `/tmp/tailscaled.sock`,
+> or the path in `$TS_SOCKET`) or by its process, and refuses until it can ask. Make the
+> `tailscale` command available to dux and able to reach that daemon: it looks for the
+> socket at `/var/run/tailscale/tailscaled.sock`, so mount or link the sidecar's socket
+> there. Or, when no Funnel can reach dux there, set `tailscale = "no"`.
+
+On `"auto"` dux keeps looking every few seconds and follows whatever it finds; on `"yes"`
+it looks for the address once but keeps checking for a Funnel the same way.
 
 ### Serving from the terminal UI is loopback plus Tailscale, always
 
@@ -300,11 +341,11 @@ route is on (see the caveats below).
 
 **Every page answers `503`.** The page says which of three things it is. *Checking*: dux has
 just started and its first look at Tailscale has not answered yet; wait a moment. *Could not
-confirm*: the `tailscale` command failed, did not answer, or could not reach its daemon,
-so dux cannot tell whether a Funnel publishes it; fix `tailscaled` first (`tailscale
-status` shows what it says). Setting `tailscale = "no"` also gets you in, but it turns off
-dux's Funnel protection, so keep it as a last resort. *A Funnel is publishing dux*: turn it
-off (see the caveats below).
+confirm*: dux could not ask Tailscale whether a Funnel publishes it; see
+[When Tailscale isn't there](#when-tailscale-isnt-there) for every cause and the way out.
+*A Funnel is publishing dux*: turn it off (see the caveats below). A browser tab that was
+already open loses its connection the moment any of these starts, and reconnects once dux
+serves again.
 
 **The first HTTPS visit hangs.** Give it about 30 seconds: that is the certificate being
 issued, once.
@@ -379,15 +420,18 @@ console.
 >   `localhost`. It also stops answering to this machine's name while any Funnel is on.
 > - **It refuses everything until it has checked, and whenever it cannot check.** Unless the
 >   mode is `"no"`, every request answers "checking" until dux's first look at Tailscale
->   lands, a moment after it starts. Whenever a look fails, did not answer, or cannot reach the
->   daemon, dux refuses everything with a page saying it could not confirm that no Funnel
->   publishes it, until a look succeeds. Fix `tailscaled` first; `tailscale = "no"` also gets
->   you in, but it turns off this protection. dux looks for the `tailscale` command on your
->   `PATH` and where Tailscale's macOS apps put it. Only when it finds none, or none can reach
->   a daemon, AND this machine has no Tailscale address at all, does dux conclude that nothing
->   can publish it and serve.
+>   lands, a moment after it starts. Whenever dux cannot confirm that no Funnel publishes it,
+>   it refuses everything until it can. It serves without a successful look only when nothing
+>   of Tailscale is on this machine; see
+>   [When Tailscale isn't there](#when-tailscale-isnt-there) for exactly when, and the way
+>   out.
+> - **A Funnel already seen stays refused** until a look shows it gone, through a daemon
+>   that stops or a command that fails.
+> - **Pages already open are cut off.** The moment dux starts refusing, every browser tab
+>   connected to it loses its live connection, terminals included, so a tab opened earlier
+>   cannot keep typing into them.
 >
-> Each of these says so in a warning, and a failed check never lifts one. Turn the Funnel off
+> Each of these says so in a warning, and a failed check never lifts a refusal. Turn the Funnel off
 > (`tailscale funnel status` lists it) and dux goes back to normal by itself.
 
 > [!WARNING]

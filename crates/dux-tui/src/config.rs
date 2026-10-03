@@ -932,8 +932,15 @@ fn config_schema() -> Vec<ConfigEntry> {
                  #                    configured host only until the mode changes.\n\
                  #   \"no\":            never bind it and never run the detection.\n\
                  # If the CLI is missing, the daemon is down, or something else already\n\
-                 # holds that port, dux WARNS and keeps serving. A Tailscale problem\n\
-                 # never stops dux from starting. `dux server --no-tailscale` forces\n\
+                 # holds that port, dux WARNS and keeps listening. A Tailscale problem\n\
+                 # never stops dux from starting.\n\
+                 # Unless this is \"no\", dux also checks that no Tailscale Funnel\n\
+                 # publishes it to the internet, because it has no login: while a\n\
+                 # Funnel forwards to dux, or while Tailscale is on this machine but\n\
+                 # dux cannot ask it (the CLI fails, or is missing while a tailscaled\n\
+                 # runs), every request is refused with a page saying why. Fix\n\
+                 # tailscaled or put the tailscale CLI on PATH; \"no\" also gets you in,\n\
+                 # but it turns these checks off. `dux server --no-tailscale` forces\n\
                  # \"no\" for a single run, and refuses a live change back.\n\
                  # You do not need to edit this file to change your mind: the palette\n\
                  # command set-tailscale-mode and the web Preferences dialog change this\n\

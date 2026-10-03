@@ -50,9 +50,11 @@ pub enum TailscaleUnavailable {
     /// (see [`daemon_stopped_message`]). Funnel needs a running daemon, so this
     /// is an answer: nothing is published.
     DaemonStopped,
-    /// The CLI is missing or cannot reach its daemon, yet this machine HAS a
-    /// Tailscale address, so a daemon is running that nothing here can ask
-    /// about its Funnels. Unknown, never "no Funnel".
+    /// The CLI is missing or says its daemon is not running, yet something of
+    /// Tailscale is here: an address on Tailscale's own interface, a daemon
+    /// socket, or a running `tailscaled` (userspace networking has no
+    /// interface at all). A daemon may be up that nothing here can ask about
+    /// its Funnels. Unknown, never "no Funnel".
     Unverifiable,
 }
 
@@ -68,8 +70,8 @@ impl TailscaleUnavailable {
             Self::DaemonUnreachable => "the tailscale CLI could not reach the Tailscale daemon",
             Self::DaemonStopped => "the Tailscale daemon is not running",
             Self::Unverifiable => {
-                "this machine has a Tailscale address, but the tailscale CLI is missing or \
-                 cannot reach the daemon"
+                "Tailscale is on this machine (an address on its interface, a daemon socket, \
+                 or a running tailscaled), but the tailscale CLI is missing or cannot ask it"
             }
         }
     }

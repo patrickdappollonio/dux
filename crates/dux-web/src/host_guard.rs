@@ -70,13 +70,22 @@
 //!   carries the marker, both come from loopback, and both can claim any Host.
 //!   It fails closed on unknown: a serve answers `503` until its first look at
 //!   Tailscale lands, and any look that fails, times out or cannot reach the
-//!   daemon refuses until a look succeeds, after an open state too. A failed look
-//!   never lifts a refusal. The one exception is no CLI or no reachable daemon
-//!   while this machine has NO Tailscale address on any interface: nothing can
-//!   publish dux then, and it serves. Funnel and its handler are paired however
-//!   the serve configuration splits them (any `AllowFunnel` anywhere with any
-//!   forward or proxy to dux's port anywhere), because Tailscale pairs them
-//!   across the top level and its foreground sessions.
+//!   daemon refuses until a look succeeds, after an open state too. Once a
+//!   Funnel to dux has been seen, NOTHING but a successful look that shows it
+//!   gone lifts the refusal: not a daemon outage, not a missing CLI. Two
+//!   answers serve without a successful look, both only while nothing of
+//!   Tailscale is on this machine (no Tailscale-range address on Tailscale's
+//!   own interface or on an address its last status reported, so another
+//!   CGNAT VPN does not count; no daemon socket; no `tailscaled` process): no
+//!   CLI anywhere dux looks, and a CLI that says in its own words that no
+//!   daemon is running. Nothing can publish dux then. The moment the state
+//!   leaves Open, every socket already upgraded closes itself (see
+//!   [`FunnelLockoutWatch`]), because a socket never passes this guard again.
+//!   Funnel and its handler are paired however the serve configuration splits
+//!   them (any `AllowFunnel` anywhere with any forward or proxy to dux's port
+//!   anywhere), because Tailscale pairs them across the top level and its
+//!   foreground sessions. A target's path, query and fragment are ignored, and
+//!   a port written by name, or one dux cannot read, counts as dux's.
 //!
 //! Limits, stated plainly: the lockout is read every watch period, so a Funnel
 //! switched on mid-run is refused at the next look, while an HTTP Funnel through
