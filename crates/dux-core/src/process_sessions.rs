@@ -85,21 +85,6 @@ pub fn current_boot() -> u64 {
     })
 }
 
-/// What a session's number alone may be trusted for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionEvidence {
-    /// Sessions this run of dux started and is still tracking: a process in
-    /// the session that did not start before it is a member. (The registry
-    /// replaces an entry when the same number is handed to a newer session.)
-    ThisRun,
-    /// Sessions an earlier run recorded: the number may have been handed to
-    /// an unrelated program since. A session counts by its number only while
-    /// its own leader is still there and started when the record says;
-    /// otherwise only the processes recorded by identity (and what they
-    /// started) are members. Never a member on the number alone.
-    Recorded,
-}
-
 fn epoch_secs(at: SystemTime) -> u64 {
     at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -154,34 +139,25 @@ pub fn members(
     known: &[ProcessIdentity],
     self_pid: u32,
 ) -> Vec<ProcRow> {
-    members_with(SessionEvidence::ThisRun, table, sessions, known, self_pid)
-}
-
-/// [`members`] under an explicit [`SessionEvidence`]. In every case a session
-/// from another boot is void, a session whose number a newer leader has taken
-/// is somebody else's, and a process that started before the session did is
-/// not in it.
-pub fn members_with(
-    evidence: SessionEvidence,
-    table: &[ProcRow],
-    sessions: &[ProcessSession],
-    known: &[ProcessIdentity],
-    self_pid: u32,
-) -> Vec<ProcRow> {
     let by_pid: HashMap<u32, &ProcRow> = table.iter().map(|row| (row.pid, row)).collect();
-    // Session number to the earliest start a member may have.
-    let live_sessions: HashMap<u32, u64> = sessions
+    // THE membership rule, the same in this run and at the next start. A
+    // session counts by its number only while its recorded leader is alive
+    // with the recorded identity (its pid, and a start time matching when dux
+    // spawned it). Once the leader has gone the number proves nothing (an
+    // unrelated program may hold it by now), so only the processes recorded
+    // by identity count: the members dux saw still running the moment it saw
+    // the leader exit, or the moment a delete looked. A session from another
+    // boot is void altogether.
+    let led: HashMap<u32, u64> = sessions
         .iter()
         .filter(|session| session.is_this_boot())
-        .filter(|session| match by_pid.get(&session.sid) {
-            Some(leader) if leader.sid == Some(leader.pid) => {
-                // The leader is there: it is ours only if it started when the
-                // record says, within the clocks' slack.
-                leader.start_time + START_TIME_SLACK_SECS >= session.started_at_secs
+        .filter(|session| {
+            by_pid.get(&session.sid).is_some_and(|leader| {
+                !leader.exited
+                    && leader.sid == Some(leader.pid)
+                    && leader.start_time + START_TIME_SLACK_SECS >= session.started_at_secs
                     && leader.start_time <= session.started_at_secs + START_TIME_SLACK_SECS
-            }
-            // No leader: trusted on its number only within this run.
-            _ => evidence == SessionEvidence::ThisRun,
+            })
         })
         .map(|session| {
             (
@@ -208,7 +184,7 @@ pub fn members_with(
         .iter()
         .filter(|row| {
             row.sid
-                .and_then(|sid| live_sessions.get(&sid))
+                .and_then(|sid| led.get(&sid))
                 .is_some_and(|earliest| row.start_time >= *earliest)
                 || known.contains(&row.identity())
         })
@@ -220,14 +196,44 @@ pub fn members_with(
         if eligible(row) {
             found.push(row.clone());
         }
-        // A zombie's children are still worth following: they were reparented
-        // already or will be, but until then the link is the only one there is.
+        // Descendants by parent chain, each started no earlier than its
+        // parent: a pid reused under a reparented child would have started
+        // before nothing of ours. A zombie's children are still followed:
+        // until they are reparented the link is the only one there is.
         if let Some(kids) = children.get(&row.pid) {
-            queue.extend(kids.iter().copied());
+            queue.extend(
+                kids.iter()
+                    .copied()
+                    .filter(|kid| kid.start_time >= row.start_time),
+            );
         }
     }
     found.sort_by_key(|row| row.pid);
     found
+}
+
+/// The processes still running in `session` the moment its leader was seen
+/// to exit, by number (the leader being gone, nothing else can be in the
+/// session yet: Linux and macOS never hand out a number that still names a
+/// live session), each started no earlier than the session. Recorded as the
+/// session's evidence from then on. Blocking: a worker thread's call.
+pub fn survivors_at_leader_exit(session: ProcessSession) -> Vec<ProcessIdentity> {
+    if !session.is_this_boot() {
+        return Vec::new();
+    }
+    let earliest = session
+        .started_at_secs
+        .saturating_sub(START_TIME_SLACK_SECS);
+    read_process_table()
+        .iter()
+        .filter(|row| {
+            !row.exited
+                && row.sid == Some(session.sid)
+                && row.start_time >= earliest
+                && row.pid != std::process::id()
+        })
+        .map(ProcRow::identity)
+        .collect()
 }
 
 /// The process table, read off the platform (`/proc` on Linux, libproc on
@@ -320,17 +326,6 @@ pub fn purge(
     known: &[ProcessIdentity],
     grace: Duration,
 ) -> PurgeOutcome {
-    purge_with(SessionEvidence::ThisRun, ops, sessions, known, grace)
-}
-
-/// [`purge`] under an explicit [`SessionEvidence`].
-pub fn purge_with(
-    evidence: SessionEvidence,
-    ops: &mut dyn ProcessOps,
-    sessions: &[ProcessSession],
-    known: &[ProcessIdentity],
-    grace: Duration,
-) -> PurgeOutcome {
     let self_pid = std::process::id();
     let start = ops.now();
     let kill_at = start + grace;
@@ -338,7 +333,7 @@ pub fn purge_with(
     let mut asked: HashSet<ProcessIdentity> = HashSet::new();
     loop {
         let now = ops.now();
-        let alive = members_with(evidence, &ops.table(), sessions, known, self_pid);
+        let alive = members(&ops.table(), sessions, known, self_pid);
         if alive.is_empty() {
             return PurgeOutcome::Clean {
                 stopped: asked.len(),
@@ -382,6 +377,10 @@ pub struct AgentProcessRegistry {
 
 #[derive(Default)]
 struct RegistryInner {
+    /// Per session, the members dux saw still running when it saw the
+    /// session's leader exit (or when a delete looked). The only evidence a
+    /// leaderless session's members are dux's.
+    survivors: HashMap<ProcessSession, Vec<ProcessIdentity>>,
     /// Each owner's sessions, with the folder each was started in.
     sessions: HashMap<String, Vec<(ProcessSession, std::path::PathBuf)>>,
     /// Sessions of agents already deleted, kept (bounded) so a removal of the
@@ -428,6 +427,9 @@ impl AgentProcessRegistry {
             list.retain(|entry| !older(entry));
         }
         inner.retired.retain(|entry| !older(entry));
+        inner.survivors.retain(|known, _| {
+            !(known.sid == session.sid && known.started_at_secs < session.started_at_secs)
+        });
         let list = inner.sessions.entry(agent_id.to_string()).or_default();
         if !list.iter().any(|(known, _)| *known == session) {
             list.push((session, folder));
@@ -436,6 +438,53 @@ impl AgentProcessRegistry {
             let excess = list.len() - SESSIONS_PER_AGENT;
             list.drain(..excess);
         }
+    }
+
+    /// Record `identities` as members of `session` (see
+    /// [`survivors_at_leader_exit`]).
+    pub fn record_survivors(&self, session: ProcessSession, identities: &[ProcessIdentity]) {
+        if identities.is_empty() {
+            return;
+        }
+        let mut inner = self.lock();
+        let entry = inner.survivors.entry(session).or_default();
+        for identity in identities {
+            if !entry.contains(identity) {
+                entry.push(*identity);
+            }
+        }
+    }
+
+    /// The recorded members of each of `sessions`.
+    pub fn survivors_of(&self, sessions: &[ProcessSession]) -> Vec<ProcessIdentity> {
+        let inner = self.lock();
+        sessions
+            .iter()
+            .filter_map(|session| inner.survivors.get(session))
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    /// A callback for a PTY's client to run once its child is gone: it records
+    /// what is still running in the session, on a thread of its own because
+    /// that is a walk over the process table.
+    pub fn leader_exit_hook(&self, session: ProcessSession) -> Box<dyn FnOnce() + Send> {
+        let registry = self.clone();
+        Box::new(move || {
+            let spawned = std::thread::Builder::new()
+                .name("pty-leader-exit".to_string())
+                .spawn(move || {
+                    let found = survivors_at_leader_exit(session);
+                    registry.record_survivors(session, &found);
+                });
+            if let Err(err) = spawned {
+                crate::logger::debug(&format!(
+                    "could not record what session {} left running: {err}",
+                    session.sid
+                ));
+            }
+        })
     }
 
     /// Every session remembered for `agent_id`.
@@ -534,6 +583,13 @@ impl StartupRunGuard {
         self.registry.register(&self.agent_id, session, folder);
     }
 
+    /// Record what the run's session still has running now that its leader,
+    /// the command, has exited. Blocking: the run's own worker thread.
+    pub fn record_survivors(&self, session: ProcessSession) {
+        let found = survivors_at_leader_exit(session);
+        self.registry.record_survivors(session, &found);
+    }
+
     /// Whether the agent was deleted while this run was in progress.
     pub fn agent_deleted(&self) -> bool {
         self.registry
@@ -600,11 +656,21 @@ mod tests {
         );
     }
 
+    /// The shell is gone and its background job was reparented to init. The
+    /// job is still dux's through what was recorded when the shell exited,
+    /// and never through the session number alone.
     #[test]
-    fn a_session_outlives_its_leader() {
-        // The shell is gone and its background job was reparented to init.
-        let table = vec![row(101, 1, 100), row(200, 1, 200)];
-        assert_eq!(pids(&members(&table, &[session(100)], &[], 9)), vec![101]);
+    fn a_session_outlives_its_leader_through_what_was_recorded_at_its_exit() {
+        let job = row(101, 1, 100);
+        let table = vec![job.clone(), row(200, 1, 200)];
+        assert_eq!(
+            pids(&members(&table, &[session(100)], &[job.identity()], 9)),
+            vec![101]
+        );
+        assert!(
+            members(&table, &[session(100)], &[], 9).is_empty(),
+            "never on the number alone"
+        );
     }
 
     #[test]
@@ -642,54 +708,46 @@ mod tests {
             ..session(100)
         };
         assert!(members(&table, &[earlier_boot], &[], 9).is_empty());
-        assert!(
-            members_with(SessionEvidence::Recorded, &table, &[earlier_boot], &[], 9).is_empty()
-        );
     }
 
     #[test]
     fn nothing_that_started_before_the_session_is_in_it() {
         let mut before = row(101, 1, 100);
         before.start_time = 900;
-        let table = vec![before, row(102, 1, 100)];
-        assert_eq!(pids(&members(&table, &[session(100)], &[], 9)), vec![102]);
+        let table = vec![row(100, 1, 100), before, row(102, 1, 100)];
+        assert_eq!(
+            pids(&members(&table, &[session(100)], &[], 9)),
+            vec![100, 102]
+        );
     }
 
-    /// A recorded session whose leader is gone is never trusted on its number:
-    /// the number may belong to a later, unrelated program by now. Only the
-    /// processes recorded by identity, and what they started, are members.
+    /// A session whose leader is gone is never trusted on its number, in this
+    /// run or at the next start: the number may belong to a later, unrelated
+    /// program by now. Only the processes recorded by identity, and what they
+    /// started after them, are members.
     #[test]
-    fn a_recorded_leaderless_session_needs_recorded_identities() {
+    fn a_leaderless_session_needs_recorded_identities() {
         let mut reused = row(500, 1, 100);
         reused.start_time = 5_000;
         let mine = row(101, 1, 100);
         let child_of_mine = row(102, 101, 100);
-        let table = vec![reused, mine.clone(), child_of_mine];
+        let mut older_than_its_parent = row(103, 101, 100);
+        older_than_its_parent.start_time = 500;
+        let table = vec![reused, mine.clone(), child_of_mine, older_than_its_parent];
         let recorded = [mine.identity()];
         assert_eq!(
-            pids(&members_with(
-                SessionEvidence::Recorded,
-                &table,
-                &[session(100)],
-                &recorded,
-                9
-            )),
-            vec![101, 102]
+            pids(&members(&table, &[session(100)], &recorded, 9)),
+            vec![101, 102],
+            "a child that started before its parent is a reused pid, not ours"
         );
         assert!(
-            members_with(SessionEvidence::Recorded, &table, &[session(100)], &[], 9).is_empty(),
+            members(&table, &[session(100)], &[], 9).is_empty(),
             "never on the number alone"
         );
         // With its own leader still there, the session counts by number.
         let table = vec![row(100, 1, 100), row(101, 100, 100)];
         assert_eq!(
-            pids(&members_with(
-                SessionEvidence::Recorded,
-                &table,
-                &[session(100)],
-                &[],
-                9
-            )),
+            pids(&members(&table, &[session(100)], &[], 9)),
             vec![100, 101]
         );
     }
@@ -713,8 +771,16 @@ mod tests {
     fn zombies_and_dux_itself_are_left_out() {
         let mut zombie = row(101, 100, 100);
         zombie.exited = true;
-        let table = vec![zombie, row(9, 100, 100), row(104, 101, 100)];
-        assert_eq!(pids(&members(&table, &[session(100)], &[], 9)), vec![104]);
+        let table = vec![
+            row(100, 1, 100),
+            zombie,
+            row(9, 100, 100),
+            row(104, 101, 100),
+        ];
+        assert_eq!(
+            pids(&members(&table, &[session(100)], &[], 9)),
+            vec![100, 104]
+        );
     }
 
     /// A scripted table: each process has a set of signals it dies to and a
@@ -753,7 +819,10 @@ mod tests {
             sent: Vec::new(),
             clock: Instant::now(),
         };
-        let outcome = purge(&mut ops, &[session(100)], &[], Duration::from_secs(1));
+        // 101 is recorded by identity, so it stays a member after its leader
+        // goes on SIGTERM.
+        let known = [row(101, 1, 100).identity()];
+        let outcome = purge(&mut ops, &[session(100)], &known, Duration::from_secs(1));
         assert_eq!(outcome, PurgeOutcome::Clean { stopped: 2 });
         assert!(ops.sent.contains(&(100, Signal::TERM)));
         assert!(ops.sent.contains(&(101, Signal::HUP)));
@@ -772,7 +841,8 @@ mod tests {
             sent: Vec::new(),
             clock: start,
         };
-        let outcome = purge(&mut ops, &[session(100)], &[], Duration::from_secs(1));
+        let known = [row(101, 1, 100).identity()];
+        let outcome = purge(&mut ops, &[session(100)], &known, Duration::from_secs(1));
         match outcome {
             PurgeOutcome::Survivors(rows) => assert_eq!(pids(&rows), vec![101]),
             other => panic!("expected survivors, got {other:?}"),

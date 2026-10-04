@@ -336,17 +336,20 @@ impl AdmittedRemoval {
         // folder is looked at once more under the claim, the same as an agent
         // delete's removal does.
         let requested_text = requested.to_string_lossy().into_owned();
-        let checked =
-            crate::engine::end_agent_processes_before_removal(&processes, &requested_text)
-                .and_then(|()| {
-                    match crate::engine::occupant_after_wait(&lease, &registry, &processes) {
-                        Some(occupant) => Err(crate::engine::occupied_after_wait_message(
-                            &requested_text,
-                            &occupant,
-                        )),
-                        None => Ok(()),
-                    }
-                });
+        let checked = crate::engine::end_agent_processes_before_removal(
+            &processes,
+            &registry,
+            &requested_text,
+        )
+        .and_then(|()| {
+            match crate::engine::occupant_after_wait(&lease, &registry, &processes) {
+                Some(occupant) => Err(crate::engine::occupied_after_wait_message(
+                    &requested_text,
+                    &occupant,
+                )),
+                None => Ok(()),
+            }
+        });
         if let Err(message) = checked {
             lease.finish(Err(message.clone()));
             return Err(message);

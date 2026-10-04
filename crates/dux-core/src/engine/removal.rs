@@ -663,43 +663,48 @@ impl Engine {
             .iter()
             .find(|project| project.id == project_id)?
             .clone();
-        let requested_text = requested.to_string_lossy();
-        let attached = self.sessions.iter().any(|session| {
-            crate::project_browser::same_directory(session.directory(), &requested_text)
-        }) || self
-            .removal_coordination
-            .ops
-            .holders(requested)
-            .contains(&WorktreeOpKind::CreateAgent);
-        if attached {
-            return Some(RemovalAdmission::Refused(RemovalOutcome::Attached));
-        }
-        // Something dux started still runs in the folder though no listed agent
-        // holds it: a deleted agent's CLI still stopping, a terminal. Refused
-        // and named, never removed under it.
-        if let Some(reason) = self.folder_busy_reason(requested) {
-            return Some(RemovalAdmission::Refused(RemovalOutcome::Busy { reason }));
-        }
-        match self.removal_coordination.ops.announce_removal(requested) {
-            RemovalClaim::Join(_) => Some(RemovalAdmission::Refused(RemovalOutcome::BeingRemoved)),
-            RemovalClaim::Lead(lease) => {
-                Some(RemovalAdmission::Admitted(Box::new(AdmittedRemoval {
-                    lease,
-                    project,
-                    paths: self.paths.clone(),
-                    sessions: self.sessions.clone(),
-                    requested: requested.to_path_buf(),
-                    delete_branch,
-                    wait: self.removal_wait(),
-                    processes: super::RemovalProcesses {
-                        sessions: self.process_sessions_in(requested),
-                        grace: self.individual_close_grace(),
-                        ..super::RemovalProcesses::none()
-                    },
-                    registry: self.process_registry.clone(),
-                })))
+        // Announced FIRST, so the occupancy question below is answered under
+        // the claim: nothing new can take the folder (or any folder inside it)
+        // from here on, so a "free" answer stays true until git runs. A refusal
+        // drops the lease, which withdraws the announcement.
+        let lease = match self.removal_coordination.ops.announce_removal(requested) {
+            RemovalClaim::Join(_) => {
+                return Some(RemovalAdmission::Refused(RemovalOutcome::BeingRemoved));
             }
+            RemovalClaim::Lead(lease) => lease,
+        };
+        // The one occupancy question every removal asks, with stopping
+        // processes in the way: the manager ends nothing.
+        if let Some(occupant) = self.folder_occupant(
+            requested,
+            None,
+            super::pending_removals::StoppingProcesses::Occupy,
+        ) {
+            drop(lease);
+            let outcome = match occupant {
+                super::pending_removals::Occupant::Agent { exact: true, .. }
+                | super::pending_removals::Occupant::BeingCreated => RemovalOutcome::Attached,
+                other => RemovalOutcome::Busy {
+                    reason: other.reason(),
+                },
+            };
+            return Some(RemovalAdmission::Refused(outcome));
         }
+        Some(RemovalAdmission::Admitted(Box::new(AdmittedRemoval {
+            lease,
+            project,
+            paths: self.paths.clone(),
+            sessions: self.sessions.clone(),
+            requested: requested.to_path_buf(),
+            delete_branch,
+            wait: self.removal_wait(),
+            processes: super::RemovalProcesses {
+                sessions: self.process_sessions_in(requested),
+                grace: self.individual_close_grace(),
+                ..super::RemovalProcesses::none()
+            },
+            registry: self.process_registry.clone(),
+        })))
     }
 }
 

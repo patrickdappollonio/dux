@@ -179,6 +179,7 @@ impl Engine {
                 }
             };
             self.process_registry.register(key, process, cwd);
+            client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
         }
         self.terminal_counter += 1;
         let terminal_id = format!("term-{}", self.terminal_counter);

@@ -860,6 +860,11 @@ pub struct PtyClient {
     /// cannot grow it without bound; the oldest entries are dropped. Empty for
     /// companion terminals (signal tracking off).
     passthrough: Arc<Mutex<VecDeque<crate::attention::CapturedSeq>>>,
+    /// Run once the child is gone, at the end of `Drop`: the engine records
+    /// what is still running in the child's session at that moment, the only
+    /// evidence it keeps that those processes are dux's once their leader has
+    /// exited. A mutex only so the client stays `Sync`.
+    leader_exit_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Maximum number of captured passthrough sequences retained before the oldest is
@@ -1223,7 +1228,15 @@ impl PtyClient {
             attention_notify,
             progress,
             passthrough,
+            leader_exit_hook: Mutex::new(None),
         })
+    }
+
+    /// Set what runs once this client's child is gone (see the field).
+    pub fn set_leader_exit_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        if let Ok(mut slot) = self.leader_exit_hook.lock() {
+            *slot = Some(hook);
+        }
     }
 
     fn reader_loop(mut reader: Box<dyn std::io::Read + Send>, state: ReaderLoopState) {
@@ -2125,6 +2138,15 @@ impl Drop for PtyClient {
                         .unwrap_or_else(|| "unknown".to_string()),
                 ));
             }
+        }
+        // The child is dead: record what it left running in its session.
+        if let Some(hook) = self
+            .leader_exit_hook
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            hook();
         }
     }
 }

@@ -318,6 +318,7 @@ async fn upload_dropped_file(
     };
 
     let filename = query.filename.clone();
+    let ops = state.engine.worktree_ops().clone();
     // Everything from here is filesystem work: pinning the directory (a /proc
     // read, or an `lsof` process on macOS) and writing the file. Off the async
     // reactor, exactly like the editor's file routes.
@@ -330,6 +331,18 @@ async fn upload_dropped_file(
         let dir = destination
             .open()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
+        // The folder the file actually lands in is held too, whatever pane the
+        // drop came from: a terminal's shell can stand inside an agent's
+        // worktree that is being removed, and the drop must neither land there
+        // nor bring the folder back.
+        let _target_hold = ops
+            .hold(dir.path(), dux_core::worktree_ops::WorktreeOpKind::Upload)
+            .map_err(|refused| {
+                std::io::Error::new(
+                    std::io::ErrorKind::ResourceBusy,
+                    refused.sentence("save the dropped file").to_string(),
+                )
+            })?;
         let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let saved = dux_core::file_drop::save_drop(&dir, &filename, &bytes, &stamp)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -365,6 +378,11 @@ async fn upload_dropped_file(
         // A refusal (an unusable name, a symlink in the way, a destination that
         // cannot be written) is a client condition and names its reason, so the
         // browser can put that reason in the toast rather than a generic one.
+        // The folder it would land in is being removed: the same 409 the
+        // worktree hold above answers with.
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ResourceBusy => {
+            (StatusCode::CONFLICT, e.to_string()).into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

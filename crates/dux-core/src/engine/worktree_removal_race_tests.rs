@@ -830,3 +830,57 @@ fn the_last_look_keeps_a_folder_something_new_runs_in() {
     };
     assert!(crate::engine::occupant_after_wait(&lease, &registry, &ended).is_none());
 }
+
+/// A terminal's shell started a background job (in a process group of its
+/// own, so closing the terminal does not take it) and exited. The job keeps the
+/// shell's session number, but with the shell gone that number proves nothing
+/// on its own; what makes the job dux's is that dux saw it still running the
+/// moment it saw the shell exit, and recorded it. A later removal of the
+/// worktree ends it through that record.
+#[test]
+fn a_job_left_by_a_shell_that_exited_is_ended_through_what_was_recorded_at_its_exit() {
+    let mut fx = fixture();
+    let pidfile = fx.pidfile.clone();
+    fx.engine.config.terminal.command = "sh".to_string();
+    fx.engine.config.terminal.args = vec![
+        "-c".to_string(),
+        format!(
+            "set -m; sleep 60 </dev/null >/dev/null 2>&1 & echo $! > '{}'",
+            pidfile.display()
+        ),
+    ];
+    let (tid, _) = fx
+        .engine
+        .create_companion_terminal("s1", 24, 80)
+        .expect("create terminal");
+    wait_for_writers(&pidfile, 1);
+    let job = writer_pids(&pidfile)[0];
+    let session = fx.engine.companion_terminals[&tid]
+        .client
+        .process_session()
+        .expect("session");
+
+    // The shell exits on its own; the prune drops its client, and dux looks.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fx.engine.companion_terminals.contains_key(&tid) {
+        let _ = fx.engine.prune_exited_ptys();
+        assert!(Instant::now() < deadline, "the shell never exited");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while fx
+        .engine
+        .process_registry
+        .survivors_of(&[session])
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "nothing was recorded at the shell's exit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(process_alive(job), "the job outlived its shell");
+
+    let result = delete_and_wait(&mut fx.engine);
+    assert_removed_cleanly(&fx, result);
+}

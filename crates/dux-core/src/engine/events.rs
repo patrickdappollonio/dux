@@ -722,7 +722,8 @@ pub(crate) fn perform_deferred_removal(
         // Nothing dux started for the agent may still be running in the
         // worktree when git starts deleting it: a writer there turns
         // `git worktree remove --force` into a half-done removal.
-        let processes_ended = end_agent_processes_before_removal(processes, &managed.worktree_path);
+        let processes_ended =
+            end_agent_processes_before_removal(processes, &registry, &managed.worktree_path);
         let leading = match claim {
             crate::worktree_ops::RemovalClaim::Lead(leading) => lease.insert(leading),
             // Another removal of this same worktree is already running (two
@@ -839,7 +840,7 @@ pub(crate) fn occupant_after_wait(
     let alive = crate::process_sessions::members(
         &crate::process_sessions::read_process_table(),
         &unknown,
-        &[],
+        &registry.survivors_of(&unknown),
         std::process::id(),
     );
     (!alive.is_empty()).then(|| {
@@ -887,10 +888,11 @@ const REMOVAL_SNAPSHOT_WAIT: std::time::Duration = std::time::Duration::from_sec
 /// message names what refused to die.
 pub(crate) fn end_agent_processes_before_removal(
     processes: &crate::engine::RemovalProcesses,
+    registry: &crate::process_sessions::AgentProcessRegistry,
     worktree_path: &str,
 ) -> Result<(), String> {
     let deadline = std::time::Instant::now() + REMOVAL_SNAPSHOT_WAIT;
-    let snapshot = loop {
+    let mut snapshot = loop {
         if let Some(found) = processes.snapshot.get() {
             break found.clone();
         }
@@ -903,8 +905,10 @@ pub(crate) fn end_agent_processes_before_removal(
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    match crate::process_sessions::purge_with(
-        processes.evidence,
+    // What dux saw still running in each session when it saw its leader exit:
+    // with the leader gone, the only evidence a member is dux's.
+    snapshot.extend(registry.survivors_of(&processes.sessions));
+    match crate::process_sessions::purge(
         &mut crate::process_sessions::SystemProcesses,
         &processes.sessions,
         &snapshot,
@@ -1307,6 +1311,7 @@ impl Engine {
         ) {
             self.process_registry
                 .register(&session_id, process, client.spawn_dir());
+            client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
         }
         self.providers.insert(tab_id.clone(), client);
         LaunchedProviderInsert::Kept
@@ -2191,11 +2196,12 @@ impl Engine {
                 sessions,
                 snapshot,
                 grace: self.individual_close_grace(),
-                evidence: crate::process_sessions::SessionEvidence::ThisRun,
             };
-            if let Err(message) =
-                end_agent_processes_before_removal(&processes, &managed.worktree_path)
-            {
+            if let Err(message) = end_agent_processes_before_removal(
+                &processes,
+                &self.process_registry,
+                &managed.worktree_path,
+            ) {
                 self.closing_sessions.remove(session_id);
                 anyhow::bail!(message);
             }
@@ -2364,7 +2370,6 @@ impl Engine {
             sessions,
             snapshot: std::sync::Arc::new(std::sync::OnceLock::new()),
             grace: self.individual_close_grace(),
-            evidence: crate::process_sessions::SessionEvidence::ThisRun,
         }
     }
 

@@ -20,6 +20,8 @@ mod spawn_worker;
 pub mod status_op;
 
 #[cfg(test)]
+mod races_review2_tests;
+#[cfg(test)]
 mod removal_review_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;

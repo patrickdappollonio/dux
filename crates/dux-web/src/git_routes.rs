@@ -243,6 +243,30 @@ pub(crate) fn hold_root_for_write(
         })
 }
 
+/// Hold every path an editor operation TOUCHES, not the editor's root: the
+/// file written, the folder made, both ends of a move, the entry deleted. A
+/// terminal's editor is rooted where the terminal started (a home folder, a
+/// repository root), which can CONTAIN an agent's worktree, so holding the root
+/// says nothing about a write into that worktree. Each target is checked
+/// through the registry's one containment test, so a target in or under a
+/// folder being removed is refused, and a removal of a folder waits for every
+/// operation touching anything inside it. The targets are the root joined with
+/// the request's relative paths, as spelled; the containment and symlink
+/// checks of the operation itself still run after this.
+pub(crate) fn hold_targets_for_write(
+    state: &AppState,
+    root: &Path,
+    targets: &[&str],
+    kind: dux_core::worktree_ops::WorktreeOpKind,
+    what: &str,
+) -> Result<Vec<dux_core::worktree_ops::WorktreeOpGuard>, RouteRejection> {
+    let mut holds = vec![hold_root_for_write(state, root, kind, what)?];
+    for target in targets {
+        holds.push(hold_root_for_write(state, &root.join(target), kind, what)?);
+    }
+    Ok(holds)
+}
+
 /// Which of the two engine predicates a resolution asks.
 #[derive(Clone, Copy)]
 enum GitAsk {

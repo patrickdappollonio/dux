@@ -25,75 +25,77 @@ use crate::worker::WorkerEvent;
 const QUIT_GIT_WAIT: Duration = Duration::from_secs(30);
 
 impl Engine {
-    /// The sentence for a removal that must not run because the folder is in
-    /// use, or `None` when it is free:
+    /// What occupies `folder` (the folder itself, or anything inside it) for
+    /// a removal, or `None` when it is free. THE occupancy question: the agent
+    /// delete (at dispatch, under its claim), a removal finished at the next
+    /// start, the project cascade (which goes through the agent delete) and the
+    /// worktree manager all ask this, so they cannot disagree about what is in
+    /// the way. In order:
     ///
-    /// - another agent works in the folder or anywhere inside it. A standalone
-    ///   agent inside a worktree makes the worktree un-removable for as long as
-    ///   it exists: dux never removes a standalone agent's folder, and never
-    ///   ends its processes to make way, so the sentence names it and says to
-    ///   delete it or move it first;
-    /// - an agent is being created in it (a create holds the path in the
-    ///   registry until its launch lands in `sessions`).
+    /// - an agent record, live or dormant, managed or standalone, other than
+    ///   `removing`, whose folder is in or under `folder`. A standalone one is
+    ///   reported first: dux never removes its folder or stops it to make way;
+    /// - an agent being created in it (a create holds its path until its launch
+    ///   lands in `sessions`);
+    /// - a live PTY dux runs in it (a terminal, a tab);
+    /// - a PTY still stopping in it, when `stopping` says those occupy. An agent
+    ///   delete ENDS the stopping processes of agents already deleted (a
+    ///   sibling that shared the worktree); the manager, which ends nothing,
+    ///   treats them as in the way.
+    pub(crate) fn folder_occupant(
+        &self,
+        folder: &std::path::Path,
+        removing: Option<&str>,
+        stopping: StoppingProcesses,
+    ) -> Option<Occupant> {
+        let inside = |dir: &std::path::Path| crate::worktree_ops::folder_contains(folder, dir);
+        let agents: Vec<&crate::model::AgentSession> = self
+            .sessions
+            .iter()
+            .filter(|s| Some(s.id.as_str()) != removing)
+            .filter(|s| inside(std::path::Path::new(s.directory())))
+            .collect();
+        if let Some(agent) = agents
+            .iter()
+            .find(|s| s.workspace.as_managed().is_none())
+            .or_else(|| agents.first())
+        {
+            return Some(Occupant::Agent {
+                id: agent.id.clone(),
+                label: agent.display_label(),
+                directory: agent.directory().to_string(),
+                standalone: agent.workspace.as_managed().is_none(),
+                exact: crate::worktree_ops::path_key(std::path::Path::new(agent.directory()))
+                    == crate::worktree_ops::path_key(folder),
+            });
+        }
+        if self
+            .removal_coordination
+            .ops
+            .holders(folder)
+            .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
+        {
+            return Some(Occupant::BeingCreated);
+        }
+        self.pty_occupants_in(folder)
+            .into_iter()
+            .find(|(_, _, terminating)| {
+                !terminating || matches!(stopping, StoppingProcesses::Occupy)
+            })
+            .map(|(_, what, _)| Occupant::Process(what))
+    }
+
+    /// The sentence for an agent delete's removal that must not run because the
+    /// folder is occupied (see [`Self::folder_occupant`]), or `None` when it is
+    /// free.
     pub(crate) fn worktree_occupied_message(
         &self,
         session_id: &str,
         worktree_path: &str,
     ) -> Option<StatusText> {
         let folder = std::path::Path::new(worktree_path);
-        let shown = crate::home_path::shorten_home(folder);
-        if let Some(standalone) = self.standalone_agent_inside(folder, session_id) {
-            return Some(standalone_inside_message(&shown, standalone));
-        }
-        let occupant = self
-            .sessions
-            .iter()
-            .find(|s| {
-                s.id != session_id
-                    && crate::worktree_ops::folder_contains(
-                        folder,
-                        std::path::Path::new(s.directory()),
-                    )
-            })
-            .map(|occupant| {
-                crate::status_text![
-                    "agent ",
-                    q(occupant.display_label()),
-                    " started working in it while this agent was shutting down"
-                ]
-            })
-            .or_else(|| {
-                self.removal_coordination
-                    .ops
-                    .holders(worktree_path)
-                    .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
-                    .then(|| {
-                        crate::status_text![
-                            "an agent is being created in it while this agent was shutting down"
-                        ]
-                    })
-            })?;
-        Some(crate::status_text![
-            "Kept the worktree at ",
-            q(shown),
-            ": ",
-            occupant,
-            ". Remove it from the worktree manager if you still want it gone."
-        ])
-    }
-
-    /// A standalone agent (other than `except`) whose folder is `folder` or
-    /// inside it.
-    pub(crate) fn standalone_agent_inside(
-        &self,
-        folder: &std::path::Path,
-        except: &str,
-    ) -> Option<&crate::model::AgentSession> {
-        self.sessions.iter().find(|s| {
-            s.id != except
-                && s.workspace.as_managed().is_none()
-                && crate::worktree_ops::folder_contains(folder, std::path::Path::new(s.directory()))
-        })
+        let occupant = self.folder_occupant(folder, Some(session_id), StoppingProcesses::Ended)?;
+        Some(occupant.kept_message(&crate::home_path::shorten_home(folder)))
     }
 
     /// Write a removal down until it has run. A failure to write is logged and
@@ -295,7 +297,6 @@ impl Engine {
             sessions,
             snapshot: std::sync::Arc::new(snapshot),
             grace: self.individual_close_grace(),
-            evidence: crate::process_sessions::SessionEvidence::Recorded,
         };
         let registry = self.process_registry.clone();
         let db_path = self.paths.sessions_db_path.clone();
@@ -328,40 +329,58 @@ impl Engine {
 
 impl Engine {
     /// Every PTY dux still has a process for in `folder` or inside it, whoever
-    /// owns it: a
-    /// live agent tab, a terminal, or one that is terminating (an agent deleted
-    /// a moment ago, worktree kept, whose CLI is still stopping). Read from the
-    /// engine's own maps, so it needs no look at the process table and is
-    /// cheap on the engine thread. Each comes with what to call it.
+    /// owns it: a live agent tab, a terminal, or one that is terminating (an
+    /// agent deleted a moment ago, worktree kept, whose CLI is still stopping).
+    /// Read from the engine's own maps, so it needs no look at the process
+    /// table and is cheap on the engine thread. Each comes with what to call it
+    /// and whether it is stopping.
     pub fn pty_occupants_in(
         &self,
         folder: &std::path::Path,
     ) -> Vec<(
         Option<crate::process_sessions::ProcessSession>,
         &'static str,
+        bool,
     )> {
-        let here = |client: &crate::pty::PtyClient| {
-            crate::worktree_ops::folder_contains(folder, client.spawn_dir())
-        };
+        self.pty_occupants()
+            .into_iter()
+            .filter(|(dir, ..)| crate::worktree_ops::folder_contains(folder, dir))
+            .map(|(_, session, what, terminating)| (session, what, terminating))
+            .collect()
+    }
+
+    /// Every PTY dux has a process for, with the folder it started in.
+    fn pty_occupants(
+        &self,
+    ) -> Vec<(
+        std::path::PathBuf,
+        Option<crate::process_sessions::ProcessSession>,
+        &'static str,
+        bool,
+    )> {
         let mut found = Vec::new();
-        for client in self.providers.values().filter(|client| here(client)) {
-            found.push((client.process_session(), "an agent running in it"));
-        }
-        for terminal in self
-            .companion_terminals
-            .values()
-            .filter(|terminal| here(&terminal.client))
-        {
-            found.push((terminal.client.process_session(), "a terminal open in it"));
-        }
-        for entry in self
-            .terminating_ptys
-            .iter()
-            .filter(|entry| here(&entry.client))
-        {
+        for client in self.providers.values() {
             found.push((
+                client.spawn_dir().to_path_buf(),
+                client.process_session(),
+                "an agent running in it",
+                false,
+            ));
+        }
+        for terminal in self.companion_terminals.values() {
+            found.push((
+                terminal.client.spawn_dir().to_path_buf(),
+                terminal.client.process_session(),
+                "a terminal open in it",
+                false,
+            ));
+        }
+        for entry in &self.terminating_ptys {
+            found.push((
+                entry.client.spawn_dir().to_path_buf(),
                 entry.client.process_session(),
                 "a process dux started there that is still stopping",
+                true,
             ));
         }
         found
@@ -378,86 +397,159 @@ impl Engine {
         sessions.extend(
             self.pty_occupants_in(folder)
                 .into_iter()
-                .filter_map(|(session, _)| session),
+                .filter_map(|(session, ..)| session),
         );
         sessions.sort_by_key(|session| session.sid);
         sessions.dedup();
         sessions
     }
 
-    /// Why the worktree manager may not remove `folder` right now, though no
-    /// agent of its own holds it, or `None`: a standalone agent lives in it or
-    /// inside it, or something dux started is still running there.
-    pub fn folder_busy_reason(&self, folder: &std::path::Path) -> Option<String> {
-        if let Some(standalone) = self.standalone_agent_inside(folder, "") {
-            return Some(standalone_inside_reason(standalone));
-        }
-        self.pty_occupants_in(folder)
-            .first()
-            .map(|(_, what)| (*what).to_string())
-    }
-
-    /// Every folder something dux started is still running in, with why: the
-    /// worktree manager's listing shows each as busy.
+    /// Every folder something occupies, with why, from the same sources as
+    /// [`Self::folder_occupant`] (as the manager sees them: stopping processes
+    /// occupy). The worktree manager's listing marks a row in use when one of
+    /// these is the row's folder or inside it; a row whose own agent holds it
+    /// is listed as held instead.
     pub fn busy_folders(&self) -> Vec<(std::path::PathBuf, String)> {
-        let mut found: Vec<(std::path::PathBuf, String)> = Vec::new();
-        let dirs = self
-            .providers
-            .values()
-            .map(|client| client.spawn_dir().to_path_buf())
-            .chain(
-                self.companion_terminals
-                    .values()
-                    .map(|terminal| terminal.client.spawn_dir().to_path_buf()),
-            )
-            .chain(
-                self.terminating_ptys
-                    .iter()
-                    .map(|entry| entry.client.spawn_dir().to_path_buf()),
-            )
-            .chain(
-                self.sessions
-                    .iter()
-                    .filter(|session| session.workspace.as_managed().is_none())
-                    .map(|session| std::path::PathBuf::from(session.directory())),
-            )
-            .collect::<Vec<_>>();
-        for dir in dirs {
-            let key = crate::worktree_ops::path_key(&dir);
-            if found.iter().any(|(known, _)| *known == key) {
-                continue;
-            }
-            if let Some(reason) = self.folder_busy_reason(&dir) {
-                found.push((key, reason));
-            }
-        }
+        let mut found: Vec<(std::path::PathBuf, String)> = self
+            .sessions
+            .iter()
+            .map(|agent| {
+                (
+                    crate::worktree_ops::path_key(std::path::Path::new(agent.directory())),
+                    Occupant::Agent {
+                        id: agent.id.clone(),
+                        label: agent.display_label(),
+                        directory: agent.directory().to_string(),
+                        standalone: agent.workspace.as_managed().is_none(),
+                        exact: false,
+                    }
+                    .reason(),
+                )
+            })
+            .collect();
+        found.extend(
+            self.pty_occupants()
+                .into_iter()
+                .map(|(dir, _, what, _)| (crate::worktree_ops::path_key(&dir), what.to_string())),
+        );
         found
     }
 }
 
-/// The manager's reason for a folder a standalone agent lives in.
-fn standalone_inside_reason(agent: &crate::model::AgentSession) -> String {
-    format!(
-        "standalone agent \"{}\" runs in {}; delete that agent, or move its folder out, first",
-        agent.display_label(),
-        crate::home_path::shorten_home(std::path::Path::new(agent.directory()))
-    )
+/// Whether processes still stopping in a folder are in the way of removing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoppingProcesses {
+    /// The removal ends them first (an agent delete).
+    Ended,
+    /// They occupy the folder (the worktree manager, which ends nothing).
+    Occupy,
 }
 
-/// The final for a removal kept because a standalone agent lives inside the
-/// worktree.
-fn standalone_inside_message(worktree: &str, agent: &crate::model::AgentSession) -> StatusText {
-    crate::status_text![
-        "Kept the worktree at ",
-        q(worktree.to_string()),
-        ": standalone agent ",
-        q(agent.display_label()),
-        " runs in ",
-        n(crate::home_path::shorten_home(std::path::Path::new(
-            agent.directory()
-        ))),
-        ", inside it, and dux never removes a standalone agent's folder or stops it to make \
-         way. Delete that agent, or move its folder out of the worktree, then remove the \
-         worktree from the worktree manager."
-    ]
+/// What [`Engine::folder_occupant`] found in the way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Occupant {
+    Agent {
+        id: String,
+        label: String,
+        directory: String,
+        standalone: bool,
+        /// The agent's folder IS the folder asked about (it holds it), rather
+        /// than one inside it.
+        exact: bool,
+    },
+    BeingCreated,
+    Process(&'static str),
+}
+
+impl Occupant {
+    /// What is in the way, as a phrase for the manager's row and refusal.
+    pub(crate) fn reason(&self) -> String {
+        let folder =
+            |directory: &str| crate::home_path::shorten_home(std::path::Path::new(directory));
+        match self {
+            Occupant::Agent {
+                label,
+                directory,
+                standalone: true,
+                ..
+            } => format!(
+                "standalone agent \"{label}\" runs in {}; delete that agent, or move its folder out, first",
+                folder(directory)
+            ),
+            Occupant::Agent {
+                label,
+                directory,
+                standalone: false,
+                ..
+            } => format!(
+                "agent \"{label}\" has its worktree at {}; delete that agent first",
+                folder(directory)
+            ),
+            Occupant::BeingCreated => "an agent is being created in it".to_string(),
+            Occupant::Process(what) => (*what).to_string(),
+        }
+    }
+
+    /// The final for an agent delete's removal kept because of this.
+    fn kept_message(&self, worktree: &str) -> StatusText {
+        match self {
+            Occupant::Agent {
+                label,
+                directory,
+                standalone: true,
+                ..
+            } => crate::status_text![
+                "Kept the worktree at ",
+                q(worktree.to_string()),
+                ": standalone agent ",
+                q(label.clone()),
+                " runs in ",
+                n(crate::home_path::shorten_home(std::path::Path::new(
+                    directory
+                ))),
+                ", inside it, and dux never removes a standalone agent's folder or stops it to \
+                 make way. Delete that agent, or move its folder out of the worktree, then \
+                 remove the worktree from the worktree manager."
+            ],
+            Occupant::Agent {
+                label,
+                directory,
+                exact: false,
+                ..
+            } => crate::status_text![
+                "Kept the worktree at ",
+                q(worktree.to_string()),
+                ": agent ",
+                q(label.clone()),
+                " has its own worktree at ",
+                n(crate::home_path::shorten_home(std::path::Path::new(
+                    directory
+                ))),
+                ", inside it, and removing this one would delete that one too. Delete that \
+                 agent first, then remove this worktree from the worktree manager."
+            ],
+            Occupant::Agent { label, .. } => crate::status_text![
+                "Kept the worktree at ",
+                q(worktree.to_string()),
+                ": agent ",
+                q(label.clone()),
+                " started working in it while this agent was shutting down. Remove it from \
+                 the worktree manager if you still want it gone."
+            ],
+            Occupant::BeingCreated => crate::status_text![
+                "Kept the worktree at ",
+                q(worktree.to_string()),
+                ": an agent is being created in it while this agent was shutting down. Remove \
+                 it from the worktree manager if you still want it gone."
+            ],
+            Occupant::Process(what) => crate::status_text![
+                "Kept the worktree at ",
+                q(worktree.to_string()),
+                format!(
+                    ": {what}. Remove it from the worktree manager once that has stopped, if \
+                     you still want it gone."
+                )
+            ],
+        }
+    }
 }

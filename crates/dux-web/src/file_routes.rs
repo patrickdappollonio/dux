@@ -726,9 +726,10 @@ async fn write_file<R: EditorRoot>(
     // map them to 400. The one exception is a freshness conflict, which is a
     // 409 carrying the file's CURRENT stamp so the browser can offer a choice
     // (overwrite, reload, cancel) without another round trip.
-    let hold = match crate::git_routes::hold_root_for_write(
+    let hold = match crate::git_routes::hold_targets_for_write(
         &state,
         root.path(),
+        &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
         "save the file",
     ) {
@@ -837,9 +838,10 @@ async fn create_file<R: EditorRoot>(
     let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
-    let hold = match crate::git_routes::hold_root_for_write(
+    let hold = match crate::git_routes::hold_targets_for_write(
         &state,
         root.path(),
+        &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
         "create the file",
     ) {
@@ -876,9 +878,10 @@ async fn create_dir<R: EditorRoot>(
     let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
-    let hold = match crate::git_routes::hold_root_for_write(
+    let hold = match crate::git_routes::hold_targets_for_write(
         &state,
         root.path(),
+        &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
         "create the folder",
     ) {
@@ -916,9 +919,10 @@ async fn rename_entry<R: EditorRoot>(
     let wt = worktree.clone();
     let from = op.from;
     let to = op.to;
-    let hold = match crate::git_routes::hold_root_for_write(
+    let hold = match crate::git_routes::hold_targets_for_write(
         &state,
         root.path(),
+        &[&from, &to],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
         "move the entry",
     ) {
@@ -955,9 +959,10 @@ async fn delete_entry<R: EditorRoot>(
     let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
-    let hold = match crate::git_routes::hold_root_for_write(
+    let hold = match crate::git_routes::hold_targets_for_write(
         &state,
         root.path(),
+        &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
         "delete the entry",
     ) {
