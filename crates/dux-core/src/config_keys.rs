@@ -25,8 +25,10 @@
 //! [`WritePolicy::Secret`] ones never do: `server.auth.password` is a VIRTUAL
 //! key, read from a hidden prompt or a pipe, checked against the configured
 //! minimums, and stored as its Argon2id hash at `server.auth.password_hash`.
-//! `get` on it prints that hash. A future write-only setting is one more row
-//! in [`VIRTUAL_KEYS`].
+//! `get` on it prints that hash. `env.<NAME>` values are secrets too
+//! ([`SecretKind::Text`]): asked for or piped in, stored as typed, and printed
+//! by `get` only on request ([`Key::is_sensitive`]). A future write-only
+//! setting is one more row in [`VIRTUAL_KEYS`].
 //!
 //! Every write goes through [`crate::config_write::mutate_config_file`], so it
 //! keeps the file's comments, never loses a concurrent writer's update, and
@@ -55,6 +57,9 @@ pub enum WritePolicy {
 pub enum SecretKind {
     /// An Argon2id hash of the input, stored at `stores_at` (a dot path).
     PasswordHash { stores_at: &'static str },
+    /// Stored as typed, but never taken from the command line and never
+    /// printed unless asked for: `env.<NAME>`, where API tokens live.
+    Text,
 }
 
 /// Write-only settings that have no field of their own in `Config`.
@@ -148,6 +153,14 @@ impl Key {
     pub fn is_table(&self) -> bool {
         self.shape == Shape::Table
     }
+
+    /// Whether reading it shows a secret: an environment value, or a table
+    /// holding them (`env`, and `projects`, whose entries carry their own
+    /// `env`). `get` prints these only when asked to. The password's virtual
+    /// key is not one: what it reads is the hash.
+    pub fn is_sensitive(&self) -> bool {
+        matches!(self.path[0].as_str(), "env" | "projects")
+    }
 }
 
 /// Why a path does not name a setting.
@@ -194,8 +207,12 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
     }
     match shape_of(&segments) {
         Some(shape) => Ok(Key {
+            policy: if segments.len() == 2 && segments[0] == "env" {
+                WritePolicy::Secret(SecretKind::Text)
+            } else {
+                WritePolicy::Plain
+            },
             path: segments,
-            policy: WritePolicy::Plain,
             shape,
         }),
         None => Err(KeyError::Unknown {
@@ -558,6 +575,15 @@ pub fn set_password(
     Ok(check.strength)
 }
 
+/// Store a [`SecretKind::Text`] value (an environment value) as given,
+/// through the coordinated mutation path. The caller never prints it.
+pub fn set_secret_text(config_path: &Path, key: &Key, value: &Password) -> Result<()> {
+    if key.policy != WritePolicy::Secret(SecretKind::Text) {
+        anyhow::bail!("{} is not a setting stored as typed text", key.dotted());
+    }
+    write_value(config_path, &key.path, Value::from(value.expose())).map(|_| ())
+}
+
 fn password_hash_path() -> Vec<String> {
     let WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) = VIRTUAL_KEYS[0].1 else {
         unreachable!("the first virtual key is the password");
@@ -587,7 +613,7 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
         WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => {
             stores_at.split('.').map(str::to_string).collect()
         }
-        WritePolicy::Plain => key.path.clone(),
+        WritePolicy::Secret(SecretKind::Text) | WritePolicy::Plain => key.path.clone(),
     };
     let doc: toml::Table = toml::from_str(raw).context("config.toml is not valid TOML")?;
     let mut node = Some(toml::Value::Table(doc));
@@ -721,6 +747,39 @@ port = 3890
             Err(KeyError::Unknown { .. })
         ));
         assert!(lookup("env.GITHUB_TOKEN").is_ok());
+    }
+
+    /// Environment values are usually tokens: never taken from the command
+    /// line, never printed by default, and so is anything that holds them.
+    #[test]
+    fn env_values_are_secrets_and_their_holders_are_sensitive() {
+        let token = lookup("env.GITHUB_TOKEN").unwrap();
+        assert_eq!(token.policy, WritePolicy::Secret(SecretKind::Text));
+        assert!(token.is_sensitive());
+        assert!(
+            parse_value(&token, "ghp_x").is_err(),
+            "never a command-line value"
+        );
+        assert!(lookup("env").unwrap().is_sensitive());
+        assert!(lookup("projects").unwrap().is_sensitive());
+        assert!(!lookup("server.port").unwrap().is_sensitive());
+        assert!(
+            !lookup("server.auth.password").unwrap().is_sensitive(),
+            "its get prints the hash, which is not the password"
+        );
+    }
+
+    #[test]
+    fn a_secret_text_value_is_stored_as_given_keeping_comments() {
+        let (_dir, path) = temp_config("[env]\n# my token\nGITHUB_TOKEN = \"old\"\n");
+        set_secret_text(
+            &path,
+            &lookup("env.GITHUB_TOKEN").unwrap(),
+            &Password::new("ghp_new".to_string()),
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, "[env]\n# my token\nGITHUB_TOKEN = \"ghp_new\"\n");
     }
 
     #[test]

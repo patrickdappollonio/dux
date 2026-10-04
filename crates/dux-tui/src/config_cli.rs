@@ -16,32 +16,48 @@ use std::io::{Read, Write};
 use anyhow::{Result, anyhow, bail};
 use dux_core::auth::{Password, PasswordPolicy, StrengthLabel};
 use dux_core::config::DuxPaths;
-use dux_core::config_keys::{self, GetValue, Key, SetPasswordError, WritePolicy};
+use dux_core::config_keys::{self, GetValue, Key, SecretKind, SetPasswordError, WritePolicy};
 use dux_core::reload_signal::SignalOutcome;
 use zeroize::Zeroizing;
+
+/// What the live strength line measures against: the configured minimums
+/// and the words that count against a password, the same ones the final
+/// check uses.
+pub(crate) type Meter<'a> = (&'a PasswordPolicy, &'a [&'a str]);
 
 /// Where a secret setting's value comes from. The real one reads the
 /// terminal and standard input; tests hand in canned answers.
 pub(crate) trait SecretSource {
     /// Everything piped to standard input, minus one trailing line break.
     fn read_stdin(&mut self) -> Result<Password>;
-    /// Ask twice on the terminal, without echo, showing the strength of the
-    /// first answer as it is typed. `None` when there is no terminal to ask on.
-    fn prompt_twice(&mut self, policy: &PasswordPolicy) -> Result<Option<(Password, Password)>>;
+    /// Ask twice on the terminal, without echo, the first time under
+    /// `label` and, with a `meter`, showing the strength of the answer as it
+    /// is typed. `None` when there is no terminal to ask on.
+    fn prompt_twice(
+        &mut self,
+        label: &str,
+        meter: Option<Meter<'_>>,
+    ) -> Result<Option<(Password, Password)>>;
 }
 
 /// `dux config get <path>`: print the value config.toml holds for the
 /// setting, or its default when the file leaves it out (said on stderr, so
 /// stdout stays just the value for scripts).
+///
+/// A secret (an `env` value, or a table that holds them) is printed only with
+/// `--show`; without it, `get` says the setting is set and prints nothing.
 pub(crate) fn run_get(
     args: &[String],
     paths: &DuxPaths,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
-    let [path] = args else {
-        bail!("usage: dux config get <setting>, for example `dux config get server.port`");
+    let show = args.iter().any(|a| a == "--show");
+    let rest: Vec<&String> = args.iter().filter(|a| *a != "--show").collect();
+    let [path] = rest.as_slice() else {
+        bail!("usage: dux config get <setting> [--show], for example `dux config get server.port`");
     };
+    let path = path.as_str();
     if path.starts_with('-') {
         bail!("unknown flag: {path}");
     }
@@ -52,6 +68,11 @@ pub(crate) fn run_get(
         Err(error) => bail!("could not read {}: {error}", paths.config_path.display()),
     };
     match config_keys::get(&raw, &key)? {
+        GetValue::Set(_) if key.is_sensitive() && !show => writeln!(
+            err,
+            "{path} is set; it can hold secrets, so its value is not printed. Add --show to \
+             print it."
+        )?,
         GetValue::Set(value) => writeln!(out, "{value}")?,
         GetValue::Default(value) => {
             writeln!(out, "{value}")?;
@@ -71,11 +92,18 @@ pub(crate) fn run_set(
 ) -> Result<()> {
     let parsed = parse_set_args(args)?;
     let key = config_keys::lookup(&parsed.path).map_err(|e| anyhow!("{e}"))?;
+    // A first `set` on a machine dux never ran on writes the whole commented
+    // template, as dux itself would, and makes the directory for it.
+    crate::config::install_canonical_renderer();
+    paths.ensure_dirs()?;
     match key.policy {
         WritePolicy::Secret(_) => set_secret(&key, parsed, paths, secrets, out)?,
         WritePolicy::Plain => {
             if parsed.stdin {
-                bail!("--stdin is only for settings dux asks for, like server.auth.password");
+                bail!(
+                    "--stdin is only for settings dux asks for, like server.auth.password and \
+                     env values"
+                );
             }
             let Some(value) = parsed.value else {
                 bail!(
@@ -162,29 +190,49 @@ fn set_secret(
             key.dotted()
         );
     }
+    let is_password = matches!(
+        key.policy,
+        WritePolicy::Secret(SecretKind::PasswordHash { .. })
+    );
     let policy = config_keys::current_password_policy(&paths.config_path);
+    let user_inputs = user_inputs();
+    let inputs: Vec<&str> = user_inputs.iter().map(String::as_str).collect();
     let password = if parsed.stdin {
         secrets.read_stdin()?
     } else {
-        let Some((first, second)) = secrets.prompt_twice(&policy)? else {
+        let label = if is_password {
+            "New web UI password".to_string()
+        } else {
+            format!("Value for {}", key.dotted())
+        };
+        let meter = is_password.then_some((&policy, &inputs[..]));
+        let Some((first, second)) = secrets.prompt_twice(&label, meter)? else {
             bail!(
                 "there is no terminal to ask for {} on; pipe it in with `--stdin`",
                 key.dotted()
             );
         };
         if first.expose() != second.expose() {
-            bail!("the two passwords did not match. Nothing was changed.");
+            bail!("the two answers did not match. Nothing was changed.");
         }
         first
     };
+    if !is_password {
+        config_keys::set_secret_text(&paths.config_path, key, &password)?;
+        writeln!(
+            out,
+            "{} updated in {} (the value is not shown).",
+            key.dotted(),
+            paths.config_path.display()
+        )?;
+        return Ok(());
+    }
     if password.expose().is_empty() {
         bail!(
             "an empty password is not a password. To remove the password, run \
              `dux config set server.auth.password_hash \"\"`. Nothing was changed."
         );
     }
-    let user_inputs = user_inputs();
-    let inputs: Vec<&str> = user_inputs.iter().map(String::as_str).collect();
     match config_keys::set_password(&paths.config_path, &password, &inputs) {
         Ok(strength) => {
             writeln!(
@@ -222,7 +270,8 @@ fn user_inputs() -> Vec<String> {
 fn reload_sentence(outcome: &SignalOutcome) -> String {
     match outcome {
         SignalOutcome::Sent { pid } => format!(
-            "Told the running dux (PID {pid}) to reload its config; the change is live now."
+            "Asked the running dux (PID {pid}) to reload its config. It says whether the \
+             reload worked in its status line, in the web UI's notifications and in dux.log."
         ),
         SignalOutcome::NotRunning => {
             "dux is not running, so the change applies the next time it starts.".to_string()
@@ -246,18 +295,37 @@ pub(crate) struct TerminalSecrets;
 
 impl SecretSource for TerminalSecrets {
     fn read_stdin(&mut self) -> Result<Password> {
+        use std::io::IsTerminal;
+        refuse_terminal_stdin(std::io::stdin().is_terminal())?;
         read_secret(std::io::stdin().lock())
     }
 
-    fn prompt_twice(&mut self, policy: &PasswordPolicy) -> Result<Option<(Password, Password)>> {
+    fn prompt_twice(
+        &mut self,
+        label: &str,
+        meter: Option<Meter<'_>>,
+    ) -> Result<Option<(Password, Password)>> {
         use std::io::IsTerminal;
         if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
             return Ok(None);
         }
-        let first = prompt_hidden("New web UI password", Some(policy))?;
+        let first = prompt_hidden(label, meter)?;
         let second = prompt_hidden("Type it again", None)?;
         Ok(Some((first, second)))
     }
+}
+
+/// `--stdin` reads a pipe. On a terminal it would read what is typed with
+/// the terminal echoing it, so it is refused in favour of the hidden prompt.
+fn refuse_terminal_stdin(stdin_is_terminal: bool) -> Result<()> {
+    if stdin_is_terminal {
+        bail!(
+            "--stdin reads from a pipe, and standard input here is the terminal, which would \
+             show what you type. Run the same command without --stdin to be asked for it \
+             without echo."
+        );
+    }
+    Ok(())
 }
 
 /// The most read from a pipe: the largest password any setting allows, plus a
@@ -329,14 +397,14 @@ impl HiddenEntry {
 
     /// The prompt line: its label and, while there is text and a policy, how
     /// strong it is and whether it meets the minimums. Never the text.
-    fn line(&self, label: &str, policy: Option<&PasswordPolicy>) -> String {
-        let Some(policy) = policy else {
+    fn line(&self, label: &str, meter: Option<Meter<'_>>) -> String {
+        let Some((policy, inputs)) = meter else {
             return format!("{label}: ");
         };
         if self.text.is_empty() {
             return format!("{label}: ");
         }
-        let check = dux_core::auth::check_minimums(&self.password(), policy, &[]);
+        let check = dux_core::auth::check_minimums(&self.password(), policy, inputs);
         let verdict = if check.passes() {
             ""
         } else if check
@@ -386,7 +454,7 @@ fn strength_meter(label: StrengthLabel) -> String {
 /// Ask for one hidden line on the terminal, redrawing the prompt (and its
 /// strength meter when `policy` is given) after every key. The text is never
 /// echoed. Ctrl-c, Ctrl-d and Esc cancel.
-fn prompt_hidden(label: &str, policy: Option<&PasswordPolicy>) -> Result<Password> {
+fn prompt_hidden(label: &str, meter: Option<Meter<'_>>) -> Result<Password> {
     use crossterm::event::{Event, KeyEventKind, read};
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
@@ -402,7 +470,7 @@ fn prompt_hidden(label: &str, policy: Option<&PasswordPolicy>) -> Result<Passwor
     enable_raw_mode()?;
     let _guard = RawGuard;
     let draw = |entry: &HiddenEntry, stderr: &mut std::io::Stderr| -> Result<()> {
-        write!(stderr, "\r\x1b[2K{}", entry.line(label, policy))?;
+        write!(stderr, "\r\x1b[2K{}", entry.line(label, meter))?;
         stderr.flush()?;
         Ok(())
     };
@@ -449,7 +517,11 @@ port = 3890
         fn read_stdin(&mut self) -> Result<Password> {
             read_secret(self.stdin.expect("stdin was not expected").as_bytes())
         }
-        fn prompt_twice(&mut self, _: &PasswordPolicy) -> Result<Option<(Password, Password)>> {
+        fn prompt_twice(
+            &mut self,
+            _: &str,
+            _: Option<Meter<'_>>,
+        ) -> Result<Option<(Password, Password)>> {
             Ok(self
                 .prompts
                 .map(|(a, b)| (Password::new(a.to_string()), Password::new(b.to_string()))))
@@ -717,14 +789,14 @@ port = 3890
         };
         let mut entry = HiddenEntry::default();
         assert_eq!(
-            entry.line("New web UI password", Some(&policy)),
+            entry.line("New web UI password", Some((&policy, &[][..]))),
             "New web UI password: "
         );
         for c in "passwordx".chars() {
             assert_eq!(entry.key(press(KeyCode::Char(c))), EntryStep::Continue);
         }
         assert_eq!(entry.key(press(KeyCode::Backspace)), EntryStep::Continue);
-        let line = entry.line("New web UI password", Some(&policy));
+        let line = entry.line("New web UI password", Some((&policy, &[][..])));
         assert!(line.contains("WEAK"), "{line}");
         assert!(line.contains("too short"), "{line}");
         assert!(
@@ -737,7 +809,7 @@ port = 3890
         for c in "correct horse battery staple".chars() {
             entry.key(press(KeyCode::Char(c)));
         }
-        let line = entry.line("New web UI password", Some(&policy));
+        let line = entry.line("New web UI password", Some((&policy, &[][..])));
         assert!(line.contains("EXCELLENT"), "{line}");
         assert!(!line.contains("too short"), "{line}");
         assert_eq!(entry.key(press(KeyCode::Enter)), EntryStep::Done);
@@ -759,7 +831,16 @@ port = 3890
 
     #[test]
     fn the_reload_sentence_names_each_outcome() {
-        assert!(reload_sentence(&SignalOutcome::Sent { pid: 42 }).contains("PID 42"));
+        let sent = reload_sentence(&SignalOutcome::Sent { pid: 42 });
+        assert!(sent.contains("PID 42"), "{sent}");
+        assert!(
+            !sent.contains("live now"),
+            "only the running dux knows: {sent}"
+        );
+        assert!(
+            sent.contains("status line") && sent.contains("dux.log"),
+            "{sent}"
+        );
         assert!(reload_sentence(&SignalOutcome::NotRunning).contains("next time it starts"));
         let failed = reload_sentence(&SignalOutcome::Failed {
             pid: Some(7),
@@ -783,5 +864,90 @@ port = 3890
             )
             .is_ok()
         );
+    }
+    /// The live meter scores with the same words the final check uses, so
+    /// it cannot promise a strength the set then refuses.
+    #[test]
+    fn the_live_meter_counts_the_same_user_inputs_as_the_check() {
+        let policy = PasswordPolicy {
+            minimum_length: 1,
+            minimum_score: 0,
+            maximum_bytes: 1024,
+        };
+        let mut entry = HiddenEntry::default();
+        for c in "duxdux2026dux".chars() {
+            entry.key(press(KeyCode::Char(c)));
+        }
+        let inputs = ["dux", "someone"];
+        let expected = dux_core::auth::check_minimums(&entry.password(), &policy, &inputs)
+            .strength
+            .label;
+        let line = entry.line("p", Some((&policy, &inputs[..])));
+        assert!(line.contains(&expected.as_str().to_uppercase()), "{line}");
+    }
+
+    #[test]
+    fn stdin_from_a_terminal_is_refused_with_the_prompt_as_the_way() {
+        let err = refuse_terminal_stdin(true).expect_err("a terminal would echo");
+        assert!(err.to_string().contains("without --stdin"), "{err}");
+        assert!(refuse_terminal_stdin(false).is_ok());
+    }
+
+    #[test]
+    fn an_env_value_is_never_a_command_line_argument_and_never_printed_by_set() {
+        let (_tmp, paths) = setup(Some(COMMENTED));
+        let err = set(
+            &paths,
+            &["env.GITHUB_TOKEN", "ghp_secret"],
+            &mut no_secrets(),
+        )
+        .expect_err("refused");
+        assert!(!err.to_string().contains("ghp_secret"), "{err}");
+        let mut piped = Canned {
+            stdin: Some("ghp_secret\n"),
+            prompts: None,
+        };
+        let said = set(&paths, &["env.GITHUB_TOKEN", "--stdin"], &mut piped).expect("set");
+        assert!(said.contains("env.GITHUB_TOKEN updated"), "{said}");
+        assert!(!said.contains("ghp_secret"), "{said}");
+        assert!(
+            std::fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("GITHUB_TOKEN = \"ghp_secret\"")
+        );
+    }
+
+    #[test]
+    fn get_prints_a_secret_only_with_show() {
+        let (_tmp, paths) = setup(Some("[env]\nGITHUB_TOKEN = \"ghp_secret\"\n"));
+        let (out, err) = get(&paths, "env.GITHUB_TOKEN");
+        assert_eq!(out, "", "nothing on stdout");
+        assert!(err.contains("--show"), "{err}");
+        let (out, _) = get(&paths, "env");
+        assert!(!out.contains("ghp_secret"), "{out}");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run_get(
+            &args(&["env.GITHUB_TOKEN", "--show"]),
+            &paths,
+            &mut out,
+            &mut err,
+        )
+        .expect("get --show");
+        assert_eq!(String::from_utf8(out).unwrap(), "ghp_secret\n");
+    }
+
+    /// `dux config set` on a machine where dux never ran writes the whole
+    /// documented config, directory included, not a bare one-key file.
+    #[test]
+    fn set_with_no_config_writes_the_documented_file() {
+        let (tmp, mut paths) = setup(None);
+        let root = tmp.path().join("not-yet");
+        paths.config_path = root.join("config.toml");
+        paths.lock_path = root.join("dux.lock");
+        paths.root = root;
+        set(&paths, &["server.port", "4000"], &mut no_secrets()).expect("set");
+        let written = std::fs::read_to_string(&paths.config_path).expect("created");
+        assert!(written.contains("# dux configuration"), "{written}");
+        assert!(written.contains("port = 4000"), "{written}");
     }
 }
