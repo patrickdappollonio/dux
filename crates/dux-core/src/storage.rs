@@ -2223,6 +2223,17 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    /// Test builds only: make every later session delete fail, as a database
+    /// that refuses a write would.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_session_deletes_for_tests(&self) {
+        // The table a delete names is moved out of its way, so the delete
+        // fails whether or not the session has a row.
+        self.conn
+            .execute_batch("alter table agent_sessions rename to agent_sessions_refused_by_a_test")
+            .expect("move the sessions table aside");
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<()> {
         // Delete the session and all of its dependent rows atomically. These
         // tables declare ON DELETE CASCADE FKs to `agent_sessions`, but the

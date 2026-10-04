@@ -7638,6 +7638,34 @@ pub(crate) fn runtime_project_to_config(
 mod tests {
     use super::*;
 
+    /// A changed-files read whose worker never starts still gets its keyed
+    /// busy a final: the engine answers for the worker.
+    #[test]
+    fn a_changed_files_read_that_never_starts_gives_its_busy_a_final() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let worktree = tempfile::tempdir().expect("worktree");
+        let path = worktree.path().to_path_buf();
+        *app.engine.watched_worktree.lock().unwrap() = Some(path.clone());
+        let key = "refresh-changes:test".to_string();
+        dux_core::engine::fail_next_worker_spawn();
+        app.begin_changed_files_refresh(
+            key.clone(),
+            "agent".to_string(),
+            path,
+            ChangedFilesReadVoice::Spoken,
+        );
+        app.drain_events();
+        let open: Vec<_> = app
+            .status
+            .snapshot()
+            .into_iter()
+            .filter(|status| status.key.as_deref() == Some(key.as_str()) && status.tone == "busy")
+            .collect();
+        assert!(open.is_empty(), "the read's busy got a final: {open:?}");
+        assert!(app.pending_changed_files_refresh.is_none());
+        assert!(!app.engine.status_op_is_live(&key));
+    }
+
     /// Every command the palette lists must reach an arm of `execute_command`,
     /// never the catch-all that reports it as unknown. Each name runs on a
     /// fresh app, so one command's state cannot hide another's miss.

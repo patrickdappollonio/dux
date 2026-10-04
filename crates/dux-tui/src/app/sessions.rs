@@ -7453,6 +7453,125 @@ mod tests {
         );
     }
 
+    /// Every keyed busy still open for `key`.
+    fn open_busy(app: &App, key: &str) -> Vec<dux_core::statusline::KeyedWireStatus> {
+        app.status
+            .snapshot()
+            .into_iter()
+            .filter(|status| status.key.as_deref() == Some(key) && status.tone == "busy")
+            .collect()
+    }
+
+    /// A delete whose worktree went but whose session cleanup then failed
+    /// still retires its keyed busy and its live key; the failure is the line
+    /// that stays.
+    #[test]
+    fn a_delete_whose_cleanup_fails_retires_its_busy() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+        let op = app.build_delete_status_op("s1", "Removing worktree\u{2026}".to_string());
+        let key = op.pending_status().key.expect("a keyed op");
+        let pending = app.engine.begin_status_op(&op);
+        app.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+        app.pending_delete_ops.insert("s1".to_string(), op);
+        app.engine.pending_deletions.insert("s1".to_string());
+        // The cleanup's database write is refused.
+        app.engine.session_store.fail_session_deletes_for_tests();
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::WorktreeRemoveCompleted {
+                session_id: "s1".to_string(),
+                result: Ok(dux_core::engine::RemovedBranches::Deleted(
+                    dux_core::git::RemoveResult::default(),
+                )),
+            })
+            .expect("channel send");
+        app.drain_events();
+        assert!(
+            open_busy(&app, &key).is_empty(),
+            "the delete's busy is retired"
+        );
+        assert!(!app.engine.status_op_is_live(&key), "its key is retired");
+        assert!(
+            app.status.text().contains("session cleanup failed"),
+            "{}",
+            app.status.text()
+        );
+    }
+
+    /// A diff whose worker stops without answering gives its busy a final.
+    #[test]
+    fn a_diff_whose_worker_stops_gives_its_busy_a_final() {
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        app.pending_diff = Some(PendingDiff {
+            key: crate::diff::DiffRequestKey {
+                worktree_path: "/tmp/wt".to_string(),
+                rel_path: "a.rs".to_string(),
+                show_line_numbers: false,
+                tab_width: 4,
+                seq: 1,
+            },
+            rx,
+            label: "a.rs".to_string(),
+            scroll: 0,
+            announce_at: Some(Instant::now()),
+        });
+        app.announce_slow_diff(Instant::now());
+        assert_eq!(
+            open_busy(&app, DIFF_STATUS_KEY).len(),
+            1,
+            "the busy is showing"
+        );
+        app.drain_pending_diff();
+        assert!(
+            open_busy(&app, DIFF_STATUS_KEY).is_empty(),
+            "the busy got a final"
+        );
+        assert!(app.pending_diff.is_none());
+        assert!(!app.engine.status_op_is_live(DIFF_STATUS_KEY));
+    }
+
+    /// A branch rename whose worker never starts retires the key it
+    /// registered, and leaves no busy showing.
+    #[test]
+    fn a_branch_rename_that_never_starts_retires_its_key() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+        let live_before = app.engine.live_status_keys.len();
+        dux_core::engine::fail_next_worker_spawn();
+        app.apply_rename_session("s1", "renamed-agent".to_string(), true);
+        assert_eq!(
+            app.engine.live_status_keys.len(),
+            live_before,
+            "the rename's key was retired"
+        );
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .all(|status| status.tone != "busy"),
+            "no busy is left showing"
+        );
+    }
+
     /// If the session was removed by another code path while the async
     /// delete worker was running, the worker's completion event must still
     /// overwrite the Busy status line when the message matches.

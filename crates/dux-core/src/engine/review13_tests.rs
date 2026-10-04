@@ -204,3 +204,46 @@ fn a_link_claim_covers_its_lexical_path_only() {
     assert!(ops.hold(&real, WorktreeOpKind::Pull).is_ok());
     assert!(ops.hold(&link, WorktreeOpKind::Pull).is_err());
 }
+
+/// A removal resumed at a start whose worker never starts gives the busy it
+/// already sent a final, and its key is retired.
+#[test]
+fn a_resumed_removal_that_never_starts_gives_its_busy_a_final() {
+    let (mut engine, tmp) = test_engine();
+    let repo = tmp.path().join("repo");
+    let worktree = free_worktree(&mut engine, tmp.path());
+    let mut session = sample_session("s-gone", "p1", "free");
+    if let Some(managed) = session.workspace.as_managed_mut() {
+        managed.worktree_path = worktree.to_string_lossy().into_owned();
+    }
+    engine
+        .session_store
+        .insert_pending_worktree_removal(&crate::storage::PendingWorktreeRemoval {
+            session_id: session.id.clone(),
+            label: "gone".to_string(),
+            project_path: repo.to_string_lossy().into_owned(),
+            managed: session.workspace.as_managed().unwrap().clone(),
+            delete_branch: None,
+            process_sessions: Vec::new(),
+            process_snapshot: Vec::new(),
+            process_registry: Default::default(),
+        })
+        .unwrap();
+    crate::engine::fail_next_worker_spawn();
+    engine.resume_pending_worktree_removals();
+    let mut busy_key = None;
+    let mut final_for_it = false;
+    while let Ok(event) = engine.worker_rx.recv_timeout(Duration::from_millis(500)) {
+        if let crate::worker::WorkerEvent::PollerStatus(status) = event {
+            match status.tone {
+                crate::statusline::StatusTone::Busy => busy_key = status.key.clone(),
+                _ if status.key.is_some() && status.key == busy_key => final_for_it = true,
+                _ => {}
+            }
+        }
+    }
+    let key = busy_key.expect("the resumed removal sent its busy");
+    assert!(final_for_it, "the busy got a final");
+    assert!(!engine.status_op_is_live(&key), "its key is retired");
+    assert!(worktree.exists(), "nothing ran");
+}
