@@ -46,6 +46,7 @@ pub mod model;
 pub mod palette;
 pub mod poller_status;
 pub mod pr_reference;
+pub mod process_sessions;
 pub mod project_browser;
 pub mod project_order;
 pub mod project_prose;

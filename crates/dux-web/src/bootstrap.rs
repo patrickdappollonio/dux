@@ -152,6 +152,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
             .map(|t| (TabId::new(t.id.clone()), t))
             .collect(),
         terminating_ptys: Vec::new(),
+        process_registry: Default::default(),
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
         gh_status: GhStatus::Unknown,

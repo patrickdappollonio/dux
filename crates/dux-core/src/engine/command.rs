@@ -559,6 +559,12 @@ impl Engine {
                         },
                     )));
                 }
+                // The same provider of the same agent still shutting down (a
+                // tab closed or detached a moment ago, a restart): the new CLI
+                // waits for it rather than sharing the worktree and the
+                // conversation with it. Read from what each terminating entry
+                // recorded when it started, never from the tab table.
+                let predecessors = self.terminating_predecessors(&session_id, &request.provider);
                 // Clone for the panic event closure before the job closure
                 // consumes `request`, so panic recovery can take the same path
                 // as `process_agent_launch_failed`.
@@ -577,6 +583,15 @@ impl Engine {
                         })),
                     },
                     move |tx| {
+                        if let Err(message) = wait_for_predecessors(&predecessors, &request, &tx) {
+                            let _ = tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
+                                AgentLaunchFailedData {
+                                    request: *request,
+                                    message,
+                                },
+                            )));
+                            return;
+                        }
                         crate::agent_job::run_agent_launch_job(*request, tx);
                     },
                 );
@@ -1522,6 +1537,80 @@ fn run_project_refresh(
     Ok(PullOutcome::Pulled {
         current_branch: crate::git::current_branch(repo_path).ok(),
     })
+}
+
+/// A terminating PTY a launch has to outlive: the gone signal and the moment
+/// the reaper force-kills it.
+pub(crate) struct LaunchPredecessor {
+    gone: super::PtyGone,
+    deadline: std::time::Instant,
+}
+
+impl Engine {
+    /// The terminating PTYs of `session_id` that run `provider`, which a new
+    /// launch of that provider must wait for.
+    pub(crate) fn terminating_predecessors(
+        &self,
+        session_id: &str,
+        provider: &crate::model::ProviderKind,
+    ) -> Vec<LaunchPredecessor> {
+        self.terminating_ptys
+            .iter()
+            .filter(|entry| entry.kind == super::PrunedPtyKind::Agent)
+            .filter(|entry| {
+                entry.owner.as_ref().is_some_and(|owner| {
+                    owner.session_id == session_id && owner.provider.as_ref() == Some(provider)
+                })
+            })
+            .map(|entry| LaunchPredecessor {
+                gone: entry.gone.signal(),
+                deadline: entry.deadline,
+            })
+            .collect()
+    }
+}
+
+/// Hold a launch until every previous run of its provider in the same agent
+/// has gone, saying so while it waits.
+///
+/// Bounded: each predecessor is force-killed at its own deadline (the close
+/// grace) by the reaper, and the wait allows that kill
+/// [`crate::process_sessions::KILL_SETTLE`] more to land. A predecessor still
+/// there after that refuses this launch, because two CLIs of one provider in
+/// one worktree is the thing being prevented.
+fn wait_for_predecessors(
+    predecessors: &[LaunchPredecessor],
+    request: &crate::worker::AgentLaunchRequest,
+    tx: &std::sync::mpsc::Sender<WorkerEvent>,
+) -> Result<(), String> {
+    if predecessors.is_empty() {
+        return Ok(());
+    }
+    let provider = request.provider.as_str();
+    let label = request.session.display_label();
+    let _ = tx.send(WorkerEvent::PollerStatus(StatusUpdate::info(
+        crate::status_text![
+            "Waiting for the previous ",
+            q(provider),
+            " of agent ",
+            q(label.clone()),
+            " to finish before starting it again\u{2026}"
+        ],
+    )));
+    for predecessor in predecessors {
+        let bound = predecessor
+            .deadline
+            .saturating_duration_since(std::time::Instant::now())
+            + crate::process_sessions::KILL_SETTLE;
+        if !predecessor.gone.wait(bound) {
+            return Err(format!(
+                "the previous {provider} of agent \"{label}\" was still shutting down after \
+                 dux force-closed it, so this one was not started rather than run two of them \
+                 in one worktree. Try again in a moment."
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

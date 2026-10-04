@@ -155,6 +155,42 @@ pub fn refused_resume_excerpt(
     Some(verdict_excerpt.to_vec())
 }
 
+/// Say in the log when a closed PTY's session still has members once its
+/// leader is gone. A plain close or detach keeps ordinary terminal behaviour:
+/// a `nohup`ed or disowned job is allowed to outlive its terminal, as it would
+/// a closed terminal window. It is still a process the user may not know is
+/// running, so its name goes in the log. Off the calling thread, because the
+/// look is a walk over the process table.
+fn log_session_survivors_after_close(
+    session: crate::process_sessions::ProcessSession,
+    label: String,
+) {
+    let thread_label = label.clone();
+    let spawned = std::thread::Builder::new()
+        .name("pty-close-survivors".to_string())
+        .spawn(move || {
+            let label = thread_label;
+            let survivors = crate::process_sessions::members(
+                &crate::process_sessions::read_process_table(),
+                &[session],
+                &[],
+                std::process::id(),
+            );
+            if !survivors.is_empty() {
+                crate::logger::info(&format!(
+                    "closed \"{label}\", but what it started is still running in its session \
+                     (as it would after closing a terminal window): {}",
+                    crate::process_sessions::describe(&survivors)
+                ));
+            }
+        });
+    if let Err(err) = spawned {
+        crate::logger::debug(&format!(
+            "could not look for processes left behind by \"{label}\": {err}"
+        ));
+    }
+}
+
 /// Which kind of PTY was pruned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrunedPtyKind {
@@ -190,6 +226,133 @@ pub struct DeferredWorktreeRemoval {
     /// The Busy status message to show while the removal runs (set when the
     /// worker is finally spawned, after the PTY is reaped).
     pub busy_message: crate::status_text::StatusText,
+    /// Everything dux started for the agent, to be ended before git removes a
+    /// single file. See [`RemovalProcesses`].
+    pub processes: RemovalProcesses,
+}
+
+/// The processes a worktree removal must see gone before it starts: every
+/// session dux started for the agent (each tab's PTY, each companion
+/// terminal's, any startup command's), plus whatever was running below them
+/// when the delete began.
+///
+/// The PTY barrier waits for each LEADER; that is not the agent's exit. A
+/// dev server a CLI or a shell left running keeps writing into the worktree
+/// after its parent is gone, and `git worktree remove --force` then fails with
+/// "Directory not empty" halfway through, with the registration already gone
+/// and a folder left behind. The removal worker ends all of it first, off the
+/// UI thread, bounded by `grace` plus [`crate::process_sessions::KILL_SETTLE`].
+#[derive(Clone)]
+pub struct RemovalProcesses {
+    pub sessions: Vec<crate::process_sessions::ProcessSession>,
+    /// The members found BEFORE anything was asked to exit, filled in by the
+    /// thread that then sends the polite signals. A member that called
+    /// `setsid` is tied to the agent only by its parent, and that link is cut
+    /// once the parent exits, so it is found here or not at all.
+    pub snapshot:
+        std::sync::Arc<std::sync::OnceLock<Vec<crate::process_sessions::ProcessIdentity>>>,
+    /// The configured close grace: how long the processes are given to go
+    /// after SIGTERM before SIGKILL.
+    pub grace: Duration,
+}
+
+impl RemovalProcesses {
+    /// No sessions to end and an already-complete snapshot: the removal of a
+    /// worktree nothing of dux's ever ran in.
+    pub fn none() -> Self {
+        let snapshot = std::sync::OnceLock::new();
+        let _ = snapshot.set(Vec::new());
+        Self {
+            sessions: Vec::new(),
+            snapshot: std::sync::Arc::new(snapshot),
+            grace: Duration::ZERO,
+        }
+    }
+}
+
+impl Default for RemovalProcesses {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl std::fmt::Debug for RemovalProcesses {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemovalProcesses")
+            .field("sessions", &self.sessions)
+            .field("snapshot", &self.snapshot.get())
+            .field("grace", &self.grace)
+            .finish()
+    }
+}
+
+/// Compared on what was asked for (the sessions and the grace), never on the
+/// snapshot slot, which is shared state another thread fills in.
+impl PartialEq for RemovalProcesses {
+    fn eq(&self, other: &Self) -> bool {
+        self.sessions == other.sessions && self.grace == other.grace
+    }
+}
+
+impl Eq for RemovalProcesses {}
+
+/// Who a terminating PTY belonged to, recorded the moment it starts
+/// terminating. Every later question about it (does a delete wait for it, does
+/// a relaunch of the same provider) reads this, never the live tab table: a
+/// closed tab's row and a promoted slot pointer are gone or moved by the time
+/// the question is asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminatingOwner {
+    pub session_id: String,
+    /// The provider an agent tab was running; `None` for a companion terminal.
+    pub provider: Option<crate::model::ProviderKind>,
+}
+
+/// Fires once a terminating PTY has been torn down completely: reaped, or
+/// force-killed, and its client dropped. A launch of the same provider in the
+/// same agent waits on it, so two CLIs never share one worktree and one
+/// conversation.
+#[derive(Clone, Default)]
+pub struct PtyGone(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl PtyGone {
+    /// Wait up to `timeout` for the PTY to be gone. `true` when it is.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let (lock, cvar) = &*self.0;
+        let guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (guard, _) = cvar
+            .wait_timeout_while(guard, timeout, |gone| !*gone)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard
+    }
+
+    fn fire(&self) {
+        let (lock, cvar) = &*self.0;
+        *lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        cvar.notify_all();
+    }
+}
+
+/// The firing half of [`PtyGone`], held as a [`TerminatingPty`]'s LAST field so
+/// it drops after the client: the signal means the client's own teardown (its
+/// SIGKILL and reap) has finished, not merely begun.
+#[derive(Default)]
+pub struct PtyGoneNotice(PtyGone);
+
+impl PtyGoneNotice {
+    pub fn signal(&self) -> PtyGone {
+        self.0.clone()
+    }
+}
+
+impl Drop for PtyGoneNotice {
+    fn drop(&mut self) {
+        self.0.fire();
+    }
 }
 
 /// A PTY that was SIGTERMed by an individual delete/close and is being given a
@@ -201,12 +364,15 @@ pub struct TerminatingPty {
     pub client: PtyClient,
     pub deadline: Instant,
     pub kind: PrunedPtyKind,
-    /// Session id (agent) or terminal id (companion terminal).
+    /// Tab id (agent) or terminal id (companion terminal).
     pub id: String,
     pub label: String,
-    /// Deferred worktree removal to dispatch once this PTY is reaped (agent
-    /// deletes with `delete_worktree` only).
-    pub worktree_removal: Option<DeferredWorktreeRemoval>,
+    /// The agent this PTY belonged to, captured when it started terminating.
+    /// `None` for a project or standalone terminal.
+    pub owner: Option<TerminatingOwner>,
+    /// Declared LAST so it fires after `client` has dropped. See
+    /// [`PtyGoneNotice`].
+    pub gone: PtyGoneNotice,
 }
 
 /// The result of a user-initiated `Engine::kill_tab_runtime` teardown, so a
@@ -706,14 +872,43 @@ fn pty_has_exited(client: &mut PtyClient) -> bool {
     client.is_exited() || client.try_wait().is_some()
 }
 
+/// SIGKILL every child still running and wait, bounded, for each kill to
+/// land, so a shutdown that reports its stragglers force-closed has actually
+/// closed them. Returns how many had exited on their own.
+///
+/// The wait matters because a SIGKILL is delivered, not performed: the child
+/// dies when the kernel next schedules it, and nothing had reaped it by the
+/// time a forced quit returned and reported the children dead. Bounded by
+/// [`crate::process_sessions::KILL_SETTLE`], past which a child stuck in
+/// uninterruptible I/O is logged rather than waited out.
 fn force_survivors_and_count_exited<'a>(clients: impl Iterator<Item = &'a mut PtyClient>) -> usize {
     let mut exited = 0;
+    let mut forced: Vec<&'a mut PtyClient> = Vec::new();
     for client in clients {
         if pty_has_exited(client) {
             exited += 1;
         } else {
             client.force_terminate();
+            forced.push(client);
         }
+    }
+    let deadline = Instant::now() + crate::process_sessions::KILL_SETTLE;
+    loop {
+        forced.retain_mut(|client| client.try_wait().is_none());
+        if forced.is_empty() || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for client in &forced {
+        crate::logger::warn(&format!(
+            "a child that was sent SIGKILL at shutdown (pid {}) had still not exited after {}s",
+            client
+                .child_process_id()
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            crate::process_sessions::KILL_SETTLE.as_secs()
+        ));
     }
     exited
 }
@@ -1125,7 +1320,7 @@ impl Engine {
     /// background reaper force-kills it, from the engine-wide
     /// `shutdown_timeout_seconds`, since the shared handlers cannot tell one
     /// surface from another. It bounds force-kill latency and blocks no UI.
-    fn individual_close_grace(&self) -> std::time::Duration {
+    pub(crate) fn individual_close_grace(&self) -> std::time::Duration {
         crate::config::shutdown_grace(self.config.shutdown_timeout_seconds)
     }
 
@@ -1182,10 +1377,31 @@ impl Engine {
     /// would hard-SIGKILL via `PtyClient::drop`). Returns the terminal's label,
     /// or `None` if it was not found.
     pub fn begin_close_companion_terminal(&mut self, terminal_id: &str) -> Option<String> {
+        let (label, targets) = self.move_companion_terminal_to_terminating(terminal_id)?;
+        targets.terminate();
+        Some(label)
+    }
+
+    /// Move a companion terminal into the terminating set WITHOUT signalling
+    /// it, handing back the groups to signal. The worktree-removal delete uses
+    /// this so it can look at what runs in the terminal's session before
+    /// anything is asked to exit.
+    pub(crate) fn move_companion_terminal_to_terminating(
+        &mut self,
+        terminal_id: &str,
+    ) -> Option<(String, crate::pty::SignalTargets)> {
         let term = self.companion_terminals.remove(terminal_id)?;
         self.clear_terminal_runtime(terminal_id);
         let label = term.label.clone();
-        term.client.terminate();
+        let owner = match term.owner.as_ref() {
+            crate::model::TerminalOwnerRef::Session(session_id) => Some(TerminatingOwner {
+                session_id: session_id.to_string(),
+                provider: None,
+            }),
+            crate::model::TerminalOwnerRef::Project(_)
+            | crate::model::TerminalOwnerRef::Standalone => None,
+        };
+        let targets = term.client.signal_targets();
         let deadline = Instant::now() + self.individual_close_grace();
         self.terminating_ptys.push(TerminatingPty {
             client: term.client,
@@ -1193,33 +1409,44 @@ impl Engine {
             kind: PrunedPtyKind::Terminal,
             id: terminal_id.to_string(),
             label: label.clone(),
-            worktree_removal: None,
+            owner,
+            gone: PtyGoneNotice::default(),
         });
-        Some(label)
+        Some((label, targets))
     }
 
     /// SIGTERM an agent provider and move it into the terminating set for a
-    /// background reap. `label` is kept for the reap log; `worktree_removal` is
-    /// dispatched once the PTY is reaped (agent delete with `delete_worktree`).
-    ///
-    /// Returns the `worktree_removal` back unhandled when the session has no
-    /// live provider: there is no PTY to wait for, so the caller must dispatch
-    /// the removal immediately rather than let it be lost. Returns `None` when
-    /// it was captured on a terminating entry, or there was nothing to remove.
+    /// background reap. `label` is kept for the reap log; `owner` records whose
+    /// it was, for every later question about it. Returns `false` when the tab
+    /// had no live provider.
     ///
     /// Takes a tab id, never a session id: `providers` is tab-keyed and
     /// `close_tab` passes an extra tab's id through here.
-    #[must_use]
     pub fn begin_close_provider(
         &mut self,
         tab_id: &TabIdRef,
         label: String,
-        worktree_removal: Option<DeferredWorktreeRemoval>,
-    ) -> Option<DeferredWorktreeRemoval> {
-        let Some(client) = self.providers.remove(tab_id) else {
-            return worktree_removal;
-        };
-        client.terminate();
+        owner: Option<TerminatingOwner>,
+    ) -> bool {
+        match self.move_provider_to_terminating(tab_id, label, owner) {
+            Some(targets) => {
+                targets.terminate();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`Self::begin_close_provider`] without the signal, which is handed back
+    /// instead. See [`Self::move_companion_terminal_to_terminating`].
+    pub(crate) fn move_provider_to_terminating(
+        &mut self,
+        tab_id: &TabIdRef,
+        label: String,
+        owner: Option<TerminatingOwner>,
+    ) -> Option<crate::pty::SignalTargets> {
+        let client = self.providers.remove(tab_id)?;
+        let targets = client.signal_targets();
         let deadline = Instant::now() + self.individual_close_grace();
         self.terminating_ptys.push(TerminatingPty {
             client,
@@ -1227,9 +1454,26 @@ impl Engine {
             kind: PrunedPtyKind::Agent,
             id: tab_id.as_str().to_string(),
             label,
-            worktree_removal,
+            owner,
+            gone: PtyGoneNotice::default(),
         });
-        None
+        Some(targets)
+    }
+
+    /// The owner record for one of `session_id`'s tabs, read NOW, while the
+    /// tab's row and the session's slot pointer still say which provider it
+    /// runs.
+    pub(crate) fn terminating_owner_for_tab(
+        &self,
+        session_id: &str,
+        tab_id: &TabIdRef,
+    ) -> TerminatingOwner {
+        TerminatingOwner {
+            session_id: session_id.to_string(),
+            provider: self
+                .session_by_id(session_id)
+                .map(|session| self.tab_running_provider(session, tab_id)),
+        }
     }
 
     /// The tabs of one agent that have a live provider process RIGHT NOW.
@@ -1319,8 +1563,8 @@ impl Engine {
             .map(|id| id.as_str().to_string())
             .collect::<std::collections::HashSet<String>>();
         for id in &live_tabs {
-            // No worktree removal is deferred on a detach, so the return is None.
-            let _ = self.begin_close_provider(id, label.clone(), None);
+            let owner = self.terminating_owner_for_tab(session_id, id.as_ref_id());
+            self.begin_close_provider(id, label.clone(), Some(owner));
             // `begin_close_provider` only drops `providers`; the rest of the
             // tab-keyed runtime (attention, progress, the in-flight launch key)
             // goes through the shared teardown, which finds `providers` already
@@ -1501,12 +1745,12 @@ impl Engine {
                 remaining.push(entry);
                 continue;
             }
-            // Reaped: hand back any single-PTY deferred worktree removal, then
-            // drop the client (its `Drop` SIGKILL is a benign no-op now, already
-            // gone). Group removals are resolved below once every member reaps.
+            // Reaped: drop the client (its `Drop` SIGKILL is a benign no-op
+            // now, already gone), which fires the entry's gone signal. Removals
+            // are resolved below once every PTY they wait for has reaped.
             reaped_ids.push(entry.id.clone());
-            if let Some(req) = entry.worktree_removal.take() {
-                dispatch.push(req);
+            if let Some(session) = entry.client.process_session() {
+                log_session_survivors_after_close(session, entry.label.clone());
             }
         }
         self.terminating_ptys = remaining;
@@ -4925,6 +5169,32 @@ mod tests {
         );
     }
 
+    /// A forced shutdown says its stragglers were killed, so they are dead
+    /// and reaped by the time it returns, not merely sent a SIGKILL that the
+    /// kernel has yet to act on. Read with no polling on purpose: the reap is
+    /// recorded only by a wait, so before the fix nothing had waited and this
+    /// failed every time, not just on a slow machine.
+    #[test]
+    fn a_forced_shutdown_returns_only_once_the_kill_has_landed() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.providers.insert(
+            TabId::new("s1-slot"),
+            spawn_sigterm_ignorer(worktree.path()),
+        );
+        wait_until_ready(&engine, "s1-slot");
+        let abort = std::sync::atomic::AtomicBool::new(true);
+
+        let report = engine.shutdown_ptys_interruptible(Duration::from_secs(60), Some(&abort));
+
+        assert!(report.timed_out, "the straggler was forced");
+        let client = engine.providers.get(TabIdRef::new("s1-slot")).unwrap();
+        assert!(
+            client.reaped_at().is_some() && !client.is_live(),
+            "the child the shutdown reports killed is reaped when it returns"
+        );
+    }
+
     #[test]
     fn shutdown_ptys_force_kills_stragglers_and_reports_timeout() {
         let (mut engine, _tmp) = test_engine();
@@ -5435,7 +5705,10 @@ mod tests {
         );
         assert_eq!(engine.terminating_ptys.len(), 1);
         assert_eq!(engine.terminating_ptys[0].kind, PrunedPtyKind::Terminal);
-        assert!(engine.terminating_ptys[0].worktree_removal.is_none());
+        assert!(
+            engine.terminating_ptys[0].owner.is_some(),
+            "the owning agent is recorded"
+        );
 
         // `cat` exits on SIGTERM, so the reaper drops it well before any deadline.
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -5758,7 +6031,8 @@ mod tests {
             kind: PrunedPtyKind::Terminal,
             id: "t1".to_string(),
             label: "scratch".to_string(),
-            worktree_removal: None,
+            owner: None,
+            gone: crate::engine::PtyGoneNotice::default(),
         });
 
         let dispatched = engine.reap_terminating_ptys();
@@ -5808,10 +6082,10 @@ mod tests {
         assert!(!engine.providers.contains_key(TabIdRef::new("s1-slot")));
         assert_eq!(engine.terminating_ptys.len(), 1);
         assert_eq!(engine.terminating_ptys[0].kind, PrunedPtyKind::Agent);
-        let req = engine.terminating_ptys[0]
-            .worktree_removal
-            .as_ref()
-            .expect("worktree removal deferred onto the terminating agent");
+        assert_eq!(engine.pending_group_removals.len(), 1);
+        let group = &engine.pending_group_removals[0];
+        assert!(group.pending_ids.contains("s1-slot"));
+        let req = &group.removal;
         assert_eq!(req.session_id, "s1");
         assert_eq!(req.managed.worktree_path, worktree.path().to_string_lossy());
 
@@ -6082,13 +6356,6 @@ mod tests {
         // removal is parked on ONE group barrier over both, not on any single
         // entry (which would fire when the first, not the last, tab reaps).
         assert_eq!(engine.terminating_ptys.len(), 2);
-        assert!(
-            engine
-                .terminating_ptys
-                .iter()
-                .all(|e| e.worktree_removal.is_none()),
-            "a multi-tab delete carries no per-entry removal"
-        );
         assert_eq!(engine.pending_group_removals.len(), 1);
         let group = &engine.pending_group_removals[0];
         assert!(group.pending_ids.contains("s1-slot") && group.pending_ids.contains("tab-2"));
@@ -6132,7 +6399,11 @@ mod tests {
             kind: PrunedPtyKind::Agent,
             id: "tab-2".to_string(),
             label: "feat".to_string(),
-            worktree_removal: None,
+            owner: Some(super::TerminatingOwner {
+                session_id: "s1".to_string(),
+                provider: Some(crate::model::ProviderKind::new("codex")),
+            }),
+            gone: crate::engine::PtyGoneNotice::default(),
         });
 
         let outcome = engine.begin_delete_session("s1", true, None);
@@ -6150,6 +6421,73 @@ mod tests {
             group.pending_ids.contains("s1-slot") && group.pending_ids.contains("tab-2"),
             "the group barrier must wait for the already-terminating straggler too: {:?}",
             group.pending_ids
+        );
+    }
+
+    /// A tab closed a moment before the delete has already lost its row, so the
+    /// tab table can no longer say whose its terminating PTY is. The entry
+    /// recorded its owner when it started terminating, and the delete waits for
+    /// it through that.
+    #[test]
+    fn a_delete_waits_for_a_tab_closed_just_before_it() {
+        use crate::engine::BeginDeleteSessionOutcome;
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = sample_tab("tab-2", "s1", "codex", 1);
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(TabId::new("tab-2"), tab);
+        engine
+            .providers
+            .insert(TabId::new("tab-2"), spawn_sigterm_ignorer(worktree.path()));
+        wait_until_ready(&engine, "tab-2");
+
+        engine
+            .close_tab("s1", "tab-2")
+            .expect("close the extra tab");
+        assert!(
+            engine.owning_session_for_tab("tab-2").is_none(),
+            "the closed tab's row is gone, so only its own record knows its agent"
+        );
+        let entry = engine
+            .terminating_ptys
+            .iter()
+            .find(|entry| entry.id == "tab-2")
+            .expect("the closed tab is terminating");
+        assert_eq!(
+            entry.owner,
+            Some(super::TerminatingOwner {
+                session_id: "s1".to_string(),
+                provider: Some(crate::model::ProviderKind::new("codex")),
+            })
+        );
+
+        let outcome = engine.begin_delete_session("s1", true, None);
+        assert!(matches!(
+            outcome,
+            BeginDeleteSessionOutcome::AsyncStarted { .. }
+        ));
+        assert_eq!(engine.pending_group_removals.len(), 1);
+        assert!(
+            engine.pending_group_removals[0]
+                .pending_ids
+                .contains("tab-2"),
+            "the removal waits for the closed tab's process"
+        );
+        assert!(
+            !engine.pending_deletions.contains("s1"),
+            "and nothing was dispatched while it runs"
         );
     }
 
@@ -6174,7 +6512,8 @@ mod tests {
                 kind: PrunedPtyKind::Agent,
                 id: id.to_string(),
                 label: "feat".to_string(),
-                worktree_removal: None,
+                owner: None,
+                gone: crate::engine::PtyGoneNotice::default(),
             });
         }
         engine.pending_group_removals.push(GroupWorktreeRemoval {
@@ -6195,6 +6534,7 @@ mod tests {
                     worktree_path: worktree.path().to_string_lossy().to_string(),
                 },
                 busy_message: "removing".to_string().into(),
+                processes: crate::engine::RemovalProcesses::none(),
             },
         });
 

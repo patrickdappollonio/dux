@@ -2467,7 +2467,18 @@ fn branch_still_exists(repo_path: &Path, branch_name: &str) -> bool {
 /// `--force`, so a worktree with uncommitted work is removed anyway: every
 /// caller must confirm with the user first.
 pub fn remove_worktree_keep_branch(repo_path: &Path, worktree_path: &Path) -> Result<()> {
-    let output = Command::new("git")
+    remove_worktree_keep_branch_after(repo_path, worktree_path, WORKTREE_REMOVAL_RETRY_PAUSE)
+}
+
+/// How long a worktree removal that failed while git still had the worktree
+/// registered waits before its one retry. Long enough for a process that was
+/// writing into the folder to have been stopped, short enough to sit inside
+/// the removal's spinner. Not a user setting: the removal is already bounded
+/// by the close grace, and this is one pause on a failure path.
+pub const WORKTREE_REMOVAL_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn run_worktree_remove(repo_path: &Path, worktree_path: &Path) -> Result<std::process::Output> {
+    Ok(Command::new("git")
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
@@ -2479,26 +2490,187 @@ pub fn remove_worktree_keep_branch(repo_path: &Path, worktree_path: &Path) -> Re
             "--",
             worktree_path.to_string_lossy().as_ref(),
         ])
-        .output()?;
-    if !output.status.success() {
-        if worktree_path.exists() {
-            return Err(anyhow!(
-                "git worktree remove failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        // Worktree already gone from disk: prune stale git refs.
-        let _ = Command::new("git")
-            .args([
-                "-C",
-                repo_path.to_string_lossy().as_ref(),
-                "worktree",
-                "prune",
-            ])
-            .output();
-    }
-    Ok(())
+        .output()?)
 }
+
+/// [`remove_worktree_keep_branch`] with the retry pause as a parameter, so a
+/// test does not sit through it.
+///
+/// A failed `git worktree remove --force` is the "Directory not empty" case
+/// when something is still writing into the folder. git deletes the files,
+/// finds the folder refilled, and fails its last `rmdir`; by then it has
+/// ALREADY dropped the worktree's registration (it carries on to the admin
+/// directory whatever the work tree did), so the same command a second time
+/// can only answer "is not a working tree". The retry is therefore made only
+/// while git still lists the worktree. Otherwise the folder is left to the
+/// user with a [`LeftoverWorktreeFolder`] saying exactly that: dux never
+/// deletes a worktree's files itself, that is git's job.
+pub(crate) fn remove_worktree_keep_branch_after(
+    repo_path: &Path,
+    worktree_path: &Path,
+    retry_pause: std::time::Duration,
+) -> Result<()> {
+    let mut output = run_worktree_remove(repo_path, worktree_path)?;
+    if !output.status.success()
+        && worktree_path.exists()
+        && worktree_is_registered(repo_path, worktree_path)
+    {
+        std::thread::sleep(retry_pause);
+        output = run_worktree_remove(repo_path, worktree_path)?;
+    }
+    if output.status.success() {
+        return Ok(());
+    }
+    // Whatever happened, a registration whose folder is gone is pruned, so a
+    // failure never leaves git listing a worktree that is not there.
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "worktree",
+            "prune",
+        ])
+        .output();
+    if !worktree_path.exists() {
+        // Worktree already gone from disk: the prune above was the cleanup.
+        return Ok(());
+    }
+    let git_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if worktree_is_registered(repo_path, worktree_path) {
+        return Err(anyhow!("git worktree remove failed: {git_error}"));
+    }
+    let (leftovers, more) = list_leftovers(worktree_path, LEFTOVERS_NAMED);
+    Err(anyhow::Error::new(LeftoverWorktreeFolder {
+        path: worktree_path.to_path_buf(),
+        leftovers,
+        more,
+        git_error,
+        branches: Vec::new(),
+    }))
+}
+
+/// How many leftover paths a [`LeftoverWorktreeFolder`] names.
+const LEFTOVERS_NAMED: usize = 5;
+
+/// Whether git still lists `worktree_path` among the repository's worktrees.
+/// Read from `worktree list --porcelain -z`, the machine-stable form, and
+/// compared on canonical paths so a symlinked spelling still matches. A git
+/// that cannot answer reads as "not registered", which only skips the retry.
+pub(crate) fn worktree_is_registered(repo_path: &Path, worktree_path: &Path) -> bool {
+    let Ok(output) = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z",
+        ])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let wanted = worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf());
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|field| field.strip_prefix(b"worktree "))
+        .map(|path| std::path::PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+        .any(|path| path.canonicalize().unwrap_or(path) == wanted)
+}
+
+/// Up to `limit` of what is left in a folder git could not finish deleting,
+/// as relative paths, innermost first (an empty directory names itself), plus
+/// how many more there are.
+fn list_leftovers(folder: &Path, limit: usize) -> (Vec<String>, usize) {
+    let mut leaves: Vec<String> = walkdir::WalkDir::new(folder)
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            !entry.file_type().is_dir()
+                || std::fs::read_dir(entry.path()).is_ok_and(|mut dir| dir.next().is_none())
+        })
+        .filter_map(|entry| {
+            entry
+                .path()
+                .strip_prefix(folder)
+                .ok()
+                .map(|relative| relative.to_string_lossy().into_owned())
+        })
+        .collect();
+    leaves.sort();
+    let more = leaves.len().saturating_sub(limit);
+    leaves.truncate(limit);
+    (leaves, more)
+}
+
+/// A worktree removal git could only half finish: the registration is gone,
+/// the folder is not, because something kept writing into it while git was
+/// deleting it. dux never finishes the job with a recursive delete of its own,
+/// so the message tells the user what is left and how to finish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftoverWorktreeFolder {
+    pub path: std::path::PathBuf,
+    /// Up to a handful of what is left, relative to `path`.
+    pub leftovers: Vec<String>,
+    /// How many more leftovers there are beyond `leftovers`.
+    pub more: usize,
+    /// git's own last word on it.
+    pub git_error: String,
+    /// What happened to each branch the delete was asked to remove, once git
+    /// had let go of the worktree.
+    pub branches: Vec<(String, BranchDeletion)>,
+}
+
+impl std::fmt::Display for LeftoverWorktreeFolder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path = crate::home_path::shorten_home(&self.path);
+        write!(
+            f,
+            "git removed the worktree at {path} from the repository but could not delete \
+             the folder itself, because something kept writing into it while it was being \
+             removed (possibly a dev server started in that worktree)."
+        )?;
+        if self.leftovers.is_empty() {
+            write!(f, " The folder is still there.")?;
+        } else {
+            write!(f, " Still in it: {}", self.leftovers.join(", "))?;
+            if self.more > 0 {
+                write!(f, " and {} more", self.more)?;
+            }
+            write!(f, ".")?;
+        }
+        write!(
+            f,
+            " Stop whatever is still running in that folder, then delete the folder {path} \
+             yourself."
+        )?;
+        for (name, outcome) in &self.branches {
+            match outcome {
+                BranchDeletion::Deleted => write!(f, " Branch {name} was deleted as asked.")?,
+                BranchDeletion::AlreadyGone => write!(f, " Branch {name} was already gone.")?,
+                BranchDeletion::Refused { reason } => write!(
+                    f,
+                    " git refused to delete branch {name} ({reason}); delete it with \
+                     git branch -D once the folder is gone."
+                )?,
+            }
+        }
+        if !self.git_error.is_empty() {
+            write!(f, " (git said: {})", self.git_error)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for LeftoverWorktreeFolder {}
 
 /// Whether the worktree has anything uncommitted: staged changes, unstaged
 /// changes, or untracked files. Untracked files count deliberately, because
@@ -2547,7 +2719,32 @@ pub fn remove_worktree(
 ) -> Result<RemoveResult> {
     // The worktree half is shared with `remove_worktree_keep_branch`; only the
     // branch deletions below are this function's own.
-    remove_worktree_keep_branch(repo_path, worktree_path)?;
+    if let Err(err) = remove_worktree_keep_branch(repo_path, worktree_path) {
+        // git let go of the worktree and only its folder is left, so the
+        // branches are no longer checked out anywhere and the deletion the user
+        // asked for still happens; the error says what became of them.
+        return Err(match err.downcast::<LeftoverWorktreeFolder>() {
+            Ok(mut leftover) => {
+                for name in [Some(branch_name), initial_branch]
+                    .into_iter()
+                    .flatten()
+                    .filter(|name| !name.is_empty())
+                {
+                    if leftover.branches.iter().any(|(done, _)| done == name) {
+                        continue;
+                    }
+                    let outcome = delete_branch_force(repo_path, name).unwrap_or_else(|err| {
+                        BranchDeletion::Refused {
+                            reason: format!("{err:#}"),
+                        }
+                    });
+                    leftover.branches.push((name.to_string(), outcome));
+                }
+                anyhow::Error::new(leftover)
+            }
+            Err(err) => err,
+        });
+    }
     let branch = delete_branch_force(repo_path, branch_name)?;
     // Only a DISTINCT, non-empty birth branch is a second thing to delete. An
     // empty one comes from a session record that never had it recorded.

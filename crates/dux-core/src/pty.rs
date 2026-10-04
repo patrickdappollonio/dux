@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, GridCell, Scroll};
@@ -795,6 +795,10 @@ pub struct PtyClient {
     /// an engine map would have to be cleared on every teardown path, and the
     /// one that matters here is the teardown the prune itself performs).
     spawned_at: Instant,
+    /// The session the child leads (portable-pty calls `setsid`), recorded at
+    /// spawn so whatever the child leaves running in it can still be found
+    /// after the child itself is gone. `None` when the platform gave no pid.
+    process_session: Option<crate::process_sessions::ProcessSession>,
     exited: Arc<AtomicBool>,
     /// When the reader thread reached end of input, written once immediately
     /// BEFORE it sets `exited`, so anyone who observes `exited` (an `Acquire`
@@ -1191,6 +1195,9 @@ impl PtyClient {
             track_agent_signals,
         };
         let reader_thread = thread::spawn(move || Self::reader_loop(reader, reader_state));
+        let process_session = child
+            .process_id()
+            .map(crate::process_sessions::ProcessSession::started_now);
 
         Ok(Self {
             master: pair.master,
@@ -1201,6 +1208,7 @@ impl PtyClient {
             scrollback_capacity: scrollback_lines,
             reaped: None,
             spawned_at: Instant::now(),
+            process_session,
             exited,
             read_error,
             exited_at,
@@ -1793,20 +1801,25 @@ impl PtyClient {
     /// child pid and the extra signal is skipped. Returns the first error (ESRCH,
     /// "group already gone", is benign).
     fn signal_process_groups(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
-        let Some(child) = self.child_process_id() else {
-            return Ok(());
-        };
-        let Some(child_group) = rustix::process::Pid::from_raw(child as i32) else {
-            return Ok(());
-        };
-        let child_res = rustix::process::kill_process_group(child_group, sig);
-        let fg_res = match self.foreground_pgid() {
-            Some(fg) if fg != child => rustix::process::Pid::from_raw(fg as i32)
-                .map(|group| rustix::process::kill_process_group(group, sig))
-                .unwrap_or(Ok(())),
-            _ => Ok(()),
-        };
-        child_res.and(fg_res)
+        self.signal_targets().send(sig)
+    }
+
+    /// The process groups [`Self::terminate`] and [`Self::force_terminate`]
+    /// signal, read now (the foreground group is a `tcgetpgrp` on the master)
+    /// so the signal itself can be sent later, from another thread. A worktree
+    /// removal uses that to look at what is running in the PTY's session BEFORE
+    /// anything is asked to exit, because a process that called `setsid` is
+    /// tied to the agent only by its parent, and that link is cut the moment
+    /// the parent exits.
+    pub fn signal_targets(&self) -> SignalTargets {
+        let child = self.child_process_id();
+        let foreground = self.foreground_pgid().filter(|fg| Some(*fg) != child);
+        SignalTargets { child, foreground }
+    }
+
+    /// The session this PTY's child leads, recorded at spawn.
+    pub fn process_session(&self) -> Option<crate::process_sessions::ProcessSession> {
+        self.process_session
     }
 
     /// The directory this PTY's child was spawned in. See the field docs: it is
@@ -2091,11 +2104,73 @@ impl Drop for PtyClient {
         // portable-pty maps to Ok(0)) and the reader thread returns. Join it so
         // the thread does not outlive this client; otherwise detached reader
         // threads accumulate across a long session and across the test suite.
+        //
+        // Bounded, because end of input needs EVERY holder of the PTY gone,
+        // and a background job outside both signalled groups is not. See
+        // [`READER_JOIN_BOUND`].
         if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
+            let deadline = Instant::now() + READER_JOIN_BOUND;
+            while !handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                logger::info(&format!(
+                    "PtyClient::drop: something the child started still holds its terminal \
+                     open (session {}), so the reader thread was left to finish on its own \
+                     rather than block this thread",
+                    self.process_session
+                        .map(|session| session.sid.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                ));
+            }
         }
     }
 }
+
+/// The process groups a PTY's teardown signals: the child's own (it leads its
+/// session and group) and, when a job-controlled app owns the terminal, that
+/// app's foreground group. See [`PtyClient::signal_targets`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalTargets {
+    child: Option<u32>,
+    foreground: Option<u32>,
+}
+
+impl SignalTargets {
+    /// Send `sig` to every target group. Returns the first error; `ESRCH` (the
+    /// group already went) is benign.
+    pub fn send(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
+        let signal_group = |pgid: u32| {
+            rustix::process::Pid::from_raw(pgid as i32)
+                .map(|group| rustix::process::kill_process_group(group, sig))
+                .unwrap_or(Ok(()))
+        };
+        let child_res = self.child.map(signal_group).unwrap_or(Ok(()));
+        let fg_res = self.foreground.map(signal_group).unwrap_or(Ok(()));
+        child_res.and(fg_res)
+    }
+
+    /// [`PtyClient::terminate`]'s polite pair, SIGTERM then SIGHUP, sent to
+    /// targets read earlier.
+    pub fn terminate(&self) {
+        let _ = self.send(rustix::process::Signal::TERM);
+        let _ = self.send(rustix::process::Signal::HUP);
+    }
+}
+
+/// How long dropping a [`PtyClient`] waits for its reader thread to finish.
+///
+/// The reader ends at end of input, which arrives only once every process
+/// holding the PTY open has closed it. A background job the group kill cannot
+/// reach (a job-controlled job in a group of its own, a `nohup`ed or disowned
+/// command, a child that called `setsid`) keeps it open for as long as it
+/// runs, so an unbounded join hung whichever thread dropped the client: the
+/// engine actor or the terminal UI's loop. Past this bound the thread is
+/// detached and logged; it ends by itself when the last holder goes. Not a
+/// user setting: it bounds a wait that is normally microseconds.
+pub const READER_JOIN_BOUND: Duration = Duration::from_millis(250);
 
 /// Resolve a process name from its PID.
 ///
@@ -7373,6 +7448,62 @@ mod tests {
         assert!(
             matches!(rx2.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
             "rx2 should still be live (Empty), not disconnected"
+        );
+    }
+
+    /// A disowned background job of an interactive shell lives in a process
+    /// group of its own and keeps the terminal open after the shell exits. The
+    /// group kill in `Drop` cannot reach it, so dropping the client must not
+    /// wait for the reader thread to see end of input, or it waits for as long
+    /// as the job runs: the engine thread, frozen.
+    #[test]
+    fn dropping_a_pty_never_waits_on_a_disowned_job_holding_it_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("job.pid");
+        let mut client = PtyClient::spawn_with_env(
+            "bash",
+            &[
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "-i".to_string(),
+            ],
+            dir.path(),
+            24,
+            80,
+            100,
+            &[],
+        )
+        .expect("spawn bash");
+        client
+            .write_bytes(b"sleep 30 & echo $! > job.pid; disown; exit\n")
+            .expect("type into bash");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "bash never exited");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let job: i32 = std::fs::read_to_string(&pidfile)
+            .expect("job pid")
+            .trim()
+            .parse()
+            .expect("numeric pid");
+        let job_pid = rustix::process::Pid::from_raw(job).expect("pid");
+        assert!(
+            rustix::process::test_kill_process(job_pid).is_ok(),
+            "the disowned job outlives the shell"
+        );
+        assert!(!client.is_exited(), "and it holds the terminal open");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(client);
+            let _ = tx.send(());
+        });
+        let dropped = rx.recv_timeout(Duration::from_secs(5));
+        let _ = rustix::process::kill_process(job_pid, rustix::process::Signal::KILL);
+        assert!(
+            dropped.is_ok(),
+            "dropping the client must not wait on the job that holds the terminal"
         );
     }
 }
