@@ -92,6 +92,20 @@ pub(crate) fn run_set(
 ) -> Result<()> {
     let parsed = parse_set_args(args)?;
     let key = config_keys::lookup(&parsed.path).map_err(|e| anyhow!("{e}"))?;
+    // A config.toml deleted while a dux runs is not replaced with a fresh
+    // default: that would drop the running password the moment the dux
+    // reloaded it. The running dux keeps its settings until the file is back.
+    if !paths.config_path.exists()
+        && let Some(pid) = dux_core::reload_signal::running_dux(&paths.lock_path)
+    {
+        bail!(
+            "{} is missing while dux is running (PID {pid}), and writing a fresh one here would \
+             drop the running settings, the web password included. Put the file back, or use \
+             Recover config in that dux to write its running settings to it, then run this \
+             again. Nothing was changed.",
+            paths.config_path.display()
+        );
+    }
     // A first `set` on a machine dux never ran on writes the whole commented
     // template, as dux itself would, and makes the directory for it.
     crate::config::install_canonical_renderer();
@@ -949,5 +963,18 @@ port = 3890
         let written = std::fs::read_to_string(&paths.config_path).expect("created");
         assert!(written.contains("# dux configuration"), "{written}");
         assert!(written.contains("port = 4000"), "{written}");
+    }
+
+    /// config.toml deleted while a dux runs: `set` must not write a fresh
+    /// default (password-less) file and tell that dux to reload it.
+    #[test]
+    fn set_refuses_a_missing_config_while_a_dux_is_running() {
+        let (_tmp, paths) = setup(None);
+        let _running =
+            dux_core::lockfile::SingleInstanceLock::acquire(&paths.lock_path).expect("lock");
+        let err = set(&paths, &["server.port", "4000"], &mut no_secrets()).expect_err("refused");
+        let text = err.to_string();
+        assert!(text.contains("Recover config"), "{text}");
+        assert!(!paths.config_path.exists(), "nothing was written");
     }
 }

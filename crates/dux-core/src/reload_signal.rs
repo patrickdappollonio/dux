@@ -82,6 +82,17 @@ pub fn signal_running_dux(lock_path: &Path) -> SignalOutcome {
     }
 }
 
+/// The PID of whatever holds `lock_path`, or `None` when nothing does. For a
+/// refusal, so it asks less than [`signal_running_dux`] does: a held lock is
+/// reason enough to leave the running dux's files alone, and the process name
+/// is not checked.
+pub fn running_dux(lock_path: &Path) -> Option<u32> {
+    match holder(lock_path, None) {
+        Holder::Pid(pid) => Some(pid),
+        Holder::None | Holder::Unknown(_) => None,
+    }
+}
+
 fn send(pid: u32) -> SignalOutcome {
     let Some(raw) = i32::try_from(pid)
         .ok()
