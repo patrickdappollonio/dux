@@ -2568,3 +2568,196 @@ async fn a_right_password_racing_a_block_gets_no_session() {
         right.headers
     );
 }
+
+// ── IPv6 prefixes, planted cookies, the first-password route ────────────
+
+fn v6(peer: &str) -> Arrival {
+    Arrival {
+        peer: SocketAddr::new(peer.parse().unwrap(), 50000),
+        local: "[2001:db8:ffff::10]:3890".parse().unwrap(),
+    }
+}
+
+/// A single LAN device that owns an IPv6 /64 (every SLAAC host does) rotates
+/// the address it sends from. Its failures count against its /64, so the
+/// rotation gains it nothing: the wait applies across the /64, `max_failed_logins`
+/// still blocks, and the owner on another network signs in.
+#[tokio::test]
+async fn rotating_ipv6_addresses_in_one_slash64_gains_nothing() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 5\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 30",
+    );
+    for n in 1..=5u32 {
+        let answer = dux
+            .login(
+                v6(&format!("2001:db8:1:1::{n:x}")),
+                "not the password at all",
+            )
+            .await;
+        assert!(answer.status.is_client_error(), "{}", answer.body);
+    }
+    // The address that reached the limit is written (the /64 itself is
+    // pending the owner's decision), and the next one from it is refused.
+    assert!(
+        dux.config().contains("\"2001:db8:1:1::5\""),
+        "{}",
+        dux.config()
+    );
+    let again = dux.login(v6("2001:db8:1:1::5"), "again").await;
+    assert_eq!(again.error().as_deref(), Some("blocked"), "{}", again.body);
+    // The owner, from another network, with the right password.
+    let owner = dux.login(v6("2001:db8:2:2::5"), PASSWORD).await;
+    assert_eq!(owner.status, StatusCode::NO_CONTENT, "{}", owner.body);
+
+    // The wait follows the /64 too, and says so.
+    let slowed = Dux::with_password("failed_login_delay_seconds = 30\nmax_failed_logins = 0");
+    let first = slowed.login(v6("2001:db8:1:1::1"), "wrong").await;
+    assert_eq!(first.status, StatusCode::UNAUTHORIZED, "{}", first.body);
+    let rotated = slowed.login(v6("2001:db8:1:1::2"), "wrong").await;
+    assert_eq!(
+        rotated.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        rotated.body
+    );
+    assert_eq!(
+        rotated.json()["from"],
+        json!("from this address's network (its IPv6 /64)")
+    );
+}
+
+/// A refusal caused by a shared count says so: the verified network's
+/// per-minute limit is "from the network", never "from this address", which
+/// would be false for the owner's first attempt.
+#[tokio::test]
+async fn a_shared_limit_never_says_from_this_address() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 0\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 2",
+    );
+    for n in 1..=2u8 {
+        let peer = Arrival {
+            peer: SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, n)),
+                50000,
+            ),
+            local: NETWORK.local,
+        };
+        let _ = dux.login(peer, "wrong").await;
+    }
+    let owner = dux.login(NETWORK, PASSWORD).await;
+    assert_eq!(
+        owner.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        owner.body
+    );
+    let message = owner.json()["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!message.contains("this address"), "{message}");
+    assert!(message.contains("from the network"), "{message}");
+    assert_eq!(owner.json()["from"], json!("from the network"));
+
+    // Its own wait still says it is its own.
+    let own = Dux::with_password("failed_login_delay_seconds = 30\nmax_failed_logins = 0");
+    let _ = own.login(NETWORK, "wrong").await;
+    let again = own.login(NETWORK, "wrong").await;
+    assert_eq!(again.json()["from"], json!("from this address"));
+}
+
+/// Cookies are not isolated by port, so any page served from the same host
+/// name on another port (an agent's dev server the owner previews, say) can
+/// set `dux_session_<port>` with a more specific `Path`. The browser then
+/// sends that one first, beside the real session. dux reads only the first
+/// non-empty value, so the owner's valid session is ignored: every request is
+/// 401, and signing in again cannot help (the new cookie is `Path=/`, and the
+/// planted one still comes first).
+#[tokio::test]
+async fn a_planted_cookie_with_the_same_name_hides_a_valid_session() {
+    let dux = Dux::with_password("");
+    let valid = dux.signed_in(NETWORK).await;
+    let (name, _) = valid.split_once('=').unwrap();
+    // A well-formed token dux never issued, as a page on another port can set.
+    let planted = format!("{name}={}", "A".repeat(43));
+    for both in [format!("{planted}; {valid}"), format!("{valid}; {planted}")] {
+        let status = dux.status(NETWORK, Some(&both)).await;
+        let projects = dux
+            .send(
+                NETWORK,
+                Req::new(Method::GET, "/api/v1/projects").cookie(&both),
+            )
+            .await;
+        assert!(
+            status["signed_in"] == json!(true) && projects.status == StatusCode::OK,
+            "the browser holds a valid session, yet dux answers signed_in = {} and {} {} ({both})",
+            status["signed_in"],
+            projects.status,
+            projects.body
+        );
+    }
+    // Signing out with both revokes the valid one, whichever came first.
+    let both = format!("{planted}; {valid}");
+    let out = dux
+        .send(
+            NETWORK,
+            Req::new(Method::POST, "/api/v1/auth/logout").cookie(&both),
+        )
+        .await;
+    assert_eq!(out.status, StatusCode::NO_CONTENT, "{}", out.body);
+    assert!(out.set_cookie().contains("Path=/"), "{}", out.set_cookie());
+    assert_auth_required(
+        &dux.send(
+            NETWORK,
+            Req::new(Method::GET, "/api/v1/projects").cookie(&valid),
+        )
+        .await,
+        "the session after signing out",
+    );
+}
+
+/// The first-password refusal explains itself with "This browser reached dux
+/// over loopback" whenever classification recorded a reason, but that reason
+/// is also recorded for connections that never touched loopback: this machine
+/// opening its own LAN address, and a tailnet device on the Tailscale
+/// listener while dux cannot confirm its exposure. Both are told something
+/// false about how they connected.
+#[tokio::test]
+async fn the_first_password_refusal_never_says_loopback_for_a_connection_that_was_not() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let unconfirmed = ExposureCell::new(FunnelState::Unconfirmed);
+    unconfirmed.set_identity(Some(IdentityFacts {
+        own_ips: own_tailscale_ips(),
+        ..IdentityFacts::default()
+    }));
+    let dux = Dux::start_tuned("", |params| params.with_live_exposure(unconfirmed));
+    let own_lan = Arrival {
+        peer: "192.0.2.10:40000".parse().unwrap(),
+        local: "192.0.2.10:3890".parse().unwrap(),
+    };
+    for (from, what) in [
+        (TAILNET, "the Tailscale listener"),
+        (own_lan, "this machine's own LAN address"),
+    ] {
+        let answer = dux
+            .send(
+                from,
+                Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
+            )
+            .await;
+        assert_eq!(
+            answer.error().as_deref(),
+            Some("first_password_not_here"),
+            "{what}: {}",
+            answer.body
+        );
+        let message = answer.json()["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !message.contains("over loopback"),
+            "{what} never reached dux over loopback, yet is told: {message}"
+        );
+    }
+}

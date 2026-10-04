@@ -58,12 +58,26 @@ describe("refusalSentence", () => {
   })
 
   it("counts down a rate limit when the wait is known", () => {
-    expect(refusalSentence(429, body({ error: "rate_limited", retry_after: 7 }), "x")).toBe(
-      "Too many attempts from this address. Try again in 7 seconds.",
-    )
+    expect(
+      refusalSentence(
+        429,
+        body({ error: "rate_limited", retry_after: 7, from: "from this address" }),
+        "x",
+      ),
+    ).toBe("Too many sign-in attempts from this address. Try again in 7 seconds.")
     expect(refusalSentence(429, { json: {}, text: "" }, "x")).toBe(
-      "Too many attempts from this address. Wait a little, then try again.",
+      "Too many sign-in attempts. Wait a little, then try again.",
     )
+  })
+
+  it("names whose attempts a shared limit counts, never this address", () => {
+    expect(
+      refusalSentence(
+        429,
+        body({ error: "rate_limited", retry_after: 30, from: "from the network" }),
+        "x",
+      ),
+    ).toBe("Too many sign-in attempts from the network. Try again in 30 seconds.")
   })
 
   it("never shows raw JSON for a code it does not know", () => {

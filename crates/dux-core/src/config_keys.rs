@@ -1185,6 +1185,20 @@ pub fn append_blocked_address(
     max_entries: u32,
 ) -> Result<BanWrite> {
     let ip = crate::config_auth::canonical(ip);
+    append_blocked_entry(config_path, ip, &ip.to_string(), max_entries)
+}
+
+/// [`append_blocked_address`] writing `entry` (the address itself, or a
+/// range holding it) for `ip`. Nothing is written when an entry already
+/// covers `ip`.
+pub fn append_blocked_entry(
+    config_path: &Path,
+    ip: std::net::IpAddr,
+    entry: &str,
+    max_entries: u32,
+) -> Result<BanWrite> {
+    let ip = crate::config_auth::canonical(ip);
+    let new_entry = entry.to_string();
     let blocked_path: Vec<String> = ["server", "auth", "blocked_addresses"]
         .iter()
         .map(|s| s.to_string())
@@ -1226,7 +1240,7 @@ pub fn append_blocked_address(
                 .and_then(|item| item.as_array())
                 .cloned()
                 .unwrap_or_default();
-            array.push(ip.to_string());
+            array.push(new_entry);
             set_in_doc(doc, &path, Value::Array(array))
         },
     );

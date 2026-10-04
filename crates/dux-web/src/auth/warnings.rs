@@ -93,11 +93,11 @@ impl Speaker {
         self.say(Loudness::Warning, WEAK_KEY, &weak_sentence(), false);
     }
 
-    pub(crate) fn blocked(&self, ip: IpAddr, failures: u32, path: &str, kept: BanKept) {
+    pub(crate) fn blocked(&self, entry: &str, failures: u32, path: &str, kept: BanKept) {
         self.say(
             Loudness::Warning,
             BLOCKED_KEY,
-            &blocked_sentence(ip, failures, path, &kept),
+            &blocked_sentence(entry, failures, path, &kept),
             false,
         );
     }
@@ -183,9 +183,8 @@ fn weak_sentence() -> String {
         .to_string()
 }
 
-fn blocked_sentence(ip: IpAddr, failures: u32, path: &str, kept: &BanKept) -> String {
-    let ip = dux_core::config_auth::canonical(ip);
-    let why = format!("dux blocked {ip} after {failures} failed sign-ins.");
+fn blocked_sentence(entry: &str, failures: u32, path: &str, kept: &BanKept) -> String {
+    let why = format!("dux blocked {entry} after {failures} failed sign-ins.");
     match kept {
         BanKept::InConfig => format!(
             "{why} It is in blocked_addresses in the [server.auth] section of {path}; if it was \
@@ -367,7 +366,7 @@ mod tests {
 
     #[test]
     fn a_block_says_where_it_lives_and_how_long_it_holds() {
-        let ip: IpAddr = "::ffff:203.0.113.7".parse().unwrap();
+        let ip = "203.0.113.7";
         let kept = blocked_sentence(
             ip,
             5,

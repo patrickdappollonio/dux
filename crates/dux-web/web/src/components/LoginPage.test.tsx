@@ -95,12 +95,16 @@ describe("LoginPage", () => {
 
   it("counts down a rate limit and holds the button until it ends", async () => {
     vi.useFakeTimers()
-    signIn.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: 3 })
+    signIn.mockResolvedValue({
+      kind: "rate_limited",
+      retryAfterSeconds: 3,
+      from: "from the network",
+    })
     render(<LoginPage status={status()} reason="required" />)
     await act(async () => submit("x"))
     // Announced once; the countdown itself is not a live region, so a screen
     // reader is not read every second.
-    expect(screen.getByRole("alert").textContent).toBe("Too many attempts from this address.")
+    expect(screen.getByRole("alert").textContent).toBe("Too many sign-in attempts from the network.")
     const countdown = screen.getByText("Try again in 3 seconds.")
     expect(countdown.closest("[role=alert]")).toBeNull()
     expect(countdown.closest("[aria-live=polite],[aria-live=assertive]")).toBeNull()
@@ -116,7 +120,7 @@ describe("LoginPage", () => {
   })
 
   it("says to wait when the server names no wait", async () => {
-    signIn.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: null })
+    signIn.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: null, from: null })
     render(<LoginPage status={status()} reason="required" />)
     await act(async () => submit("x"))
     expect(screen.getByText("Wait a little, then try again.")).toBeTruthy()

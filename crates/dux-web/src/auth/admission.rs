@@ -55,7 +55,7 @@
 //! the request came from this machine (a forward onto loopback): blocking it
 //! would lock the owner out with whoever was relayed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
@@ -81,19 +81,117 @@ enum TrackKey {
 
 impl TrackKey {
     /// Every key a client's failures count against: its verified address
-    /// alone, or the address it claims (if any) and the shared bucket. This
-    /// is the only place a key is made, so a claim can never become a
-    /// verified key.
+    /// alone (an IPv6 one by its /64), or the address it claims (if any) and
+    /// the shared bucket. This is the only place a key is made, so a claim
+    /// can never become a verified key.
     fn of(c: &Classification) -> Vec<Self> {
         let canonical = dux_core::config_auth::canonical;
         if let Some(ip) = c.verified_ip {
-            return vec![Self::Verified(canonical(ip))];
+            return vec![Self::Verified(verified_track(canonical(ip)))];
         }
         c.claimed_ip
             .map(|ip| Self::Claimed(canonical(ip)))
             .into_iter()
             .chain(std::iter::once(Self::Unverified(c.via)))
             .collect()
+    }
+}
+
+/// The /64 an IPv6 address belongs to, as its network address, or `None` for
+/// IPv4 (an IPv4-mapped address is canonical IPv4 by now).
+fn ipv6_prefix(ip: IpAddr) -> Option<std::net::Ipv6Addr> {
+    match ip {
+        IpAddr::V6(v6) => {
+            let bits = u128::from(v6) & !((1u128 << 64) - 1);
+            Some(std::net::Ipv6Addr::from(bits))
+        }
+        IpAddr::V4(_) => None,
+    }
+}
+
+/// What a verified client's failures and waits are counted under (decided,
+/// after review): its IPv6 /64, never the single address, because one host
+/// owns a whole /64 under SLAAC and can send from any address in it, so
+/// counting per address let it rotate past every wait and ban. IPv4 is
+/// counted per address.
+fn verified_track(ip: IpAddr) -> IpAddr {
+    ipv6_prefix(ip).map_or(ip, IpAddr::V6)
+}
+
+/// Whether reaching `max_failed_logins` writes a verified IPv6 client's whole
+/// /64 to `blocked_addresses` rather than the single address. PENDING THE
+/// USER'S DECISION: until they answer, today's behaviour stands and the single
+/// address is written. Counting is by /64 either way; this is the one switch.
+const BAN_WHOLE_IPV6_PREFIX: bool = false;
+
+/// What a ban writes and holds: the client's address, and the
+/// `blocked_addresses` entry that covers it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ban {
+    /// The address that reached the limit.
+    pub(crate) ip: IpAddr,
+    /// The entry written: the address itself, or its /64 when
+    /// [`BAN_WHOLE_IPV6_PREFIX`] is on.
+    pub(crate) entry: String,
+}
+
+impl Ban {
+    fn of(ip: IpAddr) -> Self {
+        let ip = dux_core::config_auth::canonical(ip);
+        let entry = match ipv6_prefix(ip) {
+            Some(prefix) if BAN_WHOLE_IPV6_PREFIX => format!("{prefix}/64"),
+            _ => ip.to_string(),
+        };
+        Self { ip, entry }
+    }
+}
+
+/// Why an attempt must wait, and for how long.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Limited {
+    pub(crate) seconds: u64,
+    /// Whose failures it is waiting out.
+    pub(crate) held_by: HeldBy,
+}
+
+/// Whose failures an attempt is waiting out. A refusal says exactly this
+/// (decided, after review): a wait a shared count imposed never says "from
+/// this address", which is false there and sends the owner looking for a
+/// problem with their own device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldBy {
+    /// This address's own failures.
+    ThisAddress,
+    /// The failures of this address's IPv6 /64, which it may share.
+    ThisPrefix,
+    /// Unverified requests that came the same way.
+    Route(Via),
+    /// The verified network's per-minute limit.
+    Network,
+}
+
+impl HeldBy {
+    /// The words for it, after "Too many sign-in attempts".
+    pub(crate) fn words(self) -> &'static str {
+        match self {
+            Self::ThisAddress => "from this address",
+            Self::ThisPrefix => "from this address's network (its IPv6 /64)",
+            Self::Route(Via::Forwarded) => "through proxies and the internet",
+            Self::Route(Via::PlainLoopback) => "over loopback",
+            Self::Route(Via::OwnAddress) => "from this machine's own addresses",
+            Self::Route(Via::Direct) => "from addresses dux cannot verify",
+            Self::Network => "from the network",
+        }
+    }
+}
+
+impl TrackKey {
+    fn held_by(self) -> HeldBy {
+        match self {
+            Self::Verified(IpAddr::V6(_)) => HeldBy::ThisPrefix,
+            Self::Verified(IpAddr::V4(_)) | Self::Claimed(_) => HeldBy::ThisAddress,
+            Self::Unverified(via) => HeldBy::Route(via),
+        }
     }
 }
 
@@ -116,6 +214,14 @@ enum Level {
 }
 
 impl Level {
+    /// Whose failures fill this level's per-minute limit.
+    fn held_by(self) -> HeldBy {
+        match self {
+            Self::Unverified(via) => HeldBy::Route(via),
+            Self::Network | Self::Tailnet | Self::ThisMachine => HeldBy::Network,
+        }
+    }
+
     /// Whether this level shares a global per-minute limit.
     fn has_global_limit(self) -> bool {
         match self {
@@ -135,13 +241,13 @@ impl Level {
 }
 
 /// What one failure led to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Strike {
     /// Nothing beyond the count and the wait.
     Counted,
     /// A verified address reached `max_failed_logins`: block it. Its count is
     /// forgotten, so a lifted block starts over.
-    Block(IpAddr),
+    Block(Ban),
     /// An address dux could not verify reached `max_failed_logins` (this
     /// failure is the one that reached it, so it is said once per run up). It
     /// is not written anywhere; it stays slowed.
@@ -163,7 +269,7 @@ struct Inner {
     minutes: HashMap<Level, (Instant, u32)>,
     /// Bans that hold for this run only: their write to `config.toml` failed,
     /// or `blocked_addresses` was already at `max_blocked_addresses`.
-    runtime_bans: HashSet<IpAddr>,
+    runtime_bans: HashMap<String, AddressBlock>,
     /// Checks admitted and still running, per key and per level: each counts
     /// as a failure that may yet land when the next attempt's wait and limits
     /// are worked out.
@@ -260,7 +366,7 @@ impl Admission {
             return true;
         }
         let inner = self.lock();
-        named().any(|ip| inner.runtime_bans.contains(&ip))
+        named().any(|ip| inner.runtime_bans.values().any(|block| block.contains(ip)))
     }
 
     /// Whether a password check may run for this client now, reserving it
@@ -273,13 +379,14 @@ impl Admission {
         cfg: &ServerAuthConfig,
         c: &Classification,
         now: Instant,
-    ) -> Result<Reservation, u64> {
+    ) -> Result<Reservation, Limited> {
         let window = Duration::from_secs(u64::from(cfg.failed_login_window_seconds));
         let keys = TrackKey::of(c);
         let mut inner = self.lock();
         let wait = keys
             .iter()
             .filter_map(|key| {
+                let held_by = key.held_by();
                 let live = inner
                     .tracked
                     .get(key)
@@ -298,10 +405,14 @@ impl Admission {
                     .chain(after_pending)
                     .filter(|wait| !wait.is_zero())
                     .max()
+                    .map(|wait| (wait, held_by))
             })
-            .max();
-        if let Some(wait) = wait {
-            return Err(ceil_secs(wait));
+            .max_by_key(|(wait, _)| *wait);
+        if let Some((wait, held_by)) = wait {
+            return Err(Limited {
+                seconds: ceil_secs(wait),
+                held_by,
+            });
         }
         inner.prune_minutes(now);
         let level = Level::of(c);
@@ -312,7 +423,10 @@ impl Admission {
                 None => (0, MINUTE),
             };
             if count.saturating_add(pending) >= cfg.max_failed_logins_per_minute {
-                return Err(ceil_secs(left));
+                return Err(Limited {
+                    seconds: ceil_secs(left),
+                    held_by: level.held_by(),
+                });
             }
         }
         for key in &keys {
@@ -360,7 +474,9 @@ impl Admission {
             match key {
                 TrackKey::Verified(_) => {
                     inner.tracked.remove(&key);
-                    strike = Strike::Block(ip);
+                    // The key may be a /64; the ban names the address that
+                    // reached the limit (or its /64, see the switch).
+                    strike = Strike::Block(Ban::of(c.verified_ip.unwrap_or(ip)));
                 }
                 TrackKey::Claimed(_) if count == cfg.max_failed_logins => {
                     strike = Strike::UnverifiedLimit(ip);
@@ -384,17 +500,15 @@ impl Admission {
     }
 
     /// Hold a ban for the rest of this run.
-    pub(crate) fn ban_for_this_run(&self, ip: IpAddr) {
-        self.lock()
-            .runtime_bans
-            .insert(dux_core::config_auth::canonical(ip));
+    pub(crate) fn ban_for_this_run(&self, ban: &Ban) {
+        if let Ok(block) = AddressBlock::parse(&ban.entry) {
+            self.lock().runtime_bans.insert(ban.entry.clone(), block);
+        }
     }
 
     /// Stop holding a ban for this run: `blocked_addresses` holds it now.
-    pub(crate) fn lift_ban_for_this_run(&self, ip: IpAddr) {
-        self.lock()
-            .runtime_bans
-            .remove(&dux_core::config_auth::canonical(ip));
+    pub(crate) fn lift_ban_for_this_run(&self, ban: &Ban) {
+        self.lock().runtime_bans.remove(&ban.entry);
     }
 
     /// How many addresses the failure tracker remembers right now.
@@ -499,7 +613,9 @@ mod tests {
             c: &Classification,
             now: Instant,
         ) -> Result<(), u64> {
-            self.check_attempt(cfg, c, now).map(drop)
+            self.check_attempt(cfg, c, now)
+                .map(drop)
+                .map_err(|limited| limited.seconds)
         }
     }
 
@@ -648,7 +764,7 @@ mod tests {
         );
         assert_eq!(
             a.record_failure(&c, &net("198.51.100.7"), t0 + Duration::from_secs(60)),
-            Strike::Block("198.51.100.7".parse().unwrap())
+            Strike::Block(Ban::of("198.51.100.7".parse().unwrap()))
         );
     }
 
@@ -748,7 +864,7 @@ mod tests {
         assert_eq!(a.record_failure(&c, &ip, late), Strike::Counted);
         assert_eq!(
             a.record_failure(&c, &ip, late),
-            Strike::Block("198.51.100.3".parse().unwrap()),
+            Strike::Block(Ban::of("198.51.100.3".parse().unwrap())),
             "three in the window blocks"
         );
         assert_eq!(a.tracked(), 0, "a blocked address's count is forgotten");
@@ -789,7 +905,7 @@ mod tests {
         assert_eq!(a.record_failure(&c, &net("::1"), t0), Strike::Counted);
         assert_eq!(
             a.record_failure(&c, &net("::ffff:198.51.100.4"), t0),
-            Strike::Block("198.51.100.4".parse().unwrap()),
+            Strike::Block(Ban::of("198.51.100.4".parse().unwrap())),
             "a mapped address is blocked as the IPv4 address it carries"
         );
         let slowed = cfg();
@@ -858,7 +974,7 @@ mod tests {
         assert!(a.is_blocked(&blocks, &net("203.0.113.9"), &[]));
         assert!(a.is_blocked(&blocks, &net("::ffff:203.0.113.9"), &[]));
         assert!(!a.is_blocked(&blocks, &net("198.51.100.9"), &[]));
-        a.ban_for_this_run("198.51.100.9".parse().unwrap());
+        a.ban_for_this_run(&Ban::of("198.51.100.9".parse().unwrap()));
         assert!(a.is_blocked(&blocks, &net("198.51.100.9"), &[]));
         let everything = vec![AddressBlock::parse("0.0.0.0/0").unwrap()];
         assert!(

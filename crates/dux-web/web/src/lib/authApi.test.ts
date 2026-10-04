@@ -203,7 +203,7 @@ describe("postLogin", () => {
 
   it("reads 429 with the wait the server asks for", async () => {
     stubFetch(reply(429, { error: "rate_limited" }, { "retry-after": "12" }))
-    expect(await postLogin("x")).toEqual({ kind: "rate_limited", retryAfterSeconds: 12 })
+    expect(await postLogin("x")).toEqual({ kind: "rate_limited", retryAfterSeconds: 12, from: null })
   })
 
   it("reads 403 as blocked, keeping where", async () => {

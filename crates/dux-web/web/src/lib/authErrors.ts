@@ -102,10 +102,24 @@ export function firstPasswordUnavailable(requiredReason: string | null): string 
   return requiredReason === null ? base : `${base} ${requiredReason}`
 }
 
-export function rateLimitSentence(seconds: number | null): string {
-  if (seconds === null) return "Too many attempts from this address. Wait a little, then try again."
-  if (seconds <= 0) return "Too many attempts from this address. You can try again now."
-  return `Too many attempts from this address. Try again in ${seconds} ${seconds === 1 ? "second" : "seconds"}.`
+/// Whose failures a 429 is waiting out, in the server's words ("from this
+/// address", "from the network"), or null when it named none. Never assumed:
+/// a shared limit is not this address's doing.
+export function limitedFrom(body: Record<string, unknown> | null): string | null {
+  return str((body ?? {}).from)
+}
+
+/// The lead sentence of a rate limit, naming whose attempts it counts only
+/// when the server said.
+export function rateLimitLead(from: string | null): string {
+  return from === null ? "Too many sign-in attempts." : `Too many sign-in attempts ${from}.`
+}
+
+export function rateLimitSentence(seconds: number | null, from: string | null): string {
+  const lead = rateLimitLead(from)
+  if (seconds === null) return `${lead} Wait a little, then try again.`
+  if (seconds <= 0) return `${lead} You can try again now.`
+  return `${lead} Try again in ${seconds} ${seconds === 1 ? "second" : "seconds"}.`
 }
 
 function looksLikeJson(text: string): boolean {
@@ -149,10 +163,16 @@ export function refusalSentence(
     case "auth_required":
       return "Your session ended. Sign in again, then try once more."
     case "rate_limited":
-      return rateLimitSentence(retryAfterSeconds(retryAfterHeader, body.json, Date.now()))
+      return rateLimitSentence(
+        retryAfterSeconds(retryAfterHeader, body.json, Date.now()),
+        limitedFrom(body.json),
+      )
   }
   if (status === 429) {
-    return rateLimitSentence(retryAfterSeconds(retryAfterHeader, body.json, Date.now()))
+    return rateLimitSentence(
+      retryAfterSeconds(retryAfterHeader, body.json, Date.now()),
+      limitedFrom(body.json),
+    )
   }
   const message = str(body.json.message)
   if (message !== null) return message

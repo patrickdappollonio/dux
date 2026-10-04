@@ -6,6 +6,7 @@ import { InlineCode } from "@/components/ui/inline-code"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { Input } from "@/components/ui/input"
 import type { AuthStatus, LoginAnswer } from "@/lib/authApi"
+import { rateLimitLead } from "@/lib/authErrors"
 import { retryAuthGate, signIn, type SignOutReason } from "@/lib/authGate"
 import { DEFAULT_FAVICON_HREF } from "@/lib/favicon"
 
@@ -80,7 +81,7 @@ function failureText(failure: Failure): string {
     case "wrong":
       return "That password did not work. Try again."
     case "rate_limited":
-      return "Too many attempts from this address."
+      return rateLimitLead(failure.from)
     case "unreachable":
       return failure.timedOut
         ? "dux did not answer in time. Check that it is still running, then try again."

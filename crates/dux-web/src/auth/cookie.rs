@@ -46,9 +46,13 @@ pub(crate) fn clear(port: u16, secure: bool) -> HeaderValue {
     HeaderValue::from_str(&text).expect("header-safe")
 }
 
-/// The value of the cookie named for `port` in a request, if any. With
-/// several (a browser that kept an old one), the first that is not empty.
-pub(crate) fn read(headers: &HeaderMap, port: u16) -> Option<String> {
+/// Every non-empty value of the cookie named for `port` in a request, in the
+/// order the browser sent them. The caller tries them all (decided, after
+/// review): cookies are not isolated by port, so a page on another port of
+/// the same host can plant one with this name and a narrower `Path`, which the
+/// browser then sends FIRST, and reading only the first would hide the real
+/// session behind it.
+pub(crate) fn read_all(headers: &HeaderMap, port: u16) -> Vec<String> {
     let wanted = name(port);
     headers
         .get_all(axum::http::header::COOKIE)
@@ -56,8 +60,9 @@ pub(crate) fn read(headers: &HeaderMap, port: u16) -> Option<String> {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(';'))
         .filter_map(|pair| pair.trim().split_once('='))
-        .find(|(key, value)| *key == wanted && !value.is_empty())
+        .filter(|(key, value)| *key == wanted && !value.is_empty())
         .map(|(_, value)| value.to_string())
+        .collect()
 }
 
 #[cfg(test)]
@@ -103,8 +108,13 @@ mod tests {
             axum::http::header::COOKIE,
             "dux_session_3890=; dux_session_3890=mine".parse().unwrap(),
         );
-        assert_eq!(read(&headers, 3890).as_deref(), Some("mine"));
-        assert_eq!(read(&headers, 4000).as_deref(), Some("other"));
-        assert_eq!(read(&headers, 5000), None);
+        assert_eq!(read_all(&headers, 3890), ["mine"]);
+        assert_eq!(read_all(&headers, 4000), ["other"]);
+        assert!(read_all(&headers, 5000).is_empty());
+        headers.append(
+            axum::http::header::COOKIE,
+            "dux_session_3890=planted".parse().unwrap(),
+        );
+        assert_eq!(read_all(&headers, 3890), ["mine", "planted"]);
     }
 }

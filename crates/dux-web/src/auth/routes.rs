@@ -69,14 +69,19 @@ fn refusal(status: StatusCode, body: serde_json::Value) -> Response {
     (status, Json(body)).into_response()
 }
 
-fn rate_limited(seconds: u64) -> Response {
+fn rate_limited(limited: super::admission::Limited) -> Response {
+    let seconds = limited.seconds;
+    let from = limited.held_by.words();
     let mut response = refusal(
         StatusCode::TOO_MANY_REQUESTS,
         json!({
             "error": "rate_limited",
             "retry_after_seconds": seconds,
+            // Whose failures this waits out, in words, for the browser's own
+            // sentence: never "from this address" for a shared count.
+            "from": from,
             "message": format!(
-                "Too many attempts from this address. Try again in {seconds} {}.",
+                "Too many sign-in attempts {from} right now. Try again in {seconds} {}.",
                 if seconds == 1 { "second" } else { "seconds" }
             ),
         }),
@@ -208,7 +213,7 @@ async fn login(
             json!({ "error": "wrong_password", "message": "That password is not right." }),
         ),
         Verify::Blocked => super::middleware::blocked(),
-        Verify::Wait(seconds) => rate_limited(seconds),
+        Verify::Wait(limited) => rate_limited(limited),
         Verify::Busy => busy(),
         Verify::NoPassword => refusal(
             StatusCode::CONFLICT,
@@ -241,8 +246,10 @@ async fn logout(
     Extension(auth): Extension<RequestAuth>,
 ) -> Response {
     let a = &auth.0;
-    if let Some(digest) = a.session {
-        state.auth.end_session(digest).await;
+    // Every session the browser presented, not just the one that let it in:
+    // signing out must leave nothing behind (decided, after review).
+    for digest in &a.presented {
+        state.auth.end_session(*digest).await;
     }
     let secure = cookie::secure(
         a.snapshot.config.cookie_secure,
@@ -361,12 +368,7 @@ async fn change_password(
                 let because = a
                     .classification
                     .loopback_distrusted
-                    .map(|cause| {
-                        format!(
-                            " This browser reached dux over loopback, but {cause}, so dux \
-                             cannot tell it is this machine."
-                        )
-                    })
+                    .map(|cause| format!(" {}", route_refusal(a.classification.via, cause)))
                     .unwrap_or_default();
                 return refusal(
                     StatusCode::FORBIDDEN,
@@ -404,7 +406,7 @@ async fn change_password(
                     );
                 }
                 Verify::Blocked => return super::middleware::blocked(),
-                Verify::Wait(seconds) => return rate_limited(seconds),
+                Verify::Wait(limited) => return rate_limited(limited),
                 Verify::Busy => return busy(),
                 Verify::NoPassword | Verify::Stale => {
                     return refusal(
@@ -479,7 +481,9 @@ async fn change_password(
         ),
         Ok(Ok(Ok(hash))) => {
             match hash {
-                Some(hash) => state.auth.applied(|config| config.password_hash = hash),
+                Some(hash) => state
+                    .auth
+                    .applied(move |config| config.password_hash = hash.clone()),
                 None => state.auth.applied(|_| {}),
             }
             let mut response = StatusCode::NO_CONTENT.into_response();
@@ -546,4 +550,53 @@ fn stops_reload(
     problem.stops(surface)
         && !(surface == dux_core::config::Surface::DuxServer
             && problem.dux_server_override.is_some())
+}
+
+/// Why a device that might have been this machine or the tailnet was not,
+/// named by the route it really took (decided, after review: the sentence
+/// once said "over loopback" for connections that never touched it). An
+/// exhaustive match, so a new route cannot inherit another's words.
+fn route_refusal(via: super::provenance::Via, cause: &str) -> String {
+    use super::provenance::Via;
+    match via {
+        Via::PlainLoopback => format!(
+            "This browser reached dux over loopback, but {cause}, so dux cannot tell it is \
+             this machine."
+        ),
+        Via::OwnAddress => "This browser reached dux from one of this machine's own addresses, \
+             which a relay on this machine (socat, `ssh -L`, a proxy) looks exactly like, so dux \
+             cannot tell it is this machine."
+            .to_string(),
+        Via::Direct => format!(
+            "This device reached dux over the tailnet, but {cause}, so dux cannot treat it as \
+             the tailnet."
+        ),
+        Via::Forwarded => format!(
+            "This browser reached dux through tailscale serve, but {cause}, so dux cannot treat \
+             it as the tailnet."
+        ),
+    }
+}
+
+#[cfg(test)]
+mod route_refusal_tests {
+    use super::*;
+    use crate::auth::provenance::Via;
+
+    #[test]
+    fn only_the_loopback_route_is_said_to_be_loopback() {
+        for via in [
+            Via::PlainLoopback,
+            Via::OwnAddress,
+            Via::Direct,
+            Via::Forwarded,
+        ] {
+            let text = route_refusal(via, "something is unconfirmed");
+            assert_eq!(
+                text.contains("over loopback"),
+                via == Via::PlainLoopback,
+                "{via:?}: {text}"
+            );
+        }
+    }
 }

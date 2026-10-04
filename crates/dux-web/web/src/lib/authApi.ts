@@ -13,6 +13,7 @@ import {
   blockedWhere,
   brokenDetail,
   count,
+  limitedFrom,
   readErrorBody,
   record,
   refusalSentence,
@@ -119,7 +120,7 @@ export async function fetchAuthStatus(): Promise<StatusAnswer> {
 export type LoginAnswer =
   | { kind: "ok" }
   | { kind: "wrong" }
-  | { kind: "rate_limited"; retryAfterSeconds: number | null }
+  | { kind: "rate_limited"; retryAfterSeconds: number | null; from: string | null }
   | { kind: "blocked"; where: string | null }
   | { kind: "broken"; detail: string }
   | { kind: "unreachable"; timedOut: boolean }
@@ -151,6 +152,7 @@ export async function postLogin(password: string): Promise<LoginAnswer> {
         body.json,
         Date.now(),
       ),
+      from: limitedFrom(body.json),
     }
   }
   const where = blockedWhere(resp.status, body)
