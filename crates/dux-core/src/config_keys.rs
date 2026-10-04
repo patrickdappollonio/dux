@@ -561,6 +561,19 @@ fn write_value(
     path: &[String],
     value: Value,
 ) -> Result<SetReport> {
+    write_value_checked(config_path, missing, path, value, |_| Ok(()))
+}
+
+/// [`write_value`], with `check` run on the document under the same file
+/// lock as the write, before the value goes in: what it reads cannot change
+/// between the check and the write. An error from it writes nothing.
+fn write_value_checked(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    path: &[String],
+    value: Value,
+    mut check: impl FnMut(&DocumentMut) -> Result<()>,
+) -> Result<SetReport> {
     // Through the one value printer, as `get` prints too.
     let now = toml_value(&Item::Value(value.clone()))
         .and_then(|now| printed_value("", path, &now, ValueForm::Line))
@@ -570,6 +583,7 @@ fn write_value(
     // that adds a problem is refused.
     let (previous, remaining_problems) =
         crate::config_write::mutate_config_file_repairing(config_path, missing, path, |doc| {
+            check(doc)?;
             let previous = value_in_doc(doc, path);
             let had = provider_command_in(doc, path);
             prepare_provider(doc, path)?;
@@ -786,19 +800,25 @@ const PASSWORD_POLICY_KEYS: [&str; 3] = [
 /// error naming it: dux cannot tell what a new password has to meet, so it
 /// sets none until that key is fixed.
 pub fn current_password_policy(config_path: &Path) -> Result<crate::auth::PasswordPolicy> {
-    let defaults = crate::config::ServerAuthConfig::default().password_policy();
-    let raw = match std::fs::read_to_string(config_path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(defaults),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", config_path.display()));
+    match std::fs::read_to_string(config_path) {
+        Ok(raw) => password_policy_of(&raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(crate::config::ServerAuthConfig::default().password_policy())
         }
-    };
-    let file: toml::Table = toml::from_str(&raw).map_err(|e| {
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read {}", config_path.display()))
+        }
+    }
+}
+
+/// [`current_password_policy`] of the file's text `raw`.
+fn password_policy_of(raw: &str) -> Result<crate::auth::PasswordPolicy> {
+    let defaults = crate::config::ServerAuthConfig::default().password_policy();
+    let file: toml::Table = toml::from_str(raw).map_err(|e| {
         anyhow::anyhow!(
             "config.toml is not valid TOML ({}), so dux cannot tell what a new password has to \
              meet; fix it first",
-            crate::config::describe_toml_error(&raw, &e)
+            crate::config::describe_toml_error(raw, &e)
         )
     })?;
     let Some(server) = file.get("server") else {
@@ -856,7 +876,10 @@ pub struct PasswordSet {
 /// Check `password` against the minimums in `config_path`, hash it, and store
 /// the hash at `server.auth.password_hash` through the coordinated mutation
 /// path. The hash is made before the file lock is taken, so a slow hash never
-/// holds up another writer.
+/// holds up another writer; the minimums are read again under the lock, from
+/// the very text the hash is written into, and the password checked against
+/// them once more, so minimums raised meanwhile can never let a weaker
+/// password through.
 pub fn set_password(
     config_path: &Path,
     password: &Password,
@@ -885,12 +908,30 @@ pub fn set_password_with(
     let hash = crate::auth::hash_password(password)
         .map_err(|e| SetPasswordError::Failed(anyhow::Error::msg(e.to_string())))?;
     let path: Vec<String> = password_hash_path();
-    let report = write_value(config_path, missing, &path, Value::from(hash))
-        .map_err(SetPasswordError::Failed)?;
-    Ok(PasswordSet {
-        strength: check.strength,
-        remaining_problems: report.remaining_problems,
-    })
+    // The check that decides is the one under the lock.
+    let mut decided: Option<crate::auth::MinimumCheck> = None;
+    let written = write_value_checked(config_path, missing, &path, Value::from(hash), |doc| {
+        let policy = password_policy_of(&doc.to_string())?;
+        let check = crate::auth::check_minimums(password, &policy, user_inputs);
+        let passes = check.passes();
+        decided = Some(check);
+        if passes {
+            Ok(())
+        } else {
+            anyhow::bail!("the password does not meet the minimums the file sets now")
+        }
+    });
+    match (written, decided) {
+        (Ok(report), Some(check)) => Ok(PasswordSet {
+            strength: check.strength,
+            remaining_problems: report.remaining_problems,
+        }),
+        (Err(_), Some(check)) if !check.passes() => Err(SetPasswordError::BelowMinimums(check)),
+        (Err(error), _) => Err(SetPasswordError::Failed(error)),
+        (Ok(_), None) => Err(SetPasswordError::Failed(anyhow::anyhow!(
+            "the password was written without being checked against the file's minimums"
+        ))),
+    }
 }
 
 /// Store a [`SecretKind::Text`] value (an environment value) as given,
@@ -1847,6 +1888,29 @@ port = 3890
         assert!(err.contains("never given on the command line"), "{err}");
         let err = parse_value(&lookup("projects").unwrap(), "[]").unwrap_err();
         assert!(err.contains("projects"), "{err}");
+    }
+
+    /// A check run under the write's lock sees the document the value would
+    /// go into (so the password's minimums are read from the very text the
+    /// hash is written to), and when it refuses, nothing is written.
+    #[test]
+    fn a_check_under_the_lock_sees_the_document_and_a_refusal_writes_nothing() {
+        let (_dir, path) = temp_config("[server.auth]\nminimum_password_length = 40\n");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let mut seen = None;
+        let result = write_value_checked(
+            &path,
+            MissingConfig::CreateDocumented,
+            &password_hash_path(),
+            Value::from("x"),
+            |doc| {
+                seen = Some(password_policy_of(&doc.to_string())?.minimum_length);
+                anyhow::bail!("refused")
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(seen, Some(40));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]

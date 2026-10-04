@@ -462,7 +462,20 @@ fn set_secret(
     let user_inputs = user_inputs();
     let inputs: Vec<&str> = user_inputs.iter().map(String::as_str).collect();
     let password = if parsed.stdin {
-        secrets.read_stdin()?
+        secrets.read_stdin().map_err(|error| {
+            if !error.is::<StdinTooLarge>() {
+                error
+            } else if is_password {
+                anyhow!(
+                    "standard input held more than any password dux accepts; nothing was changed"
+                )
+            } else {
+                anyhow!(
+                    "standard input held an environment value larger than 1 MiB, which dux does \
+                     not accept; nothing was changed"
+                )
+            }
+        })?
     } else {
         let label = if is_password {
             "New web UI password".to_string()
@@ -713,20 +726,41 @@ fn refuse_terminal_stdin(stdin_is_terminal: bool) -> Result<()> {
     Ok(())
 }
 
-/// The most read from a pipe: the largest password any setting allows, plus a
-/// line break. More than that is refused rather than buffered.
-const STDIN_LIMIT: u64 = dux_core::config_auth::MAX_PASSWORD_BYTES_LIMIT as u64 + 2;
+/// The largest environment value `--stdin` accepts. A password has its own,
+/// smaller bound, `max_password_bytes`, which its policy check applies.
+const ENV_VALUE_STDIN_LIMIT: u64 = 1024 * 1024;
 
-/// Read a password from `input`: everything up to end of input, minus one
+/// The most read from a pipe: the largest value accepted, plus a line break.
+/// More than that is refused rather than buffered.
+const STDIN_LIMIT: u64 = ENV_VALUE_STDIN_LIMIT + 2;
+
+/// Standard input held more than [`STDIN_LIMIT`]. The caller words it, since
+/// only it knows whether a password or an environment value was being read.
+#[derive(Debug)]
+struct StdinTooLarge;
+
+impl std::fmt::Display for StdinTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "standard input held more than 1 MiB, more than any value dux accepts; nothing was \
+             changed"
+        )
+    }
+}
+
+impl std::error::Error for StdinTooLarge {}
+
+/// Read a secret from `input`: everything up to end of input, minus one
 /// trailing `\n` or `\r\n`, in a buffer wiped on drop.
 fn read_secret(input: impl Read) -> Result<Password> {
     let mut bytes = Zeroizing::new(Vec::new());
     input
         .take(STDIN_LIMIT + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| anyhow!("could not read the password from standard input: {e}"))?;
+        .map_err(|e| anyhow!("could not read standard input: {e}"))?;
     if bytes.len() as u64 > STDIN_LIMIT {
-        bail!("standard input held more than any password dux accepts; nothing was changed");
+        return Err(StdinTooLarge.into());
     }
     if bytes.ends_with(b"\n") {
         bytes.pop();
@@ -1159,9 +1193,19 @@ port = 3890
     }
 
     #[test]
-    fn stdin_beyond_any_allowed_password_is_refused() {
+    fn stdin_beyond_any_allowed_value_is_refused() {
         let huge = "x".repeat(STDIN_LIMIT as usize + 10);
-        assert!(read_secret(huge.as_bytes()).is_err());
+        assert!(
+            read_secret(huge.as_bytes())
+                .unwrap_err()
+                .is::<StdinTooLarge>()
+        );
+        // An environment value up to 1 MiB is read whole.
+        let large = "x".repeat(ENV_VALUE_STDIN_LIMIT as usize);
+        assert_eq!(
+            read_secret(large.as_bytes()).unwrap().byte_len(),
+            large.len()
+        );
         assert_eq!(read_secret(&b"abc\r\n"[..]).unwrap().expose(), "abc");
         assert_eq!(
             read_secret(&b"two\nlines\n"[..]).unwrap().expose(),
@@ -2081,5 +2125,8 @@ mod hidden_values_tests;
 
 #[cfg(test)]
 mod password_control_characters_tests;
+
 #[cfg(test)]
 mod restore_report_and_unknown_path_tests;
+#[cfg(test)]
+mod stdin_limits_tests;

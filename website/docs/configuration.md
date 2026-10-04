@@ -89,9 +89,9 @@ dux config set providers.claude.command claude
   new name adds a provider, starting with its command: `set providers.<name>.command`
   first, and `set` refuses anything that would leave a provider without a command.
 - Environment values are treated as secrets, since that is where API tokens live.
-  `dux config set env.GITHUB_TOKEN` asks for the value without echoing it (or reads it
-  from a pipe with `--stdin`) and never takes it as an argument, and it reports only that
-  the value was updated. `get` on `env`, an `env.<NAME>` value or `projects` says whether
+  `dux config set env.GITHUB_TOKEN` asks for the value without echoing it (or reads it,
+  up to 1 MiB, from a pipe with `--stdin`) and never takes it as an argument, and it
+  reports only that the value was updated. `get` on `env`, an `env.<NAME>` value or `projects` says whether
   it is set but prints the value only when you add `--show`.
 - A misspelled setting is refused with the closest real one. The message repeats only the
   part of the name that exists, never what you typed after it, in case that was a value
@@ -257,7 +257,9 @@ address from `blocked_addresses` and the block lifts at once.
 
 > [!IMPORTANT]
 > A mistake in `[server.auth]` is never read as "no password". A misspelled key, a value
-> of the wrong type, a `password_hash` dux will not use, or a `config.toml` that is not
+> of the wrong type, a `password_hash` dux will not use, a password setting written
+> outside `[server.auth]` (`require` directly under `[server]`, a `password-hash` under
+> any spelling, a `[server.authentication]` table), or a `config.toml` that is not
 > valid TOML at all stops dux from starting, with a message naming the file and the
 > problem, and a reload while it runs changes nothing until the file is fixed.
 > When the section is invalid, `dux config get` and `dux config set` keep working, so

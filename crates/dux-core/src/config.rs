@@ -3089,13 +3089,56 @@ fn take_auth_section(doc: &mut toml::Table) -> Result<ServerAuthConfig, ConfigLo
     parse_auth_value(auth).map_err(ConfigLoadProblem::AuthInvalid)
 }
 
+/// The one form auth key names are matched in: lowercased, with `-` and `_`
+/// removed, so `password_hash`, `password-hash`, `passwordHash` and
+/// `PASSWORD_HASH` are one name. The stray-hash rule, the misplaced-setting
+/// rule and the auth-like table rule all compare through it.
+fn auth_key_form(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '-' | '_'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Whether `name` is, in [`auth_key_form`], a setting `[server.auth]` has.
+fn is_auth_key(name: &str) -> bool {
+    let form = auth_key_form(name);
+    crate::config_auth::auth_setting_names()
+        .iter()
+        .chain(std::iter::once(&"password_hash".to_string()))
+        .any(|known| auth_key_form(known) == form)
+}
+
+/// Whether `name` names a password hash: in [`auth_key_form`], or as the
+/// last part of a dotted name written as one key (`"auth.password_hash"`).
+fn names_a_password_hash(name: &str) -> bool {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    auth_key_form(last) == auth_key_form("password_hash")
+}
+
+/// Whether a table named `name` reads as meant for the auth settings: in
+/// [`auth_key_form`] it is "auth", within two edits of it, or one of the
+/// longer words for it ("authentication", "login").
+fn auth_like_name(name: &str) -> bool {
+    let form = auth_key_form(name);
+    form == "auth"
+        || edit_distance(&form, "auth") <= 2
+        || form == "authentication"
+        || form == "login"
+}
+
 /// A password hash, or an `auth` table, where dux does not read one, and
 /// where a misplaced auth setting could plausibly be: a `password_hash` at
 /// the top level, directly under `[server]`, or inside an auth-like table (a
-/// table at the top level or under `[server]` whose name is within two edits
-/// of "auth": `[server.auht]`, `[server.Auth]`, a top-level `[auht]`), and
-/// each such auth-like table itself when it holds a setting `[server.auth]`
-/// has. dux would start without the password the user meant to set, so each
+/// table at the top level or under `[server]` whose name reads as "auth":
+/// `[server.auht]`, `[server.Auth]`, `[server.authentication]`,
+/// `[server.login]`, a top-level `[auht]`), and each such auth-like table
+/// itself when it holds a setting `[server.auth]` has. Any setting
+/// `[server.auth]` has, written directly at the top level or directly under
+/// `[server]` (`require` one level too high), is one too: none of those
+/// names is a setting there, so it can only be an auth setting in the wrong
+/// place, and reading it as nothing would read a mistake as less
+/// protection. Every name is matched in [`auth_key_form`]. dux would start without the password the user meant to set, so each
 /// is a problem that stops the start, named by where it is (never its
 /// value), saying where it belongs, and attributed to that place.
 ///
@@ -3151,12 +3194,21 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
         };
         Problem::about(place, message)
     };
-    let auth_settings = crate::config_auth::auth_setting_names();
-    // A table under a name close to "auth" that holds one of its settings.
+    // A table under a name that reads as "auth" that holds one of its
+    // settings.
     let near_auth = |name: &str, table: &toml::Table| {
-        let name = name.to_lowercase();
-        (name == "auth" || edit_distance(&name, "auth") <= 2)
-            && table.keys().any(|key| auth_settings.contains(key))
+        auth_like_name(name) && table.keys().any(|key| is_auth_key(key))
+    };
+    // An auth setting written directly where it is not read.
+    let one_level_off = |place: Vec<String>| {
+        let shown = shown_path(raw, &place);
+        Problem::about(
+            place,
+            format!(
+                "{shown} is not read: the web UI password settings belong in [server.auth], so \
+                 dux will not start until it is moved there or removed"
+            ),
+        )
     };
     let mut problems = Vec::new();
     // A password hash anywhere but the real `[server.auth]`, whatever the
@@ -3170,6 +3222,10 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
     );
     problems.extend(found.into_iter().map(stray));
     for (name, value) in &file {
+        // A password hash here is already a stray hash above.
+        if is_auth_key(name) && !names_a_password_hash(name) {
+            problems.push(one_level_off(key_path(&[name])));
+        }
         let Some(table) = value.as_table() else {
             continue;
         };
@@ -3183,7 +3239,7 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
     // A `[server]` that is not a table (an array of tables, a value) holding
     // a password hash or an auth-like table anywhere inside it.
     if let Some(server) = file.get("server").filter(|server| !server.is_table())
-        && holds_auth_setting(server, &auth_settings)
+        && holds_auth_setting(server, true)
     {
         problems.push(Problem::about(
             key_path(&["server"]),
@@ -3194,6 +3250,9 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
     }
     if let Some(server) = file.get("server").and_then(toml::Value::as_table) {
         for (name, value) in server {
+            if name != "auth" && is_auth_key(name) && !names_a_password_hash(name) {
+                problems.push(one_level_off(key_path(&["server", name])));
+            }
             let Some(table) = value.as_table() else {
                 continue;
             };
@@ -3207,7 +3266,8 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
 }
 
 /// Every key holding a password hash in `value` (a whole config file at
-/// `path`), with its path: a key named `password_hash` in any case, or one
+/// `path`), with its path: a key named `password_hash` in any spelling
+/// [`auth_key_form`] makes one (`password-hash`, `passwordHash`), or one
 /// whose dotted name ends in it (`"auth.password_hash"`), anywhere but the
 /// real `[server.auth] password_hash`. Never where the key is a NAME the
 /// user chose (see [`names_a_user_entry`]): `[env] password_hash`, a provider
@@ -3224,9 +3284,10 @@ fn stray_password_hashes(
             for (key, child) in table {
                 let a_name = names_a_user_entry(path);
                 path.push(key.clone());
-                let lower = key.to_lowercase();
-                let names_a_hash = lower == "password_hash" || lower.ends_with(".password_hash");
-                if names_a_hash && !a_name && *path != ["server", "auth", "password_hash"] {
+                if names_a_password_hash(key)
+                    && !a_name
+                    && *path != ["server", "auth", "password_hash"]
+                {
                     found.push(path.clone());
                 }
                 stray_password_hashes(child, path, found);
@@ -3255,25 +3316,22 @@ fn names_a_user_entry(parent: &[String]) -> bool {
     }
 }
 
-/// Whether `value` holds, anywhere inside it, a `password_hash` or a table
-/// under a name close to "auth" holding one of `auth_settings`.
-fn holds_auth_setting(value: &toml::Value, auth_settings: &[String]) -> bool {
+/// Whether `value` (a `[server]` that is not a table) holds, anywhere inside
+/// it, a password hash or a table under a name that reads as "auth" holding
+/// an auth setting, or, `direct`ly in it (an entry of the array it is), an
+/// auth setting itself. Names are matched in [`auth_key_form`].
+fn holds_auth_setting(value: &toml::Value, direct: bool) -> bool {
     match value {
         toml::Value::Table(table) => table.iter().any(|(key, child)| {
-            let near = {
-                let key = key.to_lowercase();
-                key == "auth" || edit_distance(&key, "auth") <= 2
-            };
-            key == "password_hash"
-                || (near
+            names_a_password_hash(key)
+                || (direct && is_auth_key(key))
+                || (auth_like_name(key)
                     && child
                         .as_table()
-                        .is_some_and(|t| t.keys().any(|k| auth_settings.contains(k))))
-                || holds_auth_setting(child, auth_settings)
+                        .is_some_and(|t| t.keys().any(|k| is_auth_key(k))))
+                || holds_auth_setting(child, false)
         }),
-        toml::Value::Array(items) => items
-            .iter()
-            .any(|item| holds_auth_setting(item, auth_settings)),
+        toml::Value::Array(items) => items.iter().any(|item| holds_auth_setting(item, direct)),
         _ => false,
     }
 }
@@ -7647,6 +7705,71 @@ max_websocket_connections = 16
     /// `password_hash` outside `[server.auth]`, or a table named "auth" (or
     /// within two edits of it) under `[server]` or at the top level stops the
     /// start, naming where it is and where it belongs, never the hash.
+    /// The misplaced-setting rule reads any `[server.auth]` name written
+    /// directly at the top level or under `[server]` as an auth setting in
+    /// the wrong place. That holds only while no setting there shares its
+    /// name in [`auth_key_form`]; this pins it.
+    #[test]
+    fn no_auth_setting_shares_a_name_with_a_server_or_top_level_setting() {
+        let tree = serde_json::to_value(Config::default()).unwrap();
+        let names = |value: &serde_json::Value| -> Vec<String> {
+            value
+                .as_object()
+                .map(|map| map.keys().cloned().collect())
+                .unwrap_or_default()
+        };
+        let mut clashes = Vec::new();
+        for name in names(&tree).into_iter().chain(names(&tree["server"])) {
+            if name != "auth" && is_auth_key(&name) {
+                clashes.push(name);
+            }
+        }
+        assert!(clashes.is_empty(), "{clashes:?}");
+    }
+
+    /// An auth setting one level too high, any spelling of a password hash,
+    /// and an auth-like table under a longer word all stop the start; a name
+    /// the user chose stays exempt.
+    #[test]
+    fn auth_settings_in_any_spelling_or_one_level_off_stop_the_start() {
+        for body in [
+            "require = \"everywhere\"\n",
+            "[server]\nrequire = \"everywhere\"\n",
+            "[server]\nminimum-password-length = 20\n",
+            "[server]\nCookieSecure = \"always\"\n",
+            "[server]\npassword-hash = \"x\"\n",
+            "[server]\npasswordHash = \"x\"\n",
+            "password-hash = \"x\"\n",
+            "[ui]\nPassword-Hash = \"x\"\n",
+            "[server.authentication]\nrequire = \"everywhere\"\n",
+            "[server.login]\nrequire = \"everywhere\"\n",
+            "[server.Au-th]\nrequire = \"everywhere\"\n",
+            "[authentication]\nrequire = \"everywhere\"\n",
+            "server = [{ require = \"everywhere\" }]\n",
+            "[macros.m]\ntext = \"x\"\nsurface = \"agent\"\npassword-hash = \"x\"\n",
+        ] {
+            let problems = misplaced_auth_problems(body);
+            assert!(!problems.is_empty(), "{body}");
+            assert!(
+                problems.iter().all(|p| p.contains("[server.auth]")),
+                "{body}: {problems:?}"
+            );
+        }
+        for body in [
+            "[env]\npassword-hash = \"x\"\n",
+            "[providers.password-hash]\ncommand = \"x\"\n",
+            "[server.authentication]\nx = 1\n",
+            "[server.login]\nbanner = \"hi\"\n",
+            "[auth]\nusername = \"ada\"\n",
+        ] {
+            assert_eq!(
+                misplaced_auth_problems(body),
+                Vec::<String>::new(),
+                "{body}"
+            );
+        }
+    }
+
     #[test]
     fn a_password_hash_in_a_misspelled_place_stops_the_start() {
         let hash = a_password_hash();

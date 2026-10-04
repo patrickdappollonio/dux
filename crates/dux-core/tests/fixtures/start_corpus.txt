@@ -25,6 +25,16 @@
 #   starts as it did then. A field INSIDE a provider, a macro or a
 #   `[[projects]]` entry is a field of dux's schema, not a name, so a
 #   `password_hash` there is misplaced and stops both surfaces.
+# - A setting `[server.auth]` has, written directly at the top level or
+#   directly under `[server]` (`require = "everywhere"` one level too high),
+#   stops both surfaces: none of those names is a setting there, so it can
+#   only be a misplaced auth setting, and 7437238c reading it as nothing read
+#   a mistake as less protection. So does a table under a longer word for it
+#   (`[server.authentication]`, `[server.login]`) holding one. Auth key names
+#   are matched lowercased with `-` and `_` taken out, so `password-hash`,
+#   `passwordHash` and `minimum-password-length` are the names they look
+#   like; a name the user chose (`[env] password-hash`, a provider called
+#   that) stays just a name.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
@@ -451,6 +461,28 @@ start start "[macros.password_hash]\ntext = \"hi\"\nsurface = \"agent\"\n"
 start start "[providers.password_hash]\ncommand = \"x\"\n"
 refuse(was:start) refuse(was:start) "[providers.mytool]\ncommand = \"x\"\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
 start start "[[projects]]\nid = \"a\"\npath = \"/tmp/dux-corpus-a\"\n[projects.env]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[server]\nrequire = \"everywhere\"\n\n[server.auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[server]\nrequire = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "require = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "[server]\nminimum_password_length = 20\n"
+refuse(was:start) refuse(was:start) "[server]\nminimum-password-length = 20\n"
+refuse(was:start) refuse(was:start) "max_failed_logins = 3\n"
+refuse(was:start) refuse(was:start) "[server]\ncookieSecure = \"always\"\n"
+refuse(was:start) refuse(was:start) "[server]\npassword-hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[server]\npasswordHash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "password-hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[ui]\nPassword-Hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[macros.greet]\ntext = \"hi\"\nsurface = \"agent\"\npassword-hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[server.authentication]\nrequire = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "[server.login]\nrequire = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "[server.Au-th]\nrequire = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "[authentication]\nrequire = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "[login]\nmax_failed_logins = 3\n"
+refuse refuse(was:start) "server = [{ require = \"everywhere\" }]\n"
+start start "[server.authentication]\nx = 1\n"
+start start "[server.login]\nbanner = \"hi\"\n"
+refuse start "[env]\npassword-hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+start start "[providers.password-hash]\ncommand = \"x\"\n"
 
 # Every case above that is TOML with at least one table, written again twice:
 # once with each section as an inline table (`server = { port = 4000 }`,
