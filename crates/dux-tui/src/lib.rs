@@ -224,7 +224,8 @@ pub fn help_text() -> &'static str {
                                    values included: redact before sharing.\n\
           dux config reset         Remove config and logs (keeps agents and worktrees)\n\
           dux config reset --all   Full factory reset (config, logs, sessions, worktrees)\n\
-          dux config regenerate    Preview a fresh default config (shows diff)\n\
+          dux config regenerate    Preview a fresh default config (shows diff;\n\
+                                   sensitive values hidden unless --show)\n\
           dux config regenerate --yes\n\
                                    Overwrite the config file with fresh defaults\n\n\
          Environment variables:\n\

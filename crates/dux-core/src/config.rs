@@ -4259,6 +4259,12 @@ pub fn name_is_hidden(_raw: &str, segments: &[String]) -> bool {
     first_hidden(segments).is_some_and(|(index, _)| index + 1 == segments.len())
 }
 
+/// Whether any part of `parts` (a path that may run through arrays) is one
+/// the formatter never prints, so nothing at or below it is printed either.
+pub fn first_hidden_part_of(parts: &[PathPart<'_>]) -> bool {
+    first_hidden_part(parts).is_some()
+}
+
 /// [`name_is_hidden`] for a path that may run through arrays: whether its
 /// last part, a key, is one the formatter never prints.
 pub fn part_is_hidden(parts: &[PathPart<'_>]) -> bool {

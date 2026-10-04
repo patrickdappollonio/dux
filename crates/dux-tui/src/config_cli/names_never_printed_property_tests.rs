@@ -117,6 +117,23 @@ fn printed(body: &str) -> Vec<(String, String)> {
             crate::cli::collect_config_changes(&config).join("\n"),
         ));
     }
+    said.extend(previews(body, false));
+    said
+}
+
+/// The previews of `dux config regenerate` and `dux config restore-docs`,
+/// with `show` as given, as each prints them.
+fn previews(body: &str, show: bool) -> Vec<(String, String)> {
+    let mut said = vec![(
+        format!("regenerate preview (show {show})"),
+        crate::cli::regenerate_preview(body, &crate::config::render_default_config(), show),
+    )];
+    if let Ok(restored) = crate::config::restore_documentation(body) {
+        said.push((
+            format!("restore-docs preview (show {show})"),
+            crate::cli::restore_docs_preview(body, &restored.text, show),
+        ));
+    }
     said
 }
 
@@ -232,6 +249,8 @@ fn a_plaintext_password_reaches_no_printer_even_with_show() {
             let body = position.replace("{V}", bare);
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
             let mut said = printed(&body);
+            // `--show` makes no exception for a plaintext password.
+            said.extend(previews(&body, true));
             let tmp = tempfile::tempdir().expect("tempdir");
             let paths = paths_in(tmp.path());
             for args in [

@@ -31,13 +31,15 @@ pub fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
         }
         "regenerate" => {
             let yes = args[1..].iter().any(|a| a == "--yes");
-            reject_unknown_flags(&args[1..], &["--yes"])?;
-            run_regenerate(paths, yes)
+            let show = args[1..].iter().any(|a| a == "--show");
+            reject_unknown_flags(&args[1..], &["--yes", "--show"])?;
+            run_regenerate(paths, yes, show)
         }
         "restore-docs" => {
             let yes = args[1..].iter().any(|a| a == "--yes");
-            reject_unknown_flags(&args[1..], &["--yes"])?;
-            run_restore_docs(paths, yes)
+            let show = args[1..].iter().any(|a| a == "--show");
+            reject_unknown_flags(&args[1..], &["--yes", "--show"])?;
+            run_restore_docs(paths, yes, show)
         }
         "path" => {
             println!("{}", paths.config_path.display());
@@ -99,11 +101,14 @@ Subcommands:
                            redact it before sharing.
   dux config reset         Remove config and logs (keeps agents and worktrees)
   dux config reset --all   Full factory reset: remove config, logs, sessions, and worktrees
-  dux config regenerate    Preview a fresh default config (shows diff)
+  dux config regenerate    Preview a fresh default config (shows diff; [env]
+                           and other sensitive values are hidden unless you
+                           add --show)
   dux config regenerate --yes
                            Overwrite the config file with fresh defaults
   dux config restore-docs  Preview re-adding the explanatory comments to your
-                           config, keeping every value you have set
+                           config, keeping every value you have set (hides
+                           values like regenerate; --show reveals them)
   dux config restore-docs --yes
                            Apply it (writes a timestamped backup first)"
     );
@@ -427,7 +432,7 @@ fn format_value(raw: &str, path: &[String], value: &serde_json::Value) -> String
 // ---------------------------------------------------------------------------
 
 #[allow(deprecated)] // blessed sync-direct: `dux config regenerate` is a CLI-only, one-shot boot tool
-fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
+fn run_regenerate(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
     let fresh = config::render_default_config();
 
     if !yes {
@@ -438,7 +443,7 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
                 println!("config already matches defaults, so there is nothing to do");
                 return Ok(());
             }
-            print_unified_diff("current", "default", &current, &fresh);
+            print!("{}", regenerate_preview(&current, &fresh, show));
             if let Some(note) = regenerate_password_note(&current) {
                 println!("\n{note}");
             }
@@ -503,7 +508,7 @@ fn regenerate_password_note(current: &str) -> Option<&'static str> {
 /// unparseable config is refused outright, because the whole point of the
 /// command is to be the safe alternative to a defaults-based rewrite.
 #[allow(deprecated)] // blessed sync-direct: CLI-only, one-shot, runs before any engine/queue exists
-fn run_restore_docs(paths: &DuxPaths, yes: bool) -> Result<()> {
+fn run_restore_docs(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
     if !paths.config_path.exists() {
         println!("no config file found at {}", paths.config_path.display());
         println!("dux writes a fully commented config the first time it starts.");
@@ -532,7 +537,7 @@ fn run_restore_docs(paths: &DuxPaths, yes: bool) -> Result<()> {
     }
 
     if !yes {
-        print_unified_diff("current", "restored", &raw, &restored.text);
+        print!("{}", restore_docs_preview(&raw, &restored.text, show));
         print_restore_report(&restored);
         println!("\nRun `dux config restore-docs --yes` to apply this (a timestamped backup");
         println!("of your current config is written first).");
@@ -647,12 +652,46 @@ fn render_config_for_diff(config: &Config, bindings: &RuntimeBindings) -> String
 }
 
 fn print_unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) {
+    print!("{}", unified_diff(label_a, label_b, a, b));
+}
+
+fn unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) -> String {
     let diff = similar::TextDiff::from_lines(a, b);
-    println!("--- {label_a}");
-    println!("+++ {label_b}");
+    let mut out = format!("--- {label_a}\n+++ {label_b}\n");
     for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
-        println!("{hunk}");
+        out.push_str(&format!("{hunk}\n"));
     }
+    out
+}
+
+/// The user's file `raw` as a preview may print it: every line through the
+/// one value printer's rules (see `config_keys::shown_file_text`), so a
+/// plaintext password is never shown and, without `show`, nothing below a
+/// hidden key or in `[env]` or `[projects]` either.
+fn shown_for_preview(raw: &str, show: bool) -> String {
+    dux_core::config_keys::shown_file_text(raw, show, &crate::config::binding_is_understood)
+}
+
+/// What `dux config regenerate` previews: the user's file against the
+/// fresh default, each side shown as a printer may show it.
+pub(crate) fn regenerate_preview(current: &str, fresh: &str, show: bool) -> String {
+    unified_diff(
+        "current",
+        "default",
+        &shown_for_preview(current, show),
+        &shown_for_preview(fresh, show),
+    )
+}
+
+/// What `dux config restore-docs` previews: the user's file against the
+/// documented one, each side shown as a printer may show it.
+pub(crate) fn restore_docs_preview(raw: &str, restored: &str, show: bool) -> String {
+    unified_diff(
+        "current",
+        "restored",
+        &shown_for_preview(raw, show),
+        &shown_for_preview(restored, show),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2282,3 +2321,7 @@ mod config_diff_names_tests {
         assert!(!changes.contains(TOKEN), "{changes}");
     }
 }
+
+#[cfg(test)]
+#[path = "cli/preview_leak_tests.rs"]
+mod preview_leak_tests;
