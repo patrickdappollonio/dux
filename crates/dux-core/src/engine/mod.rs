@@ -24,6 +24,8 @@ mod races_review2_tests;
 #[cfg(test)]
 mod races_review3_tests;
 #[cfg(test)]
+mod races_review4_tests;
+#[cfg(test)]
 mod removal_review_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -37,10 +39,9 @@ pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, BranchDeleteInputs, DeleteTerminalView,
-    DetachedSession, DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView,
-    EventReaction, FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, RemovedBranches, StatusUpdate, WorktreeRemoval,
-    survivors_kept_worktree_message,
+    DetachedSession, DispatchAgentLaunchView, EventReaction, FinishDeleteSessionOutcome,
+    FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, RemovedBranches,
+    StatusUpdate, WorktreeRemoval, survivors_kept_worktree_message,
 };
 pub(crate) use events::{
     end_agent_processes_before_removal, occupant_after_wait, occupied_after_wait_message,

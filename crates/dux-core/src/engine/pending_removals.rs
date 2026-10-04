@@ -131,6 +131,9 @@ impl Engine {
             delete_branch: removal.delete_branch,
             process_sessions: sessions,
             process_snapshot: known,
+            // Filled in below, and kept current from then on, by the registry's
+            // one write path.
+            process_registry: Default::default(),
         };
         if let Err(err) = self.session_store.insert_pending_worktree_removal(&row) {
             crate::logger::error(&format!(
@@ -138,12 +141,16 @@ impl Engine {
                 removal.session_id
             ));
         }
-        self.process_registry
-            .set_pending_removal_store(&self.paths.sessions_db_path);
+        self.process_registry.watch_pending(
+            &removal.session_id,
+            std::path::Path::new(&removal.managed.worktree_path),
+            &self.paths.sessions_db_path,
+        );
     }
 
     /// Clear a pending removal's row on the engine's own connection.
     pub(crate) fn forget_pending_removal(&self, session_id: &str) {
+        self.process_registry.unwatch_pending(session_id);
         if let Err(err) = self
             .session_store
             .delete_pending_worktree_removal(session_id)
@@ -300,8 +307,18 @@ impl Engine {
         let _ = self
             .worker_tx
             .send(WorkerEvent::PollerStatus(op.pending_status()));
+        // The registry the live run had for this folder, rebuilt from the row
+        // with the same types, so the resumed removal asks the same questions:
+        // which sessions to end, what was recorded running in them, and which
+        // belong to a standalone agent (never ended; they keep the folder).
+        let row_registry =
+            crate::process_sessions::AgentProcessRegistry::from_snapshot(&row.process_registry);
+        let folder = std::path::Path::new(&row.managed.worktree_path);
+        let standalone = row_registry.standalone_sessions_in(folder);
         let mut sessions = row.process_sessions.clone();
-        sessions.extend(self.process_sessions_in(std::path::Path::new(&row.managed.worktree_path)));
+        sessions.extend(row_registry.sessions_in(folder));
+        sessions.extend(self.process_sessions_in(folder));
+        sessions.retain(|session| !standalone.contains(session));
         sessions.sort_by_key(|session| session.sid);
         sessions.dedup();
         // Sessions an earlier run recorded: a leaderless one is acted on only
@@ -315,7 +332,7 @@ impl Engine {
             snapshot: std::sync::Arc::new(snapshot),
             grace: self.individual_close_grace(),
         };
-        let registry = self.process_registry.clone();
+        let registry = row_registry;
         let db_path = self.paths.sessions_db_path.clone();
         // The same claim a delete takes, so nothing new starts in the folder
         // while it is being finished, and a second removal of it joins this one.

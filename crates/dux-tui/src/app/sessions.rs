@@ -2055,15 +2055,10 @@ impl App {
         }
     }
 
-    /// Delete the agent session identified by `session_id`, blocking the calling
-    /// thread for any git work. A synchronous test entry point for the
-    /// `Command::DoDeleteSession` behavior; production deletes go through
-    /// [`begin_delete_session`] so git work runs off the UI thread.
-    ///
-    /// When `delete_worktree` is true and no other sessions share the worktree,
-    /// the git worktree and branch are removed first; a failed git removal
-    /// preserves the session record so the caller can retry. When it is false,
-    /// the worktree and branch are always preserved.
+    /// Delete an agent through the one real pipeline, as a test drives it:
+    /// `begin_delete_session`, then the reaper and the worker events until the
+    /// delete's removal (if any) has reported. A failure the status line
+    /// reports as an error comes back as `Err` with that sentence.
     #[cfg(test)]
     pub(crate) fn do_delete_session(
         &mut self,
@@ -2071,12 +2066,19 @@ impl App {
         delete_worktree: bool,
         delete_branch: Option<bool>,
     ) -> Result<()> {
-        let reaction = self.engine.apply(Command::DoDeleteSession {
-            session_id: session_id.to_string(),
-            delete_worktree,
-            delete_branch,
-        })?;
-        self.apply_reaction(reaction);
+        self.begin_delete_session(session_id, delete_worktree, delete_branch);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while self.pending_delete_ops.contains_key(session_id)
+            || self.engine.pending_deletions.contains(session_id)
+        {
+            assert!(Instant::now() < deadline, "the delete never finished");
+            self.apply_reaped_terminations();
+            self.drain_events();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if self.status.tone() == crate::statusline::StatusTone::Error {
+            anyhow::bail!("{}", self.status.text());
+        }
         Ok(())
     }
 
@@ -7207,12 +7209,13 @@ mod tests {
         );
     }
 
-    /// If git fails to remove the worktree, the session record must remain.
-    /// Otherwise the user loses their agent with no way to retry. We force
-    /// the git call to fail by pointing the project path at a directory that
-    /// is not a git repository.
+    /// If git fails to remove the worktree, the folder is untouched and the
+    /// failure is said out loud, naming git and the worktree. (The agent's
+    /// record leaves the list at once, as every delete's does; the worktree
+    /// stays on disk for the worktree manager.) We force the git call to fail
+    /// by pointing the project path at a directory that is not a repository.
     #[test]
-    fn do_delete_session_preserves_session_when_git_fails() {
+    fn do_delete_session_reports_a_git_failure_and_keeps_the_folder() {
         let project_dir = tempdir().expect("project tempdir");
         // Intentionally NOT a git repo, so `git worktree remove` will exit
         // non-zero, which bubbles up as Err from git::remove_worktree.
@@ -7236,10 +7239,6 @@ mod tests {
             "error should mention git/worktree, got: {msg}",
         );
 
-        assert!(
-            app.engine.sessions.iter().any(|s| s.id == "s1"),
-            "session must be preserved when git fails so user can retry",
-        );
         assert!(
             worktree_dir.path().exists(),
             "worktree directory should be untouched on failure",

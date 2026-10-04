@@ -33,7 +33,7 @@ use crate::config::DuxPaths;
 use crate::git;
 use crate::model::{AgentSession, Project};
 use crate::worker::ProjectWorktreeEntry;
-use crate::worktree_ops::{RemovalLease, WorktreeOps, describe_holders};
+use crate::worktree_ops::{WorktreeOps, describe_holders};
 
 /// One row of the worktree manager: a managed worktree of a project, and
 /// everything both surfaces need to render and decide.
@@ -283,7 +283,10 @@ pub fn remove_managed_worktree(
 /// starts in the folder from here on. [`Self::run`] does the slow part on a
 /// worker thread.
 pub struct AdmittedRemoval {
-    pub(crate) lease: RemovalLease,
+    /// The registry the removal claims the folder in, once git's own listing
+    /// has confirmed it is one of the project's worktrees: nothing is claimed
+    /// before that.
+    pub(crate) ops: WorktreeOps,
     pub(crate) project: Project,
     pub(crate) paths: DuxPaths,
     /// The sessions as they were when the removal was admitted. Taken at the
@@ -304,7 +307,7 @@ impl AdmittedRemoval {
     /// What the removal will wait for before it runs, if anything: the busy
     /// sentence names it.
     pub fn waiting_for(&self) -> Option<String> {
-        let holders = self.lease.holders();
+        let holders = self.ops.holders(&self.requested);
         (!holders.is_empty()).then(|| describe_holders(&holders))
     }
 
@@ -312,7 +315,7 @@ impl AdmittedRemoval {
     /// classify and remove it. Shells to git and blocks: worker threads only.
     pub fn run(self) -> Result<RemovalOutcome, String> {
         let Self {
-            lease,
+            ops,
             project,
             paths,
             sessions,
@@ -336,17 +339,44 @@ impl AdmittedRemoval {
                     &requested,
                 )
             });
-        let refusal = match classified {
+        let refusal = |classified: Result<RemovalResolution, String>| match classified {
             Ok(RemovalResolution::Removable { .. }) => None,
             Ok(RemovalResolution::NotManaged) => Some(Ok(RemovalOutcome::NotManaged)),
             Ok(RemovalResolution::Attached) => Some(Ok(RemovalOutcome::Attached)),
             Err(message) => Some(Err(message)),
         };
-        if let Some(refusal) = refusal {
-            lease.finish(Ok(crate::engine::RemovedBranches::Kept(
-                crate::model::BranchKeptReason::UserDeclined,
-            )));
-            return refusal;
+        // Refused before anything is claimed: a path that is not a listed
+        // worktree root of this project (a folder inside one, the checkout,
+        // a home folder) never reads "being removed", not even briefly.
+        if let Some(refused) = refusal(classified) {
+            return refused;
+        }
+        let lease = match ops.announce_removal(&requested) {
+            crate::worktree_ops::RemovalClaim::Lead(lease) => lease,
+            crate::worktree_ops::RemovalClaim::Join(_) => return Ok(RemovalOutcome::BeingRemoved),
+        };
+        // Re-validated under the claim: the listing and any agent being
+        // created there, now that nothing new can start in the folder.
+        let reclassified = git::list_worktrees(Path::new(&project.path))
+            .map_err(|e| format!("{e:#}"))
+            .map(|worktrees| {
+                resolve_removal(
+                    crate::project_browser::classify_project_worktrees(
+                        &project, &paths, &sessions, worktrees,
+                    ),
+                    &requested,
+                )
+            });
+        let refused = refusal(reclassified).or_else(|| {
+            lease
+                .holders()
+                .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
+                .then_some(Ok(RemovalOutcome::Attached))
+        });
+        if let Some(refused) = refused {
+            // Dropping the lease unfinished withdraws the claim.
+            drop(lease);
+            return refused;
         }
         if let Err(still) = lease.wait_for_holders(wait) {
             let message = crate::engine::removal::removal_wait_expired_message(

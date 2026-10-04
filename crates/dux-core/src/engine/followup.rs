@@ -187,7 +187,6 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // surface holds in its own pending map (absent on the other).
             | EventReaction::WorktreeRemoveWaiting { .. }
             | EventReaction::FinishDeleteSessionView(_)
-            | EventReaction::DoDeleteSessionView(_)
             | EventReaction::BeginDeleteSessionView(_)
             // A create-agent branch inspection continuing. The web has no
             // follow-up for it at all (it validates and dispatches inside its own

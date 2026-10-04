@@ -38,7 +38,7 @@ const START_TIME_SLACK_SECS: u64 = 2;
 
 /// A session dux created: a PTY's child or a startup command, both started
 /// with `setsid`, so the session id is the leader's pid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProcessSession {
     pub sid: u32,
     /// When dux spawned the leader, in seconds since the epoch. Tells this
@@ -91,7 +91,7 @@ fn epoch_secs(at: SystemTime) -> u64 {
 
 /// One process, identified across two looks at the table: a pid alone can be
 /// reused, a pid with its start time cannot (in practice).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProcessIdentity {
     pub pid: u32,
     pub start_time: u64,
@@ -396,10 +396,71 @@ struct RegistryInner {
     standalone_owners: HashSet<String>,
     /// Retired sessions whose owner was a standalone agent.
     retired_standalone: HashSet<ProcessSession>,
-    /// The session database, once a removal has been recorded in it: a
-    /// survivor recorded later for a folder with a pending removal is written
-    /// into that removal's row, so a later start ends the same set.
+    /// The session database, once a removal has been recorded in it.
     pending_store: Option<std::path::PathBuf>,
+    /// The pending removals being kept current, by row id, with the folder
+    /// each removes. Every change to the registry in or under one of these
+    /// folders is written into its row at the moment it happens (see
+    /// [`AgentProcessRegistry::sync_pending`]), so a later start ends exactly
+    /// the set the live run would have.
+    pending_folders: HashMap<String, std::path::PathBuf>,
+}
+
+/// One registered session, as a pending removal's row records it: the
+/// session, the folder it was started in, and its owner's kind (a standalone
+/// agent's sessions are never ended, live or retired, in this run or the next).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegistryEntry {
+    pub session: ProcessSession,
+    pub folder: std::path::PathBuf,
+    pub standalone: bool,
+}
+
+/// The part of the registry a removal of one folder depends on, written into
+/// its pending row and rebuilt into a registry of the same type at the next
+/// start, so the resumed removal asks exactly the questions the live run would.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegistrySnapshot {
+    pub entries: Vec<RegistryEntry>,
+    pub survivors: Vec<(ProcessSession, Vec<ProcessIdentity>)>,
+}
+
+impl RegistrySnapshot {
+    /// Everything in `self` and in `other`, each entry and identity once.
+    pub fn merge(&mut self, other: &RegistrySnapshot) {
+        for entry in &other.entries {
+            if !self
+                .entries
+                .iter()
+                .any(|known| known.session == entry.session)
+            {
+                self.entries.push(entry.clone());
+            } else if entry.standalone {
+                // Owner kind is for life: once standalone, always standalone.
+                for known in &mut self.entries {
+                    if known.session == entry.session {
+                        known.standalone = true;
+                    }
+                }
+            }
+        }
+        for (session, identities) in &other.survivors {
+            match self
+                .survivors
+                .iter_mut()
+                .find(|(known, _)| known == session)
+            {
+                Some((_, known)) => {
+                    for identity in identities {
+                        if !known.contains(identity) {
+                            known.push(*identity);
+                        }
+                    }
+                }
+                None => self.survivors.push((*session, identities.clone())),
+            }
+        }
+    }
 }
 
 /// The registry key for a PTY that belongs to no agent (a project or a
@@ -442,12 +503,14 @@ impl AgentProcessRegistry {
         });
         let list = inner.sessions.entry(agent_id.to_string()).or_default();
         if !list.iter().any(|(known, _)| *known == session) {
-            list.push((session, folder));
+            list.push((session, folder.clone()));
         }
         if list.len() > SESSIONS_PER_AGENT {
             let excess = list.len() - SESSIONS_PER_AGENT;
             list.drain(..excess);
         }
+        drop(inner);
+        self.sync_pending(&folder);
     }
 
     /// [`Self::register`] for a standalone agent's session (see
@@ -464,7 +527,18 @@ impl AgentProcessRegistry {
 
     /// Mark `agent_id` as a standalone agent, so its sessions keep that kind.
     pub fn mark_standalone(&self, agent_id: &str) {
-        self.lock().standalone_owners.insert(agent_id.to_string());
+        let folders: Vec<std::path::PathBuf> = {
+            let mut inner = self.lock();
+            inner.standalone_owners.insert(agent_id.to_string());
+            inner
+                .sessions
+                .get(agent_id)
+                .map(|list| list.iter().map(|(_, folder)| folder.clone()).collect())
+                .unwrap_or_default()
+        };
+        for folder in folders {
+            self.sync_pending(&folder);
+        }
     }
 
     fn is_standalone_entry(
@@ -476,10 +550,109 @@ impl AgentProcessRegistry {
             || inner.retired_standalone.contains(session)
     }
 
-    /// Write survivors recorded from now on into the pending removals of
-    /// `db_path`.
-    pub fn set_pending_removal_store(&self, db_path: &std::path::Path) {
-        self.lock().pending_store = Some(db_path.to_path_buf());
+    /// Keep the pending removal `row_id` of `folder` current in `db_path`
+    /// from now on, and write what the registry already knows into it.
+    pub fn watch_pending(&self, row_id: &str, folder: &std::path::Path, db_path: &std::path::Path) {
+        {
+            let mut inner = self.lock();
+            inner.pending_store = Some(db_path.to_path_buf());
+            inner
+                .pending_folders
+                .insert(row_id.to_string(), crate::worktree_ops::path_key(folder));
+        }
+        self.sync_pending(folder);
+    }
+
+    /// Stop keeping `row_id` current: its removal has run.
+    pub fn unwatch_pending(&self, row_id: &str) {
+        self.lock().pending_folders.remove(row_id);
+    }
+
+    /// THE write path into pending rows: every registry change in or under a
+    /// folder with a pending removal lands here, at the moment it happens.
+    fn sync_pending(&self, changed: &std::path::Path) {
+        let changed = crate::worktree_ops::path_key(changed);
+        let (store, rows) = {
+            let inner = self.lock();
+            let Some(store) = inner.pending_store.clone() else {
+                return;
+            };
+            let rows: Vec<(String, std::path::PathBuf)> = inner
+                .pending_folders
+                .iter()
+                .filter(|(_, folder)| changed.starts_with(folder))
+                .map(|(row, folder)| (row.clone(), folder.clone()))
+                .collect();
+            (store, rows)
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let written = crate::storage::SessionStore::open(&store).and_then(|store| {
+            for (row, folder) in &rows {
+                store.merge_pending_removal_registry(row, &self.snapshot_in(folder))?;
+            }
+            Ok(())
+        });
+        if let Err(err) = written {
+            crate::logger::warn(&format!(
+                "could not keep a pending removal current with what runs in {}: {err:#}",
+                changed.display()
+            ));
+        }
+    }
+
+    /// Everything the registry knows in `folder` or under it: every session
+    /// (live or retired, any owner) with its owner's kind, and the members
+    /// recorded for each.
+    pub fn snapshot_in(&self, folder: &std::path::Path) -> RegistrySnapshot {
+        let folder = crate::worktree_ops::path_key(folder);
+        let inner = self.lock();
+        let live = inner
+            .sessions
+            .iter()
+            .flat_map(|(owner, list)| list.iter().map(move |entry| (Some(owner.as_str()), entry)));
+        let retired = inner.retired.iter().map(|entry| (None, entry));
+        let mut snapshot = RegistrySnapshot::default();
+        for (owner, (session, started_in)) in live.chain(retired) {
+            if !started_in.starts_with(&folder) {
+                continue;
+            }
+            snapshot.merge(&RegistrySnapshot {
+                entries: vec![RegistryEntry {
+                    session: *session,
+                    folder: started_in.clone(),
+                    standalone: Self::is_standalone_entry(&inner, owner, session),
+                }],
+                survivors: inner
+                    .survivors
+                    .get(session)
+                    .map(|identities| vec![(*session, identities.clone())])
+                    .unwrap_or_default(),
+            });
+        }
+        snapshot
+    }
+
+    /// A registry holding exactly `snapshot`, for a removal finished at the
+    /// next start: it answers every question the same way the live run's did.
+    pub fn from_snapshot(snapshot: &RegistrySnapshot) -> Self {
+        let registry = Self::default();
+        {
+            let mut inner = registry.lock();
+            for entry in &snapshot.entries {
+                inner
+                    .retired
+                    .push_back((entry.session, entry.folder.clone()));
+                if entry.standalone {
+                    inner.retired_standalone.insert(entry.session);
+                }
+            }
+            for (session, identities) in &snapshot.survivors {
+                inner.survivors.insert(*session, identities.clone());
+            }
+        }
+        registry
     }
 
     /// Record `identities` as members of `session` (see
@@ -489,7 +662,7 @@ impl AgentProcessRegistry {
         if identities.is_empty() {
             return;
         }
-        let (store, folder) = {
+        let folder = {
             let mut inner = self.lock();
             let entry = inner.survivors.entry(session).or_default();
             for identity in identities {
@@ -497,24 +670,16 @@ impl AgentProcessRegistry {
                     entry.push(*identity);
                 }
             }
-            let folder = inner
+            inner
                 .sessions
                 .values()
                 .flatten()
                 .chain(inner.retired.iter())
                 .find(|(known, _)| *known == session)
-                .map(|(_, folder)| folder.clone());
-            (inner.pending_store.clone(), folder)
+                .map(|(_, folder)| folder.clone())
         };
-        if let (Some(store), Some(folder)) = (store, folder) {
-            let written = crate::storage::SessionStore::open(&store)
-                .and_then(|store| store.add_pending_removal_evidence(&folder, session, identities));
-            if let Err(err) = written {
-                crate::logger::warn(&format!(
-                    "could not record what session {} left running into a pending removal: {err:#}",
-                    session.sid
-                ));
-            }
+        if let Some(folder) = folder {
+            self.sync_pending(&folder);
         }
     }
 
@@ -650,6 +815,12 @@ impl AgentProcessRegistry {
             if let Some((dropped, _)) = inner.retired.pop_front() {
                 inner.retired_standalone.remove(&dropped);
             }
+        }
+        let folders: Vec<std::path::PathBuf> =
+            mine.iter().map(|(_, folder)| folder.clone()).collect();
+        drop(inner);
+        for folder in folders {
+            self.sync_pending(&folder);
         }
         mine.into_iter().map(|(session, _)| session).collect()
     }

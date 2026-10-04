@@ -283,7 +283,6 @@ pub enum EventReaction {
 
     // -- Deletion `Command` view follow-ups (E4a). --
     FinishDeleteSessionView(Box<FinishDeleteSessionView>),
-    DoDeleteSessionView(Box<DoDeleteSessionView>),
     BeginDeleteSessionView(Box<BeginDeleteSessionView>),
 
     // -- Resource monitor. --
@@ -795,7 +794,7 @@ pub(crate) fn perform_deferred_removal(
         // it is deleted by the name it has NOW.
         let branch_name = leading.renamed(&managed.branch_name);
         let initial_branch = leading.renamed(&managed.initial_branch);
-        // The same gate as the synchronous path: unasked, only branches dux
+        // The gate every delete applies: unasked, only branches dux
         // created are dux's to delete, and the delete dialog's answer
         // overrides that in either direction.
         if managed
@@ -1120,18 +1119,6 @@ pub struct FinishDeleteSessionOutcome {
     pub project_still_has_sessions: bool,
 }
 
-/// Result of `Engine::do_delete_session`. Engine has performed the git
-/// worktree removal (if needed) and the full finish-delete-session cascade
-/// (store delete + providers/pins/resume_fallback removal + sessions retain
-/// + branch-sync refresh); the App still has to apply view follow-up.
-pub struct DoDeleteSessionOutcome {
-    /// Finish-cascade outcome (same shape T3f-1 introduced).
-    pub finish: FinishDeleteSessionOutcome,
-    /// What happened to the worktree. Drives status formatting in
-    /// `apply_finish_delete_session_outcome`.
-    pub removal: WorktreeRemoval,
-}
-
 /// Result of `Engine::begin_delete_session`. The four branches mirror the
 /// original App method's control flow.
 #[derive(Debug)]
@@ -1175,13 +1162,6 @@ pub struct FinishDeleteSessionView {
     pub outcome: FinishDeleteSessionOutcome,
     pub removal: WorktreeRemoval,
     pub update_status: bool,
-}
-
-/// View follow-up data for a `Command::DoDeleteSession`. Wraps the engine
-/// outcome with the App-context fields needed for status formatting.
-pub struct DoDeleteSessionView {
-    pub session_id: String,
-    pub outcome: DoDeleteSessionOutcome,
 }
 
 /// View follow-up data for a `Command::BeginDeleteSession`. Wraps the
@@ -2091,257 +2071,6 @@ impl Engine {
         })
     }
 
-    /// Synchronous engine half of deleting a session: look up the session and
-    /// project, optionally call `git::remove_worktree`, then run the full
-    /// `finish_delete_session` cascade.
-    ///
-    /// `Ok(None)` when the session was already gone or an async delete worker is
-    /// in flight for it, `Ok(Some(outcome))` otherwise, `Err` when
-    /// `git::remove_worktree` or `session_store.delete_session` fails. A missing
-    /// project record does not abort the deletion: the session record still goes
-    /// but its worktree is kept, since `git worktree remove` needs the repo.
-    ///
-    /// Callers must ensure no async worker is already removing this worktree, so
-    /// `pending_deletions` must not contain `session_id`. A caller that bypasses
-    /// that contract gets a soft `Ok(None)` and a logged error rather than a
-    /// race against the in-flight deletion: the path is destructive and a
-    /// debug-only check would not catch it in a release build.
-    pub fn do_delete_session(
-        &mut self,
-        session_id: &str,
-        delete_worktree: bool,
-        delete_branch: Option<bool>,
-    ) -> anyhow::Result<Option<DoDeleteSessionOutcome>> {
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
-            return Ok(None);
-        };
-        // THE EXPLICIT WIRE CONTRACT for `delete_worktree=true` on a standalone
-        // id: refuse, out loud. Quietly ignoring it would be success theater
-        // about a destructive request, and the user would come away believing
-        // dux had cleaned something up. The default is already false, so only
-        // a caller that asked on purpose can reach this.
-        if delete_worktree && !session.workspace.deletion_may_remove_directory() {
-            anyhow::bail!(standalone_delete_directory_refusal(
-                &session.display_label(),
-                session.directory()
-            ));
-        }
-        logger::info(&format!(
-            "deleting session {} at {} (delete_worktree={}, sync)",
-            session.id,
-            session.directory(),
-            delete_worktree
-        ));
-        // The project may be ABSENT for an orphaned session; we can still delete
-        // the record but cannot remove its worktree without the project repo, so
-        // an orphan always keeps its worktree.
-        let project = session.project_id().and_then(|project_id| {
-            self.projects
-                .iter()
-                .find(|project| project.id == project_id)
-                .cloned()
-        });
-        let other_sessions_on_worktree = self.sessions.iter().any(|s| {
-            s.id != session.id
-                && crate::project_browser::same_directory(s.directory(), session.directory())
-        });
-
-        // A removal needs a project to run git in and a managed working copy to
-        // remove, resolved as one pair up front so the block below is entered
-        // only when both exist and no arm in it can delete a directory dux did
-        // not create. A standalone agent has no managed workspace, so
-        // `removal_target` is `None` and the block is unreachable rather than
-        // guarded: deleting one removes dux's record and nothing else.
-        let removal_target = match (project.as_ref(), session.workspace.as_managed()) {
-            (Some(project), Some(managed)) if delete_worktree && !other_sessions_on_worktree => {
-                Some((project, managed))
-            }
-            _ => None,
-        };
-        let should_remove_worktree = removal_target.is_some();
-        // This path runs git on the calling thread and cannot wait, so it
-        // refuses outright where the deferred path would wait: something is
-        // still working in the worktree, or a removal of it is under way.
-        if let Some((_, managed)) = removal_target {
-            let ops = &self.removal_coordination.ops;
-            let holders = ops.holders(&managed.worktree_path);
-            if ops.is_being_removed(&managed.worktree_path) || !holders.is_empty() {
-                anyhow::bail!(
-                    "dux did not remove the worktree at {}: {}. Delete the agent again once that \
-                     has finished.",
-                    crate::home_path::shorten_home(std::path::Path::new(&managed.worktree_path)),
-                    if holders.is_empty() {
-                        "it is already being removed".to_string()
-                    } else {
-                        format!(
-                            "{} is still running in it",
-                            crate::worktree_ops::describe_holders(&holders)
-                        )
-                    }
-                );
-            }
-        }
-
-        if self.pending_deletions.contains(session_id) {
-            crate::logger::error(&format!(
-                "do_delete_session called while an async delete worker is in-flight for {session_id} \u{2014} refusing to proceed to avoid racing git::remove_worktree",
-            ));
-            return Ok(None);
-        }
-        // Refuse if any tab of this session has a launch in flight: such a tab is
-        // marked in-flight but not yet in `providers`, so the pre-kill below cannot
-        // reach it and `git::remove_worktree` could race the provider mid-spawn in
-        // the worktree (git-lock / cwd-deleted-under-fork). Mirrors the blanket
-        // precondition in `begin_delete_session`.
-        if should_remove_worktree
-            && self
-                .tab_ids_for_session(session_id)
-                .iter()
-                .any(|id| self.is_in_flight(&InFlightKey::AgentLaunch(id.clone())))
-        {
-            crate::logger::error(&format!(
-                "do_delete_session for {session_id}: a tab is still launching \u{2014} refusing to remove its worktree to avoid racing the spawning provider",
-            ));
-            return Ok(None);
-        }
-        // Mark the session "closing" so a concurrent `create_tab`/`launch_agent`
-        // can't spawn a fresh provider into the worktree we are about to remove.
-        // `finish_delete_session_memory` (called below) clears it. This path is
-        // synchronous so the window is tiny, but the flag keeps the invariant with
-        // `begin_delete_session` uniform.
-        if should_remove_worktree {
-            self.closing_sessions.insert(session.id.clone());
-        }
-        let remove_outcome = if let Some((project, managed)) = removal_target {
-            // Hard-kill every live tab PTY (Main + Support) and companion terminal
-            // of this session BEFORE removing the worktree: dropping a `PtyClient`
-            // SIGKILLs its whole process group, so no provider process is alive in
-            // the directory when `git::remove_worktree` runs. `finish_delete_session`
-            // below then clears the remaining runtime map entries. (This is the
-            // synchronous counterpart to `begin_delete_session`'s deferred group
-            // barrier: the project-delete loop that calls us is synchronous.)
-            let removed_terminals: Vec<String> = self
-                .companion_terminals
-                .iter()
-                .filter(|(_, t)| t.owner.closed_by_session_delete(session_id))
-                .map(|(id, _)| id.clone())
-                .collect();
-            // Every session this agent started, gathered and looked into before
-            // anything is killed, for the same reason the deferred path does.
-            let mut sessions = self.process_registry.forget_agent(session_id);
-            for tab_id in self.tab_ids_for_session(session_id) {
-                sessions.extend(
-                    self.providers
-                        .get(&tab_id)
-                        .and_then(crate::pty::PtyClient::process_session),
-                );
-            }
-            for terminal_id in &removed_terminals {
-                sessions.extend(
-                    self.companion_terminals
-                        .get(terminal_id)
-                        .and_then(|terminal| terminal.client.process_session()),
-                );
-            }
-            sessions.extend(
-                self.terminating_ptys
-                    .iter()
-                    .filter(|entry| {
-                        entry
-                            .owner
-                            .as_ref()
-                            .is_some_and(|owner| owner.session_id == session_id)
-                    })
-                    .filter_map(|entry| entry.client.process_session()),
-            );
-            let snapshot = std::sync::Arc::new(std::sync::OnceLock::new());
-            let _ = snapshot.set(crate::process_sessions::snapshot(&sessions));
-            for tab_id in self.tab_ids_for_session(session_id) {
-                self.providers.remove(&tab_id);
-            }
-            for terminal_id in &removed_terminals {
-                self.companion_terminals.remove(terminal_id);
-                self.clear_terminal_runtime(terminal_id);
-            }
-            let processes = super::RemovalProcesses {
-                sessions,
-                snapshot,
-                grace: self.individual_close_grace(),
-            };
-            if let Err(message) = end_agent_processes_before_removal(
-                &processes,
-                &self.process_registry,
-                &managed.worktree_path,
-            ) {
-                self.closing_sessions.remove(session_id);
-                anyhow::bail!(message);
-            }
-            // Clear `closing_sessions` even if removal fails: the session record
-            // survives an `Err`, and nothing else would clear the flag, leaving
-            // the agent permanently barred from creating or relaunching tabs.
-            //
-            // The gate. Unasked, dux deletes only the branches it created: an
-            // agent attached to an existing branch, or adopted with an existing
-            // worktree, gives up its worktree and keeps its branches. The delete
-            // dialog's checkbox overrides that in either direction and arrives
-            // as `delete_branch`. Deciding it here means the project-delete
-            // cascade, which calls this per agent with no answer, inherits the
-            // provenance default.
-            let result = if managed
-                .branch_provenance
-                .resolve_branch_deletion(delete_branch)
-            {
-                match crate::git::remove_worktree(
-                    std::path::Path::new(&project.path),
-                    std::path::Path::new(&managed.worktree_path),
-                    &managed.branch_name,
-                    // The BIRTH branch too: `branch_name` tracks whatever the
-                    // worktree drifted onto, so deleting only that leaves the
-                    // original behind and recreating the agent collides with it.
-                    Some(managed.initial_branch.as_str()),
-                ) {
-                    Ok(result) => RemovedBranches::Deleted(result),
-                    Err(err) => {
-                        self.closing_sessions.remove(session_id);
-                        return Err(err);
-                    }
-                }
-            } else {
-                match crate::git::remove_worktree_keep_branch(
-                    std::path::Path::new(&project.path),
-                    std::path::Path::new(&managed.worktree_path),
-                ) {
-                    Ok(()) => RemovedBranches::Kept(branch_kept_reason(
-                        managed.branch_provenance,
-                        delete_branch,
-                    )),
-                    Err(err) => {
-                        self.closing_sessions.remove(session_id);
-                        return Err(err);
-                    }
-                }
-            };
-            Some(result)
-        } else {
-            None
-        };
-
-        let Some(finish) = self.finish_delete_session(session_id)? else {
-            // Should be unreachable (we just confirmed the session exists
-            // above), but if a concurrent path removed it, treat as no-op.
-            return Ok(None);
-        };
-        Ok(Some(DoDeleteSessionOutcome {
-            removal: WorktreeRemoval::from_decision(
-                &finish.session,
-                delete_worktree,
-                finish.other_sessions_on_worktree,
-                remove_outcome,
-            ),
-            finish,
-        }))
-    }
-
     fn begin_session_tab_shutdown(
         &mut self,
         session: &AgentSession,
@@ -2549,7 +2278,7 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return BeginDeleteSessionOutcome::NotFound;
         };
-        // Same explicit contract as the synchronous path: a worktree-removing
+        // The explicit wire contract: a worktree-removing
         // delete of a standalone agent is refused rather than silently
         // downgraded to an ordinary one.
         if delete_worktree && !session.workspace.deletion_may_remove_directory() {
@@ -3222,6 +2951,8 @@ impl Engine {
     ) -> EventReaction {
         self.pending_deletions.remove(&session_id);
         self.closing_sessions.remove(&session_id);
+        // Its row is gone (the worker cleared it), so nothing keeps it current.
+        self.process_registry.unwatch_pending(&session_id);
         let our_busy_message = self.deletion_busy_messages.remove(&session_id);
         self.removal_coordination.labels.remove(&session_id);
         // A removal that was one agent of a project deletion reports into that
@@ -4586,11 +4317,9 @@ mod tests {
     }
 
     #[test]
-    fn do_delete_session_clears_closing_flag_when_worktree_removal_fails() {
-        // A failed synchronous worktree removal must still clear `closing_sessions`
-        // so the agent isn't permanently barred from creating/relaunching tabs
-        // (the async `WorktreeRemoveCompleted` handler already guarantees this;
-        // the sync path must match it).
+    fn a_delete_clears_closing_flag_when_worktree_removal_fails() {
+        // A failed worktree removal must still clear `closing_sessions`, so a
+        // later agent on the same id is not barred from creating tabs.
         let (mut engine, tmp) = test_engine();
         // A real (existing) worktree dir under a NON-git project: `git -C <proj>
         // worktree remove` fails, and because the path exists on disk
@@ -4611,7 +4340,8 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let result = engine.do_delete_session("s1", true, None);
+        let result =
+            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None);
 
         assert!(
             result.is_err(),
@@ -4619,10 +4349,9 @@ mod tests {
         );
         assert!(
             !engine.closing_sessions.contains("s1"),
-            "closing_sessions must be cleared after a failed sync worktree removal"
+            "closing_sessions must be cleared after a failed worktree removal"
         );
-        // The delete aborted, so the session record survives.
-        assert!(engine.sessions.iter().any(|s| s.id == "s1"));
+        assert!(!engine.pending_deletions.contains("s1"));
     }
 
     /// The reported journey, end to end through the engine and a REAL repo:
@@ -4687,10 +4416,10 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine
-            .do_delete_session("s1", true, None)
-            .unwrap()
-            .expect("the delete should have run");
+        let outcome =
+            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
+                .unwrap()
+                .expect("the delete should have run");
 
         assert_eq!(
             outcome.removal,
@@ -4802,8 +4531,7 @@ mod tests {
             .collect();
         let before = branches(&repo);
 
-        engine
-            .do_delete_session("s1", true, Some(true))
+        crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, Some(true))
             .unwrap()
             .expect("the delete should have run");
 
@@ -4900,10 +4628,10 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine
-            .do_delete_session("s1", true, None)
-            .unwrap()
-            .expect("the delete should have run");
+        let outcome =
+            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
+                .unwrap()
+                .expect("the delete should have run");
 
         assert_eq!(
             outcome.removal,
@@ -4946,10 +4674,14 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine
-            .do_delete_session("s1", true, Some(true))
-            .unwrap()
-            .expect("the delete should have run");
+        let outcome = crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            true,
+            Some(true),
+        )
+        .unwrap()
+        .expect("the delete should have run");
 
         assert!(
             matches!(
@@ -4991,10 +4723,14 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine
-            .do_delete_session("s1", true, Some(false))
-            .unwrap()
-            .expect("the delete should have run");
+        let outcome = crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            true,
+            Some(false),
+        )
+        .unwrap()
+        .expect("the delete should have run");
 
         assert_eq!(
             outcome.removal,
@@ -5027,7 +4763,12 @@ mod tests {
             ));
 
         for answer in [None, Some(true), Some(false)] {
-            let Err(err) = engine.do_delete_session("sa1", true, answer) else {
+            let Err(err) = crate::engine::test_support::delete_through_pipeline(
+                &mut engine,
+                "sa1",
+                true,
+                answer,
+            ) else {
                 panic!("a worktree-removing delete of a standalone agent must be refused");
             };
             assert!(
@@ -5078,10 +4819,10 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine
-            .do_delete_session("s1", true, None)
-            .unwrap()
-            .expect("ran");
+        let outcome =
+            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
+                .unwrap()
+                .expect("ran");
 
         let branches = branch_list(&repo);
         assert!(
@@ -5198,8 +4939,7 @@ mod tests {
         engine.sessions.push(first);
 
         // Delete WITHOUT the checkbox: worktree and branch stay, row goes.
-        engine
-            .do_delete_session("s1", false, None)
+        crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", false, None)
             .unwrap()
             .expect("ran");
         assert!(worktree.exists());
@@ -5219,10 +4959,10 @@ mod tests {
         engine.session_store.upsert_session(&second).unwrap();
         engine.sessions.push(second);
 
-        let outcome = engine
-            .do_delete_session("s2", true, None)
-            .unwrap()
-            .expect("ran");
+        let outcome =
+            crate::engine::test_support::delete_through_pipeline(&mut engine, "s2", true, None)
+                .unwrap()
+                .expect("ran");
 
         assert_eq!(
             outcome.removal,
@@ -5555,7 +5295,6 @@ mod tests {
             EventReaction::StartupLogsArrived { .. } => "StartupLogsArrived",
             EventReaction::StartupLogContentArrived { .. } => "StartupLogContentArrived",
             EventReaction::FinishDeleteSessionView(_) => "FinishDeleteSessionView",
-            EventReaction::DoDeleteSessionView(_) => "DoDeleteSessionView",
             EventReaction::BeginDeleteSessionView(_) => "BeginDeleteSessionView",
             EventReaction::DispatchAgentLaunchView(_) => "DispatchAgentLaunchView",
             EventReaction::DeleteTerminalView(_) => "DeleteTerminalView",
@@ -8633,7 +8372,7 @@ mod tests {
         ));
     }
 
-    // ── Engine::do_delete_session + Engine::begin_delete_session ────────────
+    // ── Engine::begin_delete_session ────────────────────────────────────────
 
     #[test]
     fn begin_delete_session_already_in_flight_returns_already_in_flight() {
@@ -8959,23 +8698,25 @@ mod tests {
     }
 
     #[test]
-    fn do_delete_session_unknown_id_returns_none() {
+    fn a_delete_of_an_unknown_id_returns_none() {
         let (mut engine, _tmp) = test_engine();
         assert!(
-            engine
-                .do_delete_session("missing", false, None)
-                .unwrap()
-                .is_none()
+            crate::engine::test_support::delete_through_pipeline(
+                &mut engine,
+                "missing",
+                false,
+                None
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
     #[test]
-    fn do_delete_session_soft_returns_when_async_worker_in_flight() {
-        // The in-flight guard must hold in release builds. If an async delete
-        // worker is already running for this session, the
-        // synchronous path must NOT proceed to `git::remove_worktree` or
-        // touch in-memory state. Otherwise the two paths would race on
-        // the worktree.
+    fn a_delete_is_refused_while_its_worktree_removal_is_already_running() {
+        // The in-flight guard holds in release builds: a second delete of an
+        // agent whose removal worker is already running is refused, leaving
+        // the record and the worktree to the removal in progress.
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         let session = sample_session("s1", "p1", "feat/x");
@@ -8983,14 +8724,15 @@ mod tests {
         engine.sessions.push(session);
         engine.pending_deletions.insert("s1".to_string());
 
-        let outcome = engine
-            .do_delete_session("s1", true, None)
-            .expect("soft-return does not error");
+        let Err(refused) =
+            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
+        else {
+            panic!("a second delete is refused while the first is running");
+        };
         assert!(
-            outcome.is_none(),
-            "do_delete_session must soft-return Ok(None) when an async worker is in-flight",
+            refused.to_string().contains("already in progress"),
+            "{refused}"
         );
-        // The session must still be present: we soft-returned, did not delete.
         assert!(
             engine.sessions.iter().any(|s| s.id == "s1"),
             "session should be untouched when the in-flight guard fires",
@@ -8998,11 +8740,10 @@ mod tests {
     }
 
     #[test]
-    fn do_delete_session_refuses_worktree_removal_while_a_tab_is_launching() {
-        // Round-2 fix: a tab whose launch is in flight is marked in-flight but not
-        // yet in `providers`, so the pre-kill can't reach it. A worktree-removing
-        // delete must refuse rather than race git::remove_worktree against the
-        // spawning provider.
+    fn a_worktree_removing_delete_is_refused_while_a_tab_is_launching() {
+        // A tab whose launch is in flight is marked in-flight but not yet in
+        // `providers`, so nothing could stop it. A worktree-removing delete
+        // refuses rather than race git against the spawning provider.
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         let session = sample_session("s1", "p1", "feat/x");
@@ -9012,13 +8753,12 @@ mod tests {
         // `AgentSession::slot_tab_id` resolves to for this fixture.
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
 
-        let outcome = engine
-            .do_delete_session("s1", true, None)
-            .expect("soft-return does not error");
-        assert!(
-            outcome.is_none(),
-            "do_delete_session must soft-return Ok(None) while a tab is launching",
-        );
+        let Err(refused) =
+            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
+        else {
+            panic!("refused while a tab is launching");
+        };
+        assert!(refused.to_string().contains("still launching"), "{refused}");
         assert!(
             engine.sessions.iter().any(|s| s.id == "s1"),
             "session should be untouched when the tab-launch guard fires",
@@ -9060,19 +8800,6 @@ mod tests {
             EventReaction::BeginDeleteSessionView(view)
                 if matches!(view.outcome, BeginDeleteSessionOutcome::NotFound)
         ));
-    }
-
-    #[test]
-    fn apply_do_delete_session_returns_nothing_for_unknown_id() {
-        let (mut engine, _tmp) = test_engine();
-        let reaction = engine
-            .apply(crate::engine::Command::DoDeleteSession {
-                delete_branch: None,
-                session_id: "missing".to_string(),
-                delete_worktree: false,
-            })
-            .unwrap();
-        assert!(matches!(reaction, EventReaction::Nothing));
     }
 
     #[test]

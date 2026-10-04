@@ -667,6 +667,7 @@ fn a_left_over_removal_never_takes_a_directory_another_agent_now_uses() {
             delete_branch: Some(true),
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
+            process_registry: Default::default(),
         })
         .expect("record");
 
@@ -747,6 +748,7 @@ fn a_resumed_removal_claims_the_folder_and_waits_for_work_in_it() {
             delete_branch: Some(true),
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
+            process_registry: Default::default(),
         })
         .expect("record");
     // A pull already running in the worktree when dux starts.

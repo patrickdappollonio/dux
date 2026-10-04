@@ -684,16 +684,12 @@ impl Engine {
         if !could_be_managed_worktree(&self.paths.worktrees_root, &project, requested) {
             return Some(RemovalAdmission::Refused(RemovalOutcome::NotManaged));
         }
-        // Announced next, so the occupancy question below is answered under
-        // the claim: nothing new can take the folder (or any folder inside it)
-        // from here on, so a "free" answer stays true until git runs. A refusal
-        // drops the lease, which withdraws the announcement.
-        let lease = match self.removal_coordination.ops.announce_removal(requested) {
-            RemovalClaim::Join(_) => {
-                return Some(RemovalAdmission::Refused(RemovalOutcome::BeingRemoved));
-            }
-            RemovalClaim::Lead(lease) => lease,
-        };
+        // Nothing is claimed here: the claim is taken on the worker, once
+        // git's own listing has confirmed the path is a worktree of this
+        // project, and re-validated under it there.
+        if self.removal_coordination.ops.is_being_removed(requested) {
+            return Some(RemovalAdmission::Refused(RemovalOutcome::BeingRemoved));
+        }
         // The one occupancy question every removal asks, with stopping
         // processes in the way: the manager ends nothing.
         if let Some(occupant) = self.folder_occupant(
@@ -701,7 +697,6 @@ impl Engine {
             None,
             super::pending_removals::StoppingProcesses::Occupy,
         ) {
-            drop(lease);
             let outcome = match occupant {
                 super::pending_removals::Occupant::Agent { exact: true, .. }
                 | super::pending_removals::Occupant::BeingCreated => RemovalOutcome::Attached,
@@ -712,7 +707,7 @@ impl Engine {
             return Some(RemovalAdmission::Refused(outcome));
         }
         Some(RemovalAdmission::Admitted(Box::new(AdmittedRemoval {
-            lease,
+            ops: self.removal_coordination.ops.clone(),
             project,
             paths: self.paths.clone(),
             sessions: self.sessions.clone(),
@@ -1373,7 +1368,8 @@ mod tests {
     }
 
     /// Item 9: an admitted manager removal waits for the operations running in
-    /// the worktree, and refuses new ones from the moment it was admitted.
+    /// the worktree, and refuses new ones from the moment it has claimed the
+    /// folder (on the worker, after git's listing confirmed it).
     #[test]
     fn a_manager_removal_waits_for_work_in_the_worktree() {
         let (mut engine, tmp) = test_engine();
@@ -1390,16 +1386,19 @@ mod tests {
             panic!("a free worktree is admitted");
         };
         assert_eq!(ticket.waiting_for().as_deref(), Some("a push"));
+        // Nothing is claimed at admission: the claim is taken on the worker,
+        // once git's listing has confirmed the path.
+        assert!(!engine.worktree_ops().is_being_removed(&worktrees[0]));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(ticket.run()).unwrap());
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
         assert!(
             engine
                 .worktree_ops()
                 .hold(&worktrees[0], WorktreeOpKind::EditorWrite)
                 .is_err(),
-            "nothing new starts once the removal is admitted"
+            "nothing new starts once the removal has claimed the folder"
         );
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || tx.send(ticket.run()).unwrap());
-        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
         assert!(worktrees[0].exists());
         drop(guard);
         let outcome = rx.recv_timeout(Duration::from_secs(20)).unwrap().unwrap();

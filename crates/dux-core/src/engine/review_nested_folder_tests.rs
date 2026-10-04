@@ -294,6 +294,7 @@ fn a_resumed_removal_does_not_kill_an_unrelated_program_that_reused_a_session_nu
             delete_branch: None,
             process_sessions: vec![recorded],
             process_snapshot: Vec::new(),
+            process_registry: Default::default(),
         })
         .unwrap();
 

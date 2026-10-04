@@ -5395,7 +5395,12 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", &link.to_string_lossy()));
 
-        let outcome = match engine.do_delete_session("s1", true, None) {
+        let outcome = match crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            true,
+            None,
+        ) {
             Ok(Some(outcome)) => outcome,
             other => panic!("the delete must proceed, got {:?}", other.is_ok()),
         };
@@ -5422,7 +5427,12 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", &folder_path));
 
-        let outcome = match engine.do_delete_session("sa1", false, None) {
+        let outcome = match crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "sa1",
+            false,
+            None,
+        ) {
             Ok(Some(outcome)) => outcome,
             Ok(None) => panic!("the session existed"),
             Err(err) => panic!("delete must succeed: {err}"),
@@ -5463,7 +5473,12 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", &folder_path));
 
-        let message = match engine.do_delete_session("sa1", true, None) {
+        let message = match crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "sa1",
+            true,
+            None,
+        ) {
             Err(err) => err.to_string(),
             Ok(_) => panic!("a destructive request dux will not honour must be refused"),
         };

@@ -5,9 +5,9 @@
 use std::path::PathBuf;
 
 use crate::engine::events::{
-    BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView, DoDeleteSessionView,
-    EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView,
-    StatusUpdate, WorktreeRemoval,
+    BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView, EventReaction,
+    FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
+    WorktreeRemoval,
 };
 use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
 use crate::ids::TabIdRef;
@@ -22,23 +22,12 @@ use crate::worker::{
 /// the context and supplies it, the Engine does the domain work and returns an
 /// `EventReaction` describing any view follow-up.
 pub enum Command {
-    /// Complete a deletion that's already past its git step. Used by both
-    /// the synchronous `do_delete_session` path (after `git::remove_worktree`)
-    /// and the async `WorktreeRemoveCompleted` callback.
+    /// Complete a deletion that's already past its git step: the async
+    /// `WorktreeRemoveCompleted` callback.
     FinishDeleteSession {
         session_id: String,
         removal: WorktreeRemoval,
         update_status: bool,
-    },
-    /// Synchronous deletion: lookup → optional `git::remove_worktree` → full
-    /// finish cascade. Used by `delete_selected_project`'s cascade.
-    DoDeleteSession {
-        session_id: String,
-        delete_worktree: bool,
-        /// The delete dialog's "also delete the branch" answer, or `None` for a
-        /// caller with no dialog behind it, which keeps the provenance default.
-        /// See [`crate::model::BranchProvenance::resolve_branch_deletion`].
-        delete_branch: Option<bool>,
     },
     /// Modal entrypoint: branches between async git-removal worker and
     /// inline finish.
@@ -84,7 +73,7 @@ pub enum Command {
     /// Delete a project and cascade-delete its agents' records and runtime,
     /// removing their worktrees from disk. The destructive counterpart to
     /// `RemoveProject`, which keeps them. Each session goes through the shared
-    /// `do_delete_session` path with `delete_worktree == true`, so the kill,
+    /// `begin_delete_session` pipeline with `delete_worktree == true`, so the kill,
     /// worktree removal and record cleanup stay single-source. Guards the whole
     /// project up front against an in-flight worktree removal or a launching
     /// tab, so a partial delete cannot report success while stranding a session.
@@ -306,23 +295,6 @@ impl Engine {
                         outcome,
                         removal,
                         update_status,
-                    },
-                )))
-            }
-            Command::DoDeleteSession {
-                session_id,
-                delete_worktree,
-                delete_branch,
-            } => {
-                let Some(outcome) =
-                    self.do_delete_session(&session_id, delete_worktree, delete_branch)?
-                else {
-                    return Ok(EventReaction::Nothing);
-                };
-                Ok(EventReaction::DoDeleteSessionView(Box::new(
-                    DoDeleteSessionView {
-                        session_id,
-                        outcome,
                     },
                 )))
             }

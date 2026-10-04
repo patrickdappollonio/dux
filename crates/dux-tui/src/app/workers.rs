@@ -3,9 +3,8 @@ use std::sync::mpsc::Sender;
 use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
-    DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, PrunedPty, PrunedPtyKind, StatusUpdate, WorktreeRemoval,
-    closed_tab_exit_notice,
+    EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView,
+    PrunedPty, PrunedPtyKind, StatusUpdate, WorktreeRemoval, closed_tab_exit_notice,
 };
 
 use super::*;
@@ -722,10 +721,6 @@ impl App {
                 self.apply_finish_delete_session_view(*view);
             }
 
-            EventReaction::DoDeleteSessionView(view) => {
-                self.apply_do_delete_session_view(*view);
-            }
-
             EventReaction::BeginDeleteSessionView(view) => {
                 self.apply_begin_delete_session_view(*view);
             }
@@ -1073,15 +1068,6 @@ impl App {
             view.outcome,
             view.removal,
             view.update_status,
-        );
-    }
-
-    fn apply_do_delete_session_view(&mut self, view: DoDeleteSessionView) {
-        self.apply_finish_delete_session_outcome(
-            &view.session_id,
-            view.outcome.finish,
-            view.outcome.removal,
-            true,
         );
     }
 

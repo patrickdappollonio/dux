@@ -73,6 +73,10 @@ pub struct PendingWorktreeRemoval {
     /// The sessions the agent's processes ran in, so a later start can end
     /// whatever of them outlived dux.
     pub process_sessions: Vec<crate::process_sessions::ProcessSession>,
+    /// The registry slice of the folder, kept current while the removal waits:
+    /// every session registered in it with its owner's kind, and what was
+    /// recorded running in each. Rebuilt into a registry at the next start.
+    pub process_registry: crate::process_sessions::RegistrySnapshot,
     /// What was running in them when the delete began, by identity: a later
     /// start acts on a leaderless session only through these.
     pub process_snapshot: Vec<crate::process_sessions::ProcessIdentity>,
@@ -495,6 +499,7 @@ impl SessionStore {
                 delete_branch integer,
                 process_sessions text not null default '',
                 process_snapshot text not null default '',
+                process_registry text not null default '',
                 created_at text not null
             );
             "#,
@@ -506,6 +511,14 @@ impl SessionStore {
             &self.conn,
             "pending_worktree_removals",
             "process_snapshot",
+            "text not null default ''",
+        )?;
+        // The registry slice the removal depends on, owner kinds included (see
+        // `crate::process_sessions::RegistrySnapshot`).
+        ensure_column(
+            &self.conn,
+            "pending_worktree_removals",
+            "process_registry",
             "text not null default ''",
         )?;
         // The slot-tab passes run last: they write `agent_tabs` rows, so the
@@ -764,8 +777,8 @@ impl SessionStore {
                 "insert or replace into pending_worktree_removals \
                  (session_id, label, project_id, project_path, worktree_path, source_branch, \
                   branch_name, initial_branch, branch_provenance, delete_branch, \
-                  process_sessions, process_snapshot, created_at) \
-                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  process_sessions, process_snapshot, process_registry, created_at) \
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     row.session_id,
                     row.label,
@@ -779,6 +792,8 @@ impl SessionStore {
                     row.delete_branch,
                     sessions,
                     encode_identities(&row.process_snapshot),
+                    serde_json::to_string(&row.process_registry)
+                        .context("failed to encode a pending removal's processes")?,
                     Utc::now().to_rfc3339(),
                 ],
             )
@@ -809,31 +824,56 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Add a session, and the members recorded for it, to every pending
-    /// removal of a folder that contains `folder`, so a later start ends what
-    /// the run that accepted the removal would have ended.
-    pub fn add_pending_removal_evidence(
+    /// Merge `snapshot` into the registry slice of pending removal `session_id`.
+    pub fn merge_pending_removal_registry(
         &self,
-        folder: &std::path::Path,
-        session: crate::process_sessions::ProcessSession,
-        identities: &[crate::process_sessions::ProcessIdentity],
+        session_id: &str,
+        snapshot: &crate::process_sessions::RegistrySnapshot,
     ) -> Result<()> {
-        for mut row in self.load_pending_worktree_removals()? {
-            if !crate::worktree_ops::folder_contains(
-                std::path::Path::new(&row.managed.worktree_path),
-                folder,
-            ) {
+        for row in self.load_pending_worktree_removals()? {
+            if row.session_id != session_id {
                 continue;
             }
-            if !row.process_sessions.contains(&session) {
-                row.process_sessions.push(session);
+            let mut merged = row.process_registry.clone();
+            merged.merge(snapshot);
+            // The sessions to end follow the slice: every session in it that
+            // is not a standalone agent's, and never one that is.
+            let mut row = row;
+            for entry in &merged.entries {
+                if entry.standalone {
+                    row.process_sessions
+                        .retain(|session| *session != entry.session);
+                } else if !row.process_sessions.contains(&entry.session) {
+                    row.process_sessions.push(entry.session);
+                }
             }
-            for identity in identities {
-                if !row.process_snapshot.contains(identity) {
-                    row.process_snapshot.push(*identity);
+            // And so does what was recorded running in them.
+            for (session, identities) in &merged.survivors {
+                let standalone = merged
+                    .entries
+                    .iter()
+                    .any(|entry| entry.session == *session && entry.standalone);
+                if standalone {
+                    continue;
+                }
+                for identity in identities {
+                    if !row.process_snapshot.contains(identity) {
+                        row.process_snapshot.push(*identity);
+                    }
                 }
             }
             self.update_pending_removal_evidence(&row)?;
+            self.conn
+                .execute(
+                    "update pending_worktree_removals set process_registry = ?2 \
+                     where session_id = ?1",
+                    params![
+                        session_id,
+                        serde_json::to_string(&merged)
+                            .context("failed to encode a pending removal's processes")?
+                    ],
+                )
+                .context("failed to keep a pending removal current")?;
         }
         Ok(())
     }
@@ -900,7 +940,8 @@ impl SessionStore {
         let mut stmt = self.conn.prepare(
             "select session_id, label, project_id, project_path, worktree_path, source_branch, \
              branch_name, initial_branch, branch_provenance, delete_branch, process_sessions, \
-             process_snapshot from pending_worktree_removals order by created_at",
+             process_snapshot, process_registry from pending_worktree_removals \
+             order by created_at",
         )?;
         let rows = stmt.query_map([], |row| {
             let sessions: String = row.get(10)?;
@@ -937,6 +978,11 @@ impl SessionStore {
                     })
                     .collect(),
                 process_snapshot: decode_identities(&row.get::<_, String>(11)?),
+                // An unreadable or empty slice is an empty one: what it would
+                // have protected or ended is then only what the other two
+                // columns say, which never includes a standalone agent's.
+                process_registry: serde_json::from_str(&row.get::<_, String>(12)?)
+                    .unwrap_or_default(),
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -2322,6 +2368,18 @@ mod tests {
                 pid: 43,
                 start_time: 1_700_000_002,
             }],
+            process_registry: crate::process_sessions::RegistrySnapshot {
+                entries: vec![crate::process_sessions::RegistryEntry {
+                    session: crate::process_sessions::ProcessSession {
+                        sid: 44,
+                        started_at_secs: 1_700_000_003,
+                        boot: 7,
+                    },
+                    folder: std::path::PathBuf::from("/wt/feat/frontend"),
+                    standalone: true,
+                }],
+                survivors: Vec::new(),
+            },
         };
         store.insert_pending_worktree_removal(&row).expect("insert");
         assert_eq!(
