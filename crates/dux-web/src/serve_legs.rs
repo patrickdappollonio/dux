@@ -1184,8 +1184,8 @@ pub(crate) fn not_checking_tailscale(forced_no: bool) -> String {
         "[server] tailscale = \"no\""
     };
     format!(
-        "dux is not checking Tailscale ({why}), so it will not notice a Tailscale Funnel or \
-         forward publishing it to the public internet, and a request through one would look \
+        "dux is not checking Tailscale ({why}), so it will not notice a Tailscale Funnel \
+         publishing it to the public internet, and a request relayed through one would look \
          like this machine. Keep this port private to your own network, or set a password \
          with [server.auth] require = \"everywhere\"."
     )
@@ -1195,7 +1195,7 @@ pub(crate) fn not_checking_tailscale(forced_no: bool) -> String {
 /// explicit choice, but one that serves whatever a Funnel publishes.
 pub(crate) fn no_longer_checking_funnel() -> String {
     "[server] tailscale is now \"no\", so dux no longer checks for Tailscale Funnel and takes \
-     requests from this machine for this machine again, including any a Funnel forwards from \
+     requests from this machine for this machine again, including any a Funnel relays from \
      the public internet. Turn the Funnel off, set tailscale back to \"auto\", or set \
      [server.auth] require = \"everywhere\"."
         .to_string()

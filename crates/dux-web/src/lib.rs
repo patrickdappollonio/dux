@@ -433,7 +433,7 @@ pub fn safety_note_public(auth: &dux_core::config::ServerAuthConfig) -> String {
     if auth.has_password() {
         "Reachable on your network; every request from it must sign in with the password. Over \
          plain HTTP the password and the session can be overheard on the way, so prefer HTTPS \
-         (tailscale serve, or a reverse proxy with [server.auth] require = \"everywhere\")."
+         (tailscale serve, or an HTTPS front end of your own with [server.auth] require = \"everywhere\")."
             .to_string()
     } else {
         "Reachable on your network with NO password set. Anyone who can reach this address \

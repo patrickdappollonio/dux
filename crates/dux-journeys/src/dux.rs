@@ -33,6 +33,10 @@ use crate::image::{JourneyNetwork, Reaper, dux_binary, journey_image};
 use crate::util::{LogBuffer, eventually, shell_quote, suffix};
 use crate::{DUX_PORT, TAILNET_IP, TAILNET_PEER_IP};
 
+/// dux's config directory inside the journey image (the entrypoint's
+/// `DUX_HOME`).
+const DUX_HOME: &str = "/data/dux";
+
 /// Where dux listens inside its container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bind {
@@ -380,7 +384,14 @@ impl Dux {
     pub async fn exec(&self, script: &str) -> Exec {
         let mut result = self
             .container
-            .exec(ExecCommand::new(["sh", "-c", script]))
+            .exec(ExecCommand::new([
+                "sh",
+                "-c",
+                // The entrypoint exports DUX_HOME for dux and its seed hooks, but
+                // an exec is a fresh shell: without it `dux config set` would
+                // find a different config than the running dux reads.
+                &format!("export DUX_HOME={DUX_HOME}; {script}"),
+            ]))
             .await
             .unwrap_or_else(|err| {
                 panic!(

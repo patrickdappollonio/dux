@@ -149,7 +149,15 @@ async fn journey_12b_no_eavesdropping_warning_on_this_machine() {
 async fn journey_12c_no_password_banner_until_told_never_again() {
     journey("12c-browser-banner", Duration::from_secs(300), async {
         let network = JourneyNetwork::create();
-        let dux = Dux::start(DuxOptions::exposed().with_network(&network)).await;
+        // The first-run welcome and release-notes dialogs would sit over the
+        // banner and take the click; a person dismisses them first.
+        let dux = Dux::start(
+            DuxOptions::exposed()
+                .with_network(&network)
+                .with_config("ui.disable_automated_welcome_screen", "true")
+                .with_config("ui.disable_release_notes", "true"),
+        )
+        .await;
         let browser = Browser::on_network(&network).await;
         let url = format!("http://{}:{DUX_PORT}/", dux.address().await);
 

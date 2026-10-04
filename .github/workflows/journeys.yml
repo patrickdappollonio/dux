@@ -19,11 +19,9 @@ permissions:
   contents: read
 
 env:
-  # Which journeys run. `journeys` is every journey that works today (the smoke
-  # journeys, which prove the harness). `auth` adds the journeys written first
-  # for the web password login, which fail until that feature is built; the
-  # change that lands the login switches this to `auth`.
-  JOURNEY_FEATURES: journeys
+  # Which journeys run. `auth` is every journey: the smoke journeys, which prove
+  # the harness, and the journeys for the web password login.
+  JOURNEY_FEATURES: auth
   # The image the harness uses instead of building its own: the cached build
   # step below produces it.
   DUX_JOURNEY_IMAGE: dux-journeys:ci
