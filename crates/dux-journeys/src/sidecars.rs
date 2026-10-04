@@ -157,6 +157,10 @@ pub fn serve_route_json() -> String {
 pub fn serve_and_proxy_caddyfile() -> String {
     let name = crate::TAILNET_NAME;
     let dux = crate::DUX_PORT;
+    // Tailscale's serve proxy reports the tailnet client's own address in
+    // X-Forwarded-For, and dux proves serve by it, so the stand-in reports a
+    // tailnet peer's address rather than the Docker address Caddy saw.
+    let peer = crate::TAILNET_PEER_IP;
     format!(
         "{{
   admin off
@@ -171,6 +175,7 @@ https://{name}:{SERVE_PORT} {{
     header_up Origin https://{name}
     header_up Tailscale-User-Login \"owner@example.com\"
     header_up Tailscale-User-Name \"Owner\"
+    header_up X-Forwarded-For {peer}
   }}
 }}
 
