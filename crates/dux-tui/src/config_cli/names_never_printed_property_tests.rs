@@ -7,7 +7,7 @@
 //! hashes.
 use super::*;
 use dux_core::start_check_fixtures::{
-    NAME_POSITIONS as POSITIONS, VALUE_POSITIONS, name_tokens as tokens,
+    BINDING_VALUE_POSITIONS, NAME_POSITIONS as POSITIONS, VALUE_POSITIONS, name_tokens as tokens,
 };
 
 /// Every table `get` is asked for.
@@ -155,6 +155,33 @@ fn a_value_below_a_hidden_key_never_reaches_a_printer() {
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
             for (printer, text) in printed(&body) {
                 if text.contains(fragment) {
+                    leaks.push(format!("{printer} on {body:?}:\n{text}"));
+                }
+            }
+        }
+    }
+    assert!(leaks.is_empty(), "{}", leaks.join("\n---\n"));
+}
+
+/// A `[keys]` binding's value is printed where a setting's value is the
+/// point (`get keys` and `dux config diff`, which print what the file sets,
+/// as they print any setting's value) and nowhere else: a binding that is not
+/// a key dux understands (a token pasted there) is named by its action and
+/// line in every problem, refusal and `set` message.
+#[test]
+fn a_binding_value_reaches_no_printer_but_the_value_printers() {
+    crate::config::install_canonical_renderer();
+    let mut leaks = Vec::new();
+    for token in tokens() {
+        let fragment = &token[..12];
+        let quoted = toml::Value::String(token.clone()).to_string();
+        let bare = &quoted[1..quoted.len() - 1];
+        for position in BINDING_VALUE_POSITIONS {
+            let body = position.replace("{V}", bare);
+            assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
+            for (printer, text) in printed(&body) {
+                let prints_values = printer == "get keys" || printer == "config diff";
+                if !prints_values && text.contains(fragment) {
                     leaks.push(format!("{printer} on {body:?}:\n{text}"));
                 }
             }

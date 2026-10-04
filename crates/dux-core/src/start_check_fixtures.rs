@@ -348,6 +348,18 @@ pub const VALUE_POSITIONS: &[&str] = &[
     "[ui.theme]\na = \"{V}\"\n",
 ];
 
+/// Where a `[keys]` binding's VALUE sits, `{V}` standing for it, in every way
+/// `[keys]` can be written. A binding is a value dux prints in `get keys`, as
+/// it prints any setting's value, and nowhere else: no problem, refusal or
+/// `set` message may repeat it.
+pub const BINDING_VALUE_POSITIONS: &[&str] = &[
+    "[keys]\nquit = [\"{V}\"]\n",
+    "[keys]\nquit = [\"ctrl-q\", \"{V}\"]\n",
+    "[keys]\nopen_palette = [\"{V}\"]\nquit = [\"{V}\"]\n",
+    "keys = { quit = [\"{V}\"] }\n",
+    "keys.quit = [\"{V}\"]\n",
+];
+
 /// Token-like names, from a fixed seed: each holds a dot and a space, so it
 /// breaks every naming rule, and starts with a marker no setting has.
 pub fn name_tokens() -> Vec<String> {

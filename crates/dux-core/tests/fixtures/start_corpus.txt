@@ -35,6 +35,16 @@
 #   `passwordHash` and `minimum-password-length` are the names they look
 #   like; a name the user chose (`[env] password-hash`, a provider called
 #   that) stays just a name.
+# - The same holds in every shape a path can take, judged by one rule over
+#   the whole file: an auth setting anywhere but exactly `server` > `auth` >
+#   the setting, spelled as dux reads it, stops both surfaces. That covers an
+#   array of tables (`[[server.auths]]`, `[[server.auth]]`), an inline array,
+#   a differently cased `[Server.auth]` or `[SERVER.auth]`, a quoted key
+#   holding dots (`"auth.require"`, `["server.auth"]`), a table nested in
+#   `[server.auth]`, a field of a provider and the retired top-level `[auth]`
+#   holding an auth setting. The real setting written as dotted keys or an
+#   inline table still starts, and the retired `[auth]` holding only its old
+#   `username` still starts.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
@@ -483,6 +493,23 @@ start start "[server.authentication]\nx = 1\n"
 start start "[server.login]\nbanner = \"hi\"\n"
 refuse start "[env]\npassword-hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
 start start "[providers.password-hash]\ncommand = \"x\"\n"
+refuse(was:start) refuse(was:start) "[server.auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n\n[[server.auths]]\nrequire = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "[server.auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n\n[Server.auth]\nrequire = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "[SERVER.auth]\nblocked_addresses = [\"203.0.113.7\"]\n"
+refuse(was:start) refuse(was:start) "[server]\n\"auth.require\" = \"everywhere\"\n\n[server.auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[\"server.auth\"]\nblocked_addresses = [\"203.0.113.7\"]\n"
+refuse(was:start) refuse(was:start) "[[server.auth]]\nrequire = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "server = { auth = [{ require = \"everywhere\" }] }\n"
+refuse(was:start) refuse(was:start) "[server.auth.extra]\nrequire = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "\"auth.require\" = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "[providers.mytool]\ncommand = \"x\"\n\"auth.require\" = \"everywhere\"\n"
+refuse(was:start) refuse(was:start) "[ui]\nx = [{ require = \"everywhere\" }]\n"
+refuse(was:start) refuse(was:start) "[auth]\nrequire = \"everywhere\"\n"
+start start "[auth]\nusername = \"ada\"\n"
+refuse start "[env]\n\"auth.require\" = \"x\"\n"
+start start "[server]\nauth.require = \"everywhere\"\n"
+start start "server.auth.require = \"everywhere\"\n"
+start start "[server]\nauth = { require = \"everywhere\" }\n"
 
 # Every case above that is TOML with at least one table, written again twice:
 # once with each section as an inline table (`server = { port = 4000 }`,

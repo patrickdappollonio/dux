@@ -3109,195 +3109,183 @@ fn is_auth_key(name: &str) -> bool {
         .any(|known| auth_key_form(known) == form)
 }
 
-/// Whether `name` names a password hash: in [`auth_key_form`], or as the
-/// last part of a dotted name written as one key (`"auth.password_hash"`).
-fn names_a_password_hash(name: &str) -> bool {
-    let last = name.rsplit('.').next().unwrap_or(name);
-    auth_key_form(last) == auth_key_form("password_hash")
+/// Whether `name` is, exactly as written, a setting `[server.auth]` has: the
+/// one spelling dux reads there.
+fn is_exact_auth_setting(name: &str) -> bool {
+    name == "password_hash"
+        || crate::config_auth::auth_setting_names()
+            .iter()
+            .any(|known| known == name)
 }
 
-/// Whether a table named `name` reads as meant for the auth settings: in
-/// [`auth_key_form`] it is "auth", within two edits of it, or one of the
-/// longer words for it ("authentication", "login").
-fn auth_like_name(name: &str) -> bool {
-    let form = auth_key_form(name);
-    form == "auth"
-        || edit_distance(&form, "auth") <= 2
-        || form == "authentication"
-        || form == "login"
-}
-
-/// A password hash, or an `auth` table, where dux does not read one, and
-/// where a misplaced auth setting could plausibly be: a `password_hash` at
-/// the top level, directly under `[server]`, or inside an auth-like table (a
-/// table at the top level or under `[server]` whose name reads as "auth":
-/// `[server.auht]`, `[server.Auth]`, `[server.authentication]`,
-/// `[server.login]`, a top-level `[auht]`), and each such auth-like table
-/// itself when it holds a setting `[server.auth]` has. Any setting
-/// `[server.auth]` has, written directly at the top level or directly under
-/// `[server]` (`require` one level too high), is one too: none of those
-/// names is a setting there, so it can only be an auth setting in the wrong
-/// place, and reading it as nothing would read a mistake as less
-/// protection. Every name is matched in [`auth_key_form`]. dux would start without the password the user meant to set, so each
-/// is a problem that stops the start, named by where it is (never its
-/// value), saying where it belongs, and attributed to that place.
+/// Every setting `[server.auth]` has, written anywhere dux does not read it,
+/// as one structural rule over the whole parsed file. dux would start
+/// without what the user meant to set (a password, `require`,
+/// `blocked_addresses`), reading a mistake as less protection, so each is a
+/// problem that stops the start, named by where it is (never its value),
+/// saying where it belongs, and attributed to that place.
 ///
-/// A table whose name is merely close to "auth" (`[path]`, `[math]`,
-/// `[auto]`, `[oauth]`) and holds nothing `[server.auth]` has is the user's
-/// own, and is ignored, as dux always did.
+/// Every key path is walked in every form the file can write it in: tables,
+/// arrays of tables, inline tables, inline arrays and dotted keys (which the
+/// parse makes one shape), and a quoted key holding dots (`"auth.require"`,
+/// `["server.auth"]`), split into its parts for this check only. Every
+/// segment is compared in [`auth_key_form`], so `password-hash`,
+/// `passwordHash` and `Require` are the settings they look like. A key that
+/// names an auth setting is misplaced unless its path is exactly
+/// `server` > `auth` > the setting, spelled as dux reads it, with no array
+/// and no quoted dotted key on the way: `[Server.auth]`, `[[server.auth]]`,
+/// `["server.auth"]`, `[server.auths]`, `require` directly under `[server]`
+/// or at the top level all hold misplaced settings.
 ///
-/// Never inside a table whose keys are names the user chose (`[env]`, a
-/// provider, a project, `[macros]`, `[keys]`): a variable or provider that
-/// happens to be named `password_hash` is not a password hash. Other unknown
-/// keys stay harmless.
-///
-/// A top-level table named exactly `[auth]` is the one exception to the
-/// table rule: it is the section the retired HTTP basic-auth feature wrote,
-/// real configs from before the upgrade still carry it (`username = "…"`),
-/// and the documentation restore cleans it up. It stops the start only when
-/// it holds a `password_hash`.
+/// Two places are exempt. A NAME the user chose (an `[env]` variable, a
+/// provider, a macro or a binding's action, a variable in a project's `env`)
+/// is just a name: a provider called `password_hash` is not a password hash,
+/// though a field inside it is a field of dux's schema like anywhere else.
+/// And the top-level `[auth]` the retired HTTP basic-auth feature wrote,
+/// which real configs still carry (`username = "…"`), is left alone while it
+/// holds nothing `[server.auth]` has; the documentation restore cleans it up.
+/// A table merely named like "auth" (`[path]`, `[oauth]`) and holding no
+/// auth setting is the user's own, as it always was.
 pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem> {
     use crate::config_auth::Problem;
     let Ok(file) = toml::from_str::<toml::Table>(raw) else {
         return Vec::new();
     };
-    // Each place is carried as its segments and printed through the one
-    // formatter.
-    let stray = |place: Vec<String>| {
-        let shown = shown_path(raw, &place);
-        Problem::about(
-            place,
-            format!(
-                "{shown} is not read: a password hash belongs in [server.auth] as password_hash, \
-                 so dux will not start until it is moved there or removed"
-            ),
-        )
-    };
-    let table_problem = |place: Vec<String>, top_level: bool| {
-        // A table the schema does not know is placed by its line (see the
-        // formatter), so it is never bracketed as if it were a name.
-        let shown = if name_is_hidden(raw, &place) {
-            shown_path(raw, &place)
-        } else {
-            format!("[{}]", shown_path(raw, &place))
-        };
-        let message = if top_level {
-            format!(
-                "{shown} is not read: the web UI password settings belong in [server.auth], so \
-                 dux will not start until it is moved there or removed"
-            )
-        } else {
-            format!(
-                "{shown} is not read: the web UI password settings belong in [server.auth], so \
-                 dux will not start until it is renamed or removed"
-            )
-        };
-        Problem::about(place, message)
-    };
-    // A table under a name that reads as "auth" that holds one of its
-    // settings.
-    let near_auth = |name: &str, table: &toml::Table| {
-        auth_like_name(name) && table.keys().any(|key| is_auth_key(key))
-    };
-    // An auth setting written directly where it is not read.
-    let one_level_off = |place: Vec<String>| {
-        let shown = shown_path(raw, &place);
-        Problem::about(
-            place,
-            format!(
-                "{shown} is not read: the web UI password settings belong in [server.auth], so \
-                 dux will not start until it is moved there or removed"
-            ),
-        )
-    };
-    let mut problems = Vec::new();
-    // A password hash anywhere but the real `[server.auth]`, whatever the
-    // table around it is called (any case, quoting or dotting), stops the
-    // start: dux would otherwise serve with no password at all.
     let mut found = Vec::new();
-    stray_password_hashes(
-        &toml::Value::Table(file.clone()),
-        &mut Vec::new(),
+    misplaced_auth_settings(
+        &toml::Value::Table(file),
+        &mut AuthWalk::default(),
         &mut found,
     );
-    problems.extend(found.into_iter().map(stray));
-    for (name, value) in &file {
-        // A password hash here is already a stray hash above.
-        if is_auth_key(name) && !names_a_password_hash(name) {
-            problems.push(one_level_off(key_path(&[name])));
-        }
-        let Some(table) = value.as_table() else {
-            continue;
-        };
-        if !near_auth(name, table) {
-            continue;
-        }
-        if name != "auth" {
-            problems.push(table_problem(key_path(&[name]), true));
-        }
-    }
-    // A `[server]` that is not a table (an array of tables, a value) holding
-    // a password hash or an auth-like table anywhere inside it.
-    if let Some(server) = file.get("server").filter(|server| !server.is_table())
-        && holds_auth_setting(server, true)
-    {
-        problems.push(Problem::about(
-            key_path(&["server"]),
-            "[server] is not a table, and it holds a web UI password setting, which dux does \
-             not read there: the settings belong in [server.auth] (a [server] table holding an \
-             [auth] table), so dux will not start until they are moved there or removed",
-        ));
-    }
-    if let Some(server) = file.get("server").and_then(toml::Value::as_table) {
-        for (name, value) in server {
-            if name != "auth" && is_auth_key(name) && !names_a_password_hash(name) {
-                problems.push(one_level_off(key_path(&["server", name])));
-            }
-            let Some(table) = value.as_table() else {
-                continue;
+    found
+        .into_iter()
+        .map(|misplaced| {
+            // Printed through the one formatter, array entries included; a
+            // name it does not print is placed by its line.
+            let parts: Vec<PathPart<'_>> = misplaced
+                .shown
+                .iter()
+                .map(|step| match step {
+                    AuthStep::Key(key) => PathPart::Key(key),
+                    AuthStep::Index(index) => PathPart::Index(*index),
+                })
+                .collect();
+            let shown = shown_parts(raw, &parts);
+            let message = if misplaced.a_hash {
+                format!(
+                    "{shown} is not read: a password hash belongs in [server.auth] as \
+                     password_hash, so dux will not start until it is moved there or removed"
+                )
+            } else {
+                format!(
+                    "{shown} is not read: the web UI password settings belong in [server.auth], \
+                     so dux will not start until it is moved there or removed"
+                )
             };
-            if name == "auth" || !near_auth(name, table) {
-                continue;
-            }
-            problems.push(table_problem(key_path(&["server", name]), false));
-        }
-    }
-    problems
+            Problem::about(misplaced.keys, message)
+        })
+        .collect()
 }
 
-/// Every key holding a password hash in `value` (a whole config file at
-/// `path`), with its path: a key named `password_hash` in any spelling
-/// [`auth_key_form`] makes one (`password-hash`, `passwordHash`), or one
-/// whose dotted name ends in it (`"auth.password_hash"`), anywhere but the
-/// real `[server.auth] password_hash`. Never where the key is a NAME the
-/// user chose (see [`names_a_user_entry`]): `[env] password_hash`, a provider
-/// or a macro called that, is just the name someone picked. A field INSIDE
-/// such an entry (a provider's, a macro's, a project's) is a field of dux's
-/// schema, so a `password_hash` there is misplaced like anywhere else.
-fn stray_password_hashes(
+/// One step of [`misplaced_auth_settings`]' walk, as printed.
+enum AuthStep {
+    Key(String),
+    Index(usize),
+}
+
+/// Where [`misplaced_auth_settings`] is in the file.
+#[derive(Default)]
+struct AuthWalk {
+    /// The path as printed: keys as written, array entries by index.
+    shown: Vec<AuthStep>,
+    /// The keys as written, for attribution and the name rule.
+    keys: Vec<String>,
+    /// The keys with every quoted dotted key split into its parts: what the
+    /// check compares.
+    parts: Vec<String>,
+    /// Whether an array was passed on the way.
+    through_array: bool,
+    /// Whether a quoted key holding dots was passed on the way.
+    through_split: bool,
+}
+
+/// An auth setting [`misplaced_auth_settings`] found where dux does not read
+/// it.
+struct MisplacedAuth {
+    shown: Vec<AuthStep>,
+    keys: Vec<String>,
+    /// Whether it is a password hash, which is said as one.
+    a_hash: bool,
+}
+
+fn misplaced_auth_settings(
     value: &toml::Value,
-    path: &mut Vec<String>,
-    found: &mut Vec<Vec<String>>,
+    walk: &mut AuthWalk,
+    found: &mut Vec<MisplacedAuth>,
 ) {
     match value {
         toml::Value::Table(table) => {
             for (key, child) in table {
-                let a_name = names_a_user_entry(path);
-                path.push(key.clone());
-                if names_a_password_hash(key)
-                    && !a_name
-                    && *path != ["server", "auth", "password_hash"]
-                {
-                    found.push(path.clone());
+                let pieces: Vec<&str> = key.split('.').collect();
+                let split = pieces.len() > 1;
+                // The name position of a map of user-chosen names, reached
+                // without a quoted dotted key: the key is the name the user
+                // chose, never a setting.
+                let a_name = !walk.through_split && names_a_user_entry(&walk.keys);
+                walk.shown.push(AuthStep::Key(key.clone()));
+                walk.keys.push(key.clone());
+                if !a_name {
+                    for (at, piece) in pieces.iter().enumerate() {
+                        if !is_auth_key(piece) {
+                            continue;
+                        }
+                        let mut path = walk.parts.clone();
+                        path.extend(pieces[..=at].iter().map(|piece| (*piece).to_string()));
+                        let read_there = !walk.through_array
+                            && !walk.through_split
+                            && !split
+                            && path.len() == 3
+                            && path[0] == "server"
+                            && path[1] == "auth"
+                            && is_exact_auth_setting(piece);
+                        if !read_there {
+                            found.push(MisplacedAuth {
+                                shown: walk
+                                    .shown
+                                    .iter()
+                                    .map(|step| match step {
+                                        AuthStep::Key(key) => AuthStep::Key(key.clone()),
+                                        AuthStep::Index(index) => AuthStep::Index(*index),
+                                    })
+                                    .collect(),
+                                keys: walk.keys.clone(),
+                                a_hash: auth_key_form(piece) == auth_key_form("password_hash"),
+                            });
+                            break;
+                        }
+                    }
                 }
-                stray_password_hashes(child, path, found);
-                path.pop();
+                let parts_before = walk.parts.len();
+                walk.parts
+                    .extend(pieces.iter().map(|piece| (*piece).to_string()));
+                let split_before = walk.through_split;
+                walk.through_split |= split;
+                misplaced_auth_settings(child, walk, found);
+                walk.through_split = split_before;
+                walk.parts.truncate(parts_before);
+                walk.keys.pop();
+                walk.shown.pop();
             }
         }
         toml::Value::Array(items) => {
-            for item in items {
-                stray_password_hashes(item, path, found);
+            let array_before = walk.through_array;
+            walk.through_array = true;
+            for (index, item) in items.iter().enumerate() {
+                walk.shown.push(AuthStep::Index(index));
+                misplaced_auth_settings(item, walk, found);
+                walk.shown.pop();
             }
+            walk.through_array = array_before;
         }
         _ => {}
     }
@@ -3316,48 +3304,12 @@ fn names_a_user_entry(parent: &[String]) -> bool {
     }
 }
 
-/// Whether `value` (a `[server]` that is not a table) holds, anywhere inside
-/// it, a password hash or a table under a name that reads as "auth" holding
-/// an auth setting, or, `direct`ly in it (an entry of the array it is), an
-/// auth setting itself. Names are matched in [`auth_key_form`].
-fn holds_auth_setting(value: &toml::Value, direct: bool) -> bool {
-    match value {
-        toml::Value::Table(table) => table.iter().any(|(key, child)| {
-            names_a_password_hash(key)
-                || (direct && is_auth_key(key))
-                || (auth_like_name(key)
-                    && child
-                        .as_table()
-                        .is_some_and(|t| t.keys().any(|k| is_auth_key(k))))
-                || holds_auth_setting(child, false)
-        }),
-        toml::Value::Array(items) => items.iter().any(|item| holds_auth_setting(item, direct)),
-        _ => false,
-    }
-}
-
 /// [`misplaced_auth_problem_list`]'s sentences.
 pub fn misplaced_auth_problems(raw: &str) -> Vec<String> {
     misplaced_auth_problem_list(raw)
         .into_iter()
         .map(|problem| problem.message)
         .collect()
-}
-
-/// The Levenshtein distance between two short names.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.iter().enumerate() {
-        let mut current = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let substitution = previous[j] + usize::from(ca != cb);
-            current.push(substitution.min(previous[j + 1] + 1).min(current[j] + 1));
-        }
-        previous = current;
-    }
-    previous[b.len()]
 }
 
 /// The `[server.auth]` section of a whole config file's text, read exactly as
@@ -4254,6 +4206,13 @@ fn shown_place(raw: &str, segments: &[String]) -> String {
 pub(crate) enum KeyStep<'a> {
     Key(&'a str),
     Entry(&'a str, usize),
+}
+
+/// The line of `raw` the key at `path` (keys only, no arrays) is written
+/// on, for a sentence that places a setting without repeating its value.
+pub fn line_of_setting(raw: &str, path: &[&str]) -> Option<usize> {
+    let steps: Vec<KeyStep<'_>> = path.iter().map(|key| KeyStep::Key(key)).collect();
+    line_of_key(raw, &steps)
 }
 
 /// The line (from 1) where the key at `steps` is written in `raw`, so a
@@ -7705,24 +7664,37 @@ max_websocket_connections = 16
     /// `password_hash` outside `[server.auth]`, or a table named "auth" (or
     /// within two edits of it) under `[server]` or at the top level stops the
     /// start, naming where it is and where it belongs, never the hash.
-    /// The misplaced-setting rule reads any `[server.auth]` name written
-    /// directly at the top level or under `[server]` as an auth setting in
-    /// the wrong place. That holds only while no setting there shares its
-    /// name in [`auth_key_form`]; this pins it.
+    /// The misplaced-setting rule reads any key named like a `[server.auth]`
+    /// setting, anywhere but `[server.auth]` itself, as an auth setting in
+    /// the wrong place. That holds only while no other setting in the schema
+    /// (the whole config, a provider, a macro, a project) shares its name in
+    /// [`auth_key_form`]; this pins it.
     #[test]
-    fn no_auth_setting_shares_a_name_with_a_server_or_top_level_setting() {
-        let tree = serde_json::to_value(Config::default()).unwrap();
-        let names = |value: &serde_json::Value| -> Vec<String> {
-            value
-                .as_object()
-                .map(|map| map.keys().cloned().collect())
-                .unwrap_or_default()
-        };
-        let mut clashes = Vec::new();
-        for name in names(&tree).into_iter().chain(names(&tree["server"])) {
-            if name != "auth" && is_auth_key(&name) {
-                clashes.push(name);
+    fn no_setting_outside_server_auth_shares_a_name_with_an_auth_setting() {
+        fn names(value: &serde_json::Value, path: &mut Vec<String>, clashes: &mut Vec<String>) {
+            let Some(map) = value.as_object() else {
+                return;
+            };
+            for (name, child) in map {
+                path.push(name.clone());
+                if path.as_slice() != ["server", "auth"] {
+                    if is_auth_key(name) {
+                        clashes.push(path.join("."));
+                    }
+                    names(child, path, clashes);
+                }
+                path.pop();
             }
+        }
+        let trees = schema_trees();
+        let mut clashes = Vec::new();
+        for tree in [
+            &trees.config,
+            &trees.provider,
+            &trees.macro_entry,
+            &trees.project,
+        ] {
+            names(tree, &mut Vec::new(), &mut clashes);
         }
         assert!(clashes.is_empty(), "{clashes:?}");
     }

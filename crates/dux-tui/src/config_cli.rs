@@ -2130,3 +2130,6 @@ mod password_control_characters_tests;
 mod restore_report_and_unknown_path_tests;
 #[cfg(test)]
 mod stdin_limits_tests;
+
+#[cfg(test)]
+mod key_binding_values_tests;

@@ -1794,6 +1794,29 @@ fn keys_start_problems(raw: &str) -> Vec<String> {
             problems.push(format!("[keys] {shown}: unknown action"));
             keys.remove(&name);
         }
+        // A binding that is not a key dux understands is placed by its line
+        // and named by its action, never repeated (see
+        // `not_a_key_sentence`), and taken out so nothing below repeats it.
+        let invalid: Vec<String> = keys
+            .iter()
+            .filter(|(_, item)| {
+                item.as_value()
+                    .and_then(toml_edit::Value::as_array)
+                    .is_some_and(|bindings| {
+                        bindings.iter().any(|binding| {
+                            binding
+                                .as_str()
+                                .is_some_and(|text| !binding_is_understood(text))
+                        })
+                    })
+            })
+            .map(|(name, _)| name.to_string())
+            .collect();
+        for name in invalid {
+            let line = dux_core::config::line_of_setting(raw, &["keys", &name]);
+            problems.push(not_a_key_sentence(&name, line));
+            keys.remove(&name);
+        }
     }
     let mut keys_only = DocumentMut::new();
     if let Some(keys) = doc.get("keys") {
@@ -2337,12 +2360,34 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
     out.push('\n');
 }
 
+/// Whether `binding` is a key dux understands: the one parser both
+/// [`validate_keys`] and the start check read a binding with.
+pub(crate) fn binding_is_understood(binding: &str) -> bool {
+    crokey::parse(&keybindings::normalize_key_string(binding)).is_ok()
+}
+
+/// The sentence for a binding of `action` that is not a key dux understands.
+/// It never repeats the binding: a value pasted in the wrong place (a token)
+/// may be what is there. `at` places it, by its line where the file's text
+/// is at hand.
+fn not_a_key_sentence(action: &str, at: Option<usize>) -> String {
+    match at {
+        Some(line) => {
+            format!(
+                "[keys] the binding on line {line} for action {action} is not a key dux understands"
+            )
+        }
+        None => format!("[keys] a binding for action {action} is not a key dux understands"),
+    }
+}
+
 /// Validate all key bindings in the config. Returns a descriptive error on failure.
 ///
 /// Checks:
 /// 1. Every action name is known (present in `BINDING_DEFS`).
 /// 2. Every key string parses successfully after normalization
-///    (bare uppercase letters like `"P"` are rewritten to `"shift-p"`).
+///    (bare uppercase letters like `"P"` are rewritten to `"shift-p"`); a
+///    binding that does not is named by its action, never repeated.
 /// 3. No two actions bind the same normalized key in overlapping scopes.
 pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
     for (name, key_strs) in &keys.bindings {
@@ -2352,10 +2397,11 @@ pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
         if !valid {
             return Err(format!("[keys] unknown action: \"{name}\""));
         }
-        for s in key_strs {
-            let normalized = keybindings::normalize_key_string(s);
-            crokey::parse(&normalized)
-                .map_err(|_| format!("[keys] invalid key \"{s}\" for action \"{name}\""))?;
+        if !key_strs
+            .iter()
+            .all(|binding| binding_is_understood(binding))
+        {
+            return Err(not_a_key_sentence(name, None));
         }
     }
 
@@ -3148,14 +3194,41 @@ mod tests {
         assert!(validate_keys(&keys).is_ok());
     }
 
+    /// The start check places a binding that is not a key by its line and
+    /// its action, in every way `[keys]` can be written, and never repeats it.
+    #[test]
+    fn a_binding_that_is_not_a_key_is_placed_by_its_line_and_action() {
+        for (raw, line) in [
+            ("[keys]\nquit = [\"zzTOKEN x\"]\n", 2),
+            (
+                "[keys]\nopen_palette = [\"ctrl-p\"]\nquit = [\"ctrl-q\", \"zzTOKEN x\"]\n",
+                3,
+            ),
+            ("keys = { quit = [\"zzTOKEN x\"] }\n", 1),
+            ("keys.quit = [\"zzTOKEN x\"]\n", 1),
+        ] {
+            let problems = keys_start_problems(raw);
+            assert_eq!(
+                problems,
+                vec![format!(
+                    "[keys] the binding on line {line} for action quit is not a key dux understands"
+                )],
+                "{raw}"
+            );
+        }
+    }
+
     #[test]
     fn validate_keys_rejects_bad_key() {
         let mut keys = KeysConfig::default();
         keys.bindings
             .insert("quit".to_string(), vec!["badkey!!!".to_string()]);
-        let result = validate_keys(&keys);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("badkey!!!"));
+        let error = validate_keys(&keys).unwrap_err();
+        // Named by its action, never repeated: the value may be a token.
+        assert_eq!(
+            error,
+            "[keys] a binding for action quit is not a key dux understands"
+        );
     }
 
     #[test]
