@@ -7606,6 +7606,14 @@ mod names_with_dots_quotes_and_spaces_tests {
                         "{body}: a path was split on a dot: {path:?}"
                     );
                 }
+                // `get` of the table, its corrections printed as the CLI
+                // prints them.
+                let key = crate::config_keys::lookup(section).expect("a table");
+                let report = crate::config_keys::get_report(&body, &key).expect("get");
+                for correction in &report.corrections {
+                    let at = shown_path(&body, &correction.path);
+                    assert!(!at.contains("SECRET"), "{body}: {at}");
+                }
             }
         }
     }
