@@ -2737,6 +2737,43 @@ pub struct Config {
     pub server: ServerConfig,
     pub keys: KeysConfig,
     pub macros: MacrosConfig,
+    /// The exact text of the file this config was read from, when it was read
+    /// from one. Never serialized. The config writer's three-way saves patch
+    /// against this text, so the base they compare memory with is the file
+    /// as it was at the moment this config was read, never a later re-read.
+    #[serde(skip)]
+    pub source_text: SourceText,
+}
+
+/// The text a [`Config`] was read from (see [`Config::source_text`]). It
+/// never makes two configs differ: equality is about settings.
+#[derive(Clone, Default)]
+pub struct SourceText(pub Option<std::sync::Arc<str>>);
+
+impl SourceText {
+    pub fn of(text: &str) -> Self {
+        Self(Some(std::sync::Arc::from(text)))
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
+impl PartialEq for SourceText {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for SourceText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "SourceText(..)"
+        } else {
+            "SourceText(None)"
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2818,6 +2855,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),
+            source_text: SourceText::default(),
         }
     }
 }
@@ -2876,9 +2914,9 @@ pub enum ConfigLoadProblem {
 /// The parser's own errors quote the offending line, and a type error repeats
 /// the value it found; either can be an API token under `[env]` or a password
 /// hash, and these messages reach the status line, toasts, dialogs and
-/// dux.log. So only the position, the key where it can be told, and the kind
-/// of problem are kept: `line 2, column 16 (env.GITHUB_TOKEN): string values
-/// must be quoted`.
+/// dux.log. So only the position and the kind of problem are kept: `line 2,
+/// column 16: string values must be quoted`. Not even the key name: a
+/// multi-line string or array can make any of its own lines look like one.
 pub fn describe_toml_error(raw: &str, error: &toml::de::Error) -> String {
     describe_config_error(raw, error.message(), error.span())
 }
@@ -2901,10 +2939,7 @@ fn describe_config_error(raw: &str, message: &str, span: Option<std::ops::Range<
         .next()
         .map_or(0, |text| text.chars().count())
         + 1;
-    match key_path_at(raw, line) {
-        Some(path) => format!("line {line}, column {column} ({path}): {kind}"),
-        None => format!("line {line}, column {column}: {kind}"),
-    }
+    format!("line {line}, column {column}: {kind}")
 }
 
 /// The kind of problem in a parser or serde message, with any value it
@@ -2930,43 +2965,6 @@ fn problem_kind(message: &str) -> String {
         };
     }
     message.to_string()
-}
-
-/// The dotted key the error's line belongs to, from the nearest
-/// `key = value` line at or above it (a multi-line value's continuation
-/// belongs to the key that opened it) and the table header above that.
-/// Key names are not secrets; nothing after the `=` is read.
-fn key_path_at(raw: &str, line: usize) -> Option<String> {
-    let lines: Vec<&str> = raw.lines().collect();
-    let mut key: Option<String> = None;
-    let mut index = line.min(lines.len());
-    while index > 0 {
-        index -= 1;
-        let text = lines[index].trim();
-        if let Some(header) = text.strip_prefix('[') {
-            let header = header.trim_start_matches('[');
-            let header = header.split(']').next().unwrap_or_default().trim();
-            return Some(match key {
-                Some(key) => format!("{header}.{key}"),
-                None => header.to_string(),
-            });
-        }
-        if key.is_none()
-            && let Some((name, _)) = text.split_once('=')
-        {
-            let name = name.trim().trim_matches(|c| c == '"' || c == '\'');
-            let looks_like_key = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
-            if looks_like_key {
-                key = Some(name.to_string());
-            } else {
-                return None;
-            }
-        }
-    }
-    key
 }
 
 impl ConfigLoadProblem {
@@ -3243,35 +3241,47 @@ pub fn load_config_file_as_written(
         path: config_path.to_path_buf(),
         problem,
     };
-    let mut config = match std::fs::read_to_string(config_path) {
+    match std::fs::read_to_string(config_path) {
         Ok(raw) => {
             // One-time migration notice: the single `[server] max_websocket_connections`
             // cap was split into three per-class caps. The unknown key is ignored on
             // load (ServerConfig has no deny_unknown_fields), so warn once so the
             // operator knows their old value is no longer in effect.
             warn_on_removed_max_websocket_connections(&raw);
-            // Apply load-time config migrations IN MEMORY at every entrypoint
-            // (deprecated `[server] bind` -> host/port, `prompt_for_name`, and
-            // retired-provider pruning), so `dux serve` honors deprecated keys
-            // instead of silently dropping them. The TUI's `ensure_config`
-            // additionally PERSISTS the migrated document; here it is memory-only.
-            // A parse or migration failure falls through to the normal recovery
-            // path on the raw text (best effort, never fatal at load).
-            let migrated = raw
-                .parse::<toml_edit::DocumentMut>()
-                .ok()
-                .and_then(|mut doc| {
-                    crate::config_migrate::apply_load_migrations(&mut doc)
-                        .ok()
-                        .map(|_| doc.to_string())
-                })
-                .unwrap_or_else(|| raw.clone());
-            recover_config(&migrated).map_err(fail)?
+            config_from_text_as_written(&raw).map_err(fail)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(error) => return Err(fail(ConfigLoadProblem::Unreadable(error.to_string()))),
-    };
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut config = Config::default();
+            config.providers.ensure_defaults();
+            Ok(config)
+        }
+        Err(error) => Err(fail(ConfigLoadProblem::Unreadable(error.to_string()))),
+    }
+}
+
+/// A config's text read as written: migrated in memory, recovered, with
+/// provider defaults, without the load corrections, and carrying the text
+/// itself as its [`Config::source_text`].
+pub fn config_from_text_as_written(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
+    // Apply load-time config migrations IN MEMORY at every entrypoint
+    // (deprecated `[server] bind` -> host/port, `prompt_for_name`, and
+    // retired-provider pruning), so `dux serve` honors deprecated keys
+    // instead of silently dropping them. The TUI's `ensure_config`
+    // additionally PERSISTS the migrated document; here it is memory-only.
+    // A parse or migration failure falls through to the normal recovery
+    // path on the raw text (best effort, never fatal at load).
+    let migrated = raw
+        .parse::<toml_edit::DocumentMut>()
+        .ok()
+        .and_then(|mut doc| {
+            crate::config_migrate::apply_load_migrations(&mut doc)
+                .ok()
+                .map(|_| doc.to_string())
+        })
+        .unwrap_or_else(|| raw.to_string());
+    let mut config = recover_config(&migrated)?;
     config.providers.ensure_defaults();
+    config.source_text = SourceText::of(raw);
     Ok(config)
 }
 
@@ -4584,10 +4594,10 @@ mod tests {
         .expect("hash")
     }
 
-    /// The error points at the user's own file: its real line number and
-    /// text, not a re-serialized copy of the section.
+    /// The error points at the user's own file by its real line number, and
+    /// quotes none of it.
     #[test]
-    fn an_auth_error_quotes_the_users_own_file() {
+    fn an_auth_error_points_at_the_users_own_line() {
         let raw = "# my config\n\n[ui]\nleft_width_pct = 20\n\n[server.auth]\nrequire = \"lan\"\n";
         let err = recover_config(raw).expect_err("refused");
         let ConfigLoadProblem::AuthInvalid(reason) = &err else {
@@ -4595,8 +4605,8 @@ mod tests {
         };
         assert!(reason.contains("line 7"), "{reason}");
         assert!(
-            reason.contains("(server.auth.require)") && !reason.contains("lan"),
-            "the real line and key, never the value: {reason}"
+            !reason.contains("(") && !reason.contains("lan"),
+            "the real line, never the key or the value: {reason}"
         );
     }
 
@@ -4609,7 +4619,10 @@ mod tests {
         let err = recover_config(raw).expect_err("not toml");
         let text = err.reason().to_string();
         assert!(!text.contains("ghp_abcdef123456"), "{text}");
-        assert!(text.contains("GITHUB_TOKEN"), "{text}");
+        assert!(
+            !text.contains("GITHUB_TOKEN"),
+            "not even the key name: {text}"
+        );
         assert!(text.contains("line 2"), "{text}");
 
         let raw = "[server.auth]\npassword_hash = \"$argon2id$v=19$nope\"\n";
@@ -4625,11 +4638,37 @@ mod tests {
     /// with no `=`, the continuation of a multi-line string, an element of a
     /// multi-line array, and a type error that would repeat the value. They
     /// say the line, the column, the key where known, and what is wrong.
+    /// Text inside a multi-line string or array is never read back as a key
+    /// name: an error there says only where it is and what is wrong.
+    #[test]
+    fn errors_inside_multi_line_values_name_no_key_and_quote_nothing() {
+        for (body, secret) in [
+            (
+                "[env]\nCERT = \"\"\"\nmy_secret_part=QUJDREVGRw\n\"\"\"\nBAD = ,\n",
+                "my_secret_part",
+            ),
+            (
+                "[server]\nallowed_hosts = [\n  \"a\",\n[hidden_secret_line\n]\n",
+                "hidden_secret_line",
+            ),
+            (
+                "[env]\nX = \"\"\"\n[looks_like_a_header_secret]\nk=v\n",
+                "looks_like_a_header_secret",
+            ),
+        ] {
+            let err = recover_config(body).expect_err(body);
+            let text = err.reason().to_string();
+            assert!(!text.contains(secret), "{body:?}: {text}");
+            assert!(!text.contains('('), "no key name at all: {text}");
+            assert!(text.starts_with("line "), "{text}");
+        }
+    }
+
     #[test]
     fn config_errors_never_carry_file_text_or_values() {
         let cases: [(&str, &str, &str); 5] = [
             ("[env]\nGITHUB_TOKEN ghp_secret1\n", "ghp_secret1", "line 2"),
-            ("[env]\nX = \"\"\"\nghp_secret2\n", "ghp_secret2", "(env.X)"),
+            ("[env]\nX = \"\"\"\nghp_secret2\n", "ghp_secret2", "line 4"),
             (
                 "[server]\nallowed_hosts = [\n  \"a\",\n  ghp_secret3,\n]\n",
                 "ghp_secret3",
@@ -4659,7 +4698,7 @@ mod tests {
         }
         let err = validate_config_str("[env]\nTOKEN = 12345678\n").unwrap_err();
         assert!(!err.contains("12345678"), "{err}");
-        assert!(err.contains("line 2") && err.contains("env.TOKEN"), "{err}");
+        assert!(err.contains("line 2") && !err.contains("TOKEN"), "{err}");
     }
 
     /// The advice fits any problem in the section, not only the password.

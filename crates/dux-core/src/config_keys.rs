@@ -42,6 +42,7 @@ use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::auth::{MinimumCheck, Password, Strength};
 use crate::config::{Config, ProviderCommandConfig};
+pub use crate::config_write::MissingConfig;
 
 /// How a setting may be written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -482,13 +483,28 @@ pub struct SetReport {
 /// Write one plain setting into the config file at `config_path`, through
 /// the coordinated mutation path. `raw` is parsed by [`parse_value`].
 pub fn set_plain(config_path: &Path, key: &Key, raw: &str) -> Result<SetReport> {
-    let value = parse_value(key, raw).map_err(anyhow::Error::msg)?;
-    write_value(config_path, &key.path, value)
+    set_plain_with(config_path, MissingConfig::CreateDocumented, key, raw)
 }
 
-fn write_value(config_path: &Path, path: &[String], value: Value) -> Result<SetReport> {
+/// [`set_plain`] with a choice of what a missing file means.
+pub fn set_plain_with(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    key: &Key,
+    raw: &str,
+) -> Result<SetReport> {
+    let value = parse_value(key, raw).map_err(anyhow::Error::msg)?;
+    write_value(config_path, missing, &key.path, value)
+}
+
+fn write_value(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    path: &[String],
+    value: Value,
+) -> Result<SetReport> {
     let now = bare(&value);
-    let previous = crate::config_write::mutate_config_file(config_path, |doc| {
+    let previous = crate::config_write::mutate_config_file_with(config_path, missing, |doc| {
         let previous = value_in_doc(doc, path);
         set_in_doc(doc, path, value)?;
         Ok(previous)
@@ -563,6 +579,21 @@ pub fn set_password(
     password: &Password,
     user_inputs: &[&str],
 ) -> Result<Strength, SetPasswordError> {
+    set_password_with(
+        config_path,
+        MissingConfig::CreateDocumented,
+        password,
+        user_inputs,
+    )
+}
+
+/// [`set_password`] with a choice of what a missing file means.
+pub fn set_password_with(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    password: &Password,
+    user_inputs: &[&str],
+) -> Result<Strength, SetPasswordError> {
     let policy = current_password_policy(config_path);
     let check = crate::auth::check_minimums(password, &policy, user_inputs);
     if !check.passes() {
@@ -571,17 +602,28 @@ pub fn set_password(
     let hash = crate::auth::hash_password(password)
         .map_err(|e| SetPasswordError::Failed(anyhow::Error::msg(e.to_string())))?;
     let path: Vec<String> = password_hash_path();
-    write_value(config_path, &path, Value::from(hash)).map_err(SetPasswordError::Failed)?;
+    write_value(config_path, missing, &path, Value::from(hash))
+        .map_err(SetPasswordError::Failed)?;
     Ok(check.strength)
 }
 
 /// Store a [`SecretKind::Text`] value (an environment value) as given,
 /// through the coordinated mutation path. The caller never prints it.
 pub fn set_secret_text(config_path: &Path, key: &Key, value: &Password) -> Result<()> {
+    set_secret_text_with(config_path, MissingConfig::CreateDocumented, key, value)
+}
+
+/// [`set_secret_text`] with a choice of what a missing file means.
+pub fn set_secret_text_with(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    key: &Key,
+    value: &Password,
+) -> Result<()> {
     if key.policy != WritePolicy::Secret(SecretKind::Text) {
         anyhow::bail!("{} is not a setting stored as typed text", key.dotted());
     }
-    write_value(config_path, &key.path, Value::from(value.expose())).map(|_| ())
+    write_value(config_path, missing, &key.path, Value::from(value.expose())).map(|_| ())
 }
 
 fn password_hash_path() -> Vec<String> {

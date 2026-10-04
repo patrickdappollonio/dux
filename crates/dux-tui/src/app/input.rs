@@ -13168,25 +13168,40 @@ not_a_real_action = ["x"]
     #[test]
     fn a_failed_reload_apply_never_reverts_the_file() {
         let mut app = test_app(default_bindings());
-        std::fs::write(&app.engine.paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        std::fs::write(
+            &app.engine.paths.config_path,
+            "[ui]\nleft_width_pct = 20\n\n[env]\nFOO = \"bar\"\n",
+        )
+        .unwrap();
         app.engine.config = dux_core::config::load_config(&app.engine.paths).unwrap();
         app.engine.retune_after_config_swap();
-        std::fs::write(&app.engine.paths.config_path, "[ui]\nleft_width_pct = 33\n").unwrap();
+        std::fs::write(
+            &app.engine.paths.config_path,
+            "[ui]\nleft_width_pct = 33\n\n[env]\n",
+        )
+        .unwrap();
         let reloaded = dux_core::config::load_config(&app.engine.paths).unwrap();
-        // What a coalesced reload's pre-swap does to the writer.
-        app.engine.config_writer.set_base(reloaded.clone());
         rusqlite::Connection::open(&app.engine.paths.sessions_db_path)
             .unwrap()
             .execute("DROP TABLE projects", [])
             .unwrap();
 
         app.apply_reloaded_config_reaction(reloaded);
-        assert_eq!(app.engine.config.ui.left_width_pct, 20, "the apply failed");
+        assert_eq!(
+            app.engine.config.ui.left_width_pct, 33,
+            "the engine keeps the new config though the apply failed"
+        );
 
-        let mut memory = app.engine.config.clone();
-        memory.ui.copy_on_select = !memory.ui.copy_on_select;
-        app.engine.config_writer.save_eager(memory).expect("save");
+        for round in 0..2 {
+            let mut memory = app.engine.config.clone();
+            memory.ui.copy_on_select = round == 0;
+            app.engine.config_writer.save_eager(memory).expect("save");
+        }
         let after = std::fs::read_to_string(&app.engine.paths.config_path).unwrap();
+        assert!(
+            !after.contains("FOO"),
+            "the deletion survives two saves:\n{after}"
+        );
         assert!(
             after.contains("left_width_pct = 33"),
             "not reverted:\n{after}"

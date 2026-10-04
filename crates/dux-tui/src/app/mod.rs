@@ -7504,12 +7504,14 @@ pub(crate) fn persist_runtime_projects_to_config_and_store(
         // is left alone.
         let base = config.clone();
         config.projects = config_project_configs;
-        dux_core::config_write::save_config_three_way(
+        let written = dux_core::config_write::save_config_three_way(
             &paths.config_path,
-            Some(&base),
+            Some(dux_core::config_write::SaveBase::read(&base)),
             config,
             dux_core::config_write::Durability::Fsync,
         )?;
+        // The file is now this text: what a later save compares with.
+        config.source_text = dux_core::config::SourceText::of(&written);
     }
 
     Ok(())
@@ -7530,14 +7532,21 @@ pub(crate) fn sync_config_projects_with_store(
     // Three-way against the config as read, so the sync writes only the
     // projects it changed and never undoes a key set on disk meanwhile.
     let base = config.clone();
+    let mut written: Option<String> = None;
     dux_core::config_sync::reconcile_config_projects(config, session_store, |config| {
-        dux_core::config_write::save_config_three_way(
+        written = Some(dux_core::config_write::save_config_three_way(
             &paths.config_path,
-            Some(&base),
+            Some(dux_core::config_write::SaveBase::read(&base)),
             config,
             dux_core::config_write::Durability::Fsync,
-        )
-    })
+        )?);
+        Ok(())
+    })?;
+    // The file is now this text: what a later save compares with.
+    if let Some(text) = written {
+        config.source_text = dux_core::config::SourceText::of(&text);
+    }
+    Ok(())
 }
 
 /// Pre-flight for the in-process flip from the TUI to the web server: resolve

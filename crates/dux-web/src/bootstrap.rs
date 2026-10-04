@@ -54,19 +54,25 @@ impl ConfigSurface for WebConfigSurface {
                     // Three-way against the config as read: the sync writes
                     // only what it changed, never a key set on disk meanwhile.
                     let base = config.clone();
+                    let mut written: Option<String> = None;
                     dux_core::config_sync::reconcile_config_projects(
                         &mut config,
                         &store,
                         |config| {
-                            dux_core::config_write::save_config_three_way(
+                            written = Some(dux_core::config_write::save_config_three_way(
                                 &paths.config_path,
-                                Some(&base),
+                                Some(dux_core::config_write::SaveBase::read(&base)),
                                 config,
                                 dux_core::config_write::Durability::Fsync,
-                            )
+                            )?);
+                            Ok(())
                         },
                     )
-                    .map_err(|e| format!("{e:#}"))
+                    .map_err(|e| format!("{e:#}"))?;
+                    if let Some(text) = written {
+                        config.source_text = dux_core::config::SourceText::of(&text);
+                    }
+                    Ok(())
                 });
             match reconciled {
                 Ok(()) => guard.complete(Ok(config)),
@@ -103,14 +109,19 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // through the core save path. The write is sync-direct because bootstrap runs
     // before the engine's config-write queue exists.
     let base = config.clone();
+    let mut written: Option<String> = None;
     dux_core::config_sync::reconcile_config_projects(&mut config, &session_store, |config| {
-        dux_core::config_write::save_config_three_way(
+        written = Some(dux_core::config_write::save_config_three_way(
             &paths.config_path,
-            Some(&base),
+            Some(dux_core::config_write::SaveBase::read(&base)),
             config,
             dux_core::config_write::Durability::Fsync,
-        )
+        )?);
+        Ok(())
     })?;
+    if let Some(text) = written {
+        config.source_text = dux_core::config::SourceText::of(&text);
+    }
     let sessions = session_store.load_sessions()?;
     let agent_tabs = session_store.load_extra_agent_tabs()?;
     let projects = dux_core::project_browser::load_projects(

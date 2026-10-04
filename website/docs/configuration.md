@@ -84,16 +84,17 @@ notifications and in `dux.log`; two `set`s in quick succession are both picked u
 is not running, the change applies the next time it starts.
 
 Writers take turns on the file, and a save dux makes from its own settings only writes the
-settings that changed inside dux since it last read the file, keeping the comments around
-them. So a value you `set`, or edit by hand, while dux runs stays as you wrote it unless
-you then change that same setting inside dux before it reloads. Projects are matched by
-their id, or by their path when one has no id, so a project you add to the file by hand
+settings that changed inside dux since it last read or saved the file, keeping the comments
+around them. So a value you `set`, or edit or delete by hand, while dux runs stays as you
+left it across any number of saves, unless you then change that same setting inside dux
+before it reloads. The same goes for each field of a project. Projects are matched by their
+id and path together, then by id, then by path, so a project you add to the file by hand
 stays when dux adds one of its own, and a project written without an id is given one the
 first time dux saves. A setting the file has never had (one new in this version of dux) is
-written in with its current value; one you delete from the file while dux runs stays
-deleted. The `[server.auth]` section is only ever changed by an
-explicit change to it (`set`, a password change, a block after failed logins), never by
-dux saving its other settings.
+written in with its current value. Once dux reloads the file, a setting missing from it
+counts as one the file has never had, so the next save writes it in with its default. The
+`[server.auth]` section is only ever changed by an explicit change to it (`set`, a password
+change, a block after failed logins), never by dux saving its other settings.
 
 > [!TIP]
 > After editing `config.toml` by hand, you can ask a running dux to reload it without
@@ -222,7 +223,8 @@ address from `blocked_addresses` and the block lifts at once.
 > they refuse it too; fix the line the error names by hand. `dux config set` itself
 > refuses any value that would leave the section invalid. If `config.toml` is deleted
 > while dux runs, a reload is refused the same way and the running settings, password
-> included, stay until the file is back.
+> included, stay until the file is back; `dux config set` refuses to write a fresh file
+> then too, and points you at Recover config.
 
 `dux config regenerate --yes` writes fresh defaults, which have no password; it says so
 when the config it replaces had one.

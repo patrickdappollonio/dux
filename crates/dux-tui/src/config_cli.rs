@@ -92,20 +92,6 @@ pub(crate) fn run_set(
 ) -> Result<()> {
     let parsed = parse_set_args(args)?;
     let key = config_keys::lookup(&parsed.path).map_err(|e| anyhow!("{e}"))?;
-    // A config.toml deleted while a dux runs is not replaced with a fresh
-    // default: that would drop the running password the moment the dux
-    // reloaded it. The running dux keeps its settings until the file is back.
-    if !paths.config_path.exists()
-        && let Some(pid) = dux_core::reload_signal::running_dux(&paths.lock_path)
-    {
-        bail!(
-            "{} is missing while dux is running (PID {pid}), and writing a fresh one here would \
-             drop the running settings, the web password included. Put the file back, or use \
-             Recover config in that dux to write its running settings to it, then run this \
-             again. Nothing was changed.",
-            paths.config_path.display()
-        );
-    }
     // A first `set` on a machine dux never ran on writes the whole commented
     // template, as dux itself would, and makes the directory for it.
     crate::config::install_canonical_renderer();
@@ -126,7 +112,12 @@ pub(crate) fn run_set(
                     parsed.path
                 );
             };
-            let report = config_keys::set_plain(&paths.config_path, &key, &value)?;
+            let report = config_keys::set_plain_with(
+                &paths.config_path,
+                missing_file_check(paths),
+                &key,
+                &value,
+            )?;
             writeln!(
                 out,
                 "{}: {} -> {} (in {})",
@@ -232,7 +223,12 @@ fn set_secret(
         first
     };
     if !is_password {
-        config_keys::set_secret_text(&paths.config_path, key, &password)?;
+        config_keys::set_secret_text_with(
+            &paths.config_path,
+            missing_file_check(paths),
+            key,
+            &password,
+        )?;
         writeln!(
             out,
             "{} updated in {} (the value is not shown).",
@@ -247,7 +243,12 @@ fn set_secret(
              `dux config set server.auth.password_hash \"\"`. Nothing was changed."
         );
     }
-    match config_keys::set_password(&paths.config_path, &password, &inputs) {
+    match config_keys::set_password_with(
+        &paths.config_path,
+        missing_file_check(paths),
+        &password,
+        &inputs,
+    ) {
         Ok(strength) => {
             writeln!(
                 out,
@@ -267,6 +268,29 @@ fn set_secret(
         }
         Err(SetPasswordError::Failed(error)) => Err(error),
     }
+}
+
+/// What a missing config.toml means to `set`: refused while a dux may be
+/// running (checked inside the config write lock, when the file turns out to
+/// be missing), because a fresh default file would drop that dux's settings,
+/// the web password included, the moment it reloaded. With no dux running it
+/// is the documented default, as a first start would write. A lock that
+/// cannot be checked counts as a running dux.
+fn missing_file_check(paths: &DuxPaths) -> config_keys::MissingConfig<'static> {
+    let lock_path = paths.lock_path.clone();
+    let config_path = paths.config_path.clone();
+    config_keys::MissingConfig::CheckFirst(Box::new(move || {
+        if dux_core::reload_signal::dux_may_be_running(&lock_path) {
+            bail!(
+                "{} is missing while dux may be running, and writing a fresh one here would \
+                 drop the running settings, the web password included. Put the file back, or \
+                 use Recover config in that dux to write its running settings to it, then run \
+                 this again. Nothing was changed.",
+                config_path.display()
+            );
+        }
+        Ok(())
+    }))
 }
 
 /// Words a guesser would try first for this person, which count against a
@@ -963,6 +987,21 @@ port = 3890
         let written = std::fs::read_to_string(&paths.config_path).expect("created");
         assert!(written.contains("# dux configuration"), "{written}");
         assert!(written.contains("port = 4000"), "{written}");
+    }
+
+    /// A lock that cannot even be checked counts as a running dux: `set`
+    /// refuses a missing file rather than guess.
+    #[test]
+    fn set_refuses_a_missing_config_when_the_lock_cannot_be_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, paths) = setup(None);
+        std::fs::write(&paths.lock_path, "").expect("lock file");
+        std::fs::set_permissions(&paths.lock_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = set(&paths, &["server.port", "4000"], &mut no_secrets());
+        std::fs::set_permissions(&paths.lock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let err = result.expect_err("refused");
+        assert!(err.to_string().contains("Recover config"), "{err}");
+        assert!(!paths.config_path.exists(), "nothing was written");
     }
 
     /// config.toml deleted while a dux runs: `set` must not write a fresh

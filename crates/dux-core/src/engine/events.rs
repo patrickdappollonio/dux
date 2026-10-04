@@ -9128,10 +9128,19 @@ mod tests {
     fn a_failed_apply_after_a_coalesced_reload_never_reverts_the_file() {
         let (mut engine, _tmp) = test_engine();
         engine.surface = Box::new(FileReloadSurface);
-        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[ui]\nleft_width_pct = 20\n\n[env]\nFOO = \"bar\"\n",
+        )
+        .unwrap();
         engine.config = crate::config::load_config(&engine.paths).unwrap();
         engine.retune_after_config_swap();
-        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 33\n").unwrap();
+        // The reloaded file changes one setting and deletes another by hand.
+        std::fs::write(
+            &engine.paths.config_path,
+            "[ui]\nleft_width_pct = 33\n\n[env]\n",
+        )
+        .unwrap();
         engine
             .apply(crate::engine::Command::ReloadConfig)
             .expect("reload");
@@ -9158,11 +9167,21 @@ mod tests {
             engine.apply_reloaded_config(*applied).is_err(),
             "the apply fails"
         );
+        assert_eq!(
+            engine.config.ui.left_width_pct, 33,
+            "the engine keeps the new config anyway"
+        );
 
-        let mut memory = engine.config.clone();
-        memory.ui.copy_on_select = !memory.ui.copy_on_select;
-        engine.config_writer.save_eager(memory).expect("save");
+        for round in 0..2 {
+            let mut memory = engine.config.clone();
+            memory.ui.copy_on_select = round == 0;
+            engine.config_writer.save_eager(memory).expect("save");
+        }
         let after = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        assert!(
+            !after.contains("FOO"),
+            "the deletion survives two saves:\n{after}"
+        );
         assert!(
             after.contains("left_width_pct = 33"),
             "not reverted:\n{after}"

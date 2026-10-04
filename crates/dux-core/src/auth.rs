@@ -160,10 +160,8 @@ fn parse_checked(phc: &str) -> Result<PasswordHash, AuthError> {
         ))
     })?;
     if parsed.algorithm.as_str() != "argon2id" {
-        return Err(invalid(format!(
-            "password_hash uses {}, and dux only accepts argon2id",
-            parsed.algorithm.as_str()
-        )));
+        // The identifier the file names is not repeated: it is the user's text.
+        return Err(invalid("password_hash is not an Argon2id hash".to_string()));
     }
     if parsed.version != Some(0x13) {
         return Err(invalid(
@@ -472,7 +470,11 @@ mod tests {
             .unwrap()
             .to_string();
         let err = validate_password_hash(&argon2i).unwrap_err();
-        assert!(err.to_string().contains("argon2id"), "{err}");
+        assert!(err.to_string().contains("is not an Argon2id hash"), "{err}");
+        assert!(
+            !err.to_string().contains("argon2i "),
+            "the identifier is not echoed: {err}"
+        );
     }
 
     #[test]

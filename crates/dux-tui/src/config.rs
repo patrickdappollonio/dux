@@ -51,22 +51,31 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     let migrations_changed = dux_core::config_migrate::apply_load_migrations(&mut doc)?;
     let retired_keys_changed = prune_retired_key_actions(&mut doc);
     let folded_keys_changed = fold_legacy_key_actions(&mut doc);
-    if migrations_changed || retired_keys_changed || folded_keys_changed {
+    let text = doc.to_string();
+    let migrated = migrations_changed || retired_keys_changed || folded_keys_changed;
+    if migrated {
         // blessed sync-direct: deprecation/retirement migration also runs at boot before the queue exists
-        dux_core::config_write::write_config_secure(&paths.config_path, &doc.to_string())
+        dux_core::config_write::write_config_secure(&paths.config_path, &text)
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
 
-    // The error names the position and the key, never the file's text,
-    // which may hold a token.
-    let text = doc.to_string();
+    // The error gives a position and the kind of problem, never the file's
+    // text, which may hold a token. The position is in the user's own text
+    // whenever the problem is there too (it almost always is: migrations
+    // only rename and remove keys).
     let mut config: Config = toml::from_str(&text).map_err(|e| {
+        let position = match toml::from_str::<Config>(&raw) {
+            Err(original) => dux_core::config::describe_toml_error(&raw, &original),
+            Ok(_) => dux_core::config::describe_toml_error(&text, &e),
+        };
         anyhow::anyhow!(
             "failed to parse {}: {}",
             paths.config_path.display(),
-            dux_core::config::describe_toml_error(&text, &e)
+            position
         )
     })?;
+    // The text the file holds now: what the config writer compares saves with.
+    config.source_text = dux_core::config::SourceText::of(if migrated { &text } else { &raw });
     config.providers.ensure_defaults();
     validate_server_host(&config)?;
     validate_project_envs(&config)?;

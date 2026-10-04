@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::config_write::{Durability, save_config_three_way_from};
+use crate::config_write::{Durability, SaveBase, save_config_three_way, union_seen};
 use crate::worker::WorkerEvent;
 
 const QUIET_WINDOW: Duration = Duration::from_millis(250);
@@ -25,8 +25,8 @@ enum WriteMsg {
     Flush(SyncSender<()>),
     Pause(SyncSender<()>),
     Resume,
-    /// The config as dux last read it from disk (startup, a reload), the
-    /// base every following save is a three-way patch against.
+    /// The config dux just adopted (a reload), carrying the exact text it was
+    /// read from: the base every following save is a three-way patch against.
     SetBase(Box<Config>),
     /// Stop the writer thread unconditionally, obeyed even while paused. Sent by
     /// `Drop` so shutdown never depends on channel disconnect (a `QuiesceGuard`
@@ -93,11 +93,11 @@ impl ConfigWriteQueue {
         let (tx, rx) = mpsc::channel();
         let lazy_inflight = Arc::new(AtomicUsize::new(0));
         // Read here, before the thread starts, so the base is the file as it
-        // was when the queue was made. A file that cannot be loaded leaves no
-        // base, and saves fall back to the full patch.
-        let base = crate::config::load_config_file_as_written(&config_path)
+        // was when the queue was made. No readable file leaves no base, and
+        // saves fall back to the full patch.
+        let base = std::fs::read_to_string(&config_path)
             .ok()
-            .map(|config| (config, std::fs::read_to_string(&config_path).ok()));
+            .and_then(|text| base_read_from(&text));
         let writer = thread::Builder::new()
             .name("config-writer".into())
             .spawn({
@@ -164,10 +164,11 @@ impl ConfigWriteQueue {
         }
     }
 
-    /// Tell the writer what the file held when dux last read it (a reload just
-    /// adopted it). Every later save writes only the keys memory changed
-    /// since, so a key someone else set on disk is never undone. Ordered with
-    /// the saves on the same channel.
+    /// Tell the writer about the config dux just adopted (a reload). Its
+    /// base becomes that config's own text ([`Config::source_text`]), so
+    /// every later save writes only what memory changes relative to the
+    /// file as it was read, and a key someone else set or deleted on disk is
+    /// never undone. Ordered with the saves on the same channel.
     pub fn set_base(&self, config: Config) {
         let _ = self.tx.send(WriteMsg::SetBase(Box::new(config)));
     }
@@ -382,10 +383,51 @@ fn receive_writer_input(
     }
 }
 
-/// The config dux last read or wrote, with the file's text at that moment:
-/// what every save is a three-way patch against, and how a key deleted by
-/// hand since is told from one the file never had.
-type Base = (Config, Option<String>);
+/// What every save is a three-way patch against (see [`SaveBase`]): the
+/// config the file last agreed with, and the file text seen since the last
+/// read.
+struct Base {
+    config: Config,
+    seen: String,
+}
+
+impl Base {
+    fn as_save_base(&self) -> SaveBase<'_> {
+        SaveBase {
+            config: &self.config,
+            seen: Some(&self.seen),
+        }
+    }
+
+    /// After writing `config` as `written`.
+    fn after_write(&self, config: Config, written: &str) -> Base {
+        Base {
+            seen: union_seen(Some(&self.seen), written),
+            config,
+        }
+    }
+}
+
+/// The base for a file just read: its config as written, and its text.
+fn base_read_from(text: &str) -> Option<Base> {
+    let config = crate::config::config_from_text_as_written(text).ok()?;
+    Some(Base {
+        config,
+        seen: text.to_string(),
+    })
+}
+
+/// The base for a config a reload adopted: the text it was read from, or,
+/// for a config read from no file, that config and the file as it is now.
+fn base_adopted(path: &std::path::Path, config: Config) -> Option<Base> {
+    if let Some(base) = config.source_text.as_str().and_then(base_read_from) {
+        return Some(base);
+    }
+    Some(Base {
+        seen: std::fs::read_to_string(path).unwrap_or_default(),
+        config,
+    })
+}
 
 /// What the writer thread carries between messages: the base its three-way
 /// saves patch against, and the coalesced lazy save waiting for its deadline.
@@ -419,7 +461,7 @@ fn handle_writer_input(
             let result = save_against_base(path, &state.base, &config, Durability::Fsync)
                 .map_err(|e| format!("{e:#}"));
             match &result {
-                Ok(text) => state.base = Some((config, Some(text.clone()))),
+                Ok(text) => state.base = Some(written_base(&state.base, config, text)),
                 Err(error) => crate::logger::error(&format!("eager config write failed: {error}")),
             }
             let _ = reply.send(result.map(|_| ()));
@@ -437,9 +479,7 @@ fn handle_writer_input(
             }
         }
         Ok(Some(WriteMsg::Resume)) => {}
-        Ok(Some(WriteMsg::SetBase(config))) => {
-            state.base = Some((*config, std::fs::read_to_string(path).ok()));
-        }
+        Ok(Some(WriteMsg::SetBase(config))) => state.base = base_adopted(path, *config),
         Ok(Some(WriteMsg::Shutdown)) => {
             flush_pending(path, state, status_lane);
             return WriterControl::Stop;
@@ -475,9 +515,7 @@ fn run_paused_writer(
                 depth = depth.saturating_add(1);
                 let _ = ack.send(());
             }
-            Ok(WriteMsg::SetBase(config)) => {
-                *base = Some((*config, std::fs::read_to_string(path).ok()));
-            }
+            Ok(WriteMsg::SetBase(config)) => *base = base_adopted(path, *config),
         }
     }
 }
@@ -490,13 +528,23 @@ fn save_against_base(
     config: &Config,
     durability: Durability,
 ) -> anyhow::Result<String> {
-    save_config_three_way_from(
+    save_config_three_way(
         path,
-        base.as_ref().map(|(config, _)| config),
-        base.as_ref().and_then(|(_, file)| file.as_deref()),
+        base.as_ref().map(Base::as_save_base),
         config,
         durability,
     )
+}
+
+/// The base after a save wrote `config` as `written`.
+fn written_base(base: &Option<Base>, config: Config, written: &str) -> Base {
+    match base {
+        Some(base) => base.after_write(config, written),
+        None => Base {
+            config,
+            seen: written.to_string(),
+        },
+    }
 }
 
 fn flush_pending(
@@ -511,7 +559,7 @@ fn flush_pending(
     let result = save_against_base(path, &state.base, &cfg, Durability::NoFsync);
     let result = match result {
         Ok(text) => {
-            state.base = Some((cfg, Some(text)));
+            state.base = Some(written_base(&state.base, cfg, &text));
             Ok(())
         }
         Err(error) => Err(error),
@@ -547,7 +595,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[ui]\nleft_width_pct = 20\ncopy_on_select = true\n").unwrap();
         let q = ConfigWriteQueue::new(path.clone());
-        let loaded: Config = toml::from_str(&read(&path)).unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
         q.set_base(loaded.clone());
 
         // `dux config set ui.left_width_pct 33`, from another process.
@@ -579,6 +627,94 @@ mod tests {
         q.save_eager(memory.clone()).unwrap();
         let after: Config = toml::from_str(&read(&path)).unwrap();
         assert_eq!(after.ui.terminal_font_size, memory.ui.terminal_font_size);
+    }
+
+    fn loaded(path: &std::path::Path) -> Config {
+        crate::config::load_config_file(path).expect("load")
+    }
+
+    /// A hand deletion stays deleted across any number of saves, not only
+    /// the first one after it.
+    #[test]
+    fn a_hand_deletion_survives_two_saves() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\ncopy_on_select = true\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let mut memory = loaded(&path);
+        std::fs::write(&path, "[ui]\ncopy_on_select = true\n").unwrap();
+        memory.ui.copy_on_select = false;
+        q.save_eager(memory.clone()).unwrap();
+        memory.ui.right_width_pct = 30;
+        q.save_eager(memory).unwrap();
+        let after = read(&path);
+        assert!(!after.contains("left_width_pct"), "{after}");
+        assert!(after.contains("right_width_pct = 30"), "{after}");
+    }
+
+    /// Changing in dux a setting that was deleted from the file by hand
+    /// writes it again: memory's own change wins over the deletion.
+    #[test]
+    fn a_change_in_memory_beats_a_hand_deletion_of_the_same_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let mut memory = loaded(&path);
+        std::fs::write(&path, "[ui]\n").unwrap();
+        memory.ui.left_width_pct = 25;
+        q.save_eager(memory.clone()).unwrap();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        q.save_eager(memory).unwrap();
+        assert!(
+            read(&path).contains("left_width_pct = 25"),
+            "{}",
+            read(&path)
+        );
+    }
+
+    /// Inside a project entry too: a field deleted by hand stays deleted
+    /// across saves.
+    #[test]
+    fn a_field_deleted_from_a_project_by_hand_survives_two_saves() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\nstartup_command = \"make\"\n",
+        )
+        .unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let mut memory = loaded(&path);
+        std::fs::write(&path, "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n").unwrap();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        q.save_eager(memory.clone()).unwrap();
+        memory.ui.right_width_pct = 31;
+        q.save_eager(memory).unwrap();
+        let after = read(&path);
+        assert!(!after.contains("startup_command = \"make\""), "{after}");
+        assert_eq!(after.matches("[[projects]]").count(), 1, "{after}");
+    }
+
+    /// A project without an id deleted by hand stays deleted, even though
+    /// each parse mints it a different id.
+    #[test]
+    fn an_id_less_project_deleted_by_hand_stays_deleted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\npath = \"/tmp/p\"\n\n[ui]\nleft_width_pct = 20\n",
+        )
+        .unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let mut memory = loaded(&path);
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        q.save_eager(memory.clone()).unwrap();
+        memory.ui.right_width_pct = 32;
+        q.save_eager(memory).unwrap();
+        assert!(!read(&path).contains("/tmp/p"), "{}", read(&path));
     }
 
     /// A setting deleted from the file by hand while dux runs is not put

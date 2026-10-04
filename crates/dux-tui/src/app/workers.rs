@@ -849,11 +849,13 @@ impl App {
             &self.engine.config.server,
             &config.server,
         );
+        let fallback = config.clone();
         let outcome = match self.apply_reloaded_config(config) {
             Err(error) => {
-                // Memory keeps the old config; the writer's base follows it so
-                // the next save cannot write it over the new file.
-                self.engine.reload_apply_failed();
+                // The view could not take the new config, but the engine still
+                // adopts it, so memory, the writer's base and the file agree
+                // and nothing old is saved over the new file.
+                self.engine.keep_reloaded_config(fallback);
                 TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}"))
             }
             Ok(()) => TuiConfigReloadOutcome::Applied,

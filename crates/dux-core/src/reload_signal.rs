@@ -82,15 +82,12 @@ pub fn signal_running_dux(lock_path: &Path) -> SignalOutcome {
     }
 }
 
-/// The PID of whatever holds `lock_path`, or `None` when nothing does. For a
-/// refusal, so it asks less than [`signal_running_dux`] does: a held lock is
-/// reason enough to leave the running dux's files alone, and the process name
-/// is not checked.
-pub fn running_dux(lock_path: &Path) -> Option<u32> {
-    match holder(lock_path, None) {
-        Holder::Pid(pid) => Some(pid),
-        Holder::None | Holder::Unknown(_) => None,
-    }
+/// Whether a dux may be running: something holds `lock_path`, or the lock
+/// cannot be checked at all (its file unreadable, the holder's process id
+/// unreadable). Fails closed, for refusals that protect a running dux, and
+/// does not check the process name: a held lock is reason enough.
+pub fn dux_may_be_running(lock_path: &Path) -> bool {
+    !matches!(holder(lock_path, None), Holder::None)
 }
 
 fn send(pid: u32) -> SignalOutcome {
@@ -358,6 +355,21 @@ mod tests {
         );
         send(child.id());
         let _ = child.wait();
+    }
+
+    /// A lock dux cannot even check counts as a running dux for a refusal:
+    /// failing closed is what keeps `set` from writing under it.
+    #[test]
+    fn a_lock_that_cannot_be_checked_counts_as_running() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock = dir.path().join("dux.lock");
+        std::fs::write(&lock, "").expect("lock file");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let held = dux_may_be_running(&lock);
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(held, "an unreadable lock is treated as held");
+        assert!(!dux_may_be_running(&dir.path().join("absent.lock")));
     }
 
     #[test]
