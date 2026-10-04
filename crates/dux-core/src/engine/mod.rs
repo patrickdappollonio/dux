@@ -22,6 +22,8 @@ pub mod status_op;
 #[cfg(test)]
 mod removal_review_tests;
 #[cfg(test)]
+mod review_nested_folder_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod worktree_removal_race_tests;

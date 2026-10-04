@@ -38,6 +38,26 @@ fn sidecar_path(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
+fn encode_identities(identities: &[crate::process_sessions::ProcessIdentity]) -> String {
+    identities
+        .iter()
+        .map(|identity| format!("{}:{}", identity.pid, identity.start_time))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn decode_identities(text: &str) -> Vec<crate::process_sessions::ProcessIdentity> {
+    text.split(',')
+        .filter_map(|entry| {
+            let (pid, start) = entry.split_once(':')?;
+            Some(crate::process_sessions::ProcessIdentity {
+                pid: pid.parse().ok()?,
+                start_time: start.parse().ok()?,
+            })
+        })
+        .collect()
+}
+
 /// A worktree removal the user asked for that dux has not finished yet, kept
 /// in the database so a quit or a crash in the middle of it does not leave a
 /// worktree and a branch behind that no agent owns.
@@ -53,6 +73,9 @@ pub struct PendingWorktreeRemoval {
     /// The sessions the agent's processes ran in, so a later start can end
     /// whatever of them outlived dux.
     pub process_sessions: Vec<crate::process_sessions::ProcessSession>,
+    /// What was running in them when the delete began, by identity: a later
+    /// start acts on a leaderless session only through these.
+    pub process_snapshot: Vec<crate::process_sessions::ProcessIdentity>,
 }
 
 impl SessionStore {
@@ -471,9 +494,19 @@ impl SessionStore {
                 branch_provenance text not null,
                 delete_branch integer,
                 process_sessions text not null default '',
+                process_snapshot text not null default '',
                 created_at text not null
             );
             "#,
+        )?;
+        // What was running in those sessions when the delete began, by
+        // identity: the only evidence a later start may act on for a session
+        // whose leader is gone.
+        ensure_column(
+            &self.conn,
+            "pending_worktree_removals",
+            "process_snapshot",
+            "text not null default ''",
         )?;
         // The slot-tab passes run last: they write `agent_tabs` rows, so the
         // table has to exist, and a failure in any of them aborts the open. A
@@ -718,7 +751,12 @@ impl SessionStore {
         let sessions = row
             .process_sessions
             .iter()
-            .map(|session| format!("{}:{}", session.sid, session.started_at_secs))
+            .map(|session| {
+                format!(
+                    "{}:{}:{}",
+                    session.sid, session.started_at_secs, session.boot
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
         self.conn
@@ -726,8 +764,8 @@ impl SessionStore {
                 "insert or replace into pending_worktree_removals \
                  (session_id, label, project_id, project_path, worktree_path, source_branch, \
                   branch_name, initial_branch, branch_provenance, delete_branch, \
-                  process_sessions, created_at) \
-                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  process_sessions, process_snapshot, created_at) \
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     row.session_id,
                     row.label,
@@ -740,10 +778,47 @@ impl SessionStore {
                     managed.branch_provenance.as_str(),
                     row.delete_branch,
                     sessions,
+                    encode_identities(&row.process_snapshot),
                     Utc::now().to_rfc3339(),
                 ],
             )
             .context("failed to record a pending worktree removal")?;
+        Ok(())
+    }
+
+    /// Record what was running in a pending removal's sessions when its delete
+    /// began, by identity.
+    pub fn set_pending_removal_snapshot(
+        &self,
+        session_id: &str,
+        snapshot: &[crate::process_sessions::ProcessIdentity],
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "update pending_worktree_removals set process_snapshot = ?2 where session_id = ?1",
+                params![session_id, encode_identities(snapshot)],
+            )
+            .context("failed to record a pending removal's processes")?;
+        Ok(())
+    }
+
+    /// Follow a branch rename into a pending removal, so the removal a later
+    /// start finishes deletes the branch by the name it has now.
+    pub fn rename_pending_removal_branch(
+        &self,
+        session_id: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "update pending_worktree_removals set \
+                 branch_name = case when branch_name = ?2 then ?3 else branch_name end, \
+                 initial_branch = case when initial_branch = ?2 then ?3 else initial_branch end \
+                 where session_id = ?1",
+                params![session_id, old, new],
+            )
+            .context("failed to follow a branch rename into a pending removal")?;
         Ok(())
     }
 
@@ -762,8 +837,8 @@ impl SessionStore {
     pub fn load_pending_worktree_removals(&self) -> Result<Vec<PendingWorktreeRemoval>> {
         let mut stmt = self.conn.prepare(
             "select session_id, label, project_id, project_path, worktree_path, source_branch, \
-             branch_name, initial_branch, branch_provenance, delete_branch, process_sessions \
-             from pending_worktree_removals order by created_at",
+             branch_name, initial_branch, branch_provenance, delete_branch, process_sessions, \
+             process_snapshot from pending_worktree_removals order by created_at",
         )?;
         let rows = stmt.query_map([], |row| {
             let sessions: String = row.get(10)?;
@@ -785,14 +860,21 @@ impl SessionStore {
                 delete_branch: row.get(9)?,
                 process_sessions: sessions
                     .split(',')
-                    .filter_map(|pair| {
-                        let (sid, at) = pair.split_once(':')?;
+                    .filter_map(|entry| {
+                        let mut fields = entry.split(':');
                         Some(crate::process_sessions::ProcessSession {
-                            sid: sid.parse().ok()?,
-                            started_at_secs: at.parse().ok()?,
+                            sid: fields.next()?.parse().ok()?,
+                            started_at_secs: fields.next()?.parse().ok()?,
+                            // A row written before boots were recorded names
+                            // no boot, and is void rather than trusted.
+                            boot: fields
+                                .next()
+                                .and_then(|boot| boot.parse().ok())
+                                .unwrap_or(0),
                         })
                     })
                     .collect(),
+                process_snapshot: decode_identities(&row.get::<_, String>(11)?),
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -2166,15 +2248,33 @@ mod tests {
                 crate::process_sessions::ProcessSession {
                     sid: 41,
                     started_at_secs: 1_700_000_000,
+                    boot: 7,
                 },
                 crate::process_sessions::ProcessSession {
                     sid: 42,
                     started_at_secs: 1_700_000_001,
+                    boot: 7,
                 },
             ],
+            process_snapshot: vec![crate::process_sessions::ProcessIdentity {
+                pid: 43,
+                start_time: 1_700_000_002,
+            }],
         };
         store.insert_pending_worktree_removal(&row).expect("insert");
-        assert_eq!(store.load_pending_worktree_removals().unwrap(), vec![row]);
+        assert_eq!(
+            store.load_pending_worktree_removals().unwrap(),
+            vec![row.clone()]
+        );
+        store
+            .rename_pending_removal_branch("a1", "feat", "feat-renamed")
+            .expect("rename");
+        let loaded = store.load_pending_worktree_removals().unwrap();
+        assert_eq!(loaded[0].managed.branch_name, "feat-renamed");
+        assert_eq!(
+            loaded[0].managed.initial_branch, "feat-0",
+            "only the renamed one moves"
+        );
         store.delete_pending_worktree_removal("a1").expect("delete");
         assert!(store.load_pending_worktree_removals().unwrap().is_empty());
     }

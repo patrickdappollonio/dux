@@ -408,14 +408,12 @@ impl Engine {
                     }
                     _ => None,
                 };
-                if let Some(path) = &existing_worktree
-                    && self.worktree_ops().is_being_removed(path)
+                if let Some(refused) = existing_worktree
+                    .as_ref()
+                    .and_then(|path| self.worktree_ops().removal_refusal(path))
                 {
                     return Ok(EventReaction::Status(StatusUpdate::error(
-                        crate::worktree_ops::HoldRefused {
-                            path: crate::worktree_ops::path_key(path),
-                        }
-                        .sentence("create an agent there"),
+                        refused.sentence("create an agent there"),
                     )));
                 }
                 // Mint the shared create-agent `HandlerStatusOp`: its opaque id
@@ -580,16 +578,11 @@ impl Engine {
                 // Nothing new may start in a folder a removal has claimed,
                 // whoever's it is: another agent sharing it, a standalone agent
                 // in it. The removal's last look relies on this.
-                if self
+                if let Some(refused) = self
                     .worktree_ops()
-                    .is_being_removed(request.session.directory())
+                    .removal_refusal(request.session.directory())
                 {
-                    let refusal = crate::worktree_ops::HoldRefused {
-                        path: crate::worktree_ops::path_key(std::path::Path::new(
-                            request.session.directory(),
-                        )),
-                    }
-                    .sentence("start this agent there");
+                    let refusal = refused.sentence("start this agent there");
                     crate::logger::warn(&format!(
                         "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": its folder is being removed"
                     ));

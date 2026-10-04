@@ -129,12 +129,16 @@ at the moment you confirm, so a worktree an agent took in the meantime, or one a
 being created on, is refused rather than removed, and a removal that finds work still
 running in the worktree waits for it the same way an agent delete does.
 
-A worktree something dux started is still running in, with no agent listed on it, is shown
-as in use and says what: an agent being created there, a terminal open in it, or the CLI of
-an agent you just deleted with its worktree kept, still stopping. It cannot be deleted from
-the manager until that has gone. Once a removal of a folder has begun, nothing new starts
-there: a new agent, a standalone agent pointed at that folder, a relaunch or a terminal is
-refused and says why.
+A worktree something is still using, with no agent of its own on it, is listed under **In
+use** and says what: an agent being created there, a terminal open in it, the CLI of an agent
+you just deleted with its worktree kept, still stopping, or a standalone agent whose folder is
+the worktree or anywhere inside it. It cannot be deleted from the manager until that has gone.
+A standalone agent inside a worktree keeps that worktree for as long as the agent exists,
+because dux never removes a standalone agent's folder: delete that agent, or move its folder
+out, first. The same holds when you delete the worktree's own agent with the worktree box
+ticked: the worktree is kept and dux names the standalone agent. Once a removal of a folder
+has begun, nothing new starts in it or in any folder inside it: a new agent, a standalone
+agent, a relaunch or a terminal is refused and says why.
 
 > [!TIP]
 > This is where you remove the branch of a worktree that has no agent. A worktree that does

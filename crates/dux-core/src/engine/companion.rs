@@ -38,14 +38,8 @@ impl Engine {
             anyhow::bail!("{reason}");
         }
         // Nothing new may start in a folder a removal has claimed.
-        if self.worktree_ops().is_being_removed(session.directory()) {
-            anyhow::bail!(
-                "{}",
-                crate::worktree_ops::HoldRefused {
-                    path: crate::worktree_ops::path_key(std::path::Path::new(session.directory())),
-                }
-                .sentence("open a terminal there")
-            );
+        if let Some(refused) = self.worktree_ops().removal_refusal(session.directory()) {
+            anyhow::bail!("{}", refused.sentence("open a terminal there"));
         }
 
         // A standalone agent belongs to no project, so a terminal opened on it

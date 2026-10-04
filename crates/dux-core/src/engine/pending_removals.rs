@@ -25,21 +25,35 @@ use crate::worker::WorkerEvent;
 const QUIT_GIT_WAIT: Duration = Duration::from_secs(30);
 
 impl Engine {
-    /// The sentence for a removal that must not run because another agent now
-    /// works in the same directory, or is being created on it (a create holds
-    /// the path in the registry until its launch lands in `sessions`), or
-    /// `None` when nobody does.
+    /// The sentence for a removal that must not run because the folder is in
+    /// use, or `None` when it is free:
+    ///
+    /// - another agent works in the folder or anywhere inside it. A standalone
+    ///   agent inside a worktree makes the worktree un-removable for as long as
+    ///   it exists: dux never removes a standalone agent's folder, and never
+    ///   ends its processes to make way, so the sentence names it and says to
+    ///   delete it or move it first;
+    /// - an agent is being created in it (a create holds the path in the
+    ///   registry until its launch lands in `sessions`).
     pub(crate) fn worktree_occupied_message(
         &self,
         session_id: &str,
         worktree_path: &str,
     ) -> Option<StatusText> {
+        let folder = std::path::Path::new(worktree_path);
+        let shown = crate::home_path::shorten_home(folder);
+        if let Some(standalone) = self.standalone_agent_inside(folder, session_id) {
+            return Some(standalone_inside_message(&shown, standalone));
+        }
         let occupant = self
             .sessions
             .iter()
             .find(|s| {
                 s.id != session_id
-                    && crate::project_browser::same_directory(s.directory(), worktree_path)
+                    && crate::worktree_ops::folder_contains(
+                        folder,
+                        std::path::Path::new(s.directory()),
+                    )
             })
             .map(|occupant| {
                 crate::status_text![
@@ -61,13 +75,25 @@ impl Engine {
             })?;
         Some(crate::status_text![
             "Kept the worktree at ",
-            q(crate::home_path::shorten_home(std::path::Path::new(
-                worktree_path
-            ))),
+            q(shown),
             ": ",
             occupant,
             ". Remove it from the worktree manager if you still want it gone."
         ])
+    }
+
+    /// A standalone agent (other than `except`) whose folder is `folder` or
+    /// inside it.
+    pub(crate) fn standalone_agent_inside(
+        &self,
+        folder: &std::path::Path,
+        except: &str,
+    ) -> Option<&crate::model::AgentSession> {
+        self.sessions.iter().find(|s| {
+            s.id != except
+                && s.workspace.as_managed().is_none()
+                && crate::worktree_ops::folder_contains(folder, std::path::Path::new(s.directory()))
+        })
     }
 
     /// Write a removal down until it has run. A failure to write is logged and
@@ -81,6 +107,13 @@ impl Engine {
             managed: removal.managed.clone(),
             delete_branch: removal.delete_branch,
             process_sessions: removal.processes.sessions.clone(),
+            // Filled in by the snapshot thread once it has looked.
+            process_snapshot: removal
+                .processes
+                .snapshot
+                .get()
+                .cloned()
+                .unwrap_or_default(),
         };
         if let Err(err) = self.session_store.insert_pending_worktree_removal(&row) {
             crate::logger::error(&format!(
@@ -252,10 +285,17 @@ impl Engine {
         sessions.extend(self.process_sessions_in(std::path::Path::new(&row.managed.worktree_path)));
         sessions.sort_by_key(|session| session.sid);
         sessions.dedup();
+        // Sessions an earlier run recorded: a leaderless one is acted on only
+        // through the processes the delete saw in it, never on its number,
+        // which an unrelated program may hold by now. A session from another
+        // boot is void altogether.
+        let snapshot = std::sync::OnceLock::new();
+        let _ = snapshot.set(row.process_snapshot.clone());
         let processes = RemovalProcesses {
             sessions,
+            snapshot: std::sync::Arc::new(snapshot),
             grace: self.individual_close_grace(),
-            ..RemovalProcesses::none()
+            evidence: crate::process_sessions::SessionEvidence::Recorded,
         };
         let registry = self.process_registry.clone();
         let db_path = self.paths.sessions_db_path.clone();
@@ -287,7 +327,8 @@ impl Engine {
 }
 
 impl Engine {
-    /// Every PTY dux still has a process for in `folder`, whoever owns it: a
+    /// Every PTY dux still has a process for in `folder` or inside it, whoever
+    /// owns it: a
     /// live agent tab, a terminal, or one that is terminating (an agent deleted
     /// a moment ago, worktree kept, whose CLI is still stopping). Read from the
     /// engine's own maps, so it needs no look at the process table and is
@@ -299,9 +340,8 @@ impl Engine {
         Option<crate::process_sessions::ProcessSession>,
         &'static str,
     )> {
-        let key = crate::worktree_ops::path_key(folder);
         let here = |client: &crate::pty::PtyClient| {
-            crate::worktree_ops::path_key(client.spawn_dir()) == key
+            crate::worktree_ops::folder_contains(folder, client.spawn_dir())
         };
         let mut found = Vec::new();
         for client in self.providers.values().filter(|client| here(client)) {
@@ -345,9 +385,13 @@ impl Engine {
         sessions
     }
 
-    /// Why the worktree manager may not remove `folder` right now because
-    /// something dux started is still running in it, or `None`.
+    /// Why the worktree manager may not remove `folder` right now, though no
+    /// agent of its own holds it, or `None`: a standalone agent lives in it or
+    /// inside it, or something dux started is still running there.
     pub fn folder_busy_reason(&self, folder: &std::path::Path) -> Option<String> {
+        if let Some(standalone) = self.standalone_agent_inside(folder, "") {
+            return Some(standalone_inside_reason(standalone));
+        }
         self.pty_occupants_in(folder)
             .first()
             .map(|(_, what)| (*what).to_string())
@@ -370,7 +414,14 @@ impl Engine {
                 self.terminating_ptys
                     .iter()
                     .map(|entry| entry.client.spawn_dir().to_path_buf()),
-            );
+            )
+            .chain(
+                self.sessions
+                    .iter()
+                    .filter(|session| session.workspace.as_managed().is_none())
+                    .map(|session| std::path::PathBuf::from(session.directory())),
+            )
+            .collect::<Vec<_>>();
         for dir in dirs {
             let key = crate::worktree_ops::path_key(&dir);
             if found.iter().any(|(known, _)| *known == key) {
@@ -382,4 +433,31 @@ impl Engine {
         }
         found
     }
+}
+
+/// The manager's reason for a folder a standalone agent lives in.
+fn standalone_inside_reason(agent: &crate::model::AgentSession) -> String {
+    format!(
+        "standalone agent \"{}\" runs in {}; delete that agent, or move its folder out, first",
+        agent.display_label(),
+        crate::home_path::shorten_home(std::path::Path::new(agent.directory()))
+    )
+}
+
+/// The final for a removal kept because a standalone agent lives inside the
+/// worktree.
+fn standalone_inside_message(worktree: &str, agent: &crate::model::AgentSession) -> StatusText {
+    crate::status_text![
+        "Kept the worktree at ",
+        q(worktree.to_string()),
+        ": standalone agent ",
+        q(agent.display_label()),
+        " runs in ",
+        n(crate::home_path::shorten_home(std::path::Path::new(
+            agent.directory()
+        ))),
+        ", inside it, and dux never removes a standalone agent's folder or stops it to make \
+         way. Delete that agent, or move its folder out of the worktree, then remove the \
+         worktree from the worktree manager."
+    ]
 }

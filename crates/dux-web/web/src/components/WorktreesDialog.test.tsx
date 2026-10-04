@@ -187,6 +187,36 @@ describe("WorktreesDialog", () => {
     expect(screen.queryByText("Already has an agent")).toBeNull()
   })
 
+  it("REVIEW: does not file a worktree nothing but a stopping process holds under an agent", () => {
+    // The server marks a folder busy (not adoptable, no agent, not being
+    // removed) when something dux started is still running there, such as
+    // the CLI of an agent deleted a moment ago with its worktree kept. No
+    // agent holds it, so telling the user to "delete the agent holding it"
+    // points at an agent that does not exist.
+    seed([
+      entry({
+        branch_name: "busy",
+        worktree_path: "/wt/busy",
+        adoptable: false,
+        agent_id: null,
+        being_removed: false,
+        reason: "In use: a process dux started there that is still stopping.",
+      }),
+    ])
+    render(<WorktreesDialog />)
+    expect(screen.queryByText("Already has an agent")).toBeNull()
+    expect(
+      screen.queryByText("To remove one of these, delete the agent holding it."),
+    ).toBeNull()
+    // It sits under its own heading, with what is using it on the row.
+    expect(screen.getByText("In use")).toBeTruthy()
+    expect(
+      screen.getAllByText("In use: a process dux started there that is still stopping.")
+        .length,
+    ).toBeGreaterThan(0)
+    expect(screen.queryByRole("button", { name: "Worktree actions" })).toBeNull()
+  })
+
   it("names the branch, the full path and the loss in the delete confirmation", () => {
     seed([entry({ worktree_path: "/wt/messy", branch_name: "messy", dirty: true })], {
       deleteWorktreeTarget: {

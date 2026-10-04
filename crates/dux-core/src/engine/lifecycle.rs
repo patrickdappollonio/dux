@@ -254,6 +254,10 @@ pub struct RemovalProcesses {
     /// The configured close grace: how long the processes are given to go
     /// after SIGTERM before SIGKILL.
     pub grace: Duration,
+    /// What the session numbers may be trusted for: sessions this run is
+    /// tracking, or sessions an earlier run recorded (finished at the next
+    /// start), where a leaderless session counts only through `snapshot`.
+    pub evidence: crate::process_sessions::SessionEvidence,
 }
 
 impl RemovalProcesses {
@@ -266,6 +270,7 @@ impl RemovalProcesses {
             sessions: Vec::new(),
             snapshot: std::sync::Arc::new(snapshot),
             grace: Duration::ZERO,
+            evidence: crate::process_sessions::SessionEvidence::ThisRun,
         }
     }
 }

@@ -144,7 +144,7 @@ pub fn list_manageable_worktrees_with_busy(
                 Some("an agent is being created in it".to_string())
             } else {
                 busy.iter()
-                    .find(|(folder, _)| *folder == key)
+                    .find(|(folder, _)| crate::worktree_ops::folder_contains(&key, folder))
                     .map(|(_, reason)| reason.clone())
             };
             entry.dirty = git::worktree_is_dirty(&entry.path).unwrap_or(false);

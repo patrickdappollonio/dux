@@ -616,12 +616,8 @@ impl Engine {
                 } else {
                     HashSet::from([tab_id.as_str().to_string()])
                 };
-                removal.processes = self.start_removal_processes(
-                    process.into_iter().collect(),
-                    targets,
-                    &session.id,
-                );
-                self.park_removal(&label, removal, pending_ids);
+                removal.processes = self.removal_processes_for(process.into_iter().collect());
+                self.record_and_park_removal(&label, removal, targets, pending_ids);
             }
             None => {
                 self.begin_close_provider(tab_id, label.clone(), Some(owner));
@@ -899,6 +895,14 @@ mod tests {
             result: Ok(()),
             status: crate::engine::ResolvedFinal::new("k", crate::engine::Final::clear()),
         });
+        // The recorded request follows the rename too, so a crash before the
+        // removal runs still deletes the branch by its new name next start.
+        let pending = engine
+            .session_store
+            .load_pending_worktree_removals()
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].managed.branch_name, "new");
 
         let done = pump_until(&mut engine, is_completion);
         assert!(matches!(

@@ -903,7 +903,8 @@ pub(crate) fn end_agent_processes_before_removal(
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    match crate::process_sessions::purge(
+    match crate::process_sessions::purge_with(
+        processes.evidence,
         &mut crate::process_sessions::SystemProcesses,
         &processes.sessions,
         &snapshot,
@@ -2190,6 +2191,7 @@ impl Engine {
                 sessions,
                 snapshot,
                 grace: self.individual_close_grace(),
+                evidence: crate::process_sessions::SessionEvidence::ThisRun,
             };
             if let Err(message) =
                 end_agent_processes_before_removal(&processes, &managed.worktree_path)
@@ -2345,34 +2347,60 @@ impl Engine {
                 pending_ids.insert(id);
             }
         }
-        removal.processes = self.start_removal_processes(sessions, targets, &session.id);
-        self.park_removal(&session.display_label(), removal, pending_ids);
+        removal.processes = self.removal_processes_for(sessions);
+        self.record_and_park_removal(&session.display_label(), removal, targets, pending_ids);
     }
 
-    /// Look at what runs in `sessions`, THEN send the polite signals to
-    /// `targets`, both on a thread of their own because the look walks the
-    /// process table. The order matters: a child that called `setsid` is tied
-    /// to the agent only by its parent, and the signal is what makes that
-    /// parent exit. The PTYs themselves must already be in the terminating set,
-    /// unsignalled, so the reaper force-kills them at their deadline whatever
-    /// happens here.
-    pub(crate) fn start_removal_processes(
+    /// The processes a removal must end, before anything is looked at: the
+    /// sessions, sorted, and an empty snapshot slot that
+    /// [`Self::spawn_removal_snapshot`] fills.
+    pub(crate) fn removal_processes_for(
         &self,
         mut sessions: Vec<crate::process_sessions::ProcessSession>,
-        targets: Vec<crate::pty::SignalTargets>,
-        agent_id: &str,
     ) -> super::RemovalProcesses {
         sessions.sort_by_key(|process| process.sid);
         sessions.dedup();
-        let snapshot = std::sync::Arc::new(std::sync::OnceLock::new());
-        let snapshot_slot = std::sync::Arc::clone(&snapshot);
-        let snapshot_sessions = sessions.clone();
+        super::RemovalProcesses {
+            sessions,
+            snapshot: std::sync::Arc::new(std::sync::OnceLock::new()),
+            grace: self.individual_close_grace(),
+            evidence: crate::process_sessions::SessionEvidence::ThisRun,
+        }
+    }
+
+    /// Look at what runs in the removal's sessions, THEN send the polite
+    /// signals to `targets`, both on a thread of their own because the look
+    /// walks the process table. The order matters: a child that called
+    /// `setsid` is tied to the agent only by its parent, and the signal is what
+    /// makes that parent exit. What was found is also written to the removal's
+    /// pending row, so a later start that finishes it can tell those processes
+    /// from an unrelated program that reused a session number. The row must
+    /// already be recorded, and the PTYs must already be in the terminating
+    /// set, unsignalled, so the reaper force-kills them at their deadline
+    /// whatever happens here.
+    pub(crate) fn spawn_removal_snapshot(
+        &self,
+        processes: &super::RemovalProcesses,
+        targets: Vec<crate::pty::SignalTargets>,
+        agent_id: &str,
+    ) {
+        let snapshot_slot = std::sync::Arc::clone(&processes.snapshot);
+        let snapshot_sessions = processes.sessions.clone();
+        let db_path = self.paths.sessions_db_path.clone();
+        let row_id = agent_id.to_string();
         let spawned = std::thread::Builder::new()
             .name("worktree-removal-snapshot".to_string())
             .spawn(move || {
                 let found = crate::process_sessions::snapshot(&snapshot_sessions);
                 for target in &targets {
                     target.terminate();
+                }
+                let recorded = crate::storage::SessionStore::open(&db_path)
+                    .and_then(|store| store.set_pending_removal_snapshot(&row_id, &found));
+                if let Err(err) = recorded {
+                    logger::warn(&format!(
+                        "could not record the processes of agent {row_id}'s pending removal: {err:#}"
+                    ));
                 }
                 let _ = snapshot_slot.set(found);
             });
@@ -2384,28 +2412,35 @@ impl Engine {
             logger::warn(&format!(
                 "could not start the process snapshot for agent {agent_id}: {err}"
             ));
-            let _ = snapshot.set(Vec::new());
-        }
-        super::RemovalProcesses {
-            sessions,
-            snapshot,
-            grace: self.individual_close_grace(),
+            let _ = processes.snapshot.set(Vec::new());
         }
     }
 
-    /// Write a removal down, then dispatch it at once when there is nothing to
-    /// wait for, or park it on a barrier over the PTYs in `pending_ids`, which
-    /// the reaper dispatches exactly once when the last of them has gone.
-    pub(crate) fn park_removal(
+    /// Write a removal down, look at its processes and signal `targets` (see
+    /// [`Self::spawn_removal_snapshot`]), then park it.
+    pub(crate) fn record_and_park_removal(
         &mut self,
         label: &str,
         removal: super::DeferredWorktreeRemoval,
+        targets: Vec<crate::pty::SignalTargets>,
         pending_ids: std::collections::HashSet<String>,
     ) {
         // Written down before anything else can go wrong, so a quit or a crash
         // from here on leaves a removal the next start finishes rather than a
         // worktree and a branch no agent owns.
         self.record_pending_removal(label, &removal);
+        self.spawn_removal_snapshot(&removal.processes, targets, &removal.session_id);
+        self.park_removal(removal, pending_ids);
+    }
+
+    /// Dispatch a recorded removal at once when there is nothing to wait for,
+    /// or park it on a barrier over the PTYs in `pending_ids`, which
+    /// the reaper dispatches exactly once when the last of them has gone.
+    pub(crate) fn park_removal(
+        &mut self,
+        removal: super::DeferredWorktreeRemoval,
+        pending_ids: std::collections::HashSet<String>,
+    ) {
         if pending_ids.is_empty() {
             let _ = self.dispatch_deferred_worktree_removal(removal);
         } else {
@@ -3213,6 +3248,18 @@ impl Engine {
                 &expected.old_branch,
                 &new_branch,
             );
+            // And into the recorded request, so a removal a later start
+            // finishes after a crash deletes the branch by its new name too.
+            if let Err(err) = self.session_store.rename_pending_removal_branch(
+                &session_id,
+                &expected.old_branch,
+                &new_branch,
+            ) {
+                logger::warn(&format!(
+                    "could not follow the rename of {} into its pending removal: {err:#}",
+                    expected.old_branch
+                ));
+            }
         }
         self.clear_in_flight(&InFlightKey::BranchRename(session_id.clone()));
         self.rename_expected.remove(&session_id);

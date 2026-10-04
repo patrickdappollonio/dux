@@ -174,6 +174,23 @@ struct State {
 }
 
 impl State {
+    /// The key of a removal claimed on `key` or on any folder containing it.
+    fn removal_covering(&self, key: &Path) -> Option<PathBuf> {
+        self.paths
+            .iter()
+            .find(|(claimed, entry)| entry.removal.is_some() && key_contains(claimed, key))
+            .map(|(claimed, _)| claimed.clone())
+    }
+
+    /// Every operation holding `key` or any folder inside it.
+    fn kinds_within(&self, key: &Path) -> Vec<WorktreeOpKind> {
+        self.paths
+            .iter()
+            .filter(|(held, _)| key_contains(key, held))
+            .flat_map(|(_, entry)| entry.kinds())
+            .collect()
+    }
+
     fn mint(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
@@ -205,17 +222,46 @@ impl std::fmt::Debug for WorktreeOps {
     }
 }
 
-/// The key a path is registered under. The PARENT is canonicalized and the
-/// final component kept, so the key is the same whether or not the directory
-/// still exists: a removal asks about a path its own git command is about to
-/// delete, and an operation may ask after it is gone.
+/// The key a path is registered under: the nearest ancestor that exists,
+/// canonicalized, with the rest of the path appended as spelled. So a key built
+/// before a folder exists (an agent create holding the path of a worktree it is
+/// about to make) is the key built after it exists and after it is gone, even
+/// when the path reaches it through a symlink (a dotfiles-managed config
+/// folder, say). The ONE key builder: every occupancy question compares these.
 pub fn path_key(path: &Path) -> PathBuf {
-    let resolved = path
-        .parent()
-        .and_then(|parent| parent.canonicalize().ok())
-        .zip(path.file_name())
-        .map(|(parent, name)| parent.join(name));
-    resolved.unwrap_or_else(|| path.to_path_buf())
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            let mut key = canonical;
+            for component in rest.iter().rev() {
+                key.push(component);
+            }
+            return key;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// Whether `inner` is the folder `outer` or anywhere inside it. Compared by
+/// path COMPONENTS on keys from [`path_key`], never by string prefix, so
+/// `/w/agent` does not contain `/w/agent-two`. The ONE containment test: a
+/// removal of a folder deletes everything inside it, so every question about
+/// what occupies a folder (a hold, a claim, a create, a process, the manager's
+/// busy state, the last look before git) asks this.
+pub fn folder_contains(outer: &Path, inner: &Path) -> bool {
+    path_key(inner).starts_with(path_key(outer))
+}
+
+/// [`folder_contains`] for two keys already built.
+fn key_contains(outer: &Path, inner: &Path) -> bool {
+    inner.starts_with(outer)
 }
 
 impl WorktreeOps {
@@ -239,12 +285,8 @@ impl WorktreeOps {
     ) -> Result<WorktreeOpGuard, HoldRefused> {
         let key = path_key(path.as_ref());
         let mut state = self.lock();
-        if state
-            .paths
-            .get(&key)
-            .is_some_and(|entry| entry.removal.is_some())
-        {
-            return Err(HoldRefused { path: key });
+        if let Some(claimed) = state.removal_covering(&key) {
+            return Err(HoldRefused { path: claimed });
         }
         let id = state.mint();
         state
@@ -271,12 +313,8 @@ impl WorktreeOps {
     ) -> Result<(), HoldRefused> {
         let key = path_key(path.as_ref());
         let mut state = self.lock();
-        if state
-            .paths
-            .get(&key)
-            .is_some_and(|entry| entry.removal.is_some())
-        {
-            return Err(HoldRefused { path: key });
+        if let Some(claimed) = state.removal_covering(&key) {
+            return Err(HoldRefused { path: claimed });
         }
         Self::release_owner_locked(&mut state, &owner);
         state
@@ -330,23 +368,28 @@ impl WorktreeOps {
         }
     }
 
-    /// The operations holding `path` right now.
+    /// The operations holding `path`, or any folder inside it, right now: a
+    /// removal of `path` deletes those folders too.
     pub fn holders(&self, path: impl AsRef<Path>) -> Vec<WorktreeOpKind> {
         let key = path_key(path.as_ref());
-        self.lock()
-            .paths
-            .get(&key)
-            .map(PathEntry::kinds)
-            .unwrap_or_default()
+        self.lock().kinds_within(&key)
     }
 
-    /// Whether a removal of `path` has been announced and not yet finished.
-    pub fn is_being_removed(&self, path: impl AsRef<Path>) -> bool {
+    /// The refusal for starting something in `path` because a removal of it,
+    /// or of a folder containing it, is under way; names the folder being
+    /// removed. `None` when nothing covers it.
+    pub fn removal_refusal(&self, path: impl AsRef<Path>) -> Option<HoldRefused> {
         let key = path_key(path.as_ref());
         self.lock()
-            .paths
-            .get(&key)
-            .is_some_and(|entry| entry.removal.is_some())
+            .removal_covering(&key)
+            .map(|claimed| HoldRefused { path: claimed })
+    }
+
+    /// Whether a removal of `path`, or of a folder containing it, has been
+    /// announced and not yet finished.
+    pub fn is_being_removed(&self, path: impl AsRef<Path>) -> bool {
+        let key = path_key(path.as_ref());
+        self.lock().removal_covering(&key).is_some()
     }
 
     /// Announce a removal of `path`. From now on new holds on it are refused.
@@ -460,11 +503,7 @@ impl RemovalLease {
         let deadline = Instant::now() + timeout;
         let mut state = self.ops.lock();
         loop {
-            let kinds = state
-                .paths
-                .get(&self.key)
-                .map(PathEntry::kinds)
-                .unwrap_or_default();
+            let kinds = state.kinds_within(&self.key);
             if kinds.is_empty() {
                 return Ok(());
             }
@@ -586,6 +625,52 @@ mod tests {
 
     fn kept() -> RemovalResult {
         Ok(RemovedBranches::Kept(BranchKeptReason::UserDeclined))
+    }
+
+    #[test]
+    fn containment_is_by_components_not_by_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("agent");
+        assert!(folder_contains(&wt, &wt));
+        assert!(folder_contains(&wt, &wt.join("frontend").join("src")));
+        assert!(!folder_contains(&wt, &dir.path().join("agent-two")));
+        assert!(!folder_contains(&wt.join("frontend"), &wt));
+    }
+
+    #[test]
+    fn a_key_built_before_the_folder_exists_matches_one_built_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let through_link = link.join("project").join("fresh");
+        let before = path_key(&through_link);
+        std::fs::create_dir_all(real.join("project").join("fresh")).unwrap();
+        assert_eq!(before, path_key(&through_link));
+        assert_eq!(before, path_key(&real.join("project").join("fresh")));
+    }
+
+    #[test]
+    fn a_removal_covers_everything_inside_its_folder() {
+        let ops = WorktreeOps::new();
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("wt");
+        let inside = wt.join("frontend");
+        let _editor = ops.hold(&inside, WorktreeOpKind::EditorWrite).unwrap();
+        assert_eq!(ops.holders(&wt), vec![WorktreeOpKind::EditorWrite]);
+        let _lease = ops.announce_removal(&wt);
+        assert!(ops.is_being_removed(&inside));
+        let refused = ops.hold(&inside, WorktreeOpKind::Upload).unwrap_err();
+        assert_eq!(
+            refused.path,
+            path_key(&wt),
+            "names the folder being removed"
+        );
+        assert!(
+            ops.hold(dir.path().join("wt-two"), WorktreeOpKind::Upload)
+                .is_ok()
+        );
     }
 
     #[test]

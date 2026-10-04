@@ -42,8 +42,13 @@ const START_TIME_SLACK_SECS: u64 = 2;
 pub struct ProcessSession {
     pub sid: u32,
     /// When dux spawned the leader, in seconds since the epoch. Tells this
-    /// session apart from a later one that reused the same pid.
+    /// session apart from a later one that reused the same pid: nothing that
+    /// started before it can belong to it.
     pub started_at_secs: u64,
+    /// The machine boot the session was recorded in ([`current_boot`]). A
+    /// session recorded in an earlier boot is void: every pid has been handed
+    /// out afresh since, so its number names nothing of dux's.
+    pub boot: u64,
 }
 
 impl ProcessSession {
@@ -52,8 +57,47 @@ impl ProcessSession {
         Self {
             sid,
             started_at_secs: epoch_secs(SystemTime::now()),
+            boot: current_boot(),
         }
     }
+
+    /// Whether this session was recorded in the boot the machine is in now.
+    pub fn is_this_boot(&self) -> bool {
+        self.boot == current_boot()
+    }
+}
+
+/// An identity for the running boot of this machine: a hash of
+/// `/proc/sys/kernel/random/boot_id` on Linux, and the boot time
+/// (`kern.boottime`, read through sysinfo) elsewhere. Read once per process.
+pub fn current_boot() -> u64 {
+    static BOOT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BOOT.get_or_init(|| {
+        let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map(|text| text.trim().to_string())
+            .ok()
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| sysinfo::System::boot_time().to_string());
+        // FNV-1a: stable across runs and builds, unlike the std hasher.
+        id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+    })
+}
+
+/// What a session's number alone may be trusted for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionEvidence {
+    /// Sessions this run of dux started and is still tracking: a process in
+    /// the session that did not start before it is a member. (The registry
+    /// replaces an entry when the same number is handed to a newer session.)
+    ThisRun,
+    /// Sessions an earlier run recorded: the number may have been handed to
+    /// an unrelated program since. A session counts by its number only while
+    /// its own leader is still there and started when the record says;
+    /// otherwise only the processes recorded by identity (and what they
+    /// started) are members. Never a member on the number alone.
+    Recorded,
 }
 
 fn epoch_secs(at: SystemTime) -> u64 {
@@ -110,16 +154,43 @@ pub fn members(
     known: &[ProcessIdentity],
     self_pid: u32,
 ) -> Vec<ProcRow> {
+    members_with(SessionEvidence::ThisRun, table, sessions, known, self_pid)
+}
+
+/// [`members`] under an explicit [`SessionEvidence`]. In every case a session
+/// from another boot is void, a session whose number a newer leader has taken
+/// is somebody else's, and a process that started before the session did is
+/// not in it.
+pub fn members_with(
+    evidence: SessionEvidence,
+    table: &[ProcRow],
+    sessions: &[ProcessSession],
+    known: &[ProcessIdentity],
+    self_pid: u32,
+) -> Vec<ProcRow> {
     let by_pid: HashMap<u32, &ProcRow> = table.iter().map(|row| (row.pid, row)).collect();
-    let live_sessions: HashSet<u32> = sessions
+    // Session number to the earliest start a member may have.
+    let live_sessions: HashMap<u32, u64> = sessions
         .iter()
+        .filter(|session| session.is_this_boot())
         .filter(|session| match by_pid.get(&session.sid) {
             Some(leader) if leader.sid == Some(leader.pid) => {
-                leader.start_time <= session.started_at_secs + START_TIME_SLACK_SECS
+                // The leader is there: it is ours only if it started when the
+                // record says, within the clocks' slack.
+                leader.start_time + START_TIME_SLACK_SECS >= session.started_at_secs
+                    && leader.start_time <= session.started_at_secs + START_TIME_SLACK_SECS
             }
-            _ => true,
+            // No leader: trusted on its number only within this run.
+            _ => evidence == SessionEvidence::ThisRun,
         })
-        .map(|session| session.sid)
+        .map(|session| {
+            (
+                session.sid,
+                session
+                    .started_at_secs
+                    .saturating_sub(START_TIME_SLACK_SECS),
+            )
+        })
         .collect();
     let known: HashSet<ProcessIdentity> = known.iter().copied().collect();
     let eligible = |row: &ProcRow| !row.exited && row.pid != self_pid && row.pid > 1;
@@ -136,7 +207,9 @@ pub fn members(
     let mut queue: Vec<&ProcRow> = table
         .iter()
         .filter(|row| {
-            row.sid.is_some_and(|sid| live_sessions.contains(&sid))
+            row.sid
+                .and_then(|sid| live_sessions.get(&sid))
+                .is_some_and(|earliest| row.start_time >= *earliest)
                 || known.contains(&row.identity())
         })
         .collect();
@@ -247,6 +320,17 @@ pub fn purge(
     known: &[ProcessIdentity],
     grace: Duration,
 ) -> PurgeOutcome {
+    purge_with(SessionEvidence::ThisRun, ops, sessions, known, grace)
+}
+
+/// [`purge`] under an explicit [`SessionEvidence`].
+pub fn purge_with(
+    evidence: SessionEvidence,
+    ops: &mut dyn ProcessOps,
+    sessions: &[ProcessSession],
+    known: &[ProcessIdentity],
+    grace: Duration,
+) -> PurgeOutcome {
     let self_pid = std::process::id();
     let start = ops.now();
     let kill_at = start + grace;
@@ -254,7 +338,7 @@ pub fn purge(
     let mut asked: HashSet<ProcessIdentity> = HashSet::new();
     loop {
         let now = ops.now();
-        let alive = members(&ops.table(), sessions, known, self_pid);
+        let alive = members_with(evidence, &ops.table(), sessions, known, self_pid);
         if alive.is_empty() {
             return PurgeOutcome::Clean {
                 stopped: asked.len(),
@@ -335,6 +419,15 @@ impl AgentProcessRegistry {
     pub fn register(&self, agent_id: &str, session: ProcessSession, folder: &std::path::Path) {
         let folder = crate::worktree_ops::path_key(folder);
         let mut inner = self.lock();
+        // The kernel handed this number to a newer session: whatever was
+        // recorded under it before is gone, under every key.
+        let older = |(known, _): &(ProcessSession, std::path::PathBuf)| {
+            known.sid == session.sid && known.started_at_secs < session.started_at_secs
+        };
+        for list in inner.sessions.values_mut() {
+            list.retain(|entry| !older(entry));
+        }
+        inner.retired.retain(|entry| !older(entry));
         let list = inner.sessions.entry(agent_id.to_string()).or_default();
         if !list.iter().any(|(known, _)| *known == session) {
             list.push((session, folder));
@@ -354,7 +447,8 @@ impl AgentProcessRegistry {
             .unwrap_or_default()
     }
 
-    /// Every session started in `folder`, whoever started it: a live agent, a
+    /// Every session started in `folder` or anywhere inside it, whoever started
+    /// it (compared on [`crate::worktree_ops::path_key`] keys by components): a live agent, a
     /// sibling agent sharing the folder, an agent already deleted whose
     /// processes may still be stopping, a terminal, a startup command. A
     /// removal of the folder ends all of them, and its last look before git
@@ -367,7 +461,7 @@ impl AgentProcessRegistry {
             .values()
             .flatten()
             .chain(inner.retired.iter())
-            .filter(|(_, started_in)| *started_in == folder)
+            .filter(|(_, started_in)| started_in.starts_with(&folder))
             .map(|(session, _)| *session)
             .collect();
         found.sort_by_key(|session| session.sid);
@@ -483,6 +577,7 @@ mod tests {
         ProcessSession {
             sid,
             started_at_secs: 1_000,
+            boot: current_boot(),
         }
     }
 
@@ -537,6 +632,81 @@ mod tests {
             start_time: 999,
         }];
         assert!(members(&table, &[session(100)], &stale, 9).is_empty());
+    }
+
+    #[test]
+    fn a_session_from_another_boot_is_void() {
+        let table = vec![row(100, 1, 100), row(101, 100, 100)];
+        let earlier_boot = ProcessSession {
+            boot: current_boot().wrapping_add(1),
+            ..session(100)
+        };
+        assert!(members(&table, &[earlier_boot], &[], 9).is_empty());
+        assert!(
+            members_with(SessionEvidence::Recorded, &table, &[earlier_boot], &[], 9).is_empty()
+        );
+    }
+
+    #[test]
+    fn nothing_that_started_before_the_session_is_in_it() {
+        let mut before = row(101, 1, 100);
+        before.start_time = 900;
+        let table = vec![before, row(102, 1, 100)];
+        assert_eq!(pids(&members(&table, &[session(100)], &[], 9)), vec![102]);
+    }
+
+    /// A recorded session whose leader is gone is never trusted on its number:
+    /// the number may belong to a later, unrelated program by now. Only the
+    /// processes recorded by identity, and what they started, are members.
+    #[test]
+    fn a_recorded_leaderless_session_needs_recorded_identities() {
+        let mut reused = row(500, 1, 100);
+        reused.start_time = 5_000;
+        let mine = row(101, 1, 100);
+        let child_of_mine = row(102, 101, 100);
+        let table = vec![reused, mine.clone(), child_of_mine];
+        let recorded = [mine.identity()];
+        assert_eq!(
+            pids(&members_with(
+                SessionEvidence::Recorded,
+                &table,
+                &[session(100)],
+                &recorded,
+                9
+            )),
+            vec![101, 102]
+        );
+        assert!(
+            members_with(SessionEvidence::Recorded, &table, &[session(100)], &[], 9).is_empty(),
+            "never on the number alone"
+        );
+        // With its own leader still there, the session counts by number.
+        let table = vec![row(100, 1, 100), row(101, 100, 100)];
+        assert_eq!(
+            pids(&members_with(
+                SessionEvidence::Recorded,
+                &table,
+                &[session(100)],
+                &[],
+                9
+            )),
+            vec![100, 101]
+        );
+    }
+
+    #[test]
+    fn a_newer_session_with_the_same_number_replaces_the_old_entry() {
+        let registry = AgentProcessRegistry::default();
+        let here = std::path::Path::new("/work/a1");
+        let old = session(100);
+        let newer = ProcessSession {
+            started_at_secs: 2_000,
+            ..session(100)
+        };
+        registry.register("a1", old, here);
+        registry.register("a2", newer, std::path::Path::new("/work/a2"));
+        assert!(registry.sessions_of("a1").is_empty());
+        assert_eq!(registry.sessions_of("a2"), vec![newer]);
     }
 
     #[test]
@@ -669,10 +839,12 @@ mod tests {
         let old = ProcessSession {
             sid: 100,
             started_at_secs: 1_000,
+            boot: current_boot(),
         };
         let newer = ProcessSession {
             sid: 100,
             started_at_secs: 2_000,
+            boot: current_boot(),
         };
         let here = std::path::Path::new("/work/a1");
         registry.register("a1", old, here);
