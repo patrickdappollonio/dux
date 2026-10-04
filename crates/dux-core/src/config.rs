@@ -3098,6 +3098,17 @@ pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadEr
 
 /// [`load_config`] for a bare file path.
 pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, ConfigLoadError> {
+    let config = load_config_file_as_written(config_path)?;
+    Ok(apply_load_corrections(config))
+}
+
+/// The file's values as written: migrated and recovered, with provider
+/// defaults, but without the in-memory corrections [`load_config`] makes to
+/// out-of-range values. The config writer's first base, so a correction
+/// counts as a change and the next save writes it back.
+pub fn load_config_file_as_written(
+    config_path: &Path,
+) -> std::result::Result<Config, ConfigLoadError> {
     let fail = |problem| ConfigLoadError {
         path: config_path.to_path_buf(),
         problem,
@@ -3131,6 +3142,11 @@ pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, Confi
         Err(error) => return Err(fail(ConfigLoadProblem::Unreadable(error.to_string()))),
     };
     config.providers.ensure_defaults();
+    Ok(config)
+}
+
+/// The corrections [`load_config`] makes in memory, each warned about once.
+fn apply_load_corrections(mut config: Config) -> Config {
     // Surface a stale/unrecognized editor preference instead of silently falling
     // back to the first editor detected on PATH, e.g. a config left pointing at a
     // now-removed editor like "antigravity"/"windsurf".
@@ -3189,7 +3205,7 @@ pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, Confi
         crate::logger::warn(&warning);
         config.server.tailscale = TailscaleMode::Auto.as_str().to_string();
     }
-    Ok(config)
+    config
 }
 
 /// The warning [`load_config`] emits when `ui.terminal_font_size` is outside

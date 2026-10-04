@@ -95,7 +95,7 @@ impl ConfigWriteQueue {
         // Read here, before the thread starts, so the base is the file as it
         // was when the queue was made. A file that cannot be loaded leaves no
         // base, and saves fall back to the full patch.
-        let base = crate::config::load_config_file(&config_path).ok();
+        let base = crate::config::load_config_file_as_written(&config_path).ok();
         let writer = thread::Builder::new()
             .name("config-writer".into())
             .spawn({
@@ -531,6 +531,22 @@ mod tests {
         let after: Config = toml::from_str(&read(&path)).unwrap();
         assert_eq!(after.ui.left_width_pct, 33, "{}", read(&path));
         assert!(!after.ui.copy_on_select);
+    }
+
+    /// A value dux corrected at load (an out-of-range font size) is written
+    /// back by the next save: the writer's first base is the file as written,
+    /// so the correction counts as a change.
+    #[test]
+    fn a_load_time_correction_reaches_the_file_on_the_next_save() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nterminal_font_size = 500\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let memory = crate::config::load_config_file(&path).expect("load");
+        assert_ne!(memory.ui.terminal_font_size, 500, "corrected in memory");
+        q.save_eager(memory.clone()).unwrap();
+        let after: Config = toml::from_str(&read(&path)).unwrap();
+        assert_eq!(after.ui.terminal_font_size, memory.ui.terminal_font_size);
     }
 
     /// With no base set yet, the writer reads one from the file when it starts.
