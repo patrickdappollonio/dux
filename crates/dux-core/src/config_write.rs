@@ -660,6 +660,14 @@ fn note_macro_order_limit(doc: &DocumentMut, base: &Config, ours: &Config) {
     }
 }
 
+/// Whether `[section] key` is a key dux once wrote and every save removes.
+/// The formatter's schema knows these names.
+pub(crate) fn is_retired_key(section: &str, key: &str) -> bool {
+    RETIRED_KEYS
+        .iter()
+        .any(|(retired_section, retired_key)| *retired_section == section && *retired_key == key)
+}
+
 /// Keys dux once wrote and every save removes (see `apply_patches`).
 const RETIRED_KEYS: &[(&str, &str)] = &[
     ("defaults", "commit_prompt"),
@@ -4839,9 +4847,11 @@ knob = 42
         assert!(!out.contains("users"), "out:\n{out}");
         // And their removal is reported, not silent.
         assert_eq!(report.dropped, vec!["auth", "server.acme"]);
+        // A key the schema does not know is placed by its line, never named:
+        // its name may be a value pasted in the wrong place.
         assert_eq!(
             report.preserved,
-            vec!["my_fork_section.knob", "server.listen_addrs"]
+            vec!["the entry on line 12", "the entry on line 3 of [server]"]
         );
         // The merged document is still valid TOML.
         let _: toml_edit::DocumentMut = out.parse().expect("merged output re-parses");

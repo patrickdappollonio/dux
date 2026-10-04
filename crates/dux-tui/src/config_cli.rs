@@ -2034,3 +2034,9 @@ mod get_sources_and_refusing_surfaces_tests;
 
 #[cfg(test)]
 mod source_markers_and_path_echo_tests;
+
+#[cfg(test)]
+mod get_never_prints_unknown_names_tests;
+
+#[cfg(test)]
+mod names_never_printed_property_tests;

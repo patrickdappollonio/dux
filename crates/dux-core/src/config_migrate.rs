@@ -111,6 +111,14 @@ pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(Vec<String>, String)> 
         .collect()
 }
 
+/// Whether `[section] key` is a deprecated key dux still reads (and carries
+/// over to its replacement). The formatter's schema knows these names.
+pub fn is_deprecated_key(section: &str, key: &str) -> bool {
+    DEPRECATED_CONFIG_KEYS
+        .iter()
+        .any(|rule| rule.old.section == section && rule.old.key == key)
+}
+
 /// Migrate the one deprecated key `[section] key` in `doc`, if it is there
 /// and a migration rule carries its value: the value is written under the
 /// key that replaced it (unless `doc` already sets that one) and the

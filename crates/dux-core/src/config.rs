@@ -3242,16 +3242,22 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
         )
     };
     let table_problem = |place: Vec<String>, top_level: bool| {
-        let shown = shown_path(raw, &place);
+        // A table the schema does not know is placed by its line (see the
+        // formatter), so it is never bracketed as if it were a name.
+        let shown = if name_is_hidden(raw, &place) {
+            shown_path(raw, &place)
+        } else {
+            format!("[{}]", shown_path(raw, &place))
+        };
         let message = if top_level {
             format!(
-                "[{shown}] is not read: the web UI password settings belong in [server.auth], \
-                 so dux will not start until [{shown}] is moved there or removed"
+                "{shown} is not read: the web UI password settings belong in [server.auth], so \
+                 dux will not start until it is moved there or removed"
             )
         } else {
             format!(
-                "[{shown}] is not read: the web UI password settings belong in [server.auth], \
-                 so dux will not start until it is renamed or removed"
+                "{shown} is not read: the web UI password settings belong in [server.auth], so \
+                 dux will not start until it is renamed or removed"
             )
         };
         Problem::about(place, message)
@@ -3911,12 +3917,16 @@ fn wrong_typed_settings(table: &toml::Table, raw: &str) -> Vec<(String, Vec<Stri
 // Printing a setting's path
 // ---------------------------------------------------------------------------
 //
-// Every path dux prints (a problem, a correction, a table entry `get`
-// annotates, the setting a command names) goes through the formatter below.
-// A segment that is a name the user chose in a map with a naming rule
-// (`[env]`, `[providers]`, `[macros]`), and that breaks that rule, may be a
-// value pasted in the wrong place, a token above all: it is never printed,
-// and the entry is placed by its line instead.
+// Every path dux prints (a problem, a correction, a table `get` prints, the
+// setting a command names, a log line, `dux config diff`) goes through the
+// formatter below, and the formatter decides from the SCHEMA. A segment the
+// file wrote is printed as itself only when the schema knows a key of that
+// name at that position (`ui.left_width_pct`, a `[server.auth]` setting), or
+// when it is an entry of a map of user-chosen names and follows that map's
+// naming rule. Anything else (an unknown key in a fixed table, a key under a
+// value that is not a table, a name that breaks its rule) may be a value
+// pasted in the wrong place, a token above all: it is never printed, and the
+// entry is placed by its line in the file instead.
 
 /// The rule a name in a map of user-chosen names must follow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3944,9 +3954,8 @@ impl NameRule {
 }
 
 /// The tables whose keys are names the user chose, each with the rule a name
-/// there follows. The ONE list: the formatter hides a name that breaks its
-/// rule, and the misplaced-password rule leaves these tables alone, both by
-/// it, so the two cannot drift apart.
+/// there follows. The ONE list: the formatter's schema and the
+/// misplaced-password rule both read it, so they cannot drift apart.
 const USER_NAMED_MAPS: &[(&str, NameRule)] = &[
     ("env", NameRule::Variable),
     ("providers", NameRule::Plain),
@@ -3963,31 +3972,160 @@ fn user_name_rule(section: &str) -> Option<NameRule> {
         .map(|(_, rule)| *rule)
 }
 
-/// When `segments` runs through an entry whose name breaks its map's rule:
-/// that entry, placed by its line in `raw`, and the segments after it.
-fn hidden_entry(raw: &str, segments: &[String]) -> Option<(String, String, Vec<String>)> {
-    let [section, name, rest @ ..] = segments else {
-        return None;
+/// What the schema says of one segment under a path it knows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SchemaStep {
+    /// A key the schema knows at that position.
+    Known,
+    /// An entry of a map of user-chosen names, following its rule or not.
+    Entry { follows_rule: bool },
+    /// Neither: an unknown key, or one under a value that is not a table.
+    Unknown,
+}
+
+/// The schema's own trees, from the defaults: the whole config, one
+/// provider, one macro and one project, each with every field it has.
+struct SchemaTrees {
+    config: serde_json::Value,
+    provider: serde_json::Value,
+    macro_entry: serde_json::Value,
+    project: serde_json::Value,
+}
+
+fn schema_trees() -> &'static SchemaTrees {
+    static TREES: std::sync::OnceLock<SchemaTrees> = std::sync::OnceLock::new();
+    TREES.get_or_init(|| SchemaTrees {
+        config: serde_json::to_value(Config::default()).unwrap_or_default(),
+        provider: serde_json::to_value(ProviderCommandConfig::default()).unwrap_or_default(),
+        macro_entry: serde_json::to_value(MacroEntry {
+            text: String::new(),
+            surface: MacroSurface::default(),
+        })
+        .unwrap_or_default(),
+        project: toml::from_str::<ProjectConfig>("path = \"\"")
+            .ok()
+            .and_then(|project| serde_json::to_value(project).ok())
+            .unwrap_or_default(),
+    })
+}
+
+/// What the schema says of `segment` under `parent`, a path it knows.
+fn schema_step(parent: &[String], segment: &str) -> SchemaStep {
+    let trees = schema_trees();
+    let known_in = |tree: &serde_json::Value| {
+        if tree.get(segment).is_some() {
+            SchemaStep::Known
+        } else {
+            SchemaStep::Unknown
+        }
     };
-    let rule = user_name_rule(section)?;
-    if rule.allows(name) {
-        return None;
+    let parts: Vec<&str> = parent.iter().map(String::as_str).collect();
+    // dux's own former names: a deprecated key it still reads, a retired one
+    // a save removes, and a section it no longer reads.
+    let former = match parts.as_slice() {
+        [section] => {
+            crate::config_migrate::is_deprecated_key(section, segment)
+                || crate::config_write::is_retired_key(section, segment)
+        }
+        _ => false,
+    } || {
+        let mut whole: Vec<&str> = parts.clone();
+        whole.push(segment);
+        crate::config_write::ORPHANED_CONFIG_SECTIONS.contains(&whole.as_slice())
+    };
+    // `password_hash` is dux's own word wherever it is written: a misplaced
+    // one is named as what it is (see `misplaced_auth_problem_list`).
+    if former || segment == "password_hash" {
+        return SchemaStep::Known;
     }
-    let entry = match line_of_key(raw, &[KeyStep::Key(section), KeyStep::Key(name)]) {
-        Some(line) => format!("the entry on line {line}"),
-        None => "an entry whose name does not follow the naming rule".to_string(),
-    };
-    Some((section.clone(), entry, rest.to_vec()))
+    match parts.as_slice() {
+        ["keys"] if segment == "show_terminal_keys" => SchemaStep::Known,
+        ["providers", _] => known_in(&trees.provider),
+        ["macros", _] => known_in(&trees.macro_entry),
+        ["projects"] => known_in(&trees.project),
+        ["projects", "env"] => SchemaStep::Entry {
+            follows_rule: NameRule::Variable.allows(segment),
+        },
+        [map] if user_name_rule(map).is_some_and(|rule| rule != NameRule::Any) => {
+            SchemaStep::Entry {
+                follows_rule: user_name_rule(map).is_some_and(|rule| rule.allows(segment)),
+            }
+        }
+        _ => {
+            let mut node = &trees.config;
+            for part in &parts {
+                match node.get(*part) {
+                    Some(child) => node = child,
+                    None => return SchemaStep::Unknown,
+                }
+            }
+            if node.is_object() {
+                known_in(node)
+            } else {
+                SchemaStep::Unknown
+            }
+        }
+    }
+}
+
+/// Where the schema stops printing `segments` as written: the index of the
+/// first segment it may not print, and whether the segments after it may be
+/// printed (they may under an entry whose name breaks its rule, when the
+/// schema knows each of them there; never under an unknown key).
+fn first_hidden(segments: &[String]) -> Option<(usize, bool)> {
+    let mut parent: Vec<String> = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        match schema_step(&parent, segment) {
+            SchemaStep::Known | SchemaStep::Entry { follows_rule: true } => {
+                parent.push(segment.clone());
+            }
+            SchemaStep::Entry {
+                follows_rule: false,
+            } => {
+                parent.push(segment.clone());
+                let rest_known = segments[index + 1..].iter().all(|next| {
+                    let step = schema_step(&parent, next);
+                    parent.push(next.clone());
+                    matches!(
+                        step,
+                        SchemaStep::Known | SchemaStep::Entry { follows_rule: true }
+                    )
+                });
+                return Some((index, rest_known));
+            }
+            SchemaStep::Unknown => return Some((index, false)),
+        }
+    }
+    None
+}
+
+/// The entry at `segments` (its last one hidden), placed by its line in
+/// `raw`, inside `within` (the printed table around it, if any).
+fn line_placeholder(raw: &str, segments: &[String], within: Option<&str>) -> String {
+    let steps: Vec<KeyStep<'_>> = segments.iter().map(|s| KeyStep::Key(s)).collect();
+    match (line_of_key(raw, &steps), within) {
+        (Some(line), Some(table)) => format!("the entry on line {line} of [{table}]"),
+        (Some(line), None) => format!("the entry on line {line}"),
+        (None, Some(table)) => format!("an entry of [{table}] whose name is not shown"),
+        (None, None) => "an entry whose name is not shown".to_string(),
+    }
 }
 
 /// A setting's path as dux prints it, from its segments: `ui.left_width_pct`,
 /// or `the entry on line 2 of [env]` (`args of the entry on line 3 of
-/// [providers]`) where a name may not be repeated.
+/// [providers]`) where a segment may not be repeated (see the schema rule
+/// above).
 pub fn shown_path(raw: &str, segments: &[String]) -> String {
-    match hidden_entry(raw, segments) {
-        Some((section, entry, rest)) if rest.is_empty() => format!("{entry} of [{section}]"),
-        Some((section, entry, rest)) => format!("{} of {entry} of [{section}]", dotted(&rest)),
-        None => dotted(segments),
+    let Some((index, rest_known)) = first_hidden(segments) else {
+        return dotted(segments);
+    };
+    let table = (index > 0).then(|| dotted(&segments[..index]));
+    let entry = line_placeholder(raw, &segments[..=index], table.as_deref());
+    let rest = &segments[index + 1..];
+    if rest_known && !rest.is_empty() {
+        format!("{} of {entry}", dotted(rest))
+    } else {
+        entry
     }
 }
 
@@ -4012,27 +4150,36 @@ fn dotted(segments: &[String]) -> String {
         .join(".")
 }
 
-/// Whether the last segment of `segments` is an entry name that breaks its
-/// map's naming rule, which the formatter never prints.
-pub fn name_is_hidden(raw: &str, segments: &[String]) -> bool {
-    hidden_entry(raw, segments).is_some_and(|(_, _, rest)| rest.is_empty())
+/// Whether the last segment of `segments` is one the formatter never prints.
+pub fn name_is_hidden(_raw: &str, segments: &[String]) -> bool {
+    first_hidden(segments).is_some_and(|(index, _)| index + 1 == segments.len())
 }
 
 /// A setting's place in a problem sentence: `[ui] left_width_pct`, or
-/// `[env] the entry on line 2` where the name may not be repeated.
+/// `[env] the entry on line 2` where a segment may not be repeated.
 fn shown_place(raw: &str, segments: &[String]) -> String {
-    match (hidden_entry(raw, segments), segments) {
-        (Some((section, entry, rest)), _) if rest.is_empty() => format!("[{section}] {entry}"),
-        (Some((section, entry, rest)), _) => {
-            format!("[{section}] {} of {entry}", dotted(&rest))
-        }
-        (None, [section]) => format!("[{}]", dotted(std::slice::from_ref(section))),
-        (None, [section, inner @ ..]) => format!(
+    if let Some((index, rest_known)) = first_hidden(segments) {
+        let entry = line_placeholder(raw, &segments[..=index], None);
+        let rest = &segments[index + 1..];
+        let what = if rest_known && !rest.is_empty() {
+            format!("{} of {entry}", dotted(rest))
+        } else {
+            entry
+        };
+        return if index == 0 {
+            what
+        } else {
+            format!("[{}] {what}", dotted(&segments[..index]))
+        };
+    }
+    match segments {
+        [section] => format!("[{}]", dotted(std::slice::from_ref(section))),
+        [section, inner @ ..] => format!(
             "[{}] {}",
             dotted(std::slice::from_ref(section)),
             dotted(inner)
         ),
-        (None, []) => String::new(),
+        [] => String::new(),
     }
 }
 
@@ -7490,7 +7637,7 @@ max_websocket_connections = 16
         for (body, named) in [
             (
                 format!("[server.auht]\npassword_hash = \"{hash}\"\n"),
-                "server.auht",
+                "the entry on line 1 of [server]",
             ),
             (
                 format!("[server]\npassword_hash = \"{hash}\"\n"),
@@ -7500,11 +7647,14 @@ max_websocket_connections = 16
                 format!("[auth]\npassword_hash = \"{hash}\"\n"),
                 "auth.password_hash",
             ),
-            ("[auht]\nrequire = \"network\"\n".to_string(), "[auht]"),
+            (
+                "[auht]\nrequire = \"network\"\n".to_string(),
+                "the entry on line 1",
+            ),
             (format!("password_hash = \"{hash}\"\n"), "password_hash"),
             (
                 "[server.Auth]\nrequire = \"network\"\n".to_string(),
-                "server.Auth",
+                "the entry on line 1 of [server]",
             ),
             // A hash outside [server.auth] is misplaced whatever the table
             // around it is called, in any case, quoted or dotted.
@@ -7514,19 +7664,19 @@ max_websocket_connections = 16
             ),
             (
                 format!("[Server.auth]\npassword_hash = \"{hash}\"\n"),
-                "Server.auth.password_hash",
+                "the entry on line 1",
             ),
             (
                 format!("[SERVER.AUTH]\npassword_hash = \"{hash}\"\n"),
-                "SERVER.AUTH.password_hash",
+                "the entry on line 1",
             ),
             (
                 format!("[\"server.auth\"]\npassword_hash = \"{hash}\"\n"),
-                "\"server.auth\".password_hash",
+                "the entry on line 1",
             ),
             (
                 format!("[server]\n\"auth.password_hash\" = \"{hash}\"\n"),
-                "server.\"auth.password_hash\"",
+                "the entry on line 2 of [server]",
             ),
         ] {
             let error = recover_config(&body).expect_err(&body);

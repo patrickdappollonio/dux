@@ -719,12 +719,25 @@ fn check_provider_command(
     Ok(())
 }
 
+/// The value at `path` in `doc`, as `set` reports what it replaced: a value
+/// that is itself a table is never printed, since its keys are names the
+/// file chose where a value goes, and may be anything.
 fn value_in_doc(doc: &DocumentMut, path: &[String]) -> Option<String> {
     let mut item = doc.as_item();
     for segment in path {
         item = item.as_table_like()?.get(segment)?;
     }
-    item.as_value().map(bare)
+    let value = item.as_value()?;
+    let holds_a_table = match value {
+        Value::InlineTable(_) => true,
+        Value::Array(items) => items.iter().any(|item| item.is_inline_table()),
+        _ => false,
+    };
+    Some(if holds_a_table {
+        "(a table, not shown)".to_string()
+    } else {
+        bare(value)
+    })
 }
 
 /// A value's TOML text without the comments and spacing around it.
@@ -1294,7 +1307,9 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                     from: None,
                     surface: surface_of(scope),
                     path: scope.clone(),
-                    in_file: value_at(&file, scope).map(render),
+                    // Printed through the formatter: the entry's own keys
+                    // may not all be setting names.
+                    in_file: value_at(&file, scope).map(|value| render_shown(raw, scope, value)),
                     used: None,
                     reason: reason.clone(),
                 },

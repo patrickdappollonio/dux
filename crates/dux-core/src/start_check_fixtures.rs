@@ -149,3 +149,65 @@ pub fn start_corpus() -> Vec<CorpusCase> {
         })
         .collect()
 }
+
+/// Every structural position a name the file writes can take, `{T}`
+/// standing for it: each fixed table, each map of user-chosen names, under
+/// values that are not tables, and under misplaced password hashes. For the
+/// tests that a name that is not a setting name never reaches a printer.
+pub const NAME_POSITIONS: &[&str] = &[
+    "\"{T}\" = 1\n",
+    "[\"{T}\"]\nx = 1\n",
+    "[\"{T}\"]\npassword_hash = \"x\"\n",
+    "[ui]\n\"{T}\" = 5\n",
+    "[ui]\n\"{T}\" = { a = 1 }\n",
+    "[ui]\nleft_width_pct = { \"{T}\" = 1 }\n",
+    "[defaults]\n\"{T}\" = 1\n",
+    "[defaults]\n\"{T}\" = { password_hash = \"x\" }\n",
+    "[logging]\n\"{T}\" = 1\n",
+    "[capabilities]\n\"{T}\" = 1\n",
+    "[editor]\n\"{T}\" = 1\n",
+    "[terminal]\n\"{T}\" = 1\n",
+    "[startup_command_terminal]\n\"{T}\" = 1\n",
+    "[server]\n\"{T}\" = 1\n",
+    "[server]\n\"{T}\" = { password_hash = \"x\" }\n",
+    "[server]\nbind = { \"{T}\" = 1 }\n",
+    "[server.\"{T}\"]\nrequire = \"network\"\n",
+    "[server.auth]\n\"{T}\" = 5\n",
+    "[env]\n\"{T}\" = \"x\"\n",
+    "[env]\n\"{T}\" = 5\n",
+    "[env]\nA = { \"{T}\" = 1 }\n",
+    "[providers.\"{T}\"]\ncommand = \"x\"\n",
+    "[providers.\"{T}\"]\nargs = 5\n",
+    "[providers.claude]\n\"{T}\" = 5\n",
+    "[providers.mytool]\ncommand = \"x\"\n\"{T}\" = 5\n",
+    "[providers.mytool]\ncommand = \"x\"\nargs = { \"{T}\" = 1 }\n",
+    "[macros]\n\"{T}\" = \"x\"\n",
+    "[macros.\"{T}\"]\ntext = 1\n",
+    "[macros.m]\ntext = \"x\"\n\"{T}\" = 1\n",
+    "[keys]\n\"{T}\" = [\"ctrl-q\"]\n",
+    "[keys]\n\"{T}\" = 5\n",
+    "[keys]\nquit = { \"{T}\" = 1 }\n",
+    "[[projects]]\nid = \"p\"\npath = \"/tmp/dux-names-p\"\n\"{T}\" = 1\n",
+    "[[projects]]\nid = \"p\"\npath = \"/tmp/dux-names-p\"\n[projects.env]\n\"{T}\" = \"x\"\n",
+];
+
+/// Token-like names, from a fixed seed: each holds a dot and a space, so it
+/// breaks every naming rule, and starts with a marker no setting has.
+pub fn name_tokens() -> Vec<String> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    // A fixed seed, so a failure is the same failure every run.
+    let mut state: u64 = 0x005e_ed0f_d0c5;
+    (0..4)
+        .map(|_| {
+            let body: String = (0..20)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ALPHABET[(state >> 33) as usize % ALPHABET.len()] as char
+                })
+                .collect();
+            format!("zzTOKEN{}.{} x", &body[..10], &body[10..])
+        })
+        .collect()
+}

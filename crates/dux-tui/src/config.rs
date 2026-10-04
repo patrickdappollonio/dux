@@ -2642,10 +2642,20 @@ mod tests {
                 restored.text
             );
         }
+        // Reported by line: a key the schema does not know is never named.
         assert!(
             restored
                 .preserved
-                .contains(&"server.listen_addrs".to_string()),
+                .iter()
+                .any(|path| path.starts_with("the entry on line") && path.ends_with("of [server]")),
+            "preserved list: {:?}",
+            restored.preserved
+        );
+        assert!(
+            !restored
+                .preserved
+                .iter()
+                .any(|path| path.contains("listen_addrs")),
             "preserved list: {:?}",
             restored.preserved
         );

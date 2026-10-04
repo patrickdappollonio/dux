@@ -153,13 +153,16 @@ fn run_diff(paths: &DuxPaths, raw: bool) -> Result<()> {
 
     let current_raw =
         fs::read_to_string(&paths.config_path).with_context_path(&paths.config_path)?;
-    let current: Config = toml::from_str(&current_raw).map_err(|e| {
+    let mut current: Config = toml::from_str(&current_raw).map_err(|e| {
         anyhow!(
             "{}: {}",
             paths.config_path.display(),
             dux_core::config::describe_toml_error(&current_raw, &e)
         )
     })?;
+    // The text it was read from, so a name the summary may not print is
+    // placed by its line.
+    current.source_text = dux_core::config::SourceText::of(&current_raw);
 
     if raw {
         run_diff_raw(&current_raw, &current)?;
@@ -210,7 +213,7 @@ fn run_diff_summary(current: &Config) -> Result<()> {
 /// reports what the file says rather than what dux normalizes it into, with no
 /// value clamping and no shipped provider injected into a config that does not
 /// name it.
-fn collect_config_changes(current: &Config) -> Vec<String> {
+pub(crate) fn collect_config_changes(current: &Config) -> Vec<String> {
     let (Ok(default_json), Ok(current_json)) = (
         serde_json::to_value(Config::default()),
         serde_json::to_value(current),
@@ -218,9 +221,14 @@ fn collect_config_changes(current: &Config) -> Vec<String> {
         return Vec::new();
     };
 
+    // Every path is printed through the one formatter, against the file's
+    // own text where the config carries it (for the line a hidden name is
+    // on): this summary is meant to be pasted, so a name that is not a
+    // setting name (a token pasted where a key goes) never reaches it.
+    let raw = current.source_text.as_str().unwrap_or_default();
     let mut found: Vec<(String, String)> = Vec::new();
     let mut path: Vec<String> = Vec::new();
-    diff_node(&mut found, &mut path, &default_json, &current_json);
+    diff_node(raw, &mut found, &mut path, &default_json, &current_json);
 
     // Map iteration order differs by container (`IndexMap` for providers and
     // macros, `BTreeMap` for env and keys), so the order must be imposed here
@@ -298,6 +306,7 @@ fn missing_style_for(path: &[String]) -> MissingStyle {
 }
 
 fn diff_node(
+    raw: &str,
     found: &mut Vec<(String, String)>,
     path: &mut Vec<String>,
     default: &serde_json::Value,
@@ -309,7 +318,7 @@ fn diff_node(
 
     match policy_for(path) {
         Policy::Summarize(summary) => {
-            let dotted = join_path(path);
+            let dotted = dux_core::config::shown_path(raw, path);
             let line = match summary {
                 Summary::Changed => format!("{dotted}: changed"),
                 Summary::Count(singular, plural) => {
@@ -329,9 +338,13 @@ fn diff_node(
                 for name in names {
                     path.push(name.clone());
                     match (default_map.get(name), current_map.get(name)) {
-                        (Some(d), Some(c)) => diff_node(found, path, d, c),
-                        (Some(d), None) => push_missing(found, path, &style, Side::DefaultOnly, d),
-                        (None, Some(c)) => push_missing(found, path, &style, Side::CurrentOnly, c),
+                        (Some(d), Some(c)) => diff_node(raw, found, path, d, c),
+                        (Some(d), None) => {
+                            push_missing(raw, found, path, &style, Side::DefaultOnly, d)
+                        }
+                        (None, Some(c)) => {
+                            push_missing(raw, found, path, &style, Side::CurrentOnly, c)
+                        }
                         (None, None) => {}
                     }
                     path.pop();
@@ -341,7 +354,7 @@ fn diff_node(
             // and `server.allowed_hosts` are settings in their own right, not
             // parents of a `terminal.args.0`.
             _ => {
-                let dotted = join_path(path);
+                let dotted = dux_core::config::shown_path(raw, path);
                 let line = format!(
                     "{dotted}: {} -> {}",
                     format_value(default),
@@ -360,13 +373,14 @@ enum Side {
 }
 
 fn push_missing(
+    raw: &str,
     found: &mut Vec<(String, String)>,
     path: &[String],
     style: &MissingStyle,
     side: Side,
     value: &serde_json::Value,
 ) {
-    let dotted = join_path(path);
+    let dotted = dux_core::config::shown_path(raw, path);
     let line = match (style, side) {
         (MissingStyle::Marker, Side::CurrentOnly) => format!("{dotted}: (added)"),
         (MissingStyle::Marker, Side::DefaultOnly) => format!("{dotted}: (removed)"),
@@ -385,33 +399,6 @@ fn collection_len(value: &serde_json::Value) -> usize {
         serde_json::Value::Array(items) => items.len(),
         serde_json::Value::Object(map) => map.len(),
         _ => 0,
-    }
-}
-
-/// Join structural segments into a dotted path.
-///
-/// Segments are structural and are never reparsed out of a rendered string:
-/// provider and macro names are user-controlled keys and may contain a dot
-/// themselves. A segment that is not a bare TOML key (ASCII letters, digits,
-/// `_`, `-`) is quoted, so `providers."my agent.v2".command` reads
-/// unambiguously. The quoting is JSON string quoting, which escapes the quote
-/// and the backslash the same way a TOML basic string does.
-fn join_path(path: &[String]) -> String {
-    path.iter()
-        .map(|segment| quote_segment(segment))
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-fn quote_segment(segment: &str) -> String {
-    let bare = !segment.is_empty()
-        && segment
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    if bare {
-        segment.to_string()
-    } else {
-        serde_json::Value::String(segment.to_string()).to_string()
     }
 }
 
@@ -1498,7 +1485,7 @@ mod tests {
     }
 
     #[test]
-    fn config_diff_quotes_a_provider_name_that_is_not_a_bare_key() {
+    fn config_diff_never_names_a_provider_whose_name_breaks_the_rule() {
         let mut config = Config::default();
         config.providers.commands.insert(
             "my agent.v2".to_string(),
@@ -1507,7 +1494,7 @@ mod tests {
 
         assert_eq!(
             collect_config_changes(&config),
-            vec!["providers.\"my agent.v2\": (added)".to_string()]
+            vec!["an entry of [providers] whose name is not shown: (added)".to_string()]
         );
     }
 
@@ -2273,5 +2260,31 @@ mod tests {
         assert_eq!(removed_worktrees_line(0), "removed 0 session worktrees");
         assert_eq!(removed_worktrees_line(1), "removed 1 session worktree");
         assert_eq!(removed_worktrees_line(3), "removed 3 session worktrees");
+    }
+}
+
+#[cfg(test)]
+mod config_diff_names_tests {
+    use super::*;
+    const TOKEN: &str = "sk-proj-AbCdEf0123456789";
+
+    /// `dux config diff` (the summary that is safe to paste into a bug
+    /// report) must not print a provider name that breaks the provider-name
+    /// rule: such a name may be a token pasted in the wrong place.
+    #[test]
+    fn config_diff_does_not_print_a_rule_breaking_provider_name() {
+        let text = format!("[providers.\"{TOKEN} x\"]\ncommand = \"a\"\n");
+        let config: Config = toml::from_str(&text).unwrap();
+        let changes = collect_config_changes(&config).join("\n");
+        assert!(!changes.contains(TOKEN), "{changes}");
+    }
+
+    /// The same for a `[keys]` name that is no action.
+    #[test]
+    fn config_diff_does_not_print_a_rule_breaking_keys_name() {
+        let text = format!("[keys]\n\"{TOKEN} x\" = [\"ctrl-q\"]\n");
+        let config: Config = toml::from_str(&text).unwrap();
+        let changes = collect_config_changes(&config).join("\n");
+        assert!(!changes.contains(TOKEN), "{changes}");
     }
 }
