@@ -471,14 +471,19 @@ impl AuthState {
     /// slow-down, the global limit and the check gate, counting a wrong one
     /// (and blocking the address when it reaches the limit). Also measures a
     /// right one against today's minimums.
-    pub(crate) async fn verify(&self, c: &Classification, password: Password) -> Verify {
+    pub(crate) async fn verify(
+        &self,
+        c: &Classification,
+        password: Password,
+        kind: admission::CheckKind,
+    ) -> Verify {
         let snapshot = self.snapshot();
         let Some(hash) = snapshot.config.password_hash().map(str::to_string) else {
             return Verify::NoPassword;
         };
         if let Err(wait) = self
             .admission
-            .check_attempt(&snapshot.config, c, Instant::now())
+            .check_attempt(&snapshot.config, c, Instant::now(), kind)
         {
             return Verify::Wait(wait);
         }
@@ -496,7 +501,7 @@ impl AuthState {
         // counts before this one runs.
         if let Err(wait) = self
             .admission
-            .check_attempt(&snapshot.config, c, Instant::now())
+            .check_attempt(&snapshot.config, c, Instant::now(), kind)
         {
             return Verify::Wait(wait);
         }

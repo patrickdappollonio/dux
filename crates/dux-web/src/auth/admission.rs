@@ -74,6 +74,15 @@ pub(crate) struct Admission {
     inner: std::sync::Mutex<Inner>,
 }
 
+/// What a password check is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckKind {
+    /// A sign-in.
+    Login,
+    /// The current password a signed-in browser gives to change it.
+    CurrentPassword,
+}
+
 /// Whether an address may be blocked at all.
 pub(crate) fn blockable(ip: IpAddr) -> bool {
     let ip = dux_core::config_auth::canonical(ip);
@@ -110,15 +119,23 @@ impl Admission {
 
     /// Whether a password check may run for this client now. `Err` is how long
     /// it must wait first, in whole seconds (at least one).
+    ///
+    /// `kind` decides whether the address's own wait applies: it is the wait
+    /// after a failed LOGIN (`failed_login_delay_seconds`), so a sign-in serves
+    /// it and a signed-in browser's current-password check does not. Both are
+    /// counted as failures toward the block and both are held to the global
+    /// limit, so a session cannot be used to guess the password for long.
     pub(crate) fn check_attempt(
         &self,
         cfg: &ServerAuthConfig,
         c: &Classification,
         now: Instant,
+        kind: CheckKind,
     ) -> Result<(), u64> {
         let window = Duration::from_secs(u64::from(cfg.failed_login_window_seconds));
         let mut inner = self.lock();
-        if let Some(failures) = inner.tracked.get(&TrackKey::of(c))
+        if kind == CheckKind::Login
+            && let Some(failures) = inner.tracked.get(&TrackKey::of(c))
             && now.saturating_duration_since(failures.last) <= window
             && now < failures.next_allowed
         {
@@ -264,6 +281,42 @@ mod tests {
         }
     }
 
+    impl Admission {
+        fn check_attempt_login(
+            &self,
+            cfg: &ServerAuthConfig,
+            c: &Classification,
+            now: Instant,
+        ) -> Result<(), u64> {
+            self.check_attempt(cfg, c, now, CheckKind::Login)
+        }
+    }
+
+    #[test]
+    fn a_current_password_check_skips_the_login_wait_but_not_the_global_limit() {
+        let a = Admission::default();
+        let c = ServerAuthConfig {
+            max_failed_logins_per_minute: 1,
+            ..cfg()
+        };
+        let t0 = Instant::now();
+        a.record_failure(&c, &net("198.51.100.1"), t0);
+        assert!(a.check_attempt_login(&c, &net("198.51.100.1"), t0).is_err());
+        assert!(
+            a.check_attempt(&c, &net("198.51.100.1"), t0, CheckKind::CurrentPassword)
+                .is_err(),
+            "the global minute still holds"
+        );
+        let roomy = ServerAuthConfig {
+            max_failed_logins_per_minute: 0,
+            ..cfg()
+        };
+        assert_eq!(
+            a.check_attempt(&roomy, &net("198.51.100.1"), t0, CheckKind::CurrentPassword),
+            Ok(())
+        );
+    }
+
     fn net(ip: &str) -> Classification {
         from(ClientClass::Network, ip)
     }
@@ -288,15 +341,27 @@ mod tests {
     fn a_failure_makes_that_address_wait_and_only_that_address() {
         let a = Admission::default();
         let t0 = Instant::now();
-        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.1"), t0), Ok(()));
+        assert_eq!(
+            a.check_attempt_login(&cfg(), &net("198.51.100.1"), t0),
+            Ok(())
+        );
         assert_eq!(a.record_failure(&cfg(), &net("198.51.100.1"), t0), None);
-        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.1"), t0), Err(1));
-        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.2"), t0), Ok(()));
+        assert_eq!(
+            a.check_attempt_login(&cfg(), &net("198.51.100.1"), t0),
+            Err(1)
+        );
+        assert_eq!(
+            a.check_attempt_login(&cfg(), &net("198.51.100.2"), t0),
+            Ok(())
+        );
         let later = t0 + Duration::from_millis(1001);
-        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.1"), later), Ok(()));
+        assert_eq!(
+            a.check_attempt_login(&cfg(), &net("198.51.100.1"), later),
+            Ok(())
+        );
         a.record_failure(&cfg(), &net("198.51.100.1"), later);
         assert_eq!(
-            a.check_attempt(&cfg(), &net("198.51.100.1"), later),
+            a.check_attempt_login(&cfg(), &net("198.51.100.1"), later),
             Err(2),
             "doubled"
         );
@@ -352,7 +417,7 @@ mod tests {
         let slowed = cfg();
         a.record_failure(&slowed, &machine, t0);
         assert!(
-            a.check_attempt(&slowed, &machine, t0).is_err(),
+            a.check_attempt_login(&slowed, &machine, t0).is_err(),
             "this machine waits too"
         );
         // Nothing to block for a forwarded request with no readable address.
@@ -375,22 +440,22 @@ mod tests {
         }
         let fresh = net("203.0.113.50");
         assert_eq!(
-            a.check_attempt(&c, &fresh, t0 + Duration::from_secs(10)),
+            a.check_attempt_login(&c, &fresh, t0 + Duration::from_secs(10)),
             Err(50)
         );
         assert_eq!(
-            a.check_attempt(&c, &from(ClientClass::ThisMachine, "127.0.0.1"), t0),
+            a.check_attempt_login(&c, &from(ClientClass::ThisMachine, "127.0.0.1"), t0),
             Ok(())
         );
         assert_eq!(
-            a.check_attempt(&c, &fresh, t0 + Duration::from_secs(60)),
+            a.check_attempt_login(&c, &fresh, t0 + Duration::from_secs(60)),
             Ok(())
         );
         let off = ServerAuthConfig {
             max_failed_logins_per_minute: 0,
             ..c
         };
-        assert_eq!(a.check_attempt(&off, &fresh, t0), Ok(()));
+        assert_eq!(a.check_attempt_login(&off, &fresh, t0), Ok(()));
     }
 
     #[test]
@@ -407,11 +472,11 @@ mod tests {
         a.record_failure(&c, &net("198.51.100.3"), t0 + Duration::from_millis(2));
         assert_eq!(a.tracked(), 2);
         assert_eq!(
-            a.check_attempt(&c, &net("198.51.100.1"), t0 + Duration::from_millis(3)),
+            a.check_attempt_login(&c, &net("198.51.100.1"), t0 + Duration::from_millis(3)),
             Ok(()),
             "the oldest was forgotten"
         );
-        assert!(a.check_attempt(&c, &net("198.51.100.3"), t0).is_err());
+        assert!(a.check_attempt_login(&c, &net("198.51.100.3"), t0).is_err());
     }
 
     #[test]

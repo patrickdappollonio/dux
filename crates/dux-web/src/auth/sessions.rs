@@ -225,9 +225,24 @@ impl Sessions {
     /// Hold `digest` alive for as long as the lease lives. `None` when the
     /// session is not known.
     pub(crate) fn lease(&self, digest: TokenDigest) -> Option<SessionLease> {
-        let mut map = self.map();
-        let live = map.get_mut(&digest)?;
-        live.leases += 1;
+        let now = self.now();
+        {
+            let mut map = self.map();
+            let live = map.get_mut(&digest)?;
+            live.leases += 1;
+            live.last_seen_ms = live.last_seen_ms.max(now);
+        }
+        // An open tab is the session's activity, so its start is written now
+        // rather than at the next flush: a restart right after a tab opened
+        // finds a fresh last use.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let sessions = self.clone();
+            runtime.spawn(async move {
+                sessions
+                    .with_store(move |store| store.touch(&[(digest, now)]))
+                    .await;
+            });
+        }
         Some(SessionLease {
             sessions: self.clone(),
             digest,
@@ -377,6 +392,29 @@ mod tests {
         now.fetch_add(2_000, Ordering::SeqCst);
         assert!(!sessions.check(&token.digest, "g", 3_000, false));
         assert!(sessions.lease([9; 32]).is_none());
+    }
+
+    /// An open tab is the session's activity, so the moment a socket takes its
+    /// lease is written at once: a restart right after a tab opened must find a
+    /// fresh last use, not the sign-in's.
+    #[tokio::test]
+    async fn taking_a_lease_writes_the_sessions_last_use_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.sqlite3");
+        let (clock, now) = clock_at(1_000_000);
+        let sessions = Sessions::new(clock);
+        sessions.load(db.clone(), "g".into(), 60_000).await;
+        let token = sessions.issue("g").await.unwrap();
+        now.fetch_add(5_000, Ordering::SeqCst);
+        let _lease = sessions.lease(token.digest).unwrap();
+        let stored = || WebSessionStore::open(&db).unwrap().load().unwrap()[0].last_seen_ms;
+        for _ in 0..100 {
+            if stored() == 1_005_000 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(stored(), 1_005_000);
     }
 
     #[tokio::test]

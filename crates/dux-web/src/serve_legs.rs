@@ -1032,8 +1032,8 @@ pub(crate) enum Because {
 /// than refusing.
 pub(crate) fn container_warning(password_set: bool) -> String {
     let consequence = if password_set {
-        "so keep [server.auth] require = \"everywhere\" if anything outside could publish it: \
-         a request forwarded onto this port can look like this machine"
+        "so if anything outside could publish it, set [server.auth] require = \"everywhere\": \
+         a request relayed onto this port looks like this machine"
     } else {
         "and no password is set: anything that can reach this port can drive your terminals. Set \
          one with `dux config set server.auth.password`, or keep the port private to your own \

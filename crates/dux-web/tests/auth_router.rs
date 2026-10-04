@@ -992,6 +992,51 @@ async fn the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
         )
         .await;
     assert_eq!(still.status, StatusCode::OK);
+    // The right one changes it at once: a wrong current password counts toward
+    // the block, but the wait after a failed LOGIN is not the change's to serve.
+    let changed = dux
+        .send(
+            NETWORK,
+            Req::new(Method::POST, "/api/v1/auth/password")
+                .json(json!({ "current": PASSWORD, "new": OTHER_PASSWORD }))
+                .cookie(&cookie),
+        )
+        .await;
+    assert_eq!(changed.status, StatusCode::NO_CONTENT, "{}", changed.body);
+    assert_auth_required(
+        &dux.send(
+            NETWORK,
+            Req::new(Method::GET, "/api/v1/projects").cookie(&cookie),
+        )
+        .await,
+        "a session from before the change",
+    );
+    assert_eq!(
+        dux.login(NETWORK, PASSWORD).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// Wrong current passwords are guesses too: they count toward the block like
+/// failed logins do, so a stolen session cannot be used to guess the password.
+#[tokio::test]
+async fn wrong_current_passwords_count_toward_the_block() {
+    let dux = Dux::with_password("max_failed_logins = 2\nfailed_login_delay_seconds = 0");
+    let cookie = dux.signed_in(NETWORK).await;
+    let wrong = || {
+        Req::new(Method::POST, "/api/v1/auth/password")
+            .json(json!({ "current": "wrong-current-password-123", "new": OTHER_PASSWORD }))
+            .cookie(&cookie)
+    };
+    assert_eq!(
+        dux.send(NETWORK, wrong()).await.error().as_deref(),
+        Some("wrong_current_password")
+    );
+    assert_eq!(
+        dux.send(NETWORK, wrong()).await.error().as_deref(),
+        Some("blocked")
+    );
+    assert!(dux.config().contains("\"198.51.100.7\""));
 }
 
 #[tokio::test]
