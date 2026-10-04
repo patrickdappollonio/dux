@@ -506,6 +506,7 @@ impl Engine {
                 let registry = crate::agent_job::CreateJobRegistries {
                     processes: self.process_registry.clone(),
                     worktrees: self.worktree_ops().clone(),
+                    moves: self.checkout_move_guard(),
                 };
                 let reaction = self.spawn_command_worker(
                     CommandWorkerSpec {
@@ -1080,6 +1081,8 @@ impl Engine {
         busy_message: crate::status_text::StatusText,
         already_running_message: crate::status_text::StatusText,
     ) -> EventReaction {
+        // The pull's check of what git would remove runs on its worker.
+        let _engine_thread = crate::engine::destructive_guard::engine_thread();
         let repo_key = repo_path.to_string_lossy().into_owned();
         // A project pull switches the folder to its base first, so it shares
         // the folder's lock with the other two operations that switch it, and
@@ -1135,6 +1138,7 @@ impl Engine {
         let panic_key = op.key().to_string();
         let origin = self.current_origin.clone();
         let origin_for_panic = origin.clone();
+        let guard = self.checkout_move_guard();
         self.spawn_command_worker(
             CommandWorkerSpec {
                 label: format!("pull:{repo_key}"),
@@ -1155,9 +1159,9 @@ impl Engine {
             move |tx| {
                 let result = match &target {
                     PullTarget::Project { leading_branch, .. } => {
-                        run_project_refresh(&repo_path, leading_branch.clone())
+                        run_project_refresh(&repo_path, leading_branch.clone(), &guard)
                     }
-                    PullTarget::Session => crate::git::pull_current_branch(&repo_path)
+                    PullTarget::Session => crate::git::pull_current_branch(&repo_path, &guard)
                         .map(|_| PullOutcome::Pulled {
                             current_branch: None,
                         })
@@ -1626,6 +1630,7 @@ fn project_refresh_status_op(
 fn run_project_refresh(
     repo_path: &std::path::Path,
     leading_branch: Option<String>,
+    guard: &crate::checkout_move::CheckoutMoveGuard,
 ) -> Result<crate::worker::PullOutcome, String> {
     use crate::worker::PullOutcome;
     let leading_branch = match leading_branch {
@@ -1636,7 +1641,8 @@ fn run_project_refresh(
             })
             .map_err(|e| e.to_string())?,
     };
-    crate::git::switch_branch_if_needed(repo_path, &leading_branch).map_err(|e| e.to_string())?;
+    crate::git::switch_branch_if_needed(repo_path, &leading_branch, guard)
+        .map_err(|e| e.to_string())?;
     if !crate::git::has_origin_remote(repo_path).map_err(|e| e.to_string())? {
         // Nothing to pull, and that is fine; still re-read the current branch
         // so the sidebar stays fresh.
@@ -1644,7 +1650,7 @@ fn run_project_refresh(
             current_branch: crate::git::current_branch(repo_path).ok(),
         });
     }
-    crate::git::pull_branch(repo_path, &leading_branch).map_err(|e| e.to_string())?;
+    crate::git::pull_branch(repo_path, &leading_branch, guard).map_err(|e| e.to_string())?;
     Ok(PullOutcome::Pulled {
         current_branch: crate::git::current_branch(repo_path).ok(),
     })
@@ -3399,8 +3405,12 @@ mod tests {
         // The dirt that used to abort the refresh.
         std::fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
 
-        let outcome = run_project_refresh(repo.path(), Some("main".to_string()))
-            .expect("a dirty checkout must not block the refresh");
+        let outcome = run_project_refresh(
+            repo.path(),
+            Some("main".to_string()),
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .expect("a dirty checkout must not block the refresh");
         match outcome {
             PullOutcome::Pulled { current_branch } => {
                 assert_eq!(current_branch.as_deref(), Some("main"));
@@ -3415,8 +3425,12 @@ mod tests {
     fn project_refresh_without_origin_is_nothing_to_pull_info() {
         let repo = refresh_test_repo();
 
-        let outcome = run_project_refresh(repo.path(), Some("main".to_string()))
-            .expect("no origin must not be an error");
+        let outcome = run_project_refresh(
+            repo.path(),
+            Some("main".to_string()),
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .expect("no origin must not be an error");
         match &outcome {
             PullOutcome::NoOrigin { current_branch } => {
                 assert_eq!(current_branch.as_deref(), Some("main"));
@@ -3447,7 +3461,11 @@ mod tests {
             &["remote", "add", "origin", "/nonexistent/dux-test-origin"],
         );
 
-        let result = run_project_refresh(repo.path(), Some("main".to_string()));
+        let result = run_project_refresh(
+            repo.path(),
+            Some("main".to_string()),
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        );
         assert!(result.is_err(), "the pull must fail");
 
         let op = project_refresh_status_op("Refreshing...".to_string().into(), "demo");

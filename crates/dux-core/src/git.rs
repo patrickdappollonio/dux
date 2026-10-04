@@ -944,7 +944,10 @@ pub fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Result<Vec<GitWorktree>>
     Ok(worktrees)
 }
 
-pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
+pub fn pull_current_branch(
+    repo_path: &Path,
+    guard: &crate::checkout_move::CheckoutMoveGuard,
+) -> Result<()> {
     let branch = match current_branch_opt(repo_path)? {
         Some(b) => b,
         None => {
@@ -953,20 +956,28 @@ pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
             ));
         }
     };
-    pull_origin_branch(repo_path, &branch)
+    pull_origin_branch(repo_path, &branch, guard)
 }
 
-pub fn pull_branch(repo_path: &Path, branch: &str) -> Result<()> {
-    switch_branch_if_needed(repo_path, branch)?;
-    pull_origin_branch(repo_path, branch)
+pub fn pull_branch(
+    repo_path: &Path,
+    branch: &str,
+    guard: &crate::checkout_move::CheckoutMoveGuard,
+) -> Result<()> {
+    switch_branch_if_needed(repo_path, branch, guard)?;
+    pull_origin_branch(repo_path, branch, guard)
 }
 
-pub fn switch_branch_if_needed(repo_path: &Path, branch: &str) -> Result<()> {
+pub fn switch_branch_if_needed(
+    repo_path: &Path,
+    branch: &str,
+    guard: &crate::checkout_move::CheckoutMoveGuard,
+) -> Result<()> {
     // On a detached HEAD there is no current branch to compare against, so we
     // simply switch. Only skip the switch when already on the target branch.
     let current = current_branch_opt(repo_path)?;
     if current.as_deref() != Some(branch) {
-        switch_branch(repo_path, branch)?;
+        switch_branch(repo_path, branch, guard)?;
     }
     Ok(())
 }
@@ -994,52 +1005,150 @@ pub fn has_origin_remote(repo_path: &Path) -> Result<bool> {
     Ok(status.success())
 }
 
-/// Fast-forwards `branch` from `origin`.
+/// Fast-forwards `branch` from `origin`: a fetch, the check that the move
+/// removes no folder something lives in ([`crate::checkout_move`]), then a
+/// fast-forward merge of exactly what was fetched. A `git pull` would fetch and
+/// move the working tree in one step, with no room to ask before git deletes
+/// an ignored folder standing where the incoming commit tracks a file.
 ///
-/// The refspec is FULLY QUALIFIED (`refs/heads/<branch>`), and that, not a `--`
-/// separator, is what makes an option-looking branch name safe. MEASURED on git
-/// 2.55 with `GIT_TRACE=1`:
-///
-/// ```text
-/// $ git pull --ff-only origin -- --force
-/// trace: run_command: git fetch --update-head-ok origin --force
-/// ```
-///
-/// `pull` consumes the separator and forwards the refspec to an internal
-/// `fetch` carrying none of its own, so `--force`/`--prune`/`--all` are read as
-/// flags and the branch is silently never pulled, while `--depth=1` converts the
-/// user's source checkout to a shallow clone. A `refs/heads/` prefix cannot lead
-/// with a dash, so the internal fetch always reads it as a ref (measured:
-/// `git pull --ff-only origin -- refs/heads/--force` fast-forwards correctly).
-///
-/// Resolving the name to an object id first, the way
-/// `create_worktree_from_start_point` does, is not possible here: the refspec
-/// names a ref on the REMOTE. The `--` stays as defence in depth for the
-/// `origin` argument's sake.
-fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
+/// The refspec is FULLY QUALIFIED (`refs/heads/<branch>`), and that is what
+/// makes an option-looking branch name safe wherever it travels. MEASURED on
+/// git 2.55 with `GIT_TRACE=1`: `git pull --ff-only origin -- --force` consumes
+/// the separator and forwards the refspec to an internal `fetch` carrying none
+/// of its own, so `--force`/`--prune`/`--all` are read as flags and
+/// `--depth=1` converts the user's source checkout to a shallow clone. A
+/// `refs/heads/` prefix cannot lead with a dash, and the `--` stays as defence
+/// in depth. The merge takes the fetched commit's object id, which cannot lead
+/// with a dash either, read from this checkout's own `FETCH_HEAD` (per
+/// worktree, measured), the ref `git pull` itself merges.
+fn pull_origin_branch(
+    repo_path: &Path,
+    branch: &str,
+    guard: &crate::checkout_move::CheckoutMoveGuard,
+) -> Result<()> {
     let refspec = format!("refs/heads/{branch}");
     let output = Command::new("git")
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
-            "pull",
-            "--ff-only",
+            "fetch",
             "origin",
             "--",
             &refspec,
         ])
         .output()?;
     if !output.status.success() {
-        return Err(git_failure("git pull", repo_path, &output));
+        return Err(git_failure("git fetch", repo_path, &output));
+    }
+    let incoming = crate::checkout_move::commit_id(repo_path, "FETCH_HEAD")?
+        .ok_or_else(|| anyhow!("git fetch of {branch} from origin left no commit to merge"))?;
+    // Only a fast-forward moves the tree: an up-to-date or diverged checkout
+    // is left where it is (git says which below), so there is nothing to ask.
+    let head = crate::checkout_move::commit_id(repo_path, "HEAD")?;
+    let moves = match &head {
+        None => true,
+        Some(head) => head != &incoming && is_ancestor(repo_path, head, &incoming)?,
+    };
+    let _clearance = if moves {
+        Some(guard.clear(repo_path, &incoming, "pull")?)
+    } else {
+        None
+    };
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "merge",
+            "--ff-only",
+            "--no-edit",
+            &incoming,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(git_failure("git merge --ff-only", repo_path, &output));
     }
     Ok(())
 }
 
-/// Switches `repo_path` to `branch_name`. `git switch` rather than `git
-/// checkout` because it is single-purpose and rejects the detached-HEAD and
-/// file-restore surprises `checkout` silently allows. Returns git's raw stderr
-/// on failure so callers can surface the concrete reason. Requires git >= 2.23.
-pub fn switch_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
+/// Whether commit `ancestor` is an ancestor of commit `descendant` (both
+/// object ids). Exit status only.
+fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to run git merge-base in {}", repo_path.display()))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(anyhow!(
+            "git merge-base could not compare the checkout with what was fetched in {}",
+            repo_path.display()
+        )),
+    }
+}
+
+/// The commit `git switch <branch>` would check out: the local branch, or,
+/// when there is none, the remote-tracking branch git would create it from
+/// (`origin`'s first, then the only remote that has it). `None` when git
+/// would refuse the switch anyway.
+fn switch_target(repo_path: &Path, branch: &str) -> Result<Option<String>> {
+    if let Some(id) = crate::checkout_move::commit_id(repo_path, &format!("refs/heads/{branch}"))? {
+        return Ok(Some(id));
+    }
+    if let Some(id) =
+        crate::checkout_move::commit_id(repo_path, &format!("refs/remotes/origin/{branch}"))?
+    {
+        return Ok(Some(id));
+    }
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "for-each-ref",
+            "--format=%(objectname)",
+            // A branch name cannot hold a glob character, so this matches
+            // `refs/remotes/<remote>/<branch>` and nothing else.
+            &format!("refs/remotes/*/{branch}"),
+        ])
+        .output()?;
+    let ids: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    Ok(match ids.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    })
+}
+
+/// Switches `repo_path` to `branch_name`, once `guard` has cleared the move
+/// (see [`crate::checkout_move`]). `git switch` rather than `git checkout`
+/// because it is single-purpose and rejects the detached-HEAD and file-restore
+/// surprises `checkout` silently allows. Returns git's raw stderr on failure so
+/// callers can surface the concrete reason. Requires git >= 2.23.
+pub fn switch_branch(
+    repo_path: &Path,
+    branch_name: &str,
+    guard: &crate::checkout_move::CheckoutMoveGuard,
+) -> Result<()> {
+    let _clearance = match switch_target(repo_path, branch_name)? {
+        Some(target) => Some(guard.clear(repo_path, &target, "switch to the branch")?),
+        // git refuses a branch it cannot resolve, and moves nothing.
+        None => None,
+    };
+    run_switch(repo_path, branch_name)
+}
+
+fn run_switch(repo_path: &Path, branch_name: &str) -> Result<()> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -1798,7 +1907,10 @@ pub fn add_worktree_existing_branch_at(
     // commit-ish naming a tag keeps checking out detached, as it does today.
     let attached = current_branch_opt(worktree_path).unwrap_or(None);
     if attached.as_deref() != Some(branch_name) && local_branch_exists(repo_path, branch_name) {
-        switch_branch(worktree_path, branch_name)?;
+        // The add created this checkout a moment ago, so no folder in it can
+        // hold anything dux knows about yet: there is nothing for the move
+        // check to ask.
+        run_switch(worktree_path, branch_name)?;
     }
     Ok(worktree_path
         .canonicalize()
@@ -7928,7 +8040,11 @@ mod tests {
     fn switch_branch_reads_an_option_looking_branch_as_a_ref() {
         let repo = init_test_repo();
         // Without `--`, `git switch --detach` detaches HEAD instead of failing.
-        let result = switch_branch(repo.path(), "--detach");
+        let result = switch_branch(
+            repo.path(),
+            "--detach",
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        );
         assert!(result.is_err(), "expected a refused switch: {result:?}");
         assert_eq!(
             current_branch(repo.path()).unwrap(),
@@ -9480,7 +9596,11 @@ mod tests {
             run_git(repo.path(), &["reset", "--mixed", "--quiet"]);
             assert_eq!(head_commit(repo.path()).unwrap(), first);
 
-            let result = pull_origin_branch(repo.path(), name);
+            let result = pull_origin_branch(
+                repo.path(),
+                name,
+                &crate::checkout_move::CheckoutMoveGuard::default(),
+            );
 
             assert!(
                 !repo.path().join(".git").join("shallow").exists(),
@@ -9517,7 +9637,12 @@ mod tests {
         );
         run_git(repo.path(), &["reset", "--hard", "--quiet", &first]);
 
-        pull_origin_branch(repo.path(), "main").unwrap();
+        pull_origin_branch(
+            repo.path(),
+            "main",
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .unwrap();
         assert_eq!(head_commit(repo.path()).unwrap(), ahead);
     }
 
@@ -12584,7 +12709,12 @@ mod tests {
         run_git(repo.path(), &["branch", "feat"]);
         assert_eq!(current_branch(repo.path()).unwrap(), "main");
 
-        switch_branch(repo.path(), "feat").unwrap();
+        switch_branch(
+            repo.path(),
+            "feat",
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .unwrap();
 
         assert_eq!(current_branch(repo.path()).unwrap(), "feat");
     }
@@ -12592,7 +12722,12 @@ mod tests {
     #[test]
     fn switch_branch_errors_when_target_missing() {
         let repo = init_test_repo();
-        let err = switch_branch(repo.path(), "does-not-exist").unwrap_err();
+        let err = switch_branch(
+            repo.path(),
+            "does-not-exist",
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("git switch does-not-exist failed"),
@@ -12606,7 +12741,12 @@ mod tests {
         run_git(repo.path(), &["branch", "feat"]);
         fs::write(repo.path().join("scratch.txt"), "unrelated\n").unwrap();
 
-        switch_branch(repo.path(), "feat").unwrap();
+        switch_branch(
+            repo.path(),
+            "feat",
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .unwrap();
 
         assert_eq!(current_branch(repo.path()).unwrap(), "feat");
         assert_eq!(
@@ -12634,7 +12774,12 @@ mod tests {
         fs::write(repo.path().join("a.txt"), "dirty\n").unwrap();
 
         // Switching to feat should refuse because it would overwrite.
-        let err = switch_branch(repo.path(), "feat").unwrap_err();
+        let err = switch_branch(
+            repo.path(),
+            "feat",
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .unwrap_err();
         let msg = format!("{err:#}").to_lowercase();
         assert!(
             msg.contains("overwritten") || msg.contains("would be"),
@@ -12677,7 +12822,12 @@ mod tests {
         let p = tmp.path().to_path_buf();
         run_git(&p, &["checkout", "--detach", "HEAD"]);
         // Must not error on detached HEAD; must end up on main.
-        switch_branch_if_needed(&p, "main").unwrap();
+        switch_branch_if_needed(
+            &p,
+            "main",
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .unwrap();
         assert_eq!(current_branch_opt(&p).unwrap(), Some("main".to_string()));
     }
 
@@ -12704,7 +12854,12 @@ mod tests {
         run_git(clone, &["switch", "feature"]);
         assert_eq!(current_branch(clone).unwrap(), "feature");
 
-        pull_branch(clone, "main").unwrap();
+        pull_branch(
+            clone,
+            "main",
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .unwrap();
 
         assert_eq!(current_branch(clone).unwrap(), "main");
     }
@@ -12718,7 +12873,11 @@ mod tests {
         run_git(repo.path(), &["commit", "-m", "second commit"]);
         run_git(repo.path(), &["checkout", "--detach", "HEAD~1"]);
 
-        let err = pull_current_branch(repo.path()).unwrap_err();
+        let err = pull_current_branch(
+            repo.path(),
+            &crate::checkout_move::CheckoutMoveGuard::default(),
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("detached"),

@@ -997,13 +997,18 @@ impl App {
             }
         };
         let worker_tx = self.engine.worker_tx.clone();
+        let guard = self.engine.checkout_move_guard();
         thread::spawn(move || {
             dux_core::project_browser::run_checkout_job_reporting_panics(
                 action,
                 target_branch,
                 worker_tx,
                 Some(status_op_id),
-                dux_core::project_browser::run_add_project_checkout_job,
+                |action, branch, tx, id| {
+                    dux_core::project_browser::run_add_project_checkout_job(
+                        action, branch, tx, id, &guard,
+                    )
+                },
             );
         });
     }

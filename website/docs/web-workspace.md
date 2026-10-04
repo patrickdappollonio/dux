@@ -163,9 +163,12 @@ clone that sat on the wrong branch.
 > conflict come along with it, the same as with **Check out default branch…**.
 
 > [!CAUTION]
-> Switching the project folder, and **Pull project**, can delete a folder your
-> `.gitignore` hides when the incoming branch has a tracked file at that same path: git
-> treats ignored files as disposable. Move such a folder aside first if it matters.
+> Switching the project folder, **Pull project** and an agent's **Pull** make git delete a
+> folder your `.gitignore` hides when the incoming branch has a tracked file at that same
+> path: git treats ignored files as disposable. dux refuses, and changes nothing, when that
+> folder holds an agent's worktree, a standalone agent's folder, a project's repository or
+> a terminal working there, and says which. Any other ignored folder git still deletes, so
+> move such a folder aside first if it matters.
 
 Only one of **Pull project**, **Check out default branch…** and **Change base branch…**
 runs on a project at a time; starting another while one is running is refused and names

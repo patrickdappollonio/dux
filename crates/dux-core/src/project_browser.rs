@@ -344,9 +344,11 @@ pub fn run_add_project_checkout_job(
     target_branch: String,
     worker_tx: Sender<WorkerEvent>,
     status_op_id: Option<String>,
+    guard: &crate::checkout_move::CheckoutMoveGuard,
 ) {
     let path = action.repo_path().to_string();
-    let result = git::switch_branch(Path::new(&path), &target_branch).map_err(|e| format!("{e:#}"));
+    let result =
+        git::switch_branch(Path::new(&path), &target_branch, guard).map_err(|e| format!("{e:#}"));
     let _ = worker_tx.send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
         action,
         target_branch,

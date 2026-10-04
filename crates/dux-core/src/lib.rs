@@ -17,6 +17,7 @@ pub mod bidi;
 pub mod bounded_command;
 pub mod browser;
 pub mod changes_status;
+pub mod checkout_move;
 pub mod config;
 pub mod config_migrate;
 pub mod config_queue;

@@ -126,10 +126,13 @@ says so in an error that stays up, and the base stays where it was.
 > stay in the project folder, the same as with a checkout in your own terminal.
 
 > [!CAUTION]
-> Like a checkout in your own terminal, switching the project folder (and the pull below)
-> can delete a folder your `.gitignore` hides when the new branch has a tracked file at
-> that same path: git treats ignored files as disposable. Move such a folder aside first if
-> it matters.
+> When the branch you switch to (or pull in) has a tracked file at the same path as a
+> folder your `.gitignore` hides, git deletes that folder to make room: it treats ignored
+> files as disposable. dux refuses the switch or pull, and changes nothing, when that
+> folder holds something it knows about: an agent's worktree, a standalone agent's folder,
+> a project's repository, or a terminal working there. Any other ignored folder git still
+> deletes, as it would in your own terminal, so move such a folder aside first if it
+> matters. The same goes for an agent's **Pull** and for **Pull project**.
 
 ### Pulling before create
 
@@ -143,7 +146,8 @@ pull_before_creating_agent_by_default = true
 
 The pull is best-effort. It is fast-forward only, never a merge or rebase, it is skipped
 for repos with no `origin` remote, and a failed pull does not block creation: the agent
-starts from the local branch state and the status message says so.
+starts from the local branch state and the status message says so. That includes a pull
+dux refused because it would have deleted a folder it knows about (see the caution above).
 
 ### Copying uncommitted changes
 

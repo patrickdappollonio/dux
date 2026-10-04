@@ -110,6 +110,7 @@ pub enum BaseBranchChangeFailure {
 pub fn switch_to_base_branch(
     repo: &Path,
     branch: &str,
+    guard: &crate::checkout_move::CheckoutMoveGuard,
 ) -> Result<BaseBranchSwitched, BaseBranchChangeFailure> {
     if !repo.is_dir() {
         return Err(BaseBranchChangeFailure::FolderMissing);
@@ -135,7 +136,7 @@ pub fn switch_to_base_branch(
         git::create_tracking_branch(repo, branch)
             .map_err(|error| BaseBranchChangeFailure::SwitchFailed(error.to_string()))?;
     }
-    git::switch_branch(repo, branch)
+    git::switch_branch(repo, branch, guard)
         .map_err(|error| BaseBranchChangeFailure::SwitchFailed(error.to_string()))?;
     Ok(BaseBranchSwitched {
         folder_was_on_it: false,

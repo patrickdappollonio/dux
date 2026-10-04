@@ -452,6 +452,11 @@ const OUTPUT_SETTLE: std::time::Duration = std::time::Duration::from_millis(500)
 /// One of the startup command's output pipes and the thread draining it.
 struct OutputDrain {
     shared: Option<std::sync::Arc<DrainShared>>,
+    /// The reader thread, which hands the pipe back when it is told to stop.
+    reader: Option<std::thread::JoinHandle<Option<std::os::fd::OwnedFd>>>,
+    /// The write end of the reader's wake pipe: closing it tells the reader
+    /// to stop reading and hand the pipe back.
+    wake: Option<std::os::fd::OwnedFd>,
 }
 
 #[derive(Default)]
@@ -467,69 +472,80 @@ struct DrainState {
     discarding: bool,
     /// The pipe reached end of input (every holder closed it).
     ended: bool,
-    /// The reader thread should stop and close its end: the pipe was handed
-    /// to a drain process that outlives dux.
-    stop: bool,
-    /// A second handle on the read end, kept for handing the pipe on.
-    spare: Option<std::os::fd::OwnedFd>,
 }
-
-/// How often the reader thread looks up from the pipe to see whether it was
-/// asked to stop.
-const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl OutputDrain {
     /// Start draining `pipe` on a thread of its own, keeping what it reads
     /// until [`Self::finish`]. The thread never holds dux up and never lets a
     /// writer block.
     fn start(pipe: Option<impl Into<std::os::fd::OwnedFd>>) -> Self {
+        let none = Self {
+            shared: None,
+            reader: None,
+            wake: None,
+        };
         let Some(pipe) = pipe else {
-            return Self { shared: None };
+            return none;
         };
         let fd: std::os::fd::OwnedFd = pipe.into();
+        // Without a wake pipe the reader cannot be told to stop, so it reads
+        // for as long as dux runs, which still never lets a writer block.
+        let (wake_read, wake_write) = match std::io::pipe() {
+            Ok((read, write)) => (
+                Some(std::os::fd::OwnedFd::from(read)),
+                Some(std::os::fd::OwnedFd::from(write)),
+            ),
+            Err(_) => (None, None),
+        };
         let shared = std::sync::Arc::new(DrainShared::default());
-        shared
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .spare = fd.try_clone().ok();
         let drain = std::sync::Arc::clone(&shared);
         let spawned = std::thread::Builder::new()
             .name("startup-output".to_string())
-            .spawn(move || Self::read_until_done(&fd, &drain));
+            .spawn(move || Self::read_until_done(fd, wake_read, &drain));
         match spawned {
-            Ok(_) => Self {
+            Ok(reader) => Self {
                 shared: Some(shared),
+                reader: Some(reader),
+                wake: wake_write,
             },
-            Err(_) => Self { shared: None },
+            Err(_) => none,
         }
     }
 
-    fn read_until_done(fd: &std::os::fd::OwnedFd, drain: &DrainShared) {
-        use rustix::event::{PollFd, PollFlags, Timespec};
+    /// Read `fd` until it ends (answering `None`) or until `wake` reports
+    /// its write end closed (answering the pipe, unread further, for handing
+    /// on). Reads only once the pipe has something, and nothing else reads it
+    /// while this runs, so a read never waits.
+    fn read_until_done(
+        fd: std::os::fd::OwnedFd,
+        wake: Option<std::os::fd::OwnedFd>,
+        drain: &DrainShared,
+    ) -> Option<std::os::fd::OwnedFd> {
+        use rustix::event::{PollFd, PollFlags};
         let mut buf = [0u8; 8192];
-        let timeout = Timespec {
-            tv_sec: 0,
-            tv_nsec: i64::try_from(DRAIN_POLL.as_nanos()).unwrap_or(100_000_000),
-        };
         loop {
-            if drain
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .stop
-            {
-                // Handed on: the drain process reads from here, and this
-                // thread's end closes as it returns.
-                return;
+            let (pipe_ready, woken) = {
+                let mut fds = vec![PollFd::new(&fd, PollFlags::IN)];
+                if let Some(wake) = &wake {
+                    fds.push(PollFd::new(wake, PollFlags::IN));
+                }
+                match rustix::event::poll(&mut fds, None) {
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(_) => (true, false),
+                    Ok(_) => (
+                        !fds[0].revents().is_empty(),
+                        fds.get(1).is_some_and(|wake| !wake.revents().is_empty()),
+                    ),
+                }
+            };
+            if woken {
+                return Some(fd);
             }
-            let mut fds = [PollFd::new(fd, PollFlags::IN)];
-            match rustix::event::poll(&mut fds, Some(&timeout)) {
-                Ok(0) => continue,
-                Err(rustix::io::Errno::INTR) => continue,
-                _ => {}
+            if !pipe_ready {
+                continue;
             }
-            let read = crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(fd, &mut buf));
+            let read =
+                crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(&fd, &mut buf));
             let mut state = drain
                 .state
                 .lock()
@@ -538,7 +554,7 @@ impl OutputDrain {
                 Ok(0) | Err(_) => {
                     state.ended = true;
                     drain.changed.notify_all();
-                    return;
+                    return None;
                 }
                 Ok(n) => {
                     if !state.discarding {
@@ -556,44 +572,65 @@ impl OutputDrain {
     ///
     /// When something the command left running still holds the pipe, the
     /// pipe has to outlive dux, or that job's next write after dux quits
-    /// raises SIGPIPE and kills it. So the read end is handed to a small
-    /// drain process of its own (see [`spawn_output_drain`]), which reads and
-    /// discards until the last writer closes, and dux's own copies close. If
-    /// that cannot start, this thread keeps discarding for as long as dux
+    /// raises SIGPIPE and kills it. So the reader thread is woken, ends and
+    /// hands the read end back, and the read end goes to a small drain
+    /// process of its own (see [`spawn_output_drain`]), which reads and
+    /// discards until the last writer closes; dux keeps no copy. If that
+    /// cannot start, a reader thread keeps discarding for as long as dux
     /// runs, and the log says the job may lose its output when dux quits.
-    fn finish(self) -> Vec<u8> {
-        let Some(shared) = self.shared else {
+    fn finish(mut self) -> Vec<u8> {
+        let Some(shared) = self.shared.take() else {
             return Vec::new();
         };
         let deadline = std::time::Instant::now() + OUTPUT_SETTLE;
-        let mut state = shared
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while !state.ended {
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                break;
+        let (kept, ended) = {
+            let mut state = shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !state.ended {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                state = shared
+                    .changed
+                    .wait_timeout(state, deadline - now)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .0;
             }
-            state = shared
-                .changed
-                .wait_timeout(state, deadline - now)
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
-        }
-        state.discarding = true;
-        let kept = std::mem::take(&mut state.kept);
-        let spare = state.spare.take();
-        if !state.ended
-            && let Some(spare) = spare
+            state.discarding = true;
+            (std::mem::take(&mut state.kept), state.ended)
+        };
+        let Some(wake) = self.wake.take() else {
+            if !ended {
+                crate::logger::warn(
+                    "could not hand a startup command's output to a drain of its own (no wake \
+                     pipe for its reader); a job it left running may lose its output channel \
+                     when dux quits",
+                );
+            }
+            return kept;
+        };
+        // Wake the reader and wait for it: it is either gone already (the
+        // pipe ended) or answers at once with the pipe.
+        drop(wake);
+        let handed_back = self
+            .reader
+            .take()
+            .and_then(|reader| reader.join().ok())
+            .flatten();
+        if let Some(fd) = handed_back
+            && let Err(err) = spawn_output_drain(&fd)
         {
-            match spawn_output_drain(spare) {
-                Ok(()) => state.stop = true,
-                Err(err) => crate::logger::warn(&format!(
-                    "could not hand a startup command's output to a drain of its own ({err}); \
-                     a job it left running may lose its output channel when dux quits"
-                )),
-            }
+            crate::logger::warn(&format!(
+                "could not hand a startup command's output to a drain of its own ({err}); \
+                 a job it left running may lose its output channel when dux quits"
+            ));
+            let drain = std::sync::Arc::clone(&shared);
+            let _ = std::thread::Builder::new()
+                .name("startup-output".to_string())
+                .spawn(move || Self::read_until_done(fd, None, &drain));
         }
         kept
     }
@@ -605,13 +642,17 @@ impl OutputDrain {
 /// exits by itself when the last writer closes the pipe. dux does not follow
 /// it as one of the agent's processes and never waits on it: a thread of its
 /// own reaps it whenever it ends.
-fn spawn_output_drain(read_end: std::os::fd::OwnedFd) -> std::io::Result<()> {
+fn spawn_output_drain(read_end: &std::os::fd::OwnedFd) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
+    #[cfg(test)]
+    if FAIL_NEXT_DRAIN.with(|fail| fail.replace(false)) {
+        return Err(std::io::Error::other("a drain spawn failed on purpose"));
+    }
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", "exec cat >/dev/null"])
         .current_dir("/")
-        .stdin(std::process::Stdio::from(read_end))
+        .stdin(std::process::Stdio::from(read_end.try_clone()?))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // SAFETY: the hook runs in the forked child before exec and calls only
@@ -623,6 +664,8 @@ fn spawn_output_drain(read_end: std::os::fd::OwnedFd) -> std::io::Result<()> {
         });
     }
     let mut child = command.spawn()?;
+    // The child holds the read end now; the parent's copy closes here.
+    drop(command);
     #[cfg(test)]
     SPAWNED_DRAINS.with(|drains| drains.borrow_mut().push(child.id()));
     let _ = std::thread::Builder::new()
@@ -637,6 +680,8 @@ fn spawn_output_drain(read_end: std::os::fd::OwnedFd) -> std::io::Result<()> {
 thread_local! {
     /// The drain processes this thread's startup runs started.
     static SPAWNED_DRAINS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Make the next drain spawn on this thread fail.
+    static FAIL_NEXT_DRAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The refusal for a second startup-command run of one agent while the first
@@ -1398,6 +1443,108 @@ mod tests {
 mod review16_tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// The descriptors this process holds on the pipe `inode` names.
+    #[cfg(target_os = "linux")]
+    fn own_handles_on(inode: &str) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| target.to_string_lossy() == inode)
+            .count()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pipe_inode(fd: &std::os::fd::OwnedFd) -> String {
+        use std::os::fd::AsRawFd;
+        std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The hand-off ends dux's reader for good: once the output is handed to
+    /// the drain process, no descriptor of dux's (the reader thread's
+    /// included) is left on the pipe, and the drain still reads it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_hand_off_leaves_dux_no_reader_on_the_pipe() {
+        let (read_end, write_end) = std::io::pipe().unwrap();
+        let (read_end, write_end) = (
+            std::os::fd::OwnedFd::from(read_end),
+            std::os::fd::OwnedFd::from(write_end),
+        );
+        let inode = pipe_inode(&read_end);
+        let drain = OutputDrain::start(Some(read_end));
+        rustix::io::write(&write_end, b"before\n").unwrap();
+        let kept = drain.finish();
+        assert_eq!(kept, b"before\n");
+        let drains = SPAWNED_DRAINS.with(|drains| std::mem::take(&mut *drains.borrow_mut()));
+        assert_eq!(
+            drains.len(),
+            1,
+            "the still-held pipe went to a drain process"
+        );
+        assert_eq!(
+            own_handles_on(&inode),
+            1,
+            "the only descriptor left on the pipe is the writer's (the job's): dux holds no \
+             reader on it any more"
+        );
+        // The drain reads on: a writer never blocks, well past a pipe's buffer.
+        let writer = std::thread::spawn(move || {
+            let chunk = [b'x'; 65536];
+            for _ in 0..32 {
+                rustix::io::write(&write_end, &chunk).unwrap();
+            }
+            write_end
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !writer.is_finished() {
+            assert!(Instant::now() < deadline, "the drain stopped reading");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(writer.join().unwrap());
+        // The last writer closed: the drain ends by itself.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::path::Path::new(&format!("/proc/{}", drains[0])).exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the drain outlived its last writer"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A drain process that cannot start leaves a reader of dux's draining
+    /// the pipe, so the job still never blocks while dux runs.
+    #[test]
+    fn a_drain_that_cannot_start_leaves_dux_draining() {
+        let (read_end, write_end) = std::io::pipe().unwrap();
+        let (read_end, write_end) = (
+            std::os::fd::OwnedFd::from(read_end),
+            std::os::fd::OwnedFd::from(write_end),
+        );
+        let drain = OutputDrain::start(Some(read_end));
+        FAIL_NEXT_DRAIN.with(|fail| fail.set(true));
+        assert!(drain.finish().is_empty());
+        assert!(
+            SPAWNED_DRAINS.with(|drains| drains.borrow().is_empty()),
+            "no drain process started"
+        );
+        let writer = std::thread::spawn(move || {
+            let chunk = [b'x'; 65536];
+            for _ in 0..32 {
+                rustix::io::write(&write_end, &chunk).unwrap();
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !writer.is_finished() {
+            assert!(Instant::now() < deadline, "nothing drained the pipe");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        writer.join().unwrap();
+    }
 
     /// Runs only when the parent test asks for it, in a process of its own:
     /// it stands in for a dux that runs a startup command and then quits.

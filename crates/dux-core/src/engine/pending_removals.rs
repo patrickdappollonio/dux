@@ -808,6 +808,23 @@ impl Occupant {
 }
 
 impl Engine {
+    /// What a worker that pulls into or switches a checkout needs to refuse a
+    /// move that would make git delete a folder something lives in (see
+    /// [`crate::checkout_move`]).
+    pub fn checkout_move_guard(&self) -> crate::checkout_move::CheckoutMoveGuard {
+        crate::checkout_move::CheckoutMoveGuard::new(
+            self.process_registry.clone(),
+            self.paths.sessions_db_path.clone(),
+            self.removal_coordination.ops.clone(),
+            self.sessions.clone(),
+            self.projects
+                .iter()
+                .map(|project| (project.name.clone(), project.path.clone()))
+                .collect(),
+            self.pty_occupants(),
+        )
+    }
+
     /// Everything that would make deleting or moving `target` (and all that
     /// is under it) destroy something in use: an agent of any kind living
     /// there (a standalone agent's folder, another agent's worktree), an

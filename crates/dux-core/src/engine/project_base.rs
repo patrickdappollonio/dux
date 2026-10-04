@@ -65,13 +65,18 @@ impl Engine {
 
         let worker_tx = self.worker_tx.clone();
         let branch = branch.to_string();
+        let guard = self.checkout_move_guard();
         let spawned = thread::Builder::new()
             .name("dux-change-base-branch".to_string())
             .spawn(move || {
                 // A panic still answers: the busy is on screen and the folder
                 // is locked, and only this event releases both.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::base_branch::switch_to_base_branch(Path::new(&project.path), &branch)
+                    crate::base_branch::switch_to_base_branch(
+                        Path::new(&project.path),
+                        &branch,
+                        &guard,
+                    )
                 }))
                 .unwrap_or_else(|_| {
                     Err(crate::base_branch::BaseBranchChangeFailure::SwitchFailed(

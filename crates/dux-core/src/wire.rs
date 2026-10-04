@@ -3183,6 +3183,7 @@ impl Engine {
         let pending = WireStatus::from_update(&self.begin_status_op(&op));
         self.pending_web_add_project_ops.insert(op_id.clone(), op);
         let worker_tx = self.worker_tx.clone();
+        let guard = self.checkout_move_guard();
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             // Guarantee the op resolves even if the job panics; see the sibling
@@ -3197,6 +3198,7 @@ impl Engine {
                     default_branch,
                     worker_tx,
                     Some(op_id),
+                    &guard,
                 );
             }))
             .is_err()
@@ -3904,6 +3906,7 @@ impl Engine {
                 // `NonDefaultBranchCheckoutCompleted` resolves the right op.
                 let status_op_id = status_op_id.clone();
                 let worker_tx = self.worker_tx.clone();
+                let guard = self.checkout_move_guard();
                 // A panic in the switch still answers, or the repository's
                 // in-flight key and the keyed busy would never be released.
                 std::thread::spawn(move || {
@@ -3912,7 +3915,11 @@ impl Engine {
                         target_branch,
                         worker_tx,
                         status_op_id,
-                        crate::project_browser::run_add_project_checkout_job,
+                        |action, branch, tx, id| {
+                            crate::project_browser::run_add_project_checkout_job(
+                                action, branch, tx, id, &guard,
+                            )
+                        },
                     );
                 });
                 vec![]

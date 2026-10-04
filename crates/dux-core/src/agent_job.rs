@@ -264,6 +264,7 @@ struct CreatePlanContext<'a> {
     create_key: &'a str,
     creation_notes: &'a mut Vec<crate::status_text::StatusText>,
     worktrees: &'a crate::worktree_ops::WorktreeOps,
+    moves: &'a crate::checkout_move::CheckoutMoveGuard,
 }
 
 impl CreatePlanContext<'_> {
@@ -379,7 +380,7 @@ impl CreatePlanContext<'_> {
             q(project.name),
             " before creating the agent..."
         ]);
-        if let Err(err) = git::switch_branch_if_needed(repo_path, leading_branch) {
+        if let Err(err) = git::switch_branch_if_needed(repo_path, leading_branch, self.moves) {
             logger::error(&format!(
                 "pre-create branch switch failed for {}: {err}",
                 project.path
@@ -403,7 +404,7 @@ impl CreatePlanContext<'_> {
                 ));
             }
             Ok(true) => {
-                if let Err(err) = git::pull_branch(repo_path, leading_branch) {
+                if let Err(err) = git::pull_branch(repo_path, leading_branch, self.moves) {
                     logger::error(&format!(
                         "pre-create pull failed for {}: {err}",
                         project.path
@@ -1867,6 +1868,9 @@ fn launch_managed_create(
 pub struct CreateJobRegistries {
     pub processes: crate::process_sessions::AgentProcessRegistry,
     pub worktrees: crate::worktree_ops::WorktreeOps,
+    /// What the pull before the create asks before git moves the project's
+    /// checkout (see [`crate::checkout_move`]).
+    pub moves: crate::checkout_move::CheckoutMoveGuard,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1883,6 +1887,7 @@ pub fn run_create_agent_job(
     let CreateJobRegistries {
         processes: registry,
         worktrees,
+        moves,
     } = registries;
     // The opaque id of the shared create-agent `HandlerStatusOp` keys every
     // progress/failure event and is carried in `AgentLaunchKind::Create` so the
@@ -1911,6 +1916,7 @@ pub fn run_create_agent_job(
             create_key: &create_key,
             creation_notes: &mut creation_notes,
             worktrees: &worktrees,
+            moves: &moves,
         };
         let Some(plan) = context.plan(request) else {
             return;
@@ -1929,6 +1935,7 @@ pub fn run_create_agent_job(
         CreateJobRegistries {
             processes: registry,
             worktrees,
+            moves,
         },
     );
 }
@@ -2104,6 +2111,16 @@ mod tests {
         request: CreateAgentRequest,
         setup: impl FnOnce(&DuxPaths),
     ) -> JobRun {
+        drive_create_job_run_with(repo, request, setup, Default::default())
+    }
+
+    /// Same, with the registries the engine would hand the job.
+    fn drive_create_job_run_with(
+        repo: &Path,
+        request: CreateAgentRequest,
+        setup: impl FnOnce(&DuxPaths),
+        registries: CreateJobRegistries,
+    ) -> JobRun {
         let paths_root = tempfile::tempdir().unwrap();
         let paths = DuxPaths {
             root: paths_root.path().to_path_buf(),
@@ -2125,7 +2142,7 @@ mod tests {
             (80, 24),
             "op-1".to_string(),
             crate::term_identity::TerminalIdentity::default(),
-            Default::default(),
+            registries,
         );
         let mut run = JobRun {
             session: None,
@@ -4260,6 +4277,100 @@ mod tests {
         assert!(
             worktree.join("upstream.txt").exists(),
             "the pull must have run and brought in origin's newer commit"
+        );
+    }
+
+    /// The pull before a create refuses to let git delete another project's
+    /// repository standing where the incoming commit tracks a file, and the
+    /// create still goes ahead, from the checkout as it was, saying so.
+    #[test]
+    fn a_refused_pre_create_pull_still_creates_from_the_current_head() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join(".gitignore"), "vendor/\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "ignore vendor"]);
+        let before = crate::git::head_commit(repo.path()).unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        git_in(bare.path(), &["init", "--bare", "-b", "main"]);
+        git_in(
+            repo.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git_in(repo.path(), &["push", "origin", "main"]);
+        let staging = tempfile::tempdir().unwrap();
+        git_in(
+            staging.path(),
+            &["clone", bare.path().to_str().unwrap(), "."],
+        );
+        git_in(staging.path(), &["config", "user.name", "test"]);
+        git_in(staging.path(), &["config", "user.email", "t@t"]);
+        std::fs::write(staging.path().join("vendor"), "a file now\n").unwrap();
+        git_in(staging.path(), &["add", "-f", "vendor"]);
+        git_in(staging.path(), &["commit", "-m", "vendor is a file"]);
+        git_in(staging.path(), &["push", "origin", "main"]);
+        // Another project's repository, with history, in the ignored folder.
+        let other = repo.path().join("vendor").join("lib");
+        std::fs::create_dir_all(&other).unwrap();
+        git_in(&other, &["init", "-q", "-b", "main"]);
+        std::fs::write(other.join("notes.txt"), "irreplaceable\n").unwrap();
+        git_in(&other, &["add", "-A"]);
+        git_in(
+            &other,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "mine",
+            ],
+        );
+        let db = tempfile::tempdir().unwrap();
+        let registries = CreateJobRegistries {
+            moves: crate::checkout_move::CheckoutMoveGuard::new(
+                Default::default(),
+                db.path().join("sessions.sqlite3"),
+                Default::default(),
+                Vec::new(),
+                vec![("other".to_string(), other.to_string_lossy().into_owned())],
+                Vec::new(),
+            ),
+            ..Default::default()
+        };
+
+        let run = drive_create_job_run_with(
+            repo.path(),
+            new_project_request(repo.path(), true, false),
+            |_| {},
+            registries,
+        );
+
+        assert!(
+            run.failure.is_none(),
+            "a refused pull must not fail the create: {:?}",
+            run.failure
+        );
+        assert!(
+            other.join(".git").exists(),
+            "the other project's repository is kept"
+        );
+        assert_eq!(
+            crate::git::head_commit(repo.path()).unwrap(),
+            before,
+            "the checkout did not move"
+        );
+        let worktree = PathBuf::from(run.session.unwrap().directory());
+        assert!(
+            !worktree.join("vendor").is_file(),
+            "the agent starts from the old HEAD"
+        );
+        let status = run.status_message.unwrap();
+        assert!(
+            status.contains("could not pull")
+                && status.contains("project \"other\"")
+                && status.contains("starts from the local branch state"),
+            "the create says the pull was refused, why, and where it started: {status}"
         );
     }
 
