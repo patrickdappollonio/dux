@@ -54,6 +54,7 @@ import {
   type PasswordDraft,
   type Strength,
 } from "@/lib/passwordStrength"
+import { firstPasswordUnavailable, storedNotInForceSentence } from "@/lib/authErrors"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { wireProse } from "@/lib/prose"
 import {
@@ -561,7 +562,7 @@ function PasswordSettingRow({
   const unavailable =
     status === null
       ? "dux could not read its sign-in status, so the password cannot be changed from here right now. Close Preferences and open it again to ask once more."
-      : "No password is set. The first one can only be set from this machine, from your tailnet, or by running `dux config set server.auth.password` where dux runs."
+      : firstPasswordUnavailable(status.required_reason)
   return (
     <div className="flex flex-col gap-3 py-3 first:pt-0">
       <div className="flex flex-col gap-1">
@@ -836,6 +837,17 @@ function CustomizeWebappForm({
             : "Password changed. Every browser was signed out and signs in again with the new one.",
         )
         return true
+      case "stored_not_in_force":
+        // Not a success: the file holds the new password, but problems in it
+        // stop dux from using it, so the old one still applies. The drafts are
+        // cleared because they are written. Sticky (weighed): the user must act
+        // outside the toast, in config.toml, to put the password in force, and
+        // until then the password they think they set does not apply. A warning,
+        // not an error: nothing was lost and the old password still works.
+        setPasswordDraft(EMPTY_PASSWORD_DRAFT)
+        setPasswordError(null)
+        notifyWarning(storedNotInForceSentence(answer.message), { sticky: true })
+        return false
       case "refused":
         setPasswordError(answer.message)
         return false

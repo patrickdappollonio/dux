@@ -119,13 +119,13 @@ impl Exposure {
             .as_ref()
             .is_some_and(|facts| facts.forward_to_dux)
         {
-            return Some("a tailscale serve TCP forward reaches dux's port");
+            return Some("a `tailscale serve` TCP forward reaches dux's port");
         }
         match self.funnel {
             FunnelState::Open => None,
             FunnelState::Unchecked => Some(
-                "dux does not check Tailscale ([server] tailscale = \"no\" or --no-tailscale), \
-                 so it cannot rule out a Funnel or forward relaying the internet onto its port",
+                "`[server] tailscale` is `no` (or dux runs with `--no-tailscale`), so dux cannot \
+                 check for a Tailscale Funnel or forward",
             ),
             FunnelState::Checking => Some("dux has not finished its first look at Tailscale"),
             FunnelState::Unconfirmed | FunnelState::CliNotFound => {

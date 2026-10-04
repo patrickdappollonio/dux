@@ -1282,13 +1282,17 @@ async fn when_dux_cannot_check_tailscale_this_machine_signs_in_and_is_told_why()
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(reason.contains("tailscale = \"no\""), "{reason}");
+    // One short line, setting names marked for the browser's chips.
+    assert!(reason.contains("`[server] tailscale`"), "{reason}");
+    assert!(reason.ends_with('.') && reason.len() < 200, "{reason}");
     assert!(guarded.status(NETWORK, None).await["required_reason"].is_null());
 
     let open = Dux::start_tuned("", move |p| p.with_live_exposure(unchecked));
+    let open_status = open.status(THIS_MACHINE, None).await;
+    assert_eq!(open_status["can_set_first_password"], json!(false));
     assert_eq!(
-        open.status(THIS_MACHINE, None).await["can_set_first_password"],
-        json!(false)
+        open_status["required_reason"], status["required_reason"],
+        "the same line explains why the first password cannot be set here"
     );
     let refused = open
         .send(

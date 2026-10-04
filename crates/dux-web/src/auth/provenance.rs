@@ -421,7 +421,7 @@ mod tests {
         assert!(
             c.loopback_distrusted
                 .unwrap()
-                .contains("does not check Tailscale")
+                .contains("cannot check for a Tailscale Funnel")
         );
         let trusted = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &Exposure::default());
         assert_eq!(trusted.loopback_distrusted, None);

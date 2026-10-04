@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { refusalSentence, type ErrorBody } from "./authErrors"
+import {
+  firstPasswordUnavailable,
+  refusalSentence,
+  storedNotInForceSentence,
+  type ErrorBody,
+} from "./authErrors"
 
 function body(json: Record<string, unknown>): ErrorBody {
   return { json, text: JSON.stringify(json) }
@@ -80,5 +85,40 @@ describe("refusalSentence", () => {
     expect(refusalSentence(500, { json: {}, text: '{"error":' }, "save")).toBe(
       "dux refused to save (HTTP 500).",
     )
+  })
+})
+
+describe("a password stored but not in force", () => {
+  const server =
+    "The new password is saved in config.toml, but dux cannot use it until these problems in that file are fixed: session_idle_seconds must be at least 1. Until then the old password stays in force."
+
+  it("is a refusal in words: the server's sentence, which names the problems", () => {
+    expect(
+      refusalSentence(409, body({ error: "password_not_in_force", message: server }), "change the password"),
+    ).toBe(server)
+  })
+
+  it("still says what happened when the server gave no sentence", () => {
+    expect(
+      refusalSentence(409, body({ error: "password_not_in_force" }), "change the password"),
+    ).toBe(storedNotInForceSentence(null))
+    expect(storedNotInForceSentence(null)).toContain("not in force")
+  })
+
+  it("leads with the fact for the toast, then the server's details", () => {
+    const s = storedNotInForceSentence(server)
+    expect(s.startsWith("The password was stored but is not in force.")).toBe(true)
+    expect(s).toContain("session_idle_seconds")
+  })
+})
+
+describe("firstPasswordUnavailable", () => {
+  it("names where the first password can be set from", () => {
+    expect(firstPasswordUnavailable(null)).toContain("`dux config set server.auth.password`")
+  })
+
+  it("adds the server's line when this device is treated as the network", () => {
+    const reason = "`[server] tailscale` is `no`, so dux treats this device as the network."
+    expect(firstPasswordUnavailable(reason)).toBe(`${firstPasswordUnavailable(null)} ${reason}`)
   })
 })

@@ -6,7 +6,7 @@
 // (`authErrors.ts`), never as the body the server sent.
 
 import { apiFetch, isAuthInterruption } from "./apiFetch"
-import { count, readErrorBody, refusalSentence } from "./authErrors"
+import { count, readErrorBody, refusalSentence, str } from "./authErrors"
 import { getConnectionId } from "./connection"
 import { reconnectAttemptTimeoutMs } from "./connectionTiming"
 import { isDeadline, withDeadline } from "./deadline"
@@ -57,6 +57,9 @@ export async function postLogout(): Promise<LogoutAnswer> {
 
 export type PasswordAnswer =
   | { kind: "ok" }
+  /** Stored in config.toml, but problems in that file stop dux from using it;
+   * the old password (or none) still applies. Not a success. */
+  | { kind: "stored_not_in_force"; message: string | null }
   | { kind: "signed_out" }
   | { kind: "unreachable"; timedOut: boolean }
   /** `score` is the server's 0-4 strength result when it sent one. */
@@ -77,6 +80,11 @@ export async function postPassword(change: {
   }
   if (resp.ok) return { kind: "ok" }
   const err = await readErrorBody(resp)
+  if (err.json.error === "password_not_in_force") {
+    // The server's own sentence, which names the problems; the page leads
+    // with what it means (`storedNotInForceSentence`).
+    return { kind: "stored_not_in_force", message: str(err.json.message) }
+  }
   return {
     kind: "refused",
     message: refusalSentence(

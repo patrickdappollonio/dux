@@ -3,6 +3,7 @@ import { ShieldAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
+import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { Input } from "@/components/ui/input"
 import type { AuthStatus, LoginAnswer } from "@/lib/authApi"
 import { retryAuthGate, signIn, type SignOutReason } from "@/lib/authGate"
@@ -166,6 +167,16 @@ export function LoginPage({
   return (
     <Shell title="Sign in to dux">
       <p className="text-center text-sm text-muted-foreground">{REASON[reason]}</p>
+      {status?.required_reason ? (
+        // Why this device signs in at all: it reached dux over loopback, but
+        // dux could not rule out a relay from elsewhere.
+        <p
+          data-testid="login-required-reason"
+          className="text-center text-sm text-muted-foreground"
+        >
+          {renderInlineCode(status.required_reason)}
+        </p>
+      ) : null}
       {status?.transport_encrypted === false ? <PlainHttpWarning /> : null}
       <form
         data-testid="login-form"

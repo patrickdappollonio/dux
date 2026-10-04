@@ -47,9 +47,10 @@ pub(crate) struct StatusDoc {
     pub(crate) auth_broken: Option<String>,
     pub(crate) minimum_password_length: u32,
     pub(crate) minimum_password_score: u8,
-    /// Why this machine is asked for the password too, when it reached dux
-    /// over loopback but dux could not rule out that the request was relayed
-    /// from elsewhere. `null` otherwise. Shown, never decided on.
+    /// Why this device, which reached dux over loopback, is treated as the
+    /// network (so it signs in, and cannot set the first password): dux could
+    /// not rule out that the request was relayed from elsewhere. One line, with
+    /// setting names in backticks. `null` otherwise. Shown, never decided on.
     pub(crate) required_reason: Option<String>,
 }
 

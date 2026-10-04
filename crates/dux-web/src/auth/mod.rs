@@ -468,17 +468,16 @@ impl AuthState {
             }),
             minimum_password_length: config.minimum_password_length,
             minimum_password_score: config.minimum_password_score,
-            required_reason: a
-                .classification
-                .loopback_distrusted
-                .filter(|_| a.required)
-                .map(|cause| {
-                    format!(
-                        "This browser reached dux over loopback, but {cause}, so dux cannot \
-                         tell it from a request relayed from elsewhere and asks for the \
-                         password here too."
-                    )
-                }),
+            // Set whenever this device reached dux over loopback and dux could
+            // not take it for this machine: the browser shows it where it says
+            // why this device signs in, or why the first password cannot be set
+            // from here. Setting names are in backticks for the browser's chips.
+            required_reason: a.classification.loopback_distrusted.map(|cause| {
+                format!(
+                    "{}, so dux treats this device as the network.",
+                    capitalize(cause)
+                )
+            }),
         }
     }
 
@@ -654,6 +653,15 @@ impl AuthState {
     pub(crate) fn applied(&self, change: impl FnOnce(&mut ServerAuthConfig)) {
         self.live.update(change);
         (self.reload)();
+    }
+}
+
+/// `text` with its first character in upper case.
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 

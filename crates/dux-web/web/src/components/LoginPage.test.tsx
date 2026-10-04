@@ -27,6 +27,7 @@ function status(overrides: Partial<AuthStatus> = {}): AuthStatus {
     auth_broken: null,
     minimum_password_length: null,
     minimum_password_score: null,
+    required_reason: null,
     ...overrides,
   }
 }
@@ -50,6 +51,27 @@ describe("LoginPage", () => {
     expect(field).toHaveProperty("type", "password")
     expect(document.activeElement).toBe(field)
     expect(screen.getByRole("heading", { name: "Sign in to dux" })).toBeTruthy()
+  })
+
+  it("says in one line why this device signs in, with the setting as a chip", () => {
+    render(
+      <LoginPage
+        status={status({
+          required_reason: "`[server] tailscale` is `no`, so dux treats this device as the network.",
+        })}
+        reason="required"
+      />,
+    )
+    const line = screen.getByTestId("login-required-reason")
+    expect(line.textContent).toBe(
+      "[server] tailscale is no, so dux treats this device as the network.",
+    )
+    expect(line.querySelector("code")?.textContent).toBe("[server] tailscale")
+  })
+
+  it("says nothing extra when the server gives no reason", () => {
+    render(<LoginPage status={status()} reason="required" />)
+    expect(screen.queryByTestId("login-required-reason")).toBeNull()
   })
 
   it("sends the typed password and leaves the URL alone", async () => {

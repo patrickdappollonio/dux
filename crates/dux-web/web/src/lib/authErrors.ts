@@ -82,6 +82,26 @@ export function retryAfterSeconds(
   return v === null ? null : Math.max(0, Math.ceil(v))
 }
 
+/// What a password change that was stored but is not in force comes to: the
+/// file holds the new password, but problems in it stop dux from using it, so
+/// the old one (or none) still applies. Leads with that fact, then the server's
+/// sentence, which names the problems.
+export function storedNotInForceSentence(server: string | null): string {
+  const lead = "The password was stored but is not in force."
+  return server === null
+    ? `${lead} Problems in config.toml stop dux from using it; fix them, and the old password applies until then.`
+    : `${lead} ${server}`
+}
+
+/// Why the first password cannot be set from this page, with the server's
+/// line about this device when it gave one. Setting names in backticks, for
+/// the chip renderer.
+export function firstPasswordUnavailable(requiredReason: string | null): string {
+  const base =
+    "No password is set. The first one can only be set from this machine, from your tailnet, or by running `dux config set server.auth.password` where dux runs."
+  return requiredReason === null ? base : `${base} ${requiredReason}`
+}
+
 export function rateLimitSentence(seconds: number | null): string {
   if (seconds === null) return "Too many attempts from this address. Wait a little, then try again."
   if (seconds <= 0) return "Too many attempts from this address. You can try again now."
@@ -103,6 +123,8 @@ export function refusalSentence(
   switch (code) {
     case "wrong_current_password":
       return "The current password is not right, so nothing was changed."
+    case "password_not_in_force":
+      return str(body.json.message) ?? storedNotInForceSentence(null)
     case "weak_password": {
       const feedback = record(body.json.feedback)
       const suggestions = Array.isArray(feedback.suggestions) ? feedback.suggestions : []
