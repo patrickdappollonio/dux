@@ -304,7 +304,10 @@ pub(crate) fn guard_destructive_targets(
         let path = root.join(target);
         // The root itself is never deleted or moved (the operation refuses
         // it), and it is already held above.
-        if dux_core::worktree_ops::lexical_key(&path) == root_key {
+        if dux_core::worktree_ops::spelled_same(
+            &dux_core::worktree_ops::lexical_key(&path),
+            &root_key,
+        ) {
             continue;
         }
         match ops.claim_for_destructive_as(
@@ -604,8 +607,10 @@ async fn discard(
     // under the claim, and clear it right before the delete. A refusal is a
     // 409 naming what lives there.
     let target = worktree.join(&path);
-    let deletes_a_link = untracked
-        && std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink());
+    // A link at the path is removed whether it is untracked or stands where a
+    // tracked file was (the restore replaces it).
+    let deletes_a_link =
+        std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink());
     let claim = match confirmed {
         Some(dux_core::git::ConfirmedEntry::Folder { .. })
         | Some(dux_core::git::ConfirmedEntry::Repository) => true,

@@ -203,7 +203,7 @@ pub enum EngineRequest {
     /// Where a file dropped onto the pane showing this pty id should be saved.
     /// The pty id may be a terminal, an agent's first tab, or an extra tab; the
     /// engine resolves all three. A terminal answers with a PLAN rather
-    /// than a path, so the live-directory probe (a `/proc` read, or `lsof` on
+    /// than a path, so the live-directory probe (a `/proc` read, or a kernel query on
     /// macOS) happens on a blocking pool and never on this thread.
     FileDropDestination(
         String,

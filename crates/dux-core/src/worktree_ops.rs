@@ -448,8 +448,14 @@ pub fn folder_contains(outer: &Path, inner: &Path) -> bool {
 /// and a lexical spelling (never resolved by the filesystem) keeps whatever
 /// case it was recorded in. On Linux the filesystem is case-sensitive and
 /// so is the comparison.
-fn spelled_under(inner: &Path, outer: &Path) -> bool {
+pub fn spelled_under(inner: &Path, outer: &Path) -> bool {
     under_with_case(inner, outer, cfg!(target_os = "macos"))
+}
+
+/// Whether two spellings name the same path, under the same comparison as
+/// [`spelled_under`] (without case on macOS).
+pub fn spelled_same(a: &Path, b: &Path) -> bool {
+    spelled_under(a, b) && spelled_under(b, a)
 }
 
 fn under_with_case(inner: &Path, outer: &Path, ignore_case: bool) -> bool {
@@ -765,7 +771,7 @@ impl DestructiveClaim {
 
     /// Whether this claim is on exactly `path`.
     pub fn covers(&self, path: &Path) -> bool {
-        lexical_key(path) == self.key
+        spelled_same(&lexical_key(path), &self.key)
     }
 }
 

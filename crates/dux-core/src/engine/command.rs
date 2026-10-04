@@ -750,8 +750,10 @@ impl Engine {
                 // question under the claim, and clear it and delete on a
                 // worker. The engine thread never opens the session database
                 // or reads the process table for it.
+                // A link at the path is removed whether it is untracked or
+                // stands where a tracked file was (the restore replaces it).
                 let destructive = !matches!(confirmed, crate::git::ConfirmedEntry::File)
-                    || (is_untracked && crate::engine::is_symlink(&target));
+                    || crate::engine::is_symlink(&target);
                 if !destructive {
                     // A file restored or deleted as a file: nothing to clear.
                     crate::git::discard_confirmed(

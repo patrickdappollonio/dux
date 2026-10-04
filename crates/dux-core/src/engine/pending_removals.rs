@@ -504,8 +504,10 @@ pub(crate) fn occupant_in(
             label: agent.display_label(),
             directory: agent.directory().to_string(),
             standalone: agent.workspace.as_managed().is_none(),
-            exact: crate::worktree_ops::path_key(std::path::Path::new(agent.directory()))
-                == crate::worktree_ops::path_key(folder),
+            exact: crate::worktree_ops::spelled_same(
+                &crate::worktree_ops::path_key(std::path::Path::new(agent.directory())),
+                &crate::worktree_ops::path_key(folder),
+            ),
         });
     }
     if let Some((name, path)) = facts
@@ -556,9 +558,11 @@ pub(crate) fn recorded_at_or_through_link(
     stored: &std::path::Path,
 ) -> bool {
     let links = literal_spellings(link);
-    literal_spellings(stored)
-        .iter()
-        .any(|stored| links.iter().any(|link| stored.starts_with(link)))
+    literal_spellings(stored).iter().any(|stored| {
+        links
+            .iter()
+            .any(|link| crate::worktree_ops::spelled_under(stored, link))
+    })
 }
 
 /// THE occupancy rule for deleting or moving a symbolic link: the link's own

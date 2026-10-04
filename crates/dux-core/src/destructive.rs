@@ -203,7 +203,11 @@ impl Cleared<'_> {
             return Ok(());
         }
         let key = crate::worktree_ops::lexical_key(path);
-        if self.keys.contains(&key) {
+        if self
+            .keys
+            .iter()
+            .any(|cleared| crate::worktree_ops::spelled_same(cleared, &key))
+        {
             Ok(())
         } else {
             Err(anyhow::anyhow!(

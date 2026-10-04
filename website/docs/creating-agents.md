@@ -125,6 +125,12 @@ says so in an error that stays up, and the base stays where it was.
 > Uncommitted changes that do not conflict with the new branch travel with the switch and
 > stay in the project folder, the same as with a checkout in your own terminal.
 
+> [!CAUTION]
+> Like a checkout in your own terminal, switching the project folder (and the pull below)
+> can delete a folder your `.gitignore` hides when the new branch has a tracked file at
+> that same path: git treats ignored files as disposable. Move such a folder aside first if
+> it matters.
+
 ### Pulling before create
 
 By default dux pulls the leading branch first, so the new agent starts from the freshest

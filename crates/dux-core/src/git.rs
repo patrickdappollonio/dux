@@ -4587,16 +4587,50 @@ pub fn discard_confirmed<'c>(
              discarded; refresh the changes and look again before discarding it."
         ))));
     }
-    // Checked right before git runs, under the caller's hold: `git checkout
-    // -- <path>` restores the file by removing whatever stands at the path,
-    // and a FOLDER standing there goes recursively (a standalone agent's
-    // folder, a project's repository, anything). A link that took the file's
-    // place is fine: git removes the link and leaves its target alone.
-    if fs::symlink_metadata(worktree_path.join(file_path)).is_ok_and(|meta| meta.is_dir()) {
-        return Err(anyhow::Error::new(Refusal(format!(
-            "\"{file_path}\" is now a folder, so dux did not restore the file over it; move or \
-             delete the folder first if you mean to. Nothing was deleted."
-        ))));
+    // Checked right before git runs, under the caller's hold. `git checkout
+    // -- <path>` makes room for the file by removing whatever stands in its
+    // way, and none of that was confirmed:
+    // - an ANCESTOR that is now a file or a link (git removes it to make the
+    //   folder the file lives in): refused, naming it;
+    // - the path itself as a FOLDER (git deletes it recursively: a standalone
+    //   agent's folder, a project's repository): refused;
+    // - the path itself as a LINK (git removes the link, which an agent's
+    //   folder can be): only with a clearance for the link, judged at the
+    //   link's own path, through the one destructive gate.
+    let mut ancestor = PathBuf::new();
+    let components: Vec<_> = Path::new(file_path).components().collect();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        ancestor.push(component);
+        let Ok(meta) = fs::symlink_metadata(worktree_path.join(&ancestor)) else {
+            // Missing: git makes the folder, removing nothing.
+            break;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            let what = if meta.file_type().is_symlink() {
+                "a link"
+            } else {
+                "a file"
+            };
+            return Err(anyhow::Error::new(Refusal(format!(
+                "\"{}\" is now {what}, so dux did not restore \"{file_path}\" beneath it (git \
+                 would remove it to make room); move it first if you mean to. Nothing was \
+                 deleted.",
+                ancestor.display()
+            ))));
+        }
+    }
+    let full = worktree_path.join(file_path);
+    match fs::symlink_metadata(&full) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            clear().map_err(anyhow::Error::new)?.require(&full)?;
+        }
+        Ok(meta) if meta.is_dir() => {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "\"{file_path}\" is now a folder, so dux did not restore the file over it; move \
+                 or delete the folder first if you mean to. Nothing was deleted."
+            ))));
+        }
+        _ => {}
     }
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")

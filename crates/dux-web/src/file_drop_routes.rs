@@ -320,7 +320,7 @@ async fn upload_dropped_file(
     let filename = query.filename.clone();
     let ops = state.engine.worktree_ops().clone();
     // Everything from here is filesystem work: pinning the directory (a /proc
-    // read, or an `lsof` process on macOS) and writing the file. Off the async
+    // read, or a kernel query on macOS) and writing the file. Off the async
     // reactor, exactly like the editor's file routes.
     let saved = tokio::task::spawn_blocking(move || {
         let _hold = hold;

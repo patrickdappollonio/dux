@@ -310,19 +310,19 @@ pub fn run_claimed_startup_command(
             .env("DUX_AGENT_BRANCH", &run.managed.branch_name)
             .env("DUX_PROVIDER", run.session.provider.as_str())
             .env("DUX_STARTUP_COMMAND_LOG", &log_path);
-        // Output goes to files, never pipes. A job the command backgrounds
-        // without redirecting its output (`npm run dev &`) inherits whatever
-        // the command writes to; a pipe would stay open for as long as that
-        // job lives, so dux could not tell the command had ended (and could
-        // not reap it) until the job ended too. A file has no such tie: the
-        // command is reaped the moment it exits, and what it left running is
-        // recorded at that moment.
-        let mut stdout = capture_file(&log_dir)?;
-        let mut stderr = capture_file(&log_dir)?;
+        // Output goes to pipes that dux's own reader threads drain. A job the
+        // command backgrounds without redirecting its output (`npm run dev
+        // &`) inherits them, so they can stay open for as long as that job
+        // lives: dux therefore never waits for them to close. It waits for
+        // the COMMAND (`wait`, not `wait_with_output`), so the command is
+        // reaped the moment it exits and what it left running is recorded at
+        // that moment; what the readers have by then is the log, and from
+        // then on they read and throw away whatever the job writes, so it can
+        // neither block on a full pipe nor fill anything on disk.
         command
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::from(stdout.try_clone()?))
-            .stderr(std::process::Stdio::from(stderr.try_clone()?));
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         for (name, value) in &run.env {
             command.env(name, value);
         }
@@ -335,9 +335,11 @@ pub fn run_claimed_startup_command(
                 Ok(())
             });
         }
-        let child = command
+        let mut child = command
             .spawn()
             .with_context(|| format!("failed to run startup command through {shell}"))?;
+        let stdout = OutputDrain::start(child.stdout.take());
+        let stderr = OutputDrain::start(child.stderr.take());
         let process = crate::process_sessions::ProcessSession::started_now(child.id());
         crate::process_sessions::note_spawned(process);
         // Ended at once, by the registration itself, when the agent was
@@ -345,10 +347,7 @@ pub fn run_claimed_startup_command(
         let _ended =
             guard.register_session(process, std::path::Path::new(&run.managed.worktree_path));
         guard.label(process, "an agent's startup command");
-        // Dropped here, so the only copies of the capture files' descriptors
-        // left are the command's own (and those of anything it starts).
         drop(command);
-        let mut child = child;
         let status = child.wait();
         if status.is_ok() {
             crate::process_sessions::note_reaped(process);
@@ -361,8 +360,8 @@ pub fn run_claimed_startup_command(
         let ended = Utc::now();
         // What the command wrote before it exited. A job it left running may
         // still be writing; that is the job's output, not the command's.
-        let stdout = read_capture(&mut stdout)?;
-        let stderr = read_capture(&mut stderr)?;
+        let stdout = stdout.finish();
+        let stderr = stderr.finish();
         Ok(CommandOutcome {
             shell,
             shell_args,
@@ -442,35 +441,108 @@ pub fn run_claimed_startup_command(
     }
 }
 
-/// A file the startup command writes one of its output streams into: created
-/// in the run's log folder and unlinked at once, so it leaves nothing behind
-/// whoever holds it open and for however long.
-fn capture_file(dir: &Path) -> Result<fs::File> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let name = format!(
-        ".startup-output-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let path = dir.join(name);
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
-    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
-    Ok(file)
+/// The most of one output stream a startup command's log keeps.
+const OUTPUT_LOG_CAP: usize = 16 * 1024 * 1024;
+
+/// How long, once the command has exited, its readers get to take in what it
+/// wrote before exiting (it is already in the pipe) before what they have is
+/// the log.
+const OUTPUT_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// One of the startup command's output pipes and the thread draining it.
+struct OutputDrain {
+    shared: Option<std::sync::Arc<DrainShared>>,
 }
 
-/// Everything written into a capture file so far.
-fn read_capture(file: &mut fs::File) -> Result<Vec<u8>> {
-    use std::io::{Read, Seek, SeekFrom};
-    let written = file.metadata()?.len();
-    file.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    file.take(written).read_to_end(&mut bytes)?;
-    Ok(bytes)
+#[derive(Default)]
+struct DrainShared {
+    state: std::sync::Mutex<DrainState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct DrainState {
+    kept: Vec<u8>,
+    /// From now on what is read is thrown away: the log was taken.
+    discarding: bool,
+    /// The pipe reached end of input (every holder closed it).
+    ended: bool,
+}
+
+impl OutputDrain {
+    /// Start draining `pipe` on a thread of its own. The thread reads until
+    /// every holder of the pipe has closed it (the command, and any job it
+    /// left running), keeping what it reads until [`Self::finish`] and
+    /// throwing it away after, so it never holds dux up and never lets a
+    /// writer block.
+    fn start(pipe: Option<impl std::io::Read + Send + 'static>) -> Self {
+        let Some(mut pipe) = pipe else {
+            return Self { shared: None };
+        };
+        let shared = std::sync::Arc::new(DrainShared::default());
+        let drain = std::sync::Arc::clone(&shared);
+        let spawned = std::thread::Builder::new()
+            .name("startup-output".to_string())
+            .spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    let read = crate::io_retry::retry_on_interrupt(|| pipe.read(&mut buf));
+                    let mut state = drain
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match read {
+                        Ok(0) | Err(_) => {
+                            state.ended = true;
+                            drain.changed.notify_all();
+                            return;
+                        }
+                        Ok(n) => {
+                            if !state.discarding {
+                                let room = OUTPUT_LOG_CAP.saturating_sub(state.kept.len());
+                                state.kept.extend_from_slice(&buf[..n.min(room)]);
+                            }
+                        }
+                    }
+                }
+            });
+        match spawned {
+            Ok(_) => Self {
+                shared: Some(shared),
+            },
+            // No reader: the pipe is dropped with this closure's environment,
+            // so a writer gets a broken pipe rather than blocking.
+            Err(_) => Self { shared: None },
+        }
+    }
+
+    /// What was read, once the command has exited: everything if the pipe
+    /// closes within [`OUTPUT_SETTLE`] (nothing else holds it), otherwise
+    /// what had arrived by then. The reader goes on discarding until the pipe
+    /// closes.
+    fn finish(self) -> Vec<u8> {
+        let Some(shared) = self.shared else {
+            return Vec::new();
+        };
+        let deadline = std::time::Instant::now() + OUTPUT_SETTLE;
+        let mut state = shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !state.ended {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            state = shared
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        state.discarding = true;
+        std::mem::take(&mut state.kept)
+    }
 }
 
 /// The refusal for a second startup-command run of one agent while the first
@@ -1180,6 +1252,50 @@ mod tests {
             listing.content.is_empty(),
             "an empty scope carries no placeholder prose; the caller decides \
              what to say about it"
+        );
+    }
+
+    /// A job the startup command left running keeps writing into the capture
+    /// file dux made for the command's output, which was unlinked at once:
+    /// after the run has returned and its log is written, nothing ever reads
+    /// it, no file names it, and it grows on disk in dux's config folder for
+    /// as long as the job runs.
+    #[test]
+    fn review15_a_left_running_job_does_not_fill_an_invisible_file_in_the_config_folder() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        let pidfile = tmp.path().join("job.pid");
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        let result = run_startup_command(
+            &paths,
+            sleeper_run(
+                tmp.path(),
+                &format!(
+                    "(sleep 0.3; head -c 20000000 /dev/zero; sleep 30) & echo $! > '{}'; exit 0",
+                    pidfile.display()
+                ),
+            ),
+            &registry,
+        );
+        assert!(result.status.is_ok(), "{:?}", result.status);
+        let job = wait_for_pid(&pidfile);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let stdout = fs::read_link(format!("/proc/{job}/fd/1")).ok();
+        let size = fs::metadata(format!("/proc/{job}/fd/1"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        for leader in &registry.sessions_of("session-1") {
+            if let Some(group) = rustix::process::Pid::from_raw(leader.sid as i32) {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
+        }
+        if let Some(pid) = rustix::process::Pid::from_raw(job) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+        assert!(
+            size < 1_000_000,
+            "the job wrote {size} bytes into {stdout:?}, an unlinked file in dux's own folder \
+             that nothing reads and no listing shows"
         );
     }
 }
