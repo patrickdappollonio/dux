@@ -501,3 +501,225 @@ fn removal_ends_a_startup_command_still_running_in_the_worktree() {
     let err = startup.status.expect_err("the run reports the deletion");
     assert!(err.contains("was deleted"), "{err}");
 }
+
+fn pending_rows(engine: &Engine) -> Vec<crate::storage::PendingWorktreeRemoval> {
+    engine
+        .session_store
+        .load_pending_worktree_removals()
+        .expect("read pending removals")
+}
+
+/// An agent CLI that ignores the polite signals, so a delete has to wait out
+/// the whole grace for it.
+fn stubborn_tab(fx: &mut Fixture) {
+    let client = spawn_in(
+        &fx.worktree,
+        "trap '' TERM HUP; echo ready; exec sleep 30".to_string(),
+    );
+    fx.engine.providers.insert(TabId::new("s1-slot"), client);
+    let ready_by = Instant::now() + Duration::from_secs(5);
+    while !fx.engine.providers[crate::ids::TabIdRef::new("s1-slot")].has_output() {
+        assert!(Instant::now() < ready_by, "the CLI never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The removal is written down when the delete is accepted and cleared once
+/// it has run.
+#[test]
+fn a_removal_is_recorded_until_it_has_run() {
+    let mut fx = fixture();
+    stubborn_tab(&mut fx);
+    let outcome = fx.engine.begin_delete_session("s1", true, Some(true));
+    assert!(matches!(
+        outcome,
+        BeginDeleteSessionOutcome::AsyncStarted { .. }
+    ));
+    let rows = pending_rows(&fx.engine);
+    assert_eq!(rows.len(), 1, "recorded the moment the delete is accepted");
+    assert_eq!(rows[0].managed.worktree_path, fx.worktree.to_string_lossy());
+    assert_eq!(rows[0].delete_branch, Some(true));
+    assert!(
+        !rows[0].process_sessions.is_empty(),
+        "with the sessions to end"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let result = loop {
+        for removal in fx.engine.reap_terminating_ptys().removals {
+            let _ = fx.engine.dispatch_deferred_worktree_removal(removal);
+        }
+        if let Ok(crate::worker::WorkerEvent::WorktreeRemoveCompleted { result, .. }) =
+            fx.engine.worker_rx.try_recv()
+        {
+            break result;
+        }
+        assert!(Instant::now() < deadline, "the removal never reported");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_removed_cleanly(&fx, result);
+    assert!(
+        pending_rows(&fx.engine).is_empty(),
+        "cleared once it has run"
+    );
+}
+
+/// Quitting while the deleted agent's CLI is still in its grace used to lose
+/// the removal: the worktree and the branch stayed with no agent to delete
+/// them from. A clean quit now finishes it inside the shutdown wait.
+#[test]
+fn a_clean_quit_finishes_a_removal_still_waiting_on_the_agent() {
+    let mut fx = fixture();
+    stubborn_tab(&mut fx);
+    let _ = fx.engine.begin_delete_session("s1", true, Some(true));
+
+    let _report = fx.engine.shutdown_ptys(Duration::from_secs(1));
+
+    assert!(!fx.worktree.exists(), "the quit finished the removal");
+    assert!(pending_rows(&fx.engine).is_empty());
+    let branches = crate::test_git::fixture_git()
+        .args(["branch", "--list", "feat"])
+        .current_dir(&fx.repo)
+        .output()
+        .expect("git branch");
+    assert!(
+        String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+        "and the branch the user asked to delete"
+    );
+}
+
+/// A quit that could not finish (forced, or a crash) leaves the removal
+/// recorded, and the next start finishes it in the background with a status
+/// that says what it is doing and how it went.
+#[test]
+fn the_next_start_finishes_a_removal_the_last_run_left_behind() {
+    let mut fx = fixture();
+    stubborn_tab(&mut fx);
+    let _ = fx.engine.begin_delete_session("s1", true, Some(true));
+    // What both surfaces do next: the agent leaves the list at once.
+    fx.engine
+        .finish_delete_session("s1")
+        .expect("vanish the agent")
+        .expect("it was there");
+    // The crash: everything in memory is gone, the database row is not.
+    fx.engine.pending_group_removals.clear();
+    for entry in std::mem::take(&mut fx.engine.terminating_ptys) {
+        entry.client.force_terminate();
+    }
+    assert_eq!(pending_rows(&fx.engine).len(), 1);
+    assert!(fx.worktree.exists());
+
+    fx.engine.resume_pending_worktree_removals();
+
+    let mut busy = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let final_status = loop {
+        match fx.engine.worker_rx.try_recv() {
+            Ok(crate::worker::WorkerEvent::PollerStatus(status)) => busy = Some(status),
+            Ok(crate::worker::WorkerEvent::StatusOpCompleted { resolved }) => break resolved,
+            Ok(_) => {}
+            Err(_) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the resumed removal never reported"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
+    let busy = busy.expect("a busy status first");
+    assert!(
+        busy.message.contains("had not finished when it last quit"),
+        "{}",
+        busy.message
+    );
+    let reaction = final_status.into_reaction();
+    let crate::engine::EventReaction::Status(update) = reaction else {
+        panic!("expected a status final");
+    };
+    assert!(
+        update.message.contains("Finished removing the worktree"),
+        "{}",
+        update.message
+    );
+    assert!(!fx.worktree.exists(), "the removal was finished");
+    assert!(pending_rows(&fx.engine).is_empty());
+}
+
+/// A recorded removal whose directory another agent now works in is refused
+/// out loud and forgotten, never run.
+#[test]
+fn a_left_over_removal_never_takes_a_directory_another_agent_now_uses() {
+    let mut fx = fixture();
+    let session = fx.engine.sessions[0].clone();
+    fx.engine
+        .session_store
+        .insert_pending_worktree_removal(&crate::storage::PendingWorktreeRemoval {
+            session_id: "gone-agent".to_string(),
+            label: "old".to_string(),
+            project_path: fx.repo.to_string_lossy().into_owned(),
+            managed: session
+                .workspace
+                .as_managed()
+                .expect("managed test session")
+                .clone(),
+            delete_branch: Some(true),
+            process_sessions: Vec::new(),
+        })
+        .expect("record");
+
+    fx.engine.resume_pending_worktree_removals();
+
+    let warning = match fx.engine.worker_rx.try_recv() {
+        Ok(crate::worker::WorkerEvent::PollerStatus(status)) => status,
+        _ => panic!("expected the refusal"),
+    };
+    assert_eq!(warning.tone, crate::statusline::StatusTone::Warning);
+    assert!(
+        warning.message.contains("Kept the worktree"),
+        "{}",
+        warning.message
+    );
+    assert!(
+        fx.worktree.exists(),
+        "the other agent's directory is untouched"
+    );
+    assert!(
+        pending_rows(&fx.engine).is_empty(),
+        "and the request is forgotten"
+    );
+}
+
+/// A force-stop that overtakes a delete still waiting on the agent's CLI kills
+/// that CLI at once, and the worktree removal waiting on it is still
+/// dispatched, exactly once. A terminating PTY leaves only through the reaper,
+/// so no path can drop one and strand the removal behind it.
+#[test]
+fn a_force_stop_overtaking_a_delete_still_dispatches_its_removal_exactly_once() {
+    let mut fx = fixture();
+    stubborn_tab(&mut fx);
+    let _ = fx.engine.begin_delete_session("s1", true, Some(true));
+    assert_eq!(fx.engine.pending_group_removals.len(), 1);
+
+    let outcome = fx.engine.force_detach_session("s1");
+    assert!(
+        matches!(outcome, crate::engine::ForceDetachOutcome::Stopped { .. }),
+        "{outcome:?}"
+    );
+
+    let mut dispatched = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !fx.engine.terminating_ptys.is_empty() || !fx.engine.pending_group_removals.is_empty() {
+        dispatched.extend(fx.engine.reap_terminating_ptys().removals);
+        assert!(
+            Instant::now() < deadline,
+            "the overtaken PTY was never reaped"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Long after the grace the overtaken entry would have had: nothing more.
+    std::thread::sleep(Duration::from_millis(1200));
+    dispatched.extend(fx.engine.reap_terminating_ptys().removals);
+    assert_eq!(dispatched.len(), 1, "dispatched exactly once");
+    assert_eq!(dispatched[0].session_id, "s1");
+}

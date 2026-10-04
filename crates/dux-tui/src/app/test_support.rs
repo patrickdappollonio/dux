@@ -166,6 +166,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         agent_tabs: std::collections::HashMap::new(),
         terminating_ptys: Vec::new(),
         process_registry: Default::default(),
+        removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
         gh_status: crate::model::GhStatus::Unknown,

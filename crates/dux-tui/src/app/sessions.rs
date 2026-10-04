@@ -4685,6 +4685,7 @@ mod tests {
             agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
             process_registry: Default::default(),
+            removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
@@ -5028,6 +5029,7 @@ mod tests {
             agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
             process_registry: Default::default(),
+            removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
@@ -7712,6 +7714,89 @@ mod tests {
             msg.contains("not a git repository"),
             "error should include the git error, got: {msg}",
         );
+    }
+
+    /// The two finals a removal that something else was writing into can end
+    /// with reach the status line whole: the folder git could not finish (what
+    /// is left and how to finish) and the worktree kept because something dux
+    /// started would not die (which processes, and what to do).
+    #[test]
+    fn a_half_finished_or_refused_removal_says_how_to_finish_on_the_status_line() {
+        let leftover = dux_core::git::LeftoverWorktreeFolder {
+            path: std::path::PathBuf::from("/work/wt-feat"),
+            leftovers: vec![".astro/collections".to_string()],
+            more: 0,
+            git_error: "error: failed to delete '/work/wt-feat': Directory not empty".to_string(),
+            branches: vec![("feat".to_string(), dux_core::git::BranchDeletion::Deleted)],
+        }
+        .to_string();
+        let survivors = dux_core::engine::survivors_kept_worktree_message(
+            "/work/wt-feat",
+            &[dux_core::process_sessions::ProcRow {
+                pid: 4242,
+                ppid: Some(1),
+                sid: Some(4000),
+                start_time: 0,
+                name: "node".to_string(),
+                exited: false,
+            }],
+        );
+        for (message, needles) in [
+            (
+                leftover,
+                &[
+                    "/work/wt-feat",
+                    "kept writing into it",
+                    "possibly a dev server",
+                    "Still in it: .astro/collections",
+                    "Stop whatever is still running in that folder, then delete the folder",
+                    "Branch feat was deleted as asked.",
+                ][..],
+            ),
+            (
+                survivors,
+                &[
+                    "/work/wt-feat was kept, untouched",
+                    "node (pid 4242)",
+                    "would not stop, even after SIGKILL",
+                    "remove the worktree from the worktree manager",
+                ][..],
+            ),
+        ] {
+            let project_dir = tempdir().expect("project tempdir");
+            let worktree_dir = tempdir().expect("worktree tempdir");
+            let mut s1 = make_session("s1", "claude", &worktree_dir.path().to_string_lossy());
+            s1.workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .project_id = "project-1".to_string();
+            let project =
+                make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+            let mut app = test_app_with_sessions(vec![s1], vec![project]);
+            let op = app.build_delete_status_op(
+                "s1",
+                "Removing worktree for agent \"branch-s1\"\u{2026}".to_string(),
+            );
+            app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+            app.pending_delete_ops.insert("s1".to_string(), op);
+            app.engine.pending_deletions.insert("s1".to_string());
+
+            app.engine
+                .worker_tx
+                .send(WorkerEvent::WorktreeRemoveCompleted {
+                    session_id: "s1".to_string(),
+                    result: Err(message),
+                })
+                .expect("channel send");
+            app.drain_events();
+
+            let line = app.status.text();
+            assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+            assert!(line.starts_with("Worktree delete failed for "), "{line}");
+            for needle in needles {
+                assert!(line.contains(needle), "missing {needle:?} in: {line}");
+            }
+        }
     }
 
     /// The async success path (session still present at completion) resolves the

@@ -38,6 +38,23 @@ fn sidecar_path(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
+/// A worktree removal the user asked for that dux has not finished yet, kept
+/// in the database so a quit or a crash in the middle of it does not leave a
+/// worktree and a branch behind that no agent owns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingWorktreeRemoval {
+    pub session_id: String,
+    /// The agent's name at the time, for the status that reports it.
+    pub label: String,
+    pub project_path: String,
+    pub managed: crate::model::ManagedWorkspace,
+    /// The delete dialog's branch answer, `None` when nobody was asked.
+    pub delete_branch: Option<bool>,
+    /// The sessions the agent's processes ran in, so a later start can end
+    /// whatever of them outlived dux.
+    pub process_sessions: Vec<crate::process_sessions::ProcessSession>,
+}
+
 impl SessionStore {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn =
@@ -434,6 +451,30 @@ impl SessionStore {
             );
             "#,
         )?;
+        // A worktree removal the user asked for and dux has not finished: the
+        // agent's record is already gone when the removal starts (it waits for
+        // the agent's processes), so a quit or a crash in between would
+        // otherwise leave a worktree and a branch that no agent owns and
+        // nothing remembers to remove. The next start finishes what is here.
+        // Additive: existing databases start with zero rows.
+        self.conn.execute_batch(
+            r#"
+            create table if not exists pending_worktree_removals (
+                session_id text primary key,
+                label text not null,
+                project_id text not null,
+                project_path text not null,
+                worktree_path text not null,
+                source_branch text not null,
+                branch_name text not null,
+                initial_branch text not null,
+                branch_provenance text not null,
+                delete_branch integer,
+                process_sessions text not null default '',
+                created_at text not null
+            );
+            "#,
+        )?;
         // The slot-tab passes run last: they write `agent_tabs` rows, so the
         // table has to exist, and a failure in any of them aborts the open. A
         // workspace whose first tabs are unaddressable is worse than a startup
@@ -668,6 +709,94 @@ impl SessionStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// Remember a worktree removal the user asked for, until it has finished.
+    /// Replaces an earlier row for the same agent.
+    pub fn insert_pending_worktree_removal(&self, row: &PendingWorktreeRemoval) -> Result<()> {
+        let managed = &row.managed;
+        let sessions = row
+            .process_sessions
+            .iter()
+            .map(|session| format!("{}:{}", session.sid, session.started_at_secs))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.conn
+            .execute(
+                "insert or replace into pending_worktree_removals \
+                 (session_id, label, project_id, project_path, worktree_path, source_branch, \
+                  branch_name, initial_branch, branch_provenance, delete_branch, \
+                  process_sessions, created_at) \
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    row.session_id,
+                    row.label,
+                    managed.project_id,
+                    row.project_path,
+                    managed.worktree_path,
+                    managed.source_branch,
+                    managed.branch_name,
+                    managed.initial_branch,
+                    managed.branch_provenance.as_str(),
+                    row.delete_branch,
+                    sessions,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .context("failed to record a pending worktree removal")?;
+        Ok(())
+    }
+
+    /// Forget a pending worktree removal, finished one way or the other.
+    pub fn delete_pending_worktree_removal(&self, session_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "delete from pending_worktree_removals where session_id = ?1",
+                params![session_id],
+            )
+            .context("failed to clear a pending worktree removal")?;
+        Ok(())
+    }
+
+    /// Every worktree removal still waiting to be finished, oldest first.
+    pub fn load_pending_worktree_removals(&self) -> Result<Vec<PendingWorktreeRemoval>> {
+        let mut stmt = self.conn.prepare(
+            "select session_id, label, project_id, project_path, worktree_path, source_branch, \
+             branch_name, initial_branch, branch_provenance, delete_branch, process_sessions \
+             from pending_worktree_removals order by created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let sessions: String = row.get(10)?;
+            Ok(PendingWorktreeRemoval {
+                session_id: row.get(0)?,
+                label: row.get(1)?,
+                project_path: row.get(3)?,
+                managed: crate::model::ManagedWorkspace {
+                    project_id: row.get(2)?,
+                    project_path: None,
+                    worktree_path: row.get(4)?,
+                    source_branch: row.get(5)?,
+                    branch_name: row.get(6)?,
+                    initial_branch: row.get(7)?,
+                    branch_provenance: crate::model::BranchProvenance::from_str(
+                        &row.get::<_, String>(8)?,
+                    ),
+                },
+                delete_branch: row.get(9)?,
+                process_sessions: sessions
+                    .split(',')
+                    .filter_map(|pair| {
+                        let (sid, at) = pair.split_once(':')?;
+                        Some(crate::process_sessions::ProcessSession {
+                            sid: sid.parse().ok()?,
+                            started_at_secs: at.parse().ok()?,
+                        })
+                    })
+                    .collect(),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to read pending worktree removals")
     }
 
     /// Remove a single extra tab row (closing an extra tab).
@@ -2015,6 +2144,40 @@ mod tests {
     use super::*;
     use crate::model::{AgentWorkspace, FolderWorkspace};
     use chrono::Duration;
+
+    #[test]
+    fn a_pending_worktree_removal_round_trips_until_it_is_cleared() {
+        let store = SessionStore::open(std::path::Path::new(":memory:")).expect("store");
+        let row = PendingWorktreeRemoval {
+            session_id: "a1".to_string(),
+            label: "feat".to_string(),
+            project_path: "/repo".to_string(),
+            managed: crate::model::ManagedWorkspace {
+                project_id: "p1".to_string(),
+                project_path: None,
+                source_branch: "main".to_string(),
+                branch_name: "feat".to_string(),
+                initial_branch: "feat-0".to_string(),
+                branch_provenance: crate::model::BranchProvenance::AttachedExisting,
+                worktree_path: "/wt/feat".to_string(),
+            },
+            delete_branch: None,
+            process_sessions: vec![
+                crate::process_sessions::ProcessSession {
+                    sid: 41,
+                    started_at_secs: 1_700_000_000,
+                },
+                crate::process_sessions::ProcessSession {
+                    sid: 42,
+                    started_at_secs: 1_700_000_001,
+                },
+            ],
+        };
+        store.insert_pending_worktree_removal(&row).expect("insert");
+        assert_eq!(store.load_pending_worktree_removals().unwrap(), vec![row]);
+        store.delete_pending_worktree_removal("a1").expect("delete");
+        assert!(store.load_pending_worktree_removals().unwrap().is_empty());
+    }
 
     fn standalone_session(id: &str, folder: &str) -> AgentSession {
         let now = Utc::now();

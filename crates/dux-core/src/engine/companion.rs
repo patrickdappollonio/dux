@@ -163,11 +163,18 @@ impl Engine {
 
         // A terminal of an agent is remembered for the agent's whole life, so
         // a worktree removal can end what was started in it even after it was
-        // closed. A project or standalone terminal belongs to no agent.
-        if let (crate::model::TerminalOwnerRef::Session(session_id), Some(process)) =
-            (owner.as_ref(), client.process_session())
-        {
-            self.process_registry.register(session_id, process);
+        // closed. A project or standalone terminal belongs to no agent and is
+        // never purged; it is remembered so its session number is never
+        // mistaken for one a deleted agent used before.
+        if let Some(process) = client.process_session() {
+            let key = match owner.as_ref() {
+                crate::model::TerminalOwnerRef::Session(session_id) => session_id,
+                crate::model::TerminalOwnerRef::Project(_)
+                | crate::model::TerminalOwnerRef::Standalone => {
+                    crate::process_sessions::UNOWNED_PTYS
+                }
+            };
+            self.process_registry.register(key, process);
         }
         self.terminal_counter += 1;
         let terminal_id = format!("term-{}", self.terminal_counter);

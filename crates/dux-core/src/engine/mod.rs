@@ -11,6 +11,7 @@ mod events;
 mod followup;
 mod in_flight;
 mod lifecycle;
+mod pending_removals;
 mod pr_sync_control;
 mod project_base;
 mod resume_fallback;
@@ -30,6 +31,7 @@ pub use events::{
     DetachedSession, DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView,
     EventReaction, FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, RemovedBranches, StatusUpdate, WorktreeRemoval,
+    survivors_kept_worktree_message,
 };
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{
@@ -345,6 +347,10 @@ pub struct Engine {
     /// startup commands), so a worktree removal can end what they left
     /// running. See [`crate::process_sessions::AgentProcessRegistry`].
     pub process_registry: crate::process_sessions::AgentProcessRegistry,
+    /// The worktree-removal workers dispatched so far, so a quit can wait for
+    /// the ones still running instead of exiting under them. Finished handles
+    /// are dropped at each dispatch.
+    pub removal_workers: Vec<std::thread::JoinHandle<()>>,
     /// Deferred worktree removals from multi-tab deletes, each waiting for a
     /// whole session's tab PTYs to reap before firing (see
     /// [`GroupWorktreeRemoval`]). `reap_terminating_ptys` drains these as their

@@ -73,6 +73,11 @@ Nothing closes a standalone terminal for you. Removing a project closes that pro
 terminals and deleting an agent closes that agent's; neither touches one that belongs to
 nobody. It ends when you close it, or when dux shuts down.
 
+Closing a terminal works like closing a terminal window: a job you disowned or started with
+`nohup` keeps running. Deleting an agent together with its worktree is the exception: every
+job started in that agent's terminals is stopped first, because the folder it runs in is
+about to be deleted.
+
 ## Forwarding what the agent emits
 
 A real identity means agents start emitting real notifications again. These switches

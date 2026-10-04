@@ -7594,13 +7594,21 @@ mod tests {
             forced.key, busy.key,
             "the forced final must retire the spinner the polite detach raised"
         );
-        assert!(engine.terminating_ptys.is_empty());
+        // The overtaken PTY was killed on the spot and is left for the reaper,
+        // due now: the reaper is the one place a terminating PTY leaves.
+        assert!(
+            engine
+                .terminating_ptys
+                .iter()
+                .all(|entry| entry.deadline <= std::time::Instant::now())
+        );
         assert!(engine.pending_detachments.is_empty());
         // No second outcome is owed: the barrier went with the spinner.
         assert!(
             engine.reap_terminating_ptys().detach_finals.is_empty(),
             "an overtaken detach must not also emit its own final"
         );
+        assert!(engine.terminating_ptys.is_empty(), "one reap takes it");
     }
 
     /// The whole round trip, spinner AND answer. Every other test here stops at

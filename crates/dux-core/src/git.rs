@@ -7985,6 +7985,78 @@ mod tests {
         );
     }
 
+    /// A removal git refuses while it still lists the worktree (a lock that a
+    /// single `--force` does not override) is tried once more and then
+    /// reported as git's own failure: nothing was deleted and the worktree is
+    /// still registered, so there is no leftover folder to describe.
+    #[test]
+    fn a_removal_git_refuses_while_registered_is_retried_once_then_reported() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "locked");
+        let locked = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "worktree",
+                "lock",
+            ])
+            .arg(&wt)
+            .output()
+            .unwrap();
+        assert!(locked.status.success());
+
+        let err = remove_worktree_keep_branch_after(repo.path(), &wt, std::time::Duration::ZERO)
+            .expect_err("a locked worktree is not removed");
+        assert!(err.downcast_ref::<LeftoverWorktreeFolder>().is_none());
+        assert!(
+            format!("{err:#}").starts_with("git worktree remove failed:"),
+            "{err:#}"
+        );
+        assert!(wt.exists());
+        assert!(worktree_is_registered(repo.path(), &wt));
+    }
+
+    /// Once git has dropped the registration and only the folder is left, the
+    /// error is the leftover one, naming what is in it, and git lists nothing
+    /// for the path any more. dux deletes none of it.
+    #[test]
+    fn a_folder_git_has_let_go_of_is_reported_as_a_leftover() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "leftover");
+        // What a failed removal leaves: git's registration gone, the folder
+        // there with whatever was written into it during the removal.
+        let pruned = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "worktree",
+                "remove",
+                "--force",
+            ])
+            .arg(&wt)
+            .output()
+            .unwrap();
+        assert!(pruned.status.success());
+        std::fs::create_dir_all(wt.join(".astro/collections")).unwrap();
+
+        let err = remove_worktree(repo.path(), &wt, "leftover", None)
+            .expect_err("git cannot remove a folder it no longer lists");
+        let leftover = err
+            .downcast_ref::<LeftoverWorktreeFolder>()
+            .expect("the leftover error");
+        assert_eq!(leftover.leftovers, vec![".astro/collections".to_string()]);
+        assert_eq!(
+            leftover.branches,
+            vec![("leftover".to_string(), BranchDeletion::Deleted)],
+            "git let go of the worktree, so the branch the caller asked to delete goes"
+        );
+        assert!(
+            wt.join(".astro/collections").exists(),
+            "dux deleted nothing itself"
+        );
+        assert!(!worktree_is_registered(repo.path(), &wt));
+    }
+
     /// A worktree with uncommitted work is force-removed by git, so the manager
     /// warns first. That warning is only as good as this predicate.
     #[test]

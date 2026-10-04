@@ -4224,6 +4224,7 @@ impl App {
                 .collect(),
             terminating_ptys: Vec::new(),
             process_registry: Default::default(),
+            removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,

@@ -277,6 +277,35 @@ together.
 If git refuses to delete a branch dux did try to remove, dux says which branch is still there
 and why rather than reporting a deletion that did not happen.
 
+### What a delete with the worktree waits for
+
+With the worktree box ticked, dux removes nothing until everything it started for that agent
+has stopped: every tab, every terminal you opened on it, a startup command that is still
+running, and anything any of them left running in the background, such as a dev server, a
+job started with `&`, or a `nohup`ed or disowned command. Each is asked to exit, given the
+same shutdown grace as a quit (`shutdown_timeout_seconds`), and killed if it is still there.
+Only then does git remove the worktree. The agent leaves the list at once; the removal
+finishes in the background and reports when it is done.
+
+> [!WARNING]
+> Ticking the box ends processes you may have started yourself in that agent's terminals,
+> background jobs included, because the folder they work in is about to be deleted. Closing
+> a terminal on its own still behaves like closing a terminal window: a disowned or
+> `nohup`ed job keeps running.
+
+If something refuses to stop even when killed, dux keeps the worktree untouched and names the
+processes, so you can stop them and remove the worktree from the worktree manager.
+
+Something dux did not start and cannot see, such as a server another program launched in
+that folder, can still write into it while git deletes it. git then removes the worktree from
+the repository but cannot delete the folder. dux does not finish the job by deleting the
+folder itself; it tells you what is left in it and that you can delete the folder once
+whatever is writing there has stopped.
+
+If you quit dux while a removal is still waiting, the quit finishes it before exiting. If dux
+is killed or crashes first, the next start finishes it in the background and says so. It
+never removes a folder that another agent has started using in the meantime.
+
 > [!IMPORTANT]
 > Worktrees are your data. Deleting an agent leaves its worktree on disk unless you explicitly
 > opt in, which is why "adopt an existing worktree" above can bring one back.

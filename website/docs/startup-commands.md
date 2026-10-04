@@ -102,7 +102,12 @@ You can edit both by hand, but you do not have to leave the app:
 
 *Rerun startup command* re-runs the command in one agent's worktree without recreating
 the agent. Reach for it after editing the command, or when a dependency install needs a
-redo.
+redo. One run per agent at a time: while a run is still going, another is refused and dux
+says so.
+
+Deleting an agent with its worktree stops a startup command that is still running, along
+with anything it left running in the background, before the worktree is removed. A run cut
+short that way keeps no log, because the agent's logs go with it.
 
 > [!NOTE]
 > Env and startup commands are project-scoped, so editing them from an agent changes the

@@ -669,6 +669,72 @@ pub(crate) fn branch_kept_reason(
     }
 }
 
+/// The removal itself, shared by the delete's worker and the next start's
+/// resumption of one dux did not finish: end the agent's processes, then let
+/// git remove the worktree and, where the user asked for it or dux made it, the
+/// branch. Blocking: a worker thread's call. A panic becomes an `Err`.
+pub(crate) fn perform_deferred_removal(
+    session_id: &str,
+    project_path: &str,
+    managed: &crate::model::ManagedWorkspace,
+    delete_branch: Option<bool>,
+    processes: &crate::engine::RemovalProcesses,
+) -> Result<RemovedBranches, String> {
+    use std::panic::AssertUnwindSafe;
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // Nothing dux started for the agent may still be running in the
+        // worktree when git starts deleting it: a writer there turns
+        // `git worktree remove --force` into a half-done removal.
+        end_agent_processes_before_removal(processes, &managed.worktree_path)?;
+        // The same gate as the synchronous path: unasked, only branches dux
+        // created are dux's to delete, and the delete dialog's answer
+        // overrides that in either direction.
+        if managed
+            .branch_provenance
+            .resolve_branch_deletion(delete_branch)
+        {
+            crate::git::remove_worktree(
+                std::path::Path::new(project_path),
+                std::path::Path::new(&managed.worktree_path),
+                &managed.branch_name,
+                // The BIRTH branch too; see `git::remove_worktree`.
+                Some(managed.initial_branch.as_str()),
+            )
+            .map(RemovedBranches::Deleted)
+            .map_err(|e| format!("{e:#}"))
+        } else {
+            crate::git::remove_worktree_keep_branch(
+                std::path::Path::new(project_path),
+                std::path::Path::new(&managed.worktree_path),
+            )
+            .map(|()| {
+                RemovedBranches::Kept(branch_kept_reason(managed.branch_provenance, delete_branch))
+            })
+            .map_err(|e| format!("{e:#}"))
+        }
+    }))
+    .unwrap_or_else(|payload| {
+        let reason = crate::engine::spawn_worker::format_panic_payload(payload);
+        crate::logger::error(&format!(
+            "deferred worktree-remove worker panicked for session {session_id}: {reason}"
+        ));
+        Err(format!("Worker panicked: {reason}"))
+    })
+}
+
+/// Clear a pending removal's row from a worker thread, on a connection of its
+/// own. A failure is logged: the cost is the next start running a removal that
+/// is already done, which git answers as a no-op.
+pub(crate) fn forget_pending_removal_in(db_path: &std::path::Path, session_id: &str) {
+    let cleared = crate::storage::SessionStore::open(db_path)
+        .and_then(|store| store.delete_pending_worktree_removal(session_id));
+    if let Err(err) = cleared {
+        logger::warn(&format!(
+            "could not clear the finished worktree removal of agent {session_id}: {err:#}"
+        ));
+    }
+}
+
 /// How long a removal waits for the delete's own snapshot of the agent's
 /// processes, which a thread takes the moment the delete begins. A look at the
 /// process table takes milliseconds; this only bounds a thread that never ran.
@@ -724,7 +790,7 @@ fn end_agent_processes_before_removal(
 
 /// The final when something dux started for a deleted agent would not stop:
 /// the worktree is kept whole rather than deleted out from under it.
-pub(crate) fn survivors_kept_worktree_message(
+pub fn survivors_kept_worktree_message(
     worktree_path: &str,
     rows: &[crate::process_sessions::ProcRow],
 ) -> String {
@@ -2109,6 +2175,10 @@ impl Engine {
             snapshot,
             grace: self.individual_close_grace(),
         };
+        // Written down before anything else can go wrong, so a quit or a crash
+        // from here on leaves a removal the next start finishes rather than a
+        // worktree and a branch no agent owns.
+        self.record_pending_removal(&session.display_label(), &removal);
 
         if pending_ids.is_empty() {
             let _ = self.dispatch_deferred_worktree_removal(removal);
@@ -2272,13 +2342,7 @@ impl Engine {
             busy_message,
             processes,
         } = req;
-        let crate::model::ManagedWorkspace {
-            worktree_path,
-            branch_name,
-            initial_branch,
-            branch_provenance,
-            ..
-        } = managed;
+        let worktree_path = managed.worktree_path.clone();
         // Re-check the occupancy the decision was made on: this removal was
         // planned when the delete began and runs seconds later, once the
         // agent's PTYs reap, and another agent can occupy the directory in that
@@ -2287,22 +2351,9 @@ impl Engine {
         // place. Preserving the directory is the safe direction to be wrong in:
         // the worst case is a leftover the worktree manager can still remove,
         // against `git worktree remove --force` on a live provider's directory.
-        if let Some(occupant) = self.sessions.iter().find(|s| {
-            s.id != session_id
-                && crate::project_browser::same_directory(s.directory(), &worktree_path)
-        }) {
-            let message = crate::status_text![
-                "Kept the worktree at ",
-                q(crate::home_path::shorten_home(std::path::Path::new(
-                    &worktree_path
-                ))),
-                ": agent ",
-                q(occupant.display_label()),
-                " started working in it while this \
-                 agent was shutting down. Remove it from the worktree manager if you still \
-                 want it gone."
-            ];
+        if let Some(message) = self.worktree_occupied_message(&session_id, &worktree_path) {
             logger::warn(&message);
+            self.forget_pending_removal(&session_id);
             return message;
         }
         // Guard against a duplicate worker (e.g. a project delete racing the
@@ -2311,47 +2362,24 @@ impl Engine {
         self.deletion_busy_messages
             .insert(session_id.clone(), busy_message.clone());
         let tx = self.worker_tx.clone();
-        std::thread::spawn(move || {
-            use std::panic::AssertUnwindSafe;
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                // Nothing dux started for the agent may still be running in the
-                // worktree when git starts deleting it: a writer there turns
-                // `git worktree remove --force` into a half-done removal.
-                end_agent_processes_before_removal(&processes, &worktree_path)?;
-                // The same gate as the synchronous path: unasked, only branches
-                // dux created are dux's to delete, and the delete dialog's
-                // answer overrides that in either direction.
-                if branch_provenance.resolve_branch_deletion(delete_branch) {
-                    crate::git::remove_worktree(
-                        std::path::Path::new(&project_path),
-                        std::path::Path::new(&worktree_path),
-                        &branch_name,
-                        // The BIRTH branch too; see `git::remove_worktree`.
-                        Some(initial_branch.as_str()),
-                    )
-                    .map(RemovedBranches::Deleted)
-                    .map_err(|e| format!("{e:#}"))
-                } else {
-                    crate::git::remove_worktree_keep_branch(
-                        std::path::Path::new(&project_path),
-                        std::path::Path::new(&worktree_path),
-                    )
-                    .map(|()| {
-                        RemovedBranches::Kept(branch_kept_reason(branch_provenance, delete_branch))
-                    })
-                    .map_err(|e| format!("{e:#}"))
-                }
-            }))
-            .unwrap_or_else(|payload| {
-                let reason = crate::engine::spawn_worker::format_panic_payload(payload);
-                crate::logger::error(&format!(
-                    "deferred worktree-remove worker panicked for session {session_id}: {reason}"
-                ));
-                Err(format!("Worker panicked: {reason}"))
-            });
+        let db_path = self.paths.sessions_db_path.clone();
+        let handle = std::thread::spawn(move || {
+            let result = perform_deferred_removal(
+                &session_id,
+                &project_path,
+                &managed,
+                delete_branch,
+                &processes,
+            );
+            // Finished one way or the other: a failure has told the user what
+            // is left, and running it again at the next start would only say
+            // it twice.
+            forget_pending_removal_in(&db_path, &session_id);
             let _ =
                 tx.send(crate::worker::WorkerEvent::WorktreeRemoveCompleted { session_id, result });
         });
+        self.removal_workers.retain(|worker| !worker.is_finished());
+        self.removal_workers.push(handle);
         busy_message
     }
 

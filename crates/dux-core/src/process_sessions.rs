@@ -304,6 +304,12 @@ struct RegistryInner {
     startup_runs: HashMap<String, bool>,
 }
 
+/// The registry key for a PTY that belongs to no agent (a project or a
+/// standalone terminal). It is never purged; it is registered so a deleted
+/// agent's old session number, reused for one of these, is recognised as
+/// somebody else's.
+pub const UNOWNED_PTYS: &str = "\u{0}unowned";
+
 /// How many sessions are remembered per agent. An agent that has opened and
 /// closed more terminals than this over its life keeps the newest; the purge
 /// still follows every live process's own session, so this only drops the
@@ -343,12 +349,24 @@ impl AgentProcessRegistry {
     /// flag a startup command still running for it, so that run neither
     /// recreates the agent's log folder nor reports a failure about an agent
     /// that is gone.
+    ///
+    /// A session whose id was handed out again LATER, to a session registered
+    /// under any other key, is left out: once the agent's own session emptied,
+    /// the kernel was free to reuse the number, and the newer session is
+    /// somebody else's.
     pub fn forget_agent(&self, agent_id: &str) -> Vec<ProcessSession> {
         let mut inner = self.lock();
         if let Some(deleted) = inner.startup_runs.get_mut(agent_id) {
             *deleted = true;
         }
-        inner.sessions.remove(agent_id).unwrap_or_default()
+        let mine = inner.sessions.remove(agent_id).unwrap_or_default();
+        mine.into_iter()
+            .filter(|session| {
+                !inner.sessions.values().flatten().any(|other| {
+                    other.sid == session.sid && other.started_at_secs > session.started_at_secs
+                })
+            })
+            .collect()
     }
 
     /// Claim the one startup-command run an agent may have at a time. `None`
@@ -602,6 +620,25 @@ mod tests {
         );
         let _ = child.wait();
         assert!(matches!(outcome, PurgeOutcome::Clean { .. }), "{outcome:?}");
+    }
+
+    /// A session number the kernel handed out again, later, to somebody
+    /// else's PTY is not the deleted agent's to end.
+    #[test]
+    fn a_session_id_reused_elsewhere_is_not_handed_back() {
+        let registry = AgentProcessRegistry::default();
+        let old = ProcessSession {
+            sid: 100,
+            started_at_secs: 1_000,
+        };
+        let newer = ProcessSession {
+            sid: 100,
+            started_at_secs: 2_000,
+        };
+        registry.register("a1", old);
+        registry.register("a1", session(101));
+        registry.register(UNOWNED_PTYS, newer);
+        assert_eq!(registry.forget_agent("a1"), vec![session(101)]);
     }
 
     #[test]

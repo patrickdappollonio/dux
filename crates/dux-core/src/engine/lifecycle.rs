@@ -1633,19 +1633,19 @@ impl Engine {
         let mut clear_key = None;
         let tab_ids: std::collections::HashSet<String> =
             tabs.iter().map(|id| id.as_str().to_string()).collect();
-        let mut still_terminating = Vec::with_capacity(self.terminating_ptys.len());
         let mut overtaken = 0usize;
-        for entry in std::mem::take(&mut self.terminating_ptys) {
+        let now = Instant::now();
+        for entry in &mut self.terminating_ptys {
             if entry.kind == PrunedPtyKind::Agent && tab_ids.contains(&entry.id) {
                 entry.client.force_terminate();
                 overtaken += 1;
-                // Dropped here rather than pushed back: its `Drop` SIGKILL is a
-                // benign no-op now, and nothing is left to reap it for.
-            } else {
-                still_terminating.push(entry);
+                // Left for the reaper, due now, rather than dropped here: the
+                // reaper is the one place a terminating PTY leaves, so a
+                // worktree removal waiting on this entry is still dispatched,
+                // exactly once, instead of being lost with it.
+                entry.deadline = now;
             }
         }
-        self.terminating_ptys = still_terminating;
         self.pending_detachments.retain(|detach| {
             let mine = detach.session_id == session_id;
             if mine {
@@ -1858,6 +1858,8 @@ impl Engine {
         // folder git can see. A managed working copy that went away while dux
         // was not running is noticed by the same sweep.
         self.probe_agent_directories();
+        // A worktree removal the last run accepted and never finished.
+        self.resume_pending_worktree_removals();
     }
 
     /// Classify the directory every agent lives in, one off-thread probe each.
@@ -1956,6 +1958,7 @@ impl Engine {
             terminals: self.companion_terminals.len(),
         };
         if totals.is_empty() {
+            self.finish_pending_worktree_removals(abort);
             return totals.report(ShutdownTally::default(), Duration::ZERO);
         }
 
@@ -1972,6 +1975,10 @@ impl Engine {
         let report = totals.report(tally, start.elapsed());
         crate::logger::info(&format_shutdown_result(&report));
         self.detach_shutdown_sessions();
+        // A deleted agent's worktree removal waits for the agent's processes,
+        // which can still be in their grace when the quit comes in. Finished
+        // here so a clean quit leaves nothing half done.
+        self.finish_pending_worktree_removals(abort);
 
         report
     }
