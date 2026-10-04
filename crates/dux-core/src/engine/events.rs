@@ -2338,11 +2338,12 @@ impl Engine {
     /// reloaded plus drained, whenever deferred commands ran, so the surface's
     /// richer apply cannot revert a deferred change to the pre-deferral state.
     ///
-    /// With no deferral the engine leaves `self.config` alone and returns the
-    /// bare reloaded config, because the surface does the swap and must see the
-    /// pre-swap config to diff old against new. The tradeoff: a deferral
-    /// coinciding with a `[server]` change suppresses that advisory restart
-    /// warning, since the engine pre-swapped before the diff.
+    /// Either way the surface does the final swap and must see the pre-swap
+    /// config to diff old against new. With no deferral the engine leaves
+    /// `self.config` alone; with one it swaps the reloaded config in for the
+    /// drain and then puts the old one back before returning, so a deferral
+    /// (a queued follow-up reload included) never hides a `[server]` change
+    /// from the Tailscale switch, the restart warning or the bind check.
     ///
     /// On failure, whether the reload could not be parsed or could not be
     /// applied to engine state, the in-memory config is unchanged, so the
@@ -2366,9 +2367,17 @@ impl Engine {
         // successful parse that engine state rejected included: that is a real
         // failure, not a silent success on a stale config.
         let mut failure: Option<EventReaction> = None;
+        // The config before this reload. When the engine pre-swaps, it is put
+        // back before the surfaces see the result, so each surface still
+        // compares the config before the reload with the one after it and
+        // runs what a change asks of it (the Tailscale switch, the restart
+        // warning, the bind-change check), even when a follow-up reload or a
+        // deferred command rode along.
+        let mut before_reload: Option<Config> = None;
         let bare_apply: Option<EventReaction> = match result {
             Ok(config) => {
                 if must_preswap {
+                    before_reload = Some(self.config.clone());
                     // Apply the reloaded config so the deferred drain re-mutates it
                     // (and the surfaced config carries those edits).
                     // If applying it FAILS, do not pretend the reload worked: open
@@ -2431,9 +2440,11 @@ impl Engine {
             // that JUST landed) FIRST so the surface's config swap matches the
             // engine + disk state and never reverts a deferred change. Snapshot
             // `self.config` AFTER the drain above so it carries the deferred edits.
-            reactions.push(EventReaction::ApplyReloadedConfig(Box::new(
-                self.config.clone(),
-            )));
+            let reloaded = match before_reload {
+                Some(before) => std::mem::replace(&mut self.config, before),
+                None => self.config.clone(),
+            };
+            reactions.push(EventReaction::ApplyReloadedConfig(Box::new(reloaded)));
         }
         reactions.extend(deferred_reactions);
         if let Some(failure) = failure {
@@ -9019,6 +9030,49 @@ mod tests {
         }
         assert_eq!(reloads_finished, 2, "the follow-up reload ran");
         assert_eq!(engine.config.ui.left_width_pct, 22);
+    }
+
+    /// When a follow-up reload (or any deferred command) rides on a reload,
+    /// the surfaces still see the transition from the config before it: the
+    /// engine hands back the new config while its own is still the old one,
+    /// so the Tailscale switch, the restart warning and the bind-change check
+    /// all run.
+    #[test]
+    fn a_coalesced_reload_still_shows_the_surfaces_the_old_config() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        assert_eq!(engine.config.server.tailscale, "auto");
+        std::fs::write(
+            &engine.paths.config_path,
+            "[server]\ntailscale = \"no\"\nport = 4999\n",
+        )
+        .unwrap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("first reload");
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("queued reload");
+        let event = loop {
+            let event = try_recv_worker_event(&engine).expect("the first reload finishes");
+            if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                break event;
+            }
+        };
+        let applied = flatten(engine.process_worker_event(event))
+            .into_iter()
+            .find_map(|reaction| match reaction {
+                EventReaction::ApplyReloadedConfig(config) => Some(config),
+                _ => None,
+            })
+            .expect("the surfaces get the reloaded config");
+        assert_eq!(applied.server.tailscale, "no");
+        assert_eq!(applied.server.port, 4999);
+        assert_eq!(
+            engine.config.server.tailscale, "auto",
+            "the engine's own config is still the old one for the surfaces to compare"
+        );
+        assert_eq!(engine.config.server.port, Config::default().server.port);
     }
 
     fn flatten(reaction: EventReaction) -> Vec<EventReaction> {

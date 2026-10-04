@@ -8989,10 +8989,13 @@ mod tests {
         assert!(engine.reload_guard.is_none(), "barrier must be released");
         assert!(engine.deferred_commands.is_empty());
 
-        // The reloaded config landed (provider swapped from claude → codex).
+        // As with a reload that defers nothing, the engine hands the reloaded
+        // config to the surface and keeps its own until the surface applies it,
+        // so the surface can compare the config before the reload with the one
+        // after it.
         assert_eq!(
-            engine.config.defaults.provider, "codex",
-            "the reloaded config must be applied"
+            engine.config.defaults.provider, "claude",
+            "the surface still sees the config from before the reload"
         );
 
         // The deferred env change survives IN MEMORY after the reload; this is
