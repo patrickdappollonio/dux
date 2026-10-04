@@ -1,5 +1,12 @@
 import type { StatusLookup } from "@/lib/changedFiles"
-import { useRef, useState, useMemo, useCallback, useEffect } from "react"
+import {
+  useRef,
+  useState,
+  useMemo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+} from "react"
 import { ChevronRight, Loader2, RotateCw } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -288,12 +295,16 @@ export function FileTree({
   // cannot re-fire these effects on every render of the editor.
   const onLoadedDirsChangeRef = useRef(onLoadedDirsChange)
   const onRefreshSettledRef = useRef(onRefreshSettled)
-  useEffect(() => {
+  useLayoutEffect(() => {
     onLoadedDirsChangeRef.current = onLoadedDirsChange
     onRefreshSettledRef.current = onRefreshSettled
   })
 
-  useEffect(() => {
+  // A LAYOUT effect, so the caller knows the loaded directories in the same
+  // commit that puts them on screen. A passive effect runs later, and a revisit
+  // (the window regaining focus) landing in between found no directories to
+  // refetch and was dropped without a trace.
+  useLayoutEffect(() => {
     onLoadedDirsChangeRef.current?.(JSON.parse(loadedDirsKey) as string[])
   }, [loadedDirsKey])
 
