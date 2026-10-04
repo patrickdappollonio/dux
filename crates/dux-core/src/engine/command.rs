@@ -711,9 +711,25 @@ impl Engine {
             } => {
                 let _hold = self.hold_for_git_change(&worktree_path, "discard the change")?;
                 // A folder (or a nested repository) is removed whole, so the
-                // discard asks for a clearance of it: refused when anything
-                // lives in it, as every destructive operation is.
-                let check = self.destructive_check(&worktree_path.join(&path));
+                // discard follows the one destructive protocol: claim it, ask
+                // the occupancy question under the claim, and clear it right
+                // before the delete. On this thread the claim does not wait:
+                // a removal running inside the folder refuses it.
+                let target = worktree_path.join(&path);
+                let claim = match confirmed {
+                    crate::git::ConfirmedEntry::File => None,
+                    _ => Some(
+                        self.worktree_ops()
+                            .claim_for_destructive_within(&target, std::time::Duration::ZERO)
+                            .map_err(|reason| {
+                                anyhow::Error::new(crate::destructive::Refused(format!(
+                                    "dux did not delete {}: {reason}.",
+                                    crate::home_path::shorten_home(&target)
+                                )))
+                            })?,
+                    ),
+                };
+                let check = self.destructive_check(&target);
                 // The discard refuses anything that is no longer what was
                 // confirmed, so a success is the kind the user confirmed; the
                 // number of files is what actually went, which may be fewer.
@@ -722,7 +738,13 @@ impl Engine {
                     &path,
                     is_untracked,
                     Some(confirmed),
-                    || check.clear("delete"),
+                    || match &claim {
+                        Some(claim) => check.clear(&[claim], "delete"),
+                        None => Err(crate::destructive::Refused(format!(
+                            "dux did not delete {}: it was confirmed as a file",
+                            crate::home_path::shorten_home(&target)
+                        ))),
+                    },
                 )?;
                 let message = match confirmed {
                     crate::git::ConfirmedEntry::Repository => crate::status_text![

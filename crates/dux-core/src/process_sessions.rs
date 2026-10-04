@@ -901,7 +901,14 @@ struct RegistryInner {
     cap_overrun_logged: bool,
     /// The session of each agent's startup command that is running right now.
     startup_sessions: HashMap<String, ProcessSession>,
+    /// Told, in a sentence, when a deleted agent's startup command would not
+    /// stop (the engine raises it as a warning), and the grace it is given.
+    startup_stop: Option<(Duration, StartupStopNotice)>,
 }
+
+/// Who is told, in a sentence, that a deleted agent's startup command would
+/// not stop.
+type StartupStopNotice = Arc<dyn Fn(String) + Send + Sync>;
 
 /// One registered session, as a pending removal's row records it: the
 /// session, the folder it was started in, and its owner's kind (a standalone
@@ -1710,6 +1717,17 @@ impl AgentProcessRegistry {
         if let Some(deleted) = inner.startup_runs.get_mut(agent_id) {
             *deleted = true;
         }
+        // The agent's startup command, if one is running, is a process dux
+        // started for it: it goes with the agent, whichever way it is
+        // deleted. A run that registers its session only after this mark ends
+        // it itself (see `StartupRunGuard::register_session`).
+        if let Some(startup) = inner.startup_sessions.get(agent_id).copied() {
+            let stop = inner.startup_stop.clone();
+            let registry = self.clone();
+            let _ = std::thread::Builder::new()
+                .name("startup-command-stop".to_string())
+                .spawn(move || registry.end_startup_session(startup, stop));
+        }
         let mine = inner.sessions.remove(agent_id).unwrap_or_default();
         let mine: Vec<(ProcessSession, std::path::PathBuf)> = mine
             .into_iter()
@@ -1755,6 +1773,40 @@ impl AgentProcessRegistry {
         self.lock().startup_runs.contains_key(agent_id)
     }
 
+    /// Who is told when a deleted agent's startup command would not stop,
+    /// and the grace such a command is given.
+    pub fn on_startup_stop_failure(
+        &self,
+        grace: Duration,
+        notice: impl Fn(String) + Send + Sync + 'static,
+    ) {
+        self.lock().startup_stop = Some((grace, Arc::new(notice)));
+    }
+
+    /// End a deleted agent's startup command and what it started. Blocking:
+    /// a worker thread's call.
+    fn end_startup_session(
+        &self,
+        startup: ProcessSession,
+        stop: Option<(Duration, StartupStopNotice)>,
+    ) {
+        let grace = stop.as_ref().map_or(KILL_SETTLE, |(grace, _)| *grace);
+        let known = self.survivors_of(&[startup]);
+        if let PurgeOutcome::Survivors(left) =
+            purge(&mut SystemProcesses, &[startup], &known, grace)
+        {
+            let sentence = format!(
+                "A deleted agent's startup command would not stop: {} still running. Stop it \
+                 yourself.",
+                describe(&left)
+            );
+            crate::logger::warn(&sentence);
+            if let Some((_, notice)) = stop {
+                notice(sentence);
+            }
+        }
+    }
+
     /// The session of `agent_id`'s startup command, while it runs.
     pub fn startup_session_of(&self, agent_id: &str) -> Option<ProcessSession> {
         self.lock().startup_sessions.get(agent_id).copied()
@@ -1770,12 +1822,30 @@ pub struct StartupRunGuard {
 }
 
 impl StartupRunGuard {
-    pub fn register_session(&self, session: ProcessSession, folder: &std::path::Path) {
+    /// Register the run's session. When the agent was deleted before this
+    /// point (the mark is checked under the same lock the delete sets it
+    /// under), the session is ended at once instead, and `true` says so.
+    /// Blocking in that case: the run's own worker thread.
+    pub fn register_session(&self, session: ProcessSession, folder: &std::path::Path) -> bool {
         self.registry.register(&self.agent_id, session, folder);
-        self.registry
-            .lock()
-            .startup_sessions
-            .insert(self.agent_id.clone(), session);
+        let (deleted, stop) = {
+            let mut inner = self.registry.lock();
+            inner
+                .startup_sessions
+                .insert(self.agent_id.clone(), session);
+            (
+                inner
+                    .startup_runs
+                    .get(&self.agent_id)
+                    .copied()
+                    .unwrap_or(false),
+                inner.startup_stop.clone(),
+            )
+        };
+        if deleted {
+            self.registry.end_startup_session(session, stop);
+        }
+        deleted
     }
 
     /// What to call the run's processes in a sentence.
@@ -1788,6 +1858,25 @@ impl StartupRunGuard {
     pub fn record_survivors(&self, session: ProcessSession) {
         let found = survivors_at_leader_exit(session);
         self.registry.record_survivors(session, &found);
+    }
+
+    /// Run `prepare` (creating the run's log folder) unless the agent has
+    /// been deleted, under the same lock the delete marks it under, so a
+    /// delete either comes first and nothing is created, or comes after and
+    /// its own log removal takes what was created. `None` when deleted.
+    pub fn unless_deleted<T>(&self, prepare: impl FnOnce() -> T) -> Option<T> {
+        let inner = self.registry.lock();
+        if inner
+            .startup_runs
+            .get(&self.agent_id)
+            .copied()
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let prepared = prepare();
+        drop(inner);
+        Some(prepared)
     }
 
     /// Whether the agent was deleted while this run was in progress.
@@ -2017,6 +2106,42 @@ mod tests {
             CwdVerdict::Unknown(&running[0]),
             "a session started inside it may still be standing there"
         );
+    }
+
+    /// A startup run whose agent was deleted before it registered its
+    /// session ends that session at once.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_registered_after_the_delete_is_ended_at_once() {
+        use std::os::unix::process::CommandExt;
+        let registry = AgentProcessRegistry::default();
+        let guard = registry.begin_startup_run("agent").unwrap();
+        let _ = registry.forget_agent("agent");
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
+        unsafe {
+            command.pre_exec(|| {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let session = ProcessSession::started_now(child.id());
+        let ended = guard.register_session(session, std::path::Path::new("/tmp"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut gone = false;
+        while Instant::now() < deadline {
+            if child.try_wait().ok().flatten().is_some() {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(ended, "the registration said it ended the session");
+        assert!(gone, "the deleted agent's startup command was ended");
     }
 
     /// A zombie leader still leads: its pid is allocated until it is reaped,

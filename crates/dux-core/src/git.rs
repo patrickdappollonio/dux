@@ -4429,13 +4429,15 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
 /// has been confirmed to be what the user agreed to delete, right before
 /// anything goes, and a refusal comes back as a
 /// [`crate::destructive::Refused`] error.
-pub fn discard_confirmed(
+pub fn discard_confirmed<'c>(
     worktree_path: &Path,
     file_path: &str,
     is_untracked: bool,
     confirmed: Option<ConfirmedEntry>,
-    clear: impl FnOnce()
-        -> std::result::Result<crate::destructive::Cleared, crate::destructive::Refused>,
+    clear: impl FnOnce() -> std::result::Result<
+        crate::destructive::Cleared<'c>,
+        crate::destructive::Refused,
+    >,
 ) -> Result<usize> {
     refuse_unplain_path(file_path, "discard")?;
     // Whatever the path's text says, a discard never lands on the worktree

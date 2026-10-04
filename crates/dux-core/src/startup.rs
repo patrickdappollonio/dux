@@ -265,13 +265,32 @@ pub fn run_claimed_startup_command(
     guard: crate::process_sessions::StartupRunGuard,
 ) -> StartupCommandResult {
     let log_dir = agent_log_dir(paths, &run.project.id, &run.session.id);
+    // Checked under the claim, before anything is created or started: an
+    // agent deleted after its run was claimed gets neither its command nor
+    // its log folder back.
+    let Some(created) = guard.unless_deleted(|| fs::create_dir_all(&log_dir)) else {
+        crate::logger::info(&format!(
+            "the startup command for agent {} was not run: the agent was deleted before it \
+             started",
+            run.session.id
+        ));
+        return StartupCommandResult {
+            status: Err(format!(
+                "agent \"{}\" was deleted before its startup command started, so dux did not \
+                 run it",
+                run.session.display_label()
+            )),
+            session_id: run.session.id,
+            project_name: run.project.name,
+            log_path: log_dir.join("not-run.log"),
+        };
+    };
     let timestamp = Utc::now();
     let file_stamp = timestamp.format("%Y%m%dT%H%M%SZ");
     let safe_branch = sanitize_file_component(&run.managed.branch_name);
     let log_path = log_dir.join(format!("{file_stamp}-{safe_branch}.log"));
     let result = (|| -> Result<CommandOutcome> {
-        fs::create_dir_all(&log_dir)
-            .with_context(|| format!("failed to create {}", log_dir.display()))?;
+        created.with_context(|| format!("failed to create {}", log_dir.display()))?;
         let shell = startup_shell_command(&run.terminal.command);
         let shell_args = run.terminal.args.clone();
         // Test builds only: a startup command runs through a stand-in shell,
@@ -321,7 +340,10 @@ pub fn run_claimed_startup_command(
             .with_context(|| format!("failed to run startup command through {shell}"))?;
         let process = crate::process_sessions::ProcessSession::started_now(child.id());
         crate::process_sessions::note_spawned(process);
-        guard.register_session(process, std::path::Path::new(&run.managed.worktree_path));
+        // Ended at once, by the registration itself, when the agent was
+        // deleted between the check above and here.
+        let _ended =
+            guard.register_session(process, std::path::Path::new(&run.managed.worktree_path));
         guard.label(process, "an agent's startup command");
         // Dropped here, so the only copies of the capture files' descriptors
         // left are the command's own (and those of anything it starts).
@@ -936,12 +958,22 @@ mod tests {
         delete_agent_logs(&paths, "project-1", "session-1").expect("delete logs");
         let _ = registry.forget_agent("session-1");
         let result = handle.join().expect("run thread");
-        assert!(done.exists(), "the command ran to completion");
         let err = result.status.expect_err("the run reports the deletion");
-        assert!(
-            !err.contains("dux stopped the command"),
-            "the command ran to completion, but the user is told: {err}"
-        );
+        // Forgetting the agent now ends its startup command (review 10), so
+        // the run is stopped; what matters is that the sentence says what
+        // actually happened either way.
+        if done.exists() {
+            assert!(
+                !err.contains("dux stopped the command"),
+                "the command ran to completion, but the user is told: {err}"
+            );
+        } else {
+            assert!(
+                err.contains("dux stopped the command"),
+                "the command was ended, but the user is told: {err}"
+            );
+        }
+        assert!(!err.contains("log:"), "no deleted log is pointed at: {err}");
     }
 
     /// An agent deleted while its startup command runs takes its log folder
@@ -966,6 +998,40 @@ mod tests {
         assert!(
             !agent_log_dir(&paths, "project-1", "session-1").exists(),
             "the deleted agent's log folder stays gone"
+        );
+    }
+
+    /// review10: a rerun is claimed on the engine thread and its worker starts
+    /// a moment later. An agent deleted (worktree kept) in between has its
+    /// logs deleted and its registration forgotten; `startup_session_of` is
+    /// still `None`, so the delete ends nothing. The worker must not then
+    /// start the deleted agent's command anyway, nor bring its log folder back.
+    #[test]
+    fn review10_a_rerun_claimed_before_a_delete_never_starts_for_the_deleted_agent() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        // claim_startup_rerun, on the engine thread.
+        let guard = registry.begin_startup_run("session-1").expect("claim");
+        // The delete lands before the worker runs: what a keep-worktree
+        // delete does (logs gone, registry forgotten, nothing to end yet).
+        assert!(registry.startup_session_of("session-1").is_none());
+        let _ = delete_agent_logs(&paths, "project-1", "session-1");
+        let _ = registry.forget_agent("session-1");
+        // Now the worker.
+        let marker = tmp.path().join("ran-after-delete");
+        let result = run_claimed_startup_command(
+            &paths,
+            sleeper_run(tmp.path(), &format!("touch '{}'", marker.display())),
+            guard,
+        );
+        let ran = marker.exists();
+        let log_dir_back = agent_log_dir(&paths, "project-1", "session-1").exists();
+        assert!(
+            !ran && !log_dir_back,
+            "deleted agent's startup command ran: {ran}; its deleted log folder was recreated: \
+             {log_dir_back}; result: {:?}",
+            result.status
         );
     }
 

@@ -1866,6 +1866,17 @@ impl Engine {
         // restart so a removal can still end it (or keep a folder for it).
         self.process_registry
             .attach_store(&self.paths.sessions_db_path);
+        // A deleted agent's startup command that will not stop is said out
+        // loud on both surfaces.
+        let tx = self.worker_tx.clone();
+        self.process_registry.on_startup_stop_failure(
+            self.individual_close_grace(),
+            move |sentence| {
+                let _ = tx.send(crate::worker::WorkerEvent::PollerStatus(
+                    crate::engine::StatusUpdate::warning(sentence),
+                ));
+            },
+        );
         // A worktree removal the last run accepted and never finished.
         self.resume_pending_worktree_removals();
     }

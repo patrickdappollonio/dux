@@ -150,6 +150,10 @@ struct PathEntry {
     guarded: HashMap<u64, WorktreeOpKind>,
     owned: HashMap<HoldOwner, WorktreeOpKind>,
     removal: Option<Removal>,
+    /// A destructive file operation's claim (an editor or changes-pane delete
+    /// or move), by id. A different kind from a removal: a removal never
+    /// joins one, it waits for it.
+    destructive: Option<u64>,
 }
 
 impl PathEntry {
@@ -162,7 +166,10 @@ impl PathEntry {
     }
 
     fn is_idle(&self) -> bool {
-        self.guarded.is_empty() && self.owned.is_empty() && self.removal.is_none()
+        self.guarded.is_empty()
+            && self.owned.is_empty()
+            && self.removal.is_none()
+            && self.destructive.is_none()
     }
 }
 
@@ -176,12 +183,35 @@ struct State {
 }
 
 impl State {
-    /// The key of a removal claimed on `key` or on any folder containing it.
+    /// The key of a removal, or a destructive file operation, claimed on
+    /// `key` or on any folder containing it.
     fn removal_covering(&self, key: &Path) -> Option<PathBuf> {
         self.paths
             .iter()
-            .find(|(claimed, entry)| entry.removal.is_some() && key_contains(claimed, key))
+            .find(|(claimed, entry)| {
+                (entry.removal.is_some() || entry.destructive.is_some())
+                    && key_contains(claimed, key)
+            })
             .map(|(claimed, _)| claimed.clone())
+    }
+
+    /// Whether a removal or destructive claim older than `id` is on a folder
+    /// that contains `key` or that `key` contains, other than the claim `id`
+    /// itself: two of them on nested folders never run at the same time, the
+    /// later one waits. A removal of the SAME path is not counted (it is
+    /// joined instead), but a destructive claim on the same path is.
+    fn overlapping_older(&self, key: &Path, id: u64) -> bool {
+        self.paths.iter().any(|(other, entry)| {
+            let nested = key_contains(other, key) || key_contains(key, other);
+            let removal = entry
+                .removal
+                .as_ref()
+                .is_some_and(|removal| removal.id < id && other.as_path() != key && nested);
+            let destructive = entry
+                .destructive
+                .is_some_and(|claim| claim < id && claim != id && nested);
+            removal || destructive
+        })
     }
 
     /// Every operation holding `key` or any folder inside it.
@@ -431,7 +461,10 @@ impl WorktreeOps {
     /// between the occupancy check and the operation. Refused, with the
     /// reason, when a removal already covers it or an operation is already
     /// running inside it. Dropping the lease lets the folder go.
-    pub fn claim_for_destructive(&self, path: impl AsRef<Path>) -> Result<RemovalLease, String> {
+    pub fn claim_for_destructive(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<DestructiveClaim, String> {
         self.claim_for_destructive_within(path, DESTRUCTIVE_CLAIM_WAIT)
     }
 
@@ -444,30 +477,57 @@ impl WorktreeOps {
         &self,
         path: impl AsRef<Path>,
         wait: Duration,
-    ) -> Result<RemovalLease, String> {
-        let path = path.as_ref();
-        if let Some(covering) = self.removal_refusal(path) {
+    ) -> Result<DestructiveClaim, String> {
+        let key = path_key(path.as_ref());
+        let claim = {
+            let mut state = self.lock();
+            if let Some(covering) = state.removal_covering(&key) {
+                return Err(format!(
+                    "{} is being removed",
+                    crate::home_path::shorten_home(&covering)
+                ));
+            }
+            let id = state.mint();
+            state.paths.entry(key.clone()).or_default().destructive = Some(id);
+            DestructiveClaim {
+                ops: self.clone(),
+                key,
+                id,
+            }
+        };
+        let holders = self.holders(&claim.key);
+        if !holders.is_empty() {
+            return Err(format!("{} is running in it", describe_holders(&holders)));
+        }
+        if !self.wait_for_older_overlapping(&claim.key, claim.id, wait) {
             return Err(format!(
-                "{} is being removed",
-                crate::home_path::shorten_home(&covering.path)
+                "dux is still removing a worktree inside it after {} seconds; try again once \
+                 that has finished",
+                wait.as_secs()
             ));
         }
-        match self.announce_removal(path) {
-            RemovalClaim::Lead(lease) => {
-                let holders = lease.holders();
-                if !holders.is_empty() {
-                    return Err(format!("{} is running in it", describe_holders(&holders)));
-                }
-                if !lease.wait_for_overlapping_removals(wait) {
-                    return Err(format!(
-                        "dux is still removing a worktree inside it after {} seconds; try \
-                         again once that has finished",
-                        wait.as_secs()
-                    ));
-                }
-                Ok(lease)
+        Ok(claim)
+    }
+
+    /// Block until no removal or destructive claim older than `id` overlaps
+    /// `key` (see `State::overlapping_older`), or `timeout` passes (`false`).
+    fn wait_for_older_overlapping(&self, key: &Path, id: u64, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock();
+        loop {
+            if !state.overlapping_older(key, id) {
+                return true;
             }
-            RemovalClaim::Join(_) => Err("it is being removed already".to_string()),
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            state = self
+                .inner
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
         }
     }
 }
@@ -475,6 +535,52 @@ impl WorktreeOps {
 /// How long a destructive file operation waits for a removal running inside
 /// its folder before it is refused.
 pub const DESTRUCTIVE_CLAIM_WAIT: Duration = Duration::from_secs(5);
+
+/// A destructive file operation's claim on a folder (see
+/// [`WorktreeOps::claim_for_destructive`]). While it lives nothing new starts
+/// in the folder; dropping it lets the folder go. Only this registry makes
+/// one, and only a claim lets a delete or move be cleared
+/// ([`crate::destructive::DestructiveCheck::clear`]).
+pub struct DestructiveClaim {
+    ops: WorktreeOps,
+    key: PathBuf,
+    id: u64,
+}
+
+impl DestructiveClaim {
+    /// The folder claimed, as a path key.
+    pub fn path(&self) -> &Path {
+        &self.key
+    }
+
+    /// Whether this claim is on exactly `path`.
+    pub fn covers(&self, path: &Path) -> bool {
+        path_key(path) == self.key
+    }
+}
+
+impl std::fmt::Debug for DestructiveClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DestructiveClaim")
+            .field("path", &self.key)
+            .finish()
+    }
+}
+
+impl Drop for DestructiveClaim {
+    fn drop(&mut self) {
+        {
+            let mut state = self.ops.lock();
+            if let Some(entry) = state.paths.get_mut(&self.key)
+                && entry.destructive == Some(self.id)
+            {
+                entry.destructive = None;
+            }
+            state.tidy(&self.key);
+        }
+        self.ops.inner.changed.notify_all();
+    }
+}
 
 /// An RAII hold. Dropping it releases the path, panics included.
 pub struct WorktreeOpGuard {
@@ -587,31 +693,8 @@ impl RemovalLease {
     /// folder may already be gone, which its git step answers by forgetting
     /// the registration and nothing more. Run it on a worker thread only.
     pub fn wait_for_overlapping_removals(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        let mut state = self.ops.lock();
-        loop {
-            let overlapping = state.paths.iter().any(|(key, entry)| {
-                entry.removal.as_ref().is_some_and(|removal| {
-                    removal.id < self.id
-                        && *key != self.key
-                        && (key_contains(key, &self.key) || key_contains(&self.key, key))
-                })
-            });
-            if !overlapping {
-                return true;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return false;
-            }
-            state = self
-                .ops
-                .inner
-                .changed
-                .wait_timeout(state, deadline - now)
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .0;
-        }
+        self.ops
+            .wait_for_older_overlapping(&self.key, self.id, timeout)
     }
 
     /// `branch` as it is called now, following every rename recorded while
@@ -714,6 +797,20 @@ impl RemovalJoin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A removal never joins a destructive claim: it leads, and waits for
+    /// the claim (bounded) under the nested-ordering rule.
+    #[test]
+    fn a_removal_waits_for_a_destructive_claim_instead_of_joining_it() {
+        let ops = WorktreeOps::new();
+        let claim = ops.claim_for_destructive("/work/agent").unwrap();
+        let RemovalClaim::Lead(lease) = ops.announce_removal("/work/agent") else {
+            panic!("a removal leads; it never joins a destructive claim");
+        };
+        assert!(!lease.wait_for_overlapping_removals(Duration::from_millis(20)));
+        drop(claim);
+        assert!(lease.wait_for_overlapping_removals(Duration::from_millis(20)));
+    }
 
     #[test]
     fn a_destructive_claim_keeps_everything_out_of_the_folder_until_it_ends() {

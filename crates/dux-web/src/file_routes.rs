@@ -975,15 +975,16 @@ async fn destructive_editor_op(
     root: &std::path::Path,
     targets: &[&String],
     what: &'static str,
-    op: impl FnOnce(
-        &mut dyn FnMut() -> Result<dux_core::destructive::Cleared, dux_core::destructive::Refused>,
+    op: impl for<'c> FnOnce(
+        &mut dyn FnMut()
+            -> Result<dux_core::destructive::Cleared<'c>, dux_core::destructive::Refused>,
     ) -> anyhow::Result<()>
     + Send
     + 'static,
 ) -> Result<(), crate::rest_common::RouteRejection> {
     // Off the async runtime: a claim may wait (bounded) for a removal
     // running inside the folder.
-    let mut guard = {
+    let guard = {
         let state = state.clone();
         let root = root.to_path_buf();
         let relative: Vec<String> = targets.iter().map(|target| target.to_string()).collect();
@@ -1023,11 +1024,10 @@ async fn destructive_editor_op(
             None => one,
         });
     }
-    guard.hold_the_rest(state, &format!("{what} the entry"))?;
     let outcome = tokio::task::spawn_blocking(move || {
-        let _guard = guard;
+        let claims: Vec<&dux_core::worktree_ops::DestructiveClaim> = guard.claims.iter().collect();
         let mut clear = || match &check {
-            Some(check) => check.clear(what),
+            Some(check) => check.clear(&claims, what),
             None => Err(dux_core::destructive::Refused(
                 "dux did not touch it: nothing was checked".to_string(),
             )),

@@ -32,6 +32,8 @@ mod races_review6_tests;
 #[cfg(test)]
 mod removal_review_tests;
 #[cfg(test)]
+mod review10_tests;
+#[cfg(test)]
 mod review8_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;

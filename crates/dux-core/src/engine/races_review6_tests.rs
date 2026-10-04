@@ -263,16 +263,22 @@ fn a_folder_holding_a_projects_repository_is_refused_naming_the_project() {
     project.name = "Shop".to_string();
     engine.projects.push(project);
     for target in [&outer, &repo] {
+        let claim = engine.worktree_ops().claim_for_destructive(target).unwrap();
         let refused = engine
             .destructive_check(target)
-            .clear("delete")
+            .clear(&[&claim], "delete")
             .expect_err("a project's repository lives there");
         assert!(refused.0.contains("project \"Shop\""), "{refused}");
     }
+    let elsewhere = tmp.path().join("elsewhere");
+    let claim = engine
+        .worktree_ops()
+        .claim_for_destructive(&elsewhere)
+        .unwrap();
     assert!(
         engine
-            .destructive_check(&tmp.path().join("elsewhere"))
-            .clear("delete")
+            .destructive_check(&elsewhere)
+            .clear(&[&claim], "delete")
             .is_ok()
     );
 }

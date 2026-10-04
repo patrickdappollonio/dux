@@ -754,6 +754,8 @@ impl Engine {
             sessions,
             known,
             self.process_registry.clone(),
+            self.paths.sessions_db_path.clone(),
+            self.removal_coordination.ops.clone(),
         )
     }
 }

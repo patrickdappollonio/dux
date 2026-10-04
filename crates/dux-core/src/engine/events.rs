@@ -2175,45 +2175,6 @@ impl Engine {
         })
     }
 
-    /// End a deleted agent's running startup command, and whatever it has
-    /// started, off the engine thread, with the close grace. Said out loud
-    /// only when it would not stop; the run itself reports how it ended.
-    fn end_deleted_agents_startup_command(
-        &self,
-        label: String,
-        startup: crate::process_sessions::ProcessSession,
-    ) {
-        let registry = self.process_registry.clone();
-        let grace = self.individual_close_grace();
-        let tx = self.worker_tx.clone();
-        let failed_label = label.clone();
-        let spawned = std::thread::Builder::new()
-            .name("startup-command-stop".to_string())
-            .spawn(move || {
-                let known = registry.survivors_of(&[startup]);
-                let outcome = crate::process_sessions::purge(
-                    &mut crate::process_sessions::SystemProcesses,
-                    &[startup],
-                    &known,
-                    grace,
-                );
-                if let crate::process_sessions::PurgeOutcome::Survivors(left) = outcome {
-                    let _ = tx.send(WorkerEvent::PollerStatus(StatusUpdate::warning(format!(
-                        "Agent \"{label}\" was deleted, but its startup command would not stop: \
-                         {} still running. Stop it yourself.",
-                        crate::process_sessions::describe(&left)
-                    ))));
-                }
-            });
-        if let Err(err) = spawned {
-            logger::warn(&format!(
-                "could not stop the startup command of deleted agent \"{failed_label}\" \
-                 (session {}): {err}",
-                startup.sid
-            ));
-        }
-    }
-
     fn begin_session_tab_shutdown(
         &mut self,
         session: &AgentSession,
@@ -2236,13 +2197,9 @@ impl Engine {
                 self.process_registry.mark_standalone(&session.id);
             }
             // A startup command still running is a process dux started for
-            // this agent, ended like its terminals are, whether or not the
-            // worktree goes.
-            let startup = self.process_registry.startup_session_of(&session.id);
+            // this agent: forgetting the agent ends it too, like its
+            // terminals, whether or not the worktree goes.
             let _ = self.process_registry.forget_agent(&session.id);
-            if let Some(startup) = startup {
-                self.end_deleted_agents_startup_command(session.display_label(), startup);
-            }
             return;
         };
 

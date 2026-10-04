@@ -759,7 +759,30 @@ impl App {
         // standalone agent, another agent's worktree, something dux started)
         // is asked about on this thread, and the one blocking part of the
         // answer is read on the worker, before anything is deleted.
-        let destructive = self.engine.destructive_check(&worktree.join(&path));
+        // A delete follows the one destructive protocol: the folder is
+        // claimed here first (without waiting: a removal running inside it
+        // refuses the delete), the occupancy question is asked under the
+        // claim, and the worker clears it right before deleting.
+        let target = worktree.join(&path);
+        let claim = if op == FolderOp::Delete {
+            match self
+                .engine
+                .worktree_ops()
+                .claim_for_destructive_within(&target, std::time::Duration::ZERO)
+            {
+                Ok(claim) => Some(claim),
+                Err(reason) => {
+                    self.set_error(format!(
+                        "dux did not delete {}: {reason}.",
+                        dux_core::home_path::shorten_home(&target)
+                    ));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let destructive = self.engine.destructive_check(&target);
         // What the user confirmed they were deleting; the delete refuses if the
         // folder is no longer that when it runs.
         // A folder carries the number of files the dialog said would go,
@@ -790,12 +813,11 @@ impl App {
                         git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
                     }
                     FolderOp::Delete => {
-                        delete_untracked_folder(&worktree, &path, confirmed, &destructive).map(
-                            |deleted_files| FolderOpDone {
+                        delete_untracked_folder(&worktree, &path, confirmed, &destructive, claim)
+                            .map(|deleted_files| FolderOpDone {
                                 deleted_files,
                                 ..FolderOpDone::default()
-                            },
-                        )
+                            })
                     }
                 };
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
@@ -941,14 +963,16 @@ fn delete_untracked_folder(
     path: &str,
     confirmed: git::ConfirmedEntry,
     check: &dux_core::destructive::DestructiveCheck,
+    claim: Option<dux_core::worktree_ops::DestructiveClaim>,
 ) -> anyhow::Result<usize> {
     if !git::discard_classify(worktree, path)? {
         anyhow::bail!(
             "it is no longer untracked, so dux left it alone; refresh the changes and look again"
         );
     }
+    let claims: Vec<&dux_core::worktree_ops::DestructiveClaim> = claim.iter().collect();
     git::discard_confirmed(worktree, path, true, Some(confirmed), || {
-        check.clear("delete")
+        check.clear(&claims, "delete")
     })
 }
 

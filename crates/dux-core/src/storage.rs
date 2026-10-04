@@ -38,6 +38,14 @@ fn sidecar_path(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
+/// A write transaction that takes the database's write lock when it begins.
+/// A deferred one starts as a read and is refused outright (SQLite's
+/// `SQLITE_BUSY_SNAPSHOT`, which no busy timeout waits out) when another
+/// connection, the process registry's writer among them, commits in between.
+fn immediate_tx(conn: &Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+}
+
 fn encode_identities(identities: &[crate::process_sessions::ProcessIdentity]) -> String {
     identities
         .iter()
@@ -252,7 +260,7 @@ impl SessionStore {
         // succeeds, so the success line can never claim a migration that a commit
         // failure actually rolled back.
         let frozen_titles = {
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = immediate_tx(&self.conn)?;
             // IDEMPOTENT, UNGATED backfill: freeze the birth branch for any row
             // that still lacks one. The WHERE clause is self-limiting, since new
             // rows always record a genuine `initial_branch` at creation, so this
@@ -599,10 +607,7 @@ impl SessionStore {
             return Ok(());
         }
         let count = pending.len();
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("failed to start the slot tab migration")?;
+        let tx = immediate_tx(&self.conn).context("failed to start the slot tab migration")?;
         for (session_id, provider, created_at) in pending {
             let tab_id = uuid::Uuid::new_v4().to_string();
             // One below whatever the session's existing tabs start at, so the
@@ -665,10 +670,7 @@ impl SessionStore {
         if dangling.is_empty() {
             return Ok(());
         }
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("failed to start the slot tab repair")?;
+        let tx = immediate_tx(&self.conn).context("failed to start the slot tab repair")?;
         for (session_id, stale, provider, created_at) in dangling {
             let oldest: Option<(String, String)> = tx
                 .query_row(
@@ -1130,10 +1132,8 @@ impl SessionStore {
         provider: &str,
         updated_at: DateTime<Utc>,
     ) -> Result<()> {
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("failed to start retargeting the agent's provider")?;
+        let tx =
+            immediate_tx(&self.conn).context("failed to start retargeting the agent's provider")?;
         tx.execute(
             "update agent_tabs set provider = ?2 where id = \
              (select slot_tab_id from agent_sessions where id = ?1)",
@@ -1182,9 +1182,7 @@ impl SessionStore {
                  of agent {session_id}"
             );
         }
-        let tx = self
-            .conn
-            .unchecked_transaction()
+        let tx = immediate_tx(&self.conn)
             .context("failed to start promoting a tab into the agent's slot")?;
         let owner: Option<String> = tx
             .query_row(
@@ -1537,7 +1535,7 @@ impl SessionStore {
     /// standalone agent the user has. The kind column, not the project id, is
     /// what says who owns a row.
     pub fn remove_project_records(&self, project_id: &str) -> Result<Vec<String>> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         let ids: Vec<String> = {
             let mut stmt = tx.prepare("select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed'")?;
             let rows = stmt.query_map(params![project_id], |row| row.get::<_, String>(0))?;
@@ -1788,10 +1786,7 @@ impl SessionStore {
     /// Existing sessions keep going through [`Self::upsert_session`], which is
     /// the hot path status churn takes and which never touches `agent_tabs`.
     pub fn create_session(&self, session: &AgentSession) -> Result<()> {
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("failed to start creating the agent")?;
+        let tx = immediate_tx(&self.conn).context("failed to start creating the agent")?;
         tx.execute(
             "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
              values (?1, ?2, ?3, 0, ?4)",
@@ -2006,7 +2001,7 @@ impl SessionStore {
     /// `Engine::apply`. `updated_at` is deliberately NOT touched, because doing
     /// so would corrupt the "sort by most recently updated" semantics.
     pub fn reorder_sessions(&self, project_id: &str, ordered_ids: &[String]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         {
             let mut stmt = tx.prepare(
                 "update agent_sessions set sort_order = ?1 where id = ?2 and project_id = ?3",
@@ -2027,7 +2022,7 @@ impl SessionStore {
     /// validation that `ordered_ids` is the complete session set lives in the
     /// engine. `updated_at` is deliberately untouched (preserves recency sorting).
     pub fn set_global_session_order(&self, ordered_ids: &[String]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         {
             let mut stmt = tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
             for (position, id) in ordered_ids.iter().enumerate() {
@@ -2043,7 +2038,7 @@ impl SessionStore {
     /// [`reorder_sessions`], validation that `ordered_ids` is the complete set
     /// of known projects lives in `Engine::apply`, not here.
     pub fn reorder_projects(&self, ordered_ids: &[String]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         {
             let mut stmt = tx.prepare("update projects set sort_order = ?1 where id = ?2")?;
             for (position, id) in ordered_ids.iter().enumerate() {
@@ -2103,7 +2098,7 @@ impl SessionStore {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         {
             let mut update =
                 tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
@@ -2235,7 +2230,7 @@ impl SessionStore {
         // not fire. Delete the rows explicitly. Wrapped in a transaction so a
         // mid-sequence failure leaves either all of the session's rows or none,
         // never a half-deleted session (e.g. tabs gone but the session surviving).
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = immediate_tx(&self.conn)?;
         tx.execute("delete from session_prs where session_id = ?1", params![id])?;
         tx.execute(
             "delete from session_pr_overrides where session_id = ?1",

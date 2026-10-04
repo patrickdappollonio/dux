@@ -673,11 +673,11 @@ fn create_dir_from_root(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
 /// (see [`crate::destructive`]): `clear` is asked once the move is otherwise
 /// valid, right before anything moves. Moving a link moves nothing it points
 /// at, so a link is moved without one.
-pub fn rename_entry(
+pub fn rename_entry<'c>(
     worktree: &Path,
     from_rel: &str,
     to_rel: &str,
-    clear: impl FnOnce() -> Result<crate::destructive::Cleared, crate::destructive::Refused>,
+    clear: impl FnOnce() -> Result<crate::destructive::Cleared<'c>, crate::destructive::Refused>,
 ) -> anyhow::Result<()> {
     let src = entry_literal_path(worktree, from_rel)?;
     let dst = resolve_worktree_path(worktree, to_rel)?;
@@ -870,10 +870,10 @@ fn check_entry_parent_contained(
 /// path (see [`crate::destructive`]): `clear` is asked once the delete is
 /// otherwise valid, right before anything is removed. Deleting a link removes
 /// nothing it points at, so a link goes without one.
-pub fn delete_entry(
+pub fn delete_entry<'c>(
     worktree: &Path,
     rel_path: &str,
-    clear: impl FnOnce() -> Result<crate::destructive::Cleared, crate::destructive::Refused>,
+    clear: impl FnOnce() -> Result<crate::destructive::Cleared<'c>, crate::destructive::Refused>,
 ) -> anyhow::Result<()> {
     let path = entry_literal_path(worktree, rel_path)?;
     // No-follow stat on the literal path: existence and kind of the entry

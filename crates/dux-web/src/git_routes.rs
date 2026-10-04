@@ -270,41 +270,19 @@ pub(crate) fn hold_targets_for_write(
 /// What an editor delete or move holds while it runs (see
 /// [`guard_destructive_targets`]). Dropping it lets everything go.
 pub(crate) struct DestructiveGuard {
-    _holds: Vec<dux_core::worktree_ops::WorktreeOpGuard>,
-    _claims: Vec<dux_core::worktree_ops::RemovalLease>,
-    /// The targets that are not folders, held only once the occupancy check
-    /// has been asked (see [`DestructiveGuard::hold_the_rest`]).
-    rest: Vec<std::path::PathBuf>,
+    _root: dux_core::worktree_ops::WorktreeOpGuard,
+    pub(crate) claims: Vec<dux_core::worktree_ops::DestructiveClaim>,
 }
 
-impl DestructiveGuard {
-    /// Hold the targets that are not folders. Done after the occupancy check,
-    /// because a hold on a path is itself something the check reports as
-    /// running there; a file has nothing inside it to land between the two.
-    pub(crate) fn hold_the_rest(
-        &mut self,
-        state: &AppState,
-        what: &str,
-    ) -> Result<(), RouteRejection> {
-        for path in std::mem::take(&mut self.rest) {
-            self._holds.push(hold_root_for_write(
-                state,
-                &path,
-                dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
-                what,
-            )?);
-        }
-        Ok(())
-    }
-}
-
-/// The first half of an editor delete's or move's guard: a hold on the root,
-/// and a CLAIM on every target that is a folder (its own entry, links not
-/// followed), the same claim a worktree removal takes. From the claim on,
-/// nothing new can start anywhere inside the folder, so nothing lands there
-/// between the occupancy check and the operation. A folder something is
-/// already running in is refused with what that is, and one already being
-/// removed or moved is refused too.
+/// The first step of an editor delete or move, the one destructive protocol
+/// every such operation follows: a hold on the editor's root, and a CLAIM on
+/// every target (both ends of a move). From the claim on, nothing new can
+/// start in or under a target, so nothing lands there between the occupancy
+/// check and the operation, and only a claim lets the operation be cleared.
+/// A target something is already running in is refused with what that is,
+/// one already being removed or moved is refused too, and one with a removal
+/// running inside it is waited for, bounded. Blocking: call it off the async
+/// runtime.
 pub(crate) fn guard_destructive_targets(
     state: &AppState,
     root: &Path,
@@ -313,42 +291,35 @@ pub(crate) fn guard_destructive_targets(
 ) -> Result<DestructiveGuard, RouteRejection> {
     let ops = state.engine.worktree_ops();
     let mut guard = DestructiveGuard {
-        _holds: vec![hold_root_for_write(
+        _root: hold_root_for_write(
             state,
             root,
             dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
             what,
-        )?],
-        _claims: Vec::new(),
-        rest: Vec::new(),
+        )?,
+        claims: Vec::new(),
     };
     let root_key = dux_core::worktree_ops::path_key(root);
     for target in targets {
         let path = root.join(target);
-        let is_folder = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir());
         // The root itself is never deleted or moved (the operation refuses
         // it), and it is already held above.
         if dux_core::worktree_ops::path_key(&path) == root_key {
             continue;
         }
-        if !is_folder {
-            guard.rest.push(path);
-            continue;
-        }
-        let refused = |reason: String| -> RouteRejection {
-            (
-                StatusCode::CONFLICT,
-                format!(
-                    "dux did not {what} {}: {reason}.",
-                    dux_core::home_path::shorten_home(&path)
-                ),
-            )
-                .into_response()
-                .into()
-        };
         match ops.claim_for_destructive(&path) {
-            Ok(lease) => guard._claims.push(lease),
-            Err(reason) => return Err(refused(reason)),
+            Ok(claim) => guard.claims.push(claim),
+            Err(reason) => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "dux did not {what} {}: {reason}.",
+                        dux_core::home_path::shorten_home(&path)
+                    ),
+                )
+                    .into_response()
+                    .into());
+            }
         }
     }
     Ok(guard)
@@ -623,16 +594,53 @@ async fn discard(
     let wt = worktree.clone();
     let confirmed = op.confirmed();
     let path = op.path;
-    // A folder or a nested repository is deleted whole, so the discard needs
-    // a clearance for it from the one occupancy question; a refusal is a 409
-    // naming what lives there.
-    let Some(check) = state.engine.destructive_check(worktree.join(&path)).await else {
+    // A folder or a nested repository is deleted whole, so the discard
+    // follows the one destructive protocol: claim it (off the runtime, since
+    // a removal running inside it is waited for), ask the occupancy question
+    // under the claim, and clear it right before the delete. A refusal is a
+    // 409 naming what lives there.
+    let target = worktree.join(&path);
+    let claim = match confirmed {
+        Some(dux_core::git::ConfirmedEntry::Folder { .. })
+        | Some(dux_core::git::ConfirmedEntry::Repository) => {
+            let ops = state.engine.worktree_ops().clone();
+            let claimed = target.clone();
+            match tokio::task::spawn_blocking(move || ops.claim_for_destructive(&claimed)).await {
+                Ok(Ok(claim)) => Some(claim),
+                Ok(Err(reason)) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        format!(
+                            "dux did not delete {}: {reason}.",
+                            dux_core::home_path::shorten_home(&target)
+                        ),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("claim task failed: {e}"),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        _ => None,
+    };
+    let Some(check) = state.engine.destructive_check(target.clone()).await else {
         return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
     };
     // A folder that is no longer what the user confirmed is a refusal they can
     // act on (look again), which `run_git` answers as one.
     let files_deleted = match run_git("discard the file's changes", &worktree, hold, move || {
-        dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed, || check.clear("delete"))
+        dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed, || match &claim {
+            Some(claim) => check.clear(&[claim], "delete"),
+            None => Err(dux_core::destructive::Refused(format!(
+                "dux did not delete {}: nothing confirmed it as a folder",
+                dux_core::home_path::shorten_home(&target)
+            ))),
+        })
     })
     .await
     {
