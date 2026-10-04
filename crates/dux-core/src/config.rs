@@ -3584,6 +3584,15 @@ pub fn install_terminal_ui_migration(migration: TerminalUiMigration) {
 /// a retired one, or one it drops. Empty when the migrations are not
 /// installed (no terminal UI in this process) or change nothing.
 pub fn terminal_ui_key_corrections(raw: &str) -> Vec<(Vec<String>, String)> {
+    terminal_ui_key_corrections_with_sources(raw)
+        .into_iter()
+        .map(|correction| (correction.path, correction.reason))
+        .collect()
+}
+
+/// [`terminal_ui_key_corrections`], each binding that gained a retired one's
+/// with the path it came from.
+pub fn terminal_ui_key_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
     let Ok(file) = toml::from_str::<toml::Table>(raw) else {
         return Vec::new();
     };
@@ -3620,7 +3629,10 @@ pub fn terminal_ui_key_corrections(raw: &str) -> Vec<(Vec<String>, String)> {
                 "the terminal UI drops this binding: that action no longer exists".to_string()
             }
         };
-        found.push((vec!["keys".to_string(), name.clone()], reason));
+        found.push(LoadCorrection::new(
+            vec!["keys".to_string(), name.clone()],
+            reason,
+        ));
     }
     // And each action that gained the binding of a retired one.
     for (name, value) in &after {
@@ -3636,13 +3648,14 @@ pub fn terminal_ui_key_corrections(raw: &str) -> Vec<(Vec<String>, String)> {
             continue;
         }
         let names: Vec<&str> = from.iter().map(|name| name.as_str()).collect();
-        found.push((
-            vec!["keys".to_string(), name.clone()],
-            format!(
+        found.push(LoadCorrection {
+            path: vec!["keys".to_string(), name.clone()],
+            reason: format!(
                 "it also carries the binding of the retired {}",
                 names.join(" and ")
             ),
-        ));
+            from: Some(vec!["keys".to_string(), from[0].clone()]),
+        });
     }
     found
 }
@@ -4695,6 +4708,27 @@ fn key_path(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_string()).collect()
 }
 
+/// A value a load (or the terminal UI's key resolution) uses in place of
+/// what the file says at `path`, with why, and, for a value that came from
+/// another setting of the file (a deprecated key, a retired binding), that
+/// setting's path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadCorrection {
+    pub path: Vec<String>,
+    pub reason: String,
+    pub from: Option<Vec<String>>,
+}
+
+impl LoadCorrection {
+    fn new(path: Vec<String>, reason: String) -> Self {
+        Self {
+            path,
+            reason,
+            from: None,
+        }
+    }
+}
+
 /// Every value a load of the whole config file `raw` uses in place of what
 /// the file says, by the path of the setting (or entry) as segments, with
 /// why: an entry the load migrations drop (a retired provider's stock
@@ -4702,10 +4736,22 @@ fn key_path(names: &[&str]) -> Vec<String> {
 /// recovery drops or resets, and each value the load corrects. Empty for a
 /// file that does not read.
 pub fn load_corrections_of(raw: &str) -> Vec<(Vec<String>, String)> {
-    let mut found = raw
+    load_corrections_with_sources(raw)
+        .into_iter()
+        .map(|correction| (correction.path, correction.reason))
+        .collect()
+}
+
+/// [`load_corrections_of`], each with the setting a carried-over value came
+/// from.
+pub fn load_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
+    let mut found: Vec<LoadCorrection> = raw
         .parse::<toml_edit::DocumentMut>()
         .map(|doc| crate::config_migrate::retired_provider_prunes(&doc))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(path, reason)| LoadCorrection::new(path, reason))
+        .collect();
     // A value carried over from a deprecated key: said with where it came
     // from (and the line), and what to write instead.
     if let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() {
@@ -4718,13 +4764,14 @@ pub fn load_corrections_of(raw: &str) -> Vec<(Vec<String>, String)> {
                 ],
             )
             .map_or_else(String::new, |line| format!(" (line {line})"));
-            found.push((
-                carried.key,
-                format!(
+            found.push(LoadCorrection {
+                path: carried.key,
+                reason: format!(
                     "carried over from the deprecated [{}] {} = {}{line}; replace it with {}",
                     carried.old_section, carried.old_key, carried.old_value, carried.replace_with
                 ),
-            ));
+                from: Some(key_path(&[carried.old_section, carried.old_key])),
+            });
         }
     }
     // What `dux server`'s recovery drops or resets (the terminal UI will not
@@ -4764,11 +4811,16 @@ pub fn load_corrections_of(raw: &str) -> Vec<(Vec<String>, String)> {
                     }
                 }
             };
-            found.push((recovery.key(), reason));
+            found.push(LoadCorrection::new(recovery.key(), reason));
         }
     }
     if let Ok(config) = config_from_text(raw, Report::Quiet) {
-        found.extend(load_corrections(config).1);
+        found.extend(
+            load_corrections(config)
+                .1
+                .into_iter()
+                .map(|(path, reason)| LoadCorrection::new(path, reason)),
+        );
     }
     found
 }

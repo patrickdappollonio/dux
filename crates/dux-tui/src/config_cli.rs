@@ -2028,3 +2028,9 @@ mod get_keys_and_effective_tables_tests;
 
 #[cfg(test)]
 mod effective_tables_and_secret_arguments_tests;
+
+#[cfg(test)]
+mod get_sources_and_refusing_surfaces_tests;
+
+#[cfg(test)]
+mod source_markers_and_path_echo_tests;

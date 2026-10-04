@@ -209,12 +209,30 @@ impl std::error::Error for KeyError {}
 pub fn lookup(path: &str) -> Result<Key, KeyError> {
     // `name=value` is how other tools take a setting. What follows `=` may be
     // a password, so it is never repeated: only the name is.
+    // A path is repeated in a message only when it is made of what a setting
+    // name can hold; anything else may be a value typed into it (a password
+    // after `:` or a space), so it is refused without being repeated.
+    let name_like = |text: &str| {
+        text.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    };
+    let not_a_name = || {
+        KeyError::Malformed(
+            "that is not a setting name; values are never given in the path".to_string(),
+        )
+    };
     if let Some((name, _)) = path.split_once('=') {
+        if !name_like(name) {
+            return Err(not_a_name());
+        }
         return Err(KeyError::Malformed(format!(
             "a value goes after the setting's name and a space, not after `=`: write `dux \
              config set {name} <value>` (a secret such as server.auth.password is asked for, or \
              read with --stdin). What followed `=` is not repeated here."
         )));
+    }
+    if !name_like(path) {
+        return Err(not_a_name());
     }
     let segments = split_path(path)?;
     if let Some((_, policy)) = VIRTUAL_KEYS
@@ -939,6 +957,9 @@ pub struct Correction {
     /// terminal UI's own `[keys]` migrations); `None` for every surface that
     /// starts with the file. The reason then says it all.
     pub surface: Option<crate::config::Surface>,
+    /// The setting of the file the value came from, when it came from
+    /// another one (a deprecated key, a retired binding).
+    pub from: Option<Vec<String>>,
 }
 
 /// What `get` found: the value every surface that starts with the file
@@ -1025,23 +1046,37 @@ fn render_shown(raw: &str, path: &[String], value: &toml::Value) -> String {
 }
 
 /// The table `in_use` (what dux uses at `path`) as `get` prints it: every
-/// entry, each one the file `file` leaves out (a default, a stock provider)
-/// marked with a trailing `# default`, and, with `hide_names`, every name
-/// that breaks its map's rule a marker naming its line (see
-/// [`render_shown`]).
+/// entry, each one the file `file` leaves out marked with where it came
+/// from, and, with `hide_names`, every name that breaks its map's rule a
+/// marker naming its line (see [`render_shown`]). The mark comes from the
+/// same corrections the lines on stderr say (`corrections`), so the two
+/// never disagree: an entry a correction wrote from another setting is
+/// `# from <that setting>`, and only one no correction wrote is
+/// `# default`.
 fn render_in_use(
     raw: &str,
     path: &[String],
     in_use: &toml::Value,
     file: &toml::Value,
+    corrections: &[Correction],
     hide_names: bool,
 ) -> String {
     let mut leaves = Vec::new();
     leaves_of(in_use, &mut path.to_vec(), &mut leaves);
-    let defaults: Vec<Vec<String>> = leaves
+    let marks: Vec<(Vec<String>, String)> = leaves
         .into_iter()
         .filter(|(at, _)| value_at(file, at).is_none())
-        .map(|(at, _)| at)
+        .map(|(at, _)| {
+            let made = corrections.iter().find(|correction| correction.path == at);
+            let mark = match made {
+                Some(Correction {
+                    from: Some(from), ..
+                }) => format!(" # from {}", crate::config::shown_path(raw, from)),
+                Some(_) => " # corrected, see below".to_string(),
+                None => " # default".to_string(),
+            };
+            (at, mark)
+        })
         .collect();
     let text = if hide_names {
         render_shown(raw, path, in_use)
@@ -1051,20 +1086,26 @@ fn render_in_use(
     let Ok(mut doc) = text.parse::<DocumentMut>() else {
         return text;
     };
-    fn mark(table: &mut dyn toml_edit::TableLike, at: &mut Vec<String>, defaults: &[Vec<String>]) {
+    fn mark(
+        table: &mut dyn toml_edit::TableLike,
+        at: &mut Vec<String>,
+        marks: &[(Vec<String>, String)],
+    ) {
         for (key, item) in table.iter_mut() {
             at.push(key.get().to_string());
             match item {
-                Item::Value(value) if defaults.contains(at) => {
-                    value.decor_mut().set_suffix(" # default");
+                Item::Value(value) => {
+                    if let Some((_, mark)) = marks.iter().find(|(path, _)| path == at) {
+                        value.decor_mut().set_suffix(mark.as_str());
+                    }
                 }
-                Item::Table(child) => mark(child, at, defaults),
+                Item::Table(child) => mark(child, at, marks),
                 _ => {}
             }
             at.pop();
         }
     }
-    mark(doc.as_table_mut(), &mut path.to_vec(), &defaults);
+    mark(doc.as_table_mut(), &mut path.to_vec(), &marks);
     doc.to_string().trim_end().to_string()
 }
 
@@ -1119,6 +1160,20 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
             return Ok(unknown(reason, in_file));
         }
     };
+    // `[keys]` is the terminal UI's alone: a file the terminal UI will not
+    // start with has no binding in use anywhere.
+    if path.first().map(String::as_str) == Some("keys")
+        && refused_by
+            .iter()
+            .any(|(surface, _)| *surface == Surface::TerminalUi)
+    {
+        let named: Vec<String> = problems
+            .iter()
+            .filter(|problem| problem.stops(Surface::TerminalUi))
+            .map(|problem| problem.message.clone())
+            .collect();
+        return Ok(unknown(named.join("; "), in_file));
+    }
     let mut effective = serde_json::to_value(&effective).ok();
     // `[keys]` is the terminal UI's alone, so it is what the terminal UI
     // runs with, by its own resolution: its key migrations, and every
@@ -1150,12 +1205,22 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     let used = used_at(&path);
     // Every path below is a list of segments, never a dotted string split
     // again: a name may hold a dot.
-    let mut corrected: Vec<(Vec<String>, String)> = crate::config::load_corrections_of(raw);
+    let mut sourced = crate::config::load_corrections_with_sources(raw);
     // The terminal UI's own `[keys]` migrations are corrections it alone
     // makes (see `surface_of` below).
     if keys_resolved.is_some() {
-        corrected.extend(crate::config::terminal_ui_key_corrections(raw));
+        sourced.extend(crate::config::terminal_ui_key_corrections_with_sources(raw));
     }
+    let source_of = |at: &[String]| {
+        sourced
+            .iter()
+            .find(|correction| correction.path == at)
+            .and_then(|correction| correction.from.clone())
+    };
+    let corrected: Vec<(Vec<String>, String)> = sourced
+        .iter()
+        .map(|correction| (correction.path.clone(), correction.reason.clone()))
+        .collect();
     // A correction under `[keys]` is the terminal UI's alone.
     let surface_of = |at: &[String]| {
         (at.first().map(String::as_str) == Some("keys")).then_some(Surface::TerminalUi)
@@ -1170,6 +1235,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                 .iter()
                 .find(|(key, _)| *key == path)
                 .map(|(_, reason)| Correction {
+                    from: source_of(&path),
                     surface: surface_of(&path),
                     path: path.clone(),
                     in_file: None,
@@ -1225,6 +1291,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
             });
             corrections.push(match whole {
                 Some((scope, reason)) => Correction {
+                    from: None,
                     surface: surface_of(scope),
                     path: scope.clone(),
                     in_file: value_at(&file, scope).map(render),
@@ -1232,6 +1299,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                     reason: reason.clone(),
                 },
                 None => Correction {
+                    from: None,
                     surface: surface_of(&at),
                     reason: reason_at(&at),
                     path: at,
@@ -1247,6 +1315,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
                 let used = used_at(key);
                 if used.is_some() {
                     corrections.push(Correction {
+                        from: source_of(key),
                         surface: surface_of(key),
                         path: key.clone(),
                         in_file: None,
@@ -1257,8 +1326,8 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
             }
         }
         let in_use = effective_at(&path).unwrap_or_else(|| table.clone());
-        let shown = render_in_use(raw, &path, &in_use, &file, true);
-        let named = render_in_use(raw, &path, &in_use, &file, false);
+        let shown = render_in_use(raw, &path, &in_use, &file, &corrections, true);
+        let named = render_in_use(raw, &path, &in_use, &file, &corrections, false);
         return Ok(GetReport {
             with_names: (named != shown).then_some(named),
             value: GetValue::Set(shown),
@@ -1279,6 +1348,7 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     Ok(GetReport {
         value: used.clone().map_or(GetValue::Unset, GetValue::Set),
         corrections: vec![Correction {
+            from: None,
             surface: surface_of(&path),
             reason: reason_at(&path),
             path: path.clone(),
