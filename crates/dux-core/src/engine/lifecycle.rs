@@ -2178,6 +2178,18 @@ impl Engine {
             source_branch,
             ..
         } = inputs;
+        // The recreate holds the path until its completion lands, so a delete
+        // that begins meanwhile waits for it and then removes the recreated
+        // copy; a path already being removed is not checked out again.
+        if let Err(refused) = self.hold_path_for_in_flight(
+            &in_flight,
+            &worktree_path,
+            crate::worktree_ops::WorktreeOpKind::RecreateWorkingCopy,
+        ) {
+            return Err(anyhow::anyhow!(
+                refused.sentence("recreate the working copy").to_string()
+            ));
+        }
         let checkout_path = worktree_path.clone();
         let checkout_branch = branch_name.clone();
         // Every sentence the final promises is decided where the outcome lands,

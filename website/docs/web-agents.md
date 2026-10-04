@@ -123,7 +123,11 @@ deletion (it is checked out somewhere else, say), the worktree still goes and du
 the branch survived and quotes git's reason.
 
 A worktree that already has an agent names that agent and offers no delete. Delete the agent
-instead.
+instead. A worktree whose agent you just deleted is listed under **Being removed** until its
+removal finishes, with no delete of its own: it is already going. The manager checks again
+at the moment you confirm, so a worktree an agent took in the meantime, or one an agent is
+being created on, is refused rather than removed, and a removal that finds work still
+running in the worktree waits for it the same way an agent delete does.
 
 > [!TIP]
 > This is where you remove the branch of a worktree that has no agent. A worktree that does
@@ -284,8 +288,17 @@ has stopped: every tab, every terminal you opened on it, a startup command that 
 running, and anything any of them left running in the background, such as a dev server, a
 job started with `&`, or a `nohup`ed or disowned command. Each is asked to exit, given the
 same shutdown grace as a quit (`shutdown_timeout_seconds`), and killed if it is still there.
-Only then does git remove the worktree. The agent leaves the list at once; the removal
-finishes in the background and reports when it is done.
+The agent leaves the list at once; the removal finishes in the background and reports when it
+is done.
+
+It also waits for dux's own work in that worktree: a pull, a push, a commit, a branch rename,
+a recreate of the working copy or a save from the editor still running there is allowed to
+finish, and the status says what it is waiting for. A branch renamed while the
+delete waited is removed under its new name. From the moment you confirm, nothing new can
+start in that worktree: a save, a dropped file, a pull or a new agent there is refused, and
+says why. If the work still has not finished after `removal_wait_seconds` in your
+`config.toml` (120 seconds by default), dux keeps the worktree and tells you so, and you can
+remove it later from the worktree manager.
 
 > [!WARNING]
 > Ticking the box ends processes you may have started yourself in that agent's terminals,

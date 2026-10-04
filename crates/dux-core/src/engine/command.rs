@@ -370,6 +370,46 @@ impl Engine {
                         "An agent is already being created or forked.",
                     )));
                 }
+                // A project being deleted takes no new agents: the deletion
+                // has already decided which agents it removes.
+                if let Some(project_id) = request.project_id()
+                    && self.project_is_being_deleted(project_id)
+                {
+                    let name = self
+                        .projects
+                        .iter()
+                        .find(|project| project.id == project_id)
+                        .map(|project| project.name.clone())
+                        .unwrap_or_else(|| project_id.to_string());
+                    return Ok(EventReaction::Status(StatusUpdate::error(
+                        crate::status_text![
+                            "Project ",
+                            q(name),
+                            " is being deleted, so dux did not create an agent in it."
+                        ],
+                    )));
+                }
+                // An agent created on a worktree that already exists holds it
+                // from now until its launch lands, so a removal of that folder
+                // waits for it (or keeps it), and a folder already being
+                // removed is refused rather than adopted.
+                let existing_worktree = match request.as_ref() {
+                    crate::worker::CreateAgentRequest::ExistingManagedWorktree {
+                        worktree_path,
+                        ..
+                    } => Some(worktree_path.clone()),
+                    _ => None,
+                };
+                if let Some(path) = &existing_worktree
+                    && self.worktree_ops().is_being_removed(path)
+                {
+                    return Ok(EventReaction::Status(StatusUpdate::error(
+                        crate::worktree_ops::HoldRefused {
+                            path: crate::worktree_ops::path_key(path),
+                        }
+                        .sentence("create an agent there"),
+                    )));
+                }
                 // Mint the shared create-agent `HandlerStatusOp`: its opaque id
                 // correlates the dispatch busy, every progress re-emit and the
                 // final the launch-ready and launch-failed handlers resolve from
@@ -442,11 +482,21 @@ impl Engine {
                 let op_id_panic = op_id.clone();
                 let pending = op.pending_status();
                 self.pending_create_ops.insert(op_id.clone(), op);
+                self.note_create_started(&op_id, request.project_id());
+                if let Some(path) = &existing_worktree {
+                    // Cannot be refused: the announcement was checked above on
+                    // this same thread.
+                    let _ = self.worktree_ops().hold_as(
+                        crate::worktree_ops::HoldOwner::CreateOp(op_id.clone()),
+                        path,
+                        crate::worktree_ops::WorktreeOpKind::CreateAgent,
+                    );
+                }
                 let paths = self.paths.clone();
                 let config = self.config.clone();
                 let identity = self.resolved_identity();
                 let registry = self.process_registry.clone();
-                Ok(self.spawn_command_worker(
+                let reaction = self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: "create-agent".into(),
                         in_flight_key: Some(InFlightKey::CreateAgent),
@@ -471,7 +521,13 @@ impl Engine {
                             registry,
                         );
                     },
-                ))
+                );
+                // A worker that never started cleared the in-flight key; the
+                // create's own bookkeeping goes with it.
+                if !self.is_in_flight(&InFlightKey::CreateAgent) {
+                    self.note_create_finished(&op_id);
+                }
+                Ok(reaction)
             }
 
             Command::DispatchAgentLaunch { request } => {
@@ -690,14 +746,30 @@ impl Engine {
                 worktree_path,
                 message,
                 success_message,
-            } => match crate::git::commit(&worktree_path, &message) {
-                Ok(_) => Ok(EventReaction::Status(StatusUpdate::info(success_message))),
-                // Commit failures leave the index and typed message intact, so
-                // recovery stays inside the UI and does not require a sticky status.
-                Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
-                    "Commit failed: {e}"
-                )))),
-            },
+            } => {
+                // Held for the commit's own duration, so a removal of this
+                // worktree that is already waiting sees it, and refused once a
+                // removal has begun.
+                let _hold = match self
+                    .worktree_ops()
+                    .hold(&worktree_path, crate::worktree_ops::WorktreeOpKind::Commit)
+                {
+                    Ok(hold) => hold,
+                    Err(refused) => {
+                        return Ok(EventReaction::Status(StatusUpdate::error(
+                            refused.sentence("commit in it"),
+                        )));
+                    }
+                };
+                match crate::git::commit(&worktree_path, &message) {
+                    Ok(_) => Ok(EventReaction::Status(StatusUpdate::info(success_message))),
+                    // Commit failures leave the index and typed message intact, so
+                    // recovery stays inside the UI and does not require a sticky status.
+                    Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
+                        "Commit failed: {e}"
+                    )))),
+                }
+            }
 
             Command::Push { worktree_path } => {
                 let op = crate::engine::status_op("Pushing to remote\u{2026}")
@@ -709,8 +781,23 @@ impl Engine {
                     .on_failure(|e: &String| {
                         crate::engine::Final::error(format!("Push to remote failed: {e}"))
                     });
+                // The push holds its worktree until git is done with it, so a
+                // removal that begins meanwhile waits for it, and a worktree
+                // already being removed takes no push.
+                let hold = match self
+                    .worktree_ops()
+                    .hold(&worktree_path, crate::worktree_ops::WorktreeOpKind::Push)
+                {
+                    Ok(hold) => hold,
+                    Err(refused) => {
+                        return Ok(EventReaction::Status(StatusUpdate::error(
+                            refused.sentence("push from it"),
+                        )));
+                    }
+                };
                 let wt = worktree_path.clone();
                 Ok(self.spawn_status_op(op, move || {
+                    let _hold = hold;
                     crate::git::push(&wt).map(|_| ()).map_err(|e| e.to_string())
                 }))
             }
@@ -945,6 +1032,20 @@ impl Engine {
             }
             PullTarget::Session => InFlightKey::Pull(repo_key.clone()),
         };
+        // A session pull holds its worktree until its completion lands, so a
+        // removal that begins meanwhile waits for it; a worktree already being
+        // removed takes no pull. A pull already running is left to the worker
+        // primitive's own "already running" answer.
+        if matches!(target, PullTarget::Session)
+            && !self.is_in_flight(&in_flight_key)
+            && let Err(refused) = self.hold_path_for_in_flight(
+                &in_flight_key,
+                &repo_path,
+                crate::worktree_ops::WorktreeOpKind::Pull,
+            )
+        {
+            return EventReaction::Status(StatusUpdate::warning(refused.sentence("pull into it")));
+        }
         let repo_key_for_panic = repo_key.clone();
         let target_for_panic = target.clone();
         let op = match &target {
@@ -1024,7 +1125,7 @@ impl Engine {
             self.finish_delete_session_memory(session_id);
         }
         self.remove_project_from_runtime(project_id);
-        let detail = removed_agents_detail(removed.len());
+        let detail = crate::engine::removal::removed_agents_detail(removed.len());
         if was_real && let Err(error) = self.persist_projects_to_config() {
             return Ok(EventReaction::Status(StatusUpdate::error(
                 crate::status_text![
@@ -1047,80 +1148,13 @@ impl Engine {
         )))
     }
 
-    fn delete_project_with_worktrees(
-        &mut self,
-        project_id: &str,
-        project_name: &str,
-    ) -> anyhow::Result<EventReaction> {
-        if self.project_has_pending_deletion(project_id) {
-            return Ok(EventReaction::Status(StatusUpdate::error(
-                crate::status_text![
-                    "Cannot delete project ",
-                    q(project_name),
-                    " while agent worktree removals are in \
-                 progress. Wait for them to finish, then try again."
-                ],
-            )));
-        }
-        if self.project_has_launching_tab(project_id) {
-            return Ok(EventReaction::Status(StatusUpdate::error(
-                crate::status_text![
-                    "Cannot delete project ",
-                    q(project_name),
-                    " while an agent tab is still launching. \
-                 Wait a moment, then try again."
-                ],
-            )));
-        }
-        let was_real = self.projects.iter().any(|project| project.id == project_id);
-        let session_ids: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|session| session.project_id() == Some(project_id))
-            .map(|session| session.id.clone())
-            .collect();
-        let mut removed = 0usize;
-        for session_id in &session_ids {
-            // `None` for the branch: the project-removal dialog asks about the
-            // project rather than each agent's branch, so nobody answered that
-            // question and the provenance default stands. That is what keeps a
-            // project removal from taking a user's `develop` with it.
-            if self.do_delete_session(session_id, true, None)?.is_some() {
-                removed += 1;
-            }
-        }
-        self.session_store.remove_project_records(project_id)?;
-        self.remove_project_from_runtime(project_id);
-        let detail = removed_agents_detail(removed);
-        if was_real && let Err(error) = self.persist_projects_to_config() {
-            return Ok(EventReaction::Status(StatusUpdate::error(
-                crate::status_text![
-                    "Deleted ",
-                    q(project_name),
-                    format!(
-                        "{} from dux, but updating config.toml failed: \
-                 {}. The project may reappear on restart. Check the file is writable.",
-                        detail, error
-                    )
-                ],
-            )));
-        }
-        Ok(EventReaction::Status(StatusUpdate::info(
-            crate::status_text![
-                "Deleted project ",
-                q(project_name),
-                format!("{}. Worktrees were removed.", detail)
-            ],
-        )))
-    }
-
     fn project_has_pending_deletion(&self, project_id: &str) -> bool {
         self.sessions.iter().any(|session| {
             session.project_id() == Some(project_id) && self.pending_deletions.contains(&session.id)
         })
     }
 
-    fn project_has_launching_tab(&self, project_id: &str) -> bool {
+    pub(crate) fn project_has_launching_tab(&self, project_id: &str) -> bool {
         self.sessions.iter().any(|session| {
             session.project_id() == Some(project_id)
                 && self
@@ -1130,7 +1164,7 @@ impl Engine {
         })
     }
 
-    fn remove_project_from_runtime(&mut self, project_id: &str) {
+    pub(crate) fn remove_project_from_runtime(&mut self, project_id: &str) {
         self.begin_close_project_terminals(project_id);
         self.projects.retain(|project| project.id != project_id);
     }
@@ -1416,14 +1450,6 @@ fn saved_global_env_message(count: usize) -> String {
 /// The status line confirming a macro save, counting the macros written.
 fn saved_macros_message(count: usize) -> String {
     format!("Saved {}.", count_of(count, "macro"))
-}
-
-fn removed_agents_detail(removed: usize) -> String {
-    match removed {
-        0 => String::new(),
-        1 => " and its agent".to_string(),
-        count => format!(" and its {count} agents"),
-    }
 }
 
 /// Strict reorder validation: `requested` must be a permutation of `current`
@@ -1905,11 +1931,11 @@ mod tests {
     #[test]
     fn delete_project_removes_its_sessions_worktrees_and_project() {
         // The worktree-deleting project delete (distinct from RemoveProject, which
-        // keeps worktrees) cascades every session through the shared
-        // `do_delete_session` path, then drops the project row + memory. We use a
-        // non-existent worktree path so `git::remove_worktree` takes its
-        // already-gone Ok branch without needing a real git checkout (the worktree
-        // removal itself is covered by do_delete_session's own tests).
+        // keeps worktrees) drops the project row and memory at once and sends each
+        // session through the deferred, worker-run removal a single delete takes.
+        // A non-existent worktree path makes the removal take its already-gone
+        // branch without a real git checkout (the removal itself is covered in
+        // `engine::removal`).
         let (mut engine, tmp) = test_engine();
         let proj = tmp.path().join("proj");
         std::fs::create_dir_all(&proj).unwrap();
@@ -1931,18 +1957,13 @@ mod tests {
                 project_name: "p1".to_string(),
             })
             .expect("delete project");
-
-        match reaction {
-            EventReaction::Status(status) => {
-                assert_eq!(status.tone, StatusTone::Info, "expected a success status");
-                assert!(
-                    status.message.contains("its agent"),
-                    "message should mention the removed agent: {}",
-                    status.message
-                );
-            }
-            _ => panic!("expected a Status reaction"),
-        }
+        let EventReaction::Multi(started) = reaction else {
+            panic!("expected the cascade's busy");
+        };
+        let Some(EventReaction::Status(busy)) = started.first() else {
+            panic!("the busy leads");
+        };
+        assert_eq!(busy.tone, StatusTone::Busy);
         assert!(
             engine.projects.iter().all(|p| p.id != "p1"),
             "project must be gone from memory"
@@ -1951,10 +1972,27 @@ mod tests {
             engine.sessions.iter().all(|s| s.id != "s1"),
             "session must be gone from memory"
         );
+
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the removal reports");
+        let EventReaction::Status(status) = engine.process_worker_event(event) else {
+            panic!("expected the cascade's final");
+        };
+        assert_eq!(status.key, busy.key, "the final replaces the busy");
+        assert_eq!(status.tone, StatusTone::Info, "expected a success status");
+        assert!(
+            status.message.contains("its agent"),
+            "message should mention the removed agent: {}",
+            status.message
+        );
     }
 
     #[test]
-    fn delete_project_refuses_while_a_session_delete_is_pending() {
+    fn delete_project_goes_ahead_past_an_agent_delete_already_in_progress() {
+        // That agent's own removal is already running and reports on its own;
+        // the project delete neither refuses nor runs it a second time.
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         let session = sample_session("s1", "p1", "feat/x");
@@ -1967,18 +2005,23 @@ mod tests {
                 project_name: "p1".to_string(),
             })
             .expect("apply returns Ok");
-
-        match reaction {
-            EventReaction::Status(status) => {
-                assert_eq!(status.tone, StatusTone::Error);
-            }
-            _ => panic!("expected an error Status"),
-        }
+        let tones: Vec<StatusTone> = match &reaction {
+            EventReaction::Multi(all) => all
+                .iter()
+                .filter_map(|r| match r {
+                    EventReaction::Status(status) => Some(status.tone),
+                    _ => None,
+                })
+                .collect(),
+            _ => panic!("expected the cascade's statuses"),
+        };
+        assert_eq!(tones, vec![StatusTone::Busy, StatusTone::Info]);
+        assert!(engine.projects.iter().all(|p| p.id != "p1"));
+        assert!(engine.sessions.iter().all(|s| s.id != "s1"));
         assert!(
-            engine.projects.iter().any(|p| p.id == "p1"),
-            "the project must be untouched when the pending guard fires"
+            engine.pending_deletions.contains("s1"),
+            "the running removal is left to finish"
         );
-        assert!(engine.sessions.iter().any(|s| s.id == "s1"));
     }
 
     #[test]

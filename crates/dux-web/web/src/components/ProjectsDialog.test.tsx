@@ -33,6 +33,7 @@ const WORKTREE = {
   reason: null,
   dirty: false,
   agent_id: null,
+  being_removed: false,
 }
 
 type FetchCall = { url: string; method: string }

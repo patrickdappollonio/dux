@@ -2521,18 +2521,18 @@ pub(crate) fn remove_worktree_keep_branch_after(
     if output.status.success() {
         return Ok(());
     }
-    // Whatever happened, a registration whose folder is gone is pruned, so a
-    // failure never leaves git listing a worktree that is not there.
-    let _ = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "worktree",
-            "prune",
-        ])
-        .output();
     if !worktree_path.exists() {
-        // Worktree already gone from disk: the prune above was the cleanup.
+        // The worktree is already gone from disk. Forget THIS registration, if
+        // git still has one, and nothing else: a bare `git worktree prune` is
+        // repository-wide and severs any sibling whose directory happens to be
+        // unreachable at this moment (see `forget_missing_worktree_registration`).
+        if let Err(err) = forget_missing_worktree_registration(repo_path, worktree_path) {
+            crate::logger::warn(&format!(
+                "removed worktree {} is gone from disk, but its registration could not be \
+                 forgotten: {err:#}",
+                worktree_path.display()
+            ));
+        }
         return Ok(());
     }
     let git_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2553,9 +2553,9 @@ pub(crate) fn remove_worktree_keep_branch_after(
 const LEFTOVERS_NAMED: usize = 5;
 
 /// Whether git still lists `worktree_path` among the repository's worktrees.
-/// Read from `worktree list --porcelain -z`, the machine-stable form, and
-/// compared on canonical paths so a symlinked spelling still matches. A git
-/// that cannot answer reads as "not registered", which only skips the retry.
+/// Read from `worktree list --porcelain -z`, the machine-stable form, through
+/// the same parser and path comparison the targeted forget uses. A git that
+/// cannot answer reads as "not registered", which only skips the retry.
 pub(crate) fn worktree_is_registered(repo_path: &Path, worktree_path: &Path) -> bool {
     let Ok(output) = Command::new("git")
         .args([
@@ -2570,18 +2570,10 @@ pub(crate) fn worktree_is_registered(repo_path: &Path, worktree_path: &Path) -> 
     else {
         return false;
     };
-    if !output.status.success() {
-        return false;
-    }
-    let wanted = worktree_path
-        .canonicalize()
-        .unwrap_or_else(|_| worktree_path.to_path_buf());
-    output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter_map(|field| field.strip_prefix(b"worktree "))
-        .map(|path| std::path::PathBuf::from(String::from_utf8_lossy(path).into_owned()))
-        .any(|path| path.canonicalize().unwrap_or(path) == wanted)
+    output.status.success()
+        && parse_worktree_registrations(&output.stdout)
+            .iter()
+            .any(|entry| same_worktree_path(&entry.path, worktree_path))
 }
 
 /// Up to `limit` of what is left in a folder git could not finish deleting,
@@ -8055,6 +8047,109 @@ mod tests {
             "dux deleted nothing itself"
         );
         assert!(!worktree_is_registered(repo.path(), &wt));
+    }
+
+    /// Removing a worktree whose directory is already gone must forget THAT
+    /// registration only. A bare `git worktree prune` is repository-wide: a
+    /// sibling whose directory is briefly unreachable (a mount that is down, a
+    /// folder moved away for a moment) loses its registration too, and once
+    /// the folder is back `git status` in it says "not a git repository".
+    ///
+    /// The fallback runs when `git worktree remove` fails on a directory that
+    /// is not there: measured on git 2.53, a missing but registered worktree
+    /// is removed cleanly, while one git no longer knows ("is not a working
+    /// tree", the registration having gone with an earlier removal that
+    /// failed part-way) fails, and that failure used to prune everything.
+    #[test]
+    fn removing_a_vanished_worktree_leaves_an_unreachable_sibling_registered() {
+        let repo = init_test_repo();
+        let gone = repo.path().join("never-registered");
+        let sibling = add_worktree(repo.path(), "sibling");
+        let away = repo.path().join("sibling-away");
+        std::fs::rename(&sibling, &away).unwrap();
+
+        remove_worktree_keep_branch(repo.path(), &gone).unwrap();
+
+        std::fs::rename(&away, &sibling).unwrap();
+        let status = std::process::Command::new("git")
+            .args([
+                "-C",
+                sibling.to_string_lossy().as_ref(),
+                "status",
+                "--porcelain",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "the sibling worktree must still be a working copy: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let listed = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            ])
+            .output()
+            .unwrap();
+        let registrations = parse_worktree_registrations(&listed.stdout);
+        assert!(
+            !registrations
+                .iter()
+                .any(|r| same_worktree_path(&r.path, &gone)),
+            "the vanished worktree's own registration is forgotten"
+        );
+    }
+
+    /// The leftover-folder path (git let go of the worktree, something kept
+    /// writing into its folder) must not touch any other registration either:
+    /// it forgets nothing repository-wide, so a sibling whose folder is
+    /// briefly unreachable at that moment is still a working copy afterwards.
+    #[test]
+    fn a_leftover_folder_leaves_an_unreachable_sibling_registered() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "leftover-sibling");
+        let sibling = add_worktree(repo.path(), "unreachable");
+        // What a half-finished removal leaves: no registration, a folder.
+        let removed = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "worktree",
+                "remove",
+                "--force",
+            ])
+            .arg(&wt)
+            .output()
+            .unwrap();
+        assert!(removed.status.success());
+        std::fs::create_dir_all(wt.join(".astro/collections")).unwrap();
+        let away = repo.path().join("unreachable-away");
+        std::fs::rename(&sibling, &away).unwrap();
+
+        let err = remove_worktree_keep_branch_after(repo.path(), &wt, std::time::Duration::ZERO)
+            .expect_err("the folder is left over");
+        assert!(err.downcast_ref::<LeftoverWorktreeFolder>().is_some());
+
+        std::fs::rename(&away, &sibling).unwrap();
+        let status = std::process::Command::new("git")
+            .args([
+                "-C",
+                sibling.to_string_lossy().as_ref(),
+                "status",
+                "--porcelain",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "the sibling worktree must still be a working copy: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
     }
 
     /// A worktree with uncommitted work is force-removed by git, so the manager

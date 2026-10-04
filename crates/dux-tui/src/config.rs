@@ -339,6 +339,22 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::U16(c.shutdown_timeout_seconds),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Field {
+            key: "removal_wait_seconds",
+            comment: Some(CommentSource::Static(
+                "# Seconds a worktree removal waits for work still running in that worktree\n\
+                 # (a pull, a push, a commit, a branch rename, a save from the web editor,\n\
+                 # the working copy being recreated) to finish before it gives up and keeps\n\
+                 # the worktree. Deleting an agent with its worktree, deleting a project, and\n\
+                 # the worktree manager all wait this long, and the status line says what\n\
+                 # they are waiting for. Deleting a project also waits this long for an agent\n\
+                 # still being created in it. The wait happens in the background, so nothing\n\
+                 # freezes while it runs. A worktree kept this way can be removed later from\n\
+                 # the worktree manager.",
+            )),
+            value_fn: |c| FieldValue::U16(c.removal_wait_seconds),
+        },
+        ConfigEntry::Blank,
         ConfigEntry::Section("defaults"),
         ConfigEntry::Field {
             key: "provider",

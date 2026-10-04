@@ -603,6 +603,7 @@ fn the_next_start_finishes_a_removal_the_last_run_left_behind() {
         .expect("it was there");
     // The crash: everything in memory is gone, the database row is not.
     fx.engine.pending_group_removals.clear();
+    fx.engine.removal_coordination.claims.clear();
     for entry in std::mem::take(&mut fx.engine.terminating_ptys) {
         entry.client.force_terminate();
     }
@@ -722,4 +723,64 @@ fn a_force_stop_overtaking_a_delete_still_dispatches_its_removal_exactly_once() 
     dispatched.extend(fx.engine.reap_terminating_ptys().removals);
     assert_eq!(dispatched.len(), 1, "dispatched exactly once");
     assert_eq!(dispatched[0].session_id, "s1");
+}
+
+/// A removal finished at the next start takes the same claim on the folder a
+/// delete takes: nothing new starts there while it runs, and work already
+/// running there is waited for before git removes anything.
+#[test]
+fn a_resumed_removal_claims_the_folder_and_waits_for_work_in_it() {
+    let mut fx = fixture();
+    let session = fx.engine.sessions.remove(0);
+    fx.engine
+        .session_store
+        .insert_pending_worktree_removal(&crate::storage::PendingWorktreeRemoval {
+            session_id: session.id.clone(),
+            label: "feat".to_string(),
+            project_path: fx.repo.to_string_lossy().into_owned(),
+            managed: session
+                .workspace
+                .as_managed()
+                .expect("managed test session")
+                .clone(),
+            delete_branch: Some(true),
+            process_sessions: Vec::new(),
+        })
+        .expect("record");
+    // A pull already running in the worktree when dux starts.
+    let pull = fx
+        .engine
+        .worktree_ops()
+        .hold(&fx.worktree, crate::worktree_ops::WorktreeOpKind::Pull)
+        .expect("nothing claims the folder yet");
+
+    fx.engine.resume_pending_worktree_removals();
+
+    assert!(
+        fx.engine
+            .worktree_ops()
+            .hold(
+                &fx.worktree,
+                crate::worktree_ops::WorktreeOpKind::EditorWrite
+            )
+            .is_err(),
+        "nothing new may start in a folder being removed"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(fx.worktree.exists(), "the removal waits for the pull");
+    drop(pull);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(crate::worker::WorkerEvent::StatusOpCompleted { .. }) =
+            fx.engine.worker_rx.try_recv()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the resumed removal never reported"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!fx.worktree.exists(), "removed once the pull let go");
 }

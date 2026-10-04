@@ -228,6 +228,7 @@ fn managed_worktree(name: &str) -> dux_core::worktree_manager::ManagedWorktree {
         branch: Some(name.to_string()),
         dirty: false,
         attached_session_id: None,
+        being_removed: false,
     }
 }
 

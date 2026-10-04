@@ -300,12 +300,29 @@ async fn upload_dropped_file(
     // task as the write itself, rather than costing the response a second hop.
     let refresh_target = state.engine.file_drop_refresh_target(pty.clone()).await;
     let worktree = refresh_target.as_ref().map(|(_, w)| w.clone());
+    // A drop that lands in an agent's worktree holds it while it writes, so a
+    // removal of that worktree waits for it, and is refused once the removal
+    // has begun rather than creating the upload directory in a folder that is
+    // going.
+    let hold = match &worktree {
+        Some(worktree) => match crate::git_routes::hold_root_for_write(
+            &state,
+            worktree,
+            dux_core::worktree_ops::WorktreeOpKind::Upload,
+            "save the dropped file",
+        ) {
+            Ok(hold) => Some(hold),
+            Err(r) => return r.into_response(),
+        },
+        None => None,
+    };
 
     let filename = query.filename.clone();
     // Everything from here is filesystem work: pinning the directory (a /proc
     // read, or an `lsof` process on macOS) and writing the file. Off the async
     // reactor, exactly like the editor's file routes.
     let saved = tokio::task::spawn_blocking(move || {
+        let _hold = hold;
         // A destination that cannot be used is a refusal in its OWN words: a
         // path that could not be sent to the terminal, or a process dux is not
         // allowed to read. Flattening those into "could not write the file"
@@ -640,6 +657,19 @@ mod tests {
             app,
             state,
         }
+    }
+
+    /// A drop into an agent whose worktree is being removed is refused before
+    /// anything is written: the upload directory would otherwise be created
+    /// inside a folder that is going, or bring it back once it had gone.
+    #[tokio::test]
+    async fn a_drop_on_an_agent_whose_worktree_is_being_removed_is_refused() {
+        let world = drop_world().await;
+        let _removal = world.handle.worktree_ops().announce_removal(&world.wt);
+        let resp = world.drop_on("s1-slot", "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(body_text(resp).await.contains("removing the worktree"));
+        assert!(!world.wt.join(".dux").exists(), "nothing may be written");
     }
 
     #[tokio::test]

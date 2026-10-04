@@ -2864,13 +2864,9 @@ impl Engine {
                 )
             })?;
 
-        // One run per agent at a time: a second one beside the first would run
-        // the same provisioning twice in one worktree.
-        let Some(claim) = self.process_registry.begin_startup_run(session_id) else {
-            anyhow::bail!(crate::startup::startup_already_running_message(
-                &session.display_label()
-            ));
-        };
+        let claim = self
+            .claim_startup_rerun(session_id, &session.display_label(), &managed.worktree_path)
+            .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
         let paths = self.paths.clone();
         let terminal = self.config.startup_command_terminal.clone();
         let env =
@@ -2910,7 +2906,12 @@ impl Engine {
             env,
         };
         let reaction = self.spawn_status_op(op, move || {
-            crate::startup::run_claimed_startup_command(&paths, run, claim).status
+            let crate::engine::StartupRerunClaim {
+                run: run_claim,
+                hold,
+            } = claim;
+            let _hold = hold;
+            crate::startup::run_claimed_startup_command(&paths, run, run_claim).status
         });
         // `spawn_status_op` returns the pending Busy as an `EventReaction::Status`;
         // surface it as the wire outcome so the originating client shows the spinner
@@ -4062,6 +4063,16 @@ impl Engine {
                     self.resolve_web_delete_op(session_id, &outcome)
                 }
             }
+            EventReaction::WorktreeRemoveWaiting {
+                session_id,
+                message,
+            } => match self.pending_delete_ops_web.get(session_id) {
+                // The delete's own toast says what the removal is waiting for.
+                Some(op) => wire_statuses_from_reaction(&EventReaction::Status(
+                    op.progress(message.clone()),
+                )),
+                None => vec![],
+            },
             EventReaction::WorktreeRemoveFailed {
                 session_id,
                 message,

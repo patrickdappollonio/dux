@@ -183,6 +183,9 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // its own selection and message.
             | EventReaction::WorktreeRemoveSucceeded { .. }
             | EventReaction::WorktreeRemoveFailed { .. }
+            // A waiting removal re-titles the delete op's spinner, which each
+            // surface holds in its own pending map (absent on the other).
+            | EventReaction::WorktreeRemoveWaiting { .. }
             | EventReaction::FinishDeleteSessionView(_)
             | EventReaction::DoDeleteSessionView(_)
             | EventReaction::BeginDeleteSessionView(_)

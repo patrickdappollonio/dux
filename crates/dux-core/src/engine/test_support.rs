@@ -132,6 +132,7 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
         live_status_keys: Default::default(),
         last_created_op_id: None,
         created_session_by_op: HashMap::new(),
+        removal_coordination: Default::default(),
     };
     (engine, tmp)
 }

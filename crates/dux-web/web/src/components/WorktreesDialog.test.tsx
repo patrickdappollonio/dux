@@ -75,6 +75,7 @@ function entry(
     reason: null,
     dirty: false,
     agent_id: null,
+    being_removed: false,
     ...overrides,
   }
 }
@@ -165,6 +166,25 @@ describe("WorktreesDialog", () => {
     // The agent after the "Held by" label is a name, so it is the shared chip.
     const held = screen.getByText("tidy-otter", { selector: "code" })
     expect(held.parentElement?.textContent).toBe("Held by tidy-otter")
+  })
+
+  it("labels a worktree whose agent was just deleted as being removed, with no delete", () => {
+    // Its agent's delete is still letting the agent exit, so the folder is
+    // neither free nor held: it is already going, and cannot go twice.
+    seed([
+      entry({ worktree_path: "/wt/free", branch_name: "free" }),
+      entry({
+        branch_name: "going",
+        worktree_path: "/wt/going",
+        adoptable: false,
+        being_removed: true,
+        reason: "Being removed: its agent was just deleted.",
+      }),
+    ])
+    render(<WorktreesDialog />)
+    expect(screen.getAllByRole("button", { name: "Worktree actions" }).length).toBe(1)
+    expect(screen.getByText("Being removed")).toBeTruthy()
+    expect(screen.queryByText("Already has an agent")).toBeNull()
   })
 
   it("names the branch, the full path and the loss in the delete confirmation", () => {

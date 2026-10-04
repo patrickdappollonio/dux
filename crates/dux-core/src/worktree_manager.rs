@@ -33,6 +33,7 @@ use crate::config::DuxPaths;
 use crate::git;
 use crate::model::{AgentSession, Project};
 use crate::worker::ProjectWorktreeEntry;
+use crate::worktree_ops::{RemovalLease, WorktreeOps, describe_holders};
 
 /// One row of the worktree manager: a managed worktree of a project, and
 /// everything both surfaces need to render and decide.
@@ -54,13 +55,18 @@ pub struct ManagedWorktree {
     /// The agent holding this worktree, when one does. `Some` means the row is
     /// listed but not removable.
     pub attached_session_id: Option<String>,
+    /// A removal of this worktree has already begun: the agent that owned it
+    /// was just deleted and its processes are still exiting, or git is
+    /// removing it now. Listed, labelled "being removed", and not removable a
+    /// second time.
+    pub being_removed: bool,
 }
 
 impl ManagedWorktree {
-    /// Whether the manager may remove this worktree. An agent holding it is the
-    /// one reason it may not.
+    /// Whether the manager may remove this worktree: no agent holds it and no
+    /// removal of it has begun.
     pub fn is_removable(&self) -> bool {
-        self.attached_session_id.is_none()
+        self.attached_session_id.is_none() && !self.being_removed
     }
 }
 
@@ -80,6 +86,7 @@ pub fn manageable_worktrees(entries: Vec<ProjectWorktreeEntry>) -> Vec<ManagedWo
             branch: entry.branch,
             dirty: false,
             attached_session_id: entry.existing_session_id,
+            being_removed: false,
         })
         .collect()
 }
@@ -96,6 +103,7 @@ pub fn list_manageable_worktrees(
     project: &Project,
     paths: &DuxPaths,
     sessions: &[AgentSession],
+    ops: &WorktreeOps,
 ) -> Result<Vec<ManagedWorktree>, String> {
     let worktrees = git::list_worktrees(Path::new(&project.path)).map_err(|e| format!("{e:#}"))?;
     let classified =
@@ -103,6 +111,10 @@ pub fn list_manageable_worktrees(
     Ok(manageable_worktrees(classified)
         .into_iter()
         .map(|mut entry| {
+            // Asked of the registry, not of the sessions: an agent whose delete
+            // is still in its grace period has no record left, so a session
+            // snapshot would offer its folder as free.
+            entry.being_removed = ops.is_being_removed(&entry.path);
             entry.dirty = git::worktree_is_dirty(&entry.path).unwrap_or(false);
             entry
         })
@@ -173,6 +185,9 @@ pub struct BranchOutcome {
 pub enum RemovalOutcome {
     NotManaged,
     Attached,
+    /// A removal of this worktree has already begun (its agent was just
+    /// deleted); nothing was done a second time.
+    BeingRemoved,
     Removed {
         path: PathBuf,
         branch: Option<BranchOutcome>,
@@ -223,6 +238,80 @@ pub fn remove_managed_worktree(
             }
         }
     }
+}
+
+/// A removal the engine admitted: decided against the LIVE sessions and the
+/// registry at the moment of the request, and already announced, so nothing new
+/// starts in the folder from here on. [`Self::run`] does the slow part on a
+/// worker thread.
+pub struct AdmittedRemoval {
+    pub(crate) lease: RemovalLease,
+    pub(crate) project: Project,
+    pub(crate) paths: DuxPaths,
+    /// The sessions as they were when the removal was admitted. Taken at the
+    /// same moment the removal was announced, after which no agent can be
+    /// created on this folder, so it cannot go stale in the direction that
+    /// matters.
+    pub(crate) sessions: Vec<AgentSession>,
+    pub(crate) requested: PathBuf,
+    pub(crate) delete_branch: bool,
+    pub(crate) wait: std::time::Duration,
+}
+
+impl AdmittedRemoval {
+    /// What the removal will wait for before it runs, if anything: the busy
+    /// sentence names it.
+    pub fn waiting_for(&self) -> Option<String> {
+        let holders = self.lease.holders();
+        (!holders.is_empty()).then(|| describe_holders(&holders))
+    }
+
+    /// Wait (bounded) for the operations still running in the worktree, then
+    /// classify and remove it. Shells to git and blocks: worker threads only.
+    pub fn run(self) -> Result<RemovalOutcome, String> {
+        let Self {
+            lease,
+            project,
+            paths,
+            sessions,
+            requested,
+            delete_branch,
+            wait,
+        } = self;
+        if let Err(still) = lease.wait_for_holders(wait) {
+            let message = crate::engine::removal::removal_wait_expired_message(
+                &requested,
+                wait,
+                &describe_holders(&still),
+            );
+            lease.finish(Err(message.clone()));
+            return Err(message);
+        }
+        let outcome =
+            remove_managed_worktree(&project, &paths, &sessions, &requested, delete_branch);
+        lease.finish(match &outcome {
+            Ok(RemovalOutcome::Removed {
+                branch: Some(branch),
+                ..
+            }) => Ok(crate::engine::RemovedBranches::Deleted(git::RemoveResult {
+                branch: branch.deletion.clone(),
+                initial_branch: None,
+            })),
+            Ok(_) => Ok(crate::engine::RemovedBranches::Kept(
+                crate::model::BranchKeptReason::UserDeclined,
+            )),
+            Err(message) => Err(message.clone()),
+        });
+        outcome
+    }
+}
+
+/// What the engine answered a manager removal request with.
+pub enum RemovalAdmission {
+    /// Refused at once, against live state: an agent holds it, one is being
+    /// created on it, or its removal has already begun.
+    Refused(RemovalOutcome),
+    Admitted(Box<AdmittedRemoval>),
 }
 
 /// What a surface says after a successful removal, derived from what actually

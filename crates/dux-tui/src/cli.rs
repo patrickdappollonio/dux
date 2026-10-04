@@ -90,16 +90,60 @@ Subcommands:
 // ---------------------------------------------------------------------------
 
 fn run_reset(paths: &DuxPaths, all: bool) -> Result<()> {
+    let leftovers = run_reset_reporting(paths, all)?;
+    if leftovers.is_empty() {
+        println!("reset complete");
+    } else {
+        for leftover in &leftovers {
+            eprintln!("{}", leftover.line());
+        }
+        println!(
+            "reset complete, except for {} listed above",
+            count_of(leftovers.len(), "folder")
+        );
+    }
+    Ok(())
+}
+
+/// A folder the factory reset could not remove, and why. The reset goes on
+/// past it rather than stopping half-way: one worktree something is still
+/// writing into must not leave the database and config behind as well.
+#[derive(Debug)]
+struct ResetLeftover {
+    path: PathBuf,
+    reason: String,
+}
+
+impl ResetLeftover {
+    /// The line the reset prints for it: which folder, why, and what to do.
+    fn line(&self) -> String {
+        format!(
+            "warning: {} could not be removed ({}). Something may still be using it: stop \
+             whatever is running there, then delete it yourself. If git still lists it as a \
+             worktree of its project, run `git worktree remove --force -- {}` in that \
+             project's folder.",
+            self.path.display(),
+            self.reason,
+            self.path.display()
+        )
+    }
+}
+
+/// The reset itself, answering every folder it had to leave behind. Prints
+/// what it removed as it goes; the caller prints the leftovers and the summary.
+fn run_reset_reporting(paths: &DuxPaths, all: bool) -> Result<Vec<ResetLeftover>> {
     if !paths.root.exists() {
         println!("nothing to reset: {} does not exist", paths.root.display());
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let log_path = resolve_reset_log_path(paths);
 
-    if all {
-        reset_agent_data(paths)?;
-    }
+    let leftovers = if all {
+        reset_agent_data(paths)?
+    } else {
+        Vec::new()
+    };
 
     remove_file_with_message(&log_path)?;
     prune_empty_ancestors(&log_path, &paths.root)?;
@@ -112,9 +156,7 @@ fn run_reset(paths: &DuxPaths, all: bool) -> Result<()> {
     // `remove_root_if_empty` therefore skips the root when the lockfile is the
     // sole remaining entry.
     remove_root_if_empty_with_message(&paths.root)?;
-
-    println!("reset complete");
-    Ok(())
+    Ok(leftovers)
 }
 
 // ---------------------------------------------------------------------------
@@ -589,12 +631,13 @@ fn print_unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) {
 // Agent data reset
 // ---------------------------------------------------------------------------
 
-fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
+fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
     // Folders a standalone agent occupies: the sweep of the whole worktrees
     // root below is otherwise indiscriminate, and nothing stops a user pointing
     // a standalone agent at a directory inside dux's managed area, which dux
     // did not make.
     let mut occupied_folders: Vec<PathBuf> = Vec::new();
+    let mut leftovers: Vec<ResetLeftover> = Vec::new();
     if paths.sessions_db_path.exists() {
         match SessionStore::open(&paths.sessions_db_path) {
             Ok(store) => match store.load_sessions() {
@@ -620,10 +663,13 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
                     }
                     let mut removed = 0usize;
                     for session in &sessions {
-                        if let Some(managed) = session.workspace.as_managed()
-                            && remove_session_worktree(paths, managed, &occupied_folders)
-                        {
-                            removed += 1;
+                        let Some(managed) = session.workspace.as_managed() else {
+                            continue;
+                        };
+                        match remove_session_worktree(paths, managed, &occupied_folders) {
+                            SessionWorktreeReset::Removed => removed += 1,
+                            SessionWorktreeReset::Skipped => {}
+                            SessionWorktreeReset::Left(leftover) => leftovers.push(leftover),
                         }
                     }
                     println!("{}", removed_worktrees_line(removed));
@@ -641,37 +687,43 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
     // The sweep that finishes the job: whatever the per-session loop could not
     // account for (a worktree whose row was already gone, a stray directory)
     // goes with the root, except a folder a standalone agent occupies, which
-    // removing the root wholesale would undo the filter above for. When one is
-    // in the way, the root's other entries are removed individually and the
-    // root itself is left standing around them.
-    if occupied_folders.is_empty() {
-        remove_dir_with_message(&paths.worktrees_root)?;
-    } else {
-        remove_worktrees_root_sparing(&paths.worktrees_root, &occupied_folders)?;
-    }
+    // removing the root wholesale would undo the filter above for. Entry by
+    // entry and continue-on-error, so one folder something is still writing
+    // into is reported rather than stopping the reset before the database and
+    // config go.
+    let swept = sweep_worktrees_root(&paths.worktrees_root, &occupied_folders, &leftovers);
+    leftovers.extend(swept);
     remove_file_with_message(&paths.sessions_db_path)?;
-    Ok(())
+    Ok(leftovers)
 }
 
-/// Clear the managed worktrees root, leaving every entry that CONTAINS OR IS a
-/// folder a standalone agent occupies.
+/// Clear the managed worktrees root entry by entry, leaving every entry that
+/// CONTAINS OR IS a folder a standalone agent occupies, and answering every
+/// entry that could not be removed (unless a leftover inside it is already
+/// reported, which names the folder more precisely). The root itself goes when
+/// nothing is left in it.
 ///
 /// Containment, not equality: an agent pointed at `worktrees/a/b` must keep
 /// `worktrees/a` too, or removing the parent takes the child with it. Compared
 /// canonically, so a symlinked spelling cannot slip past.
-///
-/// Continue-on-error, like the rest of the reset: one undeletable entry must
-/// not stop the others.
-fn remove_worktrees_root_sparing(root: &Path, occupied: &[PathBuf]) -> Result<()> {
+fn sweep_worktrees_root(
+    root: &Path,
+    occupied: &[PathBuf],
+    already: &[ResetLeftover],
+) -> Vec<ResetLeftover> {
+    let mut leftovers = Vec::new();
     if !root.exists() {
-        return Ok(());
+        return leftovers;
     }
-    let Ok(entries) = fs::read_dir(root) else {
-        eprintln!(
-            "warning: could not read {} to reset it; left as is",
-            root.display()
-        );
-        return Ok(());
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            leftovers.push(ResetLeftover {
+                path: root.to_path_buf(),
+                reason: format!("its contents could not be read: {error}"),
+            });
+            return leftovers;
+        }
     };
     let mut kept = 0usize;
     for entry in entries.flatten() {
@@ -685,25 +737,34 @@ fn remove_worktrees_root_sparing(root: &Path, occupied: &[PathBuf]) -> Result<()
         } else {
             fs::remove_file(entry.path())
         };
-        if let Err(err) = removed {
-            eprintln!(
-                "warning: could not remove {}: {err}",
-                entry.path().display()
-            );
+        if let Err(error) = removed {
+            let covered = already
+                .iter()
+                .any(|leftover| leftover.path.starts_with(entry.path()));
+            if !covered {
+                leftovers.push(ResetLeftover {
+                    path: entry.path(),
+                    reason: error.to_string(),
+                });
+            }
         }
     }
-    println!(
-        "reset {} but kept {kept} entr{} a standalone agent is running in",
-        root.display(),
-        if kept == 1 { "y" } else { "ies" }
-    );
-    Ok(())
+    if kept > 0 {
+        println!(
+            "reset {} but kept {kept} entr{} a standalone agent is running in",
+            root.display(),
+            if kept == 1 { "y" } else { "ies" }
+        );
+    } else if remove_dir_if_empty(root).unwrap_or(false) {
+        println!("removed {}", root.display());
+    }
+    leftovers
 }
 
 /// Whether a managed worktree must be left standing because it IS, or CONTAINS,
 /// a folder a standalone agent occupies.
 ///
-/// The same rule [`remove_worktrees_root_sparing`] applies to the root's own
+/// The same rule [`sweep_worktrees_root`] applies to the root's own
 /// entries, and compared the same way: canonically, so a symlinked spelling
 /// cannot slip past. A worktree strictly INSIDE an occupied folder is not spared
 /// here, deliberately: dux made that worktree and resets what it made, and the
@@ -730,18 +791,27 @@ fn removed_worktrees_line(removed: usize) -> String {
     format!("removed {}", count_of(removed, "session worktree"))
 }
 
+/// What the reset did with one agent's managed worktree.
+enum SessionWorktreeReset {
+    Removed,
+    /// Deliberately left alone, and already said why.
+    Skipped,
+    /// It could not be removed; reported with the rest at the end.
+    Left(ResetLeftover),
+}
+
 fn remove_session_worktree(
     paths: &DuxPaths,
     managed: &dux_core::model::ManagedWorkspace,
     occupied: &[PathBuf],
-) -> bool {
+) -> SessionWorktreeReset {
     let worktree = Path::new(&managed.worktree_path);
     if !git::is_under(&paths.worktrees_root, worktree) {
         eprintln!(
             "warning: skipping worktree outside of managed root: {}",
             managed.worktree_path
         );
-        return false;
+        return SessionWorktreeReset::Skipped;
     }
     if worktree_holds_occupied_folder(worktree, occupied) {
         eprintln!(
@@ -749,7 +819,7 @@ fn remove_session_worktree(
              inside it, and dux never removes a folder it did not make",
             managed.worktree_path
         );
-        return false;
+        return SessionWorktreeReset::Skipped;
     }
 
     // Route through the shared core removal so the worktree is removed with the
@@ -777,10 +847,15 @@ fn remove_session_worktree(
     // gone even when there is no owning repo to drive git (an orphan with no
     // `project_path`) or git could not remove it. Core `remove_worktree` never
     // filesystem-deletes, so this stays the CLI's own last resort.
-    if worktree.exists() {
-        let _ = fs::remove_dir_all(worktree);
+    if worktree.exists()
+        && let Err(error) = fs::remove_dir_all(worktree)
+    {
+        return SessionWorktreeReset::Left(ResetLeftover {
+            path: worktree.to_path_buf(),
+            reason: error.to_string(),
+        });
     }
-    true
+    SessionWorktreeReset::Removed
 }
 
 // ---------------------------------------------------------------------------
@@ -807,13 +882,6 @@ fn remove_file_with_message(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_dir_with_message(path: &Path) -> Result<()> {
-    if remove_dir_if_present(path)? {
-        println!("removed {}", path.display());
-    }
-    Ok(())
-}
-
 fn remove_root_if_empty_with_message(path: &Path) -> Result<()> {
     if remove_dir_if_empty(path)? {
         println!("removed {}", path.display());
@@ -823,14 +891,6 @@ fn remove_root_if_empty_with_message(path: &Path) -> Result<()> {
 
 fn remove_file_if_present(path: &Path) -> Result<bool> {
     match fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(anyhow!("failed to remove {}: {error}", path.display())),
-    }
-}
-
-fn remove_dir_if_present(path: &Path) -> Result<bool> {
-    match fs::remove_dir_all(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(anyhow!("failed to remove {}: {error}", path.display())),
@@ -1585,6 +1645,41 @@ mod tests {
         run_reset(&harness.paths, false).expect("reset");
 
         assert!(!harness.paths.root.exists());
+    }
+
+    /// A worktree folder something is still writing into cannot be removed
+    /// whole (git and `remove_dir_all` both answer "Directory not empty"). The
+    /// reset must not stop there: the database and config still go, and every
+    /// folder it could not remove is reported with what to do about it.
+    #[test]
+    fn reset_all_continues_past_a_worktree_it_cannot_remove_and_reports_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let harness = ResetHarness::new();
+        harness.write_config_with_log_path("logs/custom.log");
+        harness.create_session("agent-1");
+        // An entry the sweep cannot delete: a folder whose own directory is
+        // read-only still holds a file, the way a folder a process keeps
+        // writing into refuses to empty.
+        let stuck = harness.paths.worktrees_root.join("stuck");
+        let locked = stuck.join("locked");
+        fs::create_dir_all(&locked).expect("stuck folder");
+        fs::write(locked.join("still-writing.log"), "x").expect("file");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).expect("chmod");
+
+        let result = run_reset_reporting(&harness.paths, true);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("chmod back");
+
+        let leftovers = result.expect("one stuck folder does not abort the reset");
+        assert!(
+            !harness.paths.sessions_db_path.exists(),
+            "the database still goes"
+        );
+        assert!(!harness.paths.config_path.exists(), "the config still goes");
+        assert_eq!(leftovers.len(), 1, "{leftovers:?}");
+        assert!(stuck.starts_with(&leftovers[0].path) || leftovers[0].path.starts_with(&stuck));
+        let line = leftovers[0].line();
+        assert!(line.contains("could not be removed"), "{line}");
+        assert!(line.contains("delete it yourself"), "{line}");
     }
 
     #[test]

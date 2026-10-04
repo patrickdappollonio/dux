@@ -259,6 +259,10 @@ export interface ProjectWorktreeEntryView {
   // The agent holding a non-adoptable worktree; its display name is resolved
   // client-side from the spine (`title || branch_name`).
   agent_id: string | null
+  // Its removal has already begun: the agent that owned it was just deleted
+  // and is still exiting, or git is removing it now. Neither adoptable nor
+  // removable a second time.
+  being_removed: boolean
 }
 
 // The branch-warning classification for a candidate project path. `known` names

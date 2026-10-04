@@ -3036,13 +3036,18 @@ impl App {
             ));
             return Ok(());
         };
-        // One run per agent at a time: a second one beside the first would run
-        // the same provisioning twice in one worktree.
-        let Some(claim) = self.engine.process_registry.begin_startup_run(&session.id) else {
-            self.set_error(crate::startup::startup_already_running_message(
-                &session.display_label(),
-            ));
-            return Ok(());
+        // One run per agent at a time, and a hold on the worktree so a removal
+        // waits for it; one sentence when either is refused.
+        let claim = match self.engine.claim_startup_rerun(
+            &session.id,
+            &session.display_label(),
+            &managed.worktree_path,
+        ) {
+            Ok(claim) => claim,
+            Err(refusal) => {
+                self.set_error(refusal.to_string());
+                return Ok(());
+            }
         };
         let paths = self.engine.paths.clone();
         let tx = self.engine.worker_tx.clone();
@@ -3072,6 +3077,11 @@ impl App {
         });
         let pending = self.engine.begin_status_op(&op);
         std::thread::spawn(move || {
+            let dux_core::engine::StartupRerunClaim {
+                run: run_claim,
+                hold,
+            } = claim;
+            let _hold = hold;
             let result = crate::startup::run_claimed_startup_command(
                 &paths,
                 crate::startup::StartupCommandRun {
@@ -3082,7 +3092,7 @@ impl App {
                     terminal,
                     env,
                 },
-                claim,
+                run_claim,
             );
             let resolved = op.resolve(&result.status);
             let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
@@ -3672,8 +3682,9 @@ impl App {
         // The whole delete (guards, the per-session cascade with worktree
         // removal, and the project record and config removal) is owned by the
         // core `Command::DeleteProject`, so the two surfaces cannot disagree on
-        // the sequencing. It is synchronous, running `git worktree remove`
-        // inline, so no async status op is needed.
+        // the sequencing. The records go at once; each worktree is removed on a
+        // worker once its agent has stopped, under one keyed busy the engine
+        // opens here and resolves when the last removal lands.
         logger::info(&format!("deleting project {}", project.path));
         let reaction = self.engine.apply(Command::DeleteProject {
             project_id: project.id.clone(),
@@ -4744,6 +4755,7 @@ mod tests {
             live_status_keys: Default::default(),
             last_created_op_id: None,
             created_session_by_op: std::collections::HashMap::new(),
+            removal_coordination: Default::default(),
         };
         let app_live_status_keys = engine.live_status_keys.clone();
         let mut app = App {
@@ -5088,6 +5100,7 @@ mod tests {
             live_status_keys: Default::default(),
             last_created_op_id: None,
             created_session_by_op: std::collections::HashMap::new(),
+            removal_coordination: Default::default(),
         };
         (engine, tmp)
     }
@@ -7577,12 +7590,12 @@ mod tests {
         );
     }
 
-    /// Project deletion must be refused when any of the project's sessions
-    /// have an async worktree removal in-flight. Allowing it would race the
-    /// synchronous `do_delete_session` against the worker and could leave the
-    /// project half-deleted with an orphaned worktree.
+    /// A project delete goes ahead while one of its agents' worktree removals
+    /// is already running: the cascade no longer removes anything on the UI
+    /// thread, so there is nothing to race, and that removal is left to finish
+    /// and report on its own rather than run a second time.
     #[test]
-    fn delete_selected_project_blocked_when_pending() {
+    fn delete_selected_project_goes_ahead_past_a_pending_agent_delete() {
         let project_dir = tempdir().expect("project tempdir");
         let worktree_dir = tempdir().expect("worktree tempdir");
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
@@ -7611,19 +7624,17 @@ mod tests {
         // The engine's guard answers the confirmed delete.
         app.resolve_confirm_delete_project(true);
 
-        // Session must still be present, because deletion was refused.
         assert!(
-            app.engine.sessions.iter().any(|s| s.id == "s1"),
-            "session must not be removed when deletion is blocked",
+            app.engine.sessions.iter().all(|s| s.id != "s1"),
+            "the agent's record goes with the project",
         );
         assert!(
-            app.engine.projects.iter().any(|p| p.id == "project-1"),
-            "project must not be removed when deletion is blocked",
+            app.engine.projects.iter().all(|p| p.id != "project-1"),
+            "the project is deleted",
         );
-        assert_eq!(
-            app.status.tone(),
-            crate::statusline::StatusTone::Error,
-            "should show an error explaining why deletion was blocked",
+        assert!(
+            app.engine.pending_deletions.contains("s1"),
+            "the removal already running is left to finish",
         );
     }
 
@@ -8754,7 +8765,8 @@ mod tests {
             app.engine.session_store.load_projects().unwrap().is_empty(),
             "the project record is gone"
         );
-        assert!(!worktree.exists(), "the worktree was removed from disk");
+        // The removal runs on a worker once the agent has exited.
+        drain_until(&mut app, "the worktree removal", |_| !worktree.exists());
     }
 
     #[test]
@@ -8826,7 +8838,8 @@ mod tests {
         };
         click(&mut app, confirm_button);
         assert!(app.engine.projects.is_empty(), "Delete runs the cascade");
-        assert!(!worktree.exists(), "the worktree was removed from disk");
+        // The removal runs on a worker once the agent has exited.
+        drain_until(&mut app, "the worktree removal", |_| !worktree.exists());
     }
 
     /// A second real agent in the first project, created the way the palette
@@ -9759,7 +9772,8 @@ mod tests {
             .unwrap();
         assert!(matches!(app.prompt, PromptState::None));
         assert!(app.engine.projects.is_empty(), "the project is gone");
-        assert!(!worktree.exists(), "the worktree was removed from disk");
+        // The removal runs on a worker once the agent has exited.
+        drain_until(&mut app, "the worktree removal", |_| !worktree.exists());
     }
 
     /// Every row of a project's action list runs its own flow, and runs it for

@@ -26,26 +26,47 @@ const QUIT_GIT_WAIT: Duration = Duration::from_secs(30);
 
 impl Engine {
     /// The sentence for a removal that must not run because another agent now
-    /// works in the same directory, or `None` when nobody does.
+    /// works in the same directory, or is being created on it (a create holds
+    /// the path in the registry until its launch lands in `sessions`), or
+    /// `None` when nobody does.
     pub(crate) fn worktree_occupied_message(
         &self,
         session_id: &str,
         worktree_path: &str,
     ) -> Option<StatusText> {
-        let occupant = self.sessions.iter().find(|s| {
-            s.id != session_id
-                && crate::project_browser::same_directory(s.directory(), worktree_path)
-        })?;
+        let occupant = self
+            .sessions
+            .iter()
+            .find(|s| {
+                s.id != session_id
+                    && crate::project_browser::same_directory(s.directory(), worktree_path)
+            })
+            .map(|occupant| {
+                crate::status_text![
+                    "agent ",
+                    q(occupant.display_label()),
+                    " started working in it while this agent was shutting down"
+                ]
+            })
+            .or_else(|| {
+                self.removal_coordination
+                    .ops
+                    .holders(worktree_path)
+                    .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
+                    .then(|| {
+                        crate::status_text![
+                            "an agent is being created in it while this agent was shutting down"
+                        ]
+                    })
+            })?;
         Some(crate::status_text![
             "Kept the worktree at ",
             q(crate::home_path::shorten_home(std::path::Path::new(
                 worktree_path
             ))),
-            ": agent ",
-            q(occupant.display_label()),
-            " started working in it while this \
-             agent was shutting down. Remove it from the worktree manager if you still \
-             want it gone."
+            ": ",
+            occupant,
+            ". Remove it from the worktree manager if you still want it gone."
         ])
     }
 
@@ -233,6 +254,13 @@ impl Engine {
             ..RemovalProcesses::none()
         };
         let db_path = self.paths.sessions_db_path.clone();
+        // The same claim a delete takes, so nothing new starts in the folder
+        // while it is being finished, and a second removal of it joins this one.
+        let claim = self
+            .removal_coordination
+            .ops
+            .announce_removal(&row.managed.worktree_path);
+        let wait = self.removal_wait();
         let _ = self.spawn_status_op(op, move || {
             let result = perform_deferred_removal(
                 &row.session_id,
@@ -240,6 +268,11 @@ impl Engine {
                 &row.managed,
                 row.delete_branch,
                 &processes,
+                super::events::RemovalCoordinationInputs {
+                    claim,
+                    wait,
+                    waiting_tx: None,
+                },
             );
             super::events::forget_pending_removal_in(&db_path, &row.session_id);
             result

@@ -372,6 +372,12 @@ pub const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u16 = 30;
 /// misconfiguration from wedging shutdown while still allowing any sane grace.
 pub const MAX_SHUTDOWN_TIMEOUT_SECONDS: u16 = 600;
 
+/// Default seconds a worktree removal waits for operations still running in
+/// that worktree (a pull, a push, a commit, a branch rename, an editor save)
+/// before it gives up and keeps the worktree. Also how long deleting a project
+/// waits for an agent still being created in it.
+pub const DEFAULT_REMOVAL_WAIT_SECONDS: u16 = 120;
+
 /// Default seconds between blind GitHub PR-status safety polls. Deliberately
 /// slow: most PR updates arrive via events (a branch push, or focusing an
 /// agent), so this backstop only needs to catch changes made on GitHub itself.
@@ -2712,6 +2718,12 @@ pub struct Config {
     /// The `[server]` key stays about quitting `dux server`, not about detaching
     /// one agent while it runs.
     pub shutdown_timeout_seconds: u16,
+    /// Seconds a worktree removal (deleting an agent with its worktree,
+    /// deleting a project, or the worktree manager) waits for operations still
+    /// running in that worktree to finish, and a project deletion waits for an
+    /// agent still being created in it, before giving up out loud. The removal
+    /// runs on a background worker, so the wait never blocks either surface.
+    pub removal_wait_seconds: u16,
     pub defaults: Defaults,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -2759,6 +2771,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+            removal_wait_seconds: DEFAULT_REMOVAL_WAIT_SECONDS,
             defaults: Defaults::default(),
             env: BTreeMap::new(),
             providers: ProvidersConfig::default(),

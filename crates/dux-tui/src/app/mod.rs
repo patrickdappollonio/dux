@@ -3076,7 +3076,15 @@ pub(crate) fn manage_worktree_visual_rows(
     let held = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| !entry.is_removable())
+        .filter(|(_, entry)| !entry.is_removable() && !entry.being_removed)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    // A worktree whose agent was just deleted: its removal is already under
+    // way, so it is neither free nor held, and it cannot be removed twice.
+    let being_removed = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.being_removed)
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
 
@@ -3092,6 +3100,14 @@ pub(crate) fn manage_worktree_visual_rows(
     if !held.is_empty() {
         rows.push(ManageWorktreeVisualRow::Header("Held By An Agent"));
         rows.extend(held.into_iter().map(ManageWorktreeVisualRow::Entry));
+    }
+    if !being_removed.is_empty() {
+        rows.push(ManageWorktreeVisualRow::Header("Being Removed"));
+        rows.extend(
+            being_removed
+                .into_iter()
+                .map(ManageWorktreeVisualRow::Entry),
+        );
     }
     rows
 }
@@ -4283,6 +4299,7 @@ impl App {
             live_status_keys,
             last_created_op_id: None,
             created_session_by_op: HashMap::new(),
+            removal_coordination: Default::default(),
         };
         Self::assemble(
             engine,
@@ -6751,6 +6768,13 @@ impl App {
             BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight) => {
                 self.set_error(
                     "A rename is already in progress for this agent. Wait for it to finish before renaming again.",
+                );
+                return;
+            }
+            BranchRenamePlan::Rejected(BranchRenameRejection::WorktreeBeingRemoved) => {
+                self.set_error(
+                    "This agent's worktree is being removed, so dux did not rename its branch. \
+                     Nothing new can start in a worktree while it is being removed.",
                 );
                 return;
             }
