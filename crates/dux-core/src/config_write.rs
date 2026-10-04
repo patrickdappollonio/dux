@@ -315,6 +315,28 @@ pub fn save_config_three_way(
     }
 }
 
+/// The source of a config right after a sync wrote its projects as
+/// `written`, starting from `read` (the config's source before the sync).
+/// The base is what the file is known to hold: the config as it was read
+/// (as written there, without load corrections, so a correction still counts
+/// as a change), with the projects the sync wrote. What has been seen is the
+/// read text and the written one together.
+pub fn source_after_sync(
+    read: &crate::config::SourceText,
+    written: &str,
+    synced: &Config,
+) -> crate::config::SourceText {
+    let mut base = match read.written_base() {
+        Some(base) => base.clone(),
+        None => read
+            .as_str()
+            .and_then(|text| crate::config::config_from_text_as_written(text).ok())
+            .unwrap_or_else(|| synced.clone()),
+    };
+    base.projects = synced.projects.clone();
+    crate::config::SourceText::written(&union_seen(read.as_str(), written), base)
+}
+
 /// What the writer has seen of the file after writing `written` on top of
 /// what it had seen (`seen`): every key and project entry of either. Keeps a
 /// setting it filled in, and later found deleted, deleted.
@@ -451,6 +473,31 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
                     }
                     continue;
                 }
+                (ours_item, Some(base_item))
+                    if is_inline_table(ours_item) && table_like(base_item).is_some() =>
+                {
+                    let (Some(ours_table), Some(base_table)) =
+                        (table_like(ours_item), table_like(base_item))
+                    else {
+                        continue;
+                    };
+                    let raw_table = raw_item.and_then(table_like);
+                    let empty = Table::new();
+                    let mut out = Table::new();
+                    merge_changed(
+                        &mut out,
+                        &empty,
+                        Some(MergeBase {
+                            raw: raw_table.as_ref(),
+                            base: &base_table,
+                        }),
+                        &ours_table,
+                    );
+                    if !out.is_empty() {
+                        put_in_place(target, key, toml_edit::value(out.into_inline_table()));
+                    }
+                    continue;
+                }
                 (Item::ArrayOfTables(ours_array), Some(Item::ArrayOfTables(base_array))) => {
                     let empty = toml_edit::ArrayOfTables::new();
                     let mut out = toml_edit::ArrayOfTables::new();
@@ -497,6 +544,40 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
                     base_item.and_then(Item::as_array_of_tables),
                     ours_array,
                 );
+            }
+            // A table written inline on either side (a project's `env`, as
+            // dux writes it, or as the user wrote it in either form) is
+            // merged entry by entry like any other table, and keeps the
+            // file's form: a `[projects.env]` subtable stays one, with its
+            // comments, and an inline table stays inline.
+            (ours_item, disk_item, Some(target_item))
+                if table_like(ours_item).is_some()
+                    && table_like(disk_item).is_some()
+                    && base_item.and_then(table_like).is_some() =>
+            {
+                let (Some(ours_table), Some(disk_table), Some(base_table)) = (
+                    table_like(ours_item),
+                    table_like(disk_item),
+                    base_item.and_then(table_like),
+                ) else {
+                    continue;
+                };
+                let raw_table = raw_item.and_then(table_like);
+                let entry_base = Some(MergeBase {
+                    raw: raw_table.as_ref(),
+                    base: &base_table,
+                });
+                match target_item {
+                    Item::Table(t) => merge_changed(t, &disk_table, entry_base, &ours_table),
+                    Item::Value(Value::InlineTable(inline)) => {
+                        let mut out = disk_table.clone();
+                        merge_changed(&mut out, &disk_table, entry_base, &ours_table);
+                        let decor = inline.decor().clone();
+                        *inline = out.into_inline_table();
+                        *inline.decor_mut() = decor;
+                    }
+                    _ => {}
+                }
             }
             _ => {
                 if !unchanged {
@@ -564,6 +645,20 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
                 .unwrap_or(ours_order.len())
         };
         target.sort_values_by(|a, _, b, _| rank(a.get()).cmp(&rank(b.get())));
+    }
+}
+
+/// Whether `item` is a table written inline (`env = { A = "1" }`).
+fn is_inline_table(item: &Item) -> bool {
+    matches!(item, Item::Value(Value::InlineTable(_)))
+}
+
+/// `item` as a table, whether it is written as one or inline.
+fn table_like(item: &Item) -> Option<Table> {
+    match item {
+        Item::Table(table) => Some(table.clone()),
+        Item::Value(Value::InlineTable(inline)) => Some(inline.clone().into_table()),
+        _ => None,
     }
 }
 
@@ -706,8 +801,12 @@ fn merge_array_of_tables(
         if disk_used[i] {
             continue;
         }
-        if find_entry(&bases, &base_used, entry).is_none() {
-            merged.push((*entry).clone());
+        // Each base entry answers for one file entry at most: once it has
+        // matched one, a second file entry it would also match (moved by
+        // hand, then another added at the old path) was added on disk.
+        match find_entry(&bases, &base_used, entry) {
+            Some(b) => base_used[b] = true,
+            None => merged.push((*entry).clone()),
         }
     }
     *target = merged;
@@ -746,6 +845,27 @@ pub fn replace_config_file<T>(
     let (text, outcome) = render(current.as_deref())?;
     check_auth_before_write(config_path, &text)?;
     write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;
+    Ok(outcome)
+}
+
+/// Read the config, decide, and write only when `decide` asks to, all under
+/// the [`ConfigFileLock`], so a writer that lands while this one waits is
+/// part of what `decide` reads and is never overwritten by a stale copy.
+/// `decide` gets the read's own result (a missing or unreadable file is its
+/// to judge) and returns the text to write, if any, with its outcome. A
+/// text to write is checked for a readable `[server.auth]` first. For a
+/// load-time migration, which rewrites keys of whatever the file holds.
+pub fn migrate_config_file<T>(
+    config_path: &Path,
+    decide: impl FnOnce(std::io::Result<String>) -> Result<(Option<String>, T)>,
+) -> Result<T> {
+    let _lock = ConfigFileLock::acquire(config_path)?;
+    let (text, outcome) = decide(fs::read_to_string(config_path))?;
+    if let Some(text) = text {
+        check_auth_before_write(config_path, &text)?;
+        write_config_atomic_unlocked(config_path, &text, Durability::Fsync)
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+    }
     Ok(outcome)
 }
 

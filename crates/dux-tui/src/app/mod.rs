@@ -5811,7 +5811,10 @@ impl App {
         }
     }
 
-    fn apply_reloaded_config(&mut self, mut config: Config) -> Result<()> {
+    /// Take the view state only a reload changes (bindings, theme, pane
+    /// sizes, diff line numbers) from `config`, returning the theme's own
+    /// warning when it could not be loaded.
+    fn take_reload_view_state(&mut self, config: &Config) -> Option<String> {
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         self.interactive_patterns = bindings.interactive_byte_patterns();
         self.bindings = bindings;
@@ -5825,6 +5828,26 @@ impl App {
         self.terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
         self.staged_pane_height_pct = config.ui.staged_pane_height_pct;
         self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
+        theme_warning
+    }
+
+    /// The engine adopted a reloaded config its own apply could not finish
+    /// (see `EventReaction::AdoptConfigView`): the view takes every setting
+    /// of `engine.config`, so a later drag or toggle starts from it rather
+    /// than writing the old values back. The failure modal that follows is
+    /// the message, so the theme's own warning is left to the next reload.
+    pub(crate) fn adopt_config_view(&mut self) {
+        let config = self.engine.config.clone();
+        let _ = self.take_reload_view_state(&config);
+        self.sync_view_state_from_config();
+        self.rebuild_left_items();
+        if self.selected_left >= self.left_items_cache.len() {
+            self.selected_left = self.left_items_cache.len().saturating_sub(1);
+        }
+    }
+
+    fn apply_reloaded_config(&mut self, mut config: Config) -> Result<()> {
+        let theme_warning = self.take_reload_view_state(&config);
         let github_was_enabled = self.engine.github_integration_enabled;
         self.engine.github_integration_enabled = config.ui.github_integration;
         if !github_was_enabled && self.engine.github_integration_enabled {
@@ -7512,7 +7535,8 @@ pub(crate) fn persist_runtime_projects_to_config_and_store(
             dux_core::config_write::Durability::Fsync,
         )?;
         // The file is now this text: what a later save compares with.
-        config.source_text = dux_core::config::SourceText::written(&written);
+        config.source_text =
+            dux_core::config_write::source_after_sync(&base.source_text, &written, config);
     }
 
     Ok(())
@@ -7545,7 +7569,8 @@ pub(crate) fn sync_config_projects_with_store(
     })?;
     // The file is now this text: what a later save compares with.
     if let Some(text) = written {
-        config.source_text = dux_core::config::SourceText::written(&text);
+        config.source_text =
+            dux_core::config_write::source_after_sync(&base.source_text, &text, config);
     }
     Ok(())
 }
@@ -9055,6 +9080,73 @@ leading_branch = "main"
         assert!(
             saved.contains("left_width_pct = 40"),
             "the set survives:\n{saved}"
+        );
+    }
+
+    /// After the startup sync writes, a value dux corrected at load still
+    /// counts as a change (so a later save writes the correction), and a key
+    /// deleted by hand before the sync stays deleted.
+    #[test]
+    fn the_sync_write_keeps_corrections_and_hand_deletions_apart() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        std::fs::write(
+            &paths.config_path,
+            "[ui]\ngithub_probe_interval_secs = 1\nleft_width_pct = 25\n",
+        )
+        .expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        assert_ne!(
+            config.ui.github_probe_interval_secs, 1,
+            "corrected in memory"
+        );
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "store-only".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .expect("seed project");
+        // Deleted by hand after dux read the file, before the sync wrote.
+        let text = std::fs::read_to_string(&paths.config_path).unwrap();
+        std::fs::write(
+            &paths.config_path,
+            text.replace("left_width_pct = 25\n", ""),
+        )
+        .unwrap();
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store).expect("sync");
+        let writer =
+            dux_core::config_queue::ConfigWriteQueue::with_base(paths.config_path.clone(), &config);
+        for round in 0..2 {
+            let mut memory = config.clone();
+            memory.ui.copy_on_select = round == 0;
+            writer.save_eager(memory).expect("save");
+        }
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read");
+        assert!(
+            !saved.contains("github_probe_interval_secs = 1\n"),
+            "the correction is written:\n{saved}"
+        );
+        assert!(
+            !saved.contains("left_width_pct"),
+            "the deletion stays:\n{saved}"
         );
     }
 

@@ -2753,7 +2753,9 @@ pub struct Config {
 #[derive(Clone, Default)]
 pub struct SourceText {
     text: Option<std::sync::Arc<str>>,
-    written: bool,
+    /// For a text dux wrote: the config that write is known to have put in
+    /// the file (the base a later save compares memory with).
+    written_base: Option<std::sync::Arc<Config>>,
 }
 
 impl SourceText {
@@ -2761,15 +2763,18 @@ impl SourceText {
     pub fn of(text: &str) -> Self {
         Self {
             text: Some(std::sync::Arc::from(text)),
-            written: false,
+            written_base: None,
         }
     }
 
-    /// The text dux wrote from this config (and so the file after it).
-    pub fn written(text: &str) -> Self {
+    /// A text dux wrote, with `base`, the config that write is known to have
+    /// put in the file. `text` is what dux has seen of the file (the text it
+    /// read plus what it wrote). `base` is never a re-parse of the written
+    /// text, which can carry another writer's change dux never had.
+    pub fn written(text: &str, base: Config) -> Self {
         Self {
             text: Some(std::sync::Arc::from(text)),
-            written: true,
+            written_base: Some(std::sync::Arc::new(base)),
         }
     }
 
@@ -2777,10 +2782,14 @@ impl SourceText {
         self.text.as_deref()
     }
 
-    /// Whether dux wrote the text from this config, rather than read the
-    /// config from it.
+    /// Whether dux wrote the text, rather than read the config from it.
     pub fn is_written(&self) -> bool {
-        self.written
+        self.written_base.is_some()
+    }
+
+    /// For a text dux wrote, the config that write put in the file.
+    pub fn written_base(&self) -> Option<&Config> {
+        self.written_base.as_deref()
     }
 }
 
@@ -3134,11 +3143,7 @@ pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, Confi
         // start of the file. Point at the section's header instead.
         if e.span().is_none_or(|span| span.start == 0) {
             let kind = problem_kind(e.message());
-            let header = raw.lines().position(|line| {
-                let line = line.trim();
-                line.starts_with("[server.auth]")
-                    || (line.starts_with("[server") && line.ends_with("auth]"))
-            });
+            let header = raw.lines().position(is_auth_section_header);
             return ConfigLoadProblem::AuthInvalid(match header {
                 Some(index) => format!("line {} (the [server.auth] header): {kind}", index + 1),
                 None => format!("in [server.auth]: {kind}"),
@@ -3150,6 +3155,25 @@ pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, Confi
         .server
         .and_then(|server| server.auth)
         .unwrap_or_default())
+}
+
+/// Whether a line is the `[server.auth]` table header itself (spacing and
+/// quoting aside), never a table whose name merely contains it.
+fn is_auth_section_header(line: &str) -> bool {
+    let line = line.trim();
+    if !line.starts_with('[') || line.starts_with("[[") {
+        return false;
+    }
+    // Read the line as TOML on its own, so quoting, spacing and a trailing
+    // comment are the parser's business rather than a string match's.
+    let Ok(doc) = line.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    doc.get("server")
+        .and_then(|server| server.as_table())
+        .and_then(|server| server.get("auth"))
+        .and_then(|auth| auth.as_table())
+        .is_some_and(|auth| !auth.is_implicit())
 }
 
 /// Read one `server.auth` value through the same deserializer every other
@@ -4700,10 +4724,38 @@ mod tests {
         );
     }
 
-    /// Config errors carry no file text and no value in any shape: a line
-    /// with no `=`, the continuation of a multi-line string, an element of a
-    /// multi-line array, and a type error that would repeat the value. They
-    /// say the line, the column, the key where known, and what is wrong.
+    /// The header found for a rule error is exactly `[server.auth]`, never a
+    /// table whose name merely contains it.
+    #[test]
+    fn an_auth_rule_error_never_points_at_a_look_alike_header() {
+        let raw = "[server.oauth]\nx = 1\n\n[server.auth]\nminimum_password_score = 9\n";
+        let text = recover_config(raw)
+            .expect_err("refused")
+            .reason()
+            .to_string();
+        assert!(text.contains("line 4"), "{text}");
+        // The header search a position-less rule error falls back to.
+        for header in [
+            "[server.auth]",
+            "  [server.auth]  ",
+            "[ server . auth ]",
+            "[\"server\".\"auth\"]",
+            "[server.auth] # mine",
+        ] {
+            assert!(is_auth_section_header(header), "{header}");
+        }
+        for header in [
+            "[server.oauth]",
+            "[server.oauthauth]",
+            "[server.auth.extra]",
+            "[server]",
+            "[[server.auth]]",
+            "server.auth = 1",
+        ] {
+            assert!(!is_auth_section_header(header), "{header}");
+        }
+    }
+
     /// A rule `[server.auth]` breaks as a whole (a value out of range) points
     /// at the section's own header line, not at a made-up line 1.
     #[test]
@@ -4789,6 +4841,10 @@ auth = { minimum_password_score = 9 }
         }
     }
 
+    /// Config errors carry no file text and no value in any shape: a line
+    /// with no `=`, the continuation of a multi-line string, an element of a
+    /// multi-line array, and a type error that would repeat the value. They
+    /// say the line, the column and what is wrong.
     #[test]
     fn config_errors_never_carry_file_text_or_values() {
         let cases: [(&str, &str, &str); 5] = [

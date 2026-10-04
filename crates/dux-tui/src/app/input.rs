@@ -13165,6 +13165,33 @@ not_a_real_action = ["x"]
     /// writer's base to the new config: memory keeps the old config, so the
     /// base goes back to it, and the next save does not write the old values
     /// over the new file.
+    /// When the engine's own apply of a reload fails (a reload with deferred
+    /// commands), it keeps the new config and says so before the failure
+    /// modal: the view follows the kept config. A plain reload failure (the
+    /// file was refused) leaves the view alone, unsaved resize included.
+    #[test]
+    fn the_reload_failure_modal_brings_the_view_to_the_kept_config() {
+        use dux_core::engine::EventReaction;
+        let mut app = test_app(default_bindings());
+        assert_ne!(app.left_width_pct, 37);
+        app.engine.config.ui.left_width_pct = 37;
+        app.engine.config.ui.show_changes_pane = false;
+        app.apply_reaction(EventReaction::OpenConfigReloadFailedModal(
+            "the file is not valid TOML".to_string(),
+        ));
+        assert_ne!(app.left_width_pct, 37, "a refused reload adopts nothing");
+        app.prompt = PromptState::None;
+        app.apply_reaction(EventReaction::Multi(vec![
+            EventReaction::AdoptConfigView,
+            EventReaction::OpenConfigReloadFailedModal(
+                "The new config was adopted, but applying it fully failed".to_string(),
+            ),
+        ]));
+        assert_eq!(app.left_width_pct, 37);
+        assert!(app.right_hidden);
+        assert!(matches!(app.prompt, PromptState::ConfigReloadFailed { .. }));
+    }
+
     #[test]
     fn a_failed_reload_apply_never_reverts_the_file() {
         let mut app = test_app(default_bindings());

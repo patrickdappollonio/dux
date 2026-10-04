@@ -692,6 +692,7 @@ impl App {
             EventReaction::OpenConfigReloadFailedModal(message) => {
                 self.apply_open_config_reload_failed_modal(message);
             }
+            EventReaction::AdoptConfigView => self.adopt_config_view(),
 
             EventReaction::ProjectPersistenceOutcome(boxed) => {
                 self.apply_project_persistence_outcome(*boxed);

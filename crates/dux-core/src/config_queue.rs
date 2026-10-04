@@ -42,9 +42,10 @@ pub struct ConfigWriteQueue {
     last_written: LastWritten,
 }
 
-/// The text of the writer's most recent write, with a count of writes, so a
-/// caller can tell whether a write happened since it last looked.
-type LastWritten = Arc<std::sync::Mutex<(u64, Option<std::sync::Arc<str>>)>>;
+/// The writer's base after its most recent SUCCESSFUL write (the config it
+/// wrote and the text it has seen), with a count of writes, so a caller can
+/// tell whether a write happened since it last looked.
+type LastWritten = Arc<std::sync::Mutex<(u64, Option<crate::config::SourceText>)>>;
 
 /// Holds a reload/recover barrier open. The writer is paused (drained) while the
 /// guard lives; dropping it resumes the writer. Owns a `Sender<WriteMsg>` clone
@@ -142,10 +143,13 @@ impl ConfigWriteQueue {
         }
     }
 
-    /// How many writes this writer has made, and the text of the latest.
-    /// The engine reads it around a reload's deferred commands: when they
-    /// wrote, the file now holds that text, not the reloaded one.
-    pub fn last_written(&self) -> (u64, Option<std::sync::Arc<str>>) {
+    /// How many writes this writer has made, and its base after the latest
+    /// one that succeeded, as a [`crate::config::SourceText`]: the text it
+    /// has seen and the config it wrote. The engine reads it around a
+    /// reload's deferred commands: when they wrote, that is what the file
+    /// agrees with, not the reloaded text. A save that failed changes
+    /// neither, so its change still counts as one a later save must write.
+    pub fn last_written(&self) -> (u64, Option<crate::config::SourceText>) {
         self.last_written
             .lock()
             .map(|guard| guard.clone())
@@ -467,9 +471,9 @@ fn base_read_from(text: &str) -> Option<Base> {
 /// the text as what has been seen.
 fn base_from_source(config: &Config) -> Option<Base> {
     let text = config.source_text.as_str()?;
-    if config.source_text.is_written() {
+    if let Some(written) = config.source_text.written_base() {
         return Some(Base {
-            config: config.clone(),
+            config: written.clone(),
             seen: text.to_string(),
         });
     }
@@ -507,10 +511,17 @@ impl WriterState {
     /// A save wrote `config` as `written`: the next base, and the text the
     /// engine can ask for.
     fn record_write(&mut self, config: Config, written: &str) {
-        self.base = Some(written_base(&self.base, config, written));
+        let base = written_base(&self.base, config, written);
         if let Ok(mut last) = self.last_written.lock() {
-            *last = (last.0 + 1, Some(std::sync::Arc::from(written)));
+            *last = (
+                last.0 + 1,
+                Some(crate::config::SourceText::written(
+                    &base.seen,
+                    base.config.clone(),
+                )),
+            );
         }
+        self.base = Some(base);
     }
 }
 
@@ -1583,6 +1594,226 @@ mod adv_tests {
             text.contains("/new/api"),
             "hand-added project lost:\n{}",
             text.lines().take(8).collect::<Vec<_>>().join("\n")
+        );
+    }
+}
+
+/// Seventh review cases, kept as regression tests.
+#[cfg(test)]
+mod zz_attack {
+    use super::*;
+    fn read(p: &std::path::Path) -> String {
+        std::fs::read_to_string(p).unwrap()
+    }
+    fn setup(
+        text: &str,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Config,
+        ConfigWriteQueue,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        (dir, path, loaded, q)
+    }
+
+    /// Hand-added project env var, then dux changes another var of that project's env.
+    #[test]
+    fn za_project_env_hand_add_lost() {
+        let (_d, path, loaded, q) =
+            setup("[[projects]]\nid = \"a\"\npath = \"/a\"\nenv = { A = \"1\" }\n");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\nenv = { A = \"1\", B = \"2\" }\n",
+        )
+        .unwrap();
+        let mut m = loaded.clone();
+        m.projects[0].env.insert("C".into(), "3".into());
+        q.save_eager(m).unwrap();
+        let t = read(&path);
+        eprintln!("ZA:\n{t}");
+        assert!(t.contains("B = \"2\""), "{t}");
+    }
+
+    /// Project env written as a subtable by hand.
+    #[test]
+    fn zb_project_env_subtable_hand_add_lost() {
+        let (_d, path, loaded, q) =
+            setup("[[projects]]\nid = \"a\"\npath = \"/a\"\n[projects.env]\nA = \"1\"\n");
+        std::fs::write(&path, "[[projects]]\nid = \"a\"\npath = \"/a\"\n# my env\n[projects.env]\nA = \"1\"\nB = \"2\"\n").unwrap();
+        let mut m = loaded.clone();
+        m.projects[0].env.insert("C".into(), "3".into());
+        q.save_eager(m).unwrap();
+        let t = read(&path);
+        eprintln!("ZB:\n{t}");
+        assert!(t.contains("B = \"2\""), "{t}");
+        assert!(t.contains("C = \"3\""), "{t}");
+        assert!(t.contains("# my env"), "the comment stays: {t}");
+        assert!(t.contains("[projects.env]"), "the subtable form stays: {t}");
+    }
+
+    /// dux removes project a; disk meanwhile has a hand-added id-less project at another path. 3 saves.
+    #[test]
+    fn zc_multi_save_mix() {
+        let (_d, path, loaded, q) = setup(
+            "[env]\nX = \"1\"\n\n[[projects]]\nid = \"a\"\npath = \"/a\"\nname = \"api\"\n\n[[projects]]\nid = \"b\"\npath = \"/b\"\nname = \"api\"\n",
+        );
+        let mut t = read(&path);
+        t = t.replace("[env]\nX = \"1\"\n", "[env]\nX = \"1\"\nH = \"hand\"\n");
+        t.push_str("\n[[projects]]\npath = \"/c\"\nname = \"api\"\n");
+        std::fs::write(&path, &t).unwrap();
+        let mut m = loaded.clone();
+        m.projects.retain(|p| p.id != "a");
+        q.save_eager(m.clone()).unwrap();
+        eprintln!("ZC1:\n{}", read(&path));
+        // hand deletes b's name, adds key
+        let t = read(&path).replace("name = \"api\"\n", "");
+        std::fs::write(&path, &t).unwrap();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        eprintln!("ZC2:\n{}", read(&path));
+        m.env.insert("Y".into(), "2".into());
+        q.save_eager(m.clone()).unwrap();
+        m.projects.push(crate::config::ProjectConfig {
+            id: "d".into(),
+            path: "/c".into(),
+            name: Some("c".into()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+        });
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        eprintln!("ZC3:\n{t}");
+        assert!(t.contains("H = \"hand\""));
+        assert!(!t.contains("\"/a\""));
+        assert_eq!(t.matches("\"/c\"").count(), 1, "{t}");
+        assert!(!t.contains("name = \"api\""), "{t}");
+    }
+
+    /// Hand-added provider and macro, dux edits macros.
+    #[test]
+    fn zd_macros_providers() {
+        let (_d, path, loaded, q) = setup("[macros]\none = \"1\"\ntwo = \"2\"\n");
+        let t = read(&path) + "three = \"3\"\n\n[providers.mine]\ncommand = \"mine\"\n";
+        std::fs::write(&path, &t).unwrap();
+        let mut m = loaded.clone();
+        eprintln!("macros type: {:?}", m.macros);
+        q.save_eager(m.clone()).unwrap();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        eprintln!("ZD:\n{t}");
+        assert!(t.contains("three"), "{t}");
+        assert!(t.contains("providers.mine"), "{t}");
+    }
+
+    /// Written base: a config dux wrote whose source is `written`; hand deletes a key
+    /// that only memory/defaults had; and the queue's seen is only W.
+    #[test]
+    fn ze_written_base_then_hand_delete() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        // simulate startup sync write
+        let mut cfg = loaded.clone();
+        cfg.env.insert("S".into(), "1".into());
+        let w = crate::config_write::save_config_three_way(
+            &path,
+            Some(crate::config_write::SaveBase::read(&loaded)),
+            &cfg,
+            crate::config_write::Durability::Fsync,
+        )
+        .unwrap();
+        cfg.source_text = crate::config::SourceText::written(&w, cfg.clone());
+        eprintln!("W:\n{w}");
+        let q = ConfigWriteQueue::with_base(path.clone(), &cfg);
+        // hand delete left_width_pct and copy_on_select
+        let t = read(&path).replace("left_width_pct = 20\n", "");
+        std::fs::write(&path, &t).unwrap();
+        let mut m = cfg.clone();
+        m.env.insert("T".into(), "2".into());
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        eprintln!("ZE:\n{t}");
+        assert!(!t.contains("left_width_pct"), "{t}");
+    }
+
+    /// A project env variable deleted by hand stays deleted when dux changes
+    /// another variable of the same project, across saves.
+    #[test]
+    fn zf_project_env_hand_delete_survives() {
+        let (_d, path, loaded, q) =
+            setup("[[projects]]\nid = \"a\"\npath = \"/a\"\nenv = { A = \"1\", B = \"2\" }\n");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\nenv = { A = \"1\" }\n",
+        )
+        .unwrap();
+        let mut m = loaded.clone();
+        m.projects[0].env.insert("C".into(), "3".into());
+        q.save_eager(m.clone()).unwrap();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m).unwrap();
+        let t = read(&path);
+        assert!(!t.contains("B = "), "{t}");
+        assert!(t.contains("A = \"1\"") && t.contains("C = \"3\""), "{t}");
+    }
+
+    /// A change whose save failed is still a change: the base is the config
+    /// of the last save that succeeded, so a later save writes it.
+    #[test]
+    fn zg_a_change_whose_save_failed_is_written_by_a_later_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, path, loaded, q) = setup("[env]\nA = \"1\"\n");
+        let mut m = loaded.clone();
+        m.env.insert("B".into(), "2".into());
+        q.save_eager(m.clone()).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut failed = m.clone();
+        failed.ui.left_width_pct = 41;
+        let result = q.save_eager(failed.clone());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "the write failed");
+        // What the engine hands the writer after a reload whose deferred
+        // save failed: the surfaced config (with the failed change), its base
+        // the last successful write.
+        let (_, last) = q.last_written();
+        let mut surfaced = failed.clone();
+        surfaced.source_text = last.expect("a write succeeded");
+        q.set_base(surfaced.clone());
+        q.save_eager(surfaced).unwrap();
+        assert!(
+            read(&path).contains("left_width_pct = 41"),
+            "{}",
+            read(&path)
+        );
+    }
+
+    /// A project moved by hand and a new one added at its old path, while dux
+    /// removes the project: the new one is not taken for the removed one.
+    #[test]
+    fn zh_one_base_entry_never_absorbs_two_file_entries() {
+        let (_d, path, loaded, q) = setup("[[projects]]\nid = \"a\"\npath = \"/old\"\n");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/new\"\n\n[[projects]]\npath = \"/old\"\n",
+        )
+        .unwrap();
+        let mut m = loaded.clone();
+        m.projects.clear();
+        q.save_eager(m).unwrap();
+        let t = read(&path);
+        assert!(
+            t.contains("\"/old\""),
+            "the new project at the old path stays: {t}"
         );
     }
 }

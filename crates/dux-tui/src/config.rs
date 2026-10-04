@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
+#[cfg(test)]
 use std::fs;
 #[cfg(test)]
 use std::path::Path;
@@ -30,34 +31,37 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
         path: paths.config_path.clone(),
         problem,
     };
-    let raw = fs::read_to_string(&paths.config_path).map_err(|error| {
-        load_error(dux_core::config::ConfigLoadProblem::Unreadable(
-            error.to_string(),
-        ))
-    })?;
-    dux_core::config::auth_section_of(&raw).map_err(load_error)?;
-    let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
-        anyhow::anyhow!(
-            "failed to parse {}: {}",
-            paths.config_path.display(),
-            dux_core::config::describe_toml_edit_error(&raw, &e)
-        )
-    })?;
-    // The deprecated-key + retired-provider migrations are the core-owned
-    // `dux_core::config_migrate::apply_load_migrations` (also applied in memory
-    // by `load_config`, so `dux serve` honors them); the TUI ADDITIONALLY
-    // persists the migrated document. Retired KEYBINDING actions are pruned only
-    // here (they matter only to the TUI's `validate_keys`).
-    let migrations_changed = dux_core::config_migrate::apply_load_migrations(&mut doc)?;
-    let retired_keys_changed = prune_retired_key_actions(&mut doc);
-    let folded_keys_changed = fold_legacy_key_actions(&mut doc);
-    let text = doc.to_string();
-    let migrated = migrations_changed || retired_keys_changed || folded_keys_changed;
-    if migrated {
-        // blessed sync-direct: deprecation/retirement migration also runs at boot before the queue exists
-        dux_core::config_write::write_config_secure(&paths.config_path, &text)
-            .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
-    }
+    // Read, migrate and write under the config write lock, so a `dux config
+    // set` (or any other writer) landing meanwhile is part of what is
+    // migrated rather than overwritten by the copy read before it.
+    let (raw, text, migrated) =
+        dux_core::config_write::migrate_config_file(&paths.config_path, |read| {
+            let raw = read.map_err(|error| {
+                load_error(dux_core::config::ConfigLoadProblem::Unreadable(
+                    error.to_string(),
+                ))
+            })?;
+            dux_core::config::auth_section_of(&raw).map_err(load_error)?;
+            let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
+                anyhow::anyhow!(
+                    "failed to parse {}: {}",
+                    paths.config_path.display(),
+                    dux_core::config::describe_toml_edit_error(&raw, &e)
+                )
+            })?;
+            // The deprecated-key + retired-provider migrations are the
+            // core-owned `dux_core::config_migrate::apply_load_migrations`
+            // (also applied in memory by `load_config`, so `dux serve` honors
+            // them); the TUI ADDITIONALLY persists the migrated document.
+            // Retired KEYBINDING actions are pruned only here (they matter
+            // only to the TUI's `validate_keys`).
+            let migrations_changed = dux_core::config_migrate::apply_load_migrations(&mut doc)?;
+            let retired_keys_changed = prune_retired_key_actions(&mut doc);
+            let folded_keys_changed = fold_legacy_key_actions(&mut doc);
+            let text = doc.to_string();
+            let migrated = migrations_changed || retired_keys_changed || folded_keys_changed;
+            Ok((migrated.then(|| text.clone()), (raw, text, migrated)))
+        })?;
 
     // The error gives a position and the kind of problem, never the file's
     // text, which may hold a token. The position is in the user's own text
@@ -4080,6 +4084,41 @@ args = [\"-l\"]
     /// The three ways `[server.auth]` can be unreadable each stop the start,
     /// name the file and the section, and leave the file exactly as it was
     /// (no migration rewrites it first).
+    /// The load-time migration rewrites the file under the config write lock,
+    /// re-reading it there: it waits for another writer instead of writing
+    /// over it.
+    #[test]
+    fn the_load_time_migration_waits_for_the_config_write_lock() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        fs::write(&paths.config_path, "[server]\ntailscale_enabled = true\n").expect("seed");
+        let held = dux_core::config_write::ConfigFileLock::acquire(&paths.config_path).unwrap();
+        let loader = {
+            let paths = paths.clone();
+            std::thread::spawn(move || ensure_config(&paths).map(|_| ()).map_err(|e| e.to_string()))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Another writer lands while the migration waits.
+        let other = "[server]\ntailscale_enabled = true\n\n[ui]\nleft_width_pct = 33\n";
+        fs::write(&paths.config_path, other).unwrap();
+        assert!(!loader.is_finished(), "the migration waits for the lock");
+        drop(held);
+        loader.join().expect("join").expect("load");
+        let after = fs::read_to_string(&paths.config_path).unwrap();
+        assert!(
+            after.contains("left_width_pct = 33"),
+            "the other write survives:\n{after}"
+        );
+        assert!(!after.contains("tailscale_enabled"), "migrated:\n{after}");
+    }
+
     #[test]
     fn ensure_config_refuses_to_start_when_server_auth_cannot_be_read() {
         let dir = tempfile::TempDir::new().expect("tempdir");
