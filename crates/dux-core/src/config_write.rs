@@ -1321,13 +1321,14 @@ pub fn mutate_config_file_with<T>(
 /// problem is anything that stops dux starting with the file
 /// ([`crate::config::start_problems_of`]: `[server.auth]` key by key, then
 /// the start checks), so a change that adds one is refused with the start's
-/// own words, and nothing is written. Returns the problems left.
+/// own words, and nothing is written. Returns the problems left, each with
+/// the surfaces it stops.
 pub fn mutate_config_file_repairing<T>(
     config_path: &Path,
     missing: MissingConfig<'_>,
     key: &str,
     change: impl FnOnce(&mut DocumentMut) -> Result<T>,
-) -> Result<(T, Vec<String>)> {
+) -> Result<(T, Vec<crate::config::StartProblem>)> {
     mutate_config_file_ruled(
         config_path,
         missing,
@@ -1350,7 +1351,7 @@ fn mutate_config_file_ruled<T>(
     missing: MissingConfig<'_>,
     rule: AuthRule,
     change: impl FnOnce(&mut DocumentMut) -> Result<T>,
-) -> Result<(T, Vec<String>)> {
+) -> Result<(T, Vec<crate::config::StartProblem>)> {
     let _lock = ConfigFileLock::acquire(config_path)?;
     let raw = match fs::read_to_string(config_path) {
         Ok(raw) => raw,
@@ -1394,13 +1395,15 @@ fn mutate_config_file_ruled<T>(
                 .map(|p| p.message.as_str())
                 .collect();
             if !added.is_empty() {
+                // Each sentence names the surfaces it stops, never "dux" as
+                // a whole.
                 anyhow::bail!(
-                    "that change would stop dux starting with {}: {}. Nothing was written.",
+                    "{} was not changed, because with that change {}. Nothing was written.",
                     config_path.display(),
-                    added.join("; ")
+                    added.join("; ").trim_end_matches('.')
                 );
             }
-            after.problems.into_iter().map(|p| p.message).collect()
+            after.problems
         }
     };
     write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;

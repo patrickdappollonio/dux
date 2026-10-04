@@ -3340,6 +3340,9 @@ pub struct StartProblem {
     /// The sentence shown: which surfaces will not start, and why. Never a
     /// value from the file.
     pub message: String,
+    /// Why, without which surfaces it stops: what a caller that words the
+    /// surfaces itself lists.
+    pub detail: String,
     /// The settings it is about, as dotted paths. Empty for the file as a
     /// whole.
     pub keys: Vec<String>,
@@ -3373,6 +3376,7 @@ impl StartProblem {
         };
         Self {
             message: format!("{who} will not start with this file: {}", problem.message),
+            detail: problem.message,
             id: problem.id,
             keys: problem.keys,
             cross_key: problem.cross_key,
@@ -3418,8 +3422,8 @@ pub fn install_terminal_ui_check(check: TerminalUiCheck) {
 ///   reads the file strictly, while `dux server` resets it to its default;
 /// - `[server] host` not an IP literal (both; `--bind` overrides it for
 ///   `dux server`);
-/// - `[server] port` 0 (`dux server`, overridable by `--port`/`--bind`, and
-///   the terminal UI only when it serves);
+/// - `[server] port` 0 (`dux server`, overridable by `--port`/`--bind`; the
+///   terminal UI starts, and its background server takes any free port);
 /// - an environment variable dux cannot use (the terminal UI);
 /// - project records that conflict, such as duplicate ids (both);
 /// - the terminal UI's own `[keys]` check, when installed (the terminal UI).
@@ -3450,9 +3454,17 @@ pub fn check_start(raw: &str) -> StartCheck {
     {
         check.unjudgeable_rules = crate::config_auth::unjudgeable_rules_of(auth);
     }
-    let Some(rest) = migrated_beside_auth(&file) else {
+    let Some((rest, migration_failures)) = migrated_beside_auth(&file) else {
         return check;
     };
+    // A deprecated key the migrations cannot carry over stops the terminal
+    // UI, whose start runs them on the file and refuses it; `dux server`
+    // reads such a file unmigrated, which is what the checks below judge.
+    for (key, message) in migration_failures {
+        check
+            .problems
+            .push(StartProblem::new(Problem::about(key, message), true, false));
+    }
     for (place, key, kind) in wrong_typed_settings(&rest) {
         check.problems.push(StartProblem::new(
             Problem::about(
@@ -3536,20 +3548,24 @@ pub fn problems_added_by_set<'a>(
 }
 
 /// The rest of the file beside `[server.auth]` (judged on its own), after
-/// the load migrations, as a start reads it. `None` only when it cannot be
-/// written back out, which a parsed table always can be.
-fn migrated_beside_auth(file: &toml::Table) -> Option<toml::Table> {
+/// the load migrations, as `dux server`'s load reads it, and every deprecated
+/// key the migrations could not carry over, each with the sentence the
+/// terminal UI's start refuses it with. When any fails, the rest is the
+/// unmigrated file, as `dux server` reads it then. `None` only when the table
+/// cannot be written back out, which a parsed table always can be.
+fn migrated_beside_auth(file: &toml::Table) -> Option<(toml::Table, Vec<(String, String)>)> {
     let mut file = file.clone();
     if let Some(server) = file.get_mut("server").and_then(toml::Value::as_table_mut) {
         server.remove("auth");
     }
     let rest = toml::to_string(&file).ok()?;
     let mut doc = rest.parse::<toml_edit::DocumentMut>().ok()?;
+    let failures = crate::config_migrate::load_migration_failures(&doc);
     let migrated = match crate::config_migrate::apply_load_migrations(&mut doc) {
-        Ok(_) => doc.to_string(),
-        Err(_) => rest,
+        Ok(_) if failures.is_empty() => doc.to_string(),
+        _ => rest,
     };
-    toml::from_str::<toml::Table>(&migrated).ok()
+    Some((toml::from_str::<toml::Table>(&migrated).ok()?, failures))
 }
 
 /// Every setting of the wrong type in `table`, each field judged on its
@@ -3597,28 +3613,28 @@ fn config_start_problems(config: &Config) -> Vec<StartProblem> {
         problem.dux_server_overridable = true;
         problems.push(problem);
     }
-    // Known by the setting, never by the host it names, so changing the
-    // host beside a port of 0 is not a new problem.
+    // Port 0 never stops the terminal UI's start, whatever `serve_while_tui`
+    // says: its background server binds loopback on port 0, which the system
+    // turns into a free port, and shows the address it got. Whether it is a problem depends on the port alone (the
+    // host only words it), so it is known by the port, and changing the host
+    // or `serve_while_tui` beside a port of 0 is not a new problem.
     if let Some(detail) = port_zero_problem(&config.server.host, config.server.port) {
-        let serving = config.server.serve_while_tui;
         let mut problem = StartProblem::new(
             Problem {
                 id: "server.port: 0".to_string(),
                 ..Problem::about("server.port", detail)
             },
-            serving,
+            false,
             true,
         );
-        if !serving {
-            problem.message = format!(
-                "dux server (and the terminal UI's background server) will not start with this \
-                 file: {}",
-                problem
-                    .message
-                    .split_once(": ")
-                    .map_or("", |(_, rest)| rest)
-            );
-        }
+        problem.message = format!(
+            "dux server will not start with this file (the terminal UI starts, and its background \
+             server listens on whatever free port it is given): {}",
+            problem
+                .message
+                .split_once(": ")
+                .map_or("", |(_, rest)| rest)
+        );
         problem.dux_server_overridable = true;
         problems.push(problem);
     }
@@ -3978,7 +3994,7 @@ pub fn config_from_text_as_written(raw: &str) -> std::result::Result<Config, Con
 }
 
 /// The corrections [`load_config`] makes in memory, each warned about once.
-fn apply_load_corrections(mut config: Config) -> Config {
+fn apply_load_corrections(config: Config) -> Config {
     // Surface a stale/unrecognized editor preference instead of silently falling
     // back to the first editor detected on PATH, e.g. a config left pointing at a
     // now-removed editor like "antigravity"/"windsurf".
@@ -3997,13 +4013,39 @@ fn apply_load_corrections(mut config: Config) -> Config {
     // Same idea for a misspelled provider drag-and-drop paste form: warn ONCE here
     // rather than on every dropped file, and let the resolution itself stay silent.
     warn_on_unknown_web_dragdrop_paste_forms(&config.providers);
+    let (config, corrections) = load_corrections(config);
+    for (_, warning) in corrections {
+        crate::logger::warn(&warning);
+    }
+    config
+}
+
+/// Every value a load of the whole config file `raw` uses in place of what
+/// the file says, by dotted key, with why: an entry the load migrations drop
+/// (a retired provider's stock block) and each value the load corrects.
+/// Empty for a file that does not read.
+pub fn load_corrections_of(raw: &str) -> Vec<(String, String)> {
+    let mut found = raw
+        .parse::<toml_edit::DocumentMut>()
+        .map(|doc| crate::config_migrate::retired_provider_prunes(&doc))
+        .unwrap_or_default();
+    if let Ok(config) = config_from_text_as_written(raw) {
+        found.extend(load_corrections(config).1);
+    }
+    found
+}
+
+/// [`apply_load_corrections`] without the logging: the corrected config,
+/// and each correction's dotted key and warning.
+fn load_corrections(mut config: Config) -> (Config, Vec<(String, String)>) {
+    let mut corrections: Vec<(String, String)> = Vec::new();
     // Same idea again for an out-of-range terminal_font_size: warn ONCE here and
     // correct it IN MEMORY, rather than letting `normalized_terminal_font_size`
     // (now pure, see its doc comment) warn on every bootstrap read. Correcting it
     // here also fixes on-disk persistence: a later save writes back the
     // already-valid in-memory value instead of re-persisting the bad one.
     if let Some(warning) = terminal_font_size_load_warning(config.ui.terminal_font_size) {
-        crate::logger::warn(&warning);
+        corrections.push(("ui.terminal_font_size".to_string(), warning));
         config.ui.terminal_font_size = DEFAULT_TERMINAL_FONT_SIZE;
     }
     // And once more for an upload directory that names somewhere dux will not
@@ -4011,33 +4053,38 @@ fn apply_load_corrections(mut config: Config) -> Config {
     // later upload resolves the default silently rather than warning per file.
     if let Some(warning) = upload_pasted_text_chars_load_warning(config.ui.upload_pasted_text_chars)
     {
-        crate::logger::warn(&warning);
+        corrections.push(("ui.upload_pasted_text_chars".to_string(), warning));
         config.ui.upload_pasted_text_chars =
             normalized_upload_pasted_text_chars(config.ui.upload_pasted_text_chars);
     }
     // And once more for the `gh` re-check interval, whose read path is an engine
     // tick rather than a bootstrap projection: correcting it here is what keeps a
     // mistyped value from warning tens of times a second for the whole run.
-    correct_github_probe_interval(&mut config.ui);
+    if let Some(warning) = github_probe_interval_load_warning(config.ui.github_probe_interval_secs)
+    {
+        corrections.push(("ui.github_probe_interval_secs".to_string(), warning));
+        config.ui.github_probe_interval_secs =
+            normalized_github_probe_interval(config.ui.github_probe_interval_secs);
+    }
     if let Some(warning) = upload_directory_load_warning(&config.ui.upload_directory) {
-        crate::logger::warn(&warning);
+        corrections.push(("ui.upload_directory".to_string(), warning));
         config.ui.upload_directory = DEFAULT_UPLOAD_DIRECTORY.to_string();
     }
     // And once more for a `ui.compose_bar` naming a mode dux does not know.
     // Corrected in memory so the bootstrap projection publishes a mode the
     // browser can act on rather than passing the typo through to it.
     if let Some(warning) = compose_bar_load_warning(&config) {
-        crate::logger::warn(&warning);
+        corrections.push(("ui.compose_bar".to_string(), warning));
         config.ui.compose_bar = ComposeBarMode::Auto.as_str().to_string();
     }
     // And once more for a `[server] tailscale` naming a mode dux does not know.
     // Corrected in memory so the serve path reads a real mode rather than
     // silently treating a typo as the default on every question it asks.
     if let Some(warning) = tailscale_load_warning(&config) {
-        crate::logger::warn(&warning);
+        corrections.push(("server.tailscale".to_string(), warning));
         config.server.tailscale = TailscaleMode::Auto.as_str().to_string();
     }
-    config
+    (config, corrections)
 }
 
 /// The warning [`load_config`] emits when `ui.terminal_font_size` is outside
@@ -4286,17 +4333,6 @@ pub fn parse_server_host(host: &str) -> Result<std::net::IpAddr, String> {
     })
 }
 
-/// Resolve the complete `dux server` listening plan from config + CLI overrides +
-/// the detected Tailscale address. This is the single source of truth for the
-/// bind rules; the binary reads the returned [`ServerPlan`]'s addresses.
-///
-/// dux is trusted-local: the primary listener is always the configured
-/// `host:port` (loopback by default) or an explicit `--bind`. There is no auth
-/// gate and no public-bind refusal; the operator chooses the host directly and
-/// the host guard (config `allowed_hosts`) governs which `Host` headers are
-/// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
-/// disabled / not detected); when present and not already covered by the primary
-/// bind it is added as a BEST-EFFORT leg.
 /// Why `host:port` cannot be served on, when the port is 0. Shared by
 /// [`resolve_server_plan`] and the start checks ([`check_start`]), so `dux
 /// config set` refuses exactly what `dux server` refuses.
@@ -4314,6 +4350,17 @@ fn port_zero_problem(host: &str, port: u16) -> Option<String> {
     })
 }
 
+/// Resolve the complete `dux server` listening plan from config + CLI overrides +
+/// the detected Tailscale address. This is the single source of truth for the
+/// bind rules; the binary reads the returned [`ServerPlan`]'s addresses.
+///
+/// dux is trusted-local: the primary listener is always the configured
+/// `host:port` (loopback by default) or an explicit `--bind`. There is no auth
+/// gate and no public-bind refusal; the operator chooses the host directly and
+/// the host guard (config `allowed_hosts`) governs which `Host` headers are
+/// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
+/// disabled / not detected); when present and not already covered by the primary
+/// bind it is added as a BEST-EFFORT leg.
 pub fn resolve_server_plan(
     server: &ServerConfig,
     cli: &ServerCliOverrides,

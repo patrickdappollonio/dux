@@ -70,7 +70,7 @@ pub const FIXTURES: &[Fixture] = &[
     Fixture {
         name: "port 0, serving beside the terminal UI",
         text: "[server]\nport = 0\nserve_while_tui = true\n",
-        stops_terminal_ui: true,
+        stops_terminal_ui: false,
         stops_dux_server: true,
     },
     Fixture {
@@ -84,6 +84,18 @@ pub const FIXTURES: &[Fixture] = &[
         text: "[[projects]]\nid = \"same\"\npath = \"/tmp/dux-fixture-a\"\n\n[[projects]]\nid = \"same\"\npath = \"/tmp/dux-fixture-b\"\n",
         stops_terminal_ui: true,
         stops_dux_server: true,
+    },
+    Fixture {
+        name: "a deprecated key of the wrong type the migrations cannot carry over",
+        text: "[defaults]\nprompt_for_name = \"yes\"\n",
+        stops_terminal_ui: true,
+        stops_dux_server: false,
+    },
+    Fixture {
+        name: "a deprecated [server] bind that is not a string",
+        text: "[server]\nbind = 5\n",
+        stops_terminal_ui: true,
+        stops_dux_server: false,
     },
     Fixture {
         name: "[keys] the terminal UI does not accept",

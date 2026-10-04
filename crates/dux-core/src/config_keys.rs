@@ -511,9 +511,10 @@ pub struct SetReport {
     pub previous: Option<String>,
     /// The value written, as TOML.
     pub now: String,
-    /// What is still wrong with `[server.auth]` after the write: a set may
-    /// repair one of several broken values, and says what is left.
-    pub remaining_problems: Vec<String>,
+    /// What still stops a surface starting with the file after the write,
+    /// each with the surfaces it stops: a set may repair one of several
+    /// broken values, and says what is left.
+    pub remaining_problems: Vec<crate::config::StartProblem>,
 }
 
 /// Write one plain setting into the config file at `config_path`, through
@@ -759,9 +760,9 @@ pub struct PasswordSet {
     /// How strong it is.
     pub strength: Strength,
     /// What still stops dux starting with the file (see
-    /// [`SetReport::remaining_problems`]): while any is left the password is
-    /// stored but not in force.
-    pub remaining_problems: Vec<String>,
+    /// [`SetReport::remaining_problems`]): a surface any of them stops keeps
+    /// its old password until they are fixed.
+    pub remaining_problems: Vec<crate::config::StartProblem>,
 }
 
 /// Check `password` against the minimums in `config_path`, hash it, and store
@@ -807,7 +808,11 @@ pub fn set_password_with(
 /// Store a [`SecretKind::Text`] value (an environment value) as given,
 /// through the coordinated mutation path. The caller never prints it.
 /// Returns what still stops dux starting with the file.
-pub fn set_secret_text(config_path: &Path, key: &Key, value: &Password) -> Result<Vec<String>> {
+pub fn set_secret_text(
+    config_path: &Path,
+    key: &Key,
+    value: &Password,
+) -> Result<Vec<crate::config::StartProblem>> {
     set_secret_text_with(config_path, MissingConfig::CreateDocumented, key, value)
 }
 
@@ -817,7 +822,7 @@ pub fn set_secret_text_with(
     missing: MissingConfig<'_>,
     key: &Key,
     value: &Password,
-) -> Result<Vec<String>> {
+) -> Result<Vec<crate::config::StartProblem>> {
     if key.policy != WritePolicy::Secret(SecretKind::Text) {
         anyhow::bail!("{} is not a setting stored as typed text", key.dotted());
     }
@@ -853,12 +858,41 @@ pub enum GetValue {
     },
 }
 
-/// The value `key` has in the file `raw`, or its default when the file
-/// leaves it out. Reads the text itself rather than a loaded config, so it
-/// works on a file dux would refuse to start with: `get` is how you look at
-/// the broken part. For a [`WritePolicy::Secret`] key it reads where the
-/// secret is stored (the password's hash).
+/// A value dux uses in place of what the file says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Correction {
+    /// What the file says, as TOML text (a string unquoted).
+    pub in_file: String,
+    /// Why dux uses something else: the load's own sentence.
+    pub reason: String,
+}
+
+/// What `get` found, and, when the load uses something other than what the
+/// file says, what the file says and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GetReport {
+    pub value: GetValue,
+    pub correction: Option<Correction>,
+}
+
+/// The value dux uses for `key` with the file `raw` (see [`get_report`]).
 pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
+    get_report(raw, key).map(|report| report.value)
+}
+
+/// The value dux uses for `key` with the file `raw`: what the file says,
+/// after every correction and prune the load makes (an out-of-range value
+/// reset, a retired provider's stock block dropped), or the default when the
+/// file leaves it out. When the load uses something else, the report says
+/// what the file says and why. Reads the text itself rather than a loaded
+/// config, so it works on a file dux would refuse to start with: `get` is
+/// how you look at the broken part. For a [`WritePolicy::Secret`] key it
+/// reads where the secret is stored (the password's hash).
+pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
+    let plain = |value| GetReport {
+        value,
+        correction: None,
+    };
     let path: Vec<String> = match key.policy {
         WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => {
             stores_at.split('.').map(str::to_string).collect()
@@ -889,7 +923,7 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
             } else {
                 named.join("; ")
             };
-            return Ok(GetValue::Unknown { in_file, reason });
+            return Ok(plain(GetValue::Unknown { in_file, reason }));
         }
     };
     // A file a surface will not start with has no value in use there: say
@@ -900,24 +934,47 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
         .map(|problem| problem.message)
         .collect();
     if !problems.is_empty() {
-        return Ok(GetValue::Unknown {
+        return Ok(plain(GetValue::Unknown {
             in_file,
             reason: problems.join("; "),
-        });
-    }
-    if let Some(value) = in_file {
-        return Ok(GetValue::Set(value));
+        }));
     }
     let mut used = serde_json::to_value(&effective).ok();
     for segment in &path {
         used = used.and_then(|n| n.get(segment).cloned());
     }
-    Ok(match used {
-        Some(serde_json::Value::Null) | None => GetValue::Unset,
-        Some(json) => match toml::Value::try_from(json) {
-            Ok(value) => GetValue::Default(render(&value)),
-            Err(_) => GetValue::Unset,
-        },
+    let used = match used {
+        Some(serde_json::Value::Null) | None => None,
+        Some(json) => toml::Value::try_from(json).ok().map(|value| render(&value)),
+    };
+    let Some(in_file) = in_file else {
+        return Ok(plain(match used {
+            Some(value) => GetValue::Default(value),
+            None => GetValue::Unset,
+        }));
+    };
+    // What the file says, unless the load uses something else for this key
+    // (or drops the entry holding it), which it says why for. A whole table
+    // is shown as the file writes it: the load fills in its defaults, which
+    // is not a correction.
+    let dotted = path.join(".");
+    let reason = (used.as_deref() != Some(in_file.as_str())
+        && !node.as_ref().is_some_and(toml::Value::is_table))
+    .then(|| {
+        crate::config::load_corrections_of(raw)
+            .into_iter()
+            .find(|(corrected, _)| {
+                dotted == *corrected || dotted.starts_with(&format!("{corrected}."))
+            })
+            .map(|(_, reason)| reason)
+    })
+    .flatten();
+    let Some(reason) = reason else {
+        return Ok(plain(GetValue::Set(in_file)));
+    };
+    Ok(GetReport {
+        value: used.map_or(GetValue::Unset, GetValue::Set),
+        correction: Some(Correction { in_file, reason }),
     })
 }
 
@@ -1282,7 +1339,11 @@ port = 3890
             "{:?}",
             report.remaining_problems
         );
-        assert!(report.remaining_problems[0].contains("max_tracked_addresses"));
+        assert!(
+            report.remaining_problems[0]
+                .message
+                .contains("max_tracked_addresses")
+        );
         let report = set_plain(
             &path,
             &lookup("server.auth.max_tracked_addresses").unwrap(),
@@ -1394,7 +1455,7 @@ port = 3890
         .expect("repairs one problem");
         assert_eq!(report.remaining_problems.len(), 1, "{report:?}");
         assert!(
-            report.remaining_problems[0].contains("require"),
+            report.remaining_problems[0].message.contains("require"),
             "{report:?}"
         );
         let report = set_plain(&path, &lookup("server.auth.require").unwrap(), "network")
@@ -1579,7 +1640,7 @@ port = 3890
             .expect("an unrelated set is allowed");
         assert_eq!(report.remaining_problems.len(), 1, "{report:?}");
         assert!(
-            report.remaining_problems[0].contains("localhost"),
+            report.remaining_problems[0].message.contains("localhost"),
             "{report:?}"
         );
     }
@@ -1608,7 +1669,7 @@ port = 3890
             "{:?}",
             set.remaining_problems
         );
-        assert!(set.remaining_problems[0].contains("require"));
+        assert!(set.remaining_problems[0].message.contains("require"));
         let problems = set_secret_text(&path, &lookup("env.TOKEN").unwrap(), &password)
             .expect("no new problem");
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -1649,7 +1710,7 @@ port = 3890
         )
         .expect("repairing a reported problem");
         assert_eq!(remaining.len(), 1, "{remaining:?}");
-        assert!(remaining[0].contains('B'), "{remaining:?}");
+        assert!(remaining[0].message.contains('B'), "{remaining:?}");
     }
 
     /// The same per variable inside a project's env.
@@ -1719,7 +1780,7 @@ port = 3890
         let report = set_plain(&path, &key, "[\"10.0.0.0/99\"]").expect("a repair");
         assert_eq!(report.remaining_problems.len(), 1, "{report:?}");
         assert!(
-            report.remaining_problems[0].contains("entry 1"),
+            report.remaining_problems[0].message.contains("entry 1"),
             "{report:?}"
         );
         set_plain(&path, &key, "[\"10.0.0.0/99\", \"also-not-an-address\"]")
@@ -1749,7 +1810,12 @@ port = 3890
         assert!(!message.contains("wide"), "{message}");
         let report = set_plain(&path, &lookup("server.port").unwrap(), "4000")
             .expect("a problem already there does not block");
-        assert_eq!(report.remaining_problems, vec![message.clone()]);
+        let remaining: Vec<&str> = report
+            .remaining_problems
+            .iter()
+            .map(|problem| problem.message.as_str())
+            .collect();
+        assert_eq!(remaining, vec![message.as_str()]);
         let GetValue::Unknown { in_file, reason } =
             get(&text, &lookup("ui.right_width_pct").unwrap()).unwrap()
         else {
@@ -1762,15 +1828,18 @@ port = 3890
         );
     }
 
-    /// `dux server` binds the port whatever the file says about serving, so
-    /// a new port 0 is refused in its words.
+    /// A new port 0 is refused in `dux server`'s words, and never said to
+    /// stop the terminal UI, which starts with it.
     #[test]
     fn a_port_of_zero_is_named_as_stopping_dux_server() {
         let (_dir, path) = temp_config("[server]\nport = 3890\n");
         let error = set_plain(&path, &lookup("server.port").unwrap(), "0").expect_err("port 0");
         assert!(
-            format!("{error:#}")
-                .contains("dux server (and the terminal UI's background server) will not start"),
+            format!("{error:#}").contains("dux server will not start"),
+            "{error:#}"
+        );
+        assert!(
+            !format!("{error:#}").contains("the terminal UI will not start"),
             "{error:#}"
         );
     }
@@ -1826,7 +1895,11 @@ port = 3890
             "{:?}",
             report.remaining_problems
         );
-        assert!(report.remaining_problems[0].contains("right_width_pct"));
+        assert!(
+            report.remaining_problems[0]
+                .message
+                .contains("right_width_pct")
+        );
     }
 
     /// A cross-key rule that could not be judged before (one of its keys out
@@ -1848,7 +1921,11 @@ port = 3890
             "{:?}",
             report.remaining_problems
         );
-        assert!(report.remaining_problems[0].contains("minimum_password_length"));
+        assert!(
+            report.remaining_problems[0]
+                .message
+                .contains("minimum_password_length")
+        );
     }
 
     /// `get` warns about any problem that stops a surface, not only a
@@ -1862,5 +1939,74 @@ port = 3890
             panic!("expected Unknown");
         };
         assert!(reason.contains("localhost"), "{reason}");
+    }
+}
+
+#[cfg(test)]
+mod get_reports_what_dux_uses_tests {
+    use super::*;
+
+    #[test]
+    fn get_reports_the_corrected_terminal_font_size_dux_uses() {
+        let raw = "[ui]\nterminal_font_size = 500\n";
+        let used = crate::config::effective_config_from_text(raw)
+            .unwrap()
+            .ui
+            .terminal_font_size;
+        assert_ne!(used, 500, "precondition: the load corrects it");
+        let got = get(raw, &lookup("ui.terminal_font_size").unwrap()).unwrap();
+        assert_eq!(
+            got,
+            GetValue::Set(used.to_string()),
+            "get must say what dux uses"
+        );
+    }
+
+    #[test]
+    fn get_reports_the_corrected_tailscale_mode_dux_uses() {
+        let raw = "[server]\ntailscale = \"maybe\"\n";
+        let used = crate::config::effective_config_from_text(raw)
+            .unwrap()
+            .server
+            .tailscale;
+        assert_eq!(used, "auto");
+        let got = get(raw, &lookup("server.tailscale").unwrap()).unwrap();
+        assert_eq!(got, GetValue::Set(used), "get must say what dux uses");
+    }
+
+    #[test]
+    fn get_reports_no_command_for_a_retired_stock_provider_dux_prunes() {
+        let raw = "[providers.gemini]\ncommand = \"gemini\"\nargs = []\nresume_args = [\"--resume\"]\nresume_wait_timeout_ms = 0\ninstall_hint = \"brew install gemini-cli\"\n";
+        let config = crate::config::effective_config_from_text(raw).unwrap();
+        assert!(
+            config.providers.get("gemini").is_none(),
+            "precondition: pruned at load"
+        );
+        let got = get(raw, &lookup("providers.gemini.command").unwrap()).unwrap();
+        assert_eq!(
+            got,
+            GetValue::Unset,
+            "dux has no gemini provider, get must not report one"
+        );
+    }
+
+    #[test]
+    fn set_serve_while_tui_never_makes_the_terminal_ui_refuse_a_file_it_started_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nport = 0\nserve_while_tui = false\n").unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            crate::config::start_refusal(&before, crate::config::Surface::TerminalUi),
+            None,
+            "precondition: the terminal UI starts with this file"
+        );
+        let result = set_plain(&path, &lookup("server.serve_while_tui").unwrap(), "true");
+        let after = std::fs::read_to_string(&path).unwrap();
+        let refusal = crate::config::start_refusal(&after, crate::config::Surface::TerminalUi);
+        assert!(
+            refusal.is_none(),
+            "set returned {result:?} and wrote a file the terminal UI refuses: {refusal:?}"
+        );
     }
 }

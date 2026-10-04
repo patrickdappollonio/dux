@@ -85,6 +85,51 @@ const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
     },
 ];
 
+/// Every deprecated key in `doc` the load migrations cannot carry over, each
+/// tried on its own (so one failure never hides another), as its dotted key
+/// and the sentence the migration fails with.
+pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(String, String)> {
+    DEPRECATED_CONFIG_KEYS
+        .iter()
+        .filter_map(|rule| {
+            let mut alone = doc.clone();
+            apply_config_deprecations_with(&mut alone, std::slice::from_ref(rule))
+                .err()
+                .map(|error| {
+                    (
+                        format!("{}.{}", rule.old.section, rule.old.key),
+                        format!("{error:#}"),
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Every retired provider's stock block in `doc` the load prunes, as its
+/// dotted key and why.
+pub fn retired_provider_prunes(doc: &DocumentMut) -> Vec<(String, String)> {
+    let mut pruned = doc.clone();
+    let Some(before) = doc.get("providers").and_then(Item::as_table) else {
+        return Vec::new();
+    };
+    prune_retired_providers(&mut pruned);
+    let after = pruned.get("providers").and_then(Item::as_table);
+    before
+        .iter()
+        .filter(|(name, _)| after.is_none_or(|after| !after.contains_key(name)))
+        .map(|(name, _)| {
+            (
+                format!("providers.{name}"),
+                format!(
+                    "dux no longer ships the {name} provider, and drops the untouched \
+                     [providers.{name}] block it once wrote when it loads the file (change any \
+                     value in it to keep it)"
+                ),
+            )
+        })
+        .collect()
+}
+
 fn apply_config_deprecations(doc: &mut DocumentMut) -> Result<bool> {
     apply_config_deprecations_with(doc, DEPRECATED_CONFIG_KEYS)
 }

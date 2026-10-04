@@ -4264,10 +4264,10 @@ args = [\"-l\"]
         assert_eq!(report.dropped, vec!["auth".to_string()]);
     }
 
-    /// The terminal UI binds `[server] port` only when the file has it serve,
-    /// so a port of 0 stops its start only then.
+    /// A port of 0 is `dux server`'s problem alone: the terminal UI starts
+    /// with it whether or not the file has it serve in the background.
     #[test]
-    fn a_port_of_zero_stops_the_terminal_ui_only_when_it_serves() {
+    fn a_port_of_zero_never_stops_the_terminal_ui() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let root = dir.path().to_path_buf();
         let paths = dux_core::config::DuxPaths {
@@ -4284,8 +4284,7 @@ args = [\"-l\"]
             "[server]\nport = 0\nserve_while_tui = true\n",
         )
         .unwrap();
-        let error = format!("{:#}", ensure_config(&paths).expect_err("refused"));
-        assert!(error.contains("port 0"), "{error}");
+        ensure_config(&paths).expect("starts when it serves in the background too");
     }
 
     /// The terminal UI's start (and reload) refuses exactly the files the one
@@ -4774,5 +4773,64 @@ mod web_dragdrop_paste_render_tests {
             parsed.providers.commands["claude"].resolved_web_dragdrop_paste(),
             dux_core::config::WebDragDropPaste::Bare
         );
+    }
+}
+
+#[cfg(test)]
+mod port_zero_and_deprecated_key_start_tests {
+    use super::*;
+
+    #[test]
+    fn the_terminal_ui_still_starts_with_a_background_server_on_port_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nport = 0\nserve_while_tui = true\n",
+        )
+        .unwrap();
+        // Before the branch the terminal UI started, and only its background
+        // server reported that it could not bind.
+        let result = ensure_config(&paths)
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"));
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn the_one_list_agrees_with_the_terminal_ui_start_on_a_deprecated_key_of_the_wrong_type() {
+        install_canonical_renderer();
+        for raw in [
+            "[defaults]\nprompt_for_name = \"yes\"\n",
+            "[server]\nbind = 5\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let paths = dux_core::config::DuxPaths {
+                config_path: root.join("config.toml"),
+                sessions_db_path: root.join("sessions.sqlite3"),
+                lock_path: root.join("dux.lock"),
+                worktrees_root: root.join("worktrees"),
+                root,
+            };
+            std::fs::write(&paths.config_path, raw).unwrap();
+            let started = ensure_config(&paths)
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"));
+            let listed =
+                dux_core::config::start_refusal(raw, dux_core::config::Surface::TerminalUi);
+            assert_eq!(
+                started.is_ok(),
+                listed.is_none(),
+                "for {raw:?}: the start said {started:?}, the one list said {listed:?}"
+            );
+        }
     }
 }
