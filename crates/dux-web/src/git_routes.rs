@@ -299,15 +299,19 @@ pub(crate) fn guard_destructive_targets(
         )?,
         claims: Vec::new(),
     };
-    let root_key = dux_core::worktree_ops::path_key(root);
+    let root_key = dux_core::worktree_ops::lexical_key(root);
     for target in targets {
         let path = root.join(target);
         // The root itself is never deleted or moved (the operation refuses
         // it), and it is already held above.
-        if dux_core::worktree_ops::path_key(&path) == root_key {
+        if dux_core::worktree_ops::lexical_key(&path) == root_key {
             continue;
         }
-        match ops.claim_for_destructive(&path) {
+        match ops.claim_for_destructive_as(
+            &path,
+            dux_core::worktree_ops::DESTRUCTIVE_CLAIM_WAIT,
+            "an editor delete or move",
+        ) {
             Ok(claim) => guard.claims.push(claim),
             Err(reason) => {
                 return Err((
@@ -611,7 +615,15 @@ async fn discard(
         true => {
             let ops = state.engine.worktree_ops().clone();
             let claimed = target.clone();
-            match tokio::task::spawn_blocking(move || ops.claim_for_destructive(&claimed)).await {
+            match tokio::task::spawn_blocking(move || {
+                ops.claim_for_destructive_as(
+                    &claimed,
+                    dux_core::worktree_ops::DESTRUCTIVE_CLAIM_WAIT,
+                    "a changes-pane delete",
+                )
+            })
+            .await
+            {
                 Ok(Ok(claim)) => Some(claim),
                 Ok(Err(reason)) => {
                     return (

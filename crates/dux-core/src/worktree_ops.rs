@@ -93,34 +93,63 @@ pub enum HoldOwner {
     CreateOp(String),
 }
 
-/// A new operation was refused because the worktree is being removed.
+/// A new operation was refused because the folder is being removed, or a
+/// delete or move of it is running.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HoldRefused {
     pub path: PathBuf,
+    /// `None` for a worktree removal; for a destructive file operation, what
+    /// it is ("an editor delete or move").
+    pub by: Option<&'static str>,
 }
 
 impl HoldRefused {
-    /// "dux is removing the worktree at X, so it did not {what}." Each caller
-    /// says what it was asked to do.
+    /// "dux is removing the worktree at X, so it did not {what}.", or, for a
+    /// delete or move running there, "{that} of X is running, so dux did not
+    /// {what}.". Each caller says what it was asked to do.
     pub fn sentence(&self, what: &str) -> crate::status_text::StatusText {
-        crate::status_text![
-            "dux is removing the worktree at ",
-            n(crate::home_path::shorten_home(&self.path)),
-            format!(
-                ", so it did not {what}. The agent that owned it was deleted; nothing \
-                 new can start in that folder while it goes."
-            )
-        ]
+        match self.by {
+            None => crate::status_text![
+                "dux is removing the worktree at ",
+                n(crate::home_path::shorten_home(&self.path)),
+                format!(
+                    ", so it did not {what}. The agent that owned it was deleted; nothing \
+                     new can start in that folder while it goes."
+                )
+            ],
+            Some(by) => crate::status_text![
+                capitalize(by),
+                " of ",
+                n(crate::home_path::shorten_home(&self.path)),
+                format!(" is running, so dux did not {what}. Try again once it has finished.")
+            ],
+        }
     }
 }
 
 impl std::fmt::Display for HoldRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "dux is removing the worktree at {}, so nothing new can start in it",
-            crate::home_path::shorten_home(&self.path)
-        )
+        match self.by {
+            None => write!(
+                f,
+                "dux is removing the worktree at {}, so nothing new can start in it",
+                crate::home_path::shorten_home(&self.path)
+            ),
+            Some(by) => write!(
+                f,
+                "{by} of {} is running, so nothing new can start in it",
+                crate::home_path::shorten_home(&self.path)
+            ),
+        }
+    }
+}
+
+/// `text` with its first letter in upper case.
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -153,7 +182,7 @@ struct PathEntry {
     /// A destructive file operation's claim (an editor or changes-pane delete
     /// or move), by id. A different kind from a removal: a removal never
     /// joins one, it waits for it.
-    destructive: Option<u64>,
+    destructive: Option<(u64, &'static str)>,
 }
 
 impl PathEntry {
@@ -183,16 +212,52 @@ struct State {
 }
 
 impl State {
-    /// The key of a removal, or a destructive file operation, claimed on
-    /// `key` or on any folder containing it.
-    fn removal_covering(&self, key: &Path) -> Option<PathBuf> {
+    /// A removal, or a destructive file operation, claimed on `key` or on
+    /// any folder containing it: the refusal for anything new there.
+    fn removal_covering(&self, key: &Path) -> Option<HoldRefused> {
         self.paths
             .iter()
             .find(|(claimed, entry)| {
                 (entry.removal.is_some() || entry.destructive.is_some())
                     && key_contains(claimed, key)
             })
-            .map(|(claimed, _)| claimed.clone())
+            .map(|(claimed, entry)| HoldRefused {
+                path: claimed.clone(),
+                by: match entry.removal {
+                    Some(_) => None,
+                    None => entry.destructive.map(|(_, by)| by),
+                },
+            })
+    }
+
+    /// What an older removal or destructive claim overlapping `key` is, in
+    /// words, when one is (see [`Self::overlapping_older`]).
+    fn overlapping_older_described(&self, key: &Path, id: u64) -> Option<String> {
+        self.paths.iter().find_map(|(other, entry)| {
+            let nested = key_contains(other, key) || key_contains(key, other);
+            if !nested {
+                return None;
+            }
+            if entry
+                .removal
+                .as_ref()
+                .is_some_and(|removal| removal.id < id && other.as_path() != key)
+            {
+                return Some(format!(
+                    "dux is still removing the worktree at {}",
+                    crate::home_path::shorten_home(other)
+                ));
+            }
+            entry
+                .destructive
+                .filter(|(claim, _)| *claim < id)
+                .map(|(_, by)| {
+                    format!(
+                        "{by} of {} is still running",
+                        crate::home_path::shorten_home(other)
+                    )
+                })
+        })
     }
 
     /// Whether a removal or destructive claim older than `id` is on a folder
@@ -209,7 +274,7 @@ impl State {
                 .is_some_and(|removal| removal.id < id && other.as_path() != key && nested);
             let destructive = entry
                 .destructive
-                .is_some_and(|claim| claim < id && claim != id && nested);
+                .is_some_and(|(claim, _)| claim < id && nested);
             removal || destructive
         })
     }
@@ -281,14 +346,47 @@ pub fn path_key(path: &Path) -> PathBuf {
     }
 }
 
-/// Whether `inner` is the folder `outer` or anywhere inside it. Compared by
-/// path COMPONENTS on keys from [`path_key`], never by string prefix, so
-/// `/w/agent` does not contain `/w/agent-two`. The ONE containment test: a
-/// removal of a folder deletes everything inside it, so every question about
-/// what occupies a folder (a hold, a claim, a create, a process, the manager's
-/// busy state, the last look before git) asks this.
+/// The LEXICAL key of a path: as written, normalized, with its parent
+/// resolved (like [`path_key`]) and its own last component kept, never
+/// followed. For a path whose last component is not a symbolic link it is
+/// the same as [`path_key`]; for a link it names the link itself, not where
+/// it leads. The registry keys holds and claims by this, so a delete or move
+/// of a link claims the link, never its target.
+pub fn lexical_key(path: &Path) -> PathBuf {
+    let normalized: PathBuf = path.components().collect();
+    match (normalized.parent(), normalized.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => path_key(parent).join(name),
+        _ => path_key(&normalized),
+    }
+}
+
+/// Every spelling a recorded path stands for: LEXICAL (as recorded, its
+/// parent resolved, its last component kept) and CANONICAL (fully
+/// resolved). They differ only for a symbolic link.
+pub fn spellings(path: &Path) -> Vec<PathBuf> {
+    let lexical = lexical_key(path);
+    let canonical = path_key(path);
+    if lexical == canonical {
+        vec![lexical]
+    } else {
+        vec![lexical, canonical]
+    }
+}
+
+/// Whether `inner` is the folder `outer` or anywhere inside it, under every
+/// spelling of both (see [`spellings`]): an occupant recorded at a link
+/// inside the folder is inside it however far the link points, and one
+/// recorded at a link outside it whose target is inside is inside it too.
+/// Compared by path COMPONENTS, never by string prefix, so `/w/agent` does
+/// not contain `/w/agent-two`. The ONE containment test: a removal of a
+/// folder deletes everything inside it, so every question about what
+/// occupies a folder (a hold, a claim, a create, a process, a working
+/// directory, the manager's busy state, the last look before git) asks this.
 pub fn folder_contains(outer: &Path, inner: &Path) -> bool {
-    path_key(inner).starts_with(path_key(outer))
+    let outers = spellings(outer);
+    spellings(inner)
+        .iter()
+        .any(|inner| outers.iter().any(|outer| inner.starts_with(outer)))
 }
 
 /// [`folder_contains`] for two keys already built.
@@ -316,10 +414,10 @@ impl WorktreeOps {
         path: impl AsRef<Path>,
         kind: WorktreeOpKind,
     ) -> Result<WorktreeOpGuard, HoldRefused> {
-        let key = path_key(path.as_ref());
+        let key = lexical_key(path.as_ref());
         let mut state = self.lock();
-        if let Some(claimed) = state.removal_covering(&key) {
-            return Err(HoldRefused { path: claimed });
+        if let Some(refused) = state.removal_covering(&key) {
+            return Err(refused);
         }
         let id = state.mint();
         state
@@ -345,10 +443,10 @@ impl WorktreeOps {
         path: impl AsRef<Path>,
         kind: WorktreeOpKind,
     ) -> Result<(), HoldRefused> {
-        let key = path_key(path.as_ref());
+        let key = lexical_key(path.as_ref());
         let mut state = self.lock();
-        if let Some(claimed) = state.removal_covering(&key) {
-            return Err(HoldRefused { path: claimed });
+        if let Some(refused) = state.removal_covering(&key) {
+            return Err(refused);
         }
         Self::release_owner_locked(&mut state, &owner);
         state
@@ -405,7 +503,7 @@ impl WorktreeOps {
     /// The operations holding `path`, or any folder inside it, right now: a
     /// removal of `path` deletes those folders too.
     pub fn holders(&self, path: impl AsRef<Path>) -> Vec<WorktreeOpKind> {
-        let key = path_key(path.as_ref());
+        let key = lexical_key(path.as_ref());
         self.lock().kinds_within(&key)
     }
 
@@ -413,16 +511,14 @@ impl WorktreeOps {
     /// or of a folder containing it, is under way; names the folder being
     /// removed. `None` when nothing covers it.
     pub fn removal_refusal(&self, path: impl AsRef<Path>) -> Option<HoldRefused> {
-        let key = path_key(path.as_ref());
-        self.lock()
-            .removal_covering(&key)
-            .map(|claimed| HoldRefused { path: claimed })
+        let key = lexical_key(path.as_ref());
+        self.lock().removal_covering(&key)
     }
 
     /// Whether a removal of `path`, or of a folder containing it, has been
     /// announced and not yet finished.
     pub fn is_being_removed(&self, path: impl AsRef<Path>) -> bool {
-        let key = path_key(path.as_ref());
+        let key = lexical_key(path.as_ref());
         self.lock().removal_covering(&key).is_some()
     }
 
@@ -431,7 +527,7 @@ impl WorktreeOps {
     /// it.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn announce_removal(&self, path: impl AsRef<Path>) -> RemovalClaim {
-        let key = path_key(path.as_ref());
+        let key = lexical_key(path.as_ref());
         let mut state = self.lock();
         let id = state.mint();
         let entry = state.paths.entry(key.clone()).or_default();
@@ -472,6 +568,19 @@ impl WorktreeOps {
         self.claim_for_destructive_within(path, DESTRUCTIVE_CLAIM_WAIT)
     }
 
+    /// [`Self::claim_for_destructive_within`], saying what the operation is
+    /// ("an editor delete or move", "a changes-pane delete"), so anything it
+    /// refuses meanwhile names it truthfully.
+    #[must_use = "a refused hold or claim must be answered, never dropped"]
+    pub fn claim_for_destructive_as(
+        &self,
+        path: impl AsRef<Path>,
+        wait: Duration,
+        by: &'static str,
+    ) -> Result<DestructiveClaim, String> {
+        self.claim_destructive(path.as_ref(), wait, by)
+    }
+
     /// [`Self::claim_for_destructive`], waiting at most `wait` for a removal
     /// running in or under the folder: the same ordering two removals of
     /// nested folders keep, so a delete or move of a folder never runs while
@@ -483,17 +592,32 @@ impl WorktreeOps {
         path: impl AsRef<Path>,
         wait: Duration,
     ) -> Result<DestructiveClaim, String> {
-        let key = path_key(path.as_ref());
+        self.claim_destructive(path.as_ref(), wait, "a delete or move")
+    }
+
+    fn claim_destructive(
+        &self,
+        path: &Path,
+        wait: Duration,
+        by: &'static str,
+    ) -> Result<DestructiveClaim, String> {
+        let key = lexical_key(path);
         let claim = {
             let mut state = self.lock();
             if let Some(covering) = state.removal_covering(&key) {
-                return Err(format!(
-                    "{} is being removed",
-                    crate::home_path::shorten_home(&covering)
-                ));
+                return Err(match covering.by {
+                    None => format!(
+                        "dux is removing the worktree at {}",
+                        crate::home_path::shorten_home(&covering.path)
+                    ),
+                    Some(by) => format!(
+                        "{by} of {} is running",
+                        crate::home_path::shorten_home(&covering.path)
+                    ),
+                });
             }
             let id = state.mint();
-            state.paths.entry(key.clone()).or_default().destructive = Some(id);
+            state.paths.entry(key.clone()).or_default().destructive = Some((id, by));
             DestructiveClaim {
                 ops: self.clone(),
                 key,
@@ -505,9 +629,12 @@ impl WorktreeOps {
             return Err(format!("{} is running in it", describe_holders(&holders)));
         }
         if !self.wait_for_older_overlapping(&claim.key, claim.id, wait) {
+            let what = self
+                .lock()
+                .overlapping_older_described(&claim.key, claim.id)
+                .unwrap_or_else(|| "another delete or removal there is still running".to_string());
             return Err(format!(
-                "dux is still removing a worktree inside it after {} seconds; try again once \
-                 that has finished",
+                "{what} after {} seconds; try again once it has finished",
                 wait.as_secs()
             ));
         }
@@ -560,7 +687,7 @@ impl DestructiveClaim {
 
     /// Whether this claim is on exactly `path`.
     pub fn covers(&self, path: &Path) -> bool {
-        path_key(path) == self.key
+        lexical_key(path) == self.key
     }
 }
 
@@ -577,7 +704,7 @@ impl Drop for DestructiveClaim {
         {
             let mut state = self.ops.lock();
             if let Some(entry) = state.paths.get_mut(&self.key)
-                && entry.destructive == Some(self.id)
+                && entry.destructive.is_some_and(|(id, _)| id == self.id)
             {
                 entry.destructive = None;
             }
@@ -802,6 +929,57 @@ impl RemovalJoin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link inside a folder that points outside it is inside the folder
+    /// (its lexical spelling), and a link outside it that points inside is
+    /// inside too (its canonical spelling).
+    #[test]
+    fn containment_holds_under_either_spelling_of_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("wt");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(folder.join("inner")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link_in = folder.join("link-out");
+        std::os::unix::fs::symlink(&outside, &link_in).unwrap();
+        let link_out = dir.path().join("link-in");
+        std::os::unix::fs::symlink(folder.join("inner"), &link_out).unwrap();
+        assert!(
+            folder_contains(&folder, &link_in),
+            "recorded at a link inside"
+        );
+        assert!(
+            folder_contains(&folder, &link_out),
+            "recorded at a link to inside"
+        );
+        assert!(
+            !folder_contains(&folder, &outside),
+            "the outside folder itself"
+        );
+    }
+
+    /// A delete or move's claim is keyed on a link's own path, and what it
+    /// refuses meanwhile names it truthfully.
+    #[test]
+    fn a_destructive_claim_names_itself_in_what_it_refuses() {
+        let ops = WorktreeOps::new();
+        let _claim = ops
+            .claim_for_destructive_as("/work/folder", Duration::ZERO, "an editor delete or move")
+            .unwrap();
+        let refused = ops
+            .hold("/work/folder/inner", WorktreeOpKind::EditorWrite)
+            .unwrap_err();
+        let sentence = refused.sentence("save the file").to_string();
+        assert!(
+            sentence.starts_with("An editor delete or move of "),
+            "{sentence}"
+        );
+        assert!(!sentence.contains("removing the worktree"), "{sentence}");
+        let claimed = ops
+            .claim_for_destructive_within("/work/folder/inner", Duration::ZERO)
+            .unwrap_err();
+        assert!(claimed.contains("an editor delete or move of"), "{claimed}");
+    }
 
     /// A removal never joins a destructive claim: it leads, and waits for
     /// the claim (bounded) under the nested-ordering rule.

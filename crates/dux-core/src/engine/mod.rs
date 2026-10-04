@@ -7,6 +7,8 @@
 pub mod command;
 mod companion;
 pub mod config_saver;
+#[doc(hidden)]
+pub mod destructive_guard;
 mod events;
 mod followup;
 mod in_flight;
@@ -35,6 +37,8 @@ mod removal_review_tests;
 mod review10_tests;
 #[cfg(test)]
 mod review11_tests;
+#[cfg(test)]
+mod review12_tests;
 #[cfg(test)]
 mod review8_tests;
 #[cfg(test)]

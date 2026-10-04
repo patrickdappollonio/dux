@@ -764,12 +764,16 @@ impl App {
         // refuses the delete), the occupancy question is asked under the
         // claim, and the worker clears it right before deleting.
         let target = worktree.join(&path);
+        // This is the UI thread: it only claims (in memory, never waiting)
+        // and asks the engine's own state; the clearance and the delete run
+        // on the worker below.
+        let _ui_thread = dux_core::engine::destructive_guard::engine_thread();
         let claim = if op == FolderOp::Delete {
-            match self
-                .engine
-                .worktree_ops()
-                .claim_for_destructive_within(&target, std::time::Duration::ZERO)
-            {
+            match self.engine.worktree_ops().claim_for_destructive_as(
+                &target,
+                std::time::Duration::ZERO,
+                "a changes-pane delete",
+            ) {
                 Ok(claim) => Some(claim),
                 Err(reason) => {
                     self.set_error(format!(

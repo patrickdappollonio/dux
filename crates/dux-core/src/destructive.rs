@@ -80,6 +80,22 @@ impl DestructiveCheck {
         self
     }
 
+    /// The refusal the engine's own state already gives (an agent or project
+    /// living there, an operation holding a path there), with no blocking
+    /// read: a caller on the engine thread can refuse at once instead of
+    /// starting a worker that would only refuse later. `None` says only that
+    /// [`Self::clear`] has more to look at.
+    pub fn refused_now(&self, what: &str) -> Option<Refused> {
+        self.targets.iter().find_map(|target| {
+            target.occupant.as_ref().map(|reason| {
+                Refused(format!(
+                    "dux did not {what} {}: {reason}.",
+                    crate::home_path::shorten_home(&target.path)
+                ))
+            })
+        })
+    }
+
     /// Clear the operation, or refuse it with the sentence that names what
     /// is in the way: an agent or project living there, an operation holding
     /// a path there, something dux started there still running, or a process
@@ -93,6 +109,9 @@ impl DestructiveCheck {
         claims: &[&'a crate::worktree_ops::DestructiveClaim],
         what: &str,
     ) -> Result<Cleared<'a>, Refused> {
+        crate::engine::destructive_guard::assert_off_engine_thread(
+            "clearing a destructive operation",
+        );
         for target in &self.targets {
             let refused = |reason: String| {
                 Refused(format!(
@@ -155,7 +174,7 @@ impl DestructiveCheck {
             keys: self
                 .targets
                 .iter()
-                .map(|target| crate::worktree_ops::path_key(&target.path))
+                .map(|target| crate::worktree_ops::lexical_key(&target.path))
                 .collect(),
             _claims: std::marker::PhantomData,
             #[cfg(test)]
@@ -183,7 +202,7 @@ impl Cleared<'_> {
         if self.any {
             return Ok(());
         }
-        let key = crate::worktree_ops::path_key(path);
+        let key = crate::worktree_ops::lexical_key(path);
         if self.keys.contains(&key) {
             Ok(())
         } else {

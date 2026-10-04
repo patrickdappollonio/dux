@@ -263,6 +263,39 @@ pub enum Command {
     WatchChangedFiles { session_id: Option<String> },
 }
 
+/// What a discard of `path` says once it is done, given how many files went.
+fn discard_message(
+    path: &str,
+    is_untracked: bool,
+    confirmed: crate::git::ConfirmedEntry,
+) -> impl Fn(usize) -> crate::status_text::StatusText + Send + 'static {
+    let path = path.to_string();
+    move |went| match confirmed {
+        crate::git::ConfirmedEntry::Repository => crate::status_text![
+            "Deleted ",
+            q(format!("{path}/")),
+            ", a repository of its own, with its history."
+        ],
+        crate::git::ConfirmedEntry::Folder { .. } => crate::status_text![
+            "Deleted the untracked files in ",
+            q(format!("{path}/")),
+            format!(
+                " ({}); files the repository ignores and repositories of their own inside it \
+                 are kept.",
+                crate::model::count_words(went, "file", "files")
+            )
+        ],
+        crate::git::ConfirmedEntry::File if is_untracked => {
+            crate::status_text!["Deleted untracked file ", q(path.clone()), "."]
+        }
+        crate::git::ConfirmedEntry::File => crate::status_text![
+            "Discarded unstaged changes to ",
+            q(path.clone()),
+            ". Staged changes, if any, are kept."
+        ],
+    }
+}
+
 impl Engine {
     /// Single dispatch point for every engine-affecting operation, whether the
     /// `Command` came from a key event or off the wire. Returns an
@@ -706,72 +739,74 @@ impl Engine {
                 is_untracked,
                 confirmed,
             } => {
-                let _hold = self.hold_for_git_change(&worktree_path, "discard the change")?;
-                // A folder (or a nested repository) is removed whole, so the
-                // discard follows the one destructive protocol: claim it, ask
-                // the occupancy question under the claim, and clear it right
-                // before the delete. On this thread the claim does not wait:
-                // a removal running inside the folder refuses it.
+                let _engine_thread = crate::engine::destructive_guard::engine_thread();
+                let hold = self.hold_for_git_change(&worktree_path, "discard the change")?;
                 let target = worktree_path.join(&path);
-                let claim = match confirmed {
-                    crate::git::ConfirmedEntry::File
-                        if !(is_untracked && crate::engine::is_symlink(&target)) =>
-                    {
-                        None
-                    }
-                    _ => Some(
-                        self.worktree_ops()
-                            .claim_for_destructive_within(&target, std::time::Duration::ZERO)
-                            .map_err(|reason| {
-                                anyhow::Error::new(crate::destructive::Refused(format!(
-                                    "dux did not delete {}: {reason}.",
-                                    crate::home_path::shorten_home(&target)
-                                )))
-                            })?,
-                    ),
-                };
-                let check = self.destructive_check(&target);
-                // The discard refuses anything that is no longer what was
-                // confirmed, so a success is the kind the user confirmed; the
-                // number of files is what actually went, which may be fewer.
-                let went = crate::git::discard_confirmed(
-                    &worktree_path,
-                    &path,
-                    is_untracked,
-                    Some(confirmed),
-                    || match &claim {
-                        Some(claim) => check.clear(&[claim], "delete"),
-                        None => Err(crate::destructive::Refused(format!(
-                            "dux did not delete {}: it was confirmed as a file",
+                let message = discard_message(&path, is_untracked, confirmed);
+                // A folder, a nested repository or an untracked link is
+                // removed whole, so the discard follows the one destructive
+                // protocol: claim it here (in memory, never waiting: a claim
+                // already held refuses it at once), ask the occupancy
+                // question under the claim, and clear it and delete on a
+                // worker. The engine thread never opens the session database
+                // or reads the process table for it.
+                let destructive = !matches!(confirmed, crate::git::ConfirmedEntry::File)
+                    || (is_untracked && crate::engine::is_symlink(&target));
+                if !destructive {
+                    // A file restored or deleted as a file: nothing to clear.
+                    crate::git::discard_confirmed(
+                        &worktree_path,
+                        &path,
+                        is_untracked,
+                        Some(confirmed),
+                        || {
+                            Err(crate::destructive::Refused(format!(
+                                "dux did not delete {}: it was confirmed as a file",
+                                crate::home_path::shorten_home(&target)
+                            )))
+                        },
+                    )?;
+                    drop(hold);
+                    return Ok(EventReaction::Status(StatusUpdate::info(message(0))));
+                }
+                let claim = self
+                    .worktree_ops()
+                    .claim_for_destructive_as(
+                        &target,
+                        std::time::Duration::ZERO,
+                        "a changes-pane delete",
+                    )
+                    .map_err(|reason| {
+                        anyhow::Error::new(crate::destructive::Refused(format!(
+                            "dux did not delete {}: {reason}.",
                             crate::home_path::shorten_home(&target)
-                        ))),
-                    },
-                )?;
-                let message = match confirmed {
-                    crate::git::ConfirmedEntry::Repository => crate::status_text![
-                        "Deleted ",
-                        q(format!("{path}/")),
-                        ", a repository of its own, with its history."
-                    ],
-                    crate::git::ConfirmedEntry::Folder { .. } => crate::status_text![
-                        "Deleted the untracked files in ",
-                        q(format!("{path}/")),
-                        format!(
-                            " ({}); files the repository ignores and repositories of their own \
-                             inside it are kept.",
-                            crate::model::count_words(went, "file", "files")
-                        )
-                    ],
-                    crate::git::ConfirmedEntry::File if is_untracked => {
-                        crate::status_text!["Deleted untracked file ", q(path), "."]
-                    }
-                    crate::git::ConfirmedEntry::File => crate::status_text![
-                        "Discarded unstaged changes to ",
-                        q(path),
-                        ". Staged changes, if any, are kept."
-                    ],
-                };
-                Ok(EventReaction::Status(StatusUpdate::info(message)))
+                        )))
+                    })?;
+                let check = self.destructive_check(&target);
+                if let Some(refused) = check.refused_now("delete") {
+                    return Err(anyhow::Error::new(refused));
+                }
+                let op = crate::engine::status_op(crate::status_text![
+                    "Deleting ",
+                    q(path.clone()),
+                    "\u{2026}"
+                ])
+                .on_success(move |went: &usize| crate::engine::Final::info(message(*went)))
+                .on_failure(|error: &String| crate::engine::Final::error(error.clone()));
+                Ok(self.spawn_status_op(op, move || {
+                    let _hold = hold;
+                    // The discard refuses anything that is no longer what
+                    // was confirmed, so a success is the kind the user
+                    // confirmed; the number of files is what actually went.
+                    crate::git::discard_confirmed(
+                        &worktree_path,
+                        &path,
+                        is_untracked,
+                        Some(confirmed),
+                        || check.clear(&[&claim], "delete"),
+                    )
+                    .map_err(|err| format!("{err:#}"))
+                }))
             }
 
             Command::CommitChanges {
@@ -2614,6 +2649,28 @@ mod tests {
         assert!(nested.join(".git").exists() && nested.join("own.txt").exists());
     }
 
+    /// A destructive discard answers with a busy status and finishes on a
+    /// worker: drive it to its final.
+    fn finish_discard(engine: &mut Engine, reaction: EventReaction) -> EventReaction {
+        let EventReaction::Status(busy) = &reaction else {
+            return reaction;
+        };
+        if busy.tone != crate::statusline::StatusTone::Busy {
+            return reaction;
+        }
+        loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the delete reports");
+            let done = matches!(event, crate::worker::WorkerEvent::StatusOpCompleted { .. });
+            let processed = engine.process_worker_event(event);
+            if done {
+                return processed;
+            }
+        }
+    }
+
     /// A folded folder is discarded whole, and the message says it was a
     /// folder: "deleted untracked file" about thirty thousand files is a lie
     /// about how much just went.
@@ -2634,6 +2691,7 @@ mod tests {
                 confirmed: crate::git::ConfirmedEntry::Folder { files: 3 },
             })
             .expect("apply");
+        let reaction = finish_discard(&mut engine, reaction);
 
         match reaction {
             EventReaction::Status(update) => assert!(
@@ -2666,6 +2724,7 @@ mod tests {
                 confirmed: crate::git::ConfirmedEntry::Folder { files: 1 },
             })
             .expect("apply");
+        let reaction = finish_discard(&mut engine, reaction);
 
         match reaction {
             EventReaction::Status(update) => {

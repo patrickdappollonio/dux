@@ -433,7 +433,7 @@ impl Engine {
             .iter()
             .map(|agent| {
                 (
-                    crate::worktree_ops::path_key(std::path::Path::new(agent.directory())),
+                    std::path::PathBuf::from(agent.directory()),
                     Occupant::Agent {
                         id: agent.id.clone(),
                         label: agent.display_label(),
@@ -448,7 +448,7 @@ impl Engine {
         found.extend(
             self.pty_occupants()
                 .into_iter()
-                .map(|(dir, _, what, _)| (crate::worktree_ops::path_key(&dir), what.to_string())),
+                .map(|(dir, _, what, _)| (dir, what.to_string())),
         );
         found
     }
@@ -602,6 +602,7 @@ pub(crate) fn stored_occupant(
     folder: &std::path::Path,
     removing: Option<&str>,
 ) -> Result<Option<Occupant>, String> {
+    crate::engine::destructive_guard::assert_off_engine_thread("reading the session database");
     let (agents, projects) = crate::storage::SessionStore::open(db_path)
         .and_then(|store| Ok((store.load_sessions()?, store.load_projects()?)))
         .map_err(|e| {

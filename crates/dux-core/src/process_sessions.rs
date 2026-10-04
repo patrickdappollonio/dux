@@ -99,7 +99,7 @@ fn judge_cwds<'a>(
     session_folder: &std::path::Path,
 ) -> CwdVerdict<'a> {
     let by_pid: HashMap<u32, &ProcRow> = table.iter().map(|row| (row.pid, row)).collect();
-    let inside = |cwd: &std::path::Path| crate::worktree_ops::path_key(cwd).starts_with(folder);
+    let inside = |cwd: &std::path::Path| crate::worktree_ops::folder_contains(folder, cwd);
     let mut unknown: Option<&'a ProcRow> = None;
     for row in running {
         if let Some(cwd) = report.found.get(&row.pid) {
@@ -130,8 +130,7 @@ fn judge_cwds<'a>(
             Some(cwd) if inside(cwd) => return CwdVerdict::Inside(row),
             Some(_) => {}
             None => {
-                if crate::worktree_ops::path_key(session_folder).starts_with(folder)
-                    && unknown.is_none()
+                if crate::worktree_ops::folder_contains(folder, session_folder) && unknown.is_none()
                 {
                     unknown = Some(row);
                 }
@@ -509,6 +508,7 @@ pub fn survivors_at_leader_exit(session: ProcessSession) -> Vec<ProcessIdentity>
 /// Blocking file and syscall work: call it from a worker thread, never the UI
 /// thread.
 pub fn read_process_table() -> Vec<ProcRow> {
+    crate::engine::destructive_guard::assert_off_engine_thread("reading the process table");
     #[cfg(target_os = "linux")]
     {
         let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -1008,7 +1008,9 @@ impl AgentProcessRegistry {
 
     /// Remember that `session` was started for agent `agent_id` in `folder`.
     pub fn register(&self, agent_id: &str, session: ProcessSession, folder: &std::path::Path) {
-        let folder = crate::worktree_ops::path_key(folder);
+        // Recorded as spelled (its parent resolved, its last component kept):
+        // containment checks it under every spelling.
+        let folder = crate::worktree_ops::lexical_key(folder);
         let mut inner = self.lock();
         // The kernel handed this number to a newer session: whatever was
         // recorded under it before is gone, under every key.
@@ -1159,7 +1161,6 @@ impl AgentProcessRegistry {
         if tracked.is_empty() {
             return None;
         }
-        let folder = crate::worktree_ops::path_key(folder);
         let table = read_process_table();
         let self_pid = std::process::id();
         for (session, started_in, known, label) in tracked {
@@ -1174,7 +1175,7 @@ impl AgentProcessRegistry {
                     .clone()
                     .unwrap_or_else(|| "a process dux started".to_string())
             };
-            match judge_cwds(&folder, &running, &table, &report, &started_in) {
+            match judge_cwds(folder, &running, &table, &report, &started_in) {
                 CwdVerdict::Clear => {}
                 CwdVerdict::Inside(row) => {
                     return Some(format!(
@@ -1251,7 +1252,7 @@ impl AgentProcessRegistry {
             Self::ensure_writer(&mut inner, db_path);
             inner
                 .pending_folders
-                .insert(row_id.to_string(), crate::worktree_ops::path_key(folder));
+                .insert(row_id.to_string(), crate::worktree_ops::lexical_key(folder));
         }
         self.sync_pending(folder);
     }
@@ -1286,7 +1287,6 @@ impl AgentProcessRegistry {
     /// registry goes into its own table, and what is known in or under a
     /// folder with a pending removal into that removal's row. Never waits.
     fn sync_pending(&self, changed: &std::path::Path) {
-        let changed = crate::worktree_ops::path_key(changed);
         let mut inner = self.lock();
         if inner.writer.is_none() {
             return;
@@ -1296,7 +1296,7 @@ impl AgentProcessRegistry {
         let rows: Vec<(String, std::path::PathBuf)> = inner
             .pending_folders
             .iter()
-            .filter(|(_, folder)| changed.starts_with(folder))
+            .filter(|(_, folder)| crate::worktree_ops::folder_contains(folder, changed))
             .map(|(row, folder)| (row.clone(), folder.clone()))
             .collect();
         for (row, folder) in rows {
@@ -1523,7 +1523,6 @@ impl AgentProcessRegistry {
     }
 
     fn snapshot_in_locked(inner: &RegistryInner, folder: &std::path::Path) -> RegistrySnapshot {
-        let folder = crate::worktree_ops::path_key(folder);
         let live = inner
             .sessions
             .iter()
@@ -1531,7 +1530,7 @@ impl AgentProcessRegistry {
         let retired = inner.retired.iter().map(|entry| (None, entry));
         let mut snapshot = RegistrySnapshot::default();
         for (owner, (session, started_in)) in live.chain(retired) {
-            if !started_in.starts_with(&folder) {
+            if !crate::worktree_ops::folder_contains(folder, started_in) {
                 continue;
             }
             snapshot.merge(&RegistrySnapshot {
@@ -1702,7 +1701,6 @@ impl AgentProcessRegistry {
         folder: &std::path::Path,
         standalone: bool,
     ) -> Vec<ProcessSession> {
-        let folder = crate::worktree_ops::path_key(folder);
         let inner = self.lock();
         let live = inner
             .sessions
@@ -1711,7 +1709,7 @@ impl AgentProcessRegistry {
         let retired = inner.retired.iter().map(|entry| (None, entry));
         let mut found: Vec<ProcessSession> = live
             .chain(retired)
-            .filter(|(_, (_, started_in))| started_in.starts_with(&folder))
+            .filter(|(_, (_, started_in))| crate::worktree_ops::folder_contains(folder, started_in))
             .filter(|(owner, (session, _))| {
                 Self::is_standalone_entry(&inner, *owner, session) == standalone
             })

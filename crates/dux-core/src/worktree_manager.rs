@@ -136,7 +136,6 @@ pub fn list_manageable_worktrees_with_busy(
             // is still in its grace period has no record left, so a session
             // snapshot would offer its folder as free.
             entry.being_removed = ops.is_being_removed(&entry.path);
-            let key = crate::worktree_ops::path_key(&entry.path);
             entry.busy = if ops
                 .holders(&entry.path)
                 .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
@@ -144,7 +143,7 @@ pub fn list_manageable_worktrees_with_busy(
                 Some("an agent is being created in it".to_string())
             } else {
                 busy.iter()
-                    .find(|(folder, _)| crate::worktree_ops::folder_contains(&key, folder))
+                    .find(|(folder, _)| crate::worktree_ops::folder_contains(&entry.path, folder))
                     .map(|(_, reason)| reason.clone())
             };
             entry.dirty = git::worktree_is_dirty(&entry.path).unwrap_or(false);
