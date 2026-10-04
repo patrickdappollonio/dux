@@ -353,23 +353,63 @@ pub fn union_seen(seen: Option<&str>, written: &str) -> String {
 
 fn union_tables(seen: &mut Table, written: &Table) {
     for (key, item) in written.iter() {
-        match (seen.get_mut(key), item) {
-            (None, _) => {
+        match seen.get_mut(key) {
+            None => {
                 seen.insert(key, item.clone());
             }
-            (Some(Item::Table(seen_table)), Item::Table(written_table)) => {
-                union_tables(seen_table, written_table);
-            }
-            (Some(Item::ArrayOfTables(seen_array)), Item::ArrayOfTables(written_array)) => {
-                for entry in written_array.iter() {
-                    let known: Vec<&Table> = seen_array.iter().collect();
-                    let used = vec![false; known.len()];
-                    if find_entry(&known, &used, entry).is_none() {
-                        seen_array.push(entry.clone());
-                    }
-                }
-            }
-            _ => {}
+            Some(seen_item) => union_items(seen_item, item),
+        }
+    }
+}
+
+/// Fold `written` into `seen` at one key, everywhere a key can live: inside
+/// a table in either form (a subtable, an inline table, one nested inline in
+/// another), and inside each entry of an array of tables matched to its
+/// written entry by the same assignment the merge uses. A value is already
+/// seen; its text does not matter here.
+fn union_items(seen: &mut Item, written: &Item) {
+    if let (Item::ArrayOfTables(seen_array), Item::ArrayOfTables(written_array)) =
+        (&mut *seen, written)
+    {
+        union_arrays(seen_array, written_array);
+        return;
+    }
+    let Some(written_table) = table_like(written) else {
+        return;
+    };
+    match seen {
+        Item::Table(seen_table) => union_tables(seen_table, &written_table),
+        Item::Value(Value::InlineTable(inline)) => {
+            let mut table = inline.clone().into_table();
+            union_tables(&mut table, &written_table);
+            let decor = inline.decor().clone();
+            *inline = table.into_inline_table();
+            *inline.decor_mut() = decor;
+        }
+        _ => {}
+    }
+}
+
+/// Each written entry folded into the seen entry it is (see
+/// [`assign_entries`]), and one with no seen entry added.
+fn union_arrays(seen: &mut toml_edit::ArrayOfTables, written: &toml_edit::ArrayOfTables) {
+    let written_entries: Vec<&Table> = written.iter().collect();
+    let matched = {
+        let seen_entries: Vec<&Table> = seen.iter().collect();
+        let mut used = vec![false; seen_entries.len()];
+        assign_entries(
+            &written_entries
+                .iter()
+                .map(|entry| vec![*entry])
+                .collect::<Vec<_>>(),
+            &seen_entries,
+            &mut used,
+        )
+    };
+    for (entry, matched) in written_entries.into_iter().zip(matched) {
+        match matched.and_then(|index| seen.get_mut(index)) {
+            Some(seen_entry) => union_tables(seen_entry, entry),
+            None => seen.push(entry.clone()),
         }
     }
 }
@@ -713,13 +753,6 @@ fn same_entry_at(tier: usize, a: &Table, b: &Table) -> bool {
     }
 }
 
-/// The first entry of `list` not yet `used` that is the same entry as
-/// `entry`, at the strongest tier any entry matches at.
-fn find_entry(list: &[&Table], used: &[bool], entry: &Table) -> Option<usize> {
-    (0..MATCH_TIERS)
-        .find_map(|tier| (0..list.len()).find(|&i| !used[i] && same_entry_at(tier, list[i], entry)))
-}
-
 /// Match each of `probes` (an entry, through any of the tables standing for
 /// it, in order of preference) to at most one entry of `list` not yet
 /// `used`, as ONE assignment: every match at a stronger tier is made, across
@@ -733,20 +766,46 @@ fn assign_entries(
 ) -> Vec<Option<usize>> {
     let mut matched = vec![None; probes.len()];
     for tier in 0..MATCH_TIERS {
-        for (slot, tables) in probes.iter().enumerate() {
-            if matched[slot].is_some() {
-                continue;
-            }
-            let found = tables.iter().find_map(|probe| {
-                (0..list.len()).find(|&i| !used[i] && same_entry_at(tier, list[i], probe))
-            });
-            if let Some(i) = found {
-                used[i] = true;
-                matched[slot] = Some(i);
+        // Within a tier, the closest candidates are paired first, so two
+        // entries that share a path (two id-less projects at one folder) are
+        // told apart by what else they hold before their position decides.
+        for closeness in (0..=CLOSEST).rev() {
+            for (slot, tables) in probes.iter().enumerate() {
+                if matched[slot].is_some() {
+                    continue;
+                }
+                let found = tables.iter().find_map(|probe| {
+                    (0..list.len()).find(|&i| {
+                        !used[i]
+                            && same_entry_at(tier, list[i], probe)
+                            && entry_closeness(list[i], probe) >= closeness
+                    })
+                });
+                if let Some(i) = found {
+                    used[i] = true;
+                    matched[slot] = Some(i);
+                }
             }
         }
     }
     matched
+}
+
+/// The highest [`entry_closeness`].
+const CLOSEST: u8 = 2;
+
+/// How much more than their identity two entries share: everything but the
+/// `id` (each parse mints one for an id-less entry), then the same `name`,
+/// then nothing.
+fn entry_closeness(a: &Table, b: &Table) -> u8 {
+    if entry_text(a, true) == entry_text(b, true) {
+        return CLOSEST;
+    }
+    let name = |table: &Table| table.get("name").map(item_text);
+    match (name(a), name(b)) {
+        (Some(x), Some(y)) if x == y => 1,
+        _ => 0,
+    }
 }
 
 /// An entry's text for comparing base and memory. When the file's own entry
@@ -1914,6 +1973,9 @@ struct CarriedProject {
     /// would mean attaching one project's keys to another project's entry, which is
     /// worse than dropping them.
     path: Option<String>,
+    /// The entry's `name`, which tells apart two id-less entries at the same
+    /// path (two projects for one folder) before their position does.
+    name: Option<String>,
     /// The comment block the user wrote ABOVE the entry, as comment lines with the
     /// surrounding whitespace already dropped (see [`carried_comment_prefix`]).
     /// `toml_edit` files it on the entry's own decor rather than on any of its keys,
@@ -1981,6 +2043,7 @@ fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
                 carried.push(Some(CarriedProject {
                     id: table.get("id").and_then(Item::as_str).map(str::to_string),
                     path: table.get("path").and_then(Item::as_str).map(str::to_string),
+                    name: table.get("name").and_then(Item::as_str).map(str::to_string),
                     header_comment: decor_comment(table.decor()),
                     first_key_comment,
                     keys,
@@ -2007,6 +2070,10 @@ fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
                     id: inline.get("id").and_then(Value::as_str).map(str::to_string),
                     path: inline
                         .get("path")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    name: inline
+                        .get("name")
                         .and_then(Value::as_str)
                         .map(str::to_string),
                     // A comment written between two elements of a multi-line array
@@ -2042,7 +2109,9 @@ fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
 ///    env-expands it, so a file that spells it `$HOME/p` holds `/home/ada/p` in
 ///    memory and never matches on the pair.
 /// 3. the raw `path` alone, and only for an entry that carried NO id, whose id was
-///    minted by the loader and therefore cannot match anything in the file.
+///    minted by the loader and therefore cannot match anything in the file; one
+///    with the project's own `name` first, so two such entries at one path keep
+///    their own keys.
 ///
 /// Step 3 accepts a miss (an id-less entry whose path is env-expanded loses its
 /// extras) rather than guessing, because the wrong guess attaches one project's
@@ -2062,6 +2131,15 @@ fn take_carried_project(
     })
     .or_else(|| {
         position(&|entry: &CarriedProject| entry.id.as_deref() == Some(project.id.as_str()))
+    })
+    .or_else(|| {
+        // Two id-less entries at one path are told apart by their name first.
+        position(&|entry: &CarriedProject| {
+            entry.id.is_none()
+                && entry.path.as_deref() == Some(project.path.as_str())
+                && entry.name.is_some()
+                && entry.name == project.name
+        })
     })
     .or_else(|| {
         position(&|entry: &CarriedProject| {

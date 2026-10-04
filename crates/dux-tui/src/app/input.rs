@@ -13166,9 +13166,11 @@ not_a_real_action = ["x"]
     /// base goes back to it, and the next save does not write the old values
     /// over the new file.
     /// When the engine's own apply of a reload fails (a reload with deferred
-    /// commands), it keeps the new config and says so before the failure
-    /// modal: the view follows the kept config. A plain reload failure (the
-    /// file was refused) leaves the view alone, unsaved resize included.
+    /// commands), it keeps the new config: the view follows it, the pending
+    /// reload resolves as an apply that failed rather than a refused file,
+    /// and both surfaces read that the new settings are in force. A plain
+    /// reload failure (the file was refused) leaves the view alone, unsaved
+    /// resize included.
     #[test]
     fn the_reload_failure_modal_brings_the_view_to_the_kept_config() {
         use dux_core::engine::EventReaction;
@@ -13184,17 +13186,30 @@ not_a_real_action = ["x"]
         let mut before = app.engine.config.clone();
         before.ui.left_width_pct = 20;
         before.ui.show_changes_pane = true;
-        app.apply_reaction(EventReaction::Multi(vec![
-            EventReaction::ConfigAdopted {
-                before: Box::new(before),
-            },
-            EventReaction::OpenConfigReloadFailedModal(
-                "The new config was adopted, but applying it fully failed".to_string(),
-            ),
-        ]));
+        while app.engine.worker_rx.try_recv().is_ok() {}
+        app.apply_reaction(EventReaction::ConfigAdopted {
+            github_was_enabled: before.ui.github_integration,
+            before: Box::new(before),
+            error: "the session database could not be read".to_string(),
+        });
         assert_eq!(app.left_width_pct, 37);
         assert!(app.right_hidden);
-        assert!(matches!(app.prompt, PromptState::ConfigReloadFailed { .. }));
+        assert!(
+            !matches!(app.prompt, PromptState::ConfigReloadFailed { .. }),
+            "the config was not refused"
+        );
+        let said = std::iter::from_fn(|| app.engine.worker_rx.try_recv().ok())
+            .find_map(|event| match event {
+                dux_core::worker::WorkerEvent::PollerStatus(status) => Some(status),
+                _ => None,
+            })
+            .expect("the outcome rides the lane both surfaces drain");
+        assert!(said.message.contains("in force"), "{}", said.message);
+        assert!(
+            said.message.contains("session database"),
+            "{}",
+            said.message
+        );
     }
 
     #[test]

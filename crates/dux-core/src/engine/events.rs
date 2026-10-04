@@ -339,9 +339,15 @@ pub enum EventReaction {
     /// does after a successful reload's swap, comparing `before` with
     /// `engine.config` (its view state, the serve and Tailscale switches,
     /// the restart warning), so nothing claims a setting that is not in
-    /// force. A failure modal follows it.
+    /// force, and reports `error` with
+    /// [`crate::config_reload_status::adopted_but_apply_failed`].
+    /// `github_was_enabled` is whether the GitHub integration was on before
+    /// the apply started; the apply already asked `gh` for a fresh answer
+    /// when it turned the integration on, so no surface asks again.
     ConfigAdopted {
         before: Box<Config>,
+        github_was_enabled: bool,
+        error: String,
     },
 
     // -- Project persistence (App applies view follow-up; Engine performed mutations). --
@@ -2388,26 +2394,24 @@ impl Engine {
             Ok(config) => {
                 if must_preswap {
                     before_reload = Some(self.config.clone());
+                    let github_was_enabled = self.github_integration_enabled;
                     // Apply the reloaded config so the deferred drain re-mutates it
                     // (and the surfaced config carries those edits).
-                    // If applying it FAILS, do not pretend the reload worked: open
-                    // the reload-failed modal. The engine still keeps the new
-                    // config (`apply_reloaded_config` falls back to
+                    // If applying it FAILS, the engine still keeps the new config
+                    // (`apply_reloaded_config` falls back to
                     // `keep_reloaded_config`), so memory, the writer's base and
                     // the file agree, and the deferred commands below re-apply
-                    // against it, so they are never dropped.
+                    // against it, so they are never dropped. The surface is told
+                    // the config was adopted and what failed, never that it was
+                    // refused.
                     if let Err(err) = self.apply_reloaded_config(config) {
-                        failure = Some(EventReaction::Multi(vec![
-                            EventReaction::ConfigAdopted {
-                                before: Box::new(
-                                    before_reload.clone().unwrap_or_else(|| self.config.clone()),
-                                ),
-                            },
-                            EventReaction::OpenConfigReloadFailedModal(format!(
-                                "The new config was adopted, but applying it fully failed: \
-                                 {err:#}"
-                            )),
-                        ]));
+                        failure = Some(EventReaction::ConfigAdopted {
+                            before: Box::new(
+                                before_reload.clone().unwrap_or_else(|| self.config.clone()),
+                            ),
+                            github_was_enabled,
+                            error: format!("{err:#}"),
+                        });
                     }
                     // On success the FINAL config (reloaded + deferred) is surfaced
                     // after the drain below, so there is no bare reaction here.
@@ -9157,8 +9161,8 @@ mod tests {
 
     /// The engine's own apply of a coalesced reload failing still adopts the
     /// new config, so the surface is told it was adopted, with the config
-    /// from before the reload to compare against, ahead of the failure
-    /// modal, and the modal says the config was adopted rather than refused.
+    /// from before the reload to compare against, whether the GitHub
+    /// integration was on before the apply, and what failed.
     #[test]
     fn an_engine_apply_failure_tells_the_surface_to_take_the_adopted_view() {
         let (mut engine, _tmp) = test_engine();
@@ -9179,18 +9183,25 @@ mod tests {
             }
         };
         break_the_session_database(&engine);
+        let was_enabled = engine.github_integration_enabled;
         let reactions = flatten(engine.process_worker_event(event));
         assert_eq!(engine.config.ui.left_width_pct, 33, "adopted");
-        let view = reactions.iter().position(|reaction| {
-            matches!(reaction, EventReaction::ConfigAdopted { before }
-                if before.ui.left_width_pct != 33)
-        });
-        let modal = reactions.iter().position(|reaction| {
-            matches!(reaction, EventReaction::OpenConfigReloadFailedModal(message)
-                if message.contains("adopted"))
-        });
         assert!(
-            matches!((view, modal), (Some(v), Some(m)) if v < m),
+            reactions.iter().any(|reaction| {
+                matches!(reaction, EventReaction::ConfigAdopted { before, github_was_enabled, error }
+                    if before.ui.left_width_pct != 33
+                        && *github_was_enabled == was_enabled
+                        && !error.is_empty())
+            }),
+            "{:?}",
+            reactions.iter().map(reaction_kind).collect::<Vec<_>>()
+        );
+        // The config is in force, so this is not a refused reload: no
+        // review-the-modal failure that would say the old settings still run.
+        assert!(
+            !reactions
+                .iter()
+                .any(|reaction| matches!(reaction, EventReaction::OpenConfigReloadFailedModal(_))),
             "{:?}",
             reactions.iter().map(reaction_kind).collect::<Vec<_>>()
         );

@@ -25,15 +25,18 @@ pub fn applied() -> StatusUpdate {
     )
 }
 
-/// The config validated but could not be adopted, so the settings already in
-/// force are the ones still running.
-pub fn apply_failed(error: &str) -> StatusUpdate {
+/// The config validated and was adopted, so its settings are in force, but a
+/// step of applying it failed. Every surface and every path says this one
+/// sentence: the engine keeps the new config whatever failed, so memory, the
+/// writer and the file agree, and saying the old settings still run would be
+/// false.
+pub fn adopted_but_apply_failed(error: &str) -> StatusUpdate {
     StatusUpdate::keyed(
         CONFIG_RELOAD,
         StatusTone::Error,
         format!(
-            "Config validation passed, but applying it failed: {error}. The settings already in \
-             force are unchanged; fix config.toml and reload again."
+            "The reloaded config.toml is in force and its settings are active, but one step of \
+             applying it failed: {error}. Fix that, then reload the config again to finish."
         ),
     )
 }
@@ -76,14 +79,30 @@ mod tests {
     #[test]
     fn both_outcomes_share_the_reload_key() {
         assert_eq!(applied().key.as_deref(), Some(CONFIG_RELOAD));
-        assert_eq!(apply_failed("boom").key.as_deref(), Some(CONFIG_RELOAD));
+        assert_eq!(
+            adopted_but_apply_failed("boom").key.as_deref(),
+            Some(CONFIG_RELOAD)
+        );
     }
 
+    /// A failed apply still adopts the new config, so the sentence says the
+    /// new settings are in force, names what failed and how to finish, and
+    /// never claims the old settings are still running.
     #[test]
     fn the_failure_names_the_error_and_a_remedy() {
-        let status = apply_failed("right_width_pct out of range");
+        let status = adopted_but_apply_failed("the session database could not be read");
         assert_eq!(status.tone, StatusTone::Error);
-        assert!(status.message.contains("right_width_pct out of range"));
-        assert!(status.message.contains("fix config.toml and reload again"));
+        assert!(
+            status
+                .message
+                .contains("the session database could not be read")
+        );
+        assert!(status.message.contains("in force"), "{}", status.message);
+        assert!(
+            status.message.contains("reload the config again"),
+            "{}",
+            status.message
+        );
+        assert!(!status.message.contains("unchanged"), "{}", status.message);
     }
 }

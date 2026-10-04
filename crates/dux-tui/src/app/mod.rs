@@ -878,7 +878,7 @@ pub enum TuiConfigReloadOutcome {
     /// comes from [`dux_core::config_reload_status::applied`].
     Applied,
     /// Validation passed but applying the config failed. Dismisses the spinner;
-    /// the sentence comes from [`dux_core::config_reload_status::apply_failed`].
+    /// the sentence comes from [`dux_core::config_reload_status::adopted_but_apply_failed`].
     ApplyFailed(String),
     /// Validation failed; the reload-failed modal is opened. Resolves to the
     /// review-the-modal error line.
@@ -5849,7 +5849,7 @@ impl App {
         )?;
         let before = std::mem::replace(&mut self.engine.config, config);
         self.engine.retune_after_config_swap();
-        self.run_config_swap_effects(&before, github_was_enabled);
+        self.run_config_swap_effects(&before, github_was_enabled, true);
         if let Some(message) = theme_warning {
             self.set_pinned_warning(message);
         }
@@ -5859,11 +5859,18 @@ impl App {
     /// Everything a reload owes once `engine.config` holds the new config,
     /// compared with `before`, the config it replaced: the view, the project
     /// list, the GitHub integration, the serve and Tailscale switches.
-    /// `github_was_enabled` is whether the integration was on before. Runs
-    /// after a successful apply and after one that failed but adopted the
-    /// config anyway, so neither claims a setting that is not in force.
-    pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
-        if !github_was_enabled && self.engine.github_integration_enabled {
+    /// `github_was_enabled` is whether the integration was on before, and
+    /// `gh_probe_owed` whether this caller still owes the fresh `gh` answer
+    /// turning it on asks for (the engine's own apply has already asked).
+    /// Runs after a successful apply and after one that failed but adopted
+    /// the config anyway, so neither claims a setting that is not in force.
+    pub(crate) fn run_config_swap_effects(
+        &mut self,
+        before: &Config,
+        github_was_enabled: bool,
+        gh_probe_owed: bool,
+    ) {
+        if gh_probe_owed && !github_was_enabled && self.engine.github_integration_enabled {
             // Off-to-on through a config reload is the same transition as the
             // palette toggle, and needs the same fresh answer from `gh`.
             self.engine.spawn_gh_status_check();
@@ -5880,22 +5887,7 @@ impl App {
             self.selected_left = self.left_items_cache.len().saturating_sub(1);
         }
         self.engine.update_branch_sync_sessions();
-        if !self.engine.github_integration_enabled {
-            self.engine.pr_statuses.clear();
-            self.engine.disarm_pr_sync();
-        } else if github_was_enabled
-            && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
-        {
-            // The integration was already on, so the status is a settled answer
-            // rather than one a probe is about to replace: re-derive the sync set
-            // and refresh. Re-seed first so a manually attached PR's badge
-            // survives the reload-time `pr_statuses` churn without waiting for a
-            // cycle.
-            self.engine.seed_pr_statuses_from_store();
-            self.engine.update_pr_sync_sessions();
-            self.engine.spawn_initial_pr_refresh();
-            self.engine.spawn_pr_sync_worker();
-        }
+        self.engine.retune_pr_sync_after_reload(github_was_enabled);
         self.reload_changed_files();
         self.refresh_current_diff();
         // `[server] serve_while_tui` is both the startup default and a live

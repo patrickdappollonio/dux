@@ -2649,6 +2649,27 @@ impl Engine {
             }
         }
         self.refresh_project_defaults();
+        self.update_branch_sync_sessions();
+    }
+
+    /// Pull-request sync after a reload swapped in a config:
+    /// `github_was_enabled` is whether the integration was on before it.
+    /// Turned off, the sync stops and its statuses go. Already on with a
+    /// settled answer from `gh`, the sync set is re-derived and refreshed,
+    /// re-seeded first so a manually attached PR's badge survives the reload
+    /// without waiting for a cycle. Turned on, the `gh` probe the reload asked
+    /// for decides, so nothing is armed here. Every surface's reload runs it.
+    pub fn retune_pr_sync_after_reload(&mut self, github_was_enabled: bool) {
+        if !self.github_integration_enabled {
+            self.pr_statuses.clear();
+            self.disarm_pr_sync();
+        } else if github_was_enabled && matches!(self.gh_status, crate::model::GhStatus::Available)
+        {
+            self.seed_pr_statuses_from_store();
+            self.update_pr_sync_sessions();
+            self.spawn_initial_pr_refresh();
+            self.spawn_pr_sync_worker();
+        }
     }
 
     fn apply_reloaded_config_inner(&mut self, config: Config) -> anyhow::Result<()> {

@@ -1990,3 +1990,508 @@ mod rev_attack {
         }
     }
 }
+
+/// Ninth review cases, kept as regression tests.
+#[cfg(test)]
+mod my_attack {
+    use super::*;
+    fn read(p: &std::path::Path) -> String {
+        std::fs::read_to_string(p).unwrap()
+    }
+    fn setup(
+        text: &str,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Config,
+        ConfigWriteQueue,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        (dir, path, loaded, q)
+    }
+
+    #[test]
+    fn a1_inline_roundtrip_comments() {
+        let text = "# top comment\nui = { left_width_pct = 25, copy_on_select = true } # trailing\nenv = { A = \"1\" } # envc\n\n[providers]\n# claude comment\nclaude = { command = \"claude\", args = [] } # cc\n\n# codex hdr\n[providers.codex]\ncommand = \"codex\" # cx\n";
+        let (_d, path, loaded, q) = setup(text);
+        let mut m = loaded.clone();
+        for round in 0..4 {
+            m.ui.left_width_pct = 30 + round;
+            m.env.insert(format!("V{round}"), "x".into());
+            if let Some(p) = m.providers.commands.get_mut("claude") {
+                p.args = vec![format!("--r{round}")];
+            }
+            q.save_eager(m.clone()).unwrap();
+            let t = read(&path);
+            eprintln!("A1 round {round}:\n{t}\n-----");
+            crate::config::config_from_text_as_written(&t).unwrap_or_else(|e| panic!("{:?}", e));
+        }
+        let t = read(&path);
+        for c in [
+            "# top comment",
+            "# trailing",
+            "# envc",
+            "# claude comment",
+            "# cc",
+            "# codex hdr",
+            "# cx",
+        ] {
+            assert!(t.contains(c), "lost {c}:\n{t}");
+        }
+        assert!(t.contains("ui = {"), "{t}");
+        assert!(t.contains("claude = {"), "{t}");
+    }
+
+    #[test]
+    fn a2_dotted_root() {
+        let text = "ui.left_width_pct = 25\nproviders.claude.command = \"x\"\nenv.A = \"1\"\n";
+        let (_d, path, loaded, q) = setup(text);
+        let mut m = loaded.clone();
+        for round in 0..3 {
+            m.ui.left_width_pct = 30 + round;
+            m.env.insert(format!("V{round}"), "x".into());
+            q.save_eager(m.clone()).unwrap();
+            let t = read(&path);
+            eprintln!("A2 round {round}:\n{t}\n-----");
+            let c = crate::config::config_from_text_as_written(&t)
+                .unwrap_or_else(|e| panic!("{:?}", e));
+            assert_eq!(c.ui.left_width_pct, 30 + round);
+        }
+    }
+
+    #[test]
+    fn a3_inline_server_auth_survives() {
+        let hash = crate::auth::hash_password(&crate::auth::Password::new(
+            "correct horse battery staple 99".to_string(),
+        ))
+        .unwrap();
+        let text = format!(
+            "server = {{ port = 3890, auth = {{ password_hash = \"{hash}\", blocked_addresses = [\"203.0.113.7\"] }} }}\n"
+        );
+        let (_d, path, loaded, q) = setup(&text);
+        let mut m = loaded.clone();
+        assert!(!m.server.auth.blocked_addresses.is_empty());
+        for round in 0..3 {
+            m.server.port = 4000 + round;
+            m.ui.left_width_pct = 30 + round;
+            q.save_eager(m.clone()).unwrap();
+            let t = read(&path);
+            eprintln!("A3 round {round}:\n{t}\n-----");
+            assert!(t.contains(&hash), "password lost:\n{t}");
+            assert!(t.contains("203.0.113.7"), "block lost:\n{t}");
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)] // the full patch, the path a sync-direct writer takes
+    fn a4_full_patch_inline() {
+        let text = "ui = { left_width_pct = 25 } # trailing\nproviders = { claude = { command = \"claude\" } }\nkeys = { quit = [\"q\"] }\nmacros = { hi = { text = \"hello\", surface = \"both\" } }\n";
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        let mut c = crate::config::load_config_file(&path).unwrap();
+        c.ui.left_width_pct = 40;
+        for _ in 0..3 {
+            crate::config_write::patch_config_file(&path, &c).unwrap();
+            let t = read(&path);
+            eprintln!("A4:\n{t}\n----");
+            crate::config::config_from_text_as_written(&t).unwrap_or_else(|e| panic!("{:?}", e));
+        }
+    }
+
+    #[test]
+    fn a5_odd_shapes_no_panic() {
+        for text in [
+            "providers = { claude = 1 }\n",
+            "[providers]\nclaude = 1\n",
+            "[providers]\nclaude = [1]\n",
+            "keys = 1\n",
+            "macros = 1\n",
+            "projects = 1\n",
+            "[[projects]]\npath = \"/a\"\nenv = 1\n",
+            "[[projects]]\npath = \"/a\"\n[projects.env]\nA = { x = 1 }\n",
+            "env = { A = { B = 1 } }\n",
+            "server = { auth = 1 }\n",
+            "[providers.claude]\ncommand = \"c\"\nargs = 1\n",
+            "ui = { a = { b = { c = 1 } } }\n",
+            "[[providers]]\nx = 1\n",
+            "[[ui]]\nx = 1\n",
+            "[[env]]\nx = 1\n",
+            "[[macros]]\nx = 1\n",
+        ] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, text).unwrap();
+            let loaded = match crate::config::load_config_file(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("load refused {text:?}: {e:?}");
+                    continue;
+                }
+            };
+            let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+            let mut m = loaded.clone();
+            m.ui.left_width_pct = 31;
+            m.env.insert("C".into(), "3".into());
+            let r =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| q.save_eager(m.clone())));
+            match r {
+                Err(_) => panic!("PANIC on {text:?}"),
+                Ok(Err(e)) => eprintln!("err {text:?}: {e:#}"),
+                Ok(Ok(_)) => {
+                    let t = read(&path);
+                    eprintln!("OK {text:?} =>\n{t}\n---");
+                    if let Err(e) = crate::config::config_from_text_as_written(&t) {
+                        panic!("unloadable after a save of {text:?}: {e:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+#[cfg(test)]
+mod my_attack2 {
+    use super::*;
+    fn read(p: &std::path::Path) -> String {
+        std::fs::read_to_string(p).unwrap()
+    }
+    fn setup(
+        text: &str,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Config,
+        ConfigWriteQueue,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        (dir, path, loaded, q)
+    }
+    fn projects(t: &str) -> Vec<(Option<String>, Option<String>, Option<String>)> {
+        let d: toml_edit::DocumentMut = t.parse().unwrap();
+        d.get("projects")
+            .and_then(|p| p.as_array_of_tables())
+            .map(|a| {
+                a.iter()
+                    .map(|e| {
+                        (
+                            e.get("id").and_then(|v| v.as_str()).map(String::from),
+                            e.get("path").and_then(|v| v.as_str()).map(String::from),
+                            e.get("name").and_then(|v| v.as_str()).map(String::from),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn b1_duplicate_ids_remove_second() {
+        let (_d, path, loaded, q) = setup(
+            "[[projects]]\nid = \"a\"\npath = \"/p\"\nname = \"one\"\n\n[[projects]]\nid = \"a\"\npath = \"/q\"\nname = \"two\"\n",
+        );
+        eprintln!(
+            "loaded: {:?}",
+            loaded
+                .projects
+                .iter()
+                .map(|p| (&p.id, &p.path))
+                .collect::<Vec<_>>()
+        );
+        let mut m = loaded.clone();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        eprintln!("B1a {:?}", projects(&read(&path)));
+        if m.projects.len() == 2 {
+            m.projects.remove(1);
+            q.save_eager(m.clone()).unwrap();
+            eprintln!("B1b {:?}", projects(&read(&path)));
+            assert!(
+                projects(&read(&path))
+                    .iter()
+                    .all(|p| p.1.as_deref() != Some("/q")),
+                "{}",
+                read(&path)
+            );
+            m.projects.remove(0);
+            q.save_eager(m.clone()).unwrap();
+            eprintln!("B1c {:?}", projects(&read(&path)));
+            assert!(projects(&read(&path)).is_empty(), "{}", read(&path));
+        }
+    }
+
+    #[test]
+    fn b2_two_idless_same_path_remove_one() {
+        let (_d, path, loaded, q) = setup(
+            "[[projects]]\npath = \"/x\"\nname = \"one\"\n\n[[projects]]\npath = \"/x\"\nname = \"two\"\n",
+        );
+        let mut m = loaded.clone();
+        eprintln!(
+            "loaded: {:?}",
+            loaded
+                .projects
+                .iter()
+                .map(|p| (&p.id, &p.path, &p.name))
+                .collect::<Vec<_>>()
+        );
+        if m.projects.len() == 2 {
+            m.projects.remove(0);
+            q.save_eager(m.clone()).unwrap();
+            let p = projects(&read(&path));
+            eprintln!("B2 {:?}", p);
+            assert_eq!(p.len(), 1, "{}", read(&path));
+            assert_eq!(p[0].2.as_deref(), Some("two"), "{}", read(&path));
+        }
+    }
+
+    /// A save with nothing changed after the file swapped the order of two entries.
+    #[test]
+    fn b3_hand_reorder_with_dux_rename() {
+        let (_d, path, loaded, q) = setup(
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\nname = \"A\"\n\n[[projects]]\nid = \"b\"\npath = \"/b\"\nname = \"B\"\n",
+        );
+        std::fs::write(&path, "[[projects]]\nid = \"b\"\npath = \"/b\"\nname = \"B\"\n\n[[projects]]\nid = \"a\"\npath = \"/a\"\nname = \"A\"\n").unwrap();
+        let mut m = loaded.clone();
+        m.projects[0].name = Some("A2".into());
+        q.save_eager(m.clone()).unwrap();
+        let p = projects(&read(&path));
+        eprintln!("B3 {:?}", p);
+        assert_eq!(p.len(), 2);
+        assert!(p.contains(&(Some("a".into()), Some("/a".into()), Some("A2".into()))));
+    }
+
+    /// Hand swap: id a now at /b and id b at /a (user swaps paths).
+    #[test]
+    fn b4_hand_swap_paths() {
+        let (_d, path, loaded, q) = setup(
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\nname = \"A\"\n\n[[projects]]\nid = \"b\"\npath = \"/b\"\nname = \"B\"\n",
+        );
+        std::fs::write(&path, "[[projects]]\nid = \"a\"\npath = \"/b\"\nname = \"A\"\n\n[[projects]]\nid = \"b\"\npath = \"/a\"\nname = \"B\"\n").unwrap();
+        let mut m = loaded.clone();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let p = projects(&read(&path));
+        eprintln!("B4 {:?}", p);
+        assert_eq!(p.len(), 2, "{}", read(&path));
+        // and dux removes b
+        m.projects.retain(|p| p.id != "b");
+        q.save_eager(m.clone()).unwrap();
+        let p = projects(&read(&path));
+        eprintln!("B4b {:?}", p);
+        assert_eq!(
+            p,
+            vec![(Some("a".into()), Some("/b".into()), Some("A".into()))],
+            "{}",
+            read(&path)
+        );
+    }
+
+    /// Hand removes the id from an entry, dux removes that project.
+    #[test]
+    fn b5_hand_strips_id_then_dux_removes() {
+        let (_d, path, loaded, q) = setup(
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\n\n[[projects]]\nid = \"b\"\npath = \"/b\"\n",
+        );
+        std::fs::write(
+            &path,
+            "[[projects]]\npath = \"/a\"\n\n[[projects]]\nid = \"b\"\npath = \"/b\"\n",
+        )
+        .unwrap();
+        let mut m = loaded.clone();
+        m.projects.retain(|p| p.id != "a");
+        q.save_eager(m.clone()).unwrap();
+        let p = projects(&read(&path));
+        eprintln!("B5 {:?}", p);
+        assert_eq!(p.len(), 1, "{}", read(&path));
+    }
+}
+#[cfg(test)]
+mod my_attack3 {
+    use super::*;
+    fn read(p: &std::path::Path) -> String {
+        std::fs::read_to_string(p).unwrap()
+    }
+    #[test]
+    fn c1_two_idless_same_path_remove_second_and_rename_first() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[projects]]\npath = \"/x\"\nname = \"one\"\nnote = \"n1\"\n\n[[projects]]\npath = \"/x\"\nname = \"two\"\nnote = \"n2\"\n").unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let mut m = loaded.clone();
+        m.projects.remove(1);
+        q.save_eager(m.clone()).unwrap();
+        eprintln!("C1a:\n{}", read(&path));
+        let mut m2 = m.clone();
+        m2.projects[0].name = Some("uno".into());
+        q.save_eager(m2.clone()).unwrap();
+        eprintln!("C1b:\n{}", read(&path));
+        let t = read(&path);
+        assert!(!t.contains("two") && !t.contains("n2"), "{t}");
+        assert!(t.contains("uno") && t.contains("n1"), "{t}");
+    }
+    #[test]
+    fn c2_two_idless_same_path_remove_first() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[projects]]\npath = \"/x\"\nname = \"one\"\nnote = \"n1\"\n\n[[projects]]\npath = \"/x\"\nname = \"two\"\nnote = \"n2\"\n").unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let mut m = loaded.clone();
+        m.projects.remove(0);
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        eprintln!("C2:\n{t}");
+        assert!(!t.contains("one") && !t.contains("n1"), "{t}");
+        assert!(t.contains("two") && t.contains("n2"), "{t}");
+    }
+}
+#[cfg(test)]
+mod my_attack4 {
+    use super::*;
+    fn read(p: &std::path::Path) -> String {
+        std::fs::read_to_string(p).unwrap()
+    }
+    fn run(initial: &str) -> String {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, initial).unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let mut m = loaded.clone();
+        m.env.insert("Z".into(), "1".into());
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        assert!(t.contains("diff_tab_width = 4"), "filled first:\n{t}");
+        // hand deletes diff_tab_width
+        let t2 = t
+            .replace("diff_tab_width = 4, ", "")
+            .replace("diff_tab_width = 4\n", "");
+        assert!(!t2.contains("diff_tab_width"));
+        std::fs::write(&path, &t2).unwrap();
+        m.env.insert("Y".into(), "2".into());
+        q.save_eager(m.clone()).unwrap();
+        // A third save keeps it deleted too.
+        m.env.insert("X".into(), "3".into());
+        q.save_eager(m.clone()).unwrap();
+        read(&path)
+    }
+    #[test]
+    fn d1_table_form_hand_delete_stays() {
+        let t = run("[ui]\nleft_width_pct = 25\n");
+        assert!(!t.contains("diff_tab_width"), "table form refilled:\n{t}");
+    }
+    #[test]
+    fn d2_inline_form_hand_delete_stays() {
+        let t = run("ui = { left_width_pct = 25 }\n");
+        assert!(!t.contains("diff_tab_width"), "inline form refilled:\n{t}");
+    }
+}
+#[cfg(test)]
+mod my_attack5 {
+    use super::*;
+    fn read(p: &std::path::Path) -> String {
+        std::fs::read_to_string(p).unwrap()
+    }
+    #[test]
+    fn e1_project_field_dux_set_then_hand_deleted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[projects]]\nid = \"a\"\npath = \"/a\"\n").unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let mut m = loaded.clone();
+        m.projects[0].startup_command = Some("make setup".into());
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        assert!(t.contains("make setup"), "{t}");
+        std::fs::write(&path, t.replace("startup_command = \"make setup\"\n", "")).unwrap();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        assert!(
+            !t.contains("make setup"),
+            "hand-deleted project field came back:\n{t}"
+        );
+        // A third save keeps it deleted too.
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        assert!(
+            !t.contains("make setup"),
+            "hand-deleted project field came back:\n{t}"
+        );
+    }
+    #[test]
+    fn e2_project_env_var_dux_set_then_hand_deleted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\nenv = { A = \"1\" }\n",
+        )
+        .unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let mut m = loaded.clone();
+        m.projects[0].env.insert("B".into(), "2".into());
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        assert!(t.contains("B = \"2\""), "{t}");
+        std::fs::write(&path, t.replace(", B = \"2\"", "")).unwrap();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        assert!(
+            !t.contains("B = \"2\""),
+            "hand-deleted env var came back:\n{t}"
+        );
+        // A third save keeps it deleted too.
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        assert!(
+            !t.contains("B = \"2\""),
+            "hand-deleted env var came back:\n{t}"
+        );
+    }
+    #[test]
+    fn e3_inline_provider_key_hand_deleted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[providers]\nclaude = { command = \"claude\" }\n").unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let mut m = loaded.clone();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        eprintln!("{t}");
+        assert!(t.contains("resume_args = [\"--continue\"], "), "{t}");
+        std::fs::write(&path, t.replace("resume_args = [\"--continue\"], ", "")).unwrap();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        assert!(
+            t.lines()
+                .any(|l| l.starts_with("claude = {") && !l.contains("resume_args")),
+            "hand-deleted inline provider key came back:\n{t}"
+        );
+        // A third save keeps it deleted too.
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        assert!(
+            t.lines()
+                .any(|l| l.starts_with("claude = {") && !l.contains("resume_args")),
+            "hand-deleted inline provider key came back:\n{t}"
+        );
+    }
+}

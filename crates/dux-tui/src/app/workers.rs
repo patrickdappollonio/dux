@@ -692,7 +692,11 @@ impl App {
             EventReaction::OpenConfigReloadFailedModal(message) => {
                 self.apply_open_config_reload_failed_modal(message);
             }
-            EventReaction::ConfigAdopted { before } => self.apply_config_adopted(*before),
+            EventReaction::ConfigAdopted {
+                before,
+                github_was_enabled,
+                error,
+            } => self.apply_config_adopted(*before, github_was_enabled, error),
 
             EventReaction::ProjectPersistenceOutcome(boxed) => {
                 self.apply_project_persistence_outcome(*boxed);
@@ -858,7 +862,7 @@ impl App {
                 // apply, so no setting is claimed that is not in force; the
                 // failure is said last, so it holds the line.
                 self.engine.keep_reloaded_config(fallback);
-                self.run_config_swap_effects(&before, github_was_enabled);
+                self.run_config_swap_effects(&before, github_was_enabled, true);
                 self.note_config_adopted(&before);
                 TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}"))
             }
@@ -875,16 +879,24 @@ impl App {
     }
 
     /// The engine adopted a reloaded config its own apply could not finish
-    /// (see `EventReaction::ConfigAdopted`): the view takes it, and
-    /// everything a reload's swap owes runs against `before`, the config it
-    /// replaced. The failure modal follows.
-    fn apply_config_adopted(&mut self, before: Config) {
+    /// (see `EventReaction::ConfigAdopted`): the view takes it, everything a
+    /// reload's swap owes runs against `before`, the config it replaced, and
+    /// the reload answers as an apply that failed, the same answer the
+    /// terminal UI's own failed apply gives. `github_was_enabled` is the
+    /// engine's own state before its apply, which already asked `gh` for a
+    /// fresh answer where one was owed.
+    fn apply_config_adopted(&mut self, before: Config, github_was_enabled: bool, error: String) {
         let adopted = self.engine.config.clone();
-        // The failure modal that follows is the message, so the theme's own
-        // warning is left to the next reload.
+        // The failure is the message, so the theme's own warning is left to
+        // the next reload.
         let _ = self.take_reload_view_state(&adopted);
-        self.run_config_swap_effects(&before, before.ui.github_integration);
+        self.run_config_swap_effects(&before, github_was_enabled, false);
         self.note_config_adopted(&before);
+        let outcome = TuiConfigReloadOutcome::ApplyFailed(error);
+        if let Some(op) = self.pending_config_reload_op.take() {
+            self.apply_reaction(op.resolve(&outcome).into_reaction());
+        }
+        self.post_config_reload_outcome(&outcome);
     }
 
     /// A new config is in force: the background server adopts its
@@ -915,7 +927,7 @@ impl App {
         let status = match outcome {
             TuiConfigReloadOutcome::Applied => dux_core::config_reload_status::applied(),
             TuiConfigReloadOutcome::ApplyFailed(error) => {
-                dux_core::config_reload_status::apply_failed(error)
+                dux_core::config_reload_status::adopted_but_apply_failed(error)
             }
             TuiConfigReloadOutcome::ValidationFailed => return,
         };
@@ -3430,7 +3442,9 @@ mod tests {
         app.engine.config.server.port += 1;
 
         app.apply_reaction(EventReaction::ConfigAdopted {
+            github_was_enabled: before.ui.github_integration,
             before: Box::new(before),
+            error: "the session database could not be read".to_string(),
         });
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
