@@ -360,6 +360,19 @@ pub const BINDING_VALUE_POSITIONS: &[&str] = &[
     "keys.quit = [\"{V}\"]\n",
 ];
 
+/// Where a project's PATH, NAME or ID sits, `{V}` standing for it, beside a
+/// problem that names the project (a broken env value, a duplicate record).
+/// Projects are sensitive in every printer: a problem names a project by its
+/// line, never by its path, name or id.
+pub const PROJECT_VALUE_POSITIONS: &[&str] = &[
+    "[[projects]]\nid = \"a\"\npath = \"/tmp/{V}\"\nenv = { FOO = \"${\" }\n",
+    "[[projects]]\nid = \"a\"\nname = \"{V}\"\npath = \"/tmp/a\"\nenv = { FOO = \"${\" }\n",
+    "[[projects]]\nid = \"{V}\"\npath = \"/tmp/a\"\nenv = { FOO = \"${\" }\n",
+    "[[projects]]\nid = \"a\"\npath = \"/tmp/{V}\"\n[[projects]]\nid = \"b\"\npath = \"/tmp/{V}\"\n",
+    "[[projects]]\nid = \"{V}\"\npath = \"/tmp/a\"\n[[projects]]\nid = \"{V}\"\npath = \"/tmp/b\"\n",
+    "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\nname = \"{V}\"\n[projects.env]\n\"1BAD\" = \"x\"\n",
+];
+
 /// Token-like names, from a fixed seed: each holds a dot and a space, so it
 /// breaks every naming rule, and starts with a marker no setting has.
 pub fn name_tokens() -> Vec<String> {

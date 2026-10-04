@@ -68,7 +68,9 @@ dux config set providers.claude.command claude
 - `set` never writes a file dux would refuse to start with: a value that would add such a
   problem (a host name where `server.host` needs an IP address, an environment variable
   name dux does not accept) is refused with the same message a start gives, and nothing
-  is written.
+  is written. So is a value dux would drop or put back to its default when it loads the
+  file (a terminal font size past its range, a provider changed back into a retired
+  stock block dux removes), since it would never be set.
 - A setting with a value of the wrong type (a word where a number goes) is read two ways:
   `dux server` uses that setting's default and starts, while the terminal UI will not start
   until it is fixed. `get` and `set` say so in those words, and `get` says the value in use
@@ -197,7 +199,10 @@ argument, where shell history and the process list would keep it. What lands in
 `config.toml` is only its Argon2id hash, at `server.auth.password_hash`;
 `dux config get server.auth.password` prints that hash. Changing or clearing the
 password signs every browser out. To remove it, run
-`dux config set server.auth.password_hash ""`.
+`dux config set server.auth.password_hash ""`. While the file has a password setting
+where dux does not read it (a `minimum-password-length` spelled with dashes, say),
+setting a password is refused until that is fixed: dux cannot tell which minimum you
+meant.
 
 > [!IMPORTANT]
 > dux reads the password only from `[server.auth]`. A `password_hash` anywhere else, or a

@@ -4267,6 +4267,18 @@ pub(crate) enum KeyStep<'a> {
     Entry(&'a str, usize),
 }
 
+/// The line the project at `index` of `projects` starts on in `raw`: its
+/// `[[projects]]` header, or its inline table.
+fn line_of_project(raw: &str, index: usize) -> Option<usize> {
+    let doc = toml_edit::Document::parse(raw).ok()?;
+    let projects = doc.as_table().get("projects")?;
+    let start = match projects.as_array_of_tables() {
+        Some(entries) => entries.get(index)?.span()?.start,
+        None => projects.as_array()?.get(index)?.span()?.start,
+    };
+    Some(raw.get(..start)?.matches('\n').count() + 1)
+}
+
 /// The line of `raw` the key at `path` (keys only, no arrays) is written
 /// on, for a sentence that places a setting without repeating its value.
 pub fn line_of_setting(raw: &str, path: &[&str]) -> Option<usize> {
@@ -4409,19 +4421,25 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
         }
     }
     for (index, project) in config.projects.iter().enumerate() {
-        let label = project.name.as_deref().unwrap_or(&project.path);
+        // A project is named by its line, never by its path, name or id.
+        let label = raw.and_then(|raw| line_of_project(raw, index)).map_or_else(
+            || format!("{} (counting from 1)", index + 1),
+            |line| format!("on line {line}"),
+        );
         for (name, value) in &project.env {
             if let Some(problem) = env_variable_problem(name, value) {
                 let which = if is_valid_var_name(name) {
-                    format!("env variable {name} of project {label}")
+                    format!("env variable {name} of the project {label}")
                 } else {
                     match line(&[
                         KeyStep::Entry("projects", index),
                         KeyStep::Key("env"),
                         KeyStep::Key(name),
                     ]) {
-                        Some(line) => format!("the env variable of project {label} on line {line}"),
-                        None => format!("an env variable of project {label}"),
+                        Some(line) => {
+                            format!("the env variable on line {line} of the project {label}")
+                        }
+                        None => format!("an env variable of the project {label}"),
                     }
                 };
                 problems.push(StartProblem::new(
@@ -4432,11 +4450,22 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
             }
         }
     }
-    if let Err(error) =
-        crate::config_sync::validate_project_records("config.toml", &config.projects)
-    {
+    if let Some(duplicate) = crate::config_sync::duplicate_project(&config.projects) {
+        // Each placed by its line, never by its path, name or id.
+        let say = |index: usize| {
+            raw.and_then(|raw| line_of_project(raw, index)).map_or_else(
+                || format!("project {} (counting from 1)", index + 1),
+                |line| format!("the project on line {line}"),
+            )
+        };
         problems.push(StartProblem::new(
-            Problem::about(key_path(&["projects"]), format!("{error:#}")),
+            Problem::about(
+                key_path(&["projects"]),
+                format!(
+                    "Project sync conflict in config.toml: {}",
+                    duplicate.sentence(&say(duplicate.first), &say(duplicate.second))
+                ),
+            ),
             true,
             true,
         ));

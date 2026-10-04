@@ -7,7 +7,8 @@
 //! hashes.
 use super::*;
 use dux_core::start_check_fixtures::{
-    BINDING_VALUE_POSITIONS, NAME_POSITIONS as POSITIONS, VALUE_POSITIONS, name_tokens as tokens,
+    BINDING_VALUE_POSITIONS, NAME_POSITIONS as POSITIONS, PROJECT_VALUE_POSITIONS, VALUE_POSITIONS,
+    name_tokens as tokens,
 };
 
 /// Every table `get` is asked for.
@@ -182,6 +183,33 @@ fn a_binding_value_reaches_no_printer_but_the_value_printers() {
             for (printer, text) in printed(&body) {
                 let prints_values = printer == "get keys" || printer == "config diff";
                 if !prints_values && text.contains(fragment) {
+                    leaks.push(format!("{printer} on {body:?}:\n{text}"));
+                }
+            }
+        }
+    }
+    assert!(leaks.is_empty(), "{}", leaks.join("\n---\n"));
+}
+
+/// A project's path, name and id reach no printer without `--show`: every
+/// problem names a project by its line, and `get projects` and `dux config
+/// diff` summarize projects.
+#[test]
+fn a_project_value_reaches_no_printer() {
+    crate::config::install_canonical_renderer();
+    let mut leaks = Vec::new();
+    for token in tokens() {
+        let fragment = &token[..12];
+        // A path and an id can hold the token's characters but a quote.
+        let plain: String = token
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        for position in PROJECT_VALUE_POSITIONS {
+            let body = position.replace("{V}", &plain);
+            assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
+            for (printer, text) in printed(&body) {
+                if text.contains(&plain[..12]) || text.contains(fragment) {
                     leaks.push(format!("{printer} on {body:?}:\n{text}"));
                 }
             }

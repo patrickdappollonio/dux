@@ -135,8 +135,10 @@ impl Key {
 /// Why a path does not name a setting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyError {
-    /// Not a well-formed path.
-    Malformed(String),
+    /// Not a well-formed path. `known` is the longest start of it that is a
+    /// setting or table (empty when none is), the only part of what was typed
+    /// that is ever repeated; `reason` holds nothing that was typed.
+    Malformed { known: String, reason: String },
     /// No such setting. `known` is the longest start of the path that is a
     /// setting or table (empty when none is); the rest is never repeated,
     /// since it may be a value typed where a name goes. `suggestion` is the
@@ -150,7 +152,11 @@ pub enum KeyError {
 impl fmt::Display for KeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Malformed(reason) => f.write_str(reason),
+            Self::Malformed { known, reason } if known.is_empty() => f.write_str(reason),
+            Self::Malformed { known, reason } => write!(
+                f,
+                "{reason} (the path starts with {known}; what follows it is not repeated)"
+            ),
             Self::Unknown { known, suggestion } => {
                 if known.is_empty() {
                     write!(f, "there is no setting with that name")?;
@@ -172,6 +178,43 @@ impl fmt::Display for KeyError {
 
 impl std::error::Error for KeyError {}
 
+/// The longest start of `segments` that is a setting or table, as printed,
+/// or empty when none is: the only part of a typed path any refusal repeats.
+fn known_prefix(segments: &[String]) -> String {
+    let known = (0..=segments.len())
+        .rev()
+        .find(|len| {
+            let prefix = &segments[..*len];
+            *len > 0
+                && (shape_of(prefix).is_some()
+                    || VIRTUAL_KEYS.iter().any(|(name, _)| *name == prefix))
+        })
+        .unwrap_or(0);
+    crate::config::shown_path("", &segments[..known])
+}
+
+/// THE refusal of a path that is not well formed: it repeats only the longest
+/// start of `typed` that names a setting or table (see [`known_prefix`]),
+/// read up to the first part that is empty or holds what no name can, and
+/// never what follows it, which may be a value typed where a name goes.
+/// `reason` must hold nothing that was typed.
+fn malformed_at(typed: &str, reason: impl Into<String>) -> KeyError {
+    let segments: Vec<String> = typed
+        .split('.')
+        .take_while(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .map(str::to_string)
+        .collect();
+    KeyError::Malformed {
+        known: known_prefix(&segments),
+        reason: reason.into(),
+    }
+}
+
 /// Find the setting `path` names.
 pub fn lookup(path: &str) -> Result<Key, KeyError> {
     // `name=value` is how other tools take a setting. What follows `=` may be
@@ -183,23 +226,25 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
         text.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
     };
-    let not_a_name = || {
-        KeyError::Malformed(
-            "that is not a setting name; values are never given in the path".to_string(),
+    let not_a_name = |typed: &str| {
+        malformed_at(
+            typed,
+            "that is not a setting name; values are never given in the path",
         )
     };
     if let Some((name, _)) = path.split_once('=') {
         if !name_like(name) {
-            return Err(not_a_name());
+            return Err(not_a_name(name));
         }
-        return Err(KeyError::Malformed(format!(
+        return Err(malformed_at(
+            name,
             "a value goes after the setting's name and a space, not after `=`: write `dux \
-             config set {name} <value>` (a secret such as server.auth.password is asked for, or \
-             read with --stdin). What followed `=` is not repeated here."
-        )));
+             config set <setting> <value>` (a secret such as server.auth.password is asked for, \
+             or read with --stdin). What followed `=` is not repeated here.",
+        ));
     }
     if !name_like(path) {
-        return Err(not_a_name());
+        return Err(not_a_name(path));
     }
     let segments = split_path(path)?;
     if let Some((_, policy)) = VIRTUAL_KEYS
@@ -216,10 +261,11 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
         && table == "env"
         && !crate::config::is_valid_env_name(name)
     {
-        return Err(KeyError::Malformed(format!(
-            "{path}: an environment variable name must match [A-Za-z_][A-Za-z0-9_]*, the rule \
-             dux starts with"
-        )));
+        return Err(malformed_at(
+            "env",
+            "an environment variable name must match [A-Za-z_][A-Za-z0-9_]*, the rule dux \
+             starts with",
+        ));
     }
     match shape_of(&segments) {
         Some(shape) => Ok(Key {
@@ -244,7 +290,7 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
                 })
                 .unwrap_or(0);
             Err(KeyError::Unknown {
-                known: crate::config::shown_path("", &segments[..known]),
+                known: known_prefix(&segments[..known]),
                 suggestion: suggest(&segments[..known], &segments[known]),
             })
         }
@@ -253,25 +299,25 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
 
 fn split_path(path: &str) -> Result<Vec<String>, KeyError> {
     if path.is_empty() {
-        return Err(KeyError::Malformed(
-            "a setting's path cannot be empty".to_string(),
-        ));
+        return Err(malformed_at("", "a setting's path cannot be empty"));
     }
     let segments: Vec<String> = path.split('.').map(str::to_string).collect();
     for segment in &segments {
         if segment.is_empty() {
-            return Err(KeyError::Malformed(format!(
-                "{path} has an empty part; write the path as table.key, like server.port"
-            )));
+            return Err(malformed_at(
+                path,
+                "the path has an empty part; write the path as table.key, like server.port",
+            ));
         }
         if !segment
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
-            return Err(KeyError::Malformed(format!(
-                "{path} has a part with characters other than letters, digits, _ and -; \
-                 a key whose name needs them cannot be set this way, so edit config.toml"
-            )));
+            return Err(malformed_at(
+                path,
+                "the path has a part with characters other than letters, digits, _ and -; a \
+                 key whose name needs them cannot be set this way, so edit config.toml",
+            ));
         }
     }
     Ok(segments)
@@ -584,11 +630,13 @@ fn write_value_checked(
     let (previous, remaining_problems) =
         crate::config_write::mutate_config_file_repairing(config_path, missing, path, |doc| {
             check(doc)?;
+            let before = doc.to_string();
             let previous = value_in_doc(doc, path);
             let had = provider_command_in(doc, path);
             prepare_provider(doc, path)?;
             set_in_doc(doc, path, value)?;
             check_provider_command(doc, path, had)?;
+            refuse_a_set_dux_would_undo(&before, &doc.to_string(), path)?;
             Ok(previous)
         })?;
     Ok(SetReport {
@@ -597,6 +645,91 @@ fn write_value_checked(
         now,
         remaining_problems,
     })
+}
+
+/// What dux's load makes of the setting at `path` with the file `raw`, by
+/// the same load `get` reports from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadedAs {
+    /// Used as written (or not written at all).
+    Kept,
+    /// Written, but the load drops it, or the entry holding it.
+    Dropped,
+    /// Written as something other than its default, but the load uses the
+    /// default in its place.
+    Reset,
+}
+
+fn loaded_as(raw: &str, path: &[String]) -> LoadedAs {
+    let Ok(file) = toml::from_str::<toml::Value>(raw) else {
+        return LoadedAs::Kept;
+    };
+    let Some(written) = value_at(&file, path) else {
+        return LoadedAs::Kept;
+    };
+    let Ok(config) = crate::config::effective_config_from_text(raw) else {
+        return LoadedAs::Kept;
+    };
+    let mut used = serde_json::to_value(&config).ok();
+    for segment in path {
+        used = used.and_then(|node| node.get(segment).cloned());
+    }
+    let Some(used) = used.filter(|used| !used.is_null()) else {
+        return LoadedAs::Dropped;
+    };
+    let mut default = Some(default_tree());
+    for segment in path {
+        default = default.and_then(|node| node.get(segment).cloned());
+    }
+    let written = serde_json::to_value(written).ok();
+    match default {
+        Some(default) if used == default && written.as_ref() != Some(&default) => LoadedAs::Reset,
+        _ => LoadedAs::Kept,
+    }
+}
+
+/// Refuse a set whose result dux's load would drop or reset: reporting it as
+/// set and then running without it would be a lie the user finds later. A
+/// set that leaves a setting dropped or reset as it already was (repairing
+/// one of two wrong fields of an entry, say) is not refused: it changes
+/// nothing about that.
+fn refuse_a_set_dux_would_undo(before: &str, after: &str, path: &[String]) -> Result<()> {
+    let now = loaded_as(after, path);
+    if now == LoadedAs::Kept || loaded_as(before, path) == now {
+        return Ok(());
+    }
+    // An entry the load already dropped before the set (over another of its
+    // values) is not dropped by it: the set may be the first of the repairs.
+    if now == LoadedAs::Dropped
+        && (1..path.len()).any(|len| loaded_as(before, &path[..len]) == LoadedAs::Dropped)
+    {
+        return Ok(());
+    }
+    let shown = crate::config::shown_path(after, path);
+    // A provider set back to dux's own retired block is pruned by the load.
+    if let [section, name, ..] = path
+        && section == "providers"
+        && let Ok(doc) = after.parse::<DocumentMut>()
+        && crate::config_migrate::retired_provider_prunes(&doc)
+            .iter()
+            .any(|(pruned, _)| *pruned == [section.clone(), name.clone()])
+    {
+        let provider = crate::config::shown_path(after, &path[..2]);
+        anyhow::bail!(
+            "that change would make {provider} match the retired stock {name} provider, which \
+             dux removes on load; nothing was changed. To remove the provider, delete its block."
+        );
+    }
+    match now {
+        LoadedAs::Dropped => anyhow::bail!(
+            "that change would make dux drop {shown} when it loads the file, so it would not be \
+             set; nothing was changed."
+        ),
+        _ => anyhow::bail!(
+            "that change would make dux reset {shown} to its default when it loads the file, so \
+             it would not be set; nothing was changed."
+        ),
+    }
 }
 
 /// Before one field of a provider the file does not list is set: a
@@ -821,6 +954,23 @@ fn password_policy_of(raw: &str) -> Result<crate::auth::PasswordPolicy> {
             crate::config::describe_toml_error(raw, &e)
         )
     })?;
+    // An auth setting written where dux does not read it (a minimum spelled
+    // `minimum-password-length`, or written one level too high) may be the
+    // minimum the user meant, so no policy can be read with any confidence
+    // until it is fixed: checking against the defaults could let through a
+    // password the user's own minimum would refuse.
+    let misplaced: Vec<String> = crate::config::misplaced_auth_problem_list(raw)
+        .into_iter()
+        .map(|problem| problem.message)
+        .collect();
+    if !misplaced.is_empty() {
+        anyhow::bail!(
+            "dux cannot tell what a new password has to meet while config.toml has a web UI \
+             password setting where dux does not read it ({}). Fix that first; no password was \
+             set.",
+            misplaced.join("; ")
+        );
+    }
     let Some(server) = file.get("server") else {
         return Ok(defaults);
     };
@@ -1719,7 +1869,7 @@ port = 3890
             "providers.my.tool.command\"",
         ] {
             assert!(
-                matches!(lookup(path), Err(KeyError::Malformed(_))),
+                matches!(lookup(path), Err(KeyError::Malformed { .. })),
                 "{path:?}"
             );
         }
@@ -1911,6 +2061,49 @@ port = 3890
         assert!(result.is_err());
         assert_eq!(seen, Some(40));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// Every refusal of a path that is not well formed repeats only the
+    /// longest start of it that names a setting or table, never the rest.
+    #[test]
+    fn a_malformed_path_repeats_only_its_known_start() {
+        for (typed, known) in [
+            ("env.ghp-SECRET123", Some("env")),
+            ("ui..ghpSECRET123", Some("ui")),
+            ("server.auth..ghpSECRET123", Some("server.auth")),
+            ("ui.ghp SECRET123", Some("ui")),
+            (".ghpSECRET123", None),
+            ("ghpSECRET123..x", None),
+            ("ui.left_width_pct=ghpSECRET123", Some("ui.left_width_pct")),
+        ] {
+            let said = lookup(typed).unwrap_err().to_string();
+            assert!(!said.contains("SECRET123"), "{typed}: {said}");
+            if let Some(known) = known {
+                assert!(
+                    said.contains(&format!("starts with {known};")),
+                    "{typed}: {said}"
+                );
+            }
+        }
+    }
+
+    /// A set whose result dux's load would reset is refused, and the file is
+    /// left as it was.
+    #[test]
+    fn a_set_dux_would_reset_is_refused() {
+        let (_dir, path) = temp_config("[ui]\nleft_width_pct = 25\n");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let error = set_plain(&path, &lookup("ui.terminal_font_size").unwrap(), "500")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("reset ui.terminal_font_size to its default"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        // Its default, and any value dux uses as written, is set.
+        set_plain(&path, &lookup("ui.terminal_font_size").unwrap(), "14").unwrap();
+        set_plain(&path, &lookup("ui.terminal_font_size").unwrap(), "20").unwrap();
     }
 
     #[test]
@@ -2462,8 +2655,13 @@ port = 3890
             "[[projects]]\nid = \"p\"\npath = \"/p\"\nname = \"api\"\n[projects.env]\nA = \"${\"\nB = \"${\"\n",
         );
         assert_eq!(problems.len(), 2, "{problems:?}");
+        // Placed by its line, never by its name, path or id.
         assert!(
-            problems.iter().all(|p| p.message.contains("api")),
+            problems
+                .iter()
+                .all(|p| p.message.contains("the project on line 1")
+                    && !p.message.contains("api")
+                    && !p.message.contains("/p")),
             "{problems:?}"
         );
     }

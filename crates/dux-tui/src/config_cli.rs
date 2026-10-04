@@ -61,7 +61,7 @@ pub(crate) fn run_get(
     };
     let path = path.as_str();
     if path.starts_with('-') {
-        bail!("unknown flag: {}", flag_name(path));
+        bail!("{UNKNOWN_FLAG}");
     }
     let key = config_keys::lookup(path).map_err(|e| anyhow!("{e}"))?;
     // Read exactly as a start reads it: no file is the defaults, while a
@@ -389,9 +389,10 @@ struct SetArgs {
 
 /// A flag as it may be named in an error: what follows `=` (perhaps a
 /// secret typed as `--password=…`) is never repeated.
-fn flag_name(arg: &str) -> &str {
-    arg.split_once('=').map_or(arg, |(name, _)| name)
-}
+/// The refusal of a flag `dux config` does not take. It repeats nothing that
+/// was typed: `--name=<value>` may carry a value, a password above all.
+const UNKNOWN_FLAG: &str = "unknown flag (not repeated, in case it holds a value): `dux config \
+     get` takes --show and `dux config set` takes --stdin";
 
 /// `<path> [value] [--stdin]`. A value may start with a single dash (a
 /// negative number); `--` ends the flags for one that starts with two.
@@ -405,7 +406,7 @@ fn parse_set_args(args: &[String]) -> Result<SetArgs> {
         } else if !flags_done && arg == "--stdin" {
             stdin = true;
         } else if !flags_done && arg.starts_with("--") {
-            bail!("unknown flag: {}", flag_name(arg));
+            bail!("{UNKNOWN_FLAG}");
         } else {
             positionals.push(arg);
         }
@@ -2136,3 +2137,6 @@ mod key_binding_values_tests;
 
 #[cfg(test)]
 mod conflicting_binding_tests;
+
+#[cfg(test)]
+mod set_get_policy_projects_paths_tests;

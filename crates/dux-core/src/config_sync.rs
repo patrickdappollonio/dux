@@ -107,23 +107,68 @@ where
 /// whose expanded paths collide. `source` names the store ("config.toml" or
 /// "SQLite") for the error.
 pub fn validate_project_records(source: &str, projects: &[ProjectConfig]) -> Result<()> {
-    for (index, project) in projects.iter().enumerate() {
-        for other in projects.iter().skip(index + 1) {
+    match duplicate_project(projects) {
+        // Named by position, never by path, name or id: those are what a
+        // user may keep private in a pasted bug report.
+        Some(duplicate) => anyhow::bail!(
+            "Project sync conflict in {source}: {}",
+            duplicate.sentence(
+                &format!("project {} (counting from 1)", duplicate.first + 1),
+                &format!("project {}", duplicate.second + 1),
+            )
+        ),
+        None => Ok(()),
+    }
+}
+
+/// Two project records dux cannot tell apart, by their positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DuplicateProject {
+    pub first: usize,
+    pub second: usize,
+    /// Whether they share an id (else they share a path).
+    pub same_id: bool,
+}
+
+impl DuplicateProject {
+    /// The sentence, with the two projects as `first` and `second` say
+    /// them (by position or by line), never by path, name or id.
+    pub fn sentence(&self, first: &str, second: &str) -> String {
+        if self.same_id {
+            format!(
+                "{first} and {second} have the same id. Remove one, or give it another id, then \
+                 restart dux."
+            )
+        } else {
+            format!(
+                "{first} and {second} have the same path. Remove one of them, then restart dux."
+            )
+        }
+    }
+}
+
+/// The first two project records in `projects` that share an id or a path.
+pub fn duplicate_project(projects: &[ProjectConfig]) -> Option<DuplicateProject> {
+    for (first, project) in projects.iter().enumerate() {
+        for (offset, other) in projects.iter().skip(first + 1).enumerate() {
+            let second = first + 1 + offset;
             if project.id == other.id {
-                anyhow::bail!(
-                    "Project sync conflict in {source}: duplicate project id \"{}\". Remove or rename one [[projects]] entry, then restart dux.",
-                    project.id
-                );
+                return Some(DuplicateProject {
+                    first,
+                    second,
+                    same_id: true,
+                });
             }
             if same_expanded_project_path(project, other) {
-                anyhow::bail!(
-                    "Project sync conflict in {source}: duplicate project path \"{}\". Remove one duplicate project entry, then restart dux.",
-                    expanded_project_path(project).unwrap_or_else(|| project.path.clone())
-                );
+                return Some(DuplicateProject {
+                    first,
+                    second,
+                    same_id: false,
+                });
             }
         }
     }
-    Ok(())
+    None
 }
 
 /// Merge a config project with its matching stored project, returning the
@@ -369,7 +414,12 @@ mod tests {
         let err = reconcile_config_projects(&mut config, &store, |_| Ok(()))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("duplicate project id"), "{err}");
+        // Named by position, never by the id itself.
+        assert!(
+            err.contains("project 1 (counting from 1) and project 2 have the same id"),
+            "{err}"
+        );
+        assert!(!err.contains("dup"), "{err}");
     }
 
     #[test]
