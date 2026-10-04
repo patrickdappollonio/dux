@@ -186,15 +186,7 @@ async fn login(
         );
     }
     let a = &auth.0;
-    match state
-        .auth
-        .verify(
-            &a.classification,
-            password,
-            super::admission::CheckKind::Login,
-        )
-        .await
-    {
+    match state.auth.verify(&a.classification, password).await {
         Verify::Right { generation, weak } => {
             state.auth.note_strength(&generation, weak);
             let token = match state.auth.sessions.issue(&generation).await {
@@ -396,15 +388,7 @@ async fn change_password(
             if current.byte_len() > config.max_password_bytes as usize {
                 return too_long(config.max_password_bytes);
             }
-            match state
-                .auth
-                .verify(
-                    &a.classification,
-                    current,
-                    super::admission::CheckKind::CurrentPassword,
-                )
-                .await
-            {
+            match state.auth.verify(&a.classification, current).await {
                 Verify::Right { .. } => hash.to_string(),
                 Verify::Wrong => {
                     return refusal(

@@ -1016,16 +1016,25 @@ async fn the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
         )
         .await;
     assert_eq!(still.status, StatusCode::OK);
-    // The right one changes it at once: a wrong current password counts toward
-    // the block, but the wait after a failed LOGIN is not the change's to serve.
-    let changed = dux
-        .send(
-            NETWORK,
-            Req::new(Method::POST, "/api/v1/auth/password")
-                .json(json!({ "current": PASSWORD, "new": OTHER_PASSWORD }))
-                .cookie(&cookie),
-        )
-        .await;
+    // A wrong current password is accounted like a failed login, so the right
+    // one waits out the same slow-down first, then changes it.
+    let change = || {
+        Req::new(Method::POST, "/api/v1/auth/password")
+            .json(json!({ "current": PASSWORD, "new": OTHER_PASSWORD }))
+            .cookie(&cookie)
+    };
+    let early = dux.send(NETWORK, change()).await;
+    assert_eq!(
+        early.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        early.body
+    );
+    let wait = early.json()["retry_after_seconds"]
+        .as_u64()
+        .expect("a wait");
+    tokio::time::sleep(Duration::from_secs(wait) + Duration::from_millis(100)).await;
+    let changed = dux.send(NETWORK, change()).await;
     assert_eq!(changed.status, StatusCode::NO_CONTENT, "{}", changed.body);
     assert_auth_required(
         &dux.send(
@@ -2097,4 +2106,199 @@ async fn this_machine_through_its_own_lan_address_is_never_written_to_the_blockl
         "this machine's own address was written to the blocklist: {}",
         dux.config()
     );
+}
+
+// ── Buckets by arrival, own addresses, the current password ─────────────
+
+/// A Funnel exposure whose look succeeded: dux knows a Funnel publishes it, so
+/// this machine's own loopback requests are asked for the password.
+fn funnel_exposure() -> dux_web::exposure::ExposureCell {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let exposure = ExposureCell::new(FunnelState::Funnel);
+    exposure.set_identity(Some(IdentityFacts {
+        funnel_any: true,
+        own_ips: own_tailscale_ips(),
+        ..IdentityFacts::default()
+    }));
+    exposure
+}
+
+/// While a Funnel publishes dux and a password is set, the owner on this
+/// machine must sign in too (loopback is distrusted). Their sign-in shares the
+/// "unverified" slow-down bucket with every anonymous Funnel visitor, so ONE
+/// wrong guess from the internet makes the owner's correct password wait, and
+/// a guesser that keeps retrying the moment its own wait ends keeps the owner
+/// out indefinitely. Default settings throughout.
+#[tokio::test]
+async fn a_funnel_guesser_never_slows_the_owner_signing_in_on_this_machine() {
+    let exposure = funnel_exposure();
+    let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
+        move |p| p.with_live_exposure(exposure)
+    });
+    // The owner on this machine is indeed asked to sign in while the Funnel stands.
+    assert_auth_required(
+        &dux.get(THIS_MACHINE, "/api/v1/projects").await,
+        "this machine under a Funnel",
+    );
+    // One wrong guess from an internet visitor through the Funnel.
+    let guess = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/login")
+                .json(json!({ "password": "wrong guess" }))
+                .header("tailscale-funnel-request", "?1")
+                .header("x-forwarded-for", "203.0.113.50"),
+        )
+        .await;
+    assert_eq!(guess.status, StatusCode::UNAUTHORIZED, "{}", guess.body);
+    // The owner, on this machine, types the right password.
+    let mine = dux.login(THIS_MACHINE, PASSWORD).await;
+    assert_eq!(
+        mine.status,
+        StatusCode::NO_CONTENT,
+        "the owner's correct password on this machine was refused because an internet \
+         visitor guessed wrong: {}",
+        mine.body
+    );
+}
+
+/// The same shared bucket, through the per-minute cap: Funnel visitors that
+/// fill it lock the owner on this machine out for the rest of the minute.
+#[tokio::test]
+async fn a_funnel_flood_never_locks_out_the_owner_on_this_machine() {
+    let exposure = funnel_exposure();
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 3",
+            hash_of(PASSWORD)
+        ),
+        move |p| p.with_live_exposure(exposure),
+    );
+    for n in 0..3u8 {
+        let _ = dux
+            .send(
+                THIS_MACHINE,
+                Req::new(Method::POST, "/api/v1/auth/login")
+                    .json(json!({ "password": "wrong guess" }))
+                    .header("tailscale-funnel-request", "?1")
+                    .header("x-forwarded-for", &format!("203.0.113.{n}")),
+            )
+            .await;
+    }
+    let mine = dux.login(THIS_MACHINE, PASSWORD).await;
+    assert_eq!(
+        mine.status,
+        StatusCode::NO_CONTENT,
+        "the owner on this machine was rate-limited by internet visitors: {}",
+        mine.body
+    );
+}
+
+/// "This machine is never blocked." The owner opening dux's LAN URL in a
+/// browser on the machine itself connects FROM that LAN address. A blocklist
+/// range the owner wrote for a hostile neighbourhood that happens to cover
+/// the machine's own address refuses the owner's own browser.
+#[tokio::test]
+async fn this_machine_through_its_own_lan_address_is_never_refused_by_the_blocklist() {
+    let dux = Dux::start("blocked_addresses = [\"192.0.2.0/24\"]");
+    let own = Arrival {
+        peer: "192.0.2.10:50000".parse().unwrap(),
+        local: "192.0.2.10:3890".parse().unwrap(),
+    };
+    let answer = dux.get(own, "/api/v1/auth/status").await;
+    assert_ne!(
+        answer.error().as_deref(),
+        Some("blocked"),
+        "this machine, on its own LAN address, was refused as blocked: {}",
+        answer.body
+    );
+}
+
+/// `max_failed_logins = 0` "never blocks anyone automatically; the slow-down
+/// below still applies" (the setting's own comment). A wrong CURRENT password
+/// skips the per-address slow-down, and the tailnet has no shared per-minute
+/// limit, so with that setting a tailnet device (which needs no session under
+/// the default `require`) can guess the password through the password route
+/// as fast as dux hashes, with no slow-down at all.
+#[tokio::test]
+async fn wrong_current_passwords_are_slowed_down_too() {
+    let dux = Dux::with_password("max_failed_logins = 0\nfailed_login_delay_seconds = 5");
+    let mut answers = Vec::new();
+    for n in 0..4 {
+        let answer = dux
+            .send(
+                TAILNET,
+                Req::new(Method::POST, "/api/v1/auth/password")
+                    .json(json!({ "current": format!("guess number {n}"), "new": OTHER_PASSWORD })),
+            )
+            .await;
+        answers.push((answer.status, answer.error()));
+    }
+    assert!(
+        answers
+            .iter()
+            .skip(1)
+            .any(|(status, _)| *status == StatusCode::TOO_MANY_REQUESTS),
+        "four wrong current passwords in a row, none slowed down: {answers:?}"
+    );
+}
+
+/// A Funnel flood never slows this machine reaching dux through one of its
+/// own addresses either: that route has its own bucket.
+#[tokio::test]
+async fn a_funnel_flood_never_locks_out_this_machine_on_its_own_address() {
+    let exposure = funnel_exposure();
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nfailed_login_delay_seconds = 5\nmax_failed_logins_per_minute = 2",
+            hash_of(PASSWORD)
+        ),
+        move |p| p.with_live_exposure(exposure),
+    );
+    for n in 0..3u8 {
+        let _ = dux
+            .send(
+                THIS_MACHINE,
+                Req::new(Method::POST, "/api/v1/auth/login")
+                    .json(json!({ "password": "wrong guess" }))
+                    .header("tailscale-funnel-request", "?1")
+                    .header("x-forwarded-for", &format!("203.0.113.{n}")),
+            )
+            .await;
+    }
+    let own = Arrival {
+        peer: "192.0.2.10:50000".parse().unwrap(),
+        local: "192.0.2.10:3890".parse().unwrap(),
+    };
+    assert_eq!(
+        dux.login(own, PASSWORD).await.status,
+        StatusCode::NO_CONTENT
+    );
+}
+
+/// The documented limit: through a raw TCP forward onto dux's port, outsiders
+/// arrive as plain loopback with nothing to tell them from the owner, so they
+/// share the owner's bucket. This pins the limit the config comment states.
+#[tokio::test]
+async fn through_a_raw_forward_outsiders_share_the_plain_loopback_bucket() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let exposure = ExposureCell::new(FunnelState::Open);
+    exposure.set_identity(Some(IdentityFacts {
+        forward_to_dux: true,
+        own_ips: own_tailscale_ips(),
+        ..IdentityFacts::default()
+    }));
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nfailed_login_delay_seconds = 5\nmax_failed_logins_per_minute = 0",
+            hash_of(PASSWORD)
+        ),
+        move |p| p.with_live_exposure(exposure),
+    );
+    // An outsider through the forward: plain loopback, wrong guess.
+    let guess = dux.login(THIS_MACHINE, "wrong guess").await;
+    assert_eq!(guess.status, StatusCode::UNAUTHORIZED, "{}", guess.body);
+    // The owner on plain loopback now waits with it.
+    let mine = dux.login(THIS_MACHINE, PASSWORD).await;
+    assert_eq!(mine.status, StatusCode::TOO_MANY_REQUESTS, "{}", mine.body);
 }

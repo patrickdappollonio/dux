@@ -257,9 +257,9 @@ The rest of the section, each documented inline in `config.toml`:
 | `max_failed_logins` | `5` | Failed logins one address may make before it is added to `blocked_addresses`. Only an address dux can verify is added (a direct connection, or one through your `tailscale serve`); behind another proxy dux keeps slowing the logins down and its log names the address for you to add by hand. `0` never blocks. |
 | `blocked_addresses` | `[]` | Addresses and CIDR ranges dux refuses outright, with or without a password. A request matches when any address it names does, forwarding headers included. Loopback never matches: an entry covering it is accepted, warned about and ignored. Yours to edit. |
 | `failed_login_window_seconds` | `900` | How long a failed login counts against its address. |
-| `failed_login_delay_seconds` | `1` | The wait after a failed login, doubling with each further one. |
+| `failed_login_delay_seconds` | `1` | The wait after a failed login or a wrong current password, doubling with each further one. |
 | `failed_login_max_delay_seconds` | `30` | The longest that wait grows. |
-| `max_failed_logins_per_minute` | `30` | Failures from many addresses together before they are told to slow down. Counted apart for the internet and unverified proxies, and for devices on your network; tailnet devices and this machine are only slowed one address at a time. |
+| `max_failed_logins_per_minute` | `30` | Failures from many addresses together before they are told to slow down. Counted apart for the internet and unverified proxies, for devices on your network, and for sign-ins on this machine; tailnet devices and this machine are only slowed one address at a time. Visitors through a `tailscale serve` TCP forward look exactly like this machine and share its count. |
 | `disable_no_auth_warning` | `false` | Hides the web UI's red warning about having no password. Its "don't show again" sets this. |
 | `cookie_secure` | `"auto"` | Whether the sign-in cookie is marked Secure: `"auto"`, `"always"` or `"never"`. |
 | `max_concurrent_password_checks` | `2` | Password checks run at once, which bounds what a flood of login attempts costs. |

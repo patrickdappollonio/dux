@@ -11,9 +11,13 @@
 //! - `failed_login_delay_seconds` / `failed_login_max_delay_seconds`: after a
 //!   failure, that address waits before its next attempt is checked; the wait
 //!   doubles with each further failure in the window, up to the maximum. This
-//!   machine waits too. 0 turns the wait off.
+//!   machine waits too, and so does a wrong CURRENT password on the
+//!   password-change route, which is accounted exactly like a failed login
+//!   (decided, after review: exempting it left the tailnet, which has no
+//!   global limit, free to guess as fast as dux hashes). 0 turns the wait off.
 //! - `max_failed_logins_per_minute`: failures from many addresses together in
-//!   the current minute, counted apart for each trust level (see [`Level`]);
+//!   the current minute, counted apart for each trust level (see [`Level`])
+//!   and, for unverified requests, for each route they took (see [`Via`]);
 //!   past it, that level is told "too many requests" until the minute is
 //!   over. Tailnet devices and this machine have no such limit, only their
 //!   own per-address wait. 0 turns it off.
@@ -30,9 +34,10 @@
 //! text the client may have chosen, so writing it to `config.toml` would let
 //! anyone fill the blocklist with addresses of their choosing, or with the
 //! owner's. Its failures are counted twice, in memory only: under the claimed
-//! address, and in ONE bucket shared by all unverified traffic, so a client
-//! rotating the address it claims still meets the doubling wait and the global
-//! limit. Reaching the limit under a claimed address writes nothing; the
+//! address, and in ONE bucket shared by all unverified traffic that came the
+//! same way ([`Via`]), so a client rotating the address it claims still meets
+//! the doubling wait and the global limit, while the owner signing in on this
+//! machine is never held by a Funnel visitor's failures. Reaching the limit under a claimed address writes nothing; the
 //! caller logs that it could not be verified and can be added by hand.
 //!
 //! The blocklist itself applies to EVERY address a request names (the peer,
@@ -40,8 +45,9 @@
 //! client that lies can only get itself refused, and a proxy's real client is
 //! caught whichever header that proxy uses.
 //!
-//! This machine (a verified loopback client) is never blocked, only slowed. A
-//! loopback address is never blocked either, even when dux cannot vouch that
+//! This machine (a verified loopback client) is never blocked, only slowed.
+//! The blocklist never matches loopback or any of this machine's own
+//! addresses, and a loopback address is never blocked either, even when dux cannot vouch that
 //! the request came from this machine (a forward onto loopback): blocking it
 //! would lock the owner out with whoever was relayed.
 
@@ -51,7 +57,7 @@ use std::time::{Duration, Instant};
 
 use dux_core::config::{AddressBlock, ServerAuthConfig};
 
-use super::provenance::{Classification, ClientClass};
+use super::provenance::{Classification, ClientClass, Via};
 
 /// What failures are counted against. A verified address and a claimed one
 /// are separate key spaces (decided, after review): a request can claim any
@@ -65,8 +71,8 @@ enum TrackKey {
     Verified(IpAddr),
     /// An address an unverified request claimed: slowed, never banned.
     Claimed(IpAddr),
-    /// The one bucket every unverified request shares.
-    Unverified,
+    /// The one bucket every unverified request that came the same way shares.
+    Unverified(Via),
 }
 
 impl TrackKey {
@@ -82,7 +88,7 @@ impl TrackKey {
         c.claimed_ip
             .map(|ip| Self::Claimed(canonical(ip)))
             .into_iter()
-            .chain(std::iter::once(Self::Unverified))
+            .chain(std::iter::once(Self::Unverified(c.via)))
             .collect()
     }
 }
@@ -92,10 +98,11 @@ impl TrackKey {
 /// verified network clients another, and verified tailnet clients and this
 /// machine none, so a flood from a less trusted level never slows a more
 /// trusted one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum Level {
-    /// No address dux can verify: an unproven forward, or the internet.
-    Unverified,
+    /// No address dux can verify, by the route it took: an unproven forward
+    /// or the internet, plain loopback, or this machine's own address.
+    Unverified(Via),
     /// A verified address on the network.
     Network,
     /// A verified tailnet device: per address only.
@@ -105,10 +112,18 @@ enum Level {
 }
 
 impl Level {
+    /// Whether this level shares a global per-minute limit.
+    fn has_global_limit(self) -> bool {
+        match self {
+            Self::Unverified(_) | Self::Network => true,
+            Self::Tailnet | Self::ThisMachine => false,
+        }
+    }
+
     fn of(c: &Classification) -> Self {
         match (c.class, c.verified_ip) {
             (ClientClass::ThisMachine, _) => Self::ThisMachine,
-            (_, None) => Self::Unverified,
+            (_, None) => Self::Unverified(c.via),
             (ClientClass::Tailnet, Some(_)) => Self::Tailnet,
             (ClientClass::Network | ClientClass::Internet, Some(_)) => Self::Network,
         }
@@ -141,8 +156,7 @@ struct Inner {
     tracked: HashMap<TrackKey, Failures>,
     /// The current minute of each level's global limit: when it began and
     /// how many failures it has seen.
-    unverified_minute: Option<(Instant, u32)>,
-    network_minute: Option<(Instant, u32)>,
+    minutes: HashMap<Level, (Instant, u32)>,
     /// Bans that hold for this run only: their write to `config.toml` failed,
     /// or `blocked_addresses` was already at `max_blocked_addresses`.
     runtime_bans: HashSet<IpAddr>,
@@ -152,15 +166,6 @@ struct Inner {
 #[derive(Default)]
 pub(crate) struct Admission {
     inner: std::sync::Mutex<Inner>,
-}
-
-/// What a password check is for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CheckKind {
-    /// A sign-in.
-    Login,
-    /// The current password a signed-in browser gives to change it.
-    CurrentPassword,
 }
 
 /// Whether an address may be blocked at all.
@@ -183,8 +188,14 @@ impl Admission {
 
     /// Whether this client is refused outright: any address it names is inside
     /// a configured `blocked_addresses` entry (`blocks`, parsed once per
-    /// config) or a ban held for this run. This machine never is.
-    pub(crate) fn is_blocked(&self, blocks: &[AddressBlock], c: &Classification) -> bool {
+    /// config) or a ban held for this run. This machine never is, and `own`
+    /// (this machine's own addresses) never match.
+    pub(crate) fn is_blocked(
+        &self,
+        blocks: &[AddressBlock],
+        c: &Classification,
+        own: &[IpAddr],
+    ) -> bool {
         if c.verified_this_machine() {
             return false;
         }
@@ -192,13 +203,15 @@ impl Admission {
         // and `tailscale serve` relays every tailnet device from it, so an
         // entry covering it would refuse the owner and the whole tailnet. Only
         // the other addresses a request names are matched, so a serve request
-        // is judged by its tailnet client's address.
+        // is judged by its tailnet client's address. This machine's own
+        // addresses never match either, for the same reason (decided, after
+        // review): the owner's browser opening dux's LAN URL connects FROM one.
         let named = || {
             c.named
                 .iter()
                 .copied()
                 .map(dux_core::config_auth::canonical)
-                .filter(|ip| !ip.is_loopback())
+                .filter(|ip| !ip.is_loopback() && !own.contains(ip))
         };
         if named().any(|ip| blocks.iter().any(|block| block.contains(ip))) {
             return true;
@@ -208,39 +221,33 @@ impl Admission {
     }
 
     /// Whether a password check may run for this client now. `Err` is how long
-    /// it must wait first, in whole seconds (at least one).
-    ///
-    /// `kind` decides whether the address's own wait applies: it is the wait
-    /// after a failed LOGIN (`failed_login_delay_seconds`), so a sign-in serves
-    /// it and a signed-in browser's current-password check does not. Both are
-    /// counted as failures toward the block and both are held to the global
-    /// limit, so a session cannot be used to guess the password for long.
+    /// it must wait first, in whole seconds (at least one). Every check, a
+    /// sign-in or a current password, is held to the same waits and limits.
     pub(crate) fn check_attempt(
         &self,
         cfg: &ServerAuthConfig,
         c: &Classification,
         now: Instant,
-        kind: CheckKind,
     ) -> Result<(), u64> {
         let window = Duration::from_secs(u64::from(cfg.failed_login_window_seconds));
         let mut inner = self.lock();
-        if kind == CheckKind::Login {
-            let wait = TrackKey::of(c)
-                .iter()
-                .filter_map(|key| inner.tracked.get(key))
-                .filter(|failures| {
-                    now.saturating_duration_since(failures.last) <= window
-                        && now < failures.next_allowed
-                })
-                .map(|failures| failures.next_allowed - now)
-                .max();
-            if let Some(wait) = wait {
-                return Err(ceil_secs(wait));
-            }
+        let wait = TrackKey::of(c)
+            .iter()
+            .filter_map(|key| inner.tracked.get(key))
+            .filter(|failures| {
+                now.saturating_duration_since(failures.last) <= window
+                    && now < failures.next_allowed
+            })
+            .map(|failures| failures.next_allowed - now)
+            .max();
+        if let Some(wait) = wait {
+            return Err(ceil_secs(wait));
         }
         inner.prune_minutes(now);
+        let level = Level::of(c);
         if cfg.max_failed_logins_per_minute > 0
-            && let Some(Some((start, count))) = inner.minute(Level::of(c)).copied()
+            && level.has_global_limit()
+            && let Some((start, count)) = inner.minutes.get(&level).copied()
         {
             let elapsed = now.saturating_duration_since(start);
             if elapsed < MINUTE && count >= cfg.max_failed_logins_per_minute {
@@ -262,8 +269,9 @@ impl Admission {
         let window = Duration::from_secs(u64::from(cfg.failed_login_window_seconds));
         let mut inner = self.lock();
         inner.prune_minutes(now);
-        if let Some(minute) = inner.minute(Level::of(c)) {
-            let minute = minute.get_or_insert((now, 0));
+        let level = Level::of(c);
+        if level.has_global_limit() {
+            let minute = inner.minutes.entry(level).or_insert((now, 0));
             minute.1 = minute.1.saturating_add(1);
         }
 
@@ -288,7 +296,7 @@ impl Admission {
                 TrackKey::Claimed(_) if count == cfg.max_failed_logins => {
                     strike = Strike::UnverifiedLimit(ip);
                 }
-                TrackKey::Claimed(_) | TrackKey::Unverified => {}
+                TrackKey::Claimed(_) | TrackKey::Unverified(_) => {}
             }
         }
         strike
@@ -300,7 +308,7 @@ impl Admission {
     pub(crate) fn record_success(&self, c: &Classification) {
         let mut inner = self.lock();
         for key in TrackKey::of(c) {
-            if key != TrackKey::Unverified {
+            if !matches!(key, TrackKey::Unverified(_)) {
                 inner.tracked.remove(&key);
             }
         }
@@ -346,7 +354,7 @@ impl Inner {
                 let oldest = self
                     .tracked
                     .iter()
-                    .filter(|(key, _)| **key != TrackKey::Unverified)
+                    .filter(|(key, _)| !matches!(key, TrackKey::Unverified(_)))
                     .min_by_key(|(_, failures)| failures.last)
                     .map(|(key, _)| *key);
                 match oldest {
@@ -371,23 +379,10 @@ impl Inner {
         failures.count
     }
 
-    /// The global limit's minute a level counts against, or `None` for a
-    /// level with no global limit.
-    fn minute(&mut self, level: Level) -> Option<&mut Option<(Instant, u32)>> {
-        match level {
-            Level::Unverified => Some(&mut self.unverified_minute),
-            Level::Network => Some(&mut self.network_minute),
-            Level::Tailnet | Level::ThisMachine => None,
-        }
-    }
-
     /// Start a new minute for each level whose current one is over.
     fn prune_minutes(&mut self, now: Instant) {
-        for minute in [&mut self.unverified_minute, &mut self.network_minute] {
-            if minute.is_some_and(|(start, _)| now.saturating_duration_since(start) >= MINUTE) {
-                *minute = None;
-            }
-        }
+        self.minutes
+            .retain(|_, (start, _)| now.saturating_duration_since(*start) < MINUTE);
     }
 }
 
@@ -422,43 +417,58 @@ mod tests {
             https_serve_route: false,
             unvouched_proxy: false,
             loopback_distrusted: None,
+            via: Via::Direct,
         }
     }
 
-    impl Admission {
-        fn check_attempt_login(
-            &self,
-            cfg: &ServerAuthConfig,
-            c: &Classification,
-            now: Instant,
-        ) -> Result<(), u64> {
-            self.check_attempt(cfg, c, now, CheckKind::Login)
+    /// An unverified request that came by `via`.
+    fn unverified(via: Via) -> Classification {
+        Classification {
+            via,
+            ..claiming("203.0.113.1")
         }
     }
 
     #[test]
-    fn a_current_password_check_skips_the_login_wait_but_not_the_global_limit() {
+    fn unverified_requests_are_slowed_apart_by_the_route_they_took() {
         let a = Admission::default();
         let c = ServerAuthConfig {
             max_failed_logins_per_minute: 1,
             ..cfg()
         };
         let t0 = Instant::now();
-        a.record_failure(&c, &net("198.51.100.1"), t0);
-        assert!(a.check_attempt_login(&c, &net("198.51.100.1"), t0).is_err());
+        let funnel = Classification {
+            claimed_ip: Some("203.0.113.50".parse().unwrap()),
+            ..unverified(Via::Forwarded)
+        };
+        a.record_failure(&c, &funnel, t0);
         assert!(
-            a.check_attempt(&c, &net("198.51.100.1"), t0, CheckKind::CurrentPassword)
-                .is_err(),
-            "the global minute still holds"
+            a.check_attempt(&c, &unverified(Via::Forwarded), t0)
+                .is_err()
         );
-        let roomy = ServerAuthConfig {
-            max_failed_logins_per_minute: 0,
+        let owner = Classification {
+            claimed_ip: None,
+            ..unverified(Via::PlainLoopback)
+        };
+        assert_eq!(a.check_attempt(&c, &owner, t0), Ok(()), "plain loopback");
+        let own = Classification {
+            claimed_ip: None,
+            ..unverified(Via::OwnAddress)
+        };
+        assert_eq!(a.check_attempt(&c, &own, t0), Ok(()), "own address");
+    }
+
+    #[test]
+    fn a_wrong_current_password_waits_like_a_failed_login() {
+        let a = Admission::default();
+        let c = ServerAuthConfig {
+            max_failed_logins: 0,
             ..cfg()
         };
-        assert_eq!(
-            a.check_attempt(&roomy, &net("198.51.100.1"), t0, CheckKind::CurrentPassword),
-            Ok(())
-        );
+        let t0 = Instant::now();
+        let tailnet = from(ClientClass::Tailnet, "100.101.102.104");
+        a.record_failure(&c, &tailnet, t0);
+        assert!(a.check_attempt(&c, &tailnet, t0).is_err(), "slowed");
     }
 
     /// A forwarded request dux cannot verify, claiming `ip`.
@@ -473,6 +483,7 @@ mod tests {
             https_serve_route: false,
             unvouched_proxy: false,
             loopback_distrusted: None,
+            via: Via::Forwarded,
         }
     }
 
@@ -497,7 +508,7 @@ mod tests {
             Strike::Counted,
             "and not again on every failure after it"
         );
-        assert!(!a.is_blocked(&[], &claimed), "nothing was banned");
+        assert!(!a.is_blocked(&[], &claimed, &[]), "nothing was banned");
     }
 
     #[test]
@@ -513,7 +524,7 @@ mod tests {
             a.record_failure(&c, &claiming("198.51.100.7"), t0);
         }
         assert_eq!(
-            a.check_attempt_login(&c, &net("198.51.100.7"), t0),
+            a.check_attempt(&c, &net("198.51.100.7"), t0),
             Ok(()),
             "the claims did not make the verified device wait"
         );
@@ -535,12 +546,12 @@ mod tests {
         a.record_failure(&cfg(), &claiming("203.0.113.1"), t0);
         a.record_failure(&cfg(), &claiming("203.0.113.2"), t0);
         assert_eq!(
-            a.check_attempt_login(&cfg(), &claiming("203.0.113.3"), t0),
+            a.check_attempt(&cfg(), &claiming("203.0.113.3"), t0),
             Err(2),
             "a fresh claim still waits out the shared, doubled wait"
         );
         assert_eq!(
-            a.check_attempt_login(&cfg(), &net("198.51.100.1"), t0),
+            a.check_attempt(&cfg(), &net("198.51.100.1"), t0),
             Ok(()),
             "a verified client is not held by unverified traffic"
         );
@@ -550,10 +561,15 @@ mod tests {
     fn the_blocklist_matches_any_address_a_request_names() {
         let a = Admission::default();
         let blocks = vec![AddressBlock::parse("203.0.113.9").unwrap()];
-        assert!(a.is_blocked(&blocks, &claiming("203.0.113.9")));
+        assert!(a.is_blocked(&blocks, &claiming("203.0.113.9"), &[]));
         let mut leftmost = claiming("198.51.100.1");
         leftmost.named.push("203.0.113.9".parse().unwrap());
-        assert!(a.is_blocked(&blocks, &leftmost));
+        assert!(a.is_blocked(&blocks, &leftmost, &[]));
+        let own: Vec<IpAddr> = vec!["203.0.113.9".parse().unwrap()];
+        assert!(
+            !a.is_blocked(&blocks, &claiming("203.0.113.9"), &own),
+            "this machine's own address never matches"
+        );
     }
 
     fn net(ip: &str) -> Classification {
@@ -580,30 +596,18 @@ mod tests {
     fn a_failure_makes_that_address_wait_and_only_that_address() {
         let a = Admission::default();
         let t0 = Instant::now();
-        assert_eq!(
-            a.check_attempt_login(&cfg(), &net("198.51.100.1"), t0),
-            Ok(())
-        );
+        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.1"), t0), Ok(()));
         assert_eq!(
             a.record_failure(&cfg(), &net("198.51.100.1"), t0),
             Strike::Counted
         );
-        assert_eq!(
-            a.check_attempt_login(&cfg(), &net("198.51.100.1"), t0),
-            Err(1)
-        );
-        assert_eq!(
-            a.check_attempt_login(&cfg(), &net("198.51.100.2"), t0),
-            Ok(())
-        );
+        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.1"), t0), Err(1));
+        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.2"), t0), Ok(()));
         let later = t0 + Duration::from_millis(1001);
-        assert_eq!(
-            a.check_attempt_login(&cfg(), &net("198.51.100.1"), later),
-            Ok(())
-        );
+        assert_eq!(a.check_attempt(&cfg(), &net("198.51.100.1"), later), Ok(()));
         a.record_failure(&cfg(), &net("198.51.100.1"), later);
         assert_eq!(
-            a.check_attempt_login(&cfg(), &net("198.51.100.1"), later),
+            a.check_attempt(&cfg(), &net("198.51.100.1"), later),
             Err(2),
             "doubled"
         );
@@ -651,7 +655,7 @@ mod tests {
         let mut now = Instant::now();
         for _ in 0..50 {
             assert_eq!(a.record_failure(&c, &ip, now), Strike::Counted);
-            assert!(a.check_attempt_login(&c, &ip, now).is_err(), "slowed");
+            assert!(a.check_attempt(&c, &ip, now).is_err(), "slowed");
             now += Duration::from_secs(31);
         }
     }
@@ -678,7 +682,7 @@ mod tests {
         let slowed = cfg();
         a.record_failure(&slowed, &machine, t0);
         assert!(
-            a.check_attempt_login(&slowed, &machine, t0).is_err(),
+            a.check_attempt(&slowed, &machine, t0).is_err(),
             "this machine waits too"
         );
         // Nothing to block for a forwarded request with no readable address.
@@ -701,22 +705,22 @@ mod tests {
         }
         let fresh = net("203.0.113.50");
         assert_eq!(
-            a.check_attempt_login(&c, &fresh, t0 + Duration::from_secs(10)),
+            a.check_attempt(&c, &fresh, t0 + Duration::from_secs(10)),
             Err(50)
         );
         assert_eq!(
-            a.check_attempt_login(&c, &from(ClientClass::ThisMachine, "127.0.0.1"), t0),
+            a.check_attempt(&c, &from(ClientClass::ThisMachine, "127.0.0.1"), t0),
             Ok(())
         );
         assert_eq!(
-            a.check_attempt_login(&c, &fresh, t0 + Duration::from_secs(60)),
+            a.check_attempt(&c, &fresh, t0 + Duration::from_secs(60)),
             Ok(())
         );
         let off = ServerAuthConfig {
             max_failed_logins_per_minute: 0,
             ..c
         };
-        assert_eq!(a.check_attempt_login(&off, &fresh, t0), Ok(()));
+        assert_eq!(a.check_attempt(&off, &fresh, t0), Ok(()));
     }
 
     #[test]
@@ -733,25 +737,29 @@ mod tests {
         a.record_failure(&c, &net("198.51.100.3"), t0 + Duration::from_millis(2));
         assert_eq!(a.tracked(), 2);
         assert_eq!(
-            a.check_attempt_login(&c, &net("198.51.100.1"), t0 + Duration::from_millis(3)),
+            a.check_attempt(&c, &net("198.51.100.1"), t0 + Duration::from_millis(3)),
             Ok(()),
             "the oldest was forgotten"
         );
-        assert!(a.check_attempt_login(&c, &net("198.51.100.3"), t0).is_err());
+        assert!(a.check_attempt(&c, &net("198.51.100.3"), t0).is_err());
     }
 
     #[test]
     fn blocks_match_ranges_and_bans_held_for_this_run() {
         let a = Admission::default();
         let blocks = vec![AddressBlock::parse("203.0.113.0/24").unwrap()];
-        assert!(a.is_blocked(&blocks, &net("203.0.113.9")));
-        assert!(a.is_blocked(&blocks, &net("::ffff:203.0.113.9")));
-        assert!(!a.is_blocked(&blocks, &net("198.51.100.9")));
+        assert!(a.is_blocked(&blocks, &net("203.0.113.9"), &[]));
+        assert!(a.is_blocked(&blocks, &net("::ffff:203.0.113.9"), &[]));
+        assert!(!a.is_blocked(&blocks, &net("198.51.100.9"), &[]));
         a.ban_for_this_run("198.51.100.9".parse().unwrap());
-        assert!(a.is_blocked(&blocks, &net("198.51.100.9")));
+        assert!(a.is_blocked(&blocks, &net("198.51.100.9"), &[]));
         let everything = vec![AddressBlock::parse("0.0.0.0/0").unwrap()];
         assert!(
-            !a.is_blocked(&everything, &from(ClientClass::ThisMachine, "127.0.0.1")),
+            !a.is_blocked(
+                &everything,
+                &from(ClientClass::ThisMachine, "127.0.0.1"),
+                &[]
+            ),
             "this machine is never refused"
         );
     }

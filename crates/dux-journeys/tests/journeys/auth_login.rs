@@ -550,8 +550,10 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
             200,
             "a refused change leaves the session alone"
         );
+        // The wrong current password is slowed like a failed sign-in, so the
+        // right one waits that out first.
         let changed = network
-            .post_json(
+            .post_json_waiting(
                 "/api/v1/auth/password",
                 &json!({ "current": STRONG_PASSWORD, "new": OTHER_STRONG_PASSWORD }),
             )

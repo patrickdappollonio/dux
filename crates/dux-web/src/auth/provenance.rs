@@ -292,6 +292,30 @@ pub struct Classification {
     /// from this machine's own Tailscale address) was counted as the network
     /// rather than this machine or the tailnet, or `None`.
     pub loopback_distrusted: Option<&'static str>,
+    /// How the request reached dux, which keeps the slow-downs of requests
+    /// dux cannot verify apart by route.
+    pub via: Via,
+}
+
+/// How a request reached dux. Unverified requests are slowed in one bucket
+/// per route (decided, after review), so internet visitors and proxied
+/// traffic can never slow or lock out the owner on this machine, who signs in
+/// over plain loopback or through one of this machine's own addresses while
+/// loopback is distrusted. The limit that cannot be lifted: through a raw TCP
+/// forward onto dux's port, outsiders arrive as plain loopback and share
+/// [`Via::PlainLoopback`] with the owner.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum Via {
+    /// Through something that said so: Tailscale's Funnel marker or any
+    /// forwarding header on a loopback stream, or a connection dux did not
+    /// record.
+    Forwarded,
+    /// Plain loopback with no marker and no forwarding header.
+    PlainLoopback,
+    /// From one of this machine's own non-loopback addresses.
+    OwnAddress,
+    /// A direct peer that is somebody else.
+    Direct,
 }
 
 impl Classification {
@@ -356,9 +380,12 @@ pub fn classify(
     exposure: &Exposure,
     interfaces: &[IpAddr],
 ) -> Classification {
-    let base = untrusted_base(facts);
     let Some(arrival) = facts.arrival else {
-        return base;
+        return untrusted_base(facts);
+    };
+    let base = Classification {
+        via: via(facts, exposure, interfaces, arrival),
+        ..untrusted_base(facts)
     };
     let candidate = match candidate(facts, exposure, interfaces, arrival, &base) {
         Ok(candidate) => candidate,
@@ -440,6 +467,25 @@ fn untrusted_base(facts: &RequestFacts) -> Classification {
         https_serve_route: false,
         unvouched_proxy: false,
         loopback_distrusted: None,
+        via: Via::Forwarded,
+    }
+}
+
+/// The route a recorded request took to dux.
+fn via(facts: &RequestFacts, exposure: &Exposure, interfaces: &[IpAddr], arrival: Arrival) -> Via {
+    let canonical = dux_core::config_auth::canonical;
+    let local = canonical(arrival.local.ip());
+    let peer = canonical(arrival.peer.ip());
+    if !local.is_loopback() || !peer.is_loopback() {
+        if own_address(peer, local, exposure, interfaces) {
+            Via::OwnAddress
+        } else {
+            Via::Direct
+        }
+    } else if facts.funnel_marker || facts.forwarded {
+        Via::Forwarded
+    } else {
+        Via::PlainLoopback
     }
 }
 

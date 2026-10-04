@@ -388,8 +388,14 @@ impl AuthState {
     /// session's last use (any request counts as activity).
     pub(crate) async fn assess(&self, facts: RequestFacts, headers: &HeaderMap) -> Assessment {
         let snapshot = self.snapshot();
-        let classification = provenance::classify(&facts, &self.exposure(), &self.interfaces());
-        let blocked = self.admission.is_blocked(&snapshot.blocks, &classification);
+        let exposure = self.exposure();
+        let interfaces = self.interfaces();
+        let classification = provenance::classify(&facts, &exposure, &interfaces);
+        let blocked = self.admission.is_blocked(
+            &snapshot.blocks,
+            &classification,
+            &own_addresses(&exposure, &interfaces, facts.arrival),
+        );
         let cookie_port = facts.arrival.map_or(0, |arrival| arrival.local.port());
         let mut session = None;
         if snapshot.has_password()
@@ -427,8 +433,14 @@ impl AuthState {
         session: Option<&TokenDigest>,
     ) -> Option<u16> {
         let snapshot = self.snapshot();
-        let classification = provenance::classify(facts, &self.exposure(), &self.interfaces());
-        if self.admission.is_blocked(&snapshot.blocks, &classification) {
+        let exposure = self.exposure();
+        let interfaces = self.interfaces();
+        let classification = provenance::classify(facts, &exposure, &interfaces);
+        if self.admission.is_blocked(
+            &snapshot.blocks,
+            &classification,
+            &own_addresses(&exposure, &interfaces, facts.arrival),
+        ) {
             return Some(socket::CLOSE_BLOCKED);
         }
         if !snapshot.has_password() || !required_by(snapshot.config.require, classification.class) {
@@ -526,19 +538,14 @@ impl AuthState {
     /// slot is held by the blocking work until Argon2 finishes, and a wrong
     /// guess is counted (and may block) even when the client hung up first, so
     /// hanging up neither frees a slot early nor makes a guess free.
-    pub(crate) async fn verify(
-        self: &Arc<Self>,
-        c: &Classification,
-        password: Password,
-        kind: admission::CheckKind,
-    ) -> Verify {
+    pub(crate) async fn verify(self: &Arc<Self>, c: &Classification, password: Password) -> Verify {
         let snapshot = self.snapshot();
         let Some(hash) = snapshot.config.password_hash().map(str::to_string) else {
             return Verify::NoPassword;
         };
         if let Err(wait) = self
             .admission
-            .check_attempt(&snapshot.config, c, Instant::now(), kind)
+            .check_attempt(&snapshot.config, c, Instant::now())
         {
             return Verify::Wait(wait);
         }
@@ -556,7 +563,7 @@ impl AuthState {
         // counts before this one runs.
         if let Err(wait) = self
             .admission
-            .check_attempt(&snapshot.config, c, Instant::now(), kind)
+            .check_attempt(&snapshot.config, c, Instant::now())
         {
             return Verify::Wait(wait);
         }
@@ -753,6 +760,26 @@ fn flush_period(config: &ServerAuthConfig) -> std::time::Duration {
 }
 
 /// How often the reach behind the no-password alarm is looked at.
+/// Every address of this machine's own: its interfaces', the Tailscale
+/// addresses the current look reported, and the one a connection reached.
+fn own_addresses(
+    exposure: &Exposure,
+    interfaces: &[IpAddr],
+    arrival: Option<Arrival>,
+) -> Vec<IpAddr> {
+    let mut own = interfaces.to_vec();
+    own.extend(arrival.map(|arrival| dux_core::config_auth::canonical(arrival.local.ip())));
+    if let Some(facts) = &exposure.identity {
+        own.extend(
+            facts
+                .own_ips
+                .iter()
+                .map(|ip| dux_core::config_auth::canonical(*ip)),
+        );
+    }
+    own
+}
+
 /// This machine's own interface addresses, canonical and sorted so two reads
 /// compare equal when nothing changed.
 fn own_interfaces() -> Vec<IpAddr> {
@@ -774,17 +801,31 @@ async fn maintain(state: Arc<AuthState>) {
     let mut generation = state.snapshot().generation.clone();
     let mut warning = warnings::ExposedWarning::default();
     warning.check(&state);
-    // Each loopback-covering entry is said once per run, at load and at the
-    // reload that adds it.
-    let mut loopback_said: std::collections::HashSet<String> = Default::default();
-    let mut say_loopback_entries = |state: &AuthState| {
-        for entry in warnings::loopback_entries(&state.snapshot().config.blocked_addresses) {
-            if loopback_said.insert(entry.clone()) {
-                state.speaker.loopback_entry(&entry);
+    // Each entry covering loopback or an own address is said once per run,
+    // at load, at the reload that adds it, or when the address appears.
+    let mut own_said: std::collections::HashSet<String> = Default::default();
+    let mut say_own_entries = |state: &AuthState| {
+        let own = own_addresses(&state.exposure(), &state.interfaces(), None);
+        for (entry, ip) in warnings::own_entries(&state.snapshot().config.blocked_addresses, &own) {
+            if own_said.insert(entry.clone()) {
+                state.speaker.own_entry(&entry, ip);
             }
         }
     };
-    say_loopback_entries(&state);
+    say_own_entries(&state);
+    // Said when a raw forward appears (the first look at start included), and
+    // withdrawn when it goes.
+    let mut forward_said = false;
+    let mut say_forward = |state: &AuthState| {
+        let known = state.exposure().forward_known();
+        if known && !forward_said {
+            state.speaker.forward_known();
+        } else if !known && forward_said {
+            state.speaker.forward_gone();
+        }
+        forward_said = known;
+    };
+    say_forward(&state);
     // The Tailscale leg comes and goes with no event of its own to wait on, so
     // the reach behind the no-password alarm is looked at on a short clock.
     let mut reach = tokio::time::interval(REACH_LOOK);
@@ -814,7 +855,7 @@ async fn maintain(state: Arc<AuthState>) {
                 }
                 state.bump();
                 warning.check(&state);
-                say_loopback_entries(&state);
+                say_own_entries(&state);
             }
             changed = async {
                 match exposure.as_mut() {
@@ -826,6 +867,7 @@ async fn maintain(state: Arc<AuthState>) {
                     exposure = None;
                 }
                 warning.check(&state);
+                say_forward(&state);
             }
             _ = flush.tick() => {
                 state.sessions.flush(idle_ms(&state.snapshot().config)).await;
@@ -833,6 +875,7 @@ async fn maintain(state: Arc<AuthState>) {
             _ = reach.tick() => {
                 warning.check(&state);
                 state.refresh_interfaces().await;
+                say_own_entries(&state);
             }
         }
     }

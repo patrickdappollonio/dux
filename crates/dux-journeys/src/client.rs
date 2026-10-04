@@ -365,6 +365,25 @@ impl Client {
         );
     }
 
+    /// `POST` a JSON body the way a person retries a refused password check:
+    /// a 429 is waited out (as its `Retry-After` says) and sent again, up to
+    /// five times, the way [`Self::login_ok`] waits out a sign-in.
+    pub async fn post_json_waiting(&self, path: &str, body: &serde_json::Value) -> Response {
+        let mut response = self.post_json(path, body).await;
+        for _ in 0..5 {
+            if response.status != 429 {
+                break;
+            }
+            let wait: u64 = response
+                .header("retry-after")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            tokio::time::sleep(std::time::Duration::from_secs(wait.clamp(1, 30))).await;
+            response = self.post_json(path, body).await;
+        }
+        response
+    }
+
     /// `POST /api/v1/auth/logout`.
     pub async fn logout(&self) -> Response {
         self.post_empty("/api/v1/auth/logout").await

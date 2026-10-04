@@ -1598,10 +1598,11 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "failed_login_delay_seconds",
             comment: Some(CommentSource::Static(
-                "# After a failed login, how long that address must wait before its next\n\
-                 # attempt is checked. The wait doubles with each further failure in the\n\
-                 # window, up to failed_login_max_delay_seconds. This machine waits too.\n\
-                 # 0 turns the wait off. Default 1.",
+                "# After a failed login (or a wrong current password when changing it),\n\
+                 # how long that address must wait before its next attempt is checked.\n\
+                 # The wait doubles with each further failure in the window, up to\n\
+                 # failed_login_max_delay_seconds. This machine waits too. 0 turns the\n\
+                 # wait off. Default 1.",
             )),
             value_fn: |c| FieldValue::U32(c.server.auth.failed_login_delay_seconds),
         },
@@ -1621,7 +1622,13 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # visitor, so a flood from one never locks out another: the internet and\n\
                  # anything behind a proxy dux cannot verify share one count, devices on\n\
                  # your network another. Your tailnet devices and this machine are only\n\
-                 # slowed one address at a time. 0 turns this limit off. Default 30.",
+                 # slowed one address at a time. While dux cannot vouch for loopback (a\n\
+                 # Funnel, tailscale = \"no\"), sign-ins on this machine keep counts of\n\
+                 # their own that internet and proxied visitors never touch, except through\n\
+                 # a tailscale serve TCP forward: visitors through one arrive exactly like\n\
+                 # this machine and share its count. Wrong current passwords when changing\n\
+                 # the password count like failed logins everywhere here. 0 turns this\n\
+                 # limit off. Default 30.",
             )),
             value_fn: |c| FieldValue::U32(c.server.auth.max_failed_logins_per_minute),
         },

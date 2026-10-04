@@ -27,7 +27,8 @@ pub(crate) const EXPOSED_KEY: &str = "server-auth-no-password";
 const PROXY_KEY: &str = "server-auth-proxy";
 const WEAK_KEY: &str = "server-auth-weak-password";
 const BLOCKED_KEY: &str = "server-auth-blocked";
-const LOOPBACK_ENTRY_KEY: &str = "server-auth-loopback-entry";
+const OWN_ENTRY_KEY: &str = "server-auth-own-entry";
+const FORWARD_KEY: &str = "server-auth-forward";
 
 /// Says a sentence everywhere it belongs.
 pub(crate) struct Speaker {
@@ -112,15 +113,25 @@ impl Speaker {
         );
     }
 
-    /// A `blocked_addresses` entry covers loopback, which the blocklist never
-    /// applies to.
-    pub(crate) fn loopback_entry(&self, entry: &str) {
+    /// A `blocked_addresses` entry covers loopback or an address of this
+    /// machine, which the blocklist never applies to.
+    pub(crate) fn own_entry(&self, entry: &str, ip: IpAddr) {
         self.say(
             Loudness::Warning,
-            LOOPBACK_ENTRY_KEY,
-            &loopback_entry_sentence(entry),
+            OWN_ENTRY_KEY,
+            &own_entry_sentence(entry, ip),
             false,
         );
+    }
+
+    /// A raw TCP forward onto dux's port appeared.
+    pub(crate) fn forward_known(&self) {
+        self.say(Loudness::Warning, FORWARD_KEY, &forward_sentence(), false);
+    }
+
+    /// The forward is gone.
+    pub(crate) fn forward_gone(&self) {
+        self.withdraw(FORWARD_KEY);
     }
 
     fn exposed(&self, reach: &[String], funnel: bool) {
@@ -199,34 +210,53 @@ fn blocked_sentence(ip: IpAddr, failures: u32, path: &str, kept: &BanKept) -> St
 fn unverified_limit_sentence(ip: IpAddr, failures: u32, path: &str) -> String {
     let ip = dux_core::config_auth::canonical(ip);
     format!(
-        "{failures} failed sign-ins came through a proxy claiming to be {ip}. dux did not add it          to blocked_addresses because it could not verify that address (the proxy is not a          confirmed tailscale serve route, so the client may have chosen it); it keeps slowing          those sign-ins down. If you trust the proxy, add {ip} to blocked_addresses in the          [server.auth] section of {path} by hand and reload the config."
+        "{failures} failed sign-ins came through a proxy claiming to be {ip}. dux did not add it \
+         to blocked_addresses because it could not verify that address (the proxy is not a \
+         confirmed tailscale serve route, so the client may have chosen it); it keeps slowing \
+         those sign-ins down. If you trust the proxy, add {ip} to blocked_addresses in the \
+         [server.auth] section of {path} by hand and reload the config."
     )
 }
 
-/// The entries of `blocked_addresses` that cover a loopback address. Config
+/// The entries of `blocked_addresses` that cover loopback or one of `own`
+/// (this machine's own addresses), each with the address it covers. Config
 /// validation still accepts them (decided, after review): they are not wrong
 /// so much as inert here, and refusing to start over one would be worse.
-pub(crate) fn loopback_entries(entries: &[String]) -> Vec<String> {
-    let loopback: [IpAddr; 2] = [
+pub(crate) fn own_entries(entries: &[String], own: &[IpAddr]) -> Vec<(String, IpAddr)> {
+    let mut mine: Vec<IpAddr> = vec![
         IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
     ];
+    mine.extend(own.iter().copied());
     entries
         .iter()
-        .filter(|entry| {
-            dux_core::config_auth::AddressBlock::parse(entry)
-                .is_ok_and(|block| loopback.iter().any(|ip| block.contains(*ip)))
+        .filter_map(|entry| {
+            let block = dux_core::config_auth::AddressBlock::parse(entry).ok()?;
+            let ip = mine.iter().find(|ip| block.contains(**ip))?;
+            Some((entry.clone(), *ip))
         })
-        .cloned()
         .collect()
 }
 
-fn loopback_entry_sentence(entry: &str) -> String {
+fn own_entry_sentence(entry: &str, ip: IpAddr) -> String {
     format!(
-        "blocked_addresses in [server.auth] has \"{entry}\", which covers loopback. dux never \
-         applies the blocklist to loopback: that is this machine, and tailscale serve relays \
-         every tailnet device through it, so the entry never refuses anyone on this machine."
+        "blocked_addresses in [server.auth] has \"{entry}\", which covers {ip}, an address of \
+         this machine. dux never applies the blocklist to this machine's own addresses or to \
+         loopback (tailscale serve relays every tailnet device through it), so that part of the \
+         entry never refuses anyone."
     )
+}
+
+/// What dux says when a raw TCP forward onto its port appears. The shared
+/// slow-down is the one limit the per-route buckets cannot lift (decided,
+/// after review), so it is said here rather than left for someone to find.
+fn forward_sentence() -> String {
+    "A tailscale serve TCP forward reaches dux's port. Whoever comes in through it arrives \
+     over plain loopback with nothing to tell them apart from this machine, so dux counts every \
+     such request as the network (with a password set, someone on this machine signs in too), \
+     and their failed sign-ins slow down sign-ins on this machine over loopback as well. \
+     Remove the forward (`tailscale serve status` lists it) to separate them."
+        .to_string()
 }
 
 /// Follows whether the no-password alarm is due, saying it when it becomes
@@ -255,20 +285,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn entries_covering_loopback_are_found_and_named() {
-        let entries: Vec<String> = ["127.0.0.0/8", "203.0.113.0/24", "::1", "0.0.0.0/0", "bad"]
-            .iter()
-            .map(ToString::to_string)
+    fn entries_covering_loopback_or_an_own_address_are_found_and_named() {
+        let entries: Vec<String> = [
+            "127.0.0.0/8",
+            "203.0.113.0/24",
+            "::1",
+            "192.0.2.0/24",
+            "0.0.0.0/0",
+            "bad",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let own: Vec<IpAddr> = vec!["192.0.2.10".parse().unwrap()];
+        let found: Vec<String> = own_entries(&entries, &own)
+            .into_iter()
+            .map(|(entry, ip)| format!("{entry} {ip}"))
             .collect();
         assert_eq!(
-            loopback_entries(&entries),
-            ["127.0.0.0/8", "::1", "0.0.0.0/0"]
+            found,
+            [
+                "127.0.0.0/8 127.0.0.1",
+                "::1 ::1",
+                "192.0.2.0/24 192.0.2.10",
+                "0.0.0.0/0 127.0.0.1"
+            ]
         );
-        let text = loopback_entry_sentence("127.0.0.0/8");
+        let text = own_entry_sentence("192.0.2.0/24", "192.0.2.10".parse().unwrap());
         assert!(
-            text.contains("127.0.0.0/8") && text.contains("never"),
+            text.contains("192.0.2.0/24") && text.contains("192.0.2.10") && text.contains("never"),
             "{text}"
         );
+        let unverified =
+            unverified_limit_sentence("203.0.113.9".parse().unwrap(), 10, "/x/config.toml");
+        assert!(
+            !unverified.contains("  "),
+            "no runs of spaces: {unverified}"
+        );
+    }
+
+    #[test]
+    fn the_forward_note_says_it_shares_this_machines_slow_down() {
+        let text = forward_sentence();
+        assert!(
+            text.contains("slow down sign-ins on this machine"),
+            "{text}"
+        );
+        assert!(!text.contains("  "), "{text}");
     }
 
     #[test]
