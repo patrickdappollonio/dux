@@ -64,11 +64,19 @@ pub(crate) fn run_get(
         bail!("unknown flag: {}", flag_name(path));
     }
     let key = config_keys::lookup(path).map_err(|e| anyhow!("{e}"))?;
-    let raw = match std::fs::read_to_string(&paths.config_path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => bail!("could not read {}: {error}", paths.config_path.display()),
+    // Read exactly as a start reads it: no file is the defaults, while a
+    // link to a file that is gone (or a file that cannot be read) stops
+    // every surface, so there is no value in use to report.
+    let raw = match dux_core::config::read_config_text(&paths.config_path) {
+        Ok(raw) => raw.unwrap_or_default(),
+        Err(error) => bail!(
+            "{error}. Neither the terminal UI nor dux server starts with it, so no value of \
+             {} is in use.",
+            dux_core::config::shown_key("", path)
+        ),
     };
+    // Every path printed below goes through the one formatter.
+    let path = &dux_core::config::shown_key(&raw, path);
     let report = config_keys::get_report(&raw, &key)?;
     let hide = key.is_sensitive() && !show;
     // Every surface that starts with the file uses the same value, so it is
@@ -132,13 +140,17 @@ pub(crate) fn run_get(
     // One line per value the load changes: the setting asked for, or each
     // entry inside the table asked for.
     for correction in &report.corrections {
-        let at = &correction.path;
+        let at = dux_core::config::shown_key(&raw, &correction.path);
         let reason = correction.reason.trim_end_matches('.');
-        let in_file = if hide {
-            "a value"
-        } else {
-            correction.in_file.as_str()
+        let Some(in_file) = &correction.in_file else {
+            // Left out of the file; the load writes it from a deprecated key.
+            match &correction.used {
+                Some(used) if !hide => writeln!(err, "({at}: {users} uses {used}, {reason})")?,
+                _ => writeln!(err, "({at}: {users} uses a value {reason})")?,
+            }
+            continue;
         };
+        let in_file = if hide { "a value" } else { in_file.as_str() };
         match &correction.used {
             Some(used) if !hide => writeln!(
                 err,
@@ -207,18 +219,32 @@ pub(crate) fn run_set(
             writeln!(
                 out,
                 "{}: {} -> {} (in {})",
-                report.path,
+                shown(paths, &report.path),
                 report.previous.as_deref().unwrap_or("(not set)"),
                 report.now,
                 paths.config_path.display()
             )?;
-            write_surface_verdicts(out, &report.remaining_problems)?;
-            report.remaining_problems
+            (report.remaining_problems, false)
         }
     };
+    let (remaining, password) = remaining;
+    // What the file now is, which holds whatever is running.
+    write_surface_verdicts(out, &remaining)?;
+    // What happened to a running dux is said only from the outcome of
+    // asking it, and only once that outcome is known.
     let outcome = dux_core::reload_signal::signal_running_dux(&paths.lock_path);
     writeln!(out, "{}", reload_sentence(&outcome, !remaining.is_empty()))?;
+    if password && let Some(sentence) = password_sentence(&outcome, &remaining) {
+        writeln!(out, "{sentence}")?;
+    }
     Ok(())
+}
+
+/// A setting's dotted path as printed, through the one formatter, against
+/// the file as it is now.
+fn shown(paths: &DuxPaths, dotted: &str) -> String {
+    let raw = std::fs::read_to_string(&paths.config_path).unwrap_or_default();
+    dux_core::config::shown_key(&raw, dotted)
 }
 
 /// The problems that stop `surface` (at start, and on a reload, which
@@ -235,11 +261,10 @@ fn stopping(problems: &[StartProblem], surface: Surface, reload: bool) -> Vec<&S
         .collect()
 }
 
-/// When problems are left in the file, what each surface makes of it, said
-/// only for the surfaces it is true of: which will not start (and, when
-/// running, keep their settings) and why, and which apply it. Which kind of
-/// dux holds the lock cannot be told from outside, so both are said, each
-/// for itself. Nothing when the file has no problem.
+/// When problems are left in the file, what each surface makes of the FILE:
+/// which will not start with it and why, and which start with it. Nothing
+/// here is about a running dux, which [`reload_sentence`] says from the
+/// outcome of asking it. Nothing when the file has no problem.
 fn write_surface_verdicts(out: &mut dyn Write, problems: &[StartProblem]) -> Result<()> {
     if problems.is_empty() {
         return Ok(());
@@ -262,15 +287,11 @@ fn write_surface_verdicts(out: &mut dyn Write, problems: &[StartProblem]) -> Res
     };
     let terminal_ui = stopping(problems, Surface::TerminalUi, false);
     if terminal_ui.is_empty() {
-        writeln!(
-            out,
-            "The terminal UI applies it (a running terminal UI reloads it now)."
-        )?;
+        writeln!(out, "The terminal UI starts with this file.")?;
     } else {
         writeln!(
             out,
-            "With this file, the terminal UI will not start (and a running terminal UI keeps its \
-             settings) until:"
+            "With this file, the terminal UI will not start, nor take it on a reload, until:"
         )?;
         list(out, &terminal_ui)?;
     }
@@ -279,22 +300,18 @@ fn write_surface_verdicts(out: &mut dyn Write, problems: &[StartProblem]) -> Res
     if !reload.is_empty() {
         writeln!(
             out,
-            "With this file, dux server will not start (and a running dux server keeps its \
-             settings) until:"
+            "With this file, dux server will not start, nor take it on a reload, until:"
         )?;
         list(out, &start)?;
     } else if !start.is_empty() {
         writeln!(
             out,
-            "dux server applies it (a running dux server reloads it now), but a new dux server \
-             will not start with this file until:"
+            "dux server takes this file on a reload, but a new dux server will not start with it \
+             until:"
         )?;
         list(out, &start)?;
     } else {
-        writeln!(
-            out,
-            "dux server applies it (a running dux server reloads it now)."
-        )?;
+        writeln!(out, "dux server starts with this file.")?;
     }
     Ok(())
 }
@@ -356,7 +373,7 @@ fn set_secret(
     paths: &DuxPaths,
     secrets: &mut dyn SecretSource,
     out: &mut dyn Write,
-) -> Result<Vec<StartProblem>> {
+) -> Result<(Vec<StartProblem>, bool)> {
     if parsed.value.is_some() {
         // The value is deliberately not repeated: it may be the password.
         bail!(
@@ -410,11 +427,10 @@ fn set_secret(
         writeln!(
             out,
             "{} updated in {} (the value is not shown).",
-            key.dotted(),
+            shown(paths, &key.dotted()),
             paths.config_path.display()
         )?;
-        write_surface_verdicts(out, &remaining)?;
-        return Ok(remaining);
+        return Ok((remaining, false));
     }
     if password.expose().is_empty() {
         bail!(
@@ -428,10 +444,9 @@ fn set_secret(
         &password,
         &inputs,
     ) {
-        Ok(set) if !set.remaining_problems.is_empty() => {
-            // Stored; in force only on a surface that takes the file. Each
-            // surface is said for itself, since which one is running cannot
-            // be told from outside.
+        // Stored. Whether it is in force anywhere is said after the running
+        // dux was asked to reload, from what came of that.
+        Ok(set) => {
             writeln!(
                 out,
                 "The web UI password is stored (strength: {}): its Argon2id hash is in \
@@ -439,49 +454,7 @@ fn set_secret(
                 set.strength.label.as_str(),
                 paths.config_path.display()
             )?;
-            let problems = &set.remaining_problems;
-            if stopping(problems, Surface::DuxServer, true).is_empty() {
-                writeln!(
-                    out,
-                    "A running dux server puts it in force now: every browser signed in to it is \
-                     signed out and logs in with the new password."
-                )?;
-            } else {
-                writeln!(
-                    out,
-                    "A running dux server keeps the old password until the problems below are \
-                     fixed."
-                )?;
-            }
-            if stopping(problems, Surface::TerminalUi, true).is_empty() {
-                writeln!(
-                    out,
-                    "A running terminal UI puts it in force for its background server now: every \
-                     browser signed in to that is signed out and logs in with the new password."
-                )?;
-            } else {
-                writeln!(
-                    out,
-                    "A running terminal UI keeps the old password until the problems below are \
-                     fixed."
-                )?;
-            }
-            write_surface_verdicts(out, problems)?;
-            Ok(set.remaining_problems)
-        }
-        Ok(set) => {
-            writeln!(
-                out,
-                "The web UI password is set (strength: {}). Its Argon2id hash is in \
-                 server.auth.password_hash in {}; the password itself is stored nowhere.",
-                set.strength.label.as_str(),
-                paths.config_path.display()
-            )?;
-            writeln!(
-                out,
-                "Every browser signed in to dux is signed out and logs in with the new password."
-            )?;
-            Ok(Vec::new())
+            Ok((set.remaining_problems, true))
         }
         Err(SetPasswordError::BelowMinimums(check)) => {
             Err(anyhow!("{}", SetPasswordError::BelowMinimums(check)))
@@ -566,27 +539,72 @@ fn reload_sentence(outcome: &SignalOutcome, problems_remain: bool) -> String {
             why: NoReloadHandler::OlderVersion,
         } => format!(
             "The running dux (PID {pid}) is an older version that cannot reload its config while \
-             running; the change applies when you restart it.{then}"
+             running; the change applies when you restart it. Until then it keeps its current \
+             settings, the old web UI password and its signed-in sessions included.{then}"
         ),
         SignalOutcome::NotSignalled {
             pid,
             why: NoReloadHandler::NotCaught,
         } => format!(
             "The running dux (PID {pid}) does not handle the reload signal right now, so it was \
-             not sent one; run Reload config in it, or the change applies when you restart \
-             it.{then}"
+             not sent one. Until it is reloaded (Reload config in it) or restarted, it keeps its \
+             current settings, the old web UI password and its signed-in sessions \
+             included.{then}"
         ),
         SignalOutcome::Failed { pid, reason } if problems_remain => format!(
-            "The change is saved, but the running dux could not be told to reload ({reason}); \
-             if it is a kind that refuses this file, it would keep its current settings anyway \
-             until the problems above are fixed. {}",
+            "The change is saved, but the running dux could not be told to reload ({reason}). \
+             Until it is reloaded or restarted it keeps its current settings, the old web UI \
+             password and its signed-in sessions included, and if it is a kind that refuses this \
+             file it keeps them until the problems above are fixed. {}",
             by_hand(pid)
         ),
         SignalOutcome::Failed { pid, reason } => format!(
-            "The change is saved, but the running dux could not be told to reload ({reason}). {}",
+            "The change is saved, but the running dux could not be told to reload ({reason}). \
+             Until it is reloaded or restarted it keeps its current settings, the old web UI \
+             password and its signed-in sessions included. {}",
             by_hand(pid)
         ),
     }
+}
+
+/// What a new web UI password does to a running dux, from the outcome of
+/// asking it to reload and nothing else: only a dux that was sent the
+/// signal signs anyone out, and then only a kind that takes the file. Each
+/// kind is said for itself, since which one is running cannot be told from
+/// outside. `None` where the reload sentence already says it all.
+fn password_sentence(outcome: &SignalOutcome, problems: &[StartProblem]) -> Option<String> {
+    let SignalOutcome::Sent { .. } = outcome else {
+        return None;
+    };
+    if problems.is_empty() {
+        return Some(
+            "Once it has reloaded, the new password is in force: every browser signed in to it \
+             is signed out and logs in with the new password."
+                .to_string(),
+        );
+    }
+    let said_of = |surface: Surface, name: &str, signed_in: &str| {
+        if stopping(problems, surface, true).is_empty() {
+            format!(
+                "If it is {name}, the new password is in force once it has reloaded: every \
+                 browser signed in to {signed_in} is signed out and logs in with the new password."
+            )
+        } else {
+            format!(
+                "If it is {name}, it keeps the old password and its signed-in sessions until the \
+                 problems above are fixed."
+            )
+        }
+    };
+    Some(format!(
+        "{} {}",
+        said_of(Surface::DuxServer, "dux server", "it"),
+        said_of(
+            Surface::TerminalUi,
+            "the terminal UI",
+            "its background server"
+        )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1464,14 +1482,55 @@ port = 3890
             !said.contains("Every browser signed in to dux is signed out"),
             "{said}"
         );
+        // No dux runs here, so nothing is said to be in force or kept by
+        // one: only what the file does to each surface.
+        assert!(!said.contains("signed out"), "{said}");
+        assert!(said.contains("the terminal UI will not start"), "{said}");
+        assert!(said.contains("dux server starts with this file"), "{said}");
+        assert!(said.contains("dux is not running"), "{said}");
+    }
+
+    /// A password reaches browsers only through a dux that was asked to
+    /// reload: with problems left, each kind is said for itself, from the
+    /// file's verdict for it; with none, the reload signs them out; with no
+    /// signal sent, nothing is said to have happened at all.
+    #[test]
+    fn the_password_sentence_follows_the_signal_outcome() {
+        let sent = SignalOutcome::Sent { pid: 7 };
+        // The terminal UI's own `[keys]` check joins the start checks.
+        crate::config::install_canonical_renderer();
+        let keys_only =
+            dux_core::config::start_problems_of("[keys]\nnot_a_real_action = [\"x\"]\n");
+        let said = password_sentence(&sent, &keys_only).expect("sent");
         assert!(
-            said.contains("A running terminal UI keeps the old password"),
+            said.contains("If it is dux server, the new password is in force"),
             "{said}"
         );
         assert!(
-            said.contains("A running dux server puts it in force"),
+            said.contains("If it is the terminal UI, it keeps the old password"),
             "{said}"
         );
+        let said = password_sentence(&sent, &[]).expect("sent");
+        assert!(said.contains("is signed out"), "{said}");
+        for outcome in [
+            SignalOutcome::NotRunning,
+            SignalOutcome::NotSignalled {
+                pid: 7,
+                why: NoReloadHandler::OlderVersion,
+            },
+            SignalOutcome::NotSignalled {
+                pid: 7,
+                why: NoReloadHandler::NotCaught,
+            },
+            SignalOutcome::Failed {
+                pid: Some(7),
+                reason: "x".to_string(),
+            },
+        ] {
+            assert_eq!(password_sentence(&outcome, &[]), None, "{outcome:?}");
+            let said = reload_sentence(&outcome, false);
+            assert!(!said.contains("signed out"), "{said}");
+        }
     }
 
     /// `get` shows the value dux uses after the load's corrections, and
@@ -1874,10 +1933,16 @@ mod overridable_problems_name_their_flag_tests {
             },
             false,
         );
-        assert_eq!(
-            said,
-            "The running dux (PID 42) is an older version that cannot reload its config while \
-             running; the change applies when you restart it."
+        assert!(
+            said.starts_with(
+                "The running dux (PID 42) is an older version that cannot reload its config \
+                 while running; the change applies when you restart it."
+            ),
+            "{said}"
+        );
+        assert!(
+            said.contains("the old web UI password and its signed-in sessions"),
+            "{said}"
         );
         let said = reload_sentence(
             &SignalOutcome::NotSignalled {
@@ -1899,3 +1964,6 @@ mod overridable_problems_name_their_flag_tests {
         assert!(!said.contains("kill -USR1"), "{said}");
     }
 }
+
+#[cfg(test)]
+mod printing_signals_and_carried_values_tests;

@@ -3619,18 +3619,86 @@ fn wrong_typed_settings(table: &toml::Table, raw: &str) -> Vec<(String, String, 
             wrong_typed_inside(section, &mut Vec::new(), value, &mut found);
         }
     }
-    for (place, key, _) in &mut found {
-        if let Some(name) = key.strip_prefix("env.")
-            && !is_valid_var_name(name.split('.').next().unwrap_or(name))
-        {
-            let name = name.split('.').next().unwrap_or(name);
-            *place = match line_of_key(raw, &[KeyStep::Key("env"), KeyStep::Key(name)]) {
-                Some(line) => format!("[env] the entry on line {line}"),
-                None => "[env] an entry whose name is not a variable name".to_string(),
-            };
-        }
-    }
     found
+        .into_iter()
+        .map(|(segments, kind)| (shown_place(raw, &segments), segments.join("."), kind))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Printing a setting's path
+// ---------------------------------------------------------------------------
+//
+// Every path dux prints (a problem, a correction, a table entry `get`
+// annotates, the setting a command names) goes through the formatter below.
+// A segment that is a name the user chose in a map with a naming rule
+// (`[env]`, `[providers]`, `[macros]`), and that breaks that rule, may be a
+// value pasted in the wrong place, a token above all: it is never printed,
+// and the entry is placed by its line instead.
+
+/// The rule a name in a user-named map must follow, for the maps that have
+/// one: an environment variable name in `[env]`, and the characters a
+/// setting path allows in `[providers]` and `[macros]`.
+fn user_name_rule(section: &str) -> Option<fn(&str) -> bool> {
+    fn plain(name: &str) -> bool {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+    match section {
+        "env" => Some(is_valid_var_name),
+        "providers" | "macros" => Some(plain),
+        _ => None,
+    }
+}
+
+/// When `segments` runs through an entry whose name breaks its map's rule:
+/// that entry, placed by its line in `raw`, and the segments after it.
+fn hidden_entry(raw: &str, segments: &[String]) -> Option<(String, String, Vec<String>)> {
+    let [section, name, rest @ ..] = segments else {
+        return None;
+    };
+    let rule = user_name_rule(section)?;
+    if rule(name) {
+        return None;
+    }
+    let entry = match line_of_key(raw, &[KeyStep::Key(section), KeyStep::Key(name)]) {
+        Some(line) => format!("the entry on line {line}"),
+        None => "an entry whose name does not follow the naming rule".to_string(),
+    };
+    Some((section.clone(), entry, rest.to_vec()))
+}
+
+/// A setting's path as dux prints it, from its segments: `ui.left_width_pct`,
+/// or `the entry on line 2 of [env]` (`args of the entry on line 3 of
+/// [providers]`) where a name may not be repeated.
+pub fn shown_path(raw: &str, segments: &[String]) -> String {
+    match hidden_entry(raw, segments) {
+        Some((section, entry, rest)) if rest.is_empty() => format!("{entry} of [{section}]"),
+        Some((section, entry, rest)) => format!("{} of {entry} of [{section}]", rest.join(".")),
+        None => segments.join("."),
+    }
+}
+
+/// [`shown_path`] for a dotted key.
+pub fn shown_key(raw: &str, dotted: &str) -> String {
+    let segments: Vec<String> = dotted.split('.').map(str::to_string).collect();
+    shown_path(raw, &segments)
+}
+
+/// A setting's place in a problem sentence: `[ui] left_width_pct`, or
+/// `[env] the entry on line 2` where the name may not be repeated.
+fn shown_place(raw: &str, segments: &[String]) -> String {
+    match (hidden_entry(raw, segments), segments) {
+        (Some((section, entry, rest)), _) if rest.is_empty() => format!("[{section}] {entry}"),
+        (Some((section, entry, rest)), _) => {
+            format!("[{section}] {} of {entry}", rest.join("."))
+        }
+        (None, [section]) => format!("[{section}]"),
+        (None, [section, inner @ ..]) => format!("[{section}] {}", inner.join(".")),
+        (None, []) => String::new(),
+    }
 }
 
 /// One step into a config file, for [`line_of_key`]: a key of a table, or
@@ -3667,7 +3735,7 @@ fn wrong_typed_inside(
     section: &str,
     inner: &mut Vec<String>,
     value: &toml::Value,
-    found: &mut Vec<(String, String, String)>,
+    found: &mut Vec<(Vec<String>, String)>,
 ) {
     // `value` alone, at its place inside `section`.
     let alone = |inner: &[String], value: &toml::Value| {
@@ -3688,19 +3756,10 @@ fn wrong_typed_inside(
         }
     }
     if found.len() == before {
-        let (place, key) = if inner.is_empty() {
-            (format!("[{section}]"), section.to_string())
-        } else {
-            (
-                format!("[{section}] {}", inner.join(".")),
-                format!("{section}.{}", inner.join(".")),
-            )
-        };
-        found.push((
-            place,
-            key,
-            section_solo_problem(section, alone(inner, value)),
-        ));
+        let segments: Vec<String> = std::iter::once(section.to_string())
+            .chain(inner.iter().cloned())
+            .collect();
+        found.push((segments, section_solo_problem(section, alone(inner, value))));
     }
 }
 
@@ -4155,8 +4214,8 @@ pub fn load_config_file_as_written(
         path: config_path.to_path_buf(),
         problem,
     };
-    match std::fs::read_to_string(config_path) {
-        Ok(raw) => {
+    match read_config_text(config_path)? {
+        Some(raw) => {
             // One-time migration notice: the single `[server] max_websocket_connections`
             // cap was split into three per-class caps. The unknown key is ignored on
             // load (ServerConfig has no deny_unknown_fields), so warn once so the
@@ -4164,14 +4223,32 @@ pub fn load_config_file_as_written(
             warn_on_removed_max_websocket_connections(&raw);
             config_from_text_as_written(&raw).map_err(fail)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // A link to a file that is gone is not "no file yet".
-            if let Some(target) = dangling_link_target(config_path) {
-                return Err(fail(ConfigLoadProblem::DanglingLink(target)));
-            }
+        None => {
             let mut config = Config::default();
             config.providers.ensure_defaults();
             Ok(config)
+        }
+    }
+}
+
+/// The config file's text as every reader takes it (a start, a reload,
+/// `dux config get`): `None` when there is no file yet, which means the
+/// defaults; an error when it cannot be read, or when it is a link to a file
+/// that is gone, which is not "no file yet" and stops every surface.
+pub fn read_config_text(
+    config_path: &Path,
+) -> std::result::Result<Option<String>, ConfigLoadError> {
+    let fail = |problem| ConfigLoadError {
+        path: config_path.to_path_buf(),
+        problem,
+    };
+    match std::fs::read_to_string(config_path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match dangling_link_target(config_path) {
+                Some(target) => Err(fail(ConfigLoadProblem::DanglingLink(target))),
+                None => Ok(None),
+            }
         }
         Err(error) => Err(fail(ConfigLoadProblem::Unreadable(error.to_string()))),
     }
@@ -4243,6 +4320,27 @@ pub fn load_corrections_of(raw: &str) -> Vec<(String, String)> {
         .parse::<toml_edit::DocumentMut>()
         .map(|doc| crate::config_migrate::retired_provider_prunes(&doc))
         .unwrap_or_default();
+    // A value carried over from a deprecated key: said with where it came
+    // from (and the line), and what to write instead.
+    if let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() {
+        for carried in crate::config_migrate::carried_over(&doc) {
+            let line = line_of_key(
+                raw,
+                &[
+                    KeyStep::Key(carried.old_section),
+                    KeyStep::Key(carried.old_key),
+                ],
+            )
+            .map_or_else(String::new, |line| format!(" (line {line})"));
+            found.push((
+                carried.key,
+                format!(
+                    "carried over from the deprecated [{}] {} = {}{line}; replace it with {}",
+                    carried.old_section, carried.old_key, carried.old_value, carried.replace_with
+                ),
+            ));
+        }
+    }
     // What `dux server`'s recovery drops or resets (the terminal UI will not
     // start with such a file at all), each with the wrong values that made it.
     if let Some((rest, _)) = toml::from_str::<toml::Table>(raw)
@@ -7163,6 +7261,88 @@ mod recovery_flags_and_names_tests {
         assert!(
             messages[0].contains("global env variable FOO"),
             "{messages:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod printed_paths_and_carried_values_tests {
+    use super::*;
+
+    /// The one formatter prints a valid path as it is and places an entry
+    /// whose name breaks its map's rule by its line, in every map with a rule.
+    #[test]
+    fn the_formatter_never_prints_a_name_that_breaks_its_rule() {
+        let raw = "[env]\n\"sk-live-SECRET\" = 5\nGOOD = \"1\"\n\n\
+                   [providers.\"bad name!\"]\ncommand = \"x\"\n";
+        assert_eq!(shown_key(raw, "ui.left_width_pct"), "ui.left_width_pct");
+        assert_eq!(shown_key(raw, "env.GOOD"), "env.GOOD");
+        assert_eq!(
+            shown_path(raw, &["env".to_string(), "sk-live-SECRET".to_string()]),
+            "the entry on line 2 of [env]"
+        );
+        assert_eq!(
+            shown_path(
+                raw,
+                &[
+                    "providers".to_string(),
+                    "bad name!".to_string(),
+                    "command".to_string()
+                ]
+            ),
+            "command of the entry on line 5 of [providers]"
+        );
+        // Problem sentences go through it too.
+        for problem in start_problems_of(raw) {
+            assert!(!problem.message.contains("SECRET"), "{problem:?}");
+        }
+    }
+
+    /// Every deprecated-key migration that writes a value is a correction
+    /// that says where the value came from, on which line, and what to
+    /// write instead.
+    #[test]
+    fn every_value_a_migration_writes_says_where_it_came_from() {
+        for (raw, key, said) in [
+            (
+                "[server]\nbind = \"0.0.0.0:4000\"\n",
+                "server.host",
+                "carried over from the deprecated [server] bind = \"0.0.0.0:4000\" (line 2); \
+                 replace it with server.host and server.port",
+            ),
+            (
+                "[server]\nbind = \"0.0.0.0:4000\"\n",
+                "server.port",
+                "carried over from the deprecated [server] bind",
+            ),
+            (
+                "[defaults]\nprompt_for_name = true\n",
+                "defaults.enable_randomized_pet_name_by_default",
+                "carried over from the deprecated [defaults] prompt_for_name = true (line 2)",
+            ),
+            (
+                "[server]\ntailscale_enabled = false\n",
+                "server.tailscale",
+                "carried over from the deprecated [server] tailscale_enabled = false (line 2); \
+                 replace it with server.tailscale",
+            ),
+        ] {
+            let corrections = load_corrections_of(raw);
+            let reason = corrections
+                .iter()
+                .find(|(corrected, _)| corrected == key)
+                .map(|(_, reason)| reason.as_str())
+                .unwrap_or_else(|| panic!("{key}: {corrections:?}"));
+            assert!(reason.contains(said), "{key}: {reason}");
+        }
+        // A loopback bind writes nothing (the default already covers it),
+        // and a new key the file sets beside the old one wins, so nothing
+        // is carried over into it.
+        assert!(load_corrections_of("[server]\nbind = \"127.0.0.1:3890\"\n").is_empty());
+        assert!(
+            load_corrections_of("[server]\nbind = \"0.0.0.0:4000\"\nhost = \"1.2.3.4\"\n")
+                .iter()
+                .all(|(key, _)| key != "server.host")
         );
     }
 }

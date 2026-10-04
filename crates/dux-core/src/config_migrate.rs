@@ -53,6 +53,9 @@ enum DeprecatedConfigKeyAction {
 struct DeprecatedConfigKeyRule {
     old: DeprecatedConfigKey,
     action: DeprecatedConfigKeyAction,
+    /// What to write instead, said where a value carried over from it is
+    /// shown.
+    replace_with: &'static str,
 }
 
 const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
@@ -64,6 +67,7 @@ const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
         action: DeprecatedConfigKeyAction::Replace {
             migrate: migrate_prompt_for_name,
         },
+        replace_with: "defaults.enable_randomized_pet_name_by_default (its opposite)",
     },
     DeprecatedConfigKeyRule {
         old: DeprecatedConfigKey {
@@ -73,6 +77,7 @@ const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
         action: DeprecatedConfigKeyAction::Replace {
             migrate: migrate_server_bind,
         },
+        replace_with: "server.host and server.port",
     },
     DeprecatedConfigKeyRule {
         old: DeprecatedConfigKey {
@@ -82,6 +87,7 @@ const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
         action: DeprecatedConfigKeyAction::Replace {
             migrate: migrate_tailscale_enabled,
         },
+        replace_with: "server.tailscale",
     },
 ];
 
@@ -103,6 +109,66 @@ pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(String, String)> {
                 })
         })
         .collect()
+}
+
+/// A value the load migrations write in place of a deprecated key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CarriedOver {
+    /// The dotted key the value lands in.
+    pub key: String,
+    /// The deprecated key's section and name.
+    pub old_section: &'static str,
+    pub old_key: &'static str,
+    /// The deprecated key's value as the file writes it.
+    pub old_value: String,
+    /// What to write instead, for the sentence.
+    pub replace_with: &'static str,
+}
+
+/// Every value the deprecated-key migrations would write into `doc`, each
+/// rule tried on its own: a key that is absent before and present after.
+/// A migration that fails, or drops its key without carrying a value over,
+/// writes none.
+pub fn carried_over(doc: &DocumentMut) -> Vec<CarriedOver> {
+    let mut found = Vec::new();
+    for rule in DEPRECATED_CONFIG_KEYS {
+        let Some(old_value) = doc
+            .get(rule.old.section)
+            .and_then(Item::as_table_like)
+            .and_then(|table| table.get(rule.old.key))
+            .and_then(Item::as_value)
+            .map(|value| {
+                let mut value = value.clone();
+                value.decor_mut().clear();
+                value.to_string()
+            })
+        else {
+            continue;
+        };
+        let mut after = doc.clone();
+        if apply_config_deprecations_with(&mut after, std::slice::from_ref(rule)).is_err() {
+            continue;
+        }
+        let Some(table) = after.get(rule.old.section).and_then(Item::as_table_like) else {
+            continue;
+        };
+        for (key, _) in table.iter() {
+            let existed = doc
+                .get(rule.old.section)
+                .and_then(Item::as_table_like)
+                .is_some_and(|before| before.contains_key(key));
+            if !existed {
+                found.push(CarriedOver {
+                    key: format!("{}.{key}", rule.old.section),
+                    old_section: rule.old.section,
+                    old_key: rule.old.key,
+                    old_value: old_value.clone(),
+                    replace_with: rule.replace_with,
+                });
+            }
+        }
+    }
+    found
 }
 
 /// Every retired provider's stock block in `doc` the load prunes, as its

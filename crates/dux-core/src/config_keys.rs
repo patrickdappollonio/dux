@@ -866,8 +866,10 @@ pub struct Correction {
     /// The dotted setting it is about: the key asked for, or an entry inside
     /// the table asked for.
     pub path: String,
-    /// What the file says, as TOML text (a string unquoted).
-    pub in_file: String,
+    /// What the file says, as TOML text (a string unquoted), or `None`
+    /// when the file leaves the setting out and the load writes it from a
+    /// deprecated key.
+    pub in_file: Option<String>,
     /// What dux uses, or `None` when the load drops the entry holding it.
     pub used: Option<String>,
     /// Why dux uses something else: the load's own sentence.
@@ -974,10 +976,25 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
         }
     };
     let used = used_at(&path);
+    let corrected: Vec<(String, String)> = crate::config::load_corrections_of(raw);
+    let dotted = path.join(".");
     let Some(in_file) = in_file else {
+        // Left out of the file, but the load may still write it, from a
+        // deprecated key; that is said with where it came from.
+        let carried = used.as_ref().and_then(|_| {
+            corrected
+                .iter()
+                .find(|(key, _)| *key == dotted)
+                .map(|(_, reason)| Correction {
+                    path: dotted.clone(),
+                    in_file: None,
+                    used: used.clone(),
+                    reason: reason.clone(),
+                })
+        });
         return Ok(GetReport {
             value: used.map_or(GetValue::Unset, GetValue::Default),
-            corrections: Vec::new(),
+            corrections: carried.into_iter().collect(),
             refused_by,
         });
     };
@@ -985,8 +1002,6 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
     // comparing the two, for every key: the load's own record says why
     // (the correction or recovery step that covers it, a sibling included),
     // and a difference it has no record of is still reported.
-    let dotted = path.join(".");
-    let corrected: Vec<(String, String)> = crate::config::load_corrections_of(raw);
     let covering = |key: &str| {
         corrected
             .iter()
@@ -1028,19 +1043,33 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
             corrections.push(match whole {
                 Some((scope, reason)) => Correction {
                     path: scope.clone(),
-                    in_file: value_at(&file, &split(scope))
-                        .map(render)
-                        .unwrap_or_default(),
+                    in_file: value_at(&file, &split(scope)).map(render),
                     used: None,
                     reason: reason.clone(),
                 },
                 None => Correction {
                     reason: reason_at(&key),
                     path: key,
-                    in_file,
+                    in_file: Some(in_file),
                     used,
                 },
             });
+        }
+        // Entries the file leaves out that the load writes from a
+        // deprecated key.
+        let prefix = format!("{dotted}.");
+        for (key, reason) in &corrected {
+            if key.starts_with(&prefix) && value_at(&file, &split(key)).is_none() {
+                let used = used_at(&split(key));
+                if used.is_some() {
+                    corrections.push(Correction {
+                        path: key.clone(),
+                        in_file: None,
+                        used,
+                        reason: reason.clone(),
+                    });
+                }
+            }
         }
         return Ok(GetReport {
             value: GetValue::Set(render(table)),
@@ -1062,7 +1091,7 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
         corrections: vec![Correction {
             reason: reason_at(&dotted),
             path: dotted,
-            in_file,
+            in_file: Some(in_file),
             used,
         }],
         refused_by,
@@ -1943,7 +1972,7 @@ port = 3890
         let report = get_report(&text, &lookup("ui.left_width_pct").unwrap()).unwrap();
         assert_eq!(report.value, GetValue::Set("20".to_string()), "{report:?}");
         assert_eq!(report.corrections.len(), 1, "{report:?}");
-        assert_eq!(report.corrections[0].in_file, "wide");
+        assert_eq!(report.corrections[0].in_file.as_deref(), Some("wide"));
         assert_eq!(report.refused_by.len(), 1, "{report:?}");
         assert_eq!(report.refused_by[0].0, crate::config::Surface::TerminalUi);
         assert!(
