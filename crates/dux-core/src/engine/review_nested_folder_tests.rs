@@ -409,3 +409,137 @@ fn the_manager_refuses_a_first_worktree_being_created_through_a_symlinked_root()
         created.display()
     );
 }
+
+/// review9: a removal recorded in an EARLIER BOOT (the machine lost power in
+/// the middle of a delete, which is exactly when a removal is resumed) is void
+/// as far as processes go: every pid has been handed out afresh. Its snapshot
+/// of process identities (pid plus boot-relative start time) carries no boot,
+/// so a process of this boot that has the same pid and start tick is ended.
+/// The identity below is built from a live process to stand for such a
+/// coincidence.
+#[test]
+fn review9_a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
+    let (mut engine, tmp) = test_engine();
+    engine.config.shutdown_timeout_seconds = 1;
+    let repo = repo(tmp.path());
+    engine
+        .projects
+        .push(sample_project("p1", repo.to_str().unwrap()));
+    let worktree = agent_worktree(&mut engine, tmp.path(), &repo, "gone");
+    let session = engine.sessions.remove(0);
+
+    let mut program = std::process::Command::new("sleep");
+    program.arg("60");
+    let mut program = program.spawn().unwrap();
+    let pid = program.id();
+    let start = crate::process_sessions::process_start(pid).unwrap();
+    let other_boot = crate::process_sessions::current_boot() ^ 1;
+    engine
+        .session_store
+        .insert_pending_worktree_removal(&crate::storage::PendingWorktreeRemoval {
+            session_id: session.id.clone(),
+            label: "gone".to_string(),
+            project_path: repo.to_string_lossy().into_owned(),
+            managed: session.workspace.as_managed().unwrap().clone(),
+            delete_branch: None,
+            process_sessions: vec![crate::process_sessions::ProcessSession {
+                sid: pid,
+                started_at: start,
+                boot: other_boot,
+            }],
+            process_snapshot: vec![crate::process_sessions::ProcessIdentity {
+                pid,
+                start_time: start,
+                boot: other_boot,
+            }],
+            process_registry: Default::default(),
+        })
+        .unwrap();
+
+    engine.resume_pending_worktree_removals();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(crate::worker::WorkerEvent::StatusOpCompleted { .. }) =
+            engine.worker_rx.recv_timeout(Duration::from_millis(100))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the resumed removal never reported"
+        );
+    }
+    let alive = matches!(program.try_wait(), Ok(None));
+    let _ = program.kill();
+    let _ = program.wait();
+    assert!(!worktree.exists(), "the recorded removal ran");
+    assert!(
+        alive,
+        "a removal recorded in another boot ended pid {pid}, a process of this boot"
+    );
+}
+
+/// review9: reaping PTYs runs on the engine thread (the terminal UI's own
+/// loop). Dropping a reaped client whose terminal a disowned background job
+/// still holds open waits up to 250 ms for its reader thread, once per PTY, so
+/// an agent delete (or terminal closes) over several such PTYs freezes the
+/// engine thread for a quarter second per PTY.
+#[test]
+fn review9_reaping_ptys_held_open_by_jobs_does_not_stall_the_engine_thread() {
+    let (mut engine, tmp) = test_engine();
+    let pidfile = tmp.path().join("jobs.pid");
+    const N: usize = 8;
+    for i in 0..N {
+        let mut client = PtyClient::spawn_with_env(
+            "bash",
+            &[
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "-i".to_string(),
+            ],
+            tmp.path(),
+            24,
+            80,
+            100,
+            &[],
+        )
+        .expect("spawn bash");
+        client
+            .write_bytes(
+                format!(
+                    "sleep 30 & echo $! >> '{}'; disown; exit\n",
+                    pidfile.display()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while client.try_wait().is_none() {
+            assert!(Instant::now() < deadline, "bash never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let tab = TabId::new(format!("t{i}"));
+        engine.providers.insert(tab.clone(), client);
+        let _ = engine.move_provider_to_terminating(tab.as_ref_id(), format!("t{i}"), None);
+    }
+    let started = Instant::now();
+    let _ = engine.reap_terminating_ptys();
+    let blocked = started.elapsed();
+    for pid in std::fs::read_to_string(&pidfile)
+        .unwrap_or_default()
+        .lines()
+    {
+        if let Some(pid) = pid
+            .trim()
+            .parse()
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+    assert!(
+        blocked < Duration::from_millis(250),
+        "reaping {N} PTYs held the engine thread for {blocked:?}"
+    );
+}

@@ -326,6 +326,12 @@ dux started elsewhere that is standing in it, is never ended to make way. The wo
 and dux names the terminal: `cd` out of the folder or close the terminal, then remove the
 worktree from the worktree manager.
 
+> [!IMPORTANT]
+> dux follows what it started through the terminal session and the process tree it started
+> it in. A program that fully detaches itself from both, such as a `tmux new -d` session or
+> a daemon that double-forks, is not seen at all: dux neither stops it nor counts it as
+> using the worktree. Stop such a program yourself before you delete the worktree.
+
 Something dux did not start and cannot see, such as a server another program launched in
 that folder, can still write into it while git deletes it. git then removes the worktree from
 the repository but cannot delete the folder. dux does not finish the job by deleting the

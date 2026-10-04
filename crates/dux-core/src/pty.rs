@@ -2139,30 +2139,18 @@ impl Drop for PtyClient {
         // With the child group dead, the PTY slave is fully released (the slave
         // fd itself was dropped at spawn time; the child group held the last
         // references). The master read then returns EOF (on Linux, EIO, which
-        // portable-pty maps to Ok(0)) and the reader thread returns. Join it so
-        // the thread does not outlive this client; otherwise detached reader
-        // threads accumulate across a long session and across the test suite.
+        // portable-pty maps to Ok(0)) and the reader thread returns. It is
+        // joined so the thread does not outlive this client; otherwise detached
+        // reader threads accumulate across a long session and the test suite.
         //
-        // Bounded, because end of input needs EVERY holder of the PTY gone,
-        // and a background job outside both signalled groups is not. See
-        // [`READER_JOIN_BOUND`].
+        // Never here: the thread dropping a client is often the engine's (a
+        // reap, a close, a delete), and end of input needs EVERY holder of the
+        // PTY gone, which a background job outside both signalled groups is
+        // not. The join is handed to the one shared reaper thread, which waits
+        // a bounded time (see [`READER_JOIN_BOUND`]) and logs a reader it had
+        // to leave running.
         if let Some(handle) = self.reader_thread.take() {
-            let deadline = Instant::now() + READER_JOIN_BOUND;
-            while !handle.is_finished() && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
-            }
-            if handle.is_finished() {
-                let _ = handle.join();
-            } else {
-                logger::info(&format!(
-                    "PtyClient::drop: something the child started still holds its terminal \
-                     open (session {}), so the reader thread was left to finish on its own \
-                     rather than block this thread",
-                    self.process_session
-                        .map(|session| session.sid.to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                ));
-            }
+            hand_reader_to_reaper(handle, self.process_session.map(|session| session.sid));
         }
         // The child is dead: record what it left running in its session.
         self.fire_leader_exit_hook();
@@ -2200,7 +2188,58 @@ impl SignalTargets {
     }
 }
 
-/// How long dropping a [`PtyClient`] waits for its reader thread to finish.
+/// A reader thread whose client was dropped, for the reaper to join.
+struct ReaderToJoin {
+    handle: thread::JoinHandle<()>,
+    sid: Option<u32>,
+}
+
+/// The one reaper thread every dropped client's reader is handed to, started
+/// on first use.
+static READER_REAPER: std::sync::LazyLock<Option<std::sync::mpsc::Sender<ReaderToJoin>>> =
+    std::sync::LazyLock::new(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<ReaderToJoin>();
+        thread::Builder::new()
+            .name("pty-reader-reaper".to_string())
+            .spawn(move || {
+                while let Ok(reader) = rx.recv() {
+                    join_reader_bounded(reader);
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    });
+
+/// Hand a dropped client's reader thread to the reaper. Returns at once. If
+/// the reaper could not be started, the thread is left to finish on its own,
+/// which it does once the last holder of its terminal goes.
+fn hand_reader_to_reaper(handle: thread::JoinHandle<()>, sid: Option<u32>) {
+    if let Some(tx) = READER_REAPER.as_ref() {
+        let _ = tx.send(ReaderToJoin { handle, sid });
+    }
+}
+
+/// Join one reader, waiting at most [`READER_JOIN_BOUND`].
+fn join_reader_bounded(reader: ReaderToJoin) {
+    let deadline = Instant::now() + READER_JOIN_BOUND;
+    while !reader.handle.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    if reader.handle.is_finished() {
+        let _ = reader.handle.join();
+    } else {
+        logger::info(&format!(
+            "something a closed terminal's child started still holds its terminal open \
+             (session {}), so its reader thread was left to finish on its own",
+            reader
+                .sid
+                .map(|sid| sid.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        ));
+    }
+}
+
+/// How long the reaper waits for a dropped [`PtyClient`]'s reader thread.
 ///
 /// The reader ends at end of input, which arrives only once every process
 /// holding the PTY open has closed it. A background job the group kill cannot

@@ -41,7 +41,7 @@ fn sidecar_path(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
 fn encode_identities(identities: &[crate::process_sessions::ProcessIdentity]) -> String {
     identities
         .iter()
-        .map(|identity| format!("{}:{}", identity.pid, identity.start_time))
+        .map(|identity| format!("{}:{}:{}", identity.pid, identity.start_time, identity.boot))
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -49,10 +49,18 @@ fn encode_identities(identities: &[crate::process_sessions::ProcessIdentity]) ->
 fn decode_identities(text: &str) -> Vec<crate::process_sessions::ProcessIdentity> {
     text.split(',')
         .filter_map(|entry| {
-            let (pid, start) = entry.split_once(':')?;
+            let mut fields = entry.split(':');
+            let pid = fields.next()?.parse().ok()?;
+            let start_time = fields.next()?.parse().ok()?;
+            // No boot recorded: void, as an identity from another boot is.
+            let boot = fields
+                .next()
+                .and_then(|boot| boot.parse().ok())
+                .unwrap_or(0);
             Some(crate::process_sessions::ProcessIdentity {
-                pid: pid.parse().ok()?,
-                start_time: start.parse().ok()?,
+                pid,
+                start_time,
+                boot,
             })
         })
         .collect()
@@ -2433,6 +2441,7 @@ mod tests {
             process_snapshot: vec![crate::process_sessions::ProcessIdentity {
                 pid: 43,
                 start_time: 1_700_000_002,
+                boot: crate::process_sessions::current_boot(),
             }],
             process_registry: crate::process_sessions::RegistrySnapshot {
                 entries: vec![crate::process_sessions::RegistryEntry {

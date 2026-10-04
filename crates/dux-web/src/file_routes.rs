@@ -981,13 +981,32 @@ async fn destructive_editor_op(
     + Send
     + 'static,
 ) -> Result<(), crate::rest_common::RouteRejection> {
-    let relative: Vec<&str> = targets.iter().map(|target| target.as_str()).collect();
-    let mut guard = crate::git_routes::guard_destructive_targets(
-        state,
-        root,
-        &relative,
-        &format!("{what} the entry"),
-    )?;
+    // Off the async runtime: a claim may wait (bounded) for a removal
+    // running inside the folder.
+    let mut guard = {
+        let state = state.clone();
+        let root = root.to_path_buf();
+        let relative: Vec<String> = targets.iter().map(|target| target.to_string()).collect();
+        tokio::task::spawn_blocking(move || {
+            let relative: Vec<&str> = relative.iter().map(String::as_str).collect();
+            crate::git_routes::guard_destructive_targets(
+                &state,
+                &root,
+                &relative,
+                &format!("{what} the entry"),
+            )
+        })
+        .await
+        .map_err(|e| {
+            crate::rest_common::RouteRejection::from(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{what} task failed: {e}"),
+                )
+                    .into_response(),
+            )
+        })??
+    };
     let mut check: Option<dux_core::engine::DestructiveCheck> = None;
     for target in targets {
         let one = state

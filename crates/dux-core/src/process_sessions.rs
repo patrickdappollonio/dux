@@ -71,6 +71,76 @@ fn leader_unreaped(session: &ProcessSession) -> bool {
         .contains(session)
 }
 
+/// What [`judge_cwds`] found about one session's processes and a folder.
+#[derive(Debug, PartialEq, Eq)]
+enum CwdVerdict<'a> {
+    /// Nothing of it stands in the folder.
+    Clear,
+    /// This process stands in the folder (or, its own folder unreadable, the
+    /// nearest readable ancestor of it in its session does).
+    Inside(&'a ProcRow),
+    /// Where this process stands is unknown, nothing above it in its session
+    /// can say, and the session was started in the folder: possibly in it.
+    Unknown(&'a ProcRow),
+}
+
+/// Whether any of `running` (one session's live processes) stands in
+/// `folder` (a path key). A process whose current folder cannot be read (a
+/// `sudo` child, another user's process) is judged by its nearest readable
+/// ancestor in the same session: the shell that ran it. Only when no such
+/// ancestor is readable does it fail closed, and then only when the session
+/// itself was started in or under the folder, so one unreadable process
+/// somewhere else never blocks a removal here. Pure: the reads are handed in.
+fn judge_cwds<'a>(
+    folder: &std::path::Path,
+    running: &'a [ProcRow],
+    table: &[ProcRow],
+    report: &crate::file_drop::CwdReport,
+    session_folder: &std::path::Path,
+) -> CwdVerdict<'a> {
+    let by_pid: HashMap<u32, &ProcRow> = table.iter().map(|row| (row.pid, row)).collect();
+    let inside = |cwd: &std::path::Path| crate::worktree_ops::path_key(cwd).starts_with(folder);
+    let mut unknown: Option<&'a ProcRow> = None;
+    for row in running {
+        if let Some(cwd) = report.found.get(&row.pid) {
+            if inside(cwd) {
+                return CwdVerdict::Inside(row);
+            }
+            continue;
+        }
+        if !report.unknown.contains(&row.pid) {
+            continue;
+        }
+        // Up the parent chain, staying in the session, to the first process
+        // whose folder could be read.
+        let mut seen = HashSet::new();
+        let mut parent = row.ppid.and_then(|ppid| by_pid.get(&ppid).copied());
+        let mut stand_in: Option<&std::path::PathBuf> = None;
+        while let Some(ancestor) = parent {
+            if ancestor.sid != row.sid || !seen.insert(ancestor.pid) {
+                break;
+            }
+            if let Some(cwd) = report.found.get(&ancestor.pid) {
+                stand_in = Some(cwd);
+                break;
+            }
+            parent = ancestor.ppid.and_then(|ppid| by_pid.get(&ppid).copied());
+        }
+        match stand_in {
+            Some(cwd) if inside(cwd) => return CwdVerdict::Inside(row),
+            Some(_) => {}
+            None => {
+                if crate::worktree_ops::path_key(session_folder).starts_with(folder)
+                    && unknown.is_none()
+                {
+                    unknown = Some(row);
+                }
+            }
+        }
+    }
+    unknown.map_or(CwdVerdict::Clear, CwdVerdict::Unknown)
+}
+
 /// A start time the platform would not give (another user's process on
 /// macOS). Every membership rule fails closed on it: such a process is a
 /// member when its session or its parent chain says so, because a start time
@@ -280,6 +350,13 @@ fn macos_start(pid: u32) -> Option<u64> {
 pub struct ProcessIdentity {
     pub pid: u32,
     pub start_time: u64,
+    /// The machine boot it was recorded in ([`current_boot`]). An identity
+    /// from another boot is void, exactly like a session: every pid and
+    /// every boot-relative start time has been handed out afresh since, so
+    /// it names nothing of dux's however well it matches. An identity read
+    /// back without one (recorded before this field existed) is void too.
+    #[serde(default)]
+    pub boot: u64,
 }
 
 /// One row of the process table, as much of it as these questions need.
@@ -302,6 +379,7 @@ impl ProcRow {
         ProcessIdentity {
             pid: self.pid,
             start_time: self.start_time,
+            boot: current_boot(),
         }
     }
 }
@@ -604,6 +682,11 @@ enum WriteJob {
     },
 }
 
+/// The first pause before a failed database write is tried again, and the
+/// longest it grows to.
+const WRITE_RETRY_FIRST: Duration = Duration::from_millis(100);
+const WRITE_RETRY_MAX: Duration = Duration::from_secs(2);
+
 /// How far the writer thread has got.
 #[derive(Default)]
 struct WriterProgress {
@@ -646,58 +729,124 @@ impl RegistryWriter {
         progress: &WriterProgress,
     ) {
         let mut store: Option<crate::storage::SessionStore> = None;
-        // Ends when every registry handle (and with it the sender) is gone,
-        // after writing what was already queued.
-        while let Ok(first) = rx.recv() {
-            let mut batch = vec![first];
-            batch.extend(rx.try_iter());
-            let mut latest_registry: Option<(u64, Vec<StoredSession>)> = None;
-            let mut pending: Vec<(String, RegistrySnapshot)> = Vec::new();
-            let mut through = 0;
-            for job in batch {
-                match job {
-                    WriteJob::Registry { seq, stored } => {
-                        through = through.max(seq);
-                        latest_registry = Some((seq, stored));
-                    }
-                    WriteJob::Pending { seq, row, snapshot } => {
-                        through = through.max(seq);
-                        pending.push((row, snapshot));
-                    }
+        // What is waiting to be written: the latest whole registry, and every
+        // pending-row merge in order. A write that fails stays here and is
+        // tried again, with a growing pause, so nothing is counted as saved
+        // until it is in the database.
+        let mut registry: Option<(u64, Vec<StoredSession>)> = None;
+        let mut merges: std::collections::VecDeque<(u64, String, RegistrySnapshot)> =
+            std::collections::VecDeque::new();
+        let mut highest = 0;
+        let mut backoff = WRITE_RETRY_FIRST;
+        let mut open = true;
+        loop {
+            let nothing_waiting = registry.is_none() && merges.is_empty();
+            if nothing_waiting {
+                if !open {
+                    return;
                 }
+                match rx.recv() {
+                    Ok(job) => Self::take(job, &mut registry, &mut merges, &mut highest),
+                    // Every registry handle is gone and everything is written.
+                    Err(_) => return,
+                }
+            } else if open {
+                // Something failed: wait before trying again, taking whatever
+                // arrives meanwhile.
+                match rx.recv_timeout(backoff) {
+                    Ok(job) => Self::take(job, &mut registry, &mut merges, &mut highest),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => open = false,
+                }
+            } else {
+                std::thread::sleep(backoff);
+            }
+            for job in rx.try_iter() {
+                Self::take(job, &mut registry, &mut merges, &mut highest);
             }
             if store.is_none() {
                 match crate::storage::SessionStore::open(db_path) {
                     Ok(opened) => store = Some(opened),
                     Err(err) => crate::logger::warn(&format!(
                         "could not open the session database to save the process sessions dux \
-                         started: {err:#}"
+                         started; trying again: {err:#}"
                     )),
                 }
             }
+            let mut failed = store.is_none();
             if let Some(store) = &store {
-                for (row, snapshot) in &pending {
-                    if let Err(err) = store.merge_pending_removal_registry(row, snapshot) {
-                        crate::logger::warn(&format!(
-                            "could not keep a pending removal current with what runs in its \
-                             folder: {err:#}"
-                        ));
+                while let Some((_, row, snapshot)) = merges.front() {
+                    match store.merge_pending_removal_registry(row, snapshot) {
+                        Ok(()) => {
+                            merges.pop_front();
+                        }
+                        Err(err) => {
+                            crate::logger::warn(&format!(
+                                "could not keep a pending removal current with what runs in its \
+                                 folder; trying again: {err:#}"
+                            ));
+                            failed = true;
+                            break;
+                        }
                     }
                 }
-                if let Some((_, stored)) = &latest_registry
-                    && let Err(err) = store.replace_process_registry(stored)
-                {
-                    crate::logger::warn(&format!(
-                        "could not save the process sessions dux started: {err:#}"
-                    ));
+                if !failed && let Some((_, stored)) = &registry {
+                    match store.replace_process_registry(stored) {
+                        Ok(()) => registry = None,
+                        Err(err) => {
+                            crate::logger::warn(&format!(
+                                "could not save the process sessions dux started; trying \
+                                 again: {err:#}"
+                            ));
+                            failed = true;
+                        }
+                    }
                 }
             }
-            let mut done = progress
-                .done
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *done = (*done).max(through);
-            progress.advanced.notify_all();
+            // Everything numbered below the oldest write still waiting is in.
+            let oldest_waiting = merges
+                .front()
+                .map(|(seq, ..)| *seq)
+                .into_iter()
+                .chain(registry.as_ref().map(|(seq, _)| *seq))
+                .min();
+            let through = oldest_waiting.map_or(highest, |seq| seq.saturating_sub(1));
+            {
+                let mut done = progress
+                    .done
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *done = (*done).max(through);
+                progress.advanced.notify_all();
+            }
+            backoff = if failed {
+                (backoff * 2).min(WRITE_RETRY_MAX)
+            } else {
+                WRITE_RETRY_FIRST
+            };
+        }
+    }
+
+    /// File one job: a whole registry replaces the one waiting (the latest
+    /// wins), a merge joins the queue in order.
+    fn take(
+        job: WriteJob,
+        registry: &mut Option<(u64, Vec<StoredSession>)>,
+        merges: &mut std::collections::VecDeque<(u64, String, RegistrySnapshot)>,
+        highest: &mut u64,
+    ) {
+        match job {
+            WriteJob::Registry { seq, stored } => {
+                *highest = (*highest).max(seq);
+                // The registry waiting keeps its OLDER number: the record is
+                // not saved through it until a write of the newer one lands.
+                let seq = registry.as_ref().map_or(seq, |(older, _)| *older);
+                *registry = Some((seq, stored));
+            }
+            WriteJob::Pending { seq, row, snapshot } => {
+                *highest = (*highest).max(seq);
+                merges.push_back((seq, row, snapshot));
+            }
         }
     }
 }
@@ -773,6 +922,10 @@ pub struct StoredSession {
     pub folder: std::path::PathBuf,
     pub standalone: bool,
     pub survivors: Vec<ProcessIdentity>,
+    /// What its processes are called in a sentence, so a refusal after a
+    /// restart still names what is standing in a folder.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// The part of the registry a removal of one folder depends on, written into
@@ -874,6 +1027,7 @@ impl AgentProcessRegistry {
     /// Remember what to call `session`'s processes in a sentence.
     pub fn label(&self, session: ProcessSession, label: impl Into<String>) {
         self.lock().labels.insert(session, label.into());
+        self.persist_all();
     }
 
     /// Whether a list is past its cap.
@@ -966,22 +1120,29 @@ impl AgentProcessRegistry {
         folder: &std::path::Path,
         except: &[ProcessSession],
     ) -> Option<String> {
-        let tracked: Vec<(ProcessSession, Vec<ProcessIdentity>, Option<String>)> = {
+        type Tracked = (
+            ProcessSession,
+            std::path::PathBuf,
+            Vec<ProcessIdentity>,
+            Option<String>,
+        );
+        let tracked: Vec<Tracked> = {
             let inner = self.lock();
-            let mut all: Vec<ProcessSession> = inner
+            let mut all: Vec<(ProcessSession, std::path::PathBuf)> = inner
                 .sessions
                 .values()
                 .flatten()
                 .chain(inner.retired.iter())
-                .map(|(session, _)| *session)
-                .filter(|session| !except.contains(session))
+                .filter(|(session, _)| !except.contains(session))
+                .cloned()
                 .collect();
-            all.sort_by_key(|session| (session.sid, session.started_at));
-            all.dedup();
+            all.sort_by_key(|(session, _)| (session.sid, session.started_at));
+            all.dedup_by_key(|(session, _)| *session);
             all.into_iter()
-                .map(|session| {
+                .map(|(session, started_in)| {
                     (
                         session,
+                        started_in,
                         inner.survivors.get(&session).cloned().unwrap_or_default(),
                         inner.labels.get(&session).cloned(),
                     )
@@ -994,42 +1155,45 @@ impl AgentProcessRegistry {
         let folder = crate::worktree_ops::path_key(folder);
         let table = read_process_table();
         let self_pid = std::process::id();
-        for (session, known, label) in tracked {
+        for (session, started_in, known, label) in tracked {
             let running = members(&table, &[session], &known, self_pid);
             if running.is_empty() {
                 continue;
             }
             let pids: Vec<u32> = running.iter().map(|row| row.pid).collect();
             let report = crate::file_drop::process_cwds(&pids);
-            // Fails closed: a process whose folder could not be read may be
-            // standing in this one.
-            if let Some(row) = running.iter().find(|row| report.unknown.contains(&row.pid)) {
-                let who = label.unwrap_or_else(|| "a process dux started".to_string());
-                return Some(format!(
-                    "dux could not check where its terminals and processes are working: it \
-                     could not read the current folder of {} (pid {}), started by {who}{}, so \
-                     it cannot rule out that it is standing in this folder; close it or try \
-                     again",
-                    row.name,
-                    row.pid,
-                    report
-                        .failure
-                        .as_deref()
-                        .map(|why| format!(" ({why})"))
-                        .unwrap_or_default()
-                ));
-            }
-            let cwds = report.found;
-            if let Some(row) = running.iter().find(|row| {
-                cwds.get(&row.pid)
-                    .is_some_and(|cwd| crate::worktree_ops::path_key(cwd).starts_with(&folder))
-            }) {
-                let who = label.unwrap_or_else(|| "a process dux started".to_string());
-                return Some(format!(
-                    "{who} is working in it ({} (pid {}) has it as its current folder); `cd` \
-                     out of it or close it first",
-                    row.name, row.pid
-                ));
+            let who = || {
+                label
+                    .clone()
+                    .unwrap_or_else(|| "a process dux started".to_string())
+            };
+            match judge_cwds(&folder, &running, &table, &report, &started_in) {
+                CwdVerdict::Clear => {}
+                CwdVerdict::Inside(row) => {
+                    return Some(format!(
+                        "{} is working in it ({} (pid {}) has it as its current folder); `cd` \
+                         out of it or close it first",
+                        who(),
+                        row.name,
+                        row.pid
+                    ));
+                }
+                CwdVerdict::Unknown(row) => {
+                    return Some(format!(
+                        "dux could not check where its terminals and processes are working: it \
+                         could not read the current folder of {} (pid {}), started by {} in \
+                         this folder{}, so it cannot rule out that it is still standing here; \
+                         close it or try again",
+                        row.name,
+                        row.pid,
+                        who(),
+                        report
+                            .failure
+                            .as_deref()
+                            .map(|why| format!(" ({why})"))
+                            .unwrap_or_default()
+                    ));
+                }
             }
         }
         None
@@ -1158,6 +1322,7 @@ impl AgentProcessRegistry {
                 session: *session,
                 folder: folder.clone(),
                 survivors: inner.survivors.get(session).cloned().unwrap_or_default(),
+                label: inner.labels.get(session).cloned(),
             })
             .collect()
     }
@@ -1228,6 +1393,9 @@ impl AgentProcessRegistry {
                         }
                         if !entry.survivors.is_empty() {
                             inner.survivors.insert(entry.session, entry.survivors);
+                        }
+                        if let Some(label) = entry.label {
+                            inner.labels.insert(entry.session, label);
                         }
                     }
                 }
@@ -1741,6 +1909,7 @@ mod tests {
         let live = ProcessIdentity {
             pid: child.id(),
             start_time: process_start(child.id()).unwrap_or(0),
+            boot: current_boot(),
         };
         let first = ProcessSession {
             sid: 5_000_000,
@@ -1773,6 +1942,81 @@ mod tests {
             left.len()
         );
         assert!(left.contains(&first), "the live one stayed");
+    }
+
+    /// A process whose folder cannot be read (a `sudo` child) is judged by
+    /// the nearest readable ancestor in its session: the shell that ran it.
+    #[test]
+    fn an_unreadable_folder_is_judged_by_the_shell_that_ran_it() {
+        let folder = crate::worktree_ops::path_key(std::path::Path::new("/work/wt"));
+        let shell = row(100, 1, 100);
+        let sudo = row(101, 100, 100);
+        let table = vec![shell.clone(), sudo.clone()];
+        let running = table.clone();
+        let mut report = crate::file_drop::CwdReport::default();
+        report.unknown.push(101);
+        // The shell stands elsewhere: the sudo child is not in the way.
+        report
+            .found
+            .insert(100, std::path::PathBuf::from("/home/me"));
+        assert_eq!(
+            judge_cwds(
+                &folder,
+                &running,
+                &table,
+                &report,
+                std::path::Path::new("/repo")
+            ),
+            CwdVerdict::Clear
+        );
+        // The shell stands in the worktree: so does what it ran.
+        report
+            .found
+            .insert(100, std::path::PathBuf::from("/work/wt/src"));
+        assert_eq!(
+            judge_cwds(
+                &folder,
+                &running,
+                &table,
+                &report,
+                std::path::Path::new("/repo")
+            ),
+            CwdVerdict::Inside(&running[0])
+        );
+    }
+
+    /// With nothing readable above it in its session, an unreadable process
+    /// fails closed only when its session was started in or under the folder.
+    #[test]
+    fn an_unreadable_folder_with_no_readable_ancestor_fails_closed_only_for_its_own_folder() {
+        let folder = crate::worktree_ops::path_key(std::path::Path::new("/work/wt"));
+        let lone = row(200, 1, 200);
+        let table = vec![lone.clone()];
+        let running = table.clone();
+        let mut report = crate::file_drop::CwdReport::default();
+        report.unknown.push(200);
+        assert_eq!(
+            judge_cwds(
+                &folder,
+                &running,
+                &table,
+                &report,
+                std::path::Path::new("/elsewhere")
+            ),
+            CwdVerdict::Clear,
+            "a session started elsewhere does not block this folder"
+        );
+        assert_eq!(
+            judge_cwds(
+                &folder,
+                &running,
+                &table,
+                &report,
+                std::path::Path::new("/work/wt/x")
+            ),
+            CwdVerdict::Unknown(&running[0]),
+            "a session started inside it may still be standing there"
+        );
     }
 
     /// A zombie leader still leads: its pid is allocated until it is reaped,
@@ -1882,6 +2126,7 @@ mod tests {
         let known = [ProcessIdentity {
             pid: 102,
             start_time: 1_000 * SEC,
+            boot: current_boot(),
         }];
         assert_eq!(
             pids(&members(&table, &[session(100)], &known, 9)),
@@ -1891,6 +2136,7 @@ mod tests {
         let stale = [ProcessIdentity {
             pid: 102,
             start_time: 999 * SEC,
+            boot: current_boot(),
         }];
         assert!(members(&table, &[session(100)], &stale, 9).is_empty());
     }
@@ -2151,6 +2397,80 @@ mod tests {
         assert_eq!(
             registry.sessions_in(shared),
             vec![session(100), session(200)]
+        );
+    }
+
+    /// review9: a removal must keep the worktree when the registry's record
+    /// could not be saved before git runs (`record_not_saved`, whose sentence
+    /// names "the session database may be busy"). A busy database makes the
+    /// writer's write FAIL after SQLite's busy timeout, and the writer then
+    /// counts the change as done, so `flush` answers "saved" and git runs
+    /// with nothing written.
+    #[test]
+    fn review9_flush_does_not_report_saved_when_the_database_was_busy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        drop(crate::storage::SessionStore::open(&db).unwrap());
+        // Another connection holds the write lock for longer than the busy
+        // timeout (a long transaction elsewhere, another process).
+        let blocker = rusqlite::Connection::open(&db).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE;").unwrap();
+        let folder = tmp.path().join("wt");
+        std::fs::create_dir_all(&folder).unwrap();
+        let registry = AgentProcessRegistry::default();
+        registry.watch_pending("agent-1", &folder, &db);
+        registry.register("agent-1", session(4242), &folder);
+        let saved = registry.flush(Duration::from_secs(20));
+        blocker.execute_batch("ROLLBACK;").unwrap();
+        let stored = crate::storage::SessionStore::open(&db)
+            .unwrap()
+            .load_process_registry()
+            .unwrap();
+        assert!(
+            stored.iter().any(|entry| entry.session == session(4242)) || !saved,
+            "flush reported the record saved ({saved}) while nothing reached the database: \
+             {stored:?}"
+        );
+    }
+
+    /// review9: the persisted registry entry carries the session's label, so a
+    /// refusal after a restart still names WHAT is standing in the folder
+    /// (here a project terminal), not "a process dux started".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn review9_a_restart_keeps_what_each_session_is_called() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        drop(crate::storage::SessionStore::open(&db).unwrap());
+        let folder = tmp.path().join("wt");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30").current_dir(&folder);
+        unsafe {
+            command.pre_exec(|| {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let session = ProcessSession::started_now(child.id());
+        let first = AgentProcessRegistry::default();
+        first.attach_store(&db);
+        first.register(UNOWNED_PTYS, session, tmp.path());
+        first.label(session, "project terminal \"Terminal 2\" of project \"p\"");
+        assert!(first.flush(Duration::from_secs(10)));
+        let live_run = first.cwd_occupant(&folder, &[]).unwrap_or_default();
+        // The next start of dux.
+        let second = AgentProcessRegistry::default();
+        second.attach_store(&db);
+        let after_restart = second.cwd_occupant(&folder, &[]).unwrap_or_default();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(live_run.contains("Terminal 2"), "{live_run}");
+        assert!(
+            after_restart.contains("Terminal 2"),
+            "after a restart the refusal no longer says what is in the folder: {after_restart}"
         );
     }
 }

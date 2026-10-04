@@ -432,6 +432,19 @@ impl WorktreeOps {
     /// reason, when a removal already covers it or an operation is already
     /// running inside it. Dropping the lease lets the folder go.
     pub fn claim_for_destructive(&self, path: impl AsRef<Path>) -> Result<RemovalLease, String> {
+        self.claim_for_destructive_within(path, DESTRUCTIVE_CLAIM_WAIT)
+    }
+
+    /// [`Self::claim_for_destructive`], waiting at most `wait` for a removal
+    /// running in or under the folder: the same ordering two removals of
+    /// nested folders keep, so a delete or move of a folder never runs while
+    /// dux is removing a worktree inside it. Refused with a sentence when the
+    /// wait runs out. Blocking: never on the engine thread or an async task.
+    pub fn claim_for_destructive_within(
+        &self,
+        path: impl AsRef<Path>,
+        wait: Duration,
+    ) -> Result<RemovalLease, String> {
         let path = path.as_ref();
         if let Some(covering) = self.removal_refusal(path) {
             return Err(format!(
@@ -442,16 +455,26 @@ impl WorktreeOps {
         match self.announce_removal(path) {
             RemovalClaim::Lead(lease) => {
                 let holders = lease.holders();
-                if holders.is_empty() {
-                    Ok(lease)
-                } else {
-                    Err(format!("{} is running in it", describe_holders(&holders)))
+                if !holders.is_empty() {
+                    return Err(format!("{} is running in it", describe_holders(&holders)));
                 }
+                if !lease.wait_for_overlapping_removals(wait) {
+                    return Err(format!(
+                        "dux is still removing a worktree inside it after {} seconds; try \
+                         again once that has finished",
+                        wait.as_secs()
+                    ));
+                }
+                Ok(lease)
             }
             RemovalClaim::Join(_) => Err("it is being removed already".to_string()),
         }
     }
 }
+
+/// How long a destructive file operation waits for a removal running inside
+/// its folder before it is refused.
+pub const DESTRUCTIVE_CLAIM_WAIT: Duration = Duration::from_secs(5);
 
 /// An RAII hold. Dropping it releases the path, panics included.
 pub struct WorktreeOpGuard {
@@ -949,5 +972,27 @@ mod tests {
             panic!("leads");
         };
         assert_eq!(lease.renamed("old"), "old");
+    }
+
+    /// review9: nested ordering for a destructive claim. A worktree removal of
+    /// `/p/x` is running (its agent's processes are gone; git is about to run
+    /// or running). An editor delete or move of `/p`, which deletes or moves
+    /// `/p/x` with it, must not be granted while that removal runs: two
+    /// removals of nested folders never run at the same time.
+    #[test]
+    fn review9_a_destructive_claim_waits_for_or_refuses_a_removal_inside_it() {
+        let ops = WorktreeOps::new();
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let inner = outer.join("x");
+        std::fs::create_dir_all(&inner).unwrap();
+        let RemovalClaim::Lead(_running) = ops.announce_removal(&inner) else {
+            panic!("leads");
+        };
+        assert!(
+            ops.claim_for_destructive(&outer).is_err(),
+            "an editor delete/move of a folder around a worktree being removed was cleared to run \
+             at the same time as that removal"
+        );
     }
 }
