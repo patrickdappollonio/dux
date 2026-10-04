@@ -771,6 +771,7 @@ impl AuthState {
                     admission::Strike::UnverifiedLimit(ip) => {
                         self.speaker.unverified_limit(
                             ip,
+                            warnings::Unverified::of(c),
                             snapshot.config.max_failed_logins,
                             &self.config_path_text(),
                         );

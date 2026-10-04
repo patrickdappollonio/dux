@@ -1864,6 +1864,15 @@ async fn handle_pty_socket(
     let (sink, stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
 
+    // The session is judged before anything is subscribed: subscribing to an
+    // agent's pty can launch its provider, and a signed-out socket must never
+    // start one, nor be told the provider is gone (4001) when the truth is
+    // that it is signed out (4401). Judged again before each opening send.
+    if let Some(code) = socket_auth.opening_verdict().await {
+        let _ = sink.lock().await.send(auth_close(code)).await;
+        return;
+    }
+
     // Subscribe to the target PTY. An agent subscribe also launches/resumes the
     // provider if it isn't running yet (the same flow the legacy Subscribe uses);
     // a terminal subscribe attaches to an already-created companion terminal.
@@ -2000,7 +2009,7 @@ async fn handle_pty_socket(
         // session revoked meanwhile must get its close and not one byte of the
         // terminal (decided, after review: the loop's own watch only starts
         // after both opening sends).
-        if let Some(code) = socket_auth.opening_verdict().await {
+        if let Some(code) = socket_auth.verdict_now() {
             let _ = sink.lock().await.send(auth_close(code)).await;
             break 'attached;
         }

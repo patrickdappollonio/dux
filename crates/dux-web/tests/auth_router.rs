@@ -3337,3 +3337,77 @@ async fn an_events_socket_signed_out_while_opening_gets_nothing() {
         other => panic!("the first frame after a sign-out was not the 4401 close: {other:?}"),
     }
 }
+
+/// A PTY socket judges its session before it subscribes, since a subscribe
+/// can launch an agent's provider: signed out in that window it gets 4401,
+/// never the provider-gone 4001 that a failed subscribe (here, a terminal
+/// deleted meanwhile) would answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
+    use tokio_tungstenite::tungstenite::Message;
+    let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let hook: dux_web::auth::OpeningHook = {
+        let release = Arc::clone(&release);
+        Arc::new(move || {
+            let reached_tx = reached_tx.clone();
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                let _ = reached_tx.send(());
+                release.notified().await;
+            })
+        })
+    };
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nrequire = \"everywhere\"",
+            hash_of(PASSWORD)
+        ),
+        move |p| p.with_socket_opening_hook(hook),
+    );
+    let cookie = dux.signed_in(THIS_MACHINE).await;
+    let created = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/terminals").cookie(&cookie),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let tid = created.json()["terminal_id"].as_str().unwrap().to_string();
+    let server = Serve::start(dux).await;
+    let (_, value) = cookie.split_once('=').unwrap();
+    let on_server = format!("dux_session_{}={value}", server.addr.port());
+    let mut socket = server
+        .connect(&format!("/ws/terminals/{tid}/pty"), &[], Some(&on_server))
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), reached_rx.recv())
+        .await
+        .expect("the socket reached its opening check before subscribing")
+        .unwrap();
+    // The terminal goes away and the session ends: a subscribe now would fail
+    // and answer 4001, so 4401 proves the session was judged first.
+    let gone = server
+        ._dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::DELETE, &format!("/api/v1/terminals/{tid}")).cookie(&cookie),
+        )
+        .await;
+    assert!(gone.status.is_success(), "{} {}", gone.status, gone.body);
+    let out = server
+        ._dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/logout").cookie(&cookie),
+        )
+        .await;
+    assert_eq!(out.status, StatusCode::NO_CONTENT, "{}", out.body);
+    release.notify_waiters();
+    let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("the socket answered");
+    match first {
+        Some(Ok(Message::Close(Some(frame)))) => assert_eq!(u16::from(frame.code), 4401),
+        other => panic!("a signed-out socket was not closed with 4401: {other:?}"),
+    }
+}

@@ -104,11 +104,11 @@ impl Speaker {
 
     /// An address dux could not verify reached `max_failed_logins`: say so,
     /// and that nothing was written.
-    pub(crate) fn unverified_limit(&self, ip: IpAddr, failures: u32, path: &str) {
+    pub(crate) fn unverified_limit(&self, ip: IpAddr, why: Unverified, failures: u32, path: &str) {
         self.say(
             Loudness::Warning,
             BLOCKED_KEY,
-            &unverified_limit_sentence(ip, failures, path),
+            &unverified_limit_sentence(ip, why, failures, path),
             false,
         );
     }
@@ -206,13 +206,62 @@ fn blocked_sentence(entry: &str, failures: u32, path: &str, kept: &BanKept) -> S
 /// An unverified forwarded address at the limit. Decided: it is NOT written,
 /// because the address is only what the request claimed and writing it would
 /// let anyone fill the blocklist with addresses of their choosing.
-fn unverified_limit_sentence(ip: IpAddr, failures: u32, path: &str) -> String {
+/// Why the address a request claimed could not be verified, which the
+/// unverified-limit warning names (decided, after review: the reason it once
+/// gave, "not a confirmed tailscale serve route", was wrong for Funnel
+/// traffic and for a serve route dux could not yet vouch for).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unverified {
+    /// It came through a Tailscale Funnel: the internet, whose address
+    /// Tailscale names but dux cannot confirm.
+    Funnel,
+    /// It looked like `tailscale serve`, but dux could not vouch for what
+    /// reaches its port: the cause, in words.
+    ExposureUnconfirmed(&'static str),
+    /// It came through a proxy that is not a confirmed `tailscale serve`
+    /// route.
+    UnconfirmedProxy,
+}
+
+impl Unverified {
+    /// The reason for a request whose claimed address dux could not verify.
+    pub(crate) fn of(c: &super::provenance::Classification) -> Self {
+        use super::provenance::{ClientClass, Via};
+        match (c.class, c.via, c.loopback_distrusted) {
+            (ClientClass::Internet, _, _) => Self::Funnel,
+            (_, Via::Forwarded, Some(cause)) => Self::ExposureUnconfirmed(cause),
+            _ => Self::UnconfirmedProxy,
+        }
+    }
+}
+
+fn unverified_limit_sentence(ip: IpAddr, why: Unverified, failures: u32, path: &str) -> String {
     let ip = dux_core::config_auth::canonical(ip);
+    let (came, because, trust) = match why {
+        Unverified::Funnel => (
+            "through a Tailscale Funnel".to_string(),
+            "Funnel traffic comes from the internet, and dux cannot confirm the address it \
+             names"
+                .to_string(),
+            "If you are sure of it",
+        ),
+        Unverified::ExposureUnconfirmed(cause) => (
+            "through what looked like tailscale serve".to_string(),
+            format!("{cause}, so it cannot vouch for that route"),
+            "If you are sure of it",
+        ),
+        Unverified::UnconfirmedProxy => (
+            "through a proxy".to_string(),
+            "the proxy is not a confirmed tailscale serve route, so the client may have \
+             chosen it"
+                .to_string(),
+            "If you trust the proxy",
+        ),
+    };
     format!(
-        "{failures} failed sign-ins came through a proxy claiming to be {ip}. dux did not add it \
-         to blocked_addresses because it could not verify that address (the proxy is not a \
-         confirmed tailscale serve route, so the client may have chosen it); it keeps slowing \
-         those sign-ins down. If you trust the proxy, add {ip} to blocked_addresses in the \
+        "{failures} failed sign-ins came {came} claiming to be {ip}. dux did not add it to \
+         blocked_addresses because it could not verify that address ({because}); it keeps \
+         slowing those sign-ins down. {trust}, add {ip} to blocked_addresses in the \
          [server.auth] section of {path} by hand and reload the config."
     )
 }
@@ -315,8 +364,12 @@ mod tests {
             text.contains("192.0.2.0/24") && text.contains("192.0.2.10") && text.contains("never"),
             "{text}"
         );
-        let unverified =
-            unverified_limit_sentence("203.0.113.9".parse().unwrap(), 10, "/x/config.toml");
+        let unverified = unverified_limit_sentence(
+            "203.0.113.9".parse().unwrap(),
+            Unverified::UnconfirmedProxy,
+            10,
+            "/x/config.toml",
+        );
         assert!(
             !unverified.contains("  "),
             "no runs of spaces: {unverified}"
@@ -334,13 +387,68 @@ mod tests {
     }
 
     #[test]
+    fn the_unverified_reason_follows_how_the_request_came() {
+        use crate::auth::provenance::{Classification, ClientClass, Via};
+        let base = Classification {
+            class: ClientClass::Network,
+            named: Vec::new(),
+            verified_ip: None,
+            claimed_ip: Some("203.0.113.9".parse().unwrap()),
+            transport_encrypted: false,
+            https_serve_route: false,
+            unvouched_proxy: true,
+            loopback_distrusted: None,
+            via: Via::Forwarded,
+        };
+        assert_eq!(Unverified::of(&base), Unverified::UnconfirmedProxy);
+        let funnel = Classification {
+            class: ClientClass::Internet,
+            ..base.clone()
+        };
+        assert_eq!(Unverified::of(&funnel), Unverified::Funnel);
+        let gated = Classification {
+            loopback_distrusted: Some("dux has not finished its first look at Tailscale"),
+            ..base
+        };
+        assert_eq!(
+            Unverified::of(&gated),
+            Unverified::ExposureUnconfirmed("dux has not finished its first look at Tailscale")
+        );
+    }
+
+    #[test]
     fn an_unverified_address_at_the_limit_says_it_was_not_written_and_how_to_add_it() {
-        let text = unverified_limit_sentence("203.0.113.9".parse().unwrap(), 10, "/x/config.toml");
-        assert!(text.contains("203.0.113.9"), "{text}");
-        assert!(text.contains("did not add it"), "{text}");
-        assert!(text.contains("could not verify"), "{text}");
-        assert!(text.contains("by hand"), "{text}");
-        assert!(text.contains("/x/config.toml"), "{text}");
+        for (why, says) in [
+            (Unverified::Funnel, "Tailscale Funnel"),
+            (
+                Unverified::ExposureUnconfirmed("dux has not finished its first look at Tailscale"),
+                "first look at Tailscale",
+            ),
+            (
+                Unverified::UnconfirmedProxy,
+                "not a confirmed tailscale serve route",
+            ),
+        ] {
+            let text = unverified_limit_sentence(
+                "203.0.113.9".parse().unwrap(),
+                why,
+                10,
+                "/x/config.toml",
+            );
+            assert!(text.contains("203.0.113.9"), "{text}");
+            assert!(text.contains("did not add it"), "{text}");
+            assert!(text.contains("could not verify"), "{text}");
+            assert!(text.contains(says), "{why:?}: {text}");
+            assert!(text.contains("by hand"), "{text}");
+            assert!(text.contains("/x/config.toml"), "{text}");
+            assert!(!text.contains("  "), "{text}");
+            if why != Unverified::UnconfirmedProxy {
+                assert!(
+                    !text.contains("not a confirmed tailscale serve route"),
+                    "{text}"
+                );
+            }
+        }
     }
 
     #[test]
