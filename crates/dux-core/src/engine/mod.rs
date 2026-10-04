@@ -34,6 +34,8 @@ mod removal_review_tests;
 #[cfg(test)]
 mod review10_tests;
 #[cfg(test)]
+mod review11_tests;
+#[cfg(test)]
 mod review8_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -54,8 +56,7 @@ pub use events::{
 };
 pub(crate) use events::{
     RemovalCoordinationInputs, cwd_keeps, end_agent_processes_before_removal, occupant_after_wait,
-    occupied_after_wait_message, perform_deferred_removal, record_not_saved,
-    standalone_processes_keep,
+    perform_deferred_removal, standalone_processes_keep, wait_then_last_look,
 };
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{
@@ -71,7 +72,7 @@ pub use lifecycle::{
     detach_confirm_prose, detach_final, detach_not_running_message, detach_status_key,
     detached_agent_notice, format_shutdown_result, format_shutdown_start,
 };
-pub(crate) use pending_removals::stored_occupant;
+pub(crate) use pending_removals::{is_symlink, stored_occupant};
 pub use pr_sync_control::PrSyncControl;
 pub use removal::{
     ProjectDeletionOutcome, RemovalCoordination, StartupRerunClaim, project_deletion_final,
@@ -4432,16 +4433,35 @@ impl Engine {
         if self.is_in_flight(&InFlightKey::BranchRename(session_id.to_string())) {
             return BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight);
         }
-        // A worktree being removed takes no rename: nothing new may start in a
-        // folder that is about to go.
-        if self
+        // A worktree being removed (or deleted or moved) takes no rename:
+        // nothing new may start in a folder that is about to go. A branch
+        // rename holds its worktree until its completion lands, so a removal
+        // that begins meanwhile waits for it and then deletes the branch by
+        // its new name; the hold is taken here, checked and held in one step
+        // under the registry's lock, before anything changes, and a refusal
+        // is said out loud. A title-only rename starts nothing in the folder
+        // and holds nothing.
+        let managed = self
             .sessions
             .iter()
             .find(|s| s.id == session_id)
             .and_then(|s| s.workspace.as_managed())
-            .is_some_and(|managed| self.worktree_ops().is_being_removed(&managed.worktree_path))
-        {
-            return BranchRenamePlan::Rejected(BranchRenameRejection::WorktreeBeingRemoved);
+            .cloned();
+        if let Some(managed) = &managed {
+            let renames_the_branch = rename_branch && name != managed.branch_name;
+            let refused = if renames_the_branch {
+                self.hold_path_for_in_flight(
+                    &InFlightKey::BranchRename(session_id.to_string()),
+                    &managed.worktree_path,
+                    crate::worktree_ops::WorktreeOpKind::BranchRename,
+                )
+                .is_err()
+            } else {
+                self.worktree_ops().is_being_removed(&managed.worktree_path)
+            };
+            if refused {
+                return BranchRenamePlan::Rejected(BranchRenameRejection::WorktreeBeingRemoved);
+            }
         }
 
         // Capture the previous title before mutating, in case a failed branch
@@ -4494,15 +4514,7 @@ impl Engine {
             };
         }
         let worktree_path = managed.worktree_path.clone();
-        // The rename holds its worktree until its completion lands, so a removal
-        // that begins meanwhile waits for it and then deletes the branch by its
-        // new name.
-        // Checked above on this same thread, so this cannot be refused.
-        let _ = self.hold_path_for_in_flight(
-            &InFlightKey::BranchRename(session_id.to_string()),
-            &worktree_path,
-            crate::worktree_ops::WorktreeOpKind::BranchRename,
-        );
+        // Held above, before the title was written.
 
         // Stash the expected branches so `BranchSyncReady` can distinguish our
         // own in-progress rename (silently skip) from an unrelated external

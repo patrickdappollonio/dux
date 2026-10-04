@@ -139,7 +139,14 @@ impl DestructiveCheck {
                         )
                     })
                 })
-                .or_else(|| self.registry.cwd_occupant(&target.path, &[]));
+                .or_else(|| {
+                    // A link's removal leaves its target, and whoever works
+                    // in it, where they are.
+                    if crate::engine::is_symlink(&target.path) {
+                        return None;
+                    }
+                    self.registry.cwd_occupant(&target.path, &[])
+                });
             if let Some(reason) = reason {
                 return Err(refused(reason));
             }

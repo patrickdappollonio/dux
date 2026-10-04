@@ -4394,16 +4394,17 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// [`discard_confirmed`] with nothing confirmed: a plain file is discarded as
-/// before, and a directory of any kind is refused, because nothing said the
-/// user was looking at a folder.
-pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -> Result<()> {
-    // A directory is refused before any clearance is asked for, so this one
-    // is never called.
+/// [`discard_confirmed`] with nothing confirmed, cleared for any path: what
+/// the discard itself decides, for its own tests. Every real caller goes
+/// through a claim and a clearance.
+#[cfg(test)]
+pub(crate) fn discard_file(
+    worktree_path: &Path,
+    file_path: &str,
+    is_untracked: bool,
+) -> Result<()> {
     discard_confirmed(worktree_path, file_path, is_untracked, None, || {
-        Err(crate::destructive::Refused(format!(
-            "\"{file_path}/\" is a folder; a folder is deleted only when the delete names it as one"
-        )))
+        Ok(crate::destructive::Cleared::any_for_tests())
     })
     .map(|_| ())
 }
@@ -4502,8 +4503,15 @@ pub fn discard_confirmed<'c>(
         if !meta.is_dir() {
             match confirmed {
                 // No confirmation is what an older client sends for a file,
-                // and deleting one file is what it always meant.
-                None | Some(ConfirmedEntry::File) => fs::remove_file(&full)?,
+                // and deleting one file is what it always meant. A symbolic
+                // link is cleared first, judged at its own path: an agent's
+                // folder or a project's repository can be the link itself.
+                None | Some(ConfirmedEntry::File) => {
+                    if meta.file_type().is_symlink() {
+                        clear().map_err(anyhow::Error::new)?.require(&full)?;
+                    }
+                    fs::remove_file(&full)?
+                }
                 Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository) => {
                     return Err(changed("a file, not a folder"));
                 }

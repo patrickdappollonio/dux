@@ -218,6 +218,7 @@ impl Engine {
     /// Register `path` for the operation behind the in-flight `key`. Released
     /// by [`Engine::clear_in_flight`] for that key, so every completion path
     /// that already clears the key releases the path too.
+    #[must_use = "a refused hold must be answered, never dropped"]
     pub fn hold_path_for_in_flight(
         &self,
         key: &InFlightKey,

@@ -770,57 +770,29 @@ pub(crate) fn perform_deferred_removal(
             }
         };
         processes_ended?;
-        let holders = leading.holders();
-        if !holders.is_empty()
-            && let Some(tx) = waiting_tx
-        {
-            let _ = tx.send(crate::worker::WorkerEvent::WorktreeRemoveWaiting {
-                session_id: session_id.to_string(),
-                waiting_for: crate::worktree_ops::describe_holders(&holders),
-            });
-        }
-        if let Err(still) = leading.wait_for_holders(wait) {
-            return Err(crate::engine::removal::removal_wait_expired_message(
-                leading.path(),
-                wait,
-                &crate::worktree_ops::describe_holders(&still),
-            ));
-        }
-        // The last look, under the claim: nothing new can take the folder any
-        // more (every create, launch and terminal is refused once a removal
-        // has claimed it), so whatever is found here arrived before the claim
-        // and has not gone. Anything that still occupies the folder keeps it.
-        if let Some(occupant) = occupant_after_wait(
+        wait_then_last_look(
             leading,
-            &registry,
-            &live,
-            processes,
-            Some((&db_path, Some(session_id))),
-        ) {
-            return Err(occupied_after_wait_message(
-                &managed.worktree_path,
-                &occupant,
-            ));
-        }
-        // A removal of a folder around this one, or inside it, never runs git
-        // at the same time as this one: wait for the earlier one. If it took
-        // this folder with it, the git step below finds it gone and only
-        // forgets its registration and deletes the branches asked for.
-        if !leading.wait_for_overlapping_removals(wait) {
-            return Err(format!(
-                "the worktree at {} was kept: a removal of a folder around or inside it was \
-                 still running after {}s. Remove it from the worktree manager once that has \
-                 finished.",
-                crate::home_path::shorten_home(std::path::Path::new(&managed.worktree_path)),
-                wait.as_secs()
-            ));
-        }
-        // The record a later start recovers from is never behind a deletion
-        // that already happened: everything the registry has learnt so far is
-        // in the database before git deletes anything.
-        if let Some(message) = record_not_saved(&[&registry, &live], &managed.worktree_path) {
-            return Err(message);
-        }
+            &managed.worktree_path,
+            wait,
+            |holders| {
+                if let Some(tx) = waiting_tx {
+                    let _ = tx.send(crate::worker::WorkerEvent::WorktreeRemoveWaiting {
+                        session_id: session_id.to_string(),
+                        waiting_for: crate::worktree_ops::describe_holders(holders),
+                    });
+                }
+            },
+            &[&registry, &live],
+            || {
+                occupant_after_wait(
+                    leading,
+                    &registry,
+                    &live,
+                    processes,
+                    Some((&db_path, Some(session_id))),
+                )
+            },
+        )?;
         // A rename that landed while this removal waited moved the branch, so
         // it is deleted by the name it has NOW.
         let branch_name = leading.renamed(&managed.branch_name);
@@ -1001,6 +973,63 @@ pub(crate) fn cwd_keeps(
          manager.",
         crate::home_path::shorten_home(std::path::Path::new(folder))
     ))
+}
+
+/// THE order every removal keeps between holding its claim and running git,
+/// so it cannot drift between the agent delete, the worktree manager and a
+/// failed create's rollback: first every wait (the operations holding paths
+/// in the folder, a removal or destructive claim of a folder around or
+/// inside it, the registry's record reaching the database), THEN the last
+/// look (the whole occupancy rule, working directories included), and then
+/// the caller runs git with nothing blocking in between. A look taken before
+/// a wait is stale by the time git runs: a shell `cd`'d into the folder
+/// during the wait would lose it. `on_waiting` is told what the removal is
+/// waiting for, when anything. `last_look` answers what still occupies the
+/// folder. Blocking: a worker thread's call.
+pub(crate) fn wait_then_last_look(
+    lease: &crate::worktree_ops::RemovalLease,
+    folder: &str,
+    wait: std::time::Duration,
+    on_waiting: impl FnOnce(&[crate::worktree_ops::WorktreeOpKind]),
+    registries: &[&crate::process_sessions::AgentProcessRegistry],
+    last_look: impl FnOnce() -> Option<String>,
+) -> Result<(), String> {
+    let holders = lease.holders();
+    if !holders.is_empty() {
+        on_waiting(&holders);
+    }
+    if let Err(still) = lease.wait_for_holders(wait) {
+        return Err(crate::engine::removal::removal_wait_expired_message(
+            lease.path(),
+            wait,
+            &crate::worktree_ops::describe_holders(&still),
+        ));
+    }
+    // A removal of a folder around this one, or inside it, or an editor's or
+    // the changes pane's delete of one, never runs at the same time as this
+    // one: wait for the earlier one. If it took this folder with it, git
+    // finds it gone and only forgets its registration.
+    if !lease.wait_for_overlapping_removals(wait) {
+        return Err(format!(
+            "the worktree at {} was kept: a removal of a folder around or inside it was still \
+             running after {}s. Remove it from the worktree manager once that has finished.",
+            crate::home_path::shorten_home(std::path::Path::new(folder)),
+            wait.as_secs()
+        ));
+    }
+    // The record a later start recovers from is never behind a deletion that
+    // already happened.
+    if let Some(message) = record_not_saved(registries, folder) {
+        return Err(message);
+    }
+    // Last: nothing new can take the folder any more (every create, launch,
+    // terminal and add is refused under the claim), so whatever is found here
+    // arrived before the claim and has not gone, or is a process dux started
+    // that walked in. Anything that occupies the folder keeps it.
+    match last_look() {
+        Some(occupant) => Err(occupied_after_wait_message(folder, &occupant)),
+        None => Ok(()),
+    }
 }
 
 /// The final when the folder turned out to be in use after the removal's

@@ -231,7 +231,9 @@ Deleting or moving a folder is refused while something lives in it: an agent's w
 a standalone agent's folder, a dux project's repository, an operation dux is running there,
 something dux started that is still running there, or a terminal whose shell is standing in
 it. The refusal names which. While the delete or move runs, nothing new can start inside
-that folder.
+that folder. A symbolic link is judged at its own path: deleting or moving one leaves what
+it points at alone, but it is refused when an agent's folder or a project's repository is
+the link itself.
 
 Renaming, moving, or deleting a file that has other open editor tabs pointed at it (or, for
 a folder, tabs pointed anywhere underneath it) keeps everything in sync: a rename or move

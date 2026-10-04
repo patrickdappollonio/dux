@@ -600,9 +600,15 @@ async fn discard(
     // under the claim, and clear it right before the delete. A refusal is a
     // 409 naming what lives there.
     let target = worktree.join(&path);
+    let deletes_a_link = untracked
+        && std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink());
     let claim = match confirmed {
         Some(dux_core::git::ConfirmedEntry::Folder { .. })
-        | Some(dux_core::git::ConfirmedEntry::Repository) => {
+        | Some(dux_core::git::ConfirmedEntry::Repository) => true,
+        _ => deletes_a_link,
+    };
+    let claim = match claim {
+        true => {
             let ops = state.engine.worktree_ops().clone();
             let claimed = target.clone();
             match tokio::task::spawn_blocking(move || ops.claim_for_destructive(&claimed)).await {
@@ -626,7 +632,7 @@ async fn discard(
                 }
             }
         }
-        _ => None,
+        false => None,
     };
     let Some(check) = state.engine.destructive_check(target.clone()).await else {
         return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();

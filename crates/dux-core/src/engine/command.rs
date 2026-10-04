@@ -380,14 +380,6 @@ impl Engine {
                     }
                     _ => None,
                 };
-                if let Some(refused) = existing_worktree
-                    .as_ref()
-                    .and_then(|path| self.worktree_ops().removal_refusal(path))
-                {
-                    return Ok(EventReaction::Status(StatusUpdate::error(
-                        refused.sentence("create an agent there"),
-                    )));
-                }
                 // Mint the shared create-agent `HandlerStatusOp`: its opaque id
                 // correlates the dispatch busy, every progress re-emit and the
                 // final the launch-ready and launch-failed handlers resolve from
@@ -450,6 +442,20 @@ impl Engine {
                     // resolve in later ticks, after `current_origin` was reset).
                     .with_scope(self.current_origin.clone());
                 let op_id = op.id().to_string();
+                // Checked and held in one step, under the registry's lock: a
+                // folder being removed, deleted or moved refuses the create,
+                // out loud, and nothing of it has started yet.
+                if let Some(path) = &existing_worktree
+                    && let Err(refused) = self.worktree_ops().hold_as(
+                        crate::worktree_ops::HoldOwner::CreateOp(op_id.clone()),
+                        path,
+                        crate::worktree_ops::WorktreeOpKind::CreateAgent,
+                    )
+                {
+                    return Ok(EventReaction::Status(StatusUpdate::error(
+                        refused.sentence("create an agent there"),
+                    )));
+                }
                 // Surface this create's op id to a synchronous `apply_wire`
                 // caller, which reads `WireCommandOutcome.created_op_id` to
                 // correlate its own new session through `created_session_for_op`.
@@ -461,15 +467,6 @@ impl Engine {
                 let pending = op.pending_status();
                 self.pending_create_ops.insert(op_id.clone(), op);
                 self.note_create_started(&op_id, request.project_id());
-                if let Some(path) = &existing_worktree {
-                    // Cannot be refused: the announcement was checked above on
-                    // this same thread.
-                    let _ = self.worktree_ops().hold_as(
-                        crate::worktree_ops::HoldOwner::CreateOp(op_id.clone()),
-                        path,
-                        crate::worktree_ops::WorktreeOpKind::CreateAgent,
-                    );
-                }
                 let paths = self.paths.clone();
                 let config = self.config.clone();
                 let identity = self.resolved_identity();
@@ -717,7 +714,11 @@ impl Engine {
                 // a removal running inside the folder refuses it.
                 let target = worktree_path.join(&path);
                 let claim = match confirmed {
-                    crate::git::ConfirmedEntry::File => None,
+                    crate::git::ConfirmedEntry::File
+                        if !(is_untracked && crate::engine::is_symlink(&target)) =>
+                    {
+                        None
+                    }
                     _ => Some(
                         self.worktree_ops()
                             .claim_for_destructive_within(&target, std::time::Duration::ZERO)

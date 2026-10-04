@@ -528,6 +528,69 @@ pub(crate) fn occupant_in(
         .map(|(_, _, what, _)| Occupant::Process(what))
 }
 
+/// The spellings a path can be stored or typed under, without following a
+/// link at its end: as written (lexically normalized), and with its parent
+/// resolved and its own name kept.
+fn literal_spellings(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let lexical: std::path::PathBuf = path.components().collect();
+    let mut spellings = vec![lexical];
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        spellings.push(crate::worktree_ops::path_key(parent).join(name));
+    }
+    spellings
+}
+
+/// Whether `stored` (an agent's folder, a project's repository, a folder a
+/// session was started in, as dux recorded it) IS the symbolic link at
+/// `link`, or is recorded through it, compared without following the link,
+/// under every spelling of both.
+pub(crate) fn recorded_at_or_through_link(
+    link: &std::path::Path,
+    stored: &std::path::Path,
+) -> bool {
+    let links = literal_spellings(link);
+    literal_spellings(stored)
+        .iter()
+        .any(|stored| links.iter().any(|link| stored.starts_with(link)))
+}
+
+/// THE occupancy rule for deleting or moving a symbolic link: the link's own
+/// path, never followed (removing or moving a link leaves its target where it
+/// is). An agent whose folder, or a project whose repository, is the link or
+/// is recorded through it lives there; so does an agent being created there.
+pub(crate) fn link_occupant_in(
+    link: &std::path::Path,
+    removing: Option<&str>,
+    facts: &OccupancyFacts<'_>,
+) -> Option<Occupant> {
+    let at = |stored: &str| recorded_at_or_through_link(link, std::path::Path::new(stored));
+    if let Some(agent) = facts
+        .agents
+        .iter()
+        .filter(|s| Some(s.id.as_str()) != removing)
+        .find(|s| at(s.directory()))
+    {
+        return Some(Occupant::Agent {
+            id: agent.id.clone(),
+            label: agent.display_label(),
+            directory: agent.directory().to_string(),
+            standalone: agent.workspace.as_managed().is_none(),
+            exact: true,
+        });
+    }
+    if let Some((name, path)) = facts.projects.iter().find(|(_, path)| at(path)) {
+        return Some(Occupant::Project {
+            name: name.clone(),
+            path: path.clone(),
+        });
+    }
+    facts
+        .ops
+        .holders(link)
+        .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
+        .then_some(Occupant::BeingCreated)
+}
+
 /// [`occupant_in`] from a worker thread: the agents and projects as the
 /// session database has them now (each is written there on the engine thread
 /// before it appears anywhere else), and the path registry. The PTYs are the
@@ -556,17 +619,27 @@ pub(crate) fn stored_occupant(
             )
         })
         .collect();
+    let facts = OccupancyFacts {
+        agents: &agents,
+        projects: &projects,
+        ops,
+        ptys: Vec::new(),
+    };
+    // A link is judged at its own path; anything else by containment.
+    if is_symlink(folder) {
+        return Ok(link_occupant_in(folder, removing, &facts));
+    }
     Ok(occupant_in(
         folder,
         removing,
         StoppingProcesses::Occupy,
-        &OccupancyFacts {
-            agents: &agents,
-            projects: &projects,
-            ops,
-            ptys: Vec::new(),
-        },
+        &facts,
     ))
+}
+
+/// Whether `path` itself is a symbolic link (not followed).
+pub(crate) fn is_symlink(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// Whether processes still stopping in a folder are in the way of removing it.
@@ -733,20 +806,50 @@ impl Engine {
         &self,
         target: &std::path::Path,
     ) -> crate::destructive::DestructiveCheck {
-        let occupant = self
-            .folder_occupant(target, None, StoppingProcesses::Occupy)
-            .map(|occupant| occupant.reason())
-            .or_else(|| {
-                let holders = self.removal_coordination.ops.holders(target);
-                (!holders.is_empty()).then(|| {
-                    format!(
-                        "{} is running in it",
-                        crate::worktree_ops::describe_holders(&holders)
-                    )
-                })
-            });
-        let mut sessions = self.process_registry.sessions_in(target);
-        sessions.extend(self.process_registry.standalone_sessions_in(target));
+        let occupant = if is_symlink(target) {
+            // A link: what is recorded AT the link's own path or through it,
+            // never what its target holds (that stays where it is).
+            let projects: Vec<(String, String)> = self
+                .projects
+                .iter()
+                .map(|project| (project.name.clone(), project.path.clone()))
+                .collect();
+            link_occupant_in(
+                target,
+                None,
+                &OccupancyFacts {
+                    agents: &self.sessions,
+                    projects: &projects,
+                    ops: &self.removal_coordination.ops,
+                    ptys: Vec::new(),
+                },
+            )
+        } else {
+            self.folder_occupant(target, None, StoppingProcesses::Occupy)
+        };
+        let link = is_symlink(target);
+        let occupant = occupant.map(|occupant| occupant.reason()).or_else(|| {
+            // Operations running in a link's target are not in a link
+            // removal's way: the target stays.
+            if link {
+                return None;
+            }
+            let holders = self.removal_coordination.ops.holders(target);
+            (!holders.is_empty()).then(|| {
+                format!(
+                    "{} is running in it",
+                    crate::worktree_ops::describe_holders(&holders)
+                )
+            })
+        });
+        let sessions = if link {
+            self.process_registry
+                .sessions_matching(|folder| recorded_at_or_through_link(target, folder))
+        } else {
+            let mut sessions = self.process_registry.sessions_in(target);
+            sessions.extend(self.process_registry.standalone_sessions_in(target));
+            sessions
+        };
         let known = self.process_registry.survivors_of(&sessions);
         crate::destructive::DestructiveCheck::new(
             target,

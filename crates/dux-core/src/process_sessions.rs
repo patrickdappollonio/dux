@@ -1656,6 +1656,25 @@ impl AgentProcessRegistry {
         self.sessions_in_of_kind(folder, false)
     }
 
+    /// Every session, of any owner and kind, whose recorded folder matches.
+    pub fn sessions_matching(
+        &self,
+        matches: impl Fn(&std::path::Path) -> bool,
+    ) -> Vec<ProcessSession> {
+        let inner = self.lock();
+        let mut found: Vec<ProcessSession> = inner
+            .sessions
+            .values()
+            .flatten()
+            .chain(inner.retired.iter())
+            .filter(|(_, folder)| matches(folder))
+            .map(|(session, _)| *session)
+            .collect();
+        found.sort_by_key(|session| (session.sid, session.started_at));
+        found.dedup();
+        found
+    }
+
     /// The folders `sessions` were started in.
     pub fn folders_of(&self, sessions: &[ProcessSession]) -> Vec<std::path::PathBuf> {
         let inner = self.lock();

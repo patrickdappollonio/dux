@@ -413,39 +413,22 @@ impl AdmittedRemoval {
             &requested_text,
         )
         .and_then(|()| {
-            match crate::engine::occupant_after_wait(
+            crate::engine::wait_then_last_look(
                 &lease,
-                &registry,
-                &registry,
-                &processes,
-                Some((&paths.sessions_db_path, None)),
-            ) {
-                Some(occupant) => Err(crate::engine::occupied_after_wait_message(
-                    &requested_text,
-                    &occupant,
-                )),
-                None => Ok(()),
-            }
-        });
-        let checked = checked.and_then(|()| {
-            match crate::engine::record_not_saved(&[&registry], &requested_text) {
-                Some(message) => Err(message),
-                None => Ok(()),
-            }
-        });
-        let checked = checked.and_then(|()| {
-            // Never at the same time as a removal of a folder around or inside
-            // this one (see `RemovalLease::wait_for_overlapping_removals`).
-            if lease.wait_for_overlapping_removals(wait) {
-                Ok(())
-            } else {
-                Err(format!(
-                    "the worktree at {} was kept: a removal of a folder around or inside it was \
-                     still running after {}s.",
-                    crate::home_path::shorten_home(&requested),
-                    wait.as_secs()
-                ))
-            }
+                &requested_text,
+                wait,
+                |_| {},
+                &[&registry],
+                || {
+                    crate::engine::occupant_after_wait(
+                        &lease,
+                        &registry,
+                        &registry,
+                        &processes,
+                        Some((&paths.sessions_db_path, None)),
+                    )
+                },
+            )
         });
         if let Err(message) = checked {
             lease.finish(Err(message.clone()));

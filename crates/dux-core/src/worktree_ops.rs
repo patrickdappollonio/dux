@@ -310,6 +310,7 @@ impl WorktreeOps {
 
     /// Register an operation on `path` for as long as the returned guard lives.
     /// Refused once a removal of the path has been announced.
+    #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn hold(
         &self,
         path: impl AsRef<Path>,
@@ -337,6 +338,7 @@ impl WorktreeOps {
     /// Register an operation on `path` that `owner` releases later with
     /// [`Self::release_owner`]. Taking a second hold for an owner that already
     /// holds one replaces it.
+    #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn hold_as(
         &self,
         owner: HoldOwner,
@@ -427,6 +429,7 @@ impl WorktreeOps {
     /// Announce a removal of `path`. From now on new holds on it are refused.
     /// The first announcement leads; one made while another is unfinished joins
     /// it.
+    #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn announce_removal(&self, path: impl AsRef<Path>) -> RemovalClaim {
         let key = path_key(path.as_ref());
         let mut state = self.lock();
@@ -461,6 +464,7 @@ impl WorktreeOps {
     /// between the occupancy check and the operation. Refused, with the
     /// reason, when a removal already covers it or an operation is already
     /// running inside it. Dropping the lease lets the folder go.
+    #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn claim_for_destructive(
         &self,
         path: impl AsRef<Path>,
@@ -473,6 +477,7 @@ impl WorktreeOps {
     /// nested folders keep, so a delete or move of a folder never runs while
     /// dux is removing a worktree inside it. Refused with a sentence when the
     /// wait runs out. Blocking: never on the engine thread or an async task.
+    #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn claim_for_destructive_within(
         &self,
         path: impl AsRef<Path>,

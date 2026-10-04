@@ -669,10 +669,9 @@ fn create_dir_from_root(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
 /// The DESTINATION keeps the following resolver, because a destination reached
 /// through a symlinked directory really would write outside the tree.
 ///
-/// Anything but a symbolic link moves only with a clearance for both ends
-/// (see [`crate::destructive`]): `clear` is asked once the move is otherwise
-/// valid, right before anything moves. Moving a link moves nothing it points
-/// at, so a link is moved without one.
+/// It moves only with a clearance for both ends (see [`crate::destructive`]):
+/// `clear` is asked once the move is otherwise valid, right before anything
+/// moves. A symbolic link is judged at its own path, never followed.
 pub fn rename_entry<'c>(
     worktree: &Path,
     from_rel: &str,
@@ -681,8 +680,7 @@ pub fn rename_entry<'c>(
 ) -> anyhow::Result<()> {
     let src = entry_literal_path(worktree, from_rel)?;
     let dst = resolve_worktree_path(worktree, to_rel)?;
-    let src_meta = src
-        .symlink_metadata()
+    src.symlink_metadata()
         .map_err(|e| anyhow::anyhow!("rename source does not exist: {from_rel}: {e}"))?;
     check_entry_parent_contained(worktree, &src, from_rel)?;
     let dst_parent = dst.parent().unwrap_or(worktree);
@@ -694,11 +692,11 @@ pub fn rename_entry<'c>(
     if resolves_into_git_dir(worktree, dst_parent) {
         anyhow::bail!("refusing to rename into the git directory: {to_rel}");
     }
-    if !src_meta.file_type().is_symlink() {
-        let cleared = clear().map_err(anyhow::Error::new)?;
-        cleared.require(&src)?;
-        cleared.require(&dst)?;
-    }
+    // A link too: moving one leaves its target where it is, but an agent's
+    // folder or a project's repository can be the link itself.
+    let cleared = clear().map_err(anyhow::Error::new)?;
+    cleared.require(&src)?;
+    cleared.require(&dst)?;
     rename_no_replace(&src, &dst).map_err(|e| match e {
         RenameNoReplaceError::DestinationExists => {
             anyhow::anyhow!("refusing to rename, destination already exists: {to_rel}")
@@ -866,10 +864,10 @@ fn check_entry_parent_contained(
 /// target, so an escaping-target symlink is a legitimate delete target: only
 /// the literal path and its PARENT's containment matter here.
 ///
-/// Anything but a symbolic link goes only with a clearance for exactly that
-/// path (see [`crate::destructive`]): `clear` is asked once the delete is
-/// otherwise valid, right before anything is removed. Deleting a link removes
-/// nothing it points at, so a link goes without one.
+/// It goes only with a clearance for exactly that path (see
+/// [`crate::destructive`]): `clear` is asked once the delete is otherwise
+/// valid, right before anything is removed. A symbolic link is judged at its
+/// own path, never followed.
 pub fn delete_entry<'c>(
     worktree: &Path,
     rel_path: &str,
@@ -890,9 +888,9 @@ pub fn delete_entry<'c>(
     {
         anyhow::bail!("refusing to delete the worktree root");
     }
-    if !meta.file_type().is_symlink() {
-        clear().map_err(anyhow::Error::new)?.require(&path)?;
-    }
+    // A link too: deleting one leaves its target where it is, but an agent's
+    // folder or a project's repository can be the link itself.
+    clear().map_err(anyhow::Error::new)?.require(&path)?;
     if meta.file_type().is_symlink() || meta.is_file() {
         std::fs::remove_file(&path)
             .map_err(|e| anyhow::anyhow!("cannot delete {rel_path}: {e}"))?;
