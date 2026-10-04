@@ -32,6 +32,13 @@ inline table with two fields:
 Names are arbitrary strings: use whatever is scannable in the picker list. Declaration
 order in the file is preserved in the UI.
 
+> [!NOTE]
+> A macro can also be written as its own `[macros.<name>]` section. TOML always reads
+> those after every `name = { ... }` line, whatever order you write them in, so a macro
+> in a section can never come before an inline one. dux never changes how a macro is
+> written: when you reorder macros in dux, inline macros and section macros each take
+> the new order among themselves. Keep all macros in one form to choose any order.
+
 ### Surface values
 
 - `"agent"`: shown only when the agent pane is focused. For prompts you send to the AI.

@@ -1853,21 +1853,10 @@ fn macros_providers_and_keys_keep_hand_additions_and_comments_over_many_saves() 
                 "{what}, save {round}:\n{written}"
             );
         }
-        // The order memory holds is the order the file says, wherever
-        // the hand macro sits.
-        let memory_order: Vec<&String> = memory
-            .macros
-            .entries
-            .keys()
-            .filter(|name| name.as_str() != "hand")
-            .collect();
-        let file_order: Vec<&String> = config
-            .macros
-            .entries
-            .keys()
-            .filter(|name| name.as_str() != "hand")
-            .collect();
-        assert_eq!(file_order, memory_order, "save {round}:\n{written}");
+        // Within each form (inline entries, `[macros.<name>]` sections),
+        // the file reads back in memory's order, the hand macro aside.
+        let _ = &config;
+        assert_order_within_each_form(&memory, &written, &["hand"]);
         if round == 9 {
             drop(queue);
             memory = load(&path);
@@ -1904,34 +1893,254 @@ fn an_unreadable_record_of_what_dux_has_seen_fills_nothing_in() {
     assert!(written.contains("Z = \"1\""), "{written}");
     assert!(!written.contains("diff_tab_width"), "{written}");
     assert_eq!(
-        crate::config_write::union_seen(Some(unreadable), &written),
+        crate::config_write::union_seen(Some(unreadable), &written, &[]),
         unreadable
     );
 }
 
-/// A `[macros]` mixing inline macros and `[macros.<name>]` sections is
-/// rewritten only when memory's order cannot be read back from it: an order
-/// TOML can show leaves the sections as they are, and one it cannot turns
-/// them into inline macros, comments kept, in memory's order.
+/// The macros `text` reads back, in the order a load reads them.
+fn macro_order(text: &str) -> Vec<String> {
+    crate::config::config_from_text_as_written(text)
+        .unwrap_or_else(|error| panic!("{}\n{text}", error.reason()))
+        .macros
+        .entries
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// The macros of `text` written as `[macros.<name>]` sections.
+fn macro_sections(text: &str) -> Vec<String> {
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    doc.get("macros")
+        .and_then(toml_edit::Item::as_table)
+        .map(|macros| {
+            macros
+                .iter()
+                .filter(|(_, item)| item.as_table().is_some_and(|table| !table.is_dotted()))
+                .map(|(name, _)| name.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Within each form a macro can be written in, `text` reads its macros back
+/// in `memory`'s order (macros named in `skip` aside): inline entries
+/// always print before sections, which is the one order TOML cannot show.
+fn assert_order_within_each_form(memory: &Config, text: &str, skip: &[&str]) {
+    let sections = macro_sections(text);
+    let read_back = macro_order(text);
+    for section_form in [false, true] {
+        let pick = |names: Vec<String>| -> Vec<String> {
+            names
+                .into_iter()
+                .filter(|name| !skip.contains(&name.as_str()))
+                .filter(|name| sections.contains(name) == section_form)
+                .collect()
+        };
+        let wanted = pick(memory.macros.entries.keys().cloned().collect());
+        let got = pick(read_back.clone());
+        assert_eq!(got, wanted, "sections: {section_form}\n{text}");
+    }
+}
+
+const MIXED_MACROS: &str = "[macros]\na = { text = \"1\", surface = \"agent\" }\nb = { text = \"2\", surface = \"agent\" }\n\n[macros.c]\ntext = \"3\"\nsurface = \"agent\"\n";
+
+/// The user reorders a mixed `[macros]` by hand while dux has not
+/// reordered anything: an unrelated save keeps the user's order and the
+/// file's macros exactly as written.
 #[test]
-fn mixed_macro_forms_are_rewritten_only_when_the_order_needs_it() {
-    let text = "[macros]\nfirst = { text = \"1\", surface = \"agent\" }\n\n# about second\n[macros.second]\n# inner note\ntext = \"2\"\nsurface = \"both\"\n";
+fn a_hand_reorder_of_macros_is_kept_with_no_change_of_form() {
+    let (_dir, path, loaded, queue) = setup(MIXED_MACROS);
+    let mut memory = loaded.clone();
+    let reordered = "[macros]\nb = { text = \"2\", surface = \"agent\" }\na = { text = \"1\", surface = \"agent\" }\n\n[macros.c]\ntext = \"3\"\nsurface = \"agent\"\n";
+    std::fs::write(&path, reordered).unwrap();
+    for written in three_unrelated_saves(&path, &queue, &mut memory) {
+        assert_eq!(macro_order(&written), vec!["b", "a", "c"], "{written}");
+        assert!(written.contains(reordered), "{written}");
+    }
+}
+
+/// Macro shapes a load reads in an order of their own (a section above the
+/// `[macros]` header, dotted keys) are left exactly as written by saves
+/// that do not reorder macros.
+#[test]
+fn unrelated_saves_leave_macro_shapes_exactly_as_written() {
+    // Each case: the file, and the pieces of it that must read exactly as
+    // written after every save (a first save fills other sections in
+    // between, so the pieces, not the whole, stay contiguous).
+    for (macros, pieces) in [
+        (
+            "[macros.b]\ntext = \"2\"\nsurface = \"agent\"\n\n[macros]\na = { text = \"1\", surface = \"agent\" }\n",
+            vec![
+                "[macros.b]\ntext = \"2\"\nsurface = \"agent\"\n",
+                "[macros]\na = { text = \"1\", surface = \"agent\" }\n",
+            ],
+        ),
+        (
+            "[macros]\na.text = \"1\"\na.surface = \"agent\"\nb = { text = \"2\", surface = \"agent\" }\n",
+            vec![
+                "[macros]\na.text = \"1\"\na.surface = \"agent\"\nb = { text = \"2\", surface = \"agent\" }\n",
+            ],
+        ),
+    ] {
+        let (_dir, path, loaded, queue) = setup(macros);
+        let mut memory = loaded.clone();
+        let order = macro_order(macros);
+        for written in three_unrelated_saves(&path, &queue, &mut memory) {
+            for piece in &pieces {
+                assert!(written.contains(piece), "{piece:?} changed:\n{written}");
+            }
+            assert_eq!(macro_order(&written), order, "{written}");
+        }
+    }
+}
+
+/// A reorder in dux keeps every comment on the macros: above a section,
+/// trailing its header, and trailing a value inside it.
+#[test]
+fn reordering_macros_keeps_every_comment_and_form() {
+    let text = "[macros]\na = { text = \"1\", surface = \"agent\" } # inline note\n\n# above c\n[macros.c] # header note\ntext = \"3\" # value note\nsurface = \"agent\"\n";
     let (_dir, path, loaded, queue) = setup(text);
     let mut memory = loaded.clone();
-    for written in three_unrelated_saves(&path, &queue, &mut memory) {
-        assert!(written.contains("[macros.second]"), "{written}");
-    }
     memory.macros.entries.reverse();
     queue.save_eager(memory.clone()).unwrap();
     let written = read(&path);
-    assert!(!written.contains("[macros.second]"), "{written}");
-    assert!(written.contains("# about second"), "{written}");
-    assert!(written.contains("# inner note"), "{written}");
-    let config = crate::config::config_from_text_as_written(&written)
-        .unwrap_or_else(|error| panic!("{}\n{written}", error.reason()));
-    assert_eq!(
-        config.macros.entries.keys().collect::<Vec<_>>(),
-        vec!["second", "first"],
-        "{written}"
-    );
+    for comment in [
+        "# inline note",
+        "# above c",
+        "# header note",
+        "# value note",
+    ] {
+        assert_eq!(written.matches(comment).count(), 1, "{comment}:\n{written}");
+    }
+    assert!(written.contains("[macros.c]"), "{written}");
+    assert_order_within_each_form(&memory, &written, &[]);
+}
+
+/// Macros written as sections, with or without a `[macros]` header of
+/// their own, take memory's order through where their sections sit.
+#[test]
+fn section_macros_take_a_reorder_made_in_dux() {
+    for text in [
+        "[macros.a]\ntext = \"1\"\nsurface = \"agent\"\n\n[macros.b]\ntext = \"2\"\nsurface = \"agent\"\n",
+        "[macros]\n\n[macros.a]\ntext = \"1\"\nsurface = \"agent\"\n\n[macros.b]\ntext = \"2\"\nsurface = \"agent\"\n\n[ui]\nleft_width_pct = 30\n",
+    ] {
+        let (_dir, path, loaded, queue) = setup(text);
+        let mut memory = loaded.clone();
+        memory.macros.entries.reverse();
+        queue.save_eager(memory.clone()).unwrap();
+        for written in
+            std::iter::once(read(&path)).chain(three_unrelated_saves(&path, &queue, &mut memory))
+        {
+            assert_eq!(macro_order(&written), vec!["b", "a"], "{written}");
+            assert!(
+                written.contains("[macros.a]") && written.contains("[macros.b]"),
+                "{written}"
+            );
+        }
+    }
+}
+
+/// A reorder in dux of a mixed `[macros]` puts each form in memory's order
+/// (here every macro reads back in memory's order, because the order needs
+/// no section ahead of an inline entry).
+#[test]
+fn a_reorder_in_dux_of_mixed_macros_orders_each_form() {
+    let text = "[macros]\na = { text = \"1\", surface = \"agent\" }\n\n[macros.b]\ntext = \"2\"\nsurface = \"agent\"\n\n[macros.c]\ntext = \"3\"\nsurface = \"agent\"\n";
+    let (_dir, path, loaded, queue) = setup(text);
+    let mut memory = loaded.clone();
+    let c = memory.macros.entries.shift_remove("c").unwrap();
+    memory.macros.entries.shift_insert(1, "c".into(), c);
+    queue.save_eager(memory.clone()).unwrap();
+    let written = read(&path);
+    assert_eq!(macro_order(&written), vec!["a", "c", "b"], "{written}");
+    let mut sections = macro_sections(&written);
+    sections.sort();
+    assert_eq!(sections, vec!["b", "c"], "the forms stay:\n{written}");
+}
+
+/// Hand-added section macros and reorders in dux over forty saves and
+/// reloads: every hand macro and the comment above a section stay, once.
+#[test]
+fn macros_stay_stable_over_many_saves_with_hand_additions_and_reorders() {
+    let text = "[macros]\na = { text = \"1\", surface = \"agent\" }\n# about b\n[macros.b]\ntext = \"2\"\nsurface = \"agent\"\n";
+    let (_dir, path, loaded, mut queue) = setup(text);
+    let mut memory = loaded.clone();
+    for round in 0..40 {
+        if round % 7 == 3 {
+            std::fs::write(
+                &path,
+                read(&path) + &format!("\n[macros.h{round}]\ntext = \"h\"\nsurface = \"agent\"\n"),
+            )
+            .unwrap();
+        }
+        if round % 5 == 1 {
+            memory.macros.entries.reverse();
+        }
+        memory.env.insert(format!("E{round}"), "1".into());
+        queue.save_eager(memory.clone()).unwrap();
+        let written = read(&path);
+        assert_eq!(
+            written.matches("# about b").count(),
+            1,
+            "{round}\n{written}"
+        );
+        let read_back = macro_order(&written);
+        for hand in (0..=round).filter(|r| r % 7 == 3) {
+            let name = format!("h{hand}");
+            assert_eq!(
+                read_back
+                    .iter()
+                    .filter(|macro_name| **macro_name == name)
+                    .count(),
+                1,
+                "{round}\n{written}"
+            );
+        }
+        if round % 10 == 9 {
+            drop(queue);
+            memory = load(&path);
+            queue = queue_for(&path);
+        }
+    }
+}
+
+/// A setting deleted by hand stays deleted while dux reorders macros and
+/// saves again.
+#[test]
+fn a_hand_deletion_survives_a_macro_reorder_and_later_saves() {
+    let text = "[ui]\nleft_width_pct = 25\nright_width_pct = 30\n[macros]\na = { text = \"1\", surface = \"agent\" }\n[macros.b]\ntext = \"2\"\nsurface = \"agent\"\n";
+    let (_dir, path, loaded, queue) = setup(text);
+    let mut memory = loaded.clone();
+    std::fs::write(&path, read(&path).replace("right_width_pct = 30\n", "")).unwrap();
+    memory.macros.entries.reverse();
+    queue.save_eager(memory.clone()).unwrap();
+    for written in three_unrelated_saves(&path, &queue, &mut memory) {
+        assert!(!written.contains("right_width_pct"), "{written}");
+    }
+}
+
+/// What dux has seen stays bounded while memory replaces its one project
+/// on every save: a project neither memory nor the file has any more is
+/// forgotten.
+#[test]
+fn what_dux_has_seen_stays_bounded_while_projects_come_and_go() {
+    let (_dir, _path, loaded, queue) = setup("[ui]\nleft_width_pct = 25\n");
+    let mut memory = loaded.clone();
+    let mut first = None;
+    for round in 0..300 {
+        memory.projects = vec![project(
+            &format!("id{round}"),
+            &format!("/p/{round}"),
+            &format!("n{round}"),
+        )];
+        queue.save_eager(memory.clone()).unwrap();
+        let seen = seen_text(&queue).len();
+        let first = *first.get_or_insert(seen);
+        assert!(
+            seen <= first * 2,
+            "save {round}: seen grew from {first} to {seen}"
+        );
+    }
 }

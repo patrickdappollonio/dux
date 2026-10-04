@@ -354,7 +354,7 @@ pub fn source_after_sync(
             .unwrap_or_else(|| synced.clone()),
     };
     base.projects = synced.projects.clone();
-    crate::config::SourceText::written(&union_seen(read.as_str(), written), base)
+    crate::config::SourceText::written(&union_seen(read.as_str(), written, &synced.projects), base)
 }
 
 /// What the writer has seen of the file after writing `written` on top of
@@ -368,7 +368,11 @@ pub fn source_after_sync(
 /// this never writes) is kept as it is, so every later save keeps treating
 /// every setting as seen rather than as new (see
 /// [`apply_patches_three_way`]).
-pub fn union_seen(seen: Option<&str>, written: &str) -> String {
+///
+/// A `[[projects]]` entry neither memory (`projects`) nor the written file
+/// has any more is forgotten: no decision needs it, and keeping it would let
+/// what has been seen grow with every project a session adds and removes.
+pub fn union_seen(seen: Option<&str>, written: &str, projects: &[ProjectConfig]) -> String {
     let Some(seen) = seen else {
         return written.to_string();
     };
@@ -383,8 +387,34 @@ pub fn union_seen(seen: Option<&str>, written: &str) -> String {
         return seen.to_string();
     };
     union_tables(seen_doc.as_table_mut(), written_doc.as_table(), true);
+    forget_gone_projects(&mut seen_doc, &written_doc, projects);
     clear_positions(seen_doc.as_table_mut());
     seen_doc.to_string()
+}
+
+/// Drop the seen `[[projects]]` entries that are in neither `projects`
+/// (memory) nor `written`.
+fn forget_gone_projects(seen: &mut DocumentMut, written: &DocumentMut, projects: &[ProjectConfig]) {
+    let Some(Item::ArrayOfTables(seen_projects)) = seen.get_mut("projects") else {
+        return;
+    };
+    let written_entries: Vec<&Table> = written
+        .get("projects")
+        .and_then(Item::as_array_of_tables)
+        .map(|entries| entries.iter().collect())
+        .unwrap_or_default();
+    let field =
+        |entry: &Table, name: &str| entry.get(name).and_then(Item::as_str).map(str::to_string);
+    seen_projects.retain(|entry| {
+        let in_file = written_entries
+            .iter()
+            .any(|written| (0..MATCH_TIERS).any(|tier| same_entry_at(tier, entry, written)));
+        let in_memory = projects.iter().any(|project| {
+            field(entry, "id").as_deref() == Some(project.id.as_str())
+                || field(entry, "path").as_deref() == Some(project.path.as_str())
+        });
+        in_file || in_memory
+    });
 }
 
 /// Forget where each table sat in the document it came from, so the whole
@@ -517,102 +547,57 @@ fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<SaveBase<'_>>, o
             true,
         ),
     }
-    settle_macro_order(disk, &ours.macros);
+    if let Some(base) = base {
+        note_macro_order_limit(disk, base.config, ours);
+    }
     // Retired keys still go on every save, as they always have.
     for (section, key) in RETIRED_KEYS {
         remove_table_key(disk, section, key);
     }
 }
 
-/// Write memory's macro order when the file's `[macros]` cannot show it.
-///
-/// TOML renders a table's plain values before its subtables, so in a
-/// `[macros]` that mixes `name = { … }` lines with `[macros.name]` sections,
-/// a macro written as a section always reads back after every inline one,
-/// whatever order memory has. When that would lose memory's order, the
-/// sections are rewritten as inline entries, each keeping the comments
-/// written above and inside it, and the whole table is put in memory's
-/// order (macros memory does not know follow it). A `[macros]` whose order
-/// already reads back as memory's is left exactly as it is.
-fn settle_macro_order(doc: &mut DocumentMut, macros: &MacrosConfig) {
-    let Some(Item::Table(table)) = doc.get_mut("macros") else {
-        return;
+/// Say so when memory reordered its macros and the file cannot read back in
+/// that order. A macro's written form is never changed, and TOML prints a
+/// table's inline entries before its `[macros.<name>]` sections, so the order
+/// set in dux is kept within each form (see [`merge_changed_at`]) and a
+/// section can never read back ahead of an inline macro. What the file reads
+/// back is taken from the file itself, parsed, never guessed from how it is
+/// stored.
+fn note_macro_order_limit(doc: &DocumentMut, base: &Config, ours: &Config) {
+    let shared = |config: &Config, other: &Config| -> Vec<String> {
+        config
+            .macros
+            .entries
+            .keys()
+            .filter(|name| other.macros.entries.contains_key(*name))
+            .cloned()
+            .collect()
     };
-    let sections: Vec<String> = table
-        .iter()
-        .filter(|(_, item)| item.is_table())
-        .map(|(key, _)| key.to_string())
-        .collect();
-    if sections.is_empty() {
+    if shared(base, ours) == shared(ours, base) {
         return;
     }
-    // The order the file reads back in: plain values, then sections.
-    let read_back: Vec<String> = table
-        .iter()
-        .filter(|(_, item)| !item.is_table())
-        .map(|(key, _)| key.to_string())
-        .chain(sections.iter().cloned())
-        .filter(|key| macros.entries.contains_key(key))
-        .collect();
-    let wanted: Vec<String> = macros
+    let Ok(written) = crate::config::config_from_text_as_written(&doc.to_string()) else {
+        return;
+    };
+    let read_back: Vec<&String> = written
+        .macros
         .entries
         .keys()
-        .filter(|key| table.contains_key(key))
-        .cloned()
+        .filter(|name| ours.macros.entries.contains_key(*name))
         .collect();
-    if read_back == wanted {
-        return;
-    }
-    crate::logger::info(
-        "config.toml: [macros] mixes inline macros with [macros.<name>] sections, which TOML \
-         always reads back after the inline ones; rewriting the sections as inline macros, \
-         comments kept, so the macro order set in dux is the order the file holds",
-    );
-    for name in &sections {
-        let Some(Item::Table(section)) = table.get(name) else {
-            continue;
-        };
-        let mut comments: Vec<String> = decor_comment(section.decor()).into_iter().collect();
-        comments.extend(
-            section
-                .iter()
-                .filter_map(|(key, _)| section.key(key))
-                .filter_map(|key| decor_comment(key.leaf_decor())),
+    let wanted: Vec<&String> = ours
+        .macros
+        .entries
+        .keys()
+        .filter(|name| written.macros.entries.contains_key(*name))
+        .collect();
+    if read_back != wanted {
+        crate::logger::info(
+            "config.toml: the macro order set in dux is kept within each form, but macros \
+             written as [macros.<name>] sections always read back after the inline ones; write \
+             them all in one form to keep any order",
         );
-        let mut inline = section.clone().into_inline_table();
-        for (_, value) in inline.iter_mut() {
-            value.decor_mut().clear();
-        }
-        let mut keys: Vec<String> = Vec::new();
-        for (key, _) in inline.iter() {
-            keys.push(key.to_string());
-        }
-        for key in keys {
-            if let Some(mut key) = inline.key_mut(&key) {
-                key.leaf_decor_mut().clear();
-            }
-        }
-        inline.fmt();
-        if let Some(item) = table.get_mut(name) {
-            *item = toml_edit::value(inline);
-        }
-        if let Some(mut key) = table.key_mut(name) {
-            let prefix = if comments.is_empty() {
-                String::new()
-            } else {
-                format!("{}\n", comments.join("\n"))
-            };
-            key.leaf_decor_mut().set_prefix(prefix);
-            key.leaf_decor_mut().set_suffix(" ");
-        }
     }
-    let rank = |key: &str| {
-        macros
-            .entries
-            .get_index_of(key)
-            .unwrap_or(macros.entries.len())
-    };
-    table.sort_values_by(|a, _, b, _| rank(a.get()).cmp(&rank(b.get())));
 }
 
 /// Keys dux once wrote and every save removes (see `apply_patches`).
@@ -896,6 +881,30 @@ fn merge_changed_at(
                 .unwrap_or(ours_order.len())
         };
         target.sort_values_by(|a, _, b, _| rank(a.get()).cmp(&rank(b.get())));
+        // Child sections (`[macros.<name>]`) print where their position puts
+        // them, not in the table's key order: they take ours' order by
+        // trading the positions they already hold, so they stay in the same
+        // slots of the file and keep their form and every comment.
+        let mut sections: Vec<(String, isize)> = target
+            .iter()
+            .filter_map(|(key, item)| match item {
+                Item::Table(table) if !table.is_dotted() => {
+                    table.position().map(|position| (key.to_string(), position))
+                }
+                _ => None,
+            })
+            .collect();
+        if sections.len() > 1 {
+            let mut positions: Vec<isize> =
+                sections.iter().map(|(_, position)| *position).collect();
+            positions.sort_unstable();
+            sections.sort_by_key(|(key, _)| rank(key));
+            for ((key, _), position) in sections.iter().zip(positions) {
+                if let Some(Item::Table(table)) = target.get_mut(key) {
+                    table.set_position(Some(position));
+                }
+            }
+        }
     }
 }
 

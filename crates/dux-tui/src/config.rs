@@ -1952,7 +1952,10 @@ fn render_macros_config(
          # surface = \"both\":     shown on both surfaces.\n\
          # Newlines in text values are translated to Alt+Enter (ESC + CR) so\n\
          # multi-line macros are entered as a single prompt; press Enter yourself\n\
-         # to submit afterwards.",
+         # to submit afterwards.\n\
+         # Macros are listed in the order they are written here. A macro written\n\
+         # as its own [macros.<name>] section always comes after every\n\
+         # name = {{ ... }} line, so keep all macros in one form to choose any order.",
     );
     if macros.entries.is_empty() {
         out.push_str(

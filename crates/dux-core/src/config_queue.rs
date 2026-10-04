@@ -450,7 +450,7 @@ impl Base {
     /// After writing `config` as `written`.
     fn after_write(&self, config: Config, written: &str) -> Base {
         Base {
-            seen: union_seen(Some(&self.seen), written),
+            seen: union_seen(Some(&self.seen), written, &config.projects),
             config,
         }
     }
