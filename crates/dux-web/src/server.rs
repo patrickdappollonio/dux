@@ -5877,9 +5877,15 @@ mod tests {
         let _h =
             spawn_config_changed_forwarder(handle.subscribe_config_reloads(), Arc::clone(&bus));
 
-        // Drive a real reload (read-only re-load of config.toml; defaults when
-        // absent). The actor completes it on a later tick and fires the reload
-        // broadcast, which the forwarder converts to `config.changed`.
+        // A real reload needs a file to read: with none, the reload is refused
+        // (the running config, password included, stays) and rightly emits
+        // nothing. The engine starts without one, so write it, as a user
+        // editing config.toml by hand would, then reload.
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[ui]\nleft_width_pct = 30\n",
+        )
+        .expect("write config.toml");
         handle
             .apply_wire(dux_core::wire::WireCommand::ReloadConfig {})
             .await
@@ -5890,6 +5896,36 @@ mod tests {
             .expect("a config reload must emit config.changed")
             .expect("bus recv");
         assert_eq!(ev, config_changed_event());
+    }
+
+    /// A reload that is refused (here, config.toml does not exist) changes
+    /// nothing, so it tells no browser to refetch: it says why on the status
+    /// lane instead. The refusal is what this waits for, so nothing here
+    /// depends on how long the reload takes.
+    #[tokio::test]
+    async fn a_refused_config_reload_emits_no_config_changed() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let handle = test_engine_handle(tmp.path());
+        let mut reloads = handle.subscribe_config_reloads();
+        let mut statuses = handle.subscribe_status();
+        assert!(!tmp.path().join("config.toml").exists());
+        handle
+            .apply_wire(dux_core::wire::WireCommand::ReloadConfig {})
+            .await
+            .expect("reload command");
+        loop {
+            let status = statuses.recv().await.expect("status");
+            if status.message.contains("no longer exists") {
+                break;
+            }
+        }
+        assert!(
+            matches!(
+                reloads.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "a refused reload must not tell browsers to refetch"
+        );
     }
 
     /// End-to-end regression: saving macros through the engine actor (the

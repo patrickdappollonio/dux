@@ -18,11 +18,19 @@ use crate::server;
 /// a plain `sh`, so no test that creates or launches an agent can exec the
 /// developer's real agent CLI, and none depends on the developer's `$SHELL`. Every
 /// test in this crate boots through here rather than the production function.
+///
+/// The `gh` probe the engine loop starts is pointed at a program that does not
+/// exist, so it settles at once on "not installed" and never runs the
+/// developer's real `gh`. A real `gh` answers on its own schedule (it may ask
+/// GitHub over the network), and the moment it does it flips availability and
+/// fires `config.changed`, an event no test asked for that arrives whenever it
+/// likes. A test that needs `gh` points the probe at a stand-in of its own.
 pub(crate) fn bootstrap_test_engine(
     paths: &dux_core::config::DuxPaths,
 ) -> anyhow::Result<dux_core::engine::Engine> {
     let mut engine = crate::bootstrap::bootstrap_engine(paths)?;
     dux_core::test_provider::defuse_config(&mut engine.config);
+    engine.gh_probe.program = paths.root.join("gh-is-not-installed").into_os_string();
     Ok(engine)
 }
 
