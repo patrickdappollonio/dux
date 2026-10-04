@@ -74,19 +74,19 @@ export interface ErrorBody {
 /// Read a body without consuming the response the caller may still read.
 export async function readErrorBody(resp: Response): Promise<ErrorBody> {
   const source = typeof resp.clone === "function" ? resp.clone() : resp
-  let text = ""
+  const text = await source.text().then(
+    (t) => t.trim(),
+    () => "",
+  )
+  return { json: parseRecord(text), text }
+}
+
+function parseRecord(text: string): Record<string, unknown> {
   try {
-    text = (await source.text()).trim()
+    return record(JSON.parse(text))
   } catch {
-    text = ""
+    return {}
   }
-  let json: Record<string, unknown> = {}
-  try {
-    json = record(JSON.parse(text))
-  } catch {
-    json = {}
-  }
-  return { json, text }
 }
 
 function str(v: unknown): string | null {

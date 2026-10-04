@@ -246,7 +246,7 @@ describe("the session ending mid-use", () => {
   })
 
   it("a 4401 close holds the app socket, and signing in reopens it and refetches", async () => {
-    const { store, gate } = await loadSignedIn("")
+    const { gate } = await loadSignedIn("")
     FakeWebSocket.instances[0].open()
     signedIn = false
     FakeWebSocket.instances[0].drop(4401)

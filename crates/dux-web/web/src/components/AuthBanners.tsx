@@ -1,10 +1,11 @@
-import { useState, useSyncExternalStore } from "react"
+import { useState } from "react"
 import { KeyRound, ShieldAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
 import { postDismissNoAuthWarning, type AuthStatus } from "@/lib/authApi"
 import { noteAuthStatus } from "@/lib/authGate"
+import { dismissBanner, useDismissedBanners } from "@/lib/bannerDismissals"
 import { notifyError, notifySuccess } from "@/lib/notify"
 import { chip, prose } from "@/lib/prose"
 import { openCustomizeWebapp } from "@/lib/store"
@@ -19,32 +20,6 @@ import { openCustomizeWebapp } from "@/lib/store"
 // meant to be annoying until the owner either sets a password or says, once,
 // that they mean it ("Don't show again", which writes
 // `disable_no_auth_warning = true`).
-
-const dismissed = new Set<"no_auth" | "weak">()
-const listeners = new Set<() => void>()
-
-function dismiss(which: "no_auth" | "weak"): void {
-  dismissed.add(which)
-  for (const l of [...listeners]) l()
-}
-
-function subscribe(l: () => void): () => void {
-  listeners.add(l)
-  return () => listeners.delete(l)
-}
-
-// A version counter for `useSyncExternalStore`: the set itself is mutated in
-// place, so its identity says nothing.
-let version = 0
-listeners.add(() => {
-  version++
-})
-
-/// Test seam: forget every dismissal.
-export function resetBannerDismissalsForTests(): void {
-  dismissed.clear()
-  version++
-}
 
 const BANNER_BUTTON = "max-md:min-h-10"
 
@@ -83,7 +58,7 @@ function NoPasswordBanner({ status }: { status: AuthStatus }) {
           variant="outline"
           size="sm"
           className={BANNER_BUTTON}
-          onClick={() => dismiss("no_auth")}
+          onClick={() => dismissBanner("no_auth")}
         >
           Dismiss
         </Button>
@@ -119,7 +94,7 @@ function WeakPasswordBanner() {
           variant="outline"
           size="sm"
           className={BANNER_BUTTON}
-          onClick={() => dismiss("weak")}
+          onClick={() => dismissBanner("weak")}
         >
           Dismiss
         </Button>
@@ -137,11 +112,7 @@ function WeakPasswordBanner() {
 }
 
 export function AuthBanners({ status }: { status: AuthStatus | null }) {
-  useSyncExternalStore(
-    subscribe,
-    () => version,
-    () => version,
-  )
+  const dismissed = useDismissedBanners()
   if (status === null) return null
   const showNoAuth = status.no_auth_warning && !dismissed.has("no_auth")
   const showWeak = status.weak_password && !dismissed.has("weak")

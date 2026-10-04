@@ -23,7 +23,7 @@ const notifyError = vi.fn()
 vi.mock("@/lib/notify", () => ({ notifySuccess, notifyError }))
 
 const { AuthGate } = await import("./AuthGate")
-const { resetBannerDismissalsForTests } = await import("./AuthBanners")
+const { resetBannerDismissals } = await import("@/lib/bannerDismissals")
 
 function status(overrides: Partial<AuthStatus> = {}): AuthStatus {
   return {
@@ -43,7 +43,7 @@ function status(overrides: Partial<AuthStatus> = {}): AuthStatus {
 }
 
 beforeEach(() => {
-  resetBannerDismissalsForTests()
+  resetBannerDismissals()
 })
 
 afterEach(() => {

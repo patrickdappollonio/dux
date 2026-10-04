@@ -41,7 +41,7 @@ export const firstLoadApi = {
       })
     } catch (e) {
       rethrowAuthInterruption(e)
-      throw new Error("Could not reach the server.")
+      throw new Error("Could not reach the server.", { cause: e })
     }
     if (!resp.ok) {
       const detail = (await resp.text().catch(() => "")).trim()

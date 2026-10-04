@@ -62,7 +62,7 @@ async function load() {
   return { gate, socket: new TestSocket() }
 }
 
-let sockets: { dispose(): void }[] = []
+const sockets: { dispose(): void }[] = []
 
 beforeEach(() => {
   FakeWS.instances = []
