@@ -44,8 +44,17 @@ const sampleBootstrap: Bootstrap = {
 }
 
 describe("settingsDescriptors", () => {
-  it("groups are ordered web, both, tui", () => {
-    expect(SETTING_GROUPS.map((g) => g.surface)).toEqual(["web", "both", "tui"])
+  it("groups are ordered sign-in, web, both, tui", () => {
+    expect(SETTING_GROUPS.map((g) => g.surface)).toEqual(["signin", "web", "both", "tui"])
+  })
+
+  it("routes the password to its own write target and never through the settings PATCH", () => {
+    const d = allSettingDescriptors().find((x) => x.key === "server.auth.password")
+    expect(d?.writeTarget).toBe("password")
+    expect(d?.control.kind).toBe("password")
+    // Its group holds nothing else, so the group offers no reset to defaults.
+    const group = SETTING_GROUPS.find((g) => g.surface === "signin")
+    expect(group?.settings.map((x) => x.key)).toEqual(["server.auth.password"])
   })
 
   // NOTE: this only catches an accidental key change WITHIN this file (a typo
@@ -61,6 +70,7 @@ describe("settingsDescriptors", () => {
     const keys = allSettingDescriptors().map((d) => d.key)
     expect(new Set(keys)).toEqual(
       new Set([
+        "server.auth.password",
         "server.title",
         "server.favicon",
         "ui.show_changes_pane",

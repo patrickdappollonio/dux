@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from "react"
+import { Fragment, useEffect, useRef, useState } from "react"
 import { Check } from "lucide-react"
 import {
   notifyError,
@@ -38,7 +38,17 @@ import {
   type SettingDescriptor,
   type SettingValue,
 } from "@/lib/settingsDescriptors"
+import { postPassword, type AuthStatus } from "@/lib/authApi"
+import { afterPasswordChange, reportUnauthorized, useAuthPhase } from "@/lib/authGate"
 import { configApi } from "@/lib/configApi"
+import {
+  STRENGTH_LABELS,
+  estimateStrength,
+  passwordMinimums,
+  passwordWrite,
+  type PasswordDraft,
+  type Strength,
+} from "@/lib/passwordStrength"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { wireProse } from "@/lib/prose"
 import {
@@ -87,6 +97,8 @@ function defaultLabel(d: SettingDescriptor): string {
       return d.default ? `Default: ${d.default}` : "Default: empty"
     case "favicon":
       return "Default: Original"
+    case "password":
+      return "Default: no password"
   }
 }
 
@@ -290,6 +302,9 @@ function SettingControl({
           disabled={disabled}
         />
       )
+    case "password":
+      // Rendered by `PasswordSettingRow`, never through the generic row.
+      return null
   }
 }
 
@@ -397,6 +412,186 @@ function SettingRow({
   )
 }
 
+const EMPTY_PASSWORD_DRAFT: PasswordDraft = { current: "", next: "", confirm: "" }
+
+// The meter's reading of `password`, or null while it is being computed (or for
+// an empty field). Keyed by the password it was computed for, so a slow answer
+// for an earlier keystroke is never shown against a later one.
+function usePasswordStrength(password: string): Strength | null {
+  const [reading, setReading] = useState<{ password: string; strength: Strength } | null>(
+    null,
+  )
+  useEffect(() => {
+    if (password === "") return
+    let live = true
+    estimateStrength(password)
+      .then((strength) => {
+        if (live) setReading({ password, strength })
+      })
+      .catch(() => {
+        // The dictionaries failed to load; the next keystroke asks again, and
+        // Save says it is still checking rather than guessing.
+      })
+    return () => {
+      live = false
+    }
+  }, [password])
+  return reading !== null && reading.password === password ? reading.strength : null
+}
+
+function StrengthMeter({ strength, minScore }: { strength: Strength; minScore: number }) {
+  const below = strength.score < minScore
+  return (
+    <div className="flex flex-col gap-1">
+      <div
+        role="meter"
+        aria-label="Password strength"
+        aria-valuemin={0}
+        aria-valuemax={4}
+        aria-valuenow={strength.score}
+        aria-valuetext={strength.label}
+        className="flex gap-1"
+      >
+        {[0, 1, 2, 3, 4].map((i) => (
+          <span
+            key={i}
+            className={cn(
+              "h-1.5 flex-1 rounded-full",
+              i <= strength.score ? (below ? "bg-destructive" : "bg-primary") : "bg-muted",
+            )}
+          />
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Strength: <span className={cn("font-medium", below && "text-destructive")}>{strength.label}</span>
+        {below ? `, below the ${STRENGTH_LABELS[Math.min(4, minScore)]} this dux asks for` : ""}
+      </p>
+      {strength.hint ? <p className="text-xs text-muted-foreground">{strength.hint}</p> : null}
+    </div>
+  )
+}
+
+function PasswordField({
+  id,
+  label,
+  value,
+  autoComplete,
+  disabled,
+  onChange,
+}: {
+  id: string
+  label: string
+  value: string
+  autoComplete: string
+  disabled: boolean
+  onChange: (v: string) => void
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label htmlFor={id} className="text-xs font-medium">
+        {label}
+      </label>
+      <Input
+        id={id}
+        type="password"
+        autoComplete={autoComplete}
+        value={value}
+        disabled={disabled}
+        className="max-md:min-h-10 w-full md:w-64"
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </div>
+  )
+}
+
+// The one row that is not a `SettingRow`: three fields, a meter and its own
+// error line, all of it sent through the `"password"` write target by Save.
+// Which fields show is the server's answer about this connection: change (a
+// password is set), set the first one (allowed from here), or neither.
+function PasswordSettingRow({
+  d,
+  status,
+  draft,
+  onDraft,
+  strength,
+  error,
+  disabled,
+}: {
+  d: SettingDescriptor
+  status: AuthStatus | null
+  draft: PasswordDraft
+  onDraft: (next: PasswordDraft) => void
+  strength: Strength | null
+  error: string | null
+  disabled: boolean
+}) {
+  const id = rowId(d)
+  const editable =
+    status !== null && (status.password_set || status.can_set_first_password)
+  const mins = status ? passwordMinimums(status) : null
+  const unavailable =
+    status === null
+      ? "dux could not read its sign-in status, so the password cannot be changed from here right now. Reopen Preferences to try again."
+      : "No password is set. The first one can only be set from this machine, from your tailnet, or by running `dux config set server.auth.password` where dux runs."
+  return (
+    <div className="flex flex-col gap-3 py-3 first:pt-0">
+      <div className="flex flex-col gap-1">
+        <span id={`${id}-label`} className="text-sm font-medium">
+          {d.label}
+        </span>
+        <p className="text-xs text-muted-foreground">{renderInlineCode(d.description)}</p>
+        {editable && mins ? (
+          <p className="text-xs text-muted-foreground">
+            {`At least ${mins.length} characters, rated ${STRENGTH_LABELS[Math.min(4, mins.score)]} or better. Leave these empty to keep the current password.`}
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">{renderInlineCode(unavailable)}</p>
+        )}
+      </div>
+      {editable && mins ? (
+        <div className="flex flex-col gap-3">
+          {status.password_set ? (
+            <PasswordField
+              id={`${id}-current`}
+              label="Current password"
+              value={draft.current}
+              autoComplete="current-password"
+              disabled={disabled}
+              onChange={(current) => onDraft({ ...draft, current })}
+            />
+          ) : null}
+          <PasswordField
+            id={`${id}-new`}
+            label="New password"
+            value={draft.next}
+            autoComplete="new-password"
+            disabled={disabled}
+            onChange={(next) => onDraft({ ...draft, next })}
+          />
+          {draft.next !== "" && strength !== null ? (
+            <div className="md:w-64">
+              <StrengthMeter strength={strength} minScore={mins.score} />
+            </div>
+          ) : null}
+          <PasswordField
+            id={`${id}-confirm`}
+            label="New password again"
+            value={draft.confirm}
+            autoComplete="new-password"
+            disabled={disabled}
+            onChange={(confirm) => onDraft({ ...draft, confirm })}
+          />
+          {error ? (
+            <p role="alert" className="text-xs text-destructive">
+              {error}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 type SettingsGroup = Record<string, SettingValue>
 
 interface SettingsBody {
@@ -445,6 +640,8 @@ function buildWrites(
     // The unchanged-row skip. The `github` target posts to a blind read-and-FLIP
     // endpoint, so emitting an unchanged row would invert the setting.
     if (value === originalOf(d)) continue
+    // The password has its own path (`savePassword`) and never rides a batch.
+    if (d.writeTarget === "password") continue
     if (d.writeTarget === "identity") {
       const field = d.key.split(".")[1] as "title" | "favicon"
       identity[field] = value as string
@@ -541,6 +738,13 @@ function CustomizeWebappForm({
   // `overrides` holds only the fields touched in this dialog session; every other
   // row renders live bootstrap, so another client's change is not reverted on Save.
   const [overrides, setOverrides] = useState<Record<string, SettingValue>>({})
+  // The password row's fields, kept out of `overrides`: they are never a
+  // config value, and they leave this component only through `savePassword`.
+  const authPhase = useAuthPhase()
+  const authStatus = authPhase.kind === "open" ? authPhase.status : null
+  const [passwordDraft, setPasswordDraft] = useState<PasswordDraft>(EMPTY_PASSWORD_DRAFT)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const strength = usePasswordStrength(passwordDraft.next)
 
   // The pre-touch baseline for a row. Any field the store tracks an optimistic
   // override for must read the override-aware selector rather than raw bootstrap:
@@ -570,16 +774,67 @@ function CustomizeWebappForm({
     return false
   }
 
+  // The password's own write. Sent last, because success signs every browser
+  // out, this one included; the gate then decides what this page shows.
+  const savePassword = async (write: { current?: string; next: string }): Promise<boolean> => {
+    const answer = await postPassword(write)
+    switch (answer.kind) {
+      case "ok":
+        setPasswordDraft(EMPTY_PASSWORD_DRAFT)
+        setPasswordError(null)
+        notifySuccess(
+          write.current === undefined
+            ? "Password set. Browsers that reach dux from where it applies now have to sign in with it."
+            : "Password changed. Every browser was signed out and signs in again with the new one.",
+        )
+        return true
+      case "refused":
+        setPasswordError(answer.message)
+        return false
+      case "signed_out":
+        reportUnauthorized()
+        return false
+      case "unreachable":
+        setPasswordError("Could not reach dux, so the password was not changed. Try again.")
+        return false
+    }
+  }
+
   const save = async () => {
     if (savingRef.current) return
     if (!requireBootstrap() || !bootstrap) return
+    // Checked before anything is written: a refused password must not leave the
+    // other rows half saved behind it.
+    const editable =
+      authStatus !== null && (authStatus.password_set || authStatus.can_set_first_password)
+    const pw = editable
+      ? passwordWrite(passwordDraft, {
+          passwordSet: authStatus.password_set,
+          mins: passwordMinimums(authStatus),
+          strength,
+        })
+      : ({ kind: "none" } as const)
+    if (pw.kind === "invalid") {
+      setPasswordError(pw.message)
+      return
+    }
+    setPasswordError(null)
     savingRef.current = true
     setSaving(true)
     try {
       const touched: [SettingDescriptor, SettingValue][] = allSettingDescriptors()
         .filter((d) => d.key in overrides)
         .map((d) => [d, overrides[d.key]])
-      if (await persist(touched, originalOf)) closeCustomizeWebapp()
+      if (!(await persist(touched, originalOf))) return
+      if (pw.kind === "write") {
+        const write =
+          pw.current === undefined ? { next: pw.next } : { current: pw.current, next: pw.next }
+        if (!(await savePassword(write))) return
+        closeCustomizeWebapp()
+        await afterPasswordChange()
+        return
+      }
+      closeCustomizeWebapp()
     } finally {
       savingRef.current = false
       setSaving(false)
@@ -599,7 +854,7 @@ function CustomizeWebappForm({
       // A locked row's control is unreachable, and a reset must not write past it:
       // the run would refuse the value and the toast would contradict the dialog.
       const entries: [SettingDescriptor, SettingValue][] = settings
-        .filter((d) => lockOn(d) === null)
+        .filter((d) => lockOn(d) === null && d.writeTarget !== "password")
         .map((d) => [d, resetValue(d)])
       // Reflect the reset defaults only AFTER the write lands: an optimistic
       // override would show a failed reset as saved. The dialog stays open either way.
@@ -635,28 +890,46 @@ function CustomizeWebappForm({
                 <p className="text-xs font-medium text-muted-foreground">
                   {group.caption}
                 </p>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  disabled={saving}
-                  className="max-md:min-h-10 shrink-0 text-xs"
-                  onClick={() => resetSection(group.settings)}
-                >
-                  Reset section to defaults…
-                </Button>
+                {/* A password has no default to reset to. */}
+                {group.settings.some((d) => d.writeTarget !== "password") ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={saving}
+                    className="max-md:min-h-10 shrink-0 text-xs"
+                    onClick={() => resetSection(group.settings)}
+                  >
+                    Reset section to defaults…
+                  </Button>
+                ) : null}
               </div>
               <div className="divide-y divide-border">
                 {group.settings.map((d) => (
                   <Fragment key={d.key}>
-                    <SettingRow
-                      d={d}
-                      value={effective(d)}
-                      onChange={(v) => setOverride(d.key, v)}
-                      disabled={saving}
-                      lock={lockOn(d)}
-                      availableProviders={bootstrap?.available_providers ?? []}
-                    />
+                    {d.control.kind === "password" ? (
+                      <PasswordSettingRow
+                        d={d}
+                        status={authStatus}
+                        draft={passwordDraft}
+                        onDraft={(next) => {
+                          setPasswordDraft(next)
+                          setPasswordError(null)
+                        }}
+                        strength={strength}
+                        error={passwordError}
+                        disabled={saving}
+                      />
+                    ) : (
+                      <SettingRow
+                        d={d}
+                        value={effective(d)}
+                        onChange={(v) => setOverride(d.key, v)}
+                        disabled={saving}
+                        lock={lockOn(d)}
+                        availableProviders={bootstrap?.available_providers ?? []}
+                      />
+                    )}
                     {/* Directly beneath the setting it is a precondition for. */}
                     {d.key === "capabilities.web_notifications" ? (
                       <NotificationPermissionRow

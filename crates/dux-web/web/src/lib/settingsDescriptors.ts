@@ -18,7 +18,9 @@ import {
   MIN_TERMINAL_FONT_SIZE,
 } from "./terminalFont"
 
-export type SettingSurface = "web" | "both" | "tui"
+/** Which surface a row affects. `signin` is the web login every browser goes
+ * through, which is neither this browser's preference nor the terminal app's. */
+export type SettingSurface = "signin" | "web" | "both" | "tui"
 
 export type SettingControl =
   | { kind: "bool" }
@@ -29,6 +31,10 @@ export type SettingControl =
   | { kind: "enum-dynamic"; source: "available_providers" }
   | { kind: "favicon" }
   | { kind: "text"; maxLen: number }
+  /** The password fields and their strength meter. Its value never lives in
+   * the generic form state: the dialog holds the typed passwords separately and
+   * sends them only through the `"password"` write target. */
+  | { kind: "password" }
 
 export type SettingValue = boolean | number | string
 
@@ -53,8 +59,12 @@ export interface SettingDescriptor {
    *   changed; writing unconditionally inverts the setting.
    * - `"tailscale"`: the endpoint also moves the running listener, which only
    *   the serve loop can do. It carries an explicit value, so skipping an
-   *   unchanged row is an optimization here rather than correctness. */
-  writeTarget: "settings" | "identity" | "changesPane" | "github" | "tailscale"
+   *   unchanged row is an optimization here rather than correctness.
+   * - `"password"`: the server hashes it, checks it against the minimums,
+   *   needs the current one to change it, and signs every browser out, so it
+   *   goes to the auth endpoint and is never part of the settings PATCH or a
+   *   section reset. */
+  writeTarget: "settings" | "identity" | "changesPane" | "github" | "tailscale" | "password"
   /** True when the config field is the negative of what this row shows, so that
    * every row can be phrased positively. `read` returns the value as shown and
    * `buildWrites` flips it back once, immediately before the wire, so the
@@ -90,6 +100,24 @@ const MIN_UPLOAD_PASTED_TEXT_CHARS = 200
 const DEFAULT_UPLOAD_PASTED_TEXT_CHARS = 4_000
 
 export const SETTING_GROUPS: SettingGroup[] = [
+  {
+    surface: "signin",
+    caption: "Signing in. The password every browser signs in to this dux with.",
+    settings: [
+      {
+        key: "server.auth.password",
+        label: "Password",
+        description:
+          "Asked of every browser that reaches dux from where `[server.auth] require` says it applies. dux keeps only an Argon2 hash in `config.toml`; anyone who can read that file can still try to guess the password offline, so use a long one you use nowhere else. Changing it signs every browser out, this one included. The first password can only be set from this machine, your tailnet, or with `dux config set server.auth.password`.",
+        surface: "signin",
+        control: { kind: "password" },
+        default: "",
+        writeTarget: "password",
+        // Write-only: the server never sends a password back, not even its hash.
+        read: () => "",
+      },
+    ],
+  },
   {
     surface: "web",
     caption: "This browser (Web). These affect the web UI you're looking at.",
