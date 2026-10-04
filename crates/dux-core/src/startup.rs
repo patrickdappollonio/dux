@@ -826,6 +826,13 @@ mod tests {
         let job = wait_for_pid(&pidfile);
         let session = registry.sessions_of("session-1");
         let recorded = registry.survivors_of(&session);
+        // The job and its own `sleep` are in the command's process group (the
+        // command led its session and group): end them all.
+        for leader in &session {
+            if let Some(group) = rustix::process::Pid::from_raw(leader.sid as i32) {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
+        }
         if let Some(pid) = rustix::process::Pid::from_raw(job) {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
