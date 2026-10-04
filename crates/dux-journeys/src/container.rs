@@ -14,7 +14,8 @@ use testcontainers::bollard::models::{HostConfig, PortBinding};
 use testcontainers::core::ContainerRequest;
 use testcontainers::{GenericImage, ImageExt};
 
-use crate::image::{LABEL, PID_LABEL, Reaper};
+use crate::image::{LABEL, Reaper};
+use crate::run::{RUN_LABEL, run_id};
 use crate::util::{LogBuffer, container_logs, suffix};
 
 /// A container name for this journey, its reaper, and its log buffer
@@ -35,7 +36,7 @@ pub fn labelled(
     request
         .with_container_name(name)
         .with_label(LABEL, "1")
-        .with_label(PID_LABEL, std::process::id().to_string())
+        .with_label(RUN_LABEL, run_id())
         .with_log_consumer(logs.clone())
 }
 
@@ -43,6 +44,9 @@ pub fn labelled(
 /// `127.0.0.1` with an ephemeral host port, and nothing else.
 pub fn loopback_publish(ports: Vec<u16>) -> impl Fn(&mut HostConfig) + Send + Sync + 'static {
     move |host: &mut HostConfig| {
+        // An init process as PID 1, so the container's own process (often a
+        // shell) gets its signals and the container stops at once.
+        host.init = Some(true);
         host.publish_all_ports = Some(false);
         let bindings: HashMap<String, Option<Vec<PortBinding>>> = ports
             .iter()
@@ -65,6 +69,7 @@ pub fn loopback_publish(ports: Vec<u16>) -> impl Fn(&mut HostConfig) + Send + Sy
 pub fn share_namespace_of(container_id: &str) -> impl Fn(&mut HostConfig) + Send + Sync + 'static {
     let namespace = format!("container:{container_id}");
     move |host: &mut HostConfig| {
+        host.init = Some(true);
         host.network_mode = Some(namespace.clone());
         host.publish_all_ports = Some(false);
         host.port_bindings = None;

@@ -9,6 +9,10 @@
 //! this machine must run inside it). `DUX_JOURNEY_IMAGE` names an image to use
 //! instead (CI builds it in a cached step of its own).
 //!
+//! Old journey images are never removed during a run, because another worktree's
+//! run may be using one right now. The documented cleanup removes the ones no
+//! container uses that are over a day old.
+//!
 //! The third-party images (the base, nginx, Caddy) are pinned by digest in
 //! `tools/preview-env/journey-images.env`, which the CI workflow reads too.
 //!
@@ -18,20 +22,18 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 
+use crate::run::{cache_dir, run_id, sweep_dead_runs};
+
 /// The repository name every journey image is tagged under.
 pub const IMAGE_NAME: &str = "dux-journeys";
 
-/// The label every container and network a journey creates carries.
+/// The label every container, network and image the suite creates carries.
 pub const LABEL: &str = "dux-journeys";
-
-/// The label naming the test process that created a container, so a later run
-/// can tell a leftover of a dead run from a container a live run still uses.
-pub const PID_LABEL: &str = "dux-journeys.pid";
 
 /// The pinned third-party images, read from the file the CI workflow reads.
 const PINNED: &str = include_str!("../../../tools/preview-env/journey-images.env");
@@ -63,14 +65,33 @@ pub fn pinned(key: &str) -> String {
         .to_string()
 }
 
-/// A pinned reference split the way testcontainers takes it: the name, and the
-/// rest (`tag@sha256:...`), which it puts back together with a colon.
+/// Split an image reference into the `(name, tag)` pair testcontainers puts back
+/// together with a colon. The tag is after the last colon only when that colon
+/// comes after the last slash (a registry's port is not a tag), defaults to
+/// `latest`, and keeps a digest (`tag@sha256:...`) so the pin survives.
+pub fn split_reference(reference: &str) -> (String, String) {
+    let (named, digest) = match reference.split_once('@') {
+        Some((named, digest)) => (named, Some(digest)),
+        None => (reference, None),
+    };
+    let last_slash = named.rfind('/').map_or(0, |i| i + 1);
+    let (name, tag) = match named[last_slash..].rfind(':') {
+        Some(colon) => (
+            &named[..last_slash + colon],
+            &named[last_slash + colon + 1..],
+        ),
+        None => (named, "latest"),
+    };
+    let tag = match digest {
+        Some(digest) => format!("{tag}@{digest}"),
+        None => tag.to_string(),
+    };
+    (name.to_string(), tag)
+}
+
+/// A pinned reference split for testcontainers.
 pub fn pinned_parts(key: &str) -> (String, String) {
-    let full = pinned(key);
-    let (name, rest) = full
-        .split_once(':')
-        .unwrap_or_else(|| panic!("{key} is not name:tag@digest: {full}"));
-    (name.to_string(), rest.to_string())
+    split_reference(&pinned(key))
 }
 
 /// The repository root, found from this crate's own manifest.
@@ -85,7 +106,61 @@ fn preview_env() -> PathBuf {
     workspace_root().join("tools/preview-env")
 }
 
-/// The host-built dux binary to mount, or a panic saying how to build one.
+/// Where cargo writes this workspace's builds: `CARGO_TARGET_DIR` (relative to
+/// the workspace root when relative) or `target/`.
+fn target_dir() -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if dir.is_absolute() {
+                dir
+            } else {
+                workspace_root().join(dir)
+            }
+        }
+        None => workspace_root().join("target"),
+    }
+}
+
+/// The newest modification time among the files that go into the dux binary:
+/// every crate's sources and manifest and the web UI's sources, this crate and
+/// build output excluded.
+fn newest_source(root: &Path) -> Option<(SystemTime, PathBuf)> {
+    fn walk(dir: &Path, newest: &mut Option<(SystemTime, PathBuf)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(
+                name.as_ref(),
+                "target" | "node_modules" | "dist" | "dux-journeys" | ".git"
+            ) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&path, newest);
+            } else if let Ok(modified) = meta.modified()
+                && newest.as_ref().is_none_or(|(t, _)| modified > *t)
+            {
+                *newest = Some((modified, path));
+            }
+        }
+    }
+    let mut newest = None;
+    // The workspace's Cargo.lock is left out on purpose: this crate's own
+    // dependencies move it without changing a byte of dux.
+    walk(&root.join("crates"), &mut newest);
+    newest
+}
+
+/// The host-built dux binary to mount, or a panic saying how to build one. A
+/// binary older than the newest source is refused too (a journey run against
+/// yesterday's dux passes or fails for the wrong reason), unless
+/// `DUX_JOURNEY_ALLOW_STALE=1` says that is intended.
 pub fn dux_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("DUX_JOURNEY_BIN") {
         let path = PathBuf::from(path);
@@ -96,13 +171,28 @@ pub fn dux_binary() -> PathBuf {
         );
         return path;
     }
-    let path = workspace_root().join("target/journeys/dux");
+    let path = target_dir().join("journeys/dux");
     assert!(
         path.is_file(),
         "no dux binary at {}. Build it first: cargo build --profile journeys --bin dux \
          (or set DUX_JOURNEY_BIN to a dux binary built on this machine)",
         path.display()
     );
+    if std::env::var("DUX_JOURNEY_ALLOW_STALE").as_deref() != Ok("1") {
+        let built = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .expect("the binary's modification time");
+        if let Some((newest, source)) = newest_source(&workspace_root())
+            && newest > built
+        {
+            panic!(
+                "{} is older than {}. Rebuild it: cargo build --profile journeys --bin dux \
+                 (or set DUX_JOURNEY_ALLOW_STALE=1 to run the journeys against it anyway)",
+                path.display(),
+                source.display()
+            );
+        }
+    }
     path
 }
 
@@ -139,19 +229,18 @@ fn content_tag() -> String {
 static SETUP: OnceCell<(String, String)> = OnceCell::const_new();
 
 /// Everything a journey needs that is not its own containers, done once per
-/// test process before any journey's deadline starts: the leftovers of dead runs
-/// removed, the journey image present, the pinned proxy images pulled. Returns
-/// the journey image as `(name, tag)`.
+/// test process before any journey's deadline starts: this run started (its
+/// heartbeat and Ctrl-C cleanup), dead runs' leftovers removed, the journey
+/// image present, the pinned proxy images pulled. Returns the journey image as
+/// `(name, tag)`.
 pub async fn setup() -> (String, String) {
     SETUP
         .get_or_init(|| async {
             let work = tokio::task::spawn_blocking(|| {
+                run_id();
                 sweep_dead_runs();
                 let image = match std::env::var("DUX_JOURNEY_IMAGE") {
-                    Ok(full) => full
-                        .rsplit_once(':')
-                        .map(|(n, t)| (n.to_string(), t.to_string()))
-                        .unwrap_or((full.clone(), "latest".to_string())),
+                    Ok(full) => split_reference(&full),
                     Err(_) => {
                         let tag = content_tag();
                         ensure_built(&tag);
@@ -203,18 +292,50 @@ fn ensure_pulled(reference: &str) {
     assert!(status.success(), "docker pull {reference} failed");
 }
 
-/// Build the journey image unless it exists. A lock file held across the build
-/// makes concurrent test processes (two worktrees, say) wait for one build
-/// instead of racing their own.
+/// The lock that makes concurrent test processes (two worktrees, say) wait for
+/// one image build instead of racing their own: a per-user file under the
+/// cache directory, so it does not move with `TMPDIR`. `None`, with a warning,
+/// when it cannot be opened (a cache directory another user owns): the build
+/// then runs unguarded, which costs at most a duplicate build.
+fn build_lock() -> Option<std::fs::File> {
+    let dir = cache_dir();
+    let path = dir.join("image-build.lock");
+    let opened = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+    });
+    match opened {
+        Ok(file) => match file.lock() {
+            Ok(()) => Some(file),
+            Err(err) => {
+                eprintln!(
+                    "dux-journeys: cannot lock {} ({err}); building without the lock",
+                    path.display()
+                );
+                None
+            }
+        },
+        Err(err) => {
+            eprintln!(
+                "dux-journeys: cannot open the image build lock {} ({err}); is the directory \
+                 owned by another user? Building without the lock",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Build the journey image unless it exists.
 fn ensure_built(tag: &str) {
     let full = format!("{IMAGE_NAME}:{tag}");
     if image_present(&full) {
         return;
     }
-    let lock_path = std::env::temp_dir().join("dux-journeys-image-build.lock");
-    let lock = std::fs::File::create(&lock_path)
-        .unwrap_or_else(|err| panic!("create {}: {err}", lock_path.display()));
-    lock.lock().expect("take the image build lock");
+    let _lock = build_lock();
     if image_present(&full) {
         return;
     }
@@ -238,64 +359,12 @@ fn ensure_built(tag: &str) {
         .status()
         .expect("run docker build");
     assert!(status.success(), "docker build of {full} failed");
-    prune_older_images(tag);
-}
-
-/// Remove the journey images an older tree built. An image a running container
-/// still uses is refused by Docker and left alone.
-fn prune_older_images(keep: &str) {
-    let listed = docker(&["image", "ls", IMAGE_NAME, "--format", "{{.Tag}}"]);
-    for tag in String::from_utf8_lossy(&listed.stdout).lines() {
-        if tag.starts_with("j-") && tag != keep {
-            let _ = docker(&["image", "rm", &format!("{IMAGE_NAME}:{tag}")]);
-        }
-    }
-}
-
-/// Remove the containers and networks of journey runs whose test process is
-/// gone (killed mid-run, say). A live run's are left alone: they carry the pid
-/// of a process that still exists.
-fn sweep_dead_runs() {
-    let alive = |pid: &str| {
-        pid.parse::<u32>()
-            .is_ok_and(|p| Path::new(&format!("/proc/{p}")).exists())
-    };
-    let listed = docker(&[
-        "ps",
-        "-a",
-        "--filter",
-        &format!("label={PID_LABEL}"),
-        "--format",
-        &format!("{{{{.ID}}}} {{{{.Label \"{PID_LABEL}\"}}}}"),
-    ]);
-    for line in String::from_utf8_lossy(&listed.stdout).lines() {
-        if let Some((id, pid)) = line.split_once(' ')
-            && !alive(pid)
-        {
-            let _ = docker(&["rm", "-f", "-v", id]);
-        }
-    }
-    let networks = docker(&[
-        "network",
-        "ls",
-        "--filter",
-        &format!("label={PID_LABEL}"),
-        "--format",
-        &format!("{{{{.Name}}}} {{{{.Label \"{PID_LABEL}\"}}}}"),
-    ]);
-    for line in String::from_utf8_lossy(&networks.stdout).lines() {
-        if let Some((name, pid)) = line.split_once(' ')
-            && !alive(pid)
-        {
-            let _ = docker(&["network", "rm", name]);
-        }
-    }
 }
 
 /// Removes a container by name when dropped, whatever state it reached. It is
 /// created BEFORE the container is, so a journey cancelled between Docker
 /// creating the container and the harness getting a handle on it (a deadline, a
-/// failed copy or start) still removes it.
+/// failed copy or start) still removes it. A container already gone is fine.
 pub struct Reaper(pub String);
 
 impl Drop for Reaper {
@@ -306,9 +375,8 @@ impl Drop for Reaper {
     }
 }
 
-/// A Docker network of the journey's own, labelled with this process's pid and
-/// removed when dropped. Declare it before the containers that join it, so it
-/// outlives them.
+/// A Docker network of the journey's own, labelled with this run and removed
+/// when dropped. Whoever holds it must drop it after the containers on it.
 pub struct JourneyNetwork {
     name: String,
 }
@@ -322,7 +390,7 @@ impl JourneyNetwork {
             "--label",
             &format!("{LABEL}=1"),
             "--label",
-            &format!("{PID_LABEL}={}", std::process::id()),
+            &format!("{}={}", crate::run::RUN_LABEL, run_id()),
             &name,
         ]);
         assert!(
@@ -341,5 +409,52 @@ impl JourneyNetwork {
 impl Drop for JourneyNetwork {
     fn drop(&mut self) {
         let _ = docker(&["network", "rm", &self.name]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reference_splits_into_name_and_tag_the_way_docker_reads_it() {
+        let cases = [
+            ("dux-journeys:ci", ("dux-journeys", "ci")),
+            ("dux-journeys", ("dux-journeys", "latest")),
+            (
+                "localhost:5000/dux-journeys",
+                ("localhost:5000/dux-journeys", "latest"),
+            ),
+            (
+                "localhost:5000/team/dux:j-1",
+                ("localhost:5000/team/dux", "j-1"),
+            ),
+            (
+                "nginx:1-alpine@sha256:abc",
+                ("nginx", "1-alpine@sha256:abc"),
+            ),
+            (
+                "registry:5000/nginx@sha256:abc",
+                ("registry:5000/nginx", "latest@sha256:abc"),
+            ),
+        ];
+        for (reference, (name, tag)) in cases {
+            assert_eq!(
+                split_reference(reference),
+                (name.to_string(), tag.to_string()),
+                "{reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pinned_images_are_all_pinned_by_digest() {
+        for key in [
+            "JOURNEY_BASE_IMAGE",
+            "JOURNEY_NGINX_IMAGE",
+            "JOURNEY_CADDY_IMAGE",
+        ] {
+            assert!(pinned(key).contains("@sha256:"), "{key}");
+        }
     }
 }

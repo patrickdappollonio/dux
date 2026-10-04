@@ -18,6 +18,17 @@ description = "Container-based user journeys for dux's web server: the dux binar
 #
 #   cargo test -p dux-journeys --features journeys -- --test-threads=2
 #   cargo test -p dux-journeys --features auth -- --test-threads=2
+#
+# The repository's `cargo clippy --all-targets --all-features` gate turns both
+# features on, and that is deliberate. Keeping the journeys out of it would mean
+# either an `--exclude` in every existing clippy command (CI, CLAUDE.md,
+# CONTRIBUTING) or a separate workspace with its own lockfile, and either way the
+# main gate would stop compiling the journeys, so a change to a shared API could
+# break them unseen until the journey workflow ran. What it costs, measured: a
+# from-scratch clippy of this crate with every dependency it pulls takes 24 s at
+# three jobs, much of it crates the workspace builds anyway. On macOS the
+# dependencies are Linux-only and nothing extra is built. The journey workflow
+# also lints this crate on its own.
 [features]
 journeys = [
     "dep:testcontainers",
@@ -31,6 +42,7 @@ journeys = [
     "dep:fantoccini",
     "dep:hyper-util",
     "dep:uuid",
+    "dep:signal-hook",
 ]
 auth = ["journeys"]
 
@@ -38,9 +50,10 @@ auth = ["journeys"]
 # bind-mounted into a Linux container), so the dependencies are too. On macOS
 # the crate compiles to nothing whatever the features say.
 [target.'cfg(target_os = "linux")'.dependencies]
-# `watchdog` removes every container this process started when it gets
-# SIGINT, SIGTERM or SIGQUIT (a Ctrl-C mid-run), instead of leaving them up.
-testcontainers = { version = "0.28", default-features = false, features = ["watchdog"], optional = true }
+testcontainers = { version = "0.28", default-features = false, optional = true }
+# Ctrl-C cleanup (see src/run.rs): the run removes its own labelled containers
+# and networks, tolerating any already gone, then dies of the signal.
+signal-hook = { version = "0.3", optional = true }
 tokio = { workspace = true, features = ["process", "io-util", "fs"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"], optional = true }
 tokio-tungstenite = { workspace = true, optional = true }

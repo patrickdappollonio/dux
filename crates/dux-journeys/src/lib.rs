@@ -20,6 +20,10 @@
 //! - [`ws`] opens the events and PTY sockets with that person's cookie.
 //! - [`sidecars`] runs nginx and Caddy in front of a dux.
 //! - [`browser::Browser`] is Chromium over WebDriver, in a container of its own.
+//! - [`container`] is what every container has in common: labels, a reaper,
+//!   and ports published on the host's loopback only.
+//! - [`run`] is this test process's run: its heartbeat, its Ctrl-C cleanup,
+//!   and the sweep of what dead runs left.
 //! - [`api`] is the handful of REST calls the journeys share (add a project,
 //!   create an agent and wait for it).
 #![cfg(all(target_os = "linux", feature = "journeys"))]
@@ -30,6 +34,7 @@ pub mod client;
 pub mod container;
 pub mod dux;
 pub mod image;
+pub mod run;
 pub mod sidecars;
 pub mod util;
 pub mod ws;

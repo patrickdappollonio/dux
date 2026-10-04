@@ -220,6 +220,9 @@ pub struct Dux {
     // After the container, so it drops second: it removes a container a
     // cancelled start never handed over, and is a no-op otherwise.
     _reaper: Reaper,
+    // Last, so it drops after the container that was on it: the network this
+    // dux made for itself when the journey named none.
+    _own_network: Option<JourneyNetwork>,
     logs: LogBuffer,
     bind: Bind,
     name: String,
@@ -229,6 +232,19 @@ impl Dux {
     /// Start a dux and wait until it answers.
     pub async fn start(options: DuxOptions) -> Dux {
         let (image_name, tag) = journey_image().await;
+        // A network of its own unless the journey shares one, so no journey
+        // container ever sits on Docker's default bridge beside unrelated
+        // containers. Made before the reaper, so a cancelled start drops the
+        // reaper (removing the container) first and the network after it.
+        let own_network = match options.network {
+            Some(_) => None,
+            None => Some(JourneyNetwork::create()),
+        };
+        let network = options
+            .network
+            .clone()
+            .or_else(|| own_network.as_ref().map(|n| n.name().to_string()))
+            .expect("a network");
         let (name, reaper, logs) = identity("dux");
 
         let mut ports = vec![DUX_PORT];
@@ -283,9 +299,7 @@ impl Dux {
                 script.clone().into_bytes(),
             );
         }
-        if let Some(network) = &options.network {
-            request = request.with_network(network);
-        }
+        request = request.with_network(&network);
 
         let container = request
             .start()
@@ -294,6 +308,7 @@ impl Dux {
         let dux = Dux {
             container,
             _reaper: reaper,
+            _own_network: own_network,
             logs,
             bind: options.bind,
             name,
