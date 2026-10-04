@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { AuthGate } from './components/AuthGate.tsx'
 import { registerServiceWorker } from './lib/sw.ts'
 
 // dux's web UI is a dark, desktop-style app; opt into the `.dark` token set.
@@ -13,6 +14,9 @@ registerServiceWorker()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    {/* The sign-in gate decides whether the app or a sign-in page is on screen. */}
+    <AuthGate>
+      <App />
+    </AuthGate>
   </StrictMode>,
 )
