@@ -8949,6 +8949,85 @@ mod tests {
         assert!(engine.reload_guard.is_some());
     }
 
+    /// A surface that reloads the real file on a worker thread, as the web
+    /// surface does.
+    struct FileReloadSurface;
+
+    impl crate::engine::ConfigSurface for FileReloadSurface {
+        fn reload(
+            &self,
+            paths: crate::config::DuxPaths,
+            worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+        ) {
+            std::thread::spawn(move || {
+                let guard = crate::engine::ReloadCompletionGuard::new(worker_tx);
+                guard.complete(crate::config::load_config(&paths).map_err(|e| e.to_string()));
+            });
+        }
+
+        fn recover_render(&self, config: &crate::config::Config) -> String {
+            crate::config_write::render_config_plain(config)
+        }
+    }
+
+    /// Two `dux config set` runs in quick succession each signal a reload; the
+    /// second arrives while the first is still reading. It must not be
+    /// dropped: it runs right after, so the file's final state is what runs.
+    #[test]
+    fn a_reload_asked_for_during_a_reload_runs_right_after_it() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 21\n").unwrap();
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("first reload");
+        assert!(engine.reloading);
+        std::fs::write(&engine.paths.config_path, "[ui]\nleft_width_pct = 22\n").unwrap();
+        let second = engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("second reload");
+        let status = unwrap_status(second);
+        assert!(status.message.contains("right after"), "{}", status.message);
+        // A third collapses into the same follow-up.
+        engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("third reload");
+        assert_eq!(
+            engine
+                .deferred_commands
+                .iter()
+                .filter(|c| matches!(c, crate::engine::Command::ReloadConfig))
+                .count(),
+            1
+        );
+
+        let mut reloads_finished = 0;
+        while let Some(event) = try_recv_worker_event(&engine) {
+            if !matches!(event, WorkerEvent::ConfigReloadReady(_)) {
+                continue;
+            }
+            reloads_finished += 1;
+            let reaction = engine.process_worker_event(event);
+            for reaction in flatten(reaction) {
+                if let EventReaction::ApplyReloadedConfig(config) = reaction {
+                    engine.apply_reloaded_config(*config).expect("apply");
+                }
+            }
+            if !engine.reloading {
+                break;
+            }
+        }
+        assert_eq!(reloads_finished, 2, "the follow-up reload ran");
+        assert_eq!(engine.config.ui.left_width_pct, 22);
+    }
+
+    fn flatten(reaction: EventReaction) -> Vec<EventReaction> {
+        match reaction {
+            EventReaction::Multi(list) => list.into_iter().flat_map(flatten).collect(),
+            other => vec![other],
+        }
+    }
+
     #[test]
     fn apply_recover_config_renders_via_surface_and_writes() {
         let (mut engine, _tmp) = test_engine();

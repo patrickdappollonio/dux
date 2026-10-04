@@ -9131,18 +9131,18 @@ mod tests {
         assert!(engine.reloading);
         assert!(engine.reload_guard.is_some());
 
-        // A second reload while one is in flight must be refused: it must NOT
+        // A second reload while one is in flight is queued, never run at once: it must NOT
         // drop the live guard or spawn a second worker.
         let reaction = engine.apply(Command::ReloadConfig).expect("second reload");
         match reaction {
             EventReaction::Status(update) => {
                 assert!(
-                    update.message.contains("already in progress"),
+                    update.message.contains("already running"),
                     "got: {}",
                     update.message
                 );
             }
-            _ => panic!("expected an 'already in progress' status"),
+            _ => panic!("expected an 'already running' status"),
         }
         // The first barrier is intact.
         assert!(engine.reloading);

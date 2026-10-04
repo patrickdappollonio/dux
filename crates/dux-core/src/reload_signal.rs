@@ -114,36 +114,43 @@ enum Holder {
 /// the portable check requires; the Linux check needs none, because holding
 /// this file's lock is what makes a process the running dux.
 fn holder(lock_path: &Path, expected_name: Option<&str>) -> Holder {
+    let table = std::fs::read_to_string("/proc/locks").ok();
+    holder_with_table(lock_path, table.as_deref(), expected_name)
+}
+
+/// [`holder`] with the `/proc/locks` text passed in (`None` where there is
+/// no such file), so the fallback can be tested.
+fn holder_with_table(lock_path: &Path, table: Option<&str>, expected_name: Option<&str>) -> Holder {
     if !lock_path.exists() {
         return Holder::None;
     }
-    if let Some(answer) = holder_from_proc_locks(lock_path) {
-        return answer;
+    if let Some(table) = table
+        && let Some(pid) = holder_from_proc_locks(lock_path, table)
+    {
+        return Holder::Pid(pid);
     }
     holder_by_probe(lock_path, expected_name)
 }
 
 /// The Linux answer, read without touching the lock: `/proc/locks` lists
 /// every flock with its holder's PID and the device and inode of its file.
-/// `None` when the table cannot be read or names no visible holder (another
-/// PID namespace shows PID 0 or nothing), so the caller falls back.
-fn holder_from_proc_locks(lock_path: &Path) -> Option<Holder> {
-    let table = std::fs::read_to_string("/proc/locks").ok()?;
+/// Only a positive answer counts. No matching line is NOT "not running":
+/// on btrfs and overlayfs `stat` reports a different device number than
+/// the kernel prints there, and a holder in another PID namespace shows as 0,
+/// so every miss falls back to the portable probe.
+fn holder_from_proc_locks(lock_path: &Path, table: &str) -> Option<u32> {
     let stat = rustix::fs::stat(lock_path).ok()?;
     let (major, minor, inode) = (
         rustix::fs::major(stat.st_dev),
         rustix::fs::minor(stat.st_dev),
         stat.st_ino,
     );
-    match flock_holder_in(&table, major, minor, inode) {
-        Some(0) => None,
-        Some(pid) => Some(Holder::Pid(pid)),
-        None => Some(Holder::None),
-    }
+    flock_holder_in(table, major, minor, inode).filter(|pid| *pid != 0)
 }
 
 /// The PID holding a FLOCK on the file with this device and inode, from the
-/// text of `/proc/locks`. Lines for waiters (`->`) are skipped.
+/// text of `/proc/locks`. Only an exclusive (WRITE) lock counts, which is
+/// the one dux takes; lines for waiters (`->`) are skipped.
 fn flock_holder_in(table: &str, major: u32, minor: u32, inode: u64) -> Option<u32> {
     for line in table.lines() {
         if line.contains("->") {
@@ -151,7 +158,7 @@ fn flock_holder_in(table: &str, major: u32, minor: u32, inode: u64) -> Option<u3
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
         // "1:" "FLOCK" "ADVISORY" "WRITE" "<pid>" "<maj>:<min>:<inode>" ...
-        if fields.len() < 6 || fields[1] != "FLOCK" {
+        if fields.len() < 6 || fields[1] != "FLOCK" || fields[3] != "WRITE" {
             continue;
         }
         let mut id = fields[5].split(':');
@@ -308,6 +315,38 @@ mod tests {
             child.wait().expect("wait").success(),
             "SIGUSR1 did not kill it"
         );
+    }
+
+    /// On btrfs and overlayfs, `stat` reports a device number that differs
+    /// from the one `/proc/locks` prints, so no line matches. That is not
+    /// "nothing is running": the portable check answers instead.
+    #[test]
+    fn a_proc_locks_table_with_no_matching_line_falls_back_to_the_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut child = spawn_stand_in_dux(dir.path());
+        assert!(
+            wait_for(&dir.path().join("ready")),
+            "the child never took the lock"
+        );
+        let lock = dir.path().join("dux.lock");
+        let ino = rustix::fs::stat(&lock).expect("stat").st_ino;
+        let elsewhere = format!(
+            "1: FLOCK  ADVISORY  WRITE {} ab:cd:{ino} 0 EOF\n",
+            child.id()
+        );
+        assert_eq!(
+            holder_with_table(&lock, Some(&elsewhere), None),
+            Holder::Pid(child.id()),
+            "a device mismatch must not read as not running"
+        );
+        let read_only = format!("1: FLOCK  ADVISORY  READ  999 00:00:{ino} 0 EOF\n");
+        assert_eq!(
+            flock_holder_in(&read_only, 0, 0, ino),
+            None,
+            "a READ lock is not dux's"
+        );
+        send(child.id());
+        let _ = child.wait();
     }
 
     #[test]

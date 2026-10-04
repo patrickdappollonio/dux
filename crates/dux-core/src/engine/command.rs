@@ -785,9 +785,23 @@ impl Engine {
                 // Reject a reentrant reload: a second one would drop the live
                 // `reload_guard`, resuming the writer mid-reload, and spawn a
                 // worker whose completion closes a barrier it never opened.
+                // A reload asked for DURING one (a second `dux config set`'s
+                // SIGUSR1, a second press) may be about a file that changed
+                // after the running reload read it, so it is never dropped:
+                // it joins the deferred commands and runs as soon as the
+                // current reload closes its barrier. Any number of them
+                // collapse into one follow-up, which reads the latest file.
                 if self.reloading {
+                    if !self
+                        .deferred_commands
+                        .iter()
+                        .any(|c| matches!(c, Command::ReloadConfig))
+                    {
+                        self.deferred_commands.push(Command::ReloadConfig);
+                    }
                     return Ok(EventReaction::Status(StatusUpdate::info(
-                        "A config reload is already in progress.",
+                        "A config reload is already running; another runs right after it, so \
+                         the latest config.toml is the one that applies.",
                     )));
                 }
                 // Open the reload barrier: quiesce the writer so no queued save
