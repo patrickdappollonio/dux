@@ -9555,7 +9555,7 @@ leading_branch = "main"
         );
     }
 
-    /// A reentrant config reload (one already in flight) returns an Info status
+    /// A reentrant config reload (one already in flight) is queued behind it with an Info status
     /// and spawns no worker, so `reload_config_from_disk` must NOT set the
     /// "Reloading…" busy. Doing so would clobber the Info and strand a spinner
     /// that nothing would ever clear.
@@ -9573,7 +9573,7 @@ leading_branch = "main"
             app.status.text(),
         );
         assert!(
-            app.status.message().contains("already in progress"),
+            app.status.message().contains("already running"),
             "the engine's Info must survive, got: {}",
             app.status.message(),
         );
