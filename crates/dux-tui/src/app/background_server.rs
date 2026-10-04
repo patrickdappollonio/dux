@@ -1102,8 +1102,10 @@ pub(crate) mod tests {
         );
     }
 
+    /// A reload whose apply fails still adopts the new config, so the routes
+    /// answer on the caps that are actually in force: the new ones.
     #[test]
-    fn a_reload_whose_apply_fails_hands_the_seam_nothing() {
+    fn a_reload_whose_apply_fails_hands_the_seam_the_adopted_config() {
         let mut app = test_app(default_bindings());
         let (companion, recorded) = FakeCompanion::serving();
         app.engine.config.server.serve_while_tui = true;
@@ -1131,14 +1133,17 @@ pub(crate) mod tests {
             crate::app::StatusTone::Error,
             "the apply must be what failed, not something upstream: {message}"
         );
-        assert!(
-            recorded
-                .lock()
-                .expect("not poisoned")
-                .config_applied
-                .is_empty(),
-            "a failed apply leaves the routes on the caps still in force"
+        let applied = recorded
+            .lock()
+            .expect("not poisoned")
+            .config_applied
+            .clone();
+        assert_eq!(applied.len(), 1, "{applied:?}");
+        assert_eq!(
+            applied[0].search_index_max_files, 17,
+            "the routes take the caps of the config in force"
         );
+        assert_eq!(app.engine.config.server.search_index_max_files, 17);
     }
 
     /// A PR lookup a BROWSER started must not pop a name prompt in the terminal.

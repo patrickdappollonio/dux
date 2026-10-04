@@ -2771,7 +2771,10 @@ impl SourceText {
     /// put in the file. `text` is what dux has seen of the file (the text it
     /// read plus what it wrote). `base` is never a re-parse of the written
     /// text, which can carry another writer's change dux never had.
-    pub fn written(text: &str, base: Config) -> Self {
+    pub fn written(text: &str, mut base: Config) -> Self {
+        // The base's own source is dropped, so bases never nest one inside
+        // the other across saves.
+        base.source_text = SourceText::default();
         Self {
             text: Some(std::sync::Arc::from(text)),
             written_base: Some(std::sync::Arc::new(base)),
@@ -4726,6 +4729,20 @@ mod tests {
 
     /// The header found for a rule error is exactly `[server.auth]`, never a
     /// table whose name merely contains it.
+    /// A written source keeps the config its write put in the file, without
+    /// that config's own source: bases never nest, however many saves run.
+    #[test]
+    fn a_written_source_never_nests_the_one_before_it() {
+        let mut config = Config::default();
+        let mut source = SourceText::of("[ui]\n");
+        for round in 0..3 {
+            config.source_text = source.clone();
+            source = SourceText::written(&format!("# {round}\n"), config.clone());
+            let base = source.written_base().expect("a written base");
+            assert!(base.source_text.as_str().is_none(), "round {round}");
+        }
+    }
+
     #[test]
     fn an_auth_rule_error_never_points_at_a_look_alike_header() {
         let raw = "[server.oauth]\nx = 1\n\n[server.auth]\nminimum_password_score = 9\n";

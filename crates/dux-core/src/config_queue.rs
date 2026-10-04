@@ -625,7 +625,9 @@ fn save_against_base(
 }
 
 /// The base after a save wrote `config` as `written`.
-fn written_base(base: &Option<Base>, config: Config, written: &str) -> Base {
+fn written_base(base: &Option<Base>, mut config: Config, written: &str) -> Base {
+    // The base keeps the config, not the text it came from.
+    config.source_text = crate::config::SourceText::default();
     match base {
         Some(base) => base.after_write(config, written),
         None => Base {
@@ -1815,5 +1817,176 @@ mod zz_attack {
             t.contains("\"/old\""),
             "the new project at the old path stays: {t}"
         );
+    }
+}
+
+/// Eighth review cases, kept as regression tests.
+#[cfg(test)]
+mod rev_attack {
+    use super::*;
+    fn read(p: &std::path::Path) -> String {
+        std::fs::read_to_string(p).unwrap()
+    }
+    fn setup(
+        text: &str,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Config,
+        ConfigWriteQueue,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        (dir, path, loaded, q)
+    }
+
+    /// Same as zh but the new hand entry is ABOVE the moved one.
+    #[test]
+    fn r1_order_of_file_entries_decides_which_is_dropped() {
+        let (_d, path, loaded, q) = setup("[[projects]]\nid = \"a\"\npath = \"/old\"\n");
+        std::fs::write(&path, "[[projects]]\npath = \"/old\"\nname = \"newone\"\n\n[[projects]]\nid = \"a\"\npath = \"/new\"\n").unwrap();
+        let mut m = loaded.clone();
+        m.projects.clear();
+        q.save_eager(m).unwrap();
+        let t = read(&path);
+        eprintln!("R1:\n{t}");
+        assert!(
+            t.contains("\"/old\""),
+            "the new project at the old path stays: {t}"
+        );
+        assert!(
+            !t.contains("id = \"a\""),
+            "removed project a stays removed: {t}"
+        );
+    }
+
+    /// A project with no env: hand adds env {B}, dux adds env {C}.
+    #[test]
+    fn r2_env_created_on_both_sides() {
+        let (_d, path, loaded, q) = setup("[[projects]]\nid = \"a\"\npath = \"/a\"\n");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\nenv = { B = \"2\" }\n",
+        )
+        .unwrap();
+        let mut m = loaded.clone();
+        m.projects[0].env.insert("C".into(), "3".into());
+        q.save_eager(m).unwrap();
+        let t = read(&path);
+        eprintln!("R2:\n{t}");
+        assert!(t.contains("B = \"2\""), "hand-added B kept: {t}");
+        assert!(t.contains("C = \"3\""), "{t}");
+    }
+
+    /// Same with a subtable env written by hand.
+    #[test]
+    fn r3_env_subtable_created_on_both_sides() {
+        let (_d, path, loaded, q) = setup("[[projects]]\nid = \"a\"\npath = \"/a\"\n");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\n# mine\n[projects.env]\nB = \"2\"\n",
+        )
+        .unwrap();
+        let mut m = loaded.clone();
+        m.projects[0].env.insert("C".into(), "3".into());
+        q.save_eager(m).unwrap();
+        let t = read(&path);
+        eprintln!("R3:\n{t}");
+        assert!(t.contains("B = \"2\""), "hand-added B kept: {t}");
+        assert!(t.contains("C = \"3\""), "{t}");
+    }
+
+    /// Global env written inline at top level by hand; dux adds a var; hand adds another.
+    #[test]
+    fn r4_global_env_inline() {
+        let (_d, path, loaded, q) = setup("env = { A = \"1\" }\n");
+        std::fs::write(&path, "env = { A = \"1\", B = \"2\" }\n").unwrap();
+        let mut m = loaded.clone();
+        m.env.insert("C".into(), "3".into());
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        eprintln!("R4a:\n{t}");
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m).unwrap();
+        let t = read(&path);
+        eprintln!("R4b:\n{t}");
+        assert!(t.contains("B = \"2\""), "{t}");
+        assert!(t.contains("C = \"3\""), "{t}");
+        assert_eq!(t.matches("A = \"1\"").count(), 1, "{t}");
+    }
+
+    /// Hand converts the project's inline env to a subtable and deletes A; dux changes C. 3 saves.
+    #[test]
+    fn r5_env_form_change_and_delete() {
+        let (_d, path, loaded, q) =
+            setup("[[projects]]\nid = \"a\"\npath = \"/a\"\nenv = { A = \"1\", B = \"2\" }\n");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/a\"\n[projects.env]\nB = \"2\"\n",
+        )
+        .unwrap();
+        let mut m = loaded.clone();
+        m.projects[0].env.insert("C".into(), "3".into());
+        q.save_eager(m.clone()).unwrap();
+        eprintln!("R5a:\n{}", read(&path));
+        let t = read(&path).replace("B = \"2\"\n", "B = \"2\"\nD = \"4\"\n");
+        std::fs::write(&path, &t).unwrap();
+        m.projects[0].env.insert("C".into(), "33".into());
+        q.save_eager(m.clone()).unwrap();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m).unwrap();
+        let t = read(&path);
+        eprintln!("R5b:\n{t}");
+        assert!(!t.contains("A = "), "{t}");
+        assert!(t.contains("D = \"4\"") && t.contains("C = \"33\""), "{t}");
+    }
+
+    /// Two id-less hand projects at /x then dux removes the one it knew (base by path).
+    #[test]
+    fn r6_duplicate_paths() {
+        let (_d, path, loaded, q) = setup("[[projects]]\npath = \"/x\"\nname = \"one\"\n");
+        let t = read(&path) + "\n[[projects]]\npath = \"/x\"\nname = \"two\"\n";
+        std::fs::write(&path, &t).unwrap();
+        let mut m = loaded.clone();
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        let t = read(&path);
+        eprintln!("R6:\n{t}");
+        assert!(t.contains("\"one\"") && t.contains("\"two\""), "{t}");
+    }
+
+    /// Every top-level section written inline by hand (a dotted or inline
+    /// table before any header) is patched in its own form, and no save
+    /// panics the writer: later saves still work.
+    #[test]
+    fn r7_inline_top_level_sections_never_panic_the_writer() {
+        for text in [
+            "ui = { left_width_pct = 25 }\n",
+            "defaults = { provider = \"claude\" }\n",
+            "macros = { hi = \"hello\" }\n",
+            "server = { port = 3890 }\n",
+            "providers = { claude = { command = \"claude\" } }\n",
+            "keys = { }\n",
+            "ui = 5\nenv = 3\nmacros = []\n",
+            "projects = [{ id = \"a\", path = \"/a\" }]\n",
+            "providers = 1\n",
+        ] {
+            let (_d, path, loaded, q) = setup(text);
+            let mut m = loaded.clone();
+            m.ui.left_width_pct = 31;
+            m.env.insert("C".into(), "3".into());
+            q.save_eager(m.clone())
+                .unwrap_or_else(|e| panic!("{text}: {e:#}"));
+            m.ui.copy_on_select = !m.ui.copy_on_select;
+            q.save_eager(m).unwrap_or_else(|e| panic!("{text}: {e:#}"));
+            let t = read(&path);
+            assert!(t.contains("left_width_pct = 31"), "{text}:\n{t}");
+            assert!(t.contains("C = \"3\""), "{text}:\n{t}");
+            crate::config::config_from_text_as_written(&t)
+                .unwrap_or_else(|e| panic!("{t}: {}", e.reason()));
+        }
     }
 }

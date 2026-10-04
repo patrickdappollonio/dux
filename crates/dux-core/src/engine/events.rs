@@ -334,11 +334,15 @@ pub enum EventReaction {
     ApplyReloadedConfig(Box<Config>),
     OpenConfigReloadFailedModal(String),
     /// The engine adopted a reloaded config it could not fully apply (its
-    /// own apply of a coalesced reload failed). The surface takes the view
-    /// state of `engine.config` as it would on a successful reload, so a
-    /// later drag or toggle starts from the adopted config rather than
-    /// writing the old values back. A failure modal follows it.
-    AdoptConfigView,
+    /// own apply of a coalesced reload failed): `engine.config` is the new
+    /// config, and `before` is the one it replaced. The surface does what it
+    /// does after a successful reload's swap, comparing `before` with
+    /// `engine.config` (its view state, the serve and Tailscale switches,
+    /// the restart warning), so nothing claims a setting that is not in
+    /// force. A failure modal follows it.
+    ConfigAdopted {
+        before: Box<Config>,
+    },
 
     // -- Project persistence (App applies view follow-up; Engine performed mutations). --
     ProjectPersistenceOutcome(Box<ProjectPersistenceOutcome>),
@@ -2394,7 +2398,11 @@ impl Engine {
                     // against it, so they are never dropped.
                     if let Err(err) = self.apply_reloaded_config(config) {
                         failure = Some(EventReaction::Multi(vec![
-                            EventReaction::AdoptConfigView,
+                            EventReaction::ConfigAdopted {
+                                before: Box::new(
+                                    before_reload.clone().unwrap_or_else(|| self.config.clone()),
+                                ),
+                            },
                             EventReaction::OpenConfigReloadFailedModal(format!(
                                 "The new config was adopted, but applying it fully failed: \
                                  {err:#}"
@@ -4887,7 +4895,7 @@ mod tests {
             }
             EventReaction::ApplyReloadedConfig(_) => "ApplyReloadedConfig",
             EventReaction::OpenConfigReloadFailedModal(_) => "OpenConfigReloadFailedModal",
-            EventReaction::AdoptConfigView => "AdoptConfigView",
+            EventReaction::ConfigAdopted { .. } => "ConfigAdopted",
             EventReaction::ProjectPersistenceOutcome(_) => "ProjectPersistenceOutcome",
             EventReaction::StartupLogsArrived { .. } => "StartupLogsArrived",
             EventReaction::StartupLogContentArrived { .. } => "StartupLogContentArrived",
@@ -9148,9 +9156,9 @@ mod tests {
     }
 
     /// The engine's own apply of a coalesced reload failing still adopts the
-    /// new config, so the surface is told to take the adopted config's view
-    /// state before the failure modal, and the modal says the config was
-    /// adopted rather than that it was refused.
+    /// new config, so the surface is told it was adopted, with the config
+    /// from before the reload to compare against, ahead of the failure
+    /// modal, and the modal says the config was adopted rather than refused.
     #[test]
     fn an_engine_apply_failure_tells_the_surface_to_take_the_adopted_view() {
         let (mut engine, _tmp) = test_engine();
@@ -9173,9 +9181,10 @@ mod tests {
         break_the_session_database(&engine);
         let reactions = flatten(engine.process_worker_event(event));
         assert_eq!(engine.config.ui.left_width_pct, 33, "adopted");
-        let view = reactions
-            .iter()
-            .position(|reaction| matches!(reaction, EventReaction::AdoptConfigView));
+        let view = reactions.iter().position(|reaction| {
+            matches!(reaction, EventReaction::ConfigAdopted { before }
+                if before.ui.left_width_pct != 33)
+        });
         let modal = reactions.iter().position(|reaction| {
             matches!(reaction, EventReaction::OpenConfigReloadFailedModal(message)
                 if message.contains("adopted"))

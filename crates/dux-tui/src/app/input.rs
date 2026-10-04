@@ -13181,8 +13181,13 @@ not_a_real_action = ["x"]
         ));
         assert_ne!(app.left_width_pct, 37, "a refused reload adopts nothing");
         app.prompt = PromptState::None;
+        let mut before = app.engine.config.clone();
+        before.ui.left_width_pct = 20;
+        before.ui.show_changes_pane = true;
         app.apply_reaction(EventReaction::Multi(vec![
-            EventReaction::AdoptConfigView,
+            EventReaction::ConfigAdopted {
+                before: Box::new(before),
+            },
             EventReaction::OpenConfigReloadFailedModal(
                 "The new config was adopted, but applying it fully failed".to_string(),
             ),

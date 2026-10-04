@@ -31,11 +31,10 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
         path: paths.config_path.clone(),
         problem,
     };
-    // Read, migrate and write under the config write lock, so a `dux config
-    // set` (or any other writer) landing meanwhile is part of what is
-    // migrated rather than overwritten by the copy read before it.
-    let (raw, text, migrated) =
-        dux_core::config_write::migrate_config_file(&paths.config_path, |read| {
+    // Read the file and run the migrations on it: the text to write when
+    // they changed something, and what was read and what it became.
+    let migrate =
+        |read: std::io::Result<String>| -> Result<(Option<String>, (String, String, bool))> {
             let raw = read.map_err(|error| {
                 load_error(dux_core::config::ConfigLoadProblem::Unreadable(
                     error.to_string(),
@@ -61,7 +60,18 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
             let text = doc.to_string();
             let migrated = migrations_changed || retired_keys_changed || folded_keys_changed;
             Ok((migrated.then(|| text.clone()), (raw, text, migrated)))
-        })?;
+        };
+    // Most starts migrate nothing, and those never take the write lock, so a
+    // lock file this user cannot open does not stop them. One that does
+    // migrate reads, migrates and writes again under the lock, so a `dux
+    // config set` (or any other writer) landing meanwhile is part of what is
+    // migrated rather than overwritten by the copy read before it.
+    let (_, unlocked) = migrate(std::fs::read_to_string(&paths.config_path))?;
+    let (raw, text, migrated) = if unlocked.2 {
+        dux_core::config_write::migrate_config_file(&paths.config_path, migrate)?
+    } else {
+        unlocked
+    };
 
     // The error gives a position and the kind of problem, never the file's
     // text, which may hold a token. The position is in the user's own text
@@ -4117,6 +4127,37 @@ args = [\"-l\"]
             "the other write survives:\n{after}"
         );
         assert!(!after.contains("tailscale_enabled"), "migrated:\n{after}");
+    }
+
+    /// A config with nothing to migrate never touches the write lock, so a
+    /// lock file this user cannot open (left by a `sudo dux`) does not stop
+    /// the start.
+    #[test]
+    fn a_config_with_nothing_to_migrate_starts_without_the_write_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        fs::write(&paths.config_path, "[ui]\nleft_width_pct = 30\n").expect("seed");
+        let lock = dux_core::config_write::ConfigFileLock::lock_path(&paths.config_path);
+        fs::write(&lock, "").unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&lock).is_ok() {
+            // Running as root: every file opens, so there is nothing to show.
+            return;
+        }
+        let config = ensure_config(&paths).expect("starts");
+        assert_eq!(config.ui.left_width_pct, 30);
+        // A migration still needs the lock, and says so.
+        fs::write(&paths.config_path, "[server]\ntailscale_enabled = true\n").expect("seed");
+        let err = ensure_config(&paths).expect_err("the migration needs the lock");
+        assert!(format!("{err:#}").contains("config lock"), "{err:#}");
     }
 
     #[test]

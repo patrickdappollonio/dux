@@ -532,16 +532,24 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
             {
                 merge_changed(t, disk_table, base_side.child(key), ours_table);
             }
+            // An array the base never had (memory and the file each started
+            // one) is merged against an empty one, so the file's own entries
+            // stay beside memory's.
             (
                 Item::ArrayOfTables(ours_array),
                 Item::ArrayOfTables(disk_array),
                 Some(Item::ArrayOfTables(t)),
-            ) if base_item.is_some_and(Item::is_array_of_tables) => {
+            ) if base_item.is_none_or(Item::is_array_of_tables) => {
+                let empty = toml_edit::ArrayOfTables::new();
                 merge_array_of_tables(
                     t,
                     disk_array,
                     raw_item.and_then(Item::as_array_of_tables),
-                    base_item.and_then(Item::as_array_of_tables),
+                    Some(
+                        base_item
+                            .and_then(Item::as_array_of_tables)
+                            .unwrap_or(&empty),
+                    ),
                     ours_array,
                 );
             }
@@ -549,16 +557,18 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
             // dux writes it, or as the user wrote it in either form) is
             // merged entry by entry like any other table, and keeps the
             // file's form: a `[projects.env]` subtable stays one, with its
-            // comments, and an inline table stays inline.
+            // comments, and an inline table stays inline. A table the base
+            // never had (memory and the file each started one) is merged
+            // against an empty one, so the file's own entries stay.
             (ours_item, disk_item, Some(target_item))
                 if table_like(ours_item).is_some()
                     && table_like(disk_item).is_some()
-                    && base_item.and_then(table_like).is_some() =>
+                    && base_item.is_none_or(|item| table_like(item).is_some()) =>
             {
                 let (Some(ours_table), Some(disk_table), Some(base_table)) = (
                     table_like(ours_item),
                     table_like(disk_item),
-                    base_item.and_then(table_like),
+                    base_item.map_or(Some(Table::new()), table_like),
                 ) else {
                     continue;
                 };
@@ -681,26 +691,62 @@ fn put_in_place(target: &mut Table, key: &str, mut item: Item) {
     }
 }
 
-/// The first entry of `list` not yet `used` that is the same entry as
-/// `entry`, trying, in order: the same `id` AND the same `path`; the same
-/// `id`; the same `path`. The exact pair comes first so a copy-pasted entry
-/// with the original's id but its own path never takes the original's
-/// place. Falling back past a differing `id` is deliberate: a hand-written
-/// project has no id of its own, so each read mints a fresh one, and an id
-/// adopted from the session database replaces the file's for the same path.
-/// Never by `name`: two different projects can share one (two folders both
-/// called `api`), and matching them would drop one or give it the other's id.
-fn find_entry(list: &[&Table], used: &[bool], entry: &Table) -> Option<usize> {
+/// How strongly two entries are the same entry, strongest first: the same
+/// `id` AND the same `path`; the same `id`; the same `path`. The exact pair
+/// comes first so a copy-pasted entry with the original's id but its own
+/// path never takes the original's place. Falling back past a differing
+/// `id` is deliberate: a hand-written project has no id of its own, so each
+/// read mints a fresh one, and an id adopted from the session database
+/// replaces the file's for the same path. Never by `name`: two different
+/// projects can share one (two folders both called `api`), and matching them
+/// would drop one or give it the other's id.
+const MATCH_TIERS: usize = 3;
+
+fn same_entry_at(tier: usize, a: &Table, b: &Table) -> bool {
     let field = |table: &Table, name: &str| table.get(name).map(item_text);
-    let same = |a: &Table, b: &Table, name: &str| matches!((field(a, name), field(b, name)), (Some(x), Some(y)) if x == y);
-    let tiers: [&dyn Fn(&Table) -> bool; 3] = [
-        &|other| same(other, entry, "id") && same(other, entry, "path"),
-        &|other| same(other, entry, "id"),
-        &|other| same(other, entry, "path"),
-    ];
-    tiers
-        .iter()
-        .find_map(|tier| (0..list.len()).find(|&i| !used[i] && tier(list[i])))
+    let same =
+        |name: &str| matches!((field(a, name), field(b, name)), (Some(x), Some(y)) if x == y);
+    match tier {
+        0 => same("id") && same("path"),
+        1 => same("id"),
+        _ => same("path"),
+    }
+}
+
+/// The first entry of `list` not yet `used` that is the same entry as
+/// `entry`, at the strongest tier any entry matches at.
+fn find_entry(list: &[&Table], used: &[bool], entry: &Table) -> Option<usize> {
+    (0..MATCH_TIERS)
+        .find_map(|tier| (0..list.len()).find(|&i| !used[i] && same_entry_at(tier, list[i], entry)))
+}
+
+/// Match each of `probes` (an entry, through any of the tables standing for
+/// it, in order of preference) to at most one entry of `list` not yet
+/// `used`, as ONE assignment: every match at a stronger tier is made, across
+/// all the entries, before any at a weaker one, so a weak match (the same
+/// path) never takes an entry a strong one (the same id) wants, whatever
+/// order the entries come in. Marks what it matched as used.
+fn assign_entries(
+    probes: &[Vec<&Table>],
+    list: &[&Table],
+    used: &mut [bool],
+) -> Vec<Option<usize>> {
+    let mut matched = vec![None; probes.len()];
+    for tier in 0..MATCH_TIERS {
+        for (slot, tables) in probes.iter().enumerate() {
+            if matched[slot].is_some() {
+                continue;
+            }
+            let found = tables.iter().find_map(|probe| {
+                (0..list.len()).find(|&i| !used[i] && same_entry_at(tier, list[i], probe))
+            });
+            if let Some(i) = found {
+                used[i] = true;
+                matched[slot] = Some(i);
+            }
+        }
+    }
+    matched
 }
 
 /// An entry's text for comparing base and memory. When the file's own entry
@@ -737,28 +783,46 @@ fn merge_array_of_tables(
     let disks: Vec<&Table> = disk.iter().collect();
     let bases: Vec<&Table> = base.iter().collect();
     let raws: Vec<&Table> = raw.map(|raw| raw.iter().collect()).unwrap_or_default();
+    let ours: Vec<&Table> = ours.iter().collect();
     let mut disk_used = vec![false; disks.len()];
     let mut base_used = vec![false; bases.len()];
     let mut raw_used = vec![false; raws.len()];
+    // Memory's entries against the base, then against what dux has seen
+    // (through their base entry first), then against the file (through any
+    // of the three).
+    let base_of = assign_entries(
+        &ours.iter().map(|entry| vec![*entry]).collect::<Vec<_>>(),
+        &bases,
+        &mut base_used,
+    );
+    let raw_of = assign_entries(
+        &ours
+            .iter()
+            .zip(&base_of)
+            .map(|(entry, b)| b.map(|b| bases[b]).into_iter().chain([*entry]).collect())
+            .collect::<Vec<_>>(),
+        &raws,
+        &mut raw_used,
+    );
+    let disk_of = assign_entries(
+        &ours
+            .iter()
+            .zip(base_of.iter().zip(&raw_of))
+            .map(|(entry, (b, r))| {
+                std::iter::once(*entry)
+                    .chain(b.map(|b| bases[b]))
+                    .chain(r.map(|r| raws[r]))
+                    .collect()
+            })
+            .collect::<Vec<_>>(),
+        &disks,
+        &mut disk_used,
+    );
     let mut merged = toml_edit::ArrayOfTables::new();
-    for entry in ours.iter() {
-        let base_index = find_entry(&bases, &base_used, entry);
-        if let Some(b) = base_index {
-            base_used[b] = true;
-        }
-        let raw_index = base_index
-            .and_then(|b| find_entry(&raws, &raw_used, bases[b]))
-            .or_else(|| find_entry(&raws, &raw_used, entry));
-        if let Some(r) = raw_index {
-            raw_used[r] = true;
-        }
-        let raw_entry = raw_index.map(|r| raws[r]);
-        let disk_index = find_entry(&disks, &disk_used, entry)
-            .or_else(|| base_index.and_then(|b| find_entry(&disks, &disk_used, bases[b])))
-            .or_else(|| raw_entry.and_then(|r| find_entry(&disks, &disk_used, r)));
-        if let Some(d) = disk_index {
-            disk_used[d] = true;
-        }
+    for (slot, entry) in ours.iter().copied().enumerate() {
+        let base_index = base_of[slot];
+        let raw_entry = raw_of[slot].map(|r| raws[r]);
+        let disk_index = disk_of[slot];
         let ignore_id = raw_entry.is_some_and(|r| !r.contains_key("id"))
             || disk_index.is_some_and(|d| !disks[d].contains_key("id"));
         let unchanged = base_index
@@ -797,16 +861,27 @@ fn merge_array_of_tables(
     // has seen of the file says nothing about what memory removed, and
     // asking it would drop an entry added by hand on the save after it was
     // first written, or one dux removed and the user put back.
-    for (i, entry) in disks.iter().enumerate() {
-        if disk_used[i] {
-            continue;
-        }
-        // Each base entry answers for one file entry at most: once it has
-        // matched one, a second file entry it would also match (moved by
-        // hand, then another added at the old path) was added on disk.
-        match find_entry(&bases, &base_used, entry) {
-            Some(b) => base_used[b] = true,
-            None => merged.push((*entry).clone()),
+    // Each base entry answers for one file entry at most, matched as one
+    // assignment: a file entry with the base entry's id takes it before
+    // another that only shares its path (moved by hand, then a new one
+    // added at the old path), in whichever order the file lists them.
+    let leftovers: Vec<&Table> = disks
+        .iter()
+        .zip(&disk_used)
+        .filter(|(_, used)| !**used)
+        .map(|(entry, _)| *entry)
+        .collect();
+    let removed = assign_entries(
+        &leftovers
+            .iter()
+            .map(|entry| vec![*entry])
+            .collect::<Vec<_>>(),
+        &bases,
+        &mut base_used,
+    );
+    for (entry, removed) in leftovers.iter().zip(removed) {
+        if removed.is_none() {
+            merged.push((*entry).clone());
         }
     }
     *target = merged;
@@ -1068,7 +1143,79 @@ pub fn render_config_plain(config: &Config) -> String {
 
 /// Apply every section patch to `doc`. Mirrors the section sequence the TUI's
 /// existing-file branch ran, so both surfaces produce the same managed shape.
+///
+/// A user-edited file can hold any shape. A section written inline
+/// (`env = { A = "1" }` before any header, or a provider written inline) is
+/// patched as a table and written back inline, so it keeps the user's form.
 fn apply_patches(doc: &mut DocumentMut, config: &Config) {
+    let inline = inline_sections(doc);
+    apply_section_patches(doc, config);
+    restore_inline_sections(doc, &inline);
+}
+
+/// The paths of the sections the patches write that the file holds inline:
+/// every top-level inline table, and every inline table directly under
+/// `[providers]`.
+fn inline_sections(doc: &DocumentMut) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    for (key, item) in doc.iter() {
+        if is_inline_table(item) {
+            paths.push(vec![key.to_string()]);
+        }
+    }
+    let providers: Option<Vec<String>> = match doc.get("providers") {
+        Some(Item::Table(table)) => Some(
+            table
+                .iter()
+                .filter(|(_, item)| is_inline_table(item))
+                .map(|(key, _)| key.to_string())
+                .collect(),
+        ),
+        Some(Item::Value(Value::InlineTable(table))) => Some(
+            table
+                .iter()
+                .filter(|(_, value)| value.is_inline_table())
+                .map(|(key, _)| key.to_string())
+                .collect(),
+        ),
+        _ => None,
+    };
+    for name in providers.unwrap_or_default() {
+        paths.push(vec!["providers".to_string(), name]);
+    }
+    // Innermost first, so a provider goes back inline before its parent.
+    paths.sort_by_key(|path| std::cmp::Reverse(path.len()));
+    paths
+}
+
+/// Put each section of `paths` that the patches turned into a table back
+/// inline, in place, so its position and the comment above it stay.
+fn restore_inline_sections(doc: &mut DocumentMut, paths: &[Vec<String>]) {
+    for path in paths {
+        restore_inline_at(doc.as_table_mut(), path);
+    }
+}
+
+fn restore_inline_at(table: &mut Table, path: &[String]) {
+    match path {
+        [] => {}
+        [last] => {
+            if let Some(item) = table.get_mut(last)
+                && let Item::Table(section) = item
+            {
+                let inline = std::mem::take(section).into_inline_table();
+                *item = toml_edit::value(inline);
+            }
+        }
+        [parent, rest @ ..] => {
+            if let Some(Item::Table(next)) = table.get_mut(parent) {
+                restore_inline_at(next, rest);
+            }
+        }
+    }
+}
+
+fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     // --- top-level (no table) keys ---
     // A dotless root key must render before any table header or TOML would parse
     // it as belonging to the preceding table. `patch_root_u16` positions it at
@@ -1501,11 +1648,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.keys.show_terminal_keys,
     );
     {
-        let keys_table = doc
-            .entry("keys")
-            .or_insert_with(|| Item::Table(Table::new()))
-            .as_table_mut()
-            .unwrap();
+        let keys_table = ensure_table(doc, "keys");
         for (action, key_strs) in &config.keys.bindings {
             let mut arr = Array::new();
             for s in key_strs {
@@ -1533,10 +1676,30 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
 ///
 /// Public because the TUI's deprecation migrations reuse it.
 pub fn ensure_table<'a>(doc: &'a mut DocumentMut, section: &str) -> &'a mut Table {
-    doc.entry(section)
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .unwrap()
+    table_in(doc.as_table_mut(), section)
+}
+
+/// Get or create the table at `key` of `parent`, whatever the file holds
+/// there: a table written inline becomes a table with the same entries (see
+/// [`apply_patches`], which puts it back inline), and any other value, which
+/// no reader takes as that section anyway (a load reads it as the
+/// defaults), is replaced by an empty table. Never panics on a user's shape.
+fn table_in<'a>(parent: &'a mut Table, key: &str) -> &'a mut Table {
+    let item = parent
+        .entry(key)
+        .or_insert_with(|| Item::Table(Table::new()));
+    if !item.is_table() {
+        let table = match std::mem::take(item) {
+            Item::Value(Value::InlineTable(inline)) => inline.into_table(),
+            _ => Table::new(),
+        };
+        *item = Item::Table(table);
+    }
+    match item {
+        Item::Table(table) => table,
+        // Set to a table just above.
+        _ => unreachable!("the item was just made a table"),
+    }
 }
 
 fn patch_table_str(doc: &mut DocumentMut, section: &str, key: &str, value: &str) {
@@ -1611,18 +1774,10 @@ fn patch_table_string_array(doc: &mut DocumentMut, section: &str, key: &str, val
 }
 
 fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
-    let providers_table = doc
-        .entry("providers")
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .unwrap();
+    let providers_table = ensure_table(doc, "providers");
 
     for (name, config) in &providers.commands {
-        let tbl = providers_table
-            .entry(name)
-            .or_insert_with(|| Item::Table(Table::new()))
-            .as_table_mut()
-            .unwrap();
+        let tbl = table_in(providers_table, name);
 
         tbl["command"] = toml_edit::value(&config.command);
 

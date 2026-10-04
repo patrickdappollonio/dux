@@ -5814,7 +5814,7 @@ impl App {
     /// Take the view state only a reload changes (bindings, theme, pane
     /// sizes, diff line numbers) from `config`, returning the theme's own
     /// warning when it could not be loaded.
-    fn take_reload_view_state(&mut self, config: &Config) -> Option<String> {
+    pub(crate) fn take_reload_view_state(&mut self, config: &Config) -> Option<String> {
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         self.interactive_patterns = bindings.interactive_byte_patterns();
         self.bindings = bindings;
@@ -5831,30 +5831,10 @@ impl App {
         theme_warning
     }
 
-    /// The engine adopted a reloaded config its own apply could not finish
-    /// (see `EventReaction::AdoptConfigView`): the view takes every setting
-    /// of `engine.config`, so a later drag or toggle starts from it rather
-    /// than writing the old values back. The failure modal that follows is
-    /// the message, so the theme's own warning is left to the next reload.
-    pub(crate) fn adopt_config_view(&mut self) {
-        let config = self.engine.config.clone();
-        let _ = self.take_reload_view_state(&config);
-        self.sync_view_state_from_config();
-        self.rebuild_left_items();
-        if self.selected_left >= self.left_items_cache.len() {
-            self.selected_left = self.left_items_cache.len().saturating_sub(1);
-        }
-    }
-
     fn apply_reloaded_config(&mut self, mut config: Config) -> Result<()> {
         let theme_warning = self.take_reload_view_state(&config);
         let github_was_enabled = self.engine.github_integration_enabled;
         self.engine.github_integration_enabled = config.ui.github_integration;
-        if !github_was_enabled && self.engine.github_integration_enabled {
-            // Off-to-on through a config reload is the same transition as the
-            // palette toggle, and needs the same fresh answer from `gh`.
-            self.engine.spawn_gh_status_check();
-        }
         self.engine.projects = load_projects(
             &self.engine.session_store.load_projects()?,
             &self.engine.session_store.load_project_created_ats()?,
@@ -5867,11 +5847,27 @@ impl App {
             &self.bindings,
             &self.engine.session_store,
         )?;
-        // Captured BEFORE the swap, because the comparison is against what the
-        // running serve was told, not against what the file now says.
-        let tailscale_before = self.engine.config.server.tailscale_mode();
-        self.engine.config = config;
+        let before = std::mem::replace(&mut self.engine.config, config);
         self.engine.retune_after_config_swap();
+        self.run_config_swap_effects(&before, github_was_enabled);
+        if let Some(message) = theme_warning {
+            self.set_pinned_warning(message);
+        }
+        Ok(())
+    }
+
+    /// Everything a reload owes once `engine.config` holds the new config,
+    /// compared with `before`, the config it replaced: the view, the project
+    /// list, the GitHub integration, the serve and Tailscale switches.
+    /// `github_was_enabled` is whether the integration was on before. Runs
+    /// after a successful apply and after one that failed but adopted the
+    /// config anyway, so neither claims a setting that is not in force.
+    pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
+        if !github_was_enabled && self.engine.github_integration_enabled {
+            // Off-to-on through a config reload is the same transition as the
+            // palette toggle, and needs the same fresh answer from `gh`.
+            self.engine.spawn_gh_status_check();
+        }
         self.sync_view_state_from_config();
 
         self.engine.refresh_project_defaults();
@@ -5914,10 +5910,12 @@ impl App {
         // the reload: the serve is the companion's, and the actor arm that owns it
         // for `dux server` and the flip has no control handle here. Skipped when
         // the same reload just STARTED the serve, because that serve read the new
-        // mode from config on its way up, and when it just stopped one.
+        // mode from config on its way up, and when it just stopped one. Compared
+        // with the config before the reload, because the comparison is against
+        // what the running serve was told, not against what the file now says.
         if serving_before
             && self.background_server_is_serving()
-            && tailscale_before != self.engine.config.server.tailscale_mode()
+            && before.server.tailscale_mode() != self.engine.config.server.tailscale_mode()
         {
             let mode = self.engine.config.server.tailscale_mode();
             self.ask_companion_for_tailscale_mode(mode);
@@ -5930,10 +5928,6 @@ impl App {
         if let Some(message) = tab_reaches_agent_trap_warning(&self.bindings, &self.engine.config) {
             self.set_warning(message);
         }
-        if let Some(message) = theme_warning {
-            self.set_pinned_warning(message);
-        }
-        Ok(())
     }
 
     pub(crate) fn open_edit_macros(&mut self) {

@@ -447,6 +447,16 @@ fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::c
     }
 }
 
+/// The config a `ConfigAdopted` reaction (bare or inside a `Multi`) says was
+/// replaced, when the reaction carries one.
+fn find_config_adopted(reaction: &EventReaction) -> Option<dux_core::config::Config> {
+    match reaction {
+        EventReaction::ConfigAdopted { before } => Some((**before).clone()),
+        EventReaction::Multi(reactions) => reactions.iter().find_map(find_config_adopted),
+        _ => None,
+    }
+}
+
 /// Which way of serving a reload arrived at, because each owes a different set of
 /// restart sentences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2433,6 +2443,91 @@ impl EngineService {
         }
     }
 
+    /// The reload's follow-up on this loop, which owns the reload for `dux
+    /// server` and the flip. `ApplyReloadedConfig` and
+    /// `ProjectPersistenceOutcome` are distinct variants, so consuming the
+    /// reaction here never skips the project sync.
+    ///
+    /// The reaction may arrive WRAPPED in a `Multi` when config-mutating
+    /// commands were deferred during the reload (the engine folds the
+    /// `ApplyReloadedConfig` in with the deferred saves' status reactions), so
+    /// both forms are searched. The deferred saves' own status reactions were
+    /// already surfaced by the fan-out (it flattens `Multi`). A config in force
+    /// after a failed apply (this loop's own, or the engine's, which arrives as
+    /// `ConfigAdopted`) gets everything a reload owes the running server, as a
+    /// successful one does, so nothing stays on the config it replaced.
+    pub(crate) fn apply_reload_followup(&mut self, engine: &mut Engine, reaction: EventReaction) {
+        let adopted = find_config_adopted(&reaction);
+        if let Some(config) = take_apply_reloaded_config(reaction) {
+            let before = engine.config.clone();
+            match engine.apply_reloaded_config(*config) {
+                Ok(()) => {
+                    let _ = self.status.send(WireStatus::from_update(
+                        &dux_core::config_reload_status::applied(),
+                    ));
+                    self.config_in_force(engine, &before);
+                }
+                Err(e) => {
+                    // The engine kept the new config anyway, so it is in
+                    // force; the failure is said last, so it holds the line.
+                    self.config_in_force(engine, &before);
+                    let _ = self.status.send(WireStatus::from_update(
+                        &dux_core::config_reload_status::apply_failed(&format!("{e:#}")),
+                    ));
+                }
+            }
+        }
+        if let Some(before) = adopted {
+            self.config_in_force(engine, &before);
+        }
+    }
+
+    /// Everything a reload owes the running server once `engine.config` is
+    /// in force, compared with `before`, the config it replaced.
+    fn config_in_force(&mut self, engine: &Engine, before: &dux_core::config::Config) {
+        // Memory now matches disk: any pending raw "Save" has been adopted, so
+        // disk is no longer ahead.
+        self.config_disk_ahead = false;
+        self.live_limits.store_from(&engine.config.server);
+        // Signal the web layer that config-static state changed so it emits a
+        // `config.changed` event and clients refetch `/api/v1/bootstrap`.
+        // Fire-and-forget: an `Err` only means no forwarder is listening (e.g.
+        // the TUI flip), which is fine.
+        let _ = self.config_reload_tx.send(());
+        // The `[server]` bind section only takes effect at startup; a reload
+        // cannot rebind listeners. Warn so the user knows a restart is needed
+        // for those specific changes to take effect.
+        if let Some(warning) =
+            server_restart_warning_copy(&before.server, &engine.config.server, self.surface)
+        {
+            let _ = self.status.send(WireStatus::new("warning", warning));
+        }
+        // `[server] tailscale` IS live, so a reload that changed it acts rather
+        // than warning. This is the reload owner for `dux server` and for the
+        // flip. Background mode fills the same slot but never runs this loop,
+        // so its reload is the terminal UI's and there is no double apply. The
+        // parsed MODE, never the raw string: the value is trimmed and
+        // case-insensitive, so a user who retyped "Auto" must not have their
+        // listener stopped and started for nothing.
+        let next_tailscale = engine.config.server.tailscale_mode();
+        if before.server.tailscale_mode() != next_tailscale
+            && let Some(control) = self.tailscale_mode_control.get()
+        {
+            let status = self.status.tx.clone();
+            control.set_mode_detached(next_tailscale, move |outcome| {
+                let report = outcome.report(next_tailscale);
+                let tone = if report.warning { "warning" } else { "info" };
+                // The same key the terminal UI's mode change uses, so one
+                // answer per change whichever surface asked for it.
+                let _ = status.send(WireStatus::keyed(
+                    dux_core::tailscale::MODE_CHANGE_STATUS_KEY,
+                    tone,
+                    report.message,
+                ));
+            });
+        }
+    }
+
     /// Adopt the two live `[server]` limits from a config the drainer has already
     /// applied. The companion seam's post-apply half; see
     /// [`dux_core::background_serve::BackgroundServeCompanion::note_config_applied`].
@@ -2806,87 +2901,8 @@ pub(crate) fn run_engine_loop(
             // A reload worker re-read config.toml; apply the new config to the
             // running engine. This consumes `reaction`, so it MUST be the last
             // use of it in the loop body (all `&reaction` borrows above end
-            // first). `ApplyReloadedConfig` and `ProjectPersistenceOutcome` are
-            // distinct variants, so consuming here never skips the project sync.
-            //
-            // The reload follow-up reaction may arrive WRAPPED in a `Multi` when
-            // config-mutating commands were deferred during the reload (the
-            // engine folds the `ApplyReloadedConfig` in with the deferred saves'
-            // status reactions). Pull the `ApplyReloadedConfig` out of either the
-            // bare or the wrapped form so the server-restart warning always
-            // runs. The deferred saves' own status reactions were already
-            // surfaced by the `wire_statuses_from_reaction` drain above (it
-            // flattens `Multi`).
-            if let Some(config) = take_apply_reloaded_config(reaction) {
-                // Capture the rebind-relevant [server] settings
-                // BEFORE the swap so we can tell whether the reload touched
-                // anything that only takes effect at startup (listeners are
-                // bound once; reload-config never rebinds). Comparing here, where the
-                // arm already holds both the running config (pre-swap) and the
-                // incoming one, keeps the detection next to the config-reload handler.
-                let restart_warning =
-                    server_restart_warning_copy(&engine.config.server, &config.server, svc.surface);
-                // The parsed MODE, never the raw string: the value is trimmed
-                // and case-insensitive, so a user who retyped "Auto" must not
-                // have their listener stopped and started for nothing.
-                let previous_tailscale = engine.config.server.tailscale_mode();
-                let next_tailscale = config.server.tailscale_mode();
-                match engine.apply_reloaded_config(*config) {
-                    Ok(()) => {
-                        // Memory now matches disk: any pending raw "Save" has been
-                        // adopted, so disk is no longer ahead.
-                        svc.config_disk_ahead = false;
-                        svc.live_limits.store_from(&engine.config.server);
-                        // Signal the web layer that config-static state changed so
-                        // it emits a `config.changed` event and clients refetch
-                        // `/api/v1/bootstrap`. Fire-and-forget: an `Err` only means
-                        // no forwarder is listening (e.g. the TUI flip), which is
-                        // fine.
-                        let _ = svc.config_reload_tx.send(());
-                        let _ = svc.status.send(WireStatus::from_update(
-                            &dux_core::config_reload_status::applied(),
-                        ));
-
-                        // The new config WAS applied to the engine, but the
-                        // `[server]` bind section only takes effect at startup; a
-                        // reload cannot rebind listeners. Warn so the user knows a
-                        // restart is needed for those specific changes to take
-                        // effect.
-                        if let Some(warning) = restart_warning {
-                            let _ = svc.status.send(WireStatus::new("warning", warning));
-                        }
-
-                        // `[server] tailscale` IS live, so a reload that changed
-                        // it acts rather than warning. This is the reload owner
-                        // for `dux server` and for the flip. Background mode
-                        // fills the same slot but never runs this loop, so its
-                        // reload is the terminal UI's and there is no double
-                        // apply.
-                        if previous_tailscale != next_tailscale
-                            && let Some(control) = svc.tailscale_mode_control.get()
-                        {
-                            let status = svc.status.tx.clone();
-                            control.set_mode_detached(next_tailscale, move |outcome| {
-                                let report = outcome.report(next_tailscale);
-                                let tone = if report.warning { "warning" } else { "info" };
-                                // The same key the terminal UI's mode change
-                                // uses, so one answer per change whichever
-                                // surface asked for it.
-                                let _ = status.send(WireStatus::keyed(
-                                    dux_core::tailscale::MODE_CHANGE_STATUS_KEY,
-                                    tone,
-                                    report.message,
-                                ));
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        let _ = svc.status.send(WireStatus::from_update(
-                            &dux_core::config_reload_status::apply_failed(&format!("{e:#}")),
-                        ));
-                    }
-                }
-            }
+            // first).
+            svc.apply_reload_followup(&mut engine, reaction);
         }
 
         svc.run_maintenance(&mut engine);
@@ -4315,6 +4331,40 @@ mod tests {
 
         assert_eq!(limits.search_index_max_files(), 9);
         assert!(!limits.access_log());
+    }
+
+    /// A config the engine adopted after its own apply failed is in force, so
+    /// what a reload owes the running server follows it: the live limits and
+    /// the Host guard's allowed hosts take it, and browsers are told to
+    /// refetch, rather than everything staying on the config it replaced.
+    #[test]
+    fn a_config_adopted_after_a_failed_apply_reaches_the_running_server() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let limits = handle.live_limits();
+        let mut reloads = handle.subscribe_config_reloads();
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+        let before = engine.config.clone();
+        engine.config.server.allowed_hosts = vec!["after.example.com".to_string()];
+        engine.config.server.search_index_max_files = 4321;
+
+        svc.apply_reload_followup(
+            &mut engine,
+            EventReaction::Multi(vec![
+                EventReaction::ConfigAdopted {
+                    before: Box::new(before),
+                },
+                EventReaction::OpenConfigReloadFailedModal("applying it failed".to_string()),
+            ]),
+        );
+
+        assert_eq!(
+            limits.allowed_hosts().snapshot(),
+            vec!["after.example.com".to_string()]
+        );
+        assert_eq!(limits.search_index_max_files(), 4321);
+        assert!(reloads.try_recv().is_ok(), "browsers are told to refetch");
     }
 
     /// A background worker that died and came back is a fact about the process,

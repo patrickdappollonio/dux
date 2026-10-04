@@ -692,7 +692,7 @@ impl App {
             EventReaction::OpenConfigReloadFailedModal(message) => {
                 self.apply_open_config_reload_failed_modal(message);
             }
-            EventReaction::AdoptConfigView => self.adopt_config_view(),
+            EventReaction::ConfigAdopted { before } => self.apply_config_adopted(*before),
 
             EventReaction::ProjectPersistenceOutcome(boxed) => {
                 self.apply_project_persistence_outcome(*boxed);
@@ -846,34 +846,57 @@ impl App {
     }
 
     pub(crate) fn apply_reloaded_config_reaction(&mut self, config: Config) {
-        let bind_settings_changed = dux_core::config::server_bind_settings_changed(
-            &self.engine.config.server,
-            &config.server,
-        );
+        let before = self.engine.config.clone();
+        let github_was_enabled = self.engine.github_integration_enabled;
         let fallback = config.clone();
         let outcome = match self.apply_reloaded_config(config) {
             Err(error) => {
                 // The view could not take the new config, but the engine still
                 // adopts it, so memory, the writer's base and the file agree
-                // and nothing old is saved over the new file.
+                // and nothing old is saved over the new file. Everything a
+                // swap owes then runs against it, as after a successful
+                // apply, so no setting is claimed that is not in force; the
+                // failure is said last, so it holds the line.
                 self.engine.keep_reloaded_config(fallback);
-                // The view takes every setting of the kept config too, so a
-                // later drag or toggle starts from it rather than writing the
-                // old values back.
-                self.sync_view_state_from_config();
+                self.run_config_swap_effects(&before, github_was_enabled);
+                self.note_config_adopted(&before);
                 TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}"))
             }
             Ok(()) => TuiConfigReloadOutcome::Applied,
         };
         let applied = matches!(outcome, TuiConfigReloadOutcome::Applied);
-        if applied && let Some(companion) = self.companion.as_mut() {
-            companion.note_config_applied(&self.engine.config.server);
-        }
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
         }
         self.post_config_reload_outcome(&outcome);
-        if applied && bind_settings_changed {
+        if applied {
+            self.note_config_adopted(&before);
+        }
+    }
+
+    /// The engine adopted a reloaded config its own apply could not finish
+    /// (see `EventReaction::ConfigAdopted`): the view takes it, and
+    /// everything a reload's swap owes runs against `before`, the config it
+    /// replaced. The failure modal follows.
+    fn apply_config_adopted(&mut self, before: Config) {
+        let adopted = self.engine.config.clone();
+        // The failure modal that follows is the message, so the theme's own
+        // warning is left to the next reload.
+        let _ = self.take_reload_view_state(&adopted);
+        self.run_config_swap_effects(&before, before.ui.github_integration);
+        self.note_config_adopted(&before);
+    }
+
+    /// A new config is in force: the background server adopts its
+    /// `[server]` section, and a change only a restart applies says so.
+    fn note_config_adopted(&mut self, before: &Config) {
+        if let Some(companion) = self.companion.as_mut() {
+            companion.note_config_applied(&self.engine.config.server);
+        }
+        if dux_core::config::server_bind_settings_changed(
+            &before.server,
+            &self.engine.config.server,
+        ) {
             let serving = self.background_server_is_serving();
             self.set_pinned_warning(server_restart_warning(serving));
         }
@@ -3394,6 +3417,24 @@ mod tests {
             server_restart_warning(true),
             "a serving companion picks the stop-and-start copy"
         );
+    }
+
+    /// A config the engine adopted after its own apply failed runs the same
+    /// comparison a successful reload does: a bind change still owes the
+    /// restart warning.
+    #[test]
+    fn an_adopted_config_runs_the_reload_comparison() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let before = app.engine.config.clone();
+        app.engine.config.server.port += 1;
+
+        app.apply_reaction(EventReaction::ConfigAdopted {
+            before: Box::new(before),
+        });
+
+        let (_, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(message, server_restart_warning(false));
     }
 
     #[test]
