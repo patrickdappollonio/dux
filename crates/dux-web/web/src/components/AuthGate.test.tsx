@@ -487,16 +487,20 @@ describe("the gate layer's own events", () => {
     expect(drop.defaultPrevented).toBe(true)
   })
 
-  it("keeps IME composition on the login page away from the hidden terminal", async () => {
-    const onDocument = vi.fn()
-    document.addEventListener("compositionstart", onDocument, true)
-    try {
-      await signOutOver(<div>the app</div>)
-      fireEvent.compositionStart(screen.getByLabelText("Password"))
-      expect(onDocument).not.toHaveBeenCalled()
-    } finally {
-      document.removeEventListener("compositionstart", onDocument, true)
+  it("lets the gate's own controls hear presses, mouse buttons and the wheel", async () => {
+    // Nothing on the way to the gate may stop these: a future gate control
+    // with a hover, a tooltip or a press handler depends on them.
+    await signOutOver(<div>the app</div>)
+    const field = screen.getByLabelText("Password")
+    const heard: string[] = []
+    for (const type of ["pointerdown", "mousedown", "wheel", "compositionstart"]) {
+      field.addEventListener(type, () => heard.push(type))
     }
+    fireEvent.pointerDown(field)
+    fireEvent.mouseDown(field)
+    fireEvent.wheel(field)
+    fireEvent.compositionStart(field)
+    expect(heard).toEqual(["pointerdown", "mousedown", "wheel", "compositionstart"])
   })
 
   it("takes the hiding marks off again if something puts them back while it is up", async () => {

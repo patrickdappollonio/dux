@@ -291,3 +291,37 @@ describe("teardown", () => {
     expect(down.defaultPrevented).toBe(false)
   })
 })
+
+describe("a link press the sign-in gate interrupts", () => {
+  it("is forgotten when the gate goes up, so a release after sign-in opens nothing", async () => {
+    let signedIn = true
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) =>
+        String(input).endsWith("/auth/login")
+          ? new Response(null, { status: 204 })
+          : new Response(
+              JSON.stringify({ password_set: true, required_here: true, signed_in: signedIn }),
+            ),
+      ),
+    )
+    const gate = await import("@/lib/authGate")
+    await gate.initAuthGate()
+    linkAt = () => "https://example.test/a"
+    const { container } = setup()
+    press(container)
+    // The session ends mid-press; the release lands on the login page, which
+    // the pane's watcher leaves alone.
+    signedIn = false
+    gate.reportUnauthorized()
+    const layer = document.createElement("div")
+    layer.setAttribute("data-auth-gate-layer", "")
+    document.body.appendChild(layer)
+    release(layer)
+    signedIn = true
+    await gate.signIn("pw")
+    // The next release in the pane belongs to no press anyone made.
+    release(container)
+    expect(opened).toEqual([])
+  })
+})

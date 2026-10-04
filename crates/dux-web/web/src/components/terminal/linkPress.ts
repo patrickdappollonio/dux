@@ -23,6 +23,7 @@ import {
   linkPressAction,
   linkReleaseOpens,
 } from "@/lib/termkeys"
+import { isInGateLayer, onGateUp } from "@/lib/gateLayer"
 import { linkifierElement, primeLinkHover } from "@/lib/termlink"
 import { isDuxReplay } from "@/lib/termreplay"
 
@@ -119,6 +120,7 @@ export function createLinkPress(deps: LinkPressDeps): LinkPress {
   //    `isTrusted` check would skip every test and assistive-technology click.
   let inFlight: { uri: string; x: number; y: number; open: boolean } | null = null
   let outsideReleaseWatch: ((e: MouseEvent) => void) | null = null
+  let stopGateReset: (() => void) | null = null
   const disarmOutsideRelease = () => {
     if (!outsideReleaseWatch) return
     document.removeEventListener("mouseup", outsideReleaseWatch, true)
@@ -132,6 +134,9 @@ export function createLinkPress(deps: LinkPressDeps): LinkPress {
   const armOutsideRelease = () => {
     disarmOutsideRelease()
     const watch = (e: MouseEvent) => {
+      // A release on the sign-in gate's page is not this pane's; the gate
+      // going up already forgot the press (`onGateUp` below).
+      if (isInGateLayer(e.target)) return
       // The PRIMARY release ends the gesture; a chorded right release while
       // the left button is still down is somebody else's event.
       if (e.button !== 0) return
@@ -255,6 +260,13 @@ export function createLinkPress(deps: LinkPressDeps): LinkPress {
     },
     attach: (el) => {
       container = el
+      // A press the gate interrupts is forgotten, so a release after the next
+      // sign-in cannot pair with it and open a link nobody clicked.
+      stopGateReset?.()
+      stopGateReset = onGateUp(() => {
+        inFlight = null
+        disarmOutsideRelease()
+      })
       el.addEventListener("mousedown", onLinkPressCapture as EventListener, true)
       el.addEventListener("mouseup", onLinkReleaseCapture as EventListener, true)
     },
@@ -272,6 +284,8 @@ export function createLinkPress(deps: LinkPressDeps): LinkPress {
       )
       container = null
       disarmOutsideRelease()
+      stopGateReset?.()
+      stopGateReset = null
     },
   }
 }

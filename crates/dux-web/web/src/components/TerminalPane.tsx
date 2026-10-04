@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react"
+import { outsideGate } from "@/lib/gateLayer"
 import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 import { MonitorSmartphone } from "lucide-react"
@@ -344,13 +345,15 @@ export function TerminalPane(props: TerminalPaneProps) {
   // retried rather than dropped.
   const [compositionEnded, setCompositionEnded] = useState(0)
   useEffect(() => {
-    const start = () => {
+    // Composition on the sign-in gate's page is not this pane's: the app stays
+    // mounted under it, and these listeners see the gate's events first.
+    const start = outsideGate(() => {
       composingRef.current = true
-    }
-    const end = () => {
+    })
+    const end = outsideGate(() => {
       composingRef.current = false
       setCompositionEnded((n) => n + 1)
-    }
+    })
     document.addEventListener("compositionstart", start, true)
     document.addEventListener("compositionend", end, true)
     return () => {

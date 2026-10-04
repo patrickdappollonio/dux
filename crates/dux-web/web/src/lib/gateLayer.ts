@@ -1,21 +1,20 @@
-// The sign-in gate's layer, seen from the DOM: how to recognise it, and the
-// capture shield that keeps what happens on it away from the hidden app.
+// The sign-in gate's layer, as the hidden app's own listeners see it.
 //
-// While the gate is up the app stays mounted underneath it, and some of its
-// listeners sit on the document in the CAPTURE phase (the divider drags, which
-// hit-test by rectangle with no notion of what is painted over them; the
-// terminal's composition tracking; the panel library). Those run before the
-// event reaches the gate, so a stop on the gate itself comes too late for them.
-// The shield is a capture listener on the WINDOW, the first stop of every
-// event's journey, registered when this module loads (before any component
-// mounts and adds its own), so it runs ahead of all of them.
+// While the gate is up the app stays mounted underneath it, and a few of dux's
+// listeners sit on the document in the CAPTURE phase (the divider drags and
+// the Changes pane's gesture tracking, the terminal's composition tracking,
+// the link press's release watcher). Those see an event before the gate does,
+// so each one asks whether the event is aimed at the gate and leaves it alone
+// if so (`outsideGate`, or `isInGateLayer` directly). Nothing is stopped on the
+// way: the gate's own controls hear every event, presses and hovers included.
+// (react-resizable-panels needs nothing here: it already ignores a press on
+// content stacked above its separator.)
 //
-// It stops only events the gate's own controls do not need: presses, moves,
-// wheel, touch, IME composition, and file drags (whose default it also
-// prevents, so a file dropped on the login page does not navigate the tab away
-// and take the page's unsaved state with it). Focus, typing and clicks still
-// flow to the gate's fields and buttons, and a stop at the layer keeps their
-// bubbling away from the app's document and window listeners (`AuthGate.tsx`).
+// A gesture that began in the app before the gate went up can have its release
+// land on the gate, where those listeners now ignore it; `onGateUp` is how
+// each one resets what such a release would have ended.
+
+import { authPaused, subscribeAuth } from "./authGate"
 
 export const GATE_LAYER_ATTR = "data-auth-gate-layer"
 
@@ -23,48 +22,21 @@ export function isInGateLayer(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest(`[${GATE_LAYER_ATTR}]`) !== null
 }
 
-const SHIELDED_EVENTS = [
-  "pointerdown",
-  "pointermove",
-  "pointerup",
-  "pointercancel",
-  "pointerover",
-  "pointerout",
-  "pointerenter",
-  "pointerleave",
-  "mousedown",
-  "mousemove",
-  "mouseup",
-  "dblclick",
-  "contextmenu",
-  "touchstart",
-  "touchmove",
-  "touchend",
-  "touchcancel",
-  "wheel",
-  "compositionstart",
-  "compositionupdate",
-  "compositionend",
-  "dragenter",
-  "dragover",
-  "drop",
-] as const
-
-let gateUp = false
-
-/// Called by the gate layer as it shows and goes.
-export function setGateUp(up: boolean): void {
-  gateUp = up
-}
-
-function shield(event: Event): void {
-  if (!gateUp || !isInGateLayer(event.target)) return
-  if (event.type === "dragover" || event.type === "drop" || event.type === "dragenter") {
-    event.preventDefault()
+/// Wrap a listener of the hidden app's so it ignores events aimed at the gate.
+export function outsideGate<E extends Event>(listener: (event: E) => void): (event: E) => void {
+  return (event: E) => {
+    if (isInGateLayer(event.target)) return
+    listener(event)
   }
-  event.stopPropagation()
 }
 
-if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
-  for (const type of SHIELDED_EVENTS) window.addEventListener(type, shield, true)
+/// Run `reset` each time the page goes to one of the gate's pages. Returns the
+/// way to stop.
+export function onGateUp(reset: () => void): () => void {
+  let up = authPaused()
+  return subscribeAuth(() => {
+    const now = authPaused()
+    if (now && !up) reset()
+    up = now
+  })
 }

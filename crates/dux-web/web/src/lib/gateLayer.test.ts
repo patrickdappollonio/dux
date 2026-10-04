@@ -1,111 +1,116 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { GATE_LAYER_ATTR, isInGateLayer, setGateUp } from "./gateLayer"
+// The sign-in gate's layer as the hidden app's own listeners see it. The app
+// stays mounted under the gate, and a few of its listeners sit on the document
+// in the CAPTURE phase, where they see an event before the gate does. Each one
+// asks `isInGateLayer` (through `outsideGate`) and leaves the gate's events
+// alone; and gesture state a release on the gate would leave half-done is
+// reset the moment the gate goes up (`onGateUp`).
 
-// The capture shield. The hidden app listens on the document in the CAPTURE
-// phase (the divider drags, the terminal's composition tracking, the panel
-// library), which a stop at the gate layer itself comes too late for. A window
-// capture listener runs before every one of them.
+type Mod = typeof import("./gateLayer")
 
 let host: HTMLDivElement
 let field: HTMLInputElement
 let outside: HTMLDivElement
+let signedIn = true
 
 beforeEach(() => {
   host = document.createElement("div")
-  host.setAttribute(GATE_LAYER_ATTR, "")
+  host.setAttribute("data-auth-gate-layer", "")
   field = document.createElement("input")
   host.appendChild(field)
   document.body.appendChild(host)
   outside = document.createElement("div")
   document.body.appendChild(outside)
+  signedIn = true
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string) =>
+      String(input).endsWith("/auth/login")
+        ? new Response(null, { status: 204 })
+        : new Response(
+            JSON.stringify({ password_set: true, required_here: true, signed_in: signedIn }),
+          ),
+    ),
+  )
+  vi.resetModules()
 })
 
 afterEach(() => {
-  setGateUp(false)
   host.remove()
   outside.remove()
+  vi.unstubAllGlobals()
 })
 
-function dispatch(target: Element, type: string, init: EventInit = { bubbles: true }) {
-  const ev = new Event(type, { cancelable: true, ...init })
-  target.dispatchEvent(ev)
-  return ev
+async function load(): Promise<Mod> {
+  return import("./gateLayer")
 }
 
 describe("isInGateLayer", () => {
-  it("knows the gate's own elements and nothing else", () => {
-    expect(isInGateLayer(field)).toBe(true)
-    expect(isInGateLayer(outside)).toBe(false)
-    expect(isInGateLayer(null)).toBe(false)
+  it("knows the gate's own elements and nothing else", async () => {
+    const m = await load()
+    expect(m.isInGateLayer(field)).toBe(true)
+    expect(m.isInGateLayer(outside)).toBe(false)
+    expect(m.isInGateLayer(null)).toBe(false)
   })
 })
 
-describe("the capture shield", () => {
-  const SHIELDED = [
-    "pointerdown",
-    "pointermove",
-    "pointerup",
-    "mousedown",
-    "mouseup",
-    "dblclick",
-    "touchstart",
-    "wheel",
-    "compositionstart",
-    "compositionend",
-    "dragover",
-    "drop",
-  ]
-
-  it.each(SHIELDED)("keeps %s on the gate from the app's document capture listeners", (type) => {
-    setGateUp(true)
-    const spy = vi.fn()
-    document.addEventListener(type, spy, true)
+describe("outsideGate", () => {
+  it("runs the listener for the app's events and skips the gate's", async () => {
+    const m = await load()
+    const seen = vi.fn()
+    const listener = m.outsideGate(seen)
+    document.addEventListener("compositionstart", listener, true)
     try {
-      dispatch(field, type)
-      expect(spy).not.toHaveBeenCalled()
+      field.dispatchEvent(new Event("compositionstart", { bubbles: true }))
+      expect(seen).not.toHaveBeenCalled()
+      outside.dispatchEvent(new Event("compositionstart", { bubbles: true }))
+      expect(seen).toHaveBeenCalledTimes(1)
     } finally {
-      document.removeEventListener(type, spy, true)
+      document.removeEventListener("compositionstart", listener, true)
     }
   })
 
-  it("lets the same events through when the gate is down", () => {
-    const spy = vi.fn()
-    document.addEventListener("pointerdown", spy, true)
+  it("does not stop the event: the gate's own handlers still get it", async () => {
+    const m = await load()
+    const listener = m.outsideGate(() => {})
+    const onField = vi.fn()
+    field.addEventListener("pointerdown", onField)
+    document.addEventListener("pointerdown", listener, true)
     try {
-      dispatch(field, "pointerdown")
-      expect(spy).toHaveBeenCalledTimes(1)
+      field.dispatchEvent(new Event("pointerdown", { bubbles: true }))
+      expect(onField).toHaveBeenCalledTimes(1)
     } finally {
-      document.removeEventListener("pointerdown", spy, true)
+      document.removeEventListener("pointerdown", listener, true)
     }
   })
+})
 
-  it("leaves events aimed at the app alone", () => {
-    setGateUp(true)
-    const spy = vi.fn()
-    document.addEventListener("pointerdown", spy, true)
-    try {
-      dispatch(outside, "pointerdown")
-      expect(spy).toHaveBeenCalledTimes(1)
-    } finally {
-      document.removeEventListener("pointerdown", spy, true)
-    }
+describe("onGateUp", () => {
+  it("runs the reset when the page goes to a gate page, and not when it comes back", async () => {
+    const m = await load()
+    const gate = await import("./authGate")
+    await gate.initAuthGate()
+    const reset = vi.fn()
+    const stop = m.onGateUp(reset)
+    signedIn = false
+    gate.reportUnauthorized()
+    expect(reset).toHaveBeenCalledTimes(1)
+    signedIn = true
+    await gate.signIn("pw")
+    expect(reset).toHaveBeenCalledTimes(1)
+    stop()
   })
 
-  it("lets a click reach the gate's own button", () => {
-    setGateUp(true)
-    const button = document.createElement("button")
-    host.appendChild(button)
-    const onClick = vi.fn()
-    button.addEventListener("click", onClick)
-    button.click()
-    expect(onClick).toHaveBeenCalledTimes(1)
-  })
-
-  it("stops a file dropped on the gate from navigating the page away", () => {
-    setGateUp(true)
-    expect(dispatch(field, "dragover").defaultPrevented).toBe(true)
-    expect(dispatch(field, "drop").defaultPrevented).toBe(true)
+  it("stops when asked", async () => {
+    const m = await load()
+    const gate = await import("./authGate")
+    await gate.initAuthGate()
+    const reset = vi.fn()
+    m.onGateUp(reset)()
+    signedIn = false
+    gate.reportUnauthorized()
+    expect(reset).not.toHaveBeenCalled()
   })
 })

@@ -14,7 +14,7 @@ import { Toaster } from "@/components/ui/sonner"
 import type { AuthStatus } from "@/lib/authApi"
 import { assertNever } from "@/lib/assertNever"
 import { useAuthPhase, type AuthPhase } from "@/lib/authGate"
-import { GATE_LAYER_ATTR, setGateUp } from "@/lib/gateLayer"
+import { GATE_LAYER_ATTR } from "@/lib/gateLayer"
 
 // The root of the page: the app, and over it whatever page the sign-in gate
 // needs (the login, blocked, broken, unreachable or stuck page).
@@ -41,9 +41,8 @@ import { GATE_LAYER_ATTR, setGateUp } from "@/lib/gateLayer"
 //   so the app's bubbling document and window listeners (a dialog's Escape,
 //   the sidebar's Ctrl/Cmd-B, theater's Escape) never see what happens on the
 //   login page; the layer's own handlers run first, on the layer itself. The
-//   app's CAPTURE-phase listeners would see an event before it got here, so
-//   `lib/gateLayer.ts` stops the gestures among them earlier still, on the
-//   window, for anything aimed at this layer while it is up.
+//   app's few CAPTURE-phase listeners see an event before it gets here, so
+//   each of them ignores events aimed at this layer (`lib/gateLayer.ts`).
 //
 // The toaster lives here, outside the app, so a toast on screen (a sticky one
 // above all) outlives whatever the gate does.
@@ -157,9 +156,7 @@ function GateLayer({ children }: { children: ReactNode }) {
       e.stopPropagation()
     }
     for (const type of CONTAINED_EVENTS) host.addEventListener(type, contain)
-    setGateUp(true)
     return () => {
-      setGateUp(false)
       observer?.disconnect()
       for (const type of CONTAINED_EVENTS) host.removeEventListener(type, contain)
     }

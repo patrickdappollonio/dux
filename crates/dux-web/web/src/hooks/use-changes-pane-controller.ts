@@ -1,4 +1,3 @@
-import { isInGateLayer } from "@/lib/gateLayer"
 import { useEffect, useRef, useState } from "react"
 import type {
   GroupProps,
@@ -6,6 +5,7 @@ import type {
   PanelProps,
 } from "react-resizable-panels"
 
+import { isInGateLayer, onGateUp } from "@/lib/gateLayer"
 import { DIVIDER_DRAG_THRESHOLD_PX } from "@/lib/paneDivider"
 import {
   CHANGES_PANE_COLLAPSE_EPSILON,
@@ -215,12 +215,25 @@ export function useChangesPaneController(showChanges: boolean) {
       })
     }
 
+    // A drag the sign-in gate interrupts can have its release land on the
+    // gate, where `onDown`'s guard and the library both ignore it; forget it,
+    // or a layout change after the next sign-in would be booked to it.
+    const stopGateReset = onGateUp(() => {
+      const gesture = gestureRef.current
+      gesture.pointerDown = false
+      gesture.pointerMoved = false
+      gesture.collapseArmed = false
+      gesture.persistPending = null
+      gesture.cancelled = true
+    })
+
     window.addEventListener("pointerdown", onDown, true)
     window.addEventListener("pointermove", onMove, true)
     window.addEventListener("pointerup", onUp, true)
     window.addEventListener("pointercancel", onCancel, true)
     window.addEventListener("keydown", onKeyDown, true)
     return () => {
+      stopGateReset()
       window.removeEventListener("pointerdown", onDown, true)
       window.removeEventListener("pointermove", onMove, true)
       window.removeEventListener("pointerup", onUp, true)
