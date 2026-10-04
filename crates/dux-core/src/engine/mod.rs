@@ -2610,9 +2610,41 @@ impl Engine {
     /// the writer's base and the file agree: nothing old can be saved over the
     /// new file, and a deferred change already saved to it stays in memory
     /// too. Every surface's failed apply calls this.
-    pub fn keep_reloaded_config(&mut self, config: Config) {
-        self.config = config;
-        self.retune_after_config_swap();
+    ///
+    /// What the engine derives from the config is re-derived from the kept
+    /// one. When that is impossible because deriving it is what failed (the
+    /// session database could not be read), the kept config takes the
+    /// projects the engine actually has, and the writer's base becomes that
+    /// exact config: memory and base then agree, so the projects the engine
+    /// could not refresh never count as a change memory made, and the
+    /// file's own projects stay as they are.
+    pub fn keep_reloaded_config(&mut self, mut config: Config) {
+        self.github_integration_enabled = config.ui.github_integration;
+        let derived = self
+            .session_store
+            .load_projects()
+            .and_then(|stored| Ok((stored, self.session_store.load_project_created_ats()?)));
+        match derived {
+            Ok((stored, created)) => {
+                self.projects = crate::project_browser::load_projects(&stored, &created, &config);
+                self.config = config;
+                self.retune_after_config_swap();
+            }
+            Err(error) => {
+                crate::logger::warn(&format!(
+                    "the reloaded config's projects could not be read from the session \
+                     database ({error:#}); keeping the projects already loaded"
+                ));
+                config.projects = self
+                    .projects
+                    .iter()
+                    .map(project_to_project_config)
+                    .collect();
+                self.config = config;
+                self.retune_after_config_swap();
+                self.config_writer.set_base_exact(self.config.clone());
+            }
+        }
         self.refresh_project_defaults();
     }
 

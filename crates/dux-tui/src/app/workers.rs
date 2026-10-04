@@ -856,6 +856,10 @@ impl App {
                 // adopts it, so memory, the writer's base and the file agree
                 // and nothing old is saved over the new file.
                 self.engine.keep_reloaded_config(fallback);
+                // The view takes every setting of the kept config too, so a
+                // later drag or toggle starts from it rather than writing the
+                // old values back.
+                self.sync_view_state_from_config();
                 TuiConfigReloadOutcome::ApplyFailed(format!("{error:#}"))
             }
             Ok(()) => TuiConfigReloadOutcome::Applied,

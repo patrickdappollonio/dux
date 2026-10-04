@@ -13177,10 +13177,11 @@ not_a_real_action = ["x"]
         app.engine.retune_after_config_swap();
         std::fs::write(
             &app.engine.paths.config_path,
-            "[ui]\nleft_width_pct = 33\n\n[env]\n",
+            "[ui]\nleft_width_pct = 33\nshow_changes_pane = false\n\n[env]\n",
         )
         .unwrap();
         let reloaded = dux_core::config::load_config(&app.engine.paths).unwrap();
+        assert!(!app.right_hidden, "precondition: the changes pane shows");
         rusqlite::Connection::open(&app.engine.paths.sessions_db_path)
             .unwrap()
             .execute("DROP TABLE projects", [])
@@ -13190,6 +13191,11 @@ not_a_real_action = ["x"]
         assert_eq!(
             app.engine.config.ui.left_width_pct, 33,
             "the engine keeps the new config though the apply failed"
+        );
+        assert_eq!(app.left_width_pct, 33, "the view follows the kept config");
+        assert!(
+            app.right_hidden,
+            "every view setting follows the kept config"
         );
 
         for round in 0..2 {

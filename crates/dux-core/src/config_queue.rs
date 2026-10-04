@@ -28,6 +28,10 @@ enum WriteMsg {
     /// The config dux just adopted (a reload), carrying the exact text it was
     /// read from: the base every following save is a three-way patch against.
     SetBase(Box<Config>),
+    /// The base is exactly this config (and the file as dux last had it),
+    /// not one parsed from its text: for a config memory changed on purpose
+    /// to match what the engine holds.
+    SetBaseExact(Box<Config>),
     /// Stop the writer thread unconditionally, obeyed even while paused. Sent by
     /// `Drop` so shutdown never depends on channel disconnect (a `QuiesceGuard`
     /// holds a sender clone, so the channel can stay connected) or on guard drop
@@ -39,7 +43,12 @@ pub struct ConfigWriteQueue {
     tx: Sender<WriteMsg>,
     writer: Option<JoinHandle<()>>,
     lazy_inflight: Arc<AtomicUsize>,
+    last_written: LastWritten,
 }
+
+/// The text of the writer's most recent write, with a count of writes, so a
+/// caller can tell whether a write happened since it last looked.
+type LastWritten = Arc<std::sync::Mutex<(u64, Option<std::sync::Arc<str>>)>>;
 
 /// Holds a reload/recover barrier open. The writer is paused (drained) while the
 /// guard lives; dropping it resumes the writer. Owns a `Sender<WriteMsg>` clone
@@ -111,18 +120,40 @@ impl ConfigWriteQueue {
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let lazy_inflight = Arc::new(AtomicUsize::new(0));
+        let last_written: LastWritten = Arc::default();
         let writer = thread::Builder::new()
             .name("config-writer".into())
             .spawn({
                 let lazy_inflight = lazy_inflight.clone();
-                move || writer_loop(rx, config_path, base, lazy_inflight, status_lane)
+                let last_written = last_written.clone();
+                move || {
+                    writer_loop(
+                        rx,
+                        config_path,
+                        base,
+                        lazy_inflight,
+                        status_lane,
+                        last_written,
+                    )
+                }
             })
             .expect("spawn config-writer thread");
         ConfigWriteQueue {
             tx,
             writer: Some(writer),
             lazy_inflight,
+            last_written,
         }
+    }
+
+    /// How many writes this writer has made, and the text of the latest.
+    /// The engine reads it around a reload's deferred commands: when they
+    /// wrote, the file now holds that text, not the reloaded one.
+    pub fn last_written(&self) -> (u64, Option<std::sync::Arc<str>>) {
+        self.last_written
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or((0, None))
     }
 
     /// Deferred, coalesced, fire-and-forget. A dead writer is surfaced lazily via
@@ -184,6 +215,13 @@ impl ConfigWriteQueue {
     /// never undone. Ordered with the saves on the same channel.
     pub fn set_base(&self, config: Config) {
         let _ = self.tx.send(WriteMsg::SetBase(Box::new(config)));
+    }
+
+    /// Make the base exactly `config`, so a save writes only what memory
+    /// changes from it. What the file has been seen to hold is `config`'s own
+    /// text, or the file as it is now.
+    pub fn set_base_exact(&self, config: Config) {
+        let _ = self.tx.send(WriteMsg::SetBaseExact(Box::new(config)));
     }
 
     /// Exit-time drain: write any pending lazy, bounded by a timeout.
@@ -250,6 +288,7 @@ impl ConfigWriteQueue {
             tx,
             writer: None,
             lazy_inflight: Arc::new(AtomicUsize::new(0)),
+            last_written: Arc::default(),
         }
     }
 }
@@ -316,13 +355,14 @@ fn writer_loop(
     base: Option<Base>,
     lazy_inflight: Arc<AtomicUsize>,
     status_lane: Option<Sender<WorkerEvent>>,
+    last_written: LastWritten,
 ) {
     // Clone the counter before moving the original into the inner loop, so the
     // panic handler below still has a handle to reset it after the loop exits.
     let counter = lazy_inflight.clone();
     // Note: under panic = "abort" this guard is inert (the process aborts); it is active under the default unwind strategy.
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        writer_loop_inner(rx, path, base, lazy_inflight, status_lane)
+        writer_loop_inner(rx, path, base, lazy_inflight, status_lane, last_written)
     })) {
         let msg = panic
             .downcast_ref::<&str>()
@@ -351,11 +391,13 @@ fn writer_loop_inner(
     base: Option<Base>,
     lazy_inflight: Arc<AtomicUsize>,
     status_lane: Option<Sender<WorkerEvent>>,
+    last_written: LastWritten,
 ) {
     let mut state = WriterState {
         base,
         pending: None,
         deadline: None,
+        last_written,
     };
 
     loop {
@@ -430,6 +472,16 @@ fn base_read_from(text: &str) -> Option<Base> {
     })
 }
 
+/// A base that is exactly `config`.
+fn base_exact(path: &std::path::Path, config: Config) -> Base {
+    let seen = config
+        .source_text
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| std::fs::read_to_string(path).unwrap_or_default());
+    Base { config, seen }
+}
+
 /// The first base: the loaded config's own text, or no base at all for a
 /// config read from no file (its saves are then the full patch).
 fn base_of_loaded(loaded: &Config) -> Option<Base> {
@@ -454,6 +506,18 @@ struct WriterState {
     base: Option<Base>,
     pending: Option<Config>,
     deadline: Option<Instant>,
+    last_written: LastWritten,
+}
+
+impl WriterState {
+    /// A save wrote `config` as `written`: the next base, and the text the
+    /// engine can ask for.
+    fn record_write(&mut self, config: Config, written: &str) {
+        self.base = Some(written_base(&self.base, config, written));
+        if let Ok(mut last) = self.last_written.lock() {
+            *last = (last.0 + 1, Some(std::sync::Arc::from(written)));
+        }
+    }
 }
 
 fn handle_writer_input(
@@ -480,7 +544,7 @@ fn handle_writer_input(
             let result = save_against_base(path, &state.base, &config, Durability::Fsync)
                 .map_err(|e| format!("{e:#}"));
             match &result {
-                Ok(text) => state.base = Some(written_base(&state.base, config, text)),
+                Ok(text) => state.record_write(config, text),
                 Err(error) => crate::logger::error(&format!("eager config write failed: {error}")),
             }
             let _ = reply.send(result.map(|_| ()));
@@ -499,6 +563,7 @@ fn handle_writer_input(
         }
         Ok(Some(WriteMsg::Resume)) => {}
         Ok(Some(WriteMsg::SetBase(config))) => state.base = base_adopted(path, *config),
+        Ok(Some(WriteMsg::SetBaseExact(config))) => state.base = Some(base_exact(path, *config)),
         Ok(Some(WriteMsg::Shutdown)) => {
             flush_pending(path, state, status_lane);
             return WriterControl::Stop;
@@ -535,6 +600,7 @@ fn run_paused_writer(
                 let _ = ack.send(());
             }
             Ok(WriteMsg::SetBase(config)) => *base = base_adopted(path, *config),
+            Ok(WriteMsg::SetBaseExact(config)) => *base = Some(base_exact(path, *config)),
         }
     }
 }
@@ -578,7 +644,7 @@ fn flush_pending(
     let result = save_against_base(path, &state.base, &cfg, Durability::NoFsync);
     let result = match result {
         Ok(text) => {
-            state.base = Some(written_base(&state.base, cfg, &text));
+            state.record_write(cfg, &text);
             Ok(())
         }
         Err(error) => Err(error),
