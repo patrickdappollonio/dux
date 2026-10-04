@@ -466,8 +466,20 @@ fn merge_array_of_tables(
         seen.push(id.clone());
         match find(base, &id) {
             Some(base_entry) if base_entry.to_string() == entry.to_string() => {
-                // Unchanged in memory: the file's own version, if it still has one.
-                if let Some(file_entry) = find(original, &id) {
+                // Unchanged in memory: the file's own version, if it still has
+                // one, less any key the patch drops on every write (it carries
+                // every other key of the file's entry, so a key missing from
+                // the patched entry is one it removes on purpose, such as a
+                // project's `leading_branch`).
+                if let Some(mut file_entry) = find(original, &id) {
+                    let dropped: Vec<String> = file_entry
+                        .iter()
+                        .map(|(key, _)| key.to_string())
+                        .filter(|key| !base_entry.contains_key(key))
+                        .collect();
+                    for key in dropped {
+                        file_entry.remove(&key);
+                    }
                     merged.push(file_entry);
                 }
             }

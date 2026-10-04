@@ -51,13 +51,16 @@ impl ConfigSurface for WebConfigSurface {
             let reconciled = SessionStore::open(&paths.sessions_db_path)
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|store| {
-                    #[allow(deprecated)]
+                    // Three-way against the config as read: the sync writes
+                    // only what it changed, never a key set on disk meanwhile.
+                    let base = config.clone();
                     dux_core::config_sync::reconcile_config_projects(
                         &mut config,
                         &store,
                         |config| {
-                            dux_core::config_write::save_config_with(
+                            dux_core::config_write::save_config_three_way(
                                 &paths.config_path,
+                                Some(&base),
                                 config,
                                 dux_core::config_write::Durability::Fsync,
                             )
@@ -99,10 +102,11 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // SQLite, and validate identity conflicts, persisting any normalization back
     // through the core save path. The write is sync-direct because bootstrap runs
     // before the engine's config-write queue exists.
-    #[allow(deprecated)]
+    let base = config.clone();
     dux_core::config_sync::reconcile_config_projects(&mut config, &session_store, |config| {
-        dux_core::config_write::save_config_with(
+        dux_core::config_write::save_config_three_way(
             &paths.config_path,
+            Some(&base),
             config,
             dux_core::config_write::Durability::Fsync,
         )

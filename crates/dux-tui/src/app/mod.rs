@@ -29,7 +29,7 @@ use crate::clipboard::Clipboard;
 #[allow(deprecated)]
 // importing the deprecated TUI save_config for use in the blessed sync-direct project-sync helpers
 use crate::config::{
-    Config, DuxPaths, MacroSurface, ensure_config, provider_config, save_config, validate_keys,
+    Config, DuxPaths, MacroSurface, ensure_config, provider_config, validate_keys,
 };
 use crate::diff::SyntaxCache;
 use crate::editor::DetectedEditor;
@@ -7466,12 +7466,12 @@ pub(crate) use dux_core::agent_tabs::tab_labels;
 
 pub(crate) use dux_core::project_browser::load_projects;
 
-#[allow(deprecated)] // blessed sync-direct: bootstrap/reload-worker project-sync runs before/outside the queue
+// Sync-direct by design: bootstrap/reload-worker project-sync runs before/outside the queue.
 pub(crate) fn persist_runtime_projects_to_config_and_store(
     projects: &[Project],
     config: &mut Config,
     paths: &DuxPaths,
-    bindings: &RuntimeBindings,
+    _bindings: &RuntimeBindings,
     session_store: &SessionStore,
 ) -> Result<()> {
     let existing_projects = config.projects.clone();
@@ -7499,18 +7499,27 @@ pub(crate) fn persist_runtime_projects_to_config_and_store(
     }
 
     if config.projects != config_project_configs {
+        // Only the projects change here, so only they are written: the base is
+        // the config before the change, and a key set on disk since it was read
+        // is left alone.
+        let base = config.clone();
         config.projects = config_project_configs;
-        save_config(&paths.config_path, config, bindings)?;
+        dux_core::config_write::save_config_three_way(
+            &paths.config_path,
+            Some(&base),
+            config,
+            dux_core::config_write::Durability::Fsync,
+        )?;
     }
 
     Ok(())
 }
 
-#[allow(deprecated)] // blessed sync-direct: bootstrap/reload-worker project-sync runs before/outside the queue
+// Sync-direct by design: bootstrap/reload-worker project-sync runs before/outside the queue.
 pub(crate) fn sync_config_projects_with_store(
     config: &mut Config,
     paths: &DuxPaths,
-    bindings: &RuntimeBindings,
+    _bindings: &RuntimeBindings,
     session_store: &SessionStore,
 ) -> Result<()> {
     // The reconciliation DECISION (validate identity, merge per field, adopt
@@ -7518,8 +7527,16 @@ pub(crate) fn sync_config_projects_with_store(
     // `dux_core::config_sync::reconcile_config_projects`, shared with the web
     // server's bootstrap. Only PERSISTING is a surface concern: the TUI renders
     // the full commented template via `save_config`.
+    // Three-way against the config as read, so the sync writes only the
+    // projects it changed and never undoes a key set on disk meanwhile.
+    let base = config.clone();
     dux_core::config_sync::reconcile_config_projects(config, session_store, |config| {
-        save_config(&paths.config_path, config, bindings)
+        dux_core::config_write::save_config_three_way(
+            &paths.config_path,
+            Some(&base),
+            config,
+            dux_core::config_write::Durability::Fsync,
+        )
     })
 }
 
@@ -8933,6 +8950,53 @@ leading_branch = "main"
         assert!(!saved.contains("leading_branch"));
         let stored = store.load_projects().expect("reload projects");
         assert_eq!(stored[0].leading_branch.as_deref(), Some("main"));
+    }
+
+    /// The project sync that writes config.toml on startup and reload only
+    /// writes the projects: a `dux config set` that landed after the file was
+    /// read is not overwritten.
+    #[test]
+    fn the_project_sync_never_undoes_a_concurrent_set() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        std::fs::write(&paths.config_path, "[server]\nport = 3890\n").expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "store-only".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .expect("seed project");
+        // `dux config set server.port 4444` from another process.
+        let key = dux_core::config_keys::lookup("server.port").unwrap();
+        dux_core::config_keys::set_plain(&paths.config_path, &key, "4444").unwrap();
+
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
+            .expect("sync projects");
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read config");
+        assert!(
+            saved.contains("store-only"),
+            "the sync wrote its project:\n{saved}"
+        );
+        assert!(saved.contains("port = 4444"), "the set survives:\n{saved}");
     }
 
     #[test]
