@@ -3319,8 +3319,18 @@ fn is_auth_section_header(line: &str) -> bool {
 /// one dux starts with.
 pub fn start_check_problems(config: &Config) -> Vec<String> {
     let mut problems = Vec::new();
-    if let Err(error) = parse_server_host(&config.server.host) {
-        problems.push(error);
+    // The rules `resolve_server_plan` applies to the config itself, through
+    // the same functions it uses: the host must be an IP literal, and the
+    // port must not be 0.
+    match parse_server_host(&config.server.host) {
+        Err(error) => problems.push(error),
+        Ok(host) => {
+            if let Some(problem) =
+                port_zero_problem(std::net::SocketAddr::new(host, config.server.port))
+            {
+                problems.push(problem);
+            }
+        }
     }
     // One problem per variable, named by the variable (and project), never
     // by its value, so a second bad variable is a new problem of its own and
@@ -3368,23 +3378,40 @@ pub fn start_check(config: &Config) -> Result<()> {
 /// the `[server.auth]` problems key by key ([`auth_problems_of`]), and the
 /// start checks ([`start_check_problems`]) on the rest of the file as dux
 /// reads it. Empty when dux starts with it.
-pub fn start_problems_of(raw: &str) -> Vec<String> {
+pub fn start_problems_of(raw: &str) -> Vec<crate::config_auth::Problem> {
     let mut problems = auth_problems_of(raw);
-    let Ok(mut file) = toml::from_str::<toml::Table>(raw) else {
-        return problems;
-    };
-    // The rest of the file, read the way a start reads it, with the auth
-    // section (already judged key by key above) left out so it cannot stop
-    // the read.
+    // Every other start check runs on its own, on the rest of the file as a
+    // start's per-field recovery reads it, whatever the auth checks found:
+    // one problem never hides another, and none is listed twice.
+    if let Some(config) = recovered_config_beside_auth(raw) {
+        problems.extend(
+            start_check_problems(&config)
+                .into_iter()
+                .map(crate::config_auth::Problem::plain),
+        );
+    }
+    problems
+}
+
+/// The config a start reads from everything in `raw` but `[server.auth]`:
+/// the load migrations, then per-field recovery, the provider defaults and
+/// the load corrections. Nothing about the password is read here, so no
+/// password problem can stop it. `None` only when `raw` is not TOML.
+fn recovered_config_beside_auth(raw: &str) -> Option<Config> {
+    let mut file = toml::from_str::<toml::Table>(raw).ok()?;
     if let Some(server) = file.get_mut("server").and_then(toml::Value::as_table_mut) {
         server.remove("auth");
     }
-    let rest = toml::to_string(&file).unwrap_or_default();
-    match config_from_text_as_written(&rest) {
-        Ok(config) => problems.extend(start_check_problems(&apply_load_corrections(config))),
-        Err(problem) => problems.push(problem.reason().to_string()),
-    }
-    problems
+    let rest = toml::to_string(&file).ok()?;
+    let mut doc = rest.parse::<toml_edit::DocumentMut>().ok()?;
+    let migrated = match crate::config_migrate::apply_load_migrations(&mut doc) {
+        Ok(_) => doc.to_string(),
+        Err(_) => rest,
+    };
+    let table = toml::from_str::<toml::Table>(&migrated).ok()?;
+    let mut config = recover_config_table(table);
+    config.providers.ensure_defaults();
+    Some(apply_load_corrections(config))
 }
 
 /// The config dux runs with from a whole file's text: read as a start reads
@@ -3399,34 +3426,41 @@ pub fn effective_config_from_text(raw: &str) -> std::result::Result<Config, Conf
 /// section loads. A `server` or `server.auth` that is not a table, or a
 /// value of the wrong type, is one problem; otherwise every rule the
 /// section breaks is listed.
-pub fn auth_problems_of(raw: &str) -> Vec<String> {
+pub fn auth_problems_of(raw: &str) -> Vec<crate::config_auth::Problem> {
     let file: toml::Table = match toml::from_str(raw) {
         Ok(file) => file,
         Err(error) => {
-            return vec![format!(
+            return vec![crate::config_auth::Problem::plain(format!(
                 "the file is not valid TOML: {}",
                 problem_kind(error.message())
-            )];
+            ))];
         }
     };
-    let mut problems = misplaced_auth_problems(raw);
+    let mut problems: Vec<crate::config_auth::Problem> = misplaced_auth_problems(raw)
+        .into_iter()
+        .map(crate::config_auth::Problem::plain)
+        .collect();
     problems.extend(auth_section_problems(&file));
     problems
 }
 
 /// The problems of `[server.auth]` itself, key by key.
-fn auth_section_problems(file: &toml::Table) -> Vec<String> {
+fn auth_section_problems(file: &toml::Table) -> Vec<crate::config_auth::Problem> {
     let Some(server) = file.get("server") else {
         return Vec::new();
     };
     let Some(server) = server.as_table() else {
-        return vec!["[server] is not a table".to_string()];
+        return vec![crate::config_auth::Problem::plain(
+            "[server] is not a table",
+        )];
     };
     let Some(auth) = server.get("auth") else {
         return Vec::new();
     };
     if !auth.is_table() {
-        return vec!["server.auth is not a table".to_string()];
+        return vec![crate::config_auth::Problem::plain(
+            "server.auth is not a table",
+        )];
     }
     crate::config_auth::rule_problems_of(auth.clone())
 }
@@ -3964,6 +3998,19 @@ pub fn parse_server_host(host: &str) -> Result<std::net::IpAddr, String> {
 /// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
 /// disabled / not detected); when present and not already covered by the primary
 /// bind it is added as a BEST-EFFORT leg.
+/// Why `bind` cannot be served on, when its port is 0. Shared by
+/// [`resolve_server_plan`] and the start checks ([`start_check_problems`]),
+/// so `dux config set` refuses exactly what `dux server` refuses.
+fn port_zero_problem(bind: std::net::SocketAddr) -> Option<String> {
+    (bind.port() == 0).then(|| {
+        format!(
+            "refusing to bind {bind}: port 0 means \"pick any free port\", so there would be no \
+             stable address to open. Set [server] port (default 3890) or pass --port / --bind with \
+             a non-zero port."
+        )
+    })
+}
+
 pub fn resolve_server_plan(
     server: &ServerConfig,
     cli: &ServerCliOverrides,
@@ -3981,12 +4028,8 @@ pub fn resolve_server_plan(
             std::net::SocketAddr::new(host, cli.port.unwrap_or(server.port))
         }
     };
-    if bind.port() == 0 {
-        bail!(
-            "refusing to bind {bind}: port 0 means \"pick any free port\", so there would be no \
-             stable address to open. Set [server] port (default 3890) or pass --port / --bind with \
-             a non-zero port."
-        );
+    if let Some(problem) = port_zero_problem(bind) {
+        bail!(problem);
     }
     let tailscale = effective_tailscale_mode(server.tailscale_mode(), cli.no_tailscale);
     let ts = if tailscale.wants_tailscale() {

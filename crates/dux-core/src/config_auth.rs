@@ -216,60 +216,105 @@ impl ServerAuthConfig {
     /// status line, toasts and dux.log.
     pub fn problems(&self) -> Vec<String> {
         self.problems_with(true)
+            .into_iter()
+            .map(|problem| problem.message)
+            .collect()
     }
 
     /// [`Self::problems`], with the rules spanning keys only when
     /// `cross_field`.
-    fn problems_with(&self, cross_field: bool) -> Vec<String> {
+    fn problems_with(&self, cross_field: bool) -> Vec<Problem> {
         let mut problems = Vec::new();
         if !self.password_hash.is_empty()
             && let Err(error) = crate::auth::validate_password_hash(&self.password_hash)
         {
-            problems.push(error.to_string());
+            problems.push(Problem::plain(error.to_string()));
         }
         if self.minimum_password_score > 4 {
-            problems.push("minimum_password_score must be 0 to 4".to_string());
+            problems.push(Problem::plain("minimum_password_score must be 0 to 4"));
         }
         if self.session_idle_seconds == 0 {
-            problems.push("session_idle_seconds must be at least 1".to_string());
+            problems.push(Problem::plain("session_idle_seconds must be at least 1"));
         }
         if self.max_concurrent_password_checks == 0 {
-            problems.push(
-                "max_concurrent_password_checks must be at least 1, or nobody could log in"
-                    .to_string(),
-            );
+            problems.push(Problem::plain(
+                "max_concurrent_password_checks must be at least 1, or nobody could log in",
+            ));
         }
         let max_bytes_valid =
             self.max_password_bytes != 0 && self.max_password_bytes <= MAX_PASSWORD_BYTES_LIMIT;
         if !max_bytes_valid {
-            problems.push(format!(
+            problems.push(Problem::plain(format!(
                 "max_password_bytes must be 1 to {MAX_PASSWORD_BYTES_LIMIT}"
-            ));
+            )));
         }
         if cross_field && max_bytes_valid && self.minimum_password_length > self.max_password_bytes
         {
-            problems.push(
+            problems.push(Problem::plain(
                 "minimum_password_length is larger than max_password_bytes, so no \
-                 password could meet both"
-                    .to_string(),
-            );
+                 password could meet both",
+            ));
         }
         if self.max_tracked_addresses == 0 {
-            problems.push(
-                "max_tracked_addresses must be at least 1, or failed logins would never count"
-                    .to_string(),
-            );
+            problems.push(Problem::plain(
+                "max_tracked_addresses must be at least 1, or failed logins would never count",
+            ));
         }
         for (index, entry) in self.blocked_addresses.iter().enumerate() {
             if let Err(reason) = AddressBlock::parse(entry) {
-                problems.push(format!(
-                    "blocked_addresses entry {} (counting from 1): {reason}",
-                    index + 1
-                ));
+                // Known by the entry's own text (digested, never shown) and
+                // the reason, never its position: removing the entry above
+                // it moves it without making it a new problem.
+                problems.push(Problem {
+                    id: format!("blocked_addresses:{:016x}:{reason}", digest(entry)),
+                    message: format!(
+                        "blocked_addresses entry {} (counting from 1): {reason}",
+                        index + 1
+                    ),
+                });
             }
         }
         problems
     }
+}
+
+/// A problem that stops dux starting with a config file: the sentence shown
+/// (`message`) and what it is about (`id`). Two problems are the same when
+/// their ids are, so a problem that only moved (an entry that is now entry 1
+/// rather than 2) is still the one the file already had.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Problem {
+    /// What the problem is about: the setting, the kind of problem, and for
+    /// a list entry a digest of the entry's own text. Never shown.
+    pub id: String,
+    /// The sentence shown.
+    pub message: String,
+}
+
+impl Problem {
+    /// A problem whose sentence already names it by what it is about, with
+    /// no position in it.
+    pub fn plain(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            id: message.clone(),
+            message,
+        }
+    }
+}
+
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// A stable digest of `text` (FNV-1a), so an identity can depend on a value
+/// without holding it.
+fn digest(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// Every problem a `server.auth` table has, key by key, so no problem hides
@@ -278,9 +323,9 @@ impl ServerAuthConfig {
 /// and every rule is then checked on the keys that read (see
 /// [`ServerAuthConfig::problems`]). A rule spanning keys is checked only
 /// when every key it involves reads. A loader still refuses on any of them.
-pub fn rule_problems_of(auth: toml::Value) -> Vec<String> {
+pub fn rule_problems_of(auth: toml::Value) -> Vec<Problem> {
     let toml::Value::Table(auth) = auth else {
-        return vec!["server.auth is not a table".to_string()];
+        return vec![Problem::plain("server.auth is not a table")];
     };
     let mut problems = Vec::new();
     let mut readable = toml::Table::new();
@@ -293,10 +338,10 @@ pub fn rule_problems_of(auth: toml::Value) -> Vec<String> {
                 readable.insert(key, value);
             }
             Err(error) => {
-                problems.push(format!(
+                problems.push(Problem::plain(format!(
                     "{key}: {}",
                     crate::config::problem_kind(error.message())
-                ));
+                )));
                 unreadable.push(key);
             }
         }

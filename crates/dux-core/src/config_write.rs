@@ -1379,11 +1379,13 @@ fn mutate_config_file_ruled<T>(
             Vec::new()
         }
         AuthRule::NoNewProblems => {
+            // Problems are compared by what they are about (their id), not
+            // by their sentence, which can name a position that moved.
             let after = crate::config::start_problems_of(&text);
             let added: Vec<&str> = after
                 .iter()
-                .filter(|p| !before.contains(p))
-                .map(String::as_str)
+                .filter(|p| before.iter().all(|b| b.id != p.id))
+                .map(|p| p.message.as_str())
                 .collect();
             if !added.is_empty() {
                 anyhow::bail!(
@@ -1393,7 +1395,7 @@ fn mutate_config_file_ruled<T>(
                     added.join("; ")
                 );
             }
-            after
+            after.into_iter().map(|p| p.message).collect()
         }
     };
     write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;

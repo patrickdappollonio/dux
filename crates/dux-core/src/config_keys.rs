@@ -198,6 +198,15 @@ impl std::error::Error for KeyError {}
 
 /// Find the setting `path` names.
 pub fn lookup(path: &str) -> Result<Key, KeyError> {
+    // `name=value` is how other tools take a setting. What follows `=` may be
+    // a password, so it is never repeated: only the name is.
+    if let Some((name, _)) = path.split_once('=') {
+        return Err(KeyError::Malformed(format!(
+            "a value goes after the setting's name and a space, not after `=`: write `dux \
+             config set {name} <value>` (a secret such as server.auth.password is asked for, or \
+             read with --stdin). What followed `=` is not repeated here."
+        )));
+    }
     let segments = split_path(path)?;
     if let Some((_, policy)) = VIRTUAL_KEYS.iter().find(|(name, _)| *name == path) {
         return Ok(Key {
@@ -722,7 +731,11 @@ pub fn current_password_policy(config_path: &Path) -> Result<crate::auth::Passwo
         .iter()
         .filter_map(|key| auth.get(*key).map(|value| (key.to_string(), value.clone())))
         .collect();
-    let problems = crate::config_auth::rule_problems_of(toml::Value::Table(policy.clone()));
+    let problems: Vec<String> =
+        crate::config_auth::rule_problems_of(toml::Value::Table(policy.clone()))
+            .into_iter()
+            .map(|problem| problem.message)
+            .collect();
     if !problems.is_empty() {
         anyhow::bail!(
             "the password policy in [server.auth] is invalid ({}), so dux cannot tell what a \
@@ -863,7 +876,10 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
     let effective = match crate::config::effective_config_from_text(raw) {
         Ok(config) => config,
         Err(problem) => {
-            let named = crate::config::start_problems_of(raw);
+            let named: Vec<String> = crate::config::start_problems_of(raw)
+                .into_iter()
+                .map(|problem| problem.message)
+                .collect();
             let reason = if named.is_empty() {
                 problem.reason().to_string()
             } else {
@@ -1606,7 +1622,7 @@ port = 3890
         let problems = crate::config::start_problems_of(&std::fs::read_to_string(&path).unwrap());
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(
-            problems.iter().all(|p| !p.contains("${")),
+            problems.iter().all(|p| !p.message.contains("${")),
             "no values: {problems:?}"
         );
         let remaining = set_secret_text(
@@ -1626,6 +1642,70 @@ port = 3890
             "[[projects]]\nid = \"p\"\npath = \"/p\"\nname = \"api\"\n[projects.env]\nA = \"${\"\nB = \"${\"\n",
         );
         assert_eq!(problems.len(), 2, "{problems:?}");
-        assert!(problems.iter().all(|p| p.contains("api")), "{problems:?}");
+        assert!(
+            problems.iter().all(|p| p.message.contains("api")),
+            "{problems:?}"
+        );
+    }
+
+    /// Each start check runs on its own: a password hash in the wrong place
+    /// is one problem, listed once, and does not hide the others, so a set
+    /// adding a bad host beside it is still refused.
+    #[test]
+    fn a_set_adding_a_start_problem_is_refused_beside_a_stray_password_hash() {
+        let (_dir, path) = temp_config("[defaults]\npassword_hash = \"x\"\n");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let before = crate::config::start_problems_of(&text);
+        assert_eq!(before.len(), 1, "{before:?}");
+        let error = set_plain(&path, &lookup("server.host").unwrap(), "not-an-ip")
+            .expect_err("a bad host is a new problem");
+        assert!(format!("{error:#}").contains("not-an-ip"), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let with_host = "[defaults]\npassword_hash = \"x\"\n[server]\nhost = \"not-an-ip\"\n";
+        assert_eq!(crate::config::start_problems_of(with_host).len(), 2);
+    }
+
+    /// `dux server` refuses `[server] port = 0`, and the start checks use the
+    /// same rule, so `set` refuses it.
+    #[test]
+    fn a_port_dux_server_will_not_start_with_is_refused() {
+        let (_dir, path) = temp_config("[server]\nport = 3890\n");
+        let error = set_plain(&path, &lookup("server.port").unwrap(), "0").expect_err("port 0");
+        let server = crate::config::ServerConfig {
+            port: 0,
+            ..Default::default()
+        };
+        let start = crate::config::resolve_server_plan(
+            &server,
+            &crate::config::ServerCliOverrides::default(),
+            None,
+        )
+        .expect_err("dux server refuses port 0")
+        .to_string();
+        assert!(format!("{error:#}").contains(&start), "{error:#}\n{start}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[server]\nport = 3890\n"
+        );
+    }
+
+    /// A problem is known by what it is about, never by where it sits:
+    /// removing the first of two broken `blocked_addresses` entries is a
+    /// repair, though the one left moves from entry 2 to entry 1, and adding
+    /// a new broken entry is refused.
+    #[test]
+    fn removing_one_of_two_broken_blocked_addresses_is_a_repair() {
+        let (_dir, path) = temp_config(
+            "[server.auth]\nblocked_addresses = [\"not-an-address\", \"10.0.0.0/99\"]\n",
+        );
+        let key = lookup("server.auth.blocked_addresses").unwrap();
+        let report = set_plain(&path, &key, "[\"10.0.0.0/99\"]").expect("a repair");
+        assert_eq!(report.remaining_problems.len(), 1, "{report:?}");
+        assert!(
+            report.remaining_problems[0].contains("entry 1"),
+            "{report:?}"
+        );
+        set_plain(&path, &key, "[\"10.0.0.0/99\", \"also-not-an-address\"]")
+            .expect_err("a new broken entry");
     }
 }

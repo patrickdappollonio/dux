@@ -2164,3 +2164,405 @@ fn a_hand_deletion_survives_a_reload() {
         assert!(!written.contains("diff_tab_width"), "{written}");
     }
 }
+
+/// A randomized model of hand edits, memory changes, saves and reloads,
+/// checked against the three-way rules after every step, plus the dotted-key
+/// shapes it found worth pinning.
+mod randomized_model {
+    use super::*;
+
+    fn file(text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        (dir, path)
+    }
+
+    use crate::config_keys;
+
+    #[test]
+    fn dotted_top_level_keys_survive_a_save() {
+        let (_dir, path) = file("ui.left_width_pct = 20\n");
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let mut memory = loaded.clone();
+        memory.ui.copy_on_select = !memory.ui.copy_on_select;
+        q.save_eager(memory.clone()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let back: Config = toml::from_str(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert_eq!(back.ui.left_width_pct, 20, "{text}");
+        assert_eq!(back.ui.copy_on_select, memory.ui.copy_on_select, "{text}");
+    }
+
+    #[test]
+    fn a_dotted_auth_inside_server_survives_a_set_and_a_save() {
+        let (_dir, path) = file("[server]\nport = 3890\nauth.require = \"tailnet\"\n");
+        let key = config_keys::lookup("server.auth.cookie_secure").unwrap();
+        config_keys::set_plain(&path, &key, "always").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let auth = crate::config::auth_section_of(&text).unwrap();
+        assert_eq!(auth.require.as_str(), "tailnet", "{text}");
+        assert_eq!(auth.cookie_secure.as_str(), "always", "{text}");
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let mut memory = loaded.clone();
+        memory.server.port = 4000;
+        q.save_eager(memory).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let auth = crate::config::auth_section_of(&text).unwrap();
+        assert_eq!(auth.require.as_str(), "tailnet", "{text}");
+    }
+
+    #[test]
+    fn a_hand_added_key_survives_dux_changing_its_neighbour() {
+        let (_dir, path) = file("[ui]\nleft_width_pct = 20\n");
+        let loaded = crate::config::load_config_file(&path).unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            text.replace(
+                "left_width_pct = 20",
+                "left_width_pct = 20\nterminal_pane_height_pct = 44",
+            ),
+        )
+        .unwrap();
+        let mut memory = loaded.clone();
+        memory.ui.left_width_pct = 30;
+        q.save_eager(memory).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.ui.terminal_pane_height_pct, 44, "{text}");
+        assert_eq!(back.ui.left_width_pct, 30, "{text}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Randomized three-way save model
+    // ---------------------------------------------------------------------------
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    const KEYS: [(&str, &str); 4] = [
+        ("ui", "left_width_pct"),
+        ("ui", "right_width_pct"),
+        ("server", "port"),
+        ("ui", "copy_on_select"),
+    ];
+    const ENV: [&str; 3] = ["AA", "BB", "CC"];
+
+    fn mem_get(c: &Config, i: usize) -> String {
+        match i {
+            0 => c.ui.left_width_pct.to_string(),
+            1 => c.ui.right_width_pct.to_string(),
+            2 => c.server.port.to_string(),
+            _ => c.ui.copy_on_select.to_string(),
+        }
+    }
+    fn mem_set(c: &mut Config, i: usize, rng: &mut Rng) {
+        match i {
+            0 => c.ui.left_width_pct = 15 + rng.below(20) as u16,
+            1 => c.ui.right_width_pct = 15 + rng.below(20) as u16,
+            2 => c.server.port = 3000 + rng.below(900) as u16,
+            _ => c.ui.copy_on_select = !c.ui.copy_on_select,
+        }
+    }
+    fn random_literal(i: usize, rng: &mut Rng) -> String {
+        match i {
+            0 | 1 => (15 + rng.below(20)).to_string(),
+            2 => (3000 + rng.below(900)).to_string(),
+            _ => (rng.below(2) == 0).to_string(),
+        }
+    }
+
+    /// Disk value of a tracked key, as TOML literal text, or None when absent.
+    fn disk_get(text: &str, section: &str, key: &str) -> Option<String> {
+        let doc: toml::Table = toml::from_str(text).unwrap();
+        doc.get(section)?.get(key).map(|v| v.to_string())
+    }
+    fn disk_env(text: &str, key: &str) -> Option<String> {
+        let doc: toml::Table = toml::from_str(text).unwrap();
+        doc.get("env")?
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
+    fn hand_set(path: &std::path::Path, section: &str, key: &str, literal: Option<&str>) {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+        if doc.get(section).is_none() {
+            doc[section] = toml_edit::table();
+        }
+        let table = doc[section].as_table_like_mut().unwrap();
+        match literal {
+            Some(lit) => {
+                let v: toml_edit::Value = lit.parse().unwrap();
+                table.insert(key, toml_edit::Item::Value(v));
+            }
+            None => {
+                table.remove(key);
+            }
+        }
+        std::fs::write(path, doc.to_string()).unwrap();
+    }
+
+    #[test]
+    fn random_hand_edits_saves_and_reloads_follow_the_three_way_rules() {
+        let mut failures = Vec::new();
+        for seed in 1..=300u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+            let (_dir, path) = file(
+                "[ui]\nleft_width_pct = 20\nright_width_pct = 25\ncopy_on_select = true\n\n[server]\nport = 3890\n\n[env]\nAA = \"a\"\nBB = \"b\"\n",
+            );
+            let loaded = crate::config::load_config_file(&path).unwrap();
+            let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+            let mut memory = loaded.clone();
+            // What the file agreed with at the last save or reload.
+            let mut base = loaded.clone();
+            // Expected disk state for tracked keys.
+            let text0 = std::fs::read_to_string(&path).unwrap();
+            let mut expect: Vec<Option<String>> =
+                KEYS.iter().map(|(s, k)| disk_get(&text0, s, k)).collect();
+            let mut expect_env: Vec<Option<String>> =
+                ENV.iter().map(|k| disk_env(&text0, k)).collect();
+            let mut log = Vec::new();
+            for step in 0..25 {
+                match rng.below(6) {
+                    0 => {
+                        let i = rng.below(4) as usize;
+                        let (s, k) = KEYS[i];
+                        if rng.below(3) == 0 {
+                            hand_set(&path, s, k, None);
+                            expect[i] = None;
+                            log.push(format!("hand delete {s}.{k}"));
+                        } else {
+                            let lit = random_literal(i, &mut rng);
+                            hand_set(&path, s, k, Some(&lit));
+                            expect[i] = Some(lit.clone());
+                            log.push(format!("hand set {s}.{k}={lit}"));
+                        }
+                    }
+                    1 => {
+                        let i = rng.below(3) as usize;
+                        if rng.below(3) == 0 {
+                            hand_set(&path, "env", ENV[i], None);
+                            expect_env[i] = None;
+                            log.push(format!("hand delete env.{}", ENV[i]));
+                        } else {
+                            let v = format!("h{}", rng.below(100));
+                            hand_set(&path, "env", ENV[i], Some(&format!("\"{v}\"")));
+                            expect_env[i] = Some(v.clone());
+                            log.push(format!("hand set env.{}={v}", ENV[i]));
+                        }
+                    }
+                    2 => {
+                        let i = rng.below(4) as usize;
+                        mem_set(&mut memory, i, &mut rng);
+                        log.push(format!("mem set {}={}", KEYS[i].1, mem_get(&memory, i)));
+                    }
+                    3 => {
+                        let i = rng.below(3) as usize;
+                        if rng.below(3) == 0 {
+                            memory.env.remove(ENV[i]);
+                            log.push(format!("mem remove env.{}", ENV[i]));
+                        } else {
+                            let v = format!("m{}", rng.below(100));
+                            memory.env.insert(ENV[i].to_string(), v.clone());
+                            log.push(format!("mem set env.{}={v}", ENV[i]));
+                        }
+                    }
+                    4 => {
+                        q.save_eager(memory.clone()).unwrap();
+                        for (i, slot) in expect.iter_mut().enumerate() {
+                            if mem_get(&memory, i) != mem_get(&base, i) {
+                                *slot = Some(mem_get(&memory, i));
+                            }
+                        }
+                        for (i, k) in ENV.iter().enumerate() {
+                            let m = memory.env.get(*k).cloned();
+                            let b = base.env.get(*k).cloned();
+                            if m != b {
+                                expect_env[i] = m;
+                            }
+                        }
+                        base = memory.clone();
+                        log.push("save".into());
+                    }
+                    _ => {
+                        // reload
+                        memory = crate::config::load_config_file(&path).unwrap();
+                        q.set_base(memory.clone());
+                        base = memory.clone();
+                        log.push("reload".into());
+                    }
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let got: Vec<Option<String>> =
+                    KEYS.iter().map(|(s, k)| disk_get(&text, s, k)).collect();
+                let got_env: Vec<Option<String>> = ENV.iter().map(|k| disk_env(&text, k)).collect();
+                if got != expect || got_env != expect_env {
+                    failures.push(format!(
+                        "seed {seed} step {step}: got {got:?} {got_env:?}, expected {expect:?} {expect_env:?}\nlog: {log:#?}\nfile:\n{text}"
+                    ));
+                    break;
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failures; first:\n{}",
+            failures.len(),
+            failures[0]
+        );
+    }
+
+    const PFIELDS: [&str; 3] = ["name", "startup_command", "default_provider"];
+
+    fn proj_mem_get(c: &Config, p: usize, f: usize) -> Option<String> {
+        let id = ["p1", "p2"][p];
+        let project = c.projects.iter().find(|x| x.id == id)?;
+        match f {
+            0 => project.name.clone(),
+            1 => project.startup_command.clone(),
+            _ => project.default_provider.clone(),
+        }
+    }
+    fn proj_mem_set(c: &mut Config, p: usize, f: usize, v: Option<String>) {
+        let id = ["p1", "p2"][p];
+        let project = c.projects.iter_mut().find(|x| x.id == id).unwrap();
+        match f {
+            0 => project.name = v,
+            1 => project.startup_command = v,
+            _ => project.default_provider = v,
+        }
+    }
+    fn proj_disk_get(text: &str, p: usize, f: usize) -> Option<String> {
+        let doc: toml::Table = toml::from_str(text).unwrap();
+        let id = ["p1", "p2"][p];
+        doc.get("projects")?
+            .as_array()?
+            .iter()
+            .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(id))?
+            .get(PFIELDS[f])
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+    fn proj_hand_set(path: &std::path::Path, p: usize, f: usize, v: Option<&str>) {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+        let id = ["p1", "p2"][p];
+        let arr = doc["projects"].as_array_of_tables_mut().unwrap();
+        let entry = arr
+            .iter_mut()
+            .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(id))
+            .unwrap();
+        match v {
+            Some(v) => {
+                entry.insert(PFIELDS[f], toml_edit::value(v));
+            }
+            None => {
+                entry.remove(PFIELDS[f]);
+            }
+        }
+        std::fs::write(path, doc.to_string()).unwrap();
+    }
+
+    #[test]
+    fn random_project_field_edits_saves_and_reloads_follow_the_three_way_rules() {
+        let dir0 = tempfile::TempDir::new().unwrap();
+        let r1 = dir0.path().join("r1");
+        let r2 = dir0.path().join("r2");
+        std::fs::create_dir_all(&r1).unwrap();
+        std::fs::create_dir_all(&r2).unwrap();
+        let mut failures = Vec::new();
+        for seed in 1..=300u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+            let initial = format!(
+                "[[projects]]\nid = \"p1\"\npath = \"{}\"\nname = \"one\"\nstartup_command = \"make\"\n\n[[projects]]\nid = \"p2\"\npath = \"{}\"\nname = \"two\"\ndefault_provider = \"codex\"\n",
+                r1.display(),
+                r2.display()
+            );
+            let (_dir, path) = file(&initial);
+            let loaded = crate::config::load_config_file(&path).unwrap();
+            let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
+            let mut memory = loaded.clone();
+            let mut base = loaded.clone();
+            let text0 = std::fs::read_to_string(&path).unwrap();
+            let mut expect: Vec<Vec<Option<String>>> = (0..2)
+                .map(|p| (0..3).map(|f| proj_disk_get(&text0, p, f)).collect())
+                .collect();
+            let mut log = Vec::new();
+            for step in 0..25 {
+                let p = rng.below(2) as usize;
+                let f = rng.below(3) as usize;
+                match rng.below(4) {
+                    0 => {
+                        let v = if rng.below(3) == 0 {
+                            None
+                        } else {
+                            Some(format!("h{}", rng.below(50)))
+                        };
+                        proj_hand_set(&path, p, f, v.as_deref());
+                        expect[p][f] = v.clone();
+                        log.push(format!("hand p{} {}={v:?}", p + 1, PFIELDS[f]));
+                    }
+                    1 => {
+                        let v = if rng.below(3) == 0 {
+                            None
+                        } else {
+                            Some(format!("m{}", rng.below(50)))
+                        };
+                        proj_mem_set(&mut memory, p, f, v.clone());
+                        log.push(format!("mem p{} {}={v:?}", p + 1, PFIELDS[f]));
+                    }
+                    2 => {
+                        q.save_eager(memory.clone()).unwrap();
+                        for (p, fields) in expect.iter_mut().enumerate() {
+                            for (f, slot) in fields.iter_mut().enumerate() {
+                                let m = proj_mem_get(&memory, p, f);
+                                if m != proj_mem_get(&base, p, f) {
+                                    *slot = m;
+                                }
+                            }
+                        }
+                        base = memory.clone();
+                        log.push("save".into());
+                    }
+                    _ => {
+                        memory = crate::config::load_config_file(&path).unwrap();
+                        q.set_base(memory.clone());
+                        base = memory.clone();
+                        log.push("reload".into());
+                    }
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let got: Vec<Vec<Option<String>>> = (0..2)
+                    .map(|p| (0..3).map(|f| proj_disk_get(&text, p, f)).collect())
+                    .collect();
+                if got != expect {
+                    failures.push(format!(
+                        "seed {seed} step {step}: got {got:?}, expected {expect:?}\nlog: {log:#?}\nfile:\n{text}"
+                    ));
+                    break;
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failures; first:\n{}",
+            failures.len(),
+            failures[0]
+        );
+    }
+}

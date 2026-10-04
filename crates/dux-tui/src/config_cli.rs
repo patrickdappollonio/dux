@@ -59,7 +59,7 @@ pub(crate) fn run_get(
     };
     let path = path.as_str();
     if path.starts_with('-') {
-        bail!("unknown flag: {path}");
+        bail!("unknown flag: {}", flag_name(path));
     }
     let key = config_keys::lookup(path).map_err(|e| anyhow!("{e}"))?;
     let raw = match std::fs::read_to_string(&paths.config_path) {
@@ -191,6 +191,12 @@ struct SetArgs {
     stdin: bool,
 }
 
+/// A flag as it may be named in an error: what follows `=` (perhaps a
+/// secret typed as `--password=…`) is never repeated.
+fn flag_name(arg: &str) -> &str {
+    arg.split_once('=').map_or(arg, |(name, _)| name)
+}
+
 /// `<path> [value] [--stdin]`. A value may start with a single dash (a
 /// negative number); `--` ends the flags for one that starts with two.
 fn parse_set_args(args: &[String]) -> Result<SetArgs> {
@@ -203,7 +209,7 @@ fn parse_set_args(args: &[String]) -> Result<SetArgs> {
         } else if !flags_done && arg == "--stdin" {
             stdin = true;
         } else if !flags_done && arg.starts_with("--") {
-            bail!("unknown flag: {arg}");
+            bail!("unknown flag: {}", flag_name(arg));
         } else {
             positionals.push(arg);
         }
@@ -1212,5 +1218,38 @@ port = 3890
         assert_eq!(out, "25\n");
         assert!(err.contains("cannot"), "{err}");
         assert!(err.contains("require"), "{err}");
+    }
+
+    /// A setting typed as `key=value` (other tools' habit) is refused naming
+    /// only the part before `=`, so a password typed that way is never
+    /// printed back; an unknown `--flag=value` is named without its value too.
+    #[test]
+    fn a_value_typed_after_an_equals_sign_is_never_repeated() {
+        let (_tmp, paths) = setup(Some("[server]\nport = 3890\n"));
+        let error = set(
+            &paths,
+            &["server.auth.password=Tr0ub4dor&3xyz"],
+            &mut no_secrets(),
+        )
+        .expect_err("refused");
+        let message = format!("{error:#}");
+        assert!(!message.contains("Tr0ub4dor"), "{message}");
+        assert!(message.contains("server.auth.password"), "{message}");
+        let error = set(
+            &paths,
+            &["server.port", "--secret=hunter2"],
+            &mut no_secrets(),
+        )
+        .expect_err("refused");
+        assert!(!format!("{error:#}").contains("hunter2"), "{error:#}");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let error = run_get(
+            &args(&["server.auth.password=hunter2"]),
+            &paths,
+            &mut out,
+            &mut err,
+        )
+        .expect_err("refused");
+        assert!(!format!("{error:#}").contains("hunter2"), "{error:#}");
     }
 }
