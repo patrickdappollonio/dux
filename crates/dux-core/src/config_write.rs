@@ -423,7 +423,7 @@ fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<SaveBase<'_>>, o
             let mut with_base = original.clone();
             apply_patches(&mut with_base, base.config);
             let seen = base.seen.and_then(|text| text.parse::<DocumentMut>().ok());
-            merge_changed(
+            merge_changed_at(
                 disk.as_table_mut(),
                 original.as_table(),
                 Some(MergeBase {
@@ -431,13 +431,15 @@ fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<SaveBase<'_>>, o
                     base: with_base.as_table(),
                 }),
                 with_ours.as_table(),
+                true,
             );
         }
-        None => merge_changed(
+        None => merge_changed_at(
             disk.as_table_mut(),
             original.as_table(),
             None,
             with_ours.as_table(),
+            true,
         ),
     }
     // Retired keys still go on every save, as they always have.
@@ -468,6 +470,28 @@ struct MergeBase<'a> {
 /// rules). `disk` is the file before this save. With no base, everything
 /// in `ours` counts as changed.
 fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, ours: &Table) {
+    merge_changed_at(target, disk, base, ours, false);
+}
+
+/// Whether the array of tables at `key` is one dux merges entry by entry:
+/// `[[projects]]` at the top of the file, the one array dux writes and whose
+/// entries it can identify (by `id` and `path`). Every other array of
+/// tables (a hand-added `[[extra]]`, one nested in a section, one under a
+/// provider, a newer dux's) is one value: memory's when memory changed it,
+/// the file's otherwise, so an entry with nothing to identify it by is never
+/// written twice.
+fn merges_entries(key: &str, root: bool) -> bool {
+    root && key == "projects"
+}
+
+/// [`merge_changed`] at one table, `root` when it is the file itself.
+fn merge_changed_at(
+    target: &mut Table,
+    disk: &Table,
+    base: Option<MergeBase<'_>>,
+    ours: &Table,
+    root: bool,
+) {
     for (key, ours_item) in ours.iter() {
         let Some(base_side) = base else {
             // No base: the full patch, through the same in-place writes.
@@ -537,7 +561,9 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
                     }
                     continue;
                 }
-                (Item::ArrayOfTables(ours_array), Some(Item::ArrayOfTables(base_array))) => {
+                (Item::ArrayOfTables(ours_array), Some(Item::ArrayOfTables(base_array)))
+                    if merges_entries(key, root) =>
+                {
                     let empty = toml_edit::ArrayOfTables::new();
                     let mut out = toml_edit::ArrayOfTables::new();
                     merge_array_of_tables(
@@ -586,7 +612,7 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
                 Item::ArrayOfTables(ours_array),
                 Item::ArrayOfTables(disk_array),
                 Some(Item::ArrayOfTables(t)),
-            ) if base_item.is_none_or(Item::is_array_of_tables) => {
+            ) if merges_entries(key, root) && base_item.is_none_or(Item::is_array_of_tables) => {
                 let empty = toml_edit::ArrayOfTables::new();
                 merge_array_of_tables(
                     t,
@@ -658,6 +684,7 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
         // is merged entry by entry against an empty one, so an entry added on
         // disk by someone else stays; only the base's entries go.
         if let (Some(base_side), Some(Item::ArrayOfTables(disk_array))) = (base, disk.get(&key))
+            && merges_entries(&key, root)
             && let Some(Item::ArrayOfTables(base_array)) = base_side.base.get(&key)
         {
             let raw_array = base_side
@@ -873,6 +900,14 @@ fn merge_array_of_tables(
     let bases: Vec<&Table> = bases_managed.iter().collect();
     let raws: Vec<&Table> = raw.map(|raw| raw.iter().collect()).unwrap_or_default();
     let ours: Vec<&Table> = ours_managed.iter().collect();
+    // Every side is matched on the keys dux manages too, so how alike two
+    // entries are never depends on keys only the file has: two id-less
+    // projects at one path are told apart by their own settings, and the
+    // user's keys go with whichever file entry is matched.
+    let raws_managed: Vec<Table> = raws.iter().map(|entry| managed_keys(entry)).collect();
+    let disks_managed: Vec<Table> = disks.iter().map(|entry| managed_keys(entry)).collect();
+    let raws_matched: Vec<&Table> = raws_managed.iter().collect();
+    let disks_matched: Vec<&Table> = disks_managed.iter().collect();
     let mut disk_used = vec![false; disks.len()];
     let mut base_used = vec![false; bases.len()];
     let mut raw_used = vec![false; raws.len()];
@@ -892,7 +927,7 @@ fn merge_array_of_tables(
             .zip(&base_of)
             .map(|(entry, b)| b.map(|b| bases[b]).into_iter().chain([*entry]).collect())
             .collect::<Vec<_>>(),
-        &raws,
+        &raws_matched,
         &mut raw_used,
     );
     let disk_of = assign_entries(
@@ -900,14 +935,14 @@ fn merge_array_of_tables(
             .iter()
             .zip(base_of.iter().zip(&raw_of))
             .map(|(entry, (b, r))| {
-                r.map(|r| raws[r])
+                r.map(|r| raws_matched[r])
                     .into_iter()
                     .chain(b.map(|b| bases[b]))
                     .chain(std::iter::once(*entry))
                     .collect()
             })
             .collect::<Vec<_>>(),
-        &disks,
+        &disks_matched,
         &mut disk_used,
     );
     let mut merged = toml_edit::ArrayOfTables::new();
@@ -957,23 +992,18 @@ fn merge_array_of_tables(
     // assignment: a file entry with the base entry's id takes it before
     // another that only shares its path (moved by hand, then a new one
     // added at the old path), in whichever order the file lists them.
-    let leftovers: Vec<&Table> = disks
-        .iter()
-        .zip(&disk_used)
-        .filter(|(_, used)| !**used)
-        .map(|(entry, _)| *entry)
-        .collect();
+    let leftovers: Vec<usize> = (0..disks.len()).filter(|&d| !disk_used[d]).collect();
     let removed = assign_entries(
         &leftovers
             .iter()
-            .map(|entry| vec![*entry])
+            .map(|&d| vec![disks_matched[d]])
             .collect::<Vec<_>>(),
         &bases,
         &mut base_used,
     );
-    for (entry, removed) in leftovers.iter().zip(removed) {
+    for (&d, removed) in leftovers.iter().zip(removed) {
         if removed.is_none() {
-            merged.push((*entry).clone());
+            merged.push(disks[d].clone());
         }
     }
     *target = merged;

@@ -5862,16 +5862,13 @@ impl App {
     /// compared with `before`, the config it replaced: the view, the project
     /// list, the GitHub integration, the serve and Tailscale switches.
     /// `github_was_enabled` is whether the integration was on before; the
-    /// `gh` probe turning it on owes is asked for here and nowhere else on
-    /// this surface. Runs after a successful apply and after one that failed
-    /// but adopted the config anyway, so neither claims a setting that is not
-    /// in force.
+    /// `gh` probe a reload owes is asked for here, by the engine's one rule
+    /// ([`dux_core::engine::Engine::probe_gh_after_reload`]), and nowhere
+    /// else on this surface. Runs after a successful apply and after one
+    /// that failed but adopted the config anyway, so neither claims a
+    /// setting that is not in force.
     pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
-        if !github_was_enabled && self.engine.github_integration_enabled {
-            // Off-to-on through a config reload is the same transition as the
-            // palette toggle, and needs the same fresh answer from `gh`.
-            self.engine.spawn_gh_status_check();
-        }
+        self.engine.probe_gh_after_reload(github_was_enabled);
         self.sync_view_state_from_config();
 
         self.engine.refresh_project_defaults();
@@ -9654,10 +9651,43 @@ leading_branch = "main"
             "a reload that turns the integration on re-runs the probe",
         );
 
-        // A reload that leaves it on is not a transition and must not re-run it.
-        app.apply_reloaded_config(config)
+        // A reload that leaves it on with a settled, working answer is not a
+        // transition and must not re-run it.
+        app.engine.gh_status = dux_core::model::GhStatus::Available;
+        app.apply_reloaded_config(config.clone())
             .expect("apply reloaded config again");
         assert_eq!(app.engine.gh_probe.generation, 1);
+
+        // One that leaves it on while `gh` is not usable re-checks, the same
+        // rule the engine follows for every surface: reloading is one of the
+        // ways a user retries after fixing `gh`.
+        app.engine.gh_status = dux_core::model::GhStatus::NotInstalled;
+        app.apply_reloaded_config(config)
+            .expect("apply reloaded config a third time");
+        assert_eq!(app.engine.gh_probe.generation, 2);
+    }
+
+    /// A config the engine adopted after its own apply failed follows the
+    /// same rule: the integration was already on and `gh` is not usable, so
+    /// the reload re-checks it.
+    #[test]
+    fn an_adopted_config_re_checks_an_unusable_gh() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let dir = tempfile::tempdir().expect("tempdir");
+        app.engine.gh_probe.program = stand_in_gh(dir.path());
+        app.engine.github_integration_enabled = true;
+        app.engine.config.ui.github_integration = true;
+        app.engine.gh_status = dux_core::model::GhStatus::NotInstalled;
+        let before = app.engine.config.clone();
+        let generation = app.engine.gh_probe.generation;
+
+        app.apply_reaction(dux_core::engine::EventReaction::ConfigAdopted {
+            before: Box::new(before),
+            github_was_enabled: true,
+            error: "the session database could not be read".to_string(),
+        });
+
+        assert_eq!(app.engine.gh_probe.generation, generation.wrapping_add(1));
     }
 
     /// A config file that turns the option on and leaves both pane actions on

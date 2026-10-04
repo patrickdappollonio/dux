@@ -13161,10 +13161,6 @@ not_a_real_action = ["x"]
         assert!(!app.engine.paths.config_path.exists(), "not recreated");
     }
 
-    /// The terminal UI's apply failing after a coalesced reload moved the
-    /// writer's base to the new config: memory keeps the old config, so the
-    /// base goes back to it, and the next save does not write the old values
-    /// over the new file.
     /// When the engine's own apply of a reload fails (a reload with deferred
     /// commands), it keeps the new config: the view follows it, the pending
     /// reload resolves as an apply that failed rather than a refused file,

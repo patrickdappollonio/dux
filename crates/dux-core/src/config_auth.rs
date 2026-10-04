@@ -108,6 +108,13 @@ pub struct ServerAuthConfig {
     pub max_failed_logins: u32,
     /// Addresses and CIDR ranges refused before anything else, with or
     /// without a password. Each entry parses as an [`AddressBlock`].
+    ///
+    /// A save from memory never writes this list: it is one plain value, so
+    /// a three-way save would write it whole, and a ban another dux added
+    /// meanwhile would be lost. Every change to it, an automatic ban
+    /// included, goes through the locked mutation path
+    /// ([`crate::config_write::mutate_config_file`]), which changes it in the
+    /// file as it is under the config write lock.
     pub blocked_addresses: Vec<String>,
     /// Seconds a session survives with no request and no open socket.
     pub session_idle_seconds: u32,

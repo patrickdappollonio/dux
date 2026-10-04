@@ -1429,3 +1429,269 @@ fn a_key_dux_filled_into_an_inline_provider_stays_deleted_by_hand() {
         "hand-deleted inline provider key came back:\n{t}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Arrays of tables dux does not own, and project entries told apart by what
+// dux manages in them
+// ---------------------------------------------------------------------------
+
+/// Arrays of tables dux does not write (a hand-added `[[extra]]`, one nested
+/// in a section dux writes, one under a provider) keep exactly their entries
+/// over six saves and a reload: an entry with nothing that identifies it is
+/// never written twice.
+#[test]
+fn arrays_of_tables_dux_does_not_own_keep_their_count_over_saves_and_a_reload() {
+    let text = "[[extra]]\na = 1\n\n[[extra]]\nid = \"q\"\nb = 2\n\n[ui]\nleft_width_pct = 25\n\n[[ui.notes]]\ntext = \"hi\"\n\n[providers.claude]\ncommand = \"claude\"\n\n[[providers.claude.hooks]]\nrun = \"x\"\n";
+    let counts = |text: &str| {
+        (
+            text.matches("[[extra]]").count(),
+            text.matches("[[ui.notes]]").count(),
+            text.matches("[[providers.claude.hooks]]").count(),
+        )
+    };
+    let (_dir, path, loaded, queue) = setup(text);
+    let mut memory = loaded.clone();
+    for round in 0..6 {
+        memory.env.insert(format!("R{round}"), "1".into());
+        queue.save_eager(memory.clone()).unwrap();
+        let written = read(&path);
+        assert_eq!(counts(&written), (2, 1, 1), "save {round}:\n{written}");
+    }
+    let mut reloaded = load(&path);
+    let queue = queue_for(&path);
+    for written in three_unrelated_saves(&path, &queue, &mut reloaded) {
+        assert_eq!(counts(&written), (2, 1, 1), "after a reload:\n{written}");
+    }
+}
+
+/// A memory change to an array of tables dux does not own is written as a
+/// whole; a hand edit to it while memory has not changed it is kept.
+#[test]
+fn an_array_of_tables_dux_does_not_own_is_merged_as_one_value() {
+    let (_dir, path, loaded, queue) = setup("[[extra]]\na = 1\n");
+    std::fs::write(&path, "[[extra]]\na = 1\n\n[[extra]]\na = 2\n").unwrap();
+    let mut memory = loaded.clone();
+    for written in three_unrelated_saves(&path, &queue, &mut memory) {
+        assert_eq!(written.matches("[[extra]]").count(), 2, "{written}");
+        assert!(written.contains("a = 2"), "{written}");
+    }
+}
+
+const TWO_PROJECTS_WITH_THEIR_OWN_SETTINGS: [&str; 2] = [
+    "[[projects]]\npath = \"/x\"\nname = \"api\"\ndefault_provider = \"claude\"\nnote = \"n1\"\n\n[[projects]]\npath = \"/x\"\nname = \"api\"\ndefault_provider = \"codex\"\nnote = \"n2\"\n",
+    "[[projects]]\npath = \"/x\"\ndefault_provider = \"claude\"\nnote = \"n1\"\n\n[[projects]]\npath = \"/x\"\ndefault_provider = \"codex\"\nnote = \"n2\"\n",
+];
+
+/// Removing either of two id-less projects at one path (with the same name,
+/// or with none) leaves the survivor with its own settings and its own keys,
+/// never the removed one's.
+#[test]
+fn removing_one_of_two_projects_at_one_path_leaves_the_survivor_its_own_settings() {
+    for text in TWO_PROJECTS_WITH_THEIR_OWN_SETTINGS {
+        for (removed, kept_provider, kept_note) in [(0, "codex", "n2"), (1, "claude", "n1")] {
+            let (_dir, path, loaded, queue) = setup(text);
+            let mut memory = loaded.clone();
+            memory.projects.remove(removed);
+            queue.save_eager(memory.clone()).unwrap();
+            for written in std::iter::once(read(&path)).chain(three_unrelated_saves(
+                &path,
+                &queue,
+                &mut memory,
+            )) {
+                let doc: toml_edit::DocumentMut = written.parse().unwrap();
+                let projects = doc["projects"].as_array_of_tables().unwrap();
+                assert_eq!(projects.len(), 1, "{written}");
+                let survivor = projects.get(0).unwrap();
+                let field = |name: &str| survivor.get(name).and_then(|value| value.as_str());
+                assert_eq!(field("default_provider"), Some(kept_provider), "{written}");
+                assert_eq!(field("note"), Some(kept_note), "{written}");
+            }
+        }
+    }
+}
+
+/// A change dux makes to the second of two projects at one path lands on
+/// the second entry, which keeps its own keys.
+#[test]
+fn a_change_to_the_second_of_two_projects_at_one_path_lands_on_it() {
+    let (_dir, path, loaded, queue) = setup(TWO_PROJECTS_WITH_THEIR_OWN_SETTINGS[0]);
+    let mut memory = loaded.clone();
+    memory.projects[1].startup_command = Some("make".into());
+    queue.save_eager(memory.clone()).unwrap();
+    for text in
+        std::iter::once(read(&path)).chain(three_unrelated_saves(&path, &queue, &mut memory))
+    {
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        let projects = doc["projects"].as_array_of_tables().unwrap();
+        assert_eq!(projects.len(), 2, "{text}");
+        let second = projects.get(1).unwrap();
+        assert_eq!(
+            second.get("note").and_then(|v| v.as_str()),
+            Some("n2"),
+            "{text}"
+        );
+        assert_eq!(
+            second.get("startup_command").and_then(|v| v.as_str()),
+            Some("make"),
+            "{text}"
+        );
+        assert!(
+            projects.get(0).unwrap().get("startup_command").is_none(),
+            "{text}"
+        );
+    }
+}
+
+/// A user key edited by hand stays edited while dux renames the project.
+#[test]
+fn a_hand_edited_user_key_survives_dux_renaming_its_project() {
+    let (_dir, path, loaded, queue) = setup(
+        "[[projects]]\npath = \"/x\"\nname = \"one\"\nnote = \"n1\"\n\n[[projects]]\npath = \"/y\"\nname = \"two\"\nnote = \"n2\"\n",
+    );
+    let mut memory = loaded.clone();
+    std::fs::write(
+        &path,
+        read(&path).replace("note = \"n1\"", "note = \"edited\""),
+    )
+    .unwrap();
+    memory.projects[0].name = Some("uno".into());
+    queue.save_eager(memory.clone()).unwrap();
+    for text in
+        std::iter::once(read(&path)).chain(three_unrelated_saves(&path, &queue, &mut memory))
+    {
+        assert_eq!(
+            names_and_notes(&text),
+            vec![(some("uno"), some("edited")), (some("two"), some("n2"))],
+            "{text}"
+        );
+    }
+}
+
+/// An id added by hand to one of two projects at one path does not move
+/// keys between them when dux renames the other.
+#[test]
+fn an_id_added_by_hand_does_not_move_keys_between_projects_at_one_path() {
+    let (_dir, path, loaded, queue) = setup(TWO_PROJECTS_AT_ONE_PATH);
+    let mut memory = loaded.clone();
+    std::fs::write(
+        &path,
+        read(&path).replace("name = \"two\"", "id = \"handid\"\nname = \"two\""),
+    )
+    .unwrap();
+    memory.projects[0].name = Some("two".into());
+    queue.save_eager(memory.clone()).unwrap();
+    for text in
+        std::iter::once(read(&path)).chain(three_unrelated_saves(&path, &queue, &mut memory))
+    {
+        assert_eq!(
+            names_and_notes(&text),
+            vec![(some("two"), some("n1")), (some("two"), some("n2"))],
+            "{text}"
+        );
+    }
+}
+
+/// Two projects at one path reordered by hand keep their own keys when dux
+/// renames one.
+#[test]
+fn projects_at_one_path_reordered_by_hand_keep_their_keys_through_a_rename() {
+    let (_dir, path, loaded, queue) = setup(TWO_PROJECTS_AT_ONE_PATH);
+    let mut memory = loaded.clone();
+    std::fs::write(
+        &path,
+        "[[projects]]\npath = \"/x\"\nname = \"two\"\nnote = \"n2\"\n\n[[projects]]\npath = \"/x\"\nname = \"one\"\nnote = \"n1\"\n",
+    )
+    .unwrap();
+    memory.projects[0].name = Some("two".into());
+    queue.save_eager(memory.clone()).unwrap();
+    for text in
+        std::iter::once(read(&path)).chain(three_unrelated_saves(&path, &queue, &mut memory))
+    {
+        let mut rows = names_and_notes(&text);
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![(some("two"), some("n1")), (some("two"), some("n2"))],
+            "{text}"
+        );
+    }
+}
+
+/// A section flipped from inline to a table and back by hand, each time
+/// leaving a key out, keeps those keys out over saves and a reload.
+#[test]
+fn a_section_flipped_between_inline_and_table_by_hand_keeps_its_deletions() {
+    let (_dir, path, loaded, queue) = setup("ui = { left_width_pct = 25 }\n");
+    let mut memory = loaded.clone();
+    memory.env.insert("B".into(), "2".into());
+    queue.save_eager(memory.clone()).unwrap();
+    let written = read(&path);
+    let line = written
+        .lines()
+        .find(|line| line.starts_with("ui = {"))
+        .unwrap()
+        .to_string();
+    let inline: toml_edit::DocumentMut = line.parse().unwrap();
+    let mut ui = inline["ui"].as_inline_table().unwrap().clone().into_table();
+    ui.remove("diff_tab_width");
+    let mut table = toml_edit::DocumentMut::new();
+    table["ui"] = toml_edit::Item::Table(ui);
+    std::fs::write(
+        &path,
+        written.replace(&format!("{line}\n"), "") + "\n" + &table.to_string(),
+    )
+    .unwrap();
+    memory.ui.left_width_pct = 31;
+    queue.save_eager(memory.clone()).unwrap();
+    let text = read(&path);
+    assert!(
+        text.contains("left_width_pct = 31") && !text.contains("diff_tab_width"),
+        "{text}"
+    );
+    // Back to inline, this time also leaving `theme` out.
+    let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+    let mut ui = doc["ui"].as_table().unwrap().clone();
+    ui.remove("theme");
+    doc.remove("ui");
+    std::fs::write(&path, format!("ui = {}\n{}", ui.into_inline_table(), doc)).unwrap();
+    memory.ui.left_width_pct = 32;
+    queue.save_eager(memory.clone()).unwrap();
+    for text in
+        std::iter::once(read(&path)).chain(three_unrelated_saves(&path, &queue, &mut memory))
+    {
+        assert!(text.contains("left_width_pct = 32"), "{text}");
+        assert!(!text.contains("diff_tab_width"), "{text}");
+        assert!(!text.contains("theme ="), "{text}");
+    }
+    let mut reloaded = load(&path);
+    let queue = queue_for(&path);
+    for text in three_unrelated_saves(&path, &queue, &mut reloaded) {
+        crate::config::config_from_text_as_written(&text)
+            .unwrap_or_else(|error| panic!("{text}: {}", error.reason()));
+    }
+}
+
+/// Projects written as an inline array keep their count while dux renames
+/// one and then removes another.
+#[test]
+fn projects_written_as_an_inline_array_keep_their_count() {
+    let (_dir, path, loaded, queue) =
+        setup("projects = [ { path = \"/x\", name = \"a\", note = \"n\" }, { path = \"/y\" } ]\n");
+    let mut memory = loaded.clone();
+    assert_eq!(memory.projects.len(), 2);
+    memory.projects[0].name = Some("b".into());
+    queue.save_eager(memory.clone()).unwrap();
+    for text in
+        std::iter::once(read(&path)).chain(three_unrelated_saves(&path, &queue, &mut memory))
+    {
+        let config = crate::config::config_from_text_as_written(&text)
+            .unwrap_or_else(|error| panic!("{text}: {}", error.reason()));
+        assert_eq!(config.projects.len(), 2, "{text}");
+    }
+    memory.projects.remove(1);
+    queue.save_eager(memory.clone()).unwrap();
+    let text = read(&path);
+    let config = crate::config::config_from_text_as_written(&text)
+        .unwrap_or_else(|error| panic!("{text}: {}", error.reason()));
+    assert_eq!(config.projects.len(), 1, "{text}");
+}
