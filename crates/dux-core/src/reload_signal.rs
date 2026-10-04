@@ -20,7 +20,12 @@
 //!   `dux server` and the start-web-server flip.
 //! - The sender: [`signal_running_dux`] finds the process that HOLDS
 //!   `dux.lock` (not merely the PID written in it, which can be stale and
-//!   reused by an unrelated process) and signals it.
+//!   reused by an unrelated process) and signals it, but only once that
+//!   process has said it handles the signal: a dux writes
+//!   [`crate::lockfile::RELOAD_SIGNAL_MARKER`] into its lock file after its
+//!   handler is installed, and on Linux its `SigCgt` mask must agree. A dux
+//!   from before this exists has no handler, and the signal would kill it
+//!   along with every terminal it runs.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,12 +37,13 @@ fn pending() -> &'static Arc<AtomicBool> {
     PENDING.get_or_init(|| Arc::new(AtomicBool::new(false)))
 }
 
+static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
+
 /// Install the SIGUSR1 handler. Idempotent: the first call registers it and
 /// every later call returns that first answer. Never unregistered, so a
 /// signal between one serving mode and the next (a flip back to the terminal
 /// UI) is recorded rather than killing the process.
 pub fn install() -> Result<(), String> {
-    static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
     INSTALLED
         .get_or_init(|| {
             signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(pending()))
@@ -45,6 +51,12 @@ pub fn install() -> Result<(), String> {
                 .map_err(|e| format!("could not install the SIGUSR1 (reload config) handler: {e}"))
         })
         .clone()
+}
+
+/// Whether this process's SIGUSR1 handler is installed, which is what lets
+/// its lock file advertise that it handles the reload signal.
+pub fn is_installed() -> bool {
+    matches!(INSTALLED.get(), Some(Ok(())))
 }
 
 /// Whether a SIGUSR1 arrived since the last call. Clears the flag, so exactly
@@ -64,6 +76,21 @@ pub enum SignalOutcome {
     /// Something holds the lock but it could not be signalled; the reason is
     /// for the user (who can run `kill -USR1` or reload from the app).
     Failed { pid: Option<u32>, reason: String },
+    /// The dux holding the lock was deliberately not signalled, because it
+    /// has not shown that it handles the signal, whose default action would
+    /// terminate it.
+    NotSignalled { pid: u32, why: NoReloadHandler },
+}
+
+/// Why a running dux was not sent the reload signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoReloadHandler {
+    /// Its lock file carries no reload-signal marker: a dux from before the
+    /// reload signal, which cannot reload while running.
+    OlderVersion,
+    /// It wrote the marker, but the system says it does not catch SIGUSR1
+    /// (or cannot say whether it does).
+    NotCaught,
 }
 
 /// Send SIGUSR1 to the dux that holds `lock_path` (`dux.lock`), if one does.
@@ -74,12 +101,79 @@ pub enum SignalOutcome {
 /// a shared lock on it, and then requiring the written PID to be a running
 /// process named `dux`. A lock file left by a dux that exited holds no lock,
 /// so its PID, possibly reused by something else, is never signalled.
+///
+/// Even then it is signalled only when it says it handles the signal: its
+/// lock file carries [`crate::lockfile::RELOAD_SIGNAL_MARKER`] under that
+/// same PID, and, where the system can say (Linux's `/proc/<pid>/status`),
+/// it catches SIGUSR1 now. Both must agree; otherwise nothing is sent.
 pub fn signal_running_dux(lock_path: &Path) -> SignalOutcome {
     match holder(lock_path, Some("dux")) {
         Holder::None => SignalOutcome::NotRunning,
         Holder::Unknown(reason) => SignalOutcome::Failed { pid: None, reason },
-        Holder::Pid(pid) => send(pid),
+        Holder::Pid(pid) => match reload_handler_of(lock_path, pid, catches_sigusr1(pid)) {
+            Ok(()) => send(pid),
+            Err(why) => SignalOutcome::NotSignalled { pid, why },
+        },
     }
+}
+
+/// Whether the holder `pid` of `lock_path` handles the reload signal: its
+/// lock file names it and carries the marker, and `caught` (what the system
+/// says of its signal mask, `None` where it cannot be read) does not say no.
+fn reload_handler_of(lock_path: &Path, pid: u32, caught: Caught) -> Result<(), NoReloadHandler> {
+    let contents = std::fs::read_to_string(lock_path)
+        .map(|text| crate::lockfile::LockFileContents::parse(&text))
+        .unwrap_or_default();
+    if contents.pid != Some(pid) || !contents.handles_reload_signal {
+        return Err(NoReloadHandler::OlderVersion);
+    }
+    match caught {
+        Caught::Yes | Caught::CannotTell => Ok(()),
+        Caught::No | Caught::Unreadable => Err(NoReloadHandler::NotCaught),
+    }
+}
+
+/// What the system says about whether a process catches SIGUSR1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Caught {
+    Yes,
+    No,
+    /// The system has a place to say (`/proc`) but it could not be read for
+    /// this process: not signalled, since it cannot be shown to be safe.
+    Unreadable,
+    /// The system has no such place (no `/proc`): the marker alone decides.
+    CannotTell,
+}
+
+/// Whether `pid` catches SIGUSR1, from the `SigCgt` mask in
+/// `/proc/<pid>/status` (bit `SIGUSR1 - 1`).
+fn catches_sigusr1(pid: u32) -> Caught {
+    if !Path::new("/proc/self/status").exists() {
+        return Caught::CannotTell;
+    }
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return Caught::Unreadable;
+    };
+    sigusr1_caught_in(&status)
+}
+
+/// [`catches_sigusr1`] on the text of a `/proc/<pid>/status`.
+fn sigusr1_caught_in(status: &str) -> Caught {
+    let mask = status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigCgt:"))
+        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok());
+    let bit = 1u64 << (libc_sigusr1() - 1);
+    match mask {
+        Some(mask) if mask & bit != 0 => Caught::Yes,
+        Some(_) => Caught::No,
+        None => Caught::Unreadable,
+    }
+}
+
+/// SIGUSR1's number on this system.
+fn libc_sigusr1() -> u32 {
+    rustix::process::Signal::USR1.as_raw().unsigned_abs()
 }
 
 /// Whether a dux may be running: something holds `lock_path`, or the lock
@@ -212,7 +306,7 @@ fn holder_by_probe(lock_path: &Path, expected_name: Option<&str>) -> Holder {
     }
     let Some(pid) = std::fs::read_to_string(lock_path)
         .ok()
-        .and_then(|text| text.trim().parse::<u32>().ok())
+        .and_then(|text| crate::lockfile::LockFileContents::parse(&text).pid)
     else {
         return Holder::Unknown(format!(
             "a dux holds {} but its process id could not be read from it",
@@ -314,6 +408,12 @@ mod tests {
             "a lock holder whose name is not dux is not signalled by the portable check"
         );
 
+        // It installed its handler before taking the lock, so its lock file
+        // says it handles the signal, and its signal mask agrees.
+        assert_eq!(
+            reload_handler_of(&lock, child.id(), catches_sigusr1(child.id())),
+            Ok(())
+        );
         assert_eq!(send(child.id()), SignalOutcome::Sent { pid: child.id() });
         assert!(
             wait_for(&dir.path().join("reloaded")),
@@ -429,5 +529,57 @@ mod tests {
         pending().store(true, Ordering::SeqCst);
         assert!(take_pending());
         assert!(!take_pending());
+    }
+
+    /// `SigCgt` is a hex mask with bit `signal - 1` set for each caught
+    /// signal; no mask at all is not a yes.
+    #[test]
+    fn the_signal_mask_says_whether_sigusr1_is_caught() {
+        let bit = 1u64 << (libc_sigusr1() - 1);
+        let with = format!("Name:\tdux\nSigCgt:\t{bit:016x}\n");
+        assert_eq!(sigusr1_caught_in(&with), Caught::Yes);
+        let without = format!("SigCgt:\t{:016x}\n", !bit & 0xffff);
+        assert_eq!(sigusr1_caught_in(&without), Caught::No);
+        assert_eq!(sigusr1_caught_in("Name:\tdux\n"), Caught::Unreadable);
+    }
+
+    /// A lock file with no marker, or a marker under another PID, is an
+    /// older dux; a marker the mask contradicts is not caught; only the two
+    /// together (or the marker where the system cannot tell) allow the signal.
+    #[test]
+    fn the_marker_and_the_mask_must_agree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock = dir.path().join("dux.lock");
+        std::fs::write(&lock, "42\n").unwrap();
+        assert_eq!(
+            reload_handler_of(&lock, 42, Caught::Yes),
+            Err(NoReloadHandler::OlderVersion)
+        );
+        std::fs::write(
+            &lock,
+            format!("41\n{}\n", crate::lockfile::RELOAD_SIGNAL_MARKER),
+        )
+        .unwrap();
+        assert_eq!(
+            reload_handler_of(&lock, 42, Caught::Yes),
+            Err(NoReloadHandler::OlderVersion)
+        );
+        std::fs::write(
+            &lock,
+            format!("42\n{}\n", crate::lockfile::RELOAD_SIGNAL_MARKER),
+        )
+        .unwrap();
+        for (caught, allowed) in [
+            (Caught::Yes, true),
+            (Caught::CannotTell, true),
+            (Caught::No, false),
+            (Caught::Unreadable, false),
+        ] {
+            assert_eq!(
+                reload_handler_of(&lock, 42, caught).is_ok(),
+                allowed,
+                "{caught:?}"
+            );
+        }
     }
 }

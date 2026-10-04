@@ -382,6 +382,25 @@ fn digest(text: &str) -> u64 {
 /// [`ServerAuthConfig::problems`]). A rule spanning keys is checked only
 /// when every key it involves reads. A loader still refuses on any of them.
 pub fn rule_problems_of(auth: toml::Value) -> Vec<Problem> {
+    rule_problems_located(auth, &|_| None)
+}
+
+/// [`rule_problems_of`], placing a key dux does not know by its line in the
+/// file (`line_of`, `None` when it cannot tell) rather than by its name: an
+/// unknown name may be a value pasted in the wrong place, the password above
+/// all, so it is never repeated.
+pub fn rule_problems_located(
+    auth: toml::Value,
+    line_of: &dyn Fn(&str) -> Option<usize>,
+) -> Vec<Problem> {
+    let known: Vec<String> = toml::Value::try_from(crate::config::ServerAuthConfig::default())
+        .ok()
+        .and_then(|value| {
+            value
+                .as_table()
+                .map(|table| table.keys().cloned().collect())
+        })
+        .unwrap_or_default();
     let toml::Value::Table(auth) = auth else {
         return vec![Problem::plain("server.auth is not a table")];
     };
@@ -396,10 +415,18 @@ pub fn rule_problems_of(auth: toml::Value) -> Vec<Problem> {
                 readable.insert(key, value);
             }
             Err(error) => {
-                problems.push(Problem::about(
-                    format!("server.auth.{key}"),
-                    format!("{key}: {}", crate::config::problem_kind(error.message())),
-                ));
+                let kind = crate::config::problem_kind(error.message());
+                let message = if known.contains(&key) {
+                    format!("{key}: {kind}")
+                } else {
+                    match line_of(&key) {
+                        Some(line) => {
+                            format!("the setting on line {line} of [server.auth]: {kind}")
+                        }
+                        None => format!("a setting of [server.auth] dux does not know: {kind}"),
+                    }
+                };
+                problems.push(Problem::about(format!("server.auth.{key}"), message));
                 unreadable.push(key);
             }
         }

@@ -3376,9 +3376,10 @@ pub struct StartProblem {
     pub stops_terminal_ui: bool,
     /// Whether `dux server` will not start (or reload) with the file.
     pub stops_dux_server: bool,
-    /// Whether a `--bind`/`--port` on `dux server`'s command line takes the
-    /// file's value out of the picture, so its own start judges it.
-    pub dux_server_overridable: bool,
+    /// The `[server]` setting it is about when `dux server`'s command line
+    /// can take the file's value out of the picture (see
+    /// [`ServerFileSetting::overriding_flags`]), so its own start judges it.
+    pub dux_server_override: Option<ServerFileSetting>,
 }
 
 impl StartProblem {
@@ -3405,7 +3406,7 @@ impl StartProblem {
             entry: problem.entry,
             stops_terminal_ui: terminal_ui,
             stops_dux_server: dux_server,
-            dux_server_overridable: false,
+            dux_server_override: None,
         }
     }
 }
@@ -3468,7 +3469,7 @@ pub fn check_start(raw: &str) -> StartCheck {
         .extend(misplaced_auth_problem_list(raw).into_iter().map(both));
     check
         .problems
-        .extend(auth_section_problems(&file).into_iter().map(both));
+        .extend(auth_section_problems(&file, raw).into_iter().map(both));
     if let Some(auth) = file
         .get("server")
         .and_then(toml::Value::as_table)
@@ -3487,12 +3488,17 @@ pub fn check_start(raw: &str) -> StartCheck {
             .problems
             .push(StartProblem::new(Problem::about(key, message), true, false));
     }
-    for (place, key, kind) in wrong_typed_settings(&rest) {
+    // What `dux server`'s load does about each wrong-typed value is said as
+    // it is: the value read as its default, or the entry or section around
+    // it dropped with it.
+    let plan = recovery_plan(&rest);
+    for (place, key, kind) in wrong_typed_settings(&rest, raw) {
+        let what = Recovery::covering(&plan, &key).map_or_else(
+            || "dux server reads it as its default".to_string(),
+            |r| r.said_of(&key),
+        );
         check.problems.push(StartProblem::new(
-            Problem::about(
-                key,
-                format!("{place}: {kind} (dux server would use the default)"),
-            ),
+            Problem::about(key, format!("{place}: {kind} ({what})")),
             true,
             false,
         ));
@@ -3500,7 +3506,9 @@ pub fn check_start(raw: &str) -> StartCheck {
     let mut config = recover_config_table(rest);
     config.providers.ensure_defaults();
     let config = apply_load_corrections(config);
-    check.problems.extend(config_start_problems(&config));
+    check
+        .problems
+        .extend(config_start_problems(&config, Some(raw)));
     if let Some(terminal_ui_check) = TERMINAL_UI_CHECK.get() {
         for message in terminal_ui_check(raw) {
             check.problems.push(StartProblem::new(
@@ -3527,7 +3535,7 @@ pub fn start_refusal(raw: &str, surface: Surface) -> Option<String> {
         .into_iter()
         .find(|problem| {
             problem.stops(surface)
-                && !(surface == Surface::DuxServer && problem.dux_server_overridable)
+                && !(surface == Surface::DuxServer && problem.dux_server_override.is_some())
         })
         .map(|problem| problem.message)
 }
@@ -3600,14 +3608,56 @@ fn migrated_beside_auth(file: &toml::Table) -> Option<(toml::Table, Vec<(String,
 /// to the field that is wrong, inside a provider or any other table:
 /// (where it is, its dotted key, the kind of problem). A table that fails
 /// although none of its entries does on its own is listed whole.
-fn wrong_typed_settings(table: &toml::Table) -> Vec<(String, String, String)> {
+///
+/// An entry of `[env]` whose name is not a variable name is placed by its
+/// line in `raw` rather than named: such a name may be a value pasted in
+/// the wrong place.
+fn wrong_typed_settings(table: &toml::Table, raw: &str) -> Vec<(String, String, String)> {
     let mut found = Vec::new();
     for (section, value) in table {
         if !section_solo_ok(section, value.clone()) {
             wrong_typed_inside(section, &mut Vec::new(), value, &mut found);
         }
     }
+    for (place, key, _) in &mut found {
+        if let Some(name) = key.strip_prefix("env.")
+            && !is_valid_var_name(name.split('.').next().unwrap_or(name))
+        {
+            let name = name.split('.').next().unwrap_or(name);
+            *place = match line_of_key(raw, &[KeyStep::Key("env"), KeyStep::Key(name)]) {
+                Some(line) => format!("[env] the entry on line {line}"),
+                None => "[env] an entry whose name is not a variable name".to_string(),
+            };
+        }
+    }
     found
+}
+
+/// One step into a config file, for [`line_of_key`]: a key of a table, or
+/// one entry of an array of tables under a key.
+pub(crate) enum KeyStep<'a> {
+    Key(&'a str),
+    Entry(&'a str, usize),
+}
+
+/// The line (from 1) where the key at `steps` is written in `raw`, so a
+/// message can point at a key whose name it must not repeat.
+pub(crate) fn line_of_key(raw: &str, steps: &[KeyStep<'_>]) -> Option<usize> {
+    let doc = toml_edit::Document::parse(raw).ok()?;
+    let (last, walk) = steps.split_last()?;
+    let mut table: &dyn toml_edit::TableLike = doc.as_table();
+    for step in walk {
+        table = match step {
+            KeyStep::Key(key) => table.get(key)?.as_table_like()?,
+            KeyStep::Entry(key, index) => table.get(key)?.as_array_of_tables()?.get(*index)?,
+        };
+    }
+    let KeyStep::Key(name) = last else {
+        return None;
+    };
+    let (key, _) = table.get_key_value(name)?;
+    let start = key.span()?.start;
+    Some(raw.get(..start)?.matches('\n').count() + 1)
 }
 
 /// [`wrong_typed_settings`] for `value`, at `inner` inside `section`, which
@@ -3655,13 +3705,16 @@ fn wrong_typed_inside(
 }
 
 /// The checks a start makes on the config it read: the server host and
-/// port, the environment variables, and the project records.
-fn config_start_problems(config: &Config) -> Vec<StartProblem> {
+/// port, the environment variables, and the project records. `raw` is the
+/// file's text, which places a variable whose name is not a variable name
+/// by its line (the name itself may be a value pasted in the wrong place,
+/// so it is never repeated).
+fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem> {
     use crate::config_auth::Problem;
     let mut problems = Vec::new();
     if let Err(error) = parse_server_host(&config.server.host) {
         let mut problem = StartProblem::new(Problem::about("server.host", error), true, true);
-        problem.dux_server_overridable = true;
+        problem.dux_server_override = Some(ServerFileSetting::Host);
         problems.push(problem);
     }
     // Port 0 never stops the terminal UI's start, whatever `serve_while_tui`
@@ -3686,32 +3739,47 @@ fn config_start_problems(config: &Config) -> Vec<StartProblem> {
                 .split_once(": ")
                 .map_or("", |(_, rest)| rest)
         );
-        problem.dux_server_overridable = true;
+        problem.dux_server_override = Some(ServerFileSetting::Port);
         problems.push(problem);
     }
-    // One problem per variable, named by the variable (and project), never
-    // by its value.
+    // One problem per variable, never showing its value. A valid name says
+    // which variable; a name that is itself the problem is placed by its line.
+    let line = |steps: &[KeyStep<'_>]| raw.and_then(|raw| line_of_key(raw, steps));
     for (name, value) in &config.env {
         if let Some(problem) = env_variable_problem(name, value) {
+            let which = if is_valid_var_name(name) {
+                format!("global env variable {name}")
+            } else {
+                match line(&[KeyStep::Key("env"), KeyStep::Key(name)]) {
+                    Some(line) => format!("the global env variable on line {line}"),
+                    None => "a global env variable".to_string(),
+                }
+            };
             problems.push(StartProblem::new(
-                Problem::about(
-                    format!("env.{name}"),
-                    format!("global env variable {name}: {problem}"),
-                ),
+                Problem::about(format!("env.{name}"), format!("{which}: {problem}")),
                 true,
                 false,
             ));
         }
     }
-    for project in &config.projects {
+    for (index, project) in config.projects.iter().enumerate() {
         let label = project.name.as_deref().unwrap_or(&project.path);
         for (name, value) in &project.env {
             if let Some(problem) = env_variable_problem(name, value) {
+                let which = if is_valid_var_name(name) {
+                    format!("env variable {name} of project {label}")
+                } else {
+                    match line(&[
+                        KeyStep::Entry("projects", index),
+                        KeyStep::Key("env"),
+                        KeyStep::Key(name),
+                    ]) {
+                        Some(line) => format!("the env variable of project {label} on line {line}"),
+                        None => format!("an env variable of project {label}"),
+                    }
+                };
                 problems.push(StartProblem::new(
-                    Problem::about(
-                        "projects",
-                        format!("env variable {name} of project {label}: {problem}"),
-                    ),
+                    Problem::about("projects", format!("{which}: {problem}")),
                     true,
                     false,
                 ));
@@ -3733,7 +3801,7 @@ fn config_start_problems(config: &Config) -> Vec<StartProblem> {
 /// The checks the terminal UI's start makes on the config it read (see
 /// [`check_start`] for the whole list), as sentences.
 pub fn start_check_problems(config: &Config) -> Vec<String> {
-    config_start_problems(config)
+    config_start_problems(config, config.source_text.as_str())
         .into_iter()
         .filter(|problem| problem.stops_terminal_ui)
         .map(|problem| {
@@ -3791,12 +3859,12 @@ pub fn auth_problems_of(raw: &str) -> Vec<crate::config_auth::Problem> {
         }
     };
     let mut problems = misplaced_auth_problem_list(raw);
-    problems.extend(auth_section_problems(&file));
+    problems.extend(auth_section_problems(&file, raw));
     problems
 }
 
 /// The problems of `[server.auth]` itself, key by key.
-fn auth_section_problems(file: &toml::Table) -> Vec<crate::config_auth::Problem> {
+fn auth_section_problems(file: &toml::Table, raw: &str) -> Vec<crate::config_auth::Problem> {
     let Some(server) = file.get("server") else {
         return Vec::new();
     };
@@ -3813,7 +3881,16 @@ fn auth_section_problems(file: &toml::Table) -> Vec<crate::config_auth::Problem>
             "server.auth is not a table",
         )];
     }
-    crate::config_auth::rule_problems_of(auth.clone())
+    crate::config_auth::rule_problems_located(auth.clone(), &|key| {
+        line_of_key(
+            raw,
+            &[
+                KeyStep::Key("server"),
+                KeyStep::Key("auth"),
+                KeyStep::Key(key),
+            ],
+        )
+    })
 }
 
 /// Read one `server.auth` value through the same deserializer every other
@@ -3831,36 +3908,125 @@ pub fn parse_auth_value(auth: toml::Value) -> Result<ServerAuthConfig, String> {
         .map_err(|e| e.to_string())
 }
 
-/// The field-level recovery of every section but `[server.auth]`.
-fn recover_config_table(doc: toml::Table) -> Config {
-    // Fast path: the whole document deserializes cleanly.
-    if let Ok(cfg) = table_into_config(doc.clone()) {
-        return cfg;
+/// What the field-level recovery does to one part of a file that does not
+/// read: drop one top-level field of a section (a setting, which then reads
+/// as its default, or a whole entry of a map such as one provider), or
+/// reset a whole section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Recovery {
+    DropField { section: String, field: String },
+    ResetSection { section: String },
+}
+
+impl Recovery {
+    /// The dotted key of what it drops or resets.
+    fn key(&self) -> String {
+        match self {
+            Self::DropField { section, field } => format!("{section}.{field}"),
+            Self::ResetSection { section } => section.clone(),
+        }
     }
-    // Recovery: a section that deserializes in isolation is fine (missing sections
-    // use serde defaults, so a single-section document is always structurally ok).
-    // For a bad section, drop only the offending FIELDS where each can be isolated;
-    // otherwise reset the whole section.
-    let mut pruned = doc.clone();
+
+    /// Whether the dotted `key` is inside what it drops or resets.
+    fn covers(&self, key: &str) -> bool {
+        let own = self.key();
+        key == own || key.starts_with(&format!("{own}."))
+    }
+
+    /// The action in `plan` that covers `key`, if any.
+    fn covering<'a>(plan: &'a [Recovery], key: &str) -> Option<&'a Recovery> {
+        plan.iter().find(|recovery| recovery.covers(key))
+    }
+
+    /// What `dux server` does about the wrong value at `key`, which it covers.
+    fn said_of(&self, key: &str) -> String {
+        match self {
+            Self::DropField { .. } if self.key() == key => {
+                "dux server reads it as its default".to_string()
+            }
+            Self::DropField { section, field } => {
+                let stock = section == "providers" && is_stock_provider(field);
+                if stock {
+                    format!(
+                        "dux server drops all of [{section}] {field} over it and runs dux's own \
+                         {field} provider"
+                    )
+                } else {
+                    format!("dux server drops all of [{section}] {field} over it")
+                }
+            }
+            Self::ResetSection { section } => {
+                format!("dux server resets all of [{section}] to its defaults over it")
+            }
+        }
+    }
+}
+
+/// Whether `name` is a provider dux ships.
+fn is_stock_provider(name: &str) -> bool {
+    default_provider_commands()
+        .iter()
+        .any(|(stock, _)| *stock == name)
+}
+
+/// What the field-level recovery does to `doc` (see [`recover_config_table`]),
+/// in order. Empty for a document that reads as it is.
+fn recovery_plan(doc: &toml::Table) -> Vec<Recovery> {
+    if table_into_config(doc.clone()).is_ok() {
+        return Vec::new();
+    }
+    // A section that deserializes in isolation is fine (missing sections use
+    // serde defaults, so a single-section document is always structurally
+    // ok). For a bad section, drop only the offending FIELDS where each can be
+    // isolated; otherwise reset the whole section.
+    let mut plan = Vec::new();
     for (section, value) in doc.iter() {
         if section_solo_ok(section, value.clone()) {
             continue;
         }
         if let toml::Value::Table(tbl) = value
-            && let Some((fixed, reset_fields)) = prune_invalid_fields(section, tbl)
+            && let Some((_, reset_fields)) = prune_invalid_fields(section, tbl)
         {
-            for fk in &reset_fields {
-                crate::logger::warn(&format!(
-                    "config [{section}] {fk} is invalid; resetting it to its default"
-                ));
-            }
-            pruned.insert(section.clone(), toml::Value::Table(fixed));
+            plan.extend(reset_fields.into_iter().map(|field| Recovery::DropField {
+                section: section.clone(),
+                field,
+            }));
             continue;
         }
-        crate::logger::warn(&format!(
-            "config section [{section}] is invalid; resetting it to defaults"
-        ));
-        pruned.remove(section);
+        plan.push(Recovery::ResetSection {
+            section: section.clone(),
+        });
+    }
+    plan
+}
+
+/// The field-level recovery of every section but `[server.auth]`: the
+/// document with [`recovery_plan`] applied.
+fn recover_config_table(doc: toml::Table) -> Config {
+    let plan = recovery_plan(&doc);
+    if plan.is_empty()
+        && let Ok(cfg) = table_into_config(doc.clone())
+    {
+        return cfg;
+    }
+    let mut pruned = doc;
+    for recovery in &plan {
+        match recovery {
+            Recovery::DropField { section, field } => {
+                crate::logger::warn(&format!(
+                    "config [{section}] {field} is invalid; resetting it to its default"
+                ));
+                if let Some(table) = pruned.get_mut(section).and_then(toml::Value::as_table_mut) {
+                    table.remove(field);
+                }
+            }
+            Recovery::ResetSection { section } => {
+                crate::logger::warn(&format!(
+                    "config section [{section}] is invalid; resetting it to defaults"
+                ));
+                pruned.remove(section);
+            }
+        }
     }
     match table_into_config(pruned) {
         Ok(cfg) => cfg,
@@ -4077,22 +4243,46 @@ pub fn load_corrections_of(raw: &str) -> Vec<(String, String)> {
         .parse::<toml_edit::DocumentMut>()
         .map(|doc| crate::config_migrate::retired_provider_prunes(&doc))
         .unwrap_or_default();
-    // A wrong-typed value `dux server` reads as its default (the terminal
-    // UI will not start with it at all).
+    // What `dux server`'s recovery drops or resets (the terminal UI will not
+    // start with such a file at all), each with the wrong values that made it.
     if let Some((rest, _)) = toml::from_str::<toml::Table>(raw)
         .ok()
         .and_then(|file| migrated_beside_auth(&file))
     {
-        found.extend(
-            wrong_typed_settings(&rest)
-                .into_iter()
-                .map(|(place, key, kind)| {
-                    (
-                        key,
-                        format!("{place}: {kind}, so it is read as its default"),
-                    )
-                }),
-        );
+        let wrong = wrong_typed_settings(&rest, raw);
+        for recovery in recovery_plan(&rest) {
+            let causes: Vec<&(String, String, String)> = wrong
+                .iter()
+                .filter(|(_, key, _)| recovery.covers(key))
+                .collect();
+            let reason = match (&recovery, causes.as_slice()) {
+                (Recovery::DropField { .. }, [(place, key, kind)]) if *key == recovery.key() => {
+                    format!("{place}: {kind}, so dux server reads it as its default")
+                }
+                _ => {
+                    let places: Vec<&str> =
+                        causes.iter().map(|(place, _, _)| place.as_str()).collect();
+                    let verb = if places.len() == 1 { "has" } else { "have" };
+                    let what = match &recovery {
+                        Recovery::DropField { section, field } => {
+                            format!("dux server drops all of [{section}] {field}")
+                        }
+                        Recovery::ResetSection { section } => {
+                            format!("dux server resets all of [{section}] to its defaults")
+                        }
+                    };
+                    if places.is_empty() {
+                        format!("{what}, because it does not read")
+                    } else {
+                        format!(
+                            "{what}, because {} {verb} the wrong type",
+                            places.join(" and ")
+                        )
+                    }
+                }
+            };
+            found.push((recovery.key(), reason));
+        }
     }
     if let Ok(config) = config_from_text_as_written(raw) {
         found.extend(load_corrections(config).1);
@@ -4368,6 +4558,70 @@ pub struct ServerPlan {
     pub forced_no: bool,
 }
 
+/// A `dux server` command-line flag that takes the place of a `[server]`
+/// setting from the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerFlag {
+    /// `--bind <ADDR:PORT>`: the host and the port.
+    Bind,
+    /// `--port <PORT>`: the port.
+    Port,
+}
+
+impl ServerFlag {
+    /// The flag as typed.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bind => "--bind",
+            Self::Port => "--port",
+        }
+    }
+
+    /// Whether `cli` carries it.
+    pub fn is_set(self, cli: &ServerCliOverrides) -> bool {
+        match self {
+            Self::Bind => cli.bind.is_some(),
+            Self::Port => cli.port.is_some(),
+        }
+    }
+}
+
+/// A `[server]` setting whose file value a `dux server` flag can take the
+/// place of. The one statement of which flag does that for which setting:
+/// [`resolve_server_plan`] decides with it, and the start checks name the
+/// same flags in what they say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerFileSetting {
+    /// `[server] host`, which only `--bind` replaces.
+    Host,
+    /// `[server] port`, which `--port` or `--bind` replaces.
+    Port,
+}
+
+impl ServerFileSetting {
+    /// The flags that take the place of the file's value.
+    pub fn flags(self) -> &'static [ServerFlag] {
+        match self {
+            Self::Host => &[ServerFlag::Bind],
+            Self::Port => &[ServerFlag::Port, ServerFlag::Bind],
+        }
+    }
+
+    /// Whether `cli` takes the file's value out of the picture.
+    pub fn overridden_by(self, cli: &ServerCliOverrides) -> bool {
+        self.flags().iter().any(|flag| flag.is_set(cli))
+    }
+
+    /// The flags, for a sentence: "--bind", or "--port or --bind".
+    pub fn overriding_flags(self) -> String {
+        self.flags()
+            .iter()
+            .map(|flag| flag.name())
+            .collect::<Vec<_>>()
+            .join(" or ")
+    }
+}
+
 /// CLI overrides for the server plan. Every field is `None`/`false` when the
 /// operator passed nothing, so config values win by default and a present CLI
 /// value takes precedence.
@@ -4431,18 +4685,33 @@ pub fn resolve_server_plan(
     cli: &ServerCliOverrides,
     tailscale_ip: Option<std::net::IpAddr>,
 ) -> Result<ServerPlan> {
-    let bind: std::net::SocketAddr = match cli.bind.as_deref() {
-        Some(raw) => raw.parse().map_err(|_| {
-            anyhow!(
-                "invalid --bind address \"{raw}\": expected IP:port, e.g. 0.0.0.0:3890 \
-                 (hostnames are not resolved)"
-            )
-        })?,
-        None => {
-            let host = parse_server_host(&server.host).map_err(|e| anyhow!("{e}"))?;
-            std::net::SocketAddr::new(host, cli.port.unwrap_or(server.port))
-        }
+    let bind_flag: Option<std::net::SocketAddr> = cli
+        .bind
+        .as_deref()
+        .map(|raw| {
+            raw.parse().map_err(|_| {
+                anyhow!(
+                    "invalid --bind address \"{raw}\": expected IP:port, e.g. 0.0.0.0:3890 \
+                     (hostnames are not resolved)"
+                )
+            })
+        })
+        .transpose()?;
+    // Which flag takes the place of which `[server]` setting is decided in
+    // one place, [`ServerFileSetting`], which the start checks name too.
+    let host = match bind_flag {
+        Some(bind) if ServerFileSetting::Host.overridden_by(cli) => bind.ip(),
+        _ => parse_server_host(&server.host).map_err(|e| anyhow!("{e}"))?,
     };
+    let port = if ServerFileSetting::Port.overridden_by(cli) {
+        bind_flag
+            .map(|bind| bind.port())
+            .or(cli.port)
+            .unwrap_or(server.port)
+    } else {
+        server.port
+    };
+    let bind = std::net::SocketAddr::new(host, port);
     if let Some(problem) = port_zero_problem(&bind.ip().to_string(), bind.port()) {
         bail!(problem);
     }
@@ -6732,6 +7001,150 @@ max_websocket_connections = 16
             keys,
             vec![&vec!["providers.mytool.args".to_string()]],
             "{problems:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recovery_flags_and_names_tests {
+    use super::*;
+
+    /// A wrong value is said to cost what `dux server`'s recovery actually
+    /// drops: itself, the entry around it, or its whole section.
+    #[test]
+    fn a_wrong_value_says_what_dux_server_drops_with_it() {
+        let said = |raw: &str| -> Vec<String> {
+            start_problems_of(raw)
+                .into_iter()
+                .map(|problem| problem.detail)
+                .collect()
+        };
+        assert_eq!(
+            said("[ui]\nleft_width_pct = \"wide\"\n"),
+            vec![
+                "[ui] left_width_pct: invalid type, expected u16 (dux server reads it as its default)"
+            ]
+        );
+        let provider = said("[providers.mytool]\ncommand = \"m\"\nargs = 5\n");
+        assert!(
+            provider[0].contains("dux server drops all of [providers] mytool over it"),
+            "{provider:?}"
+        );
+        let stock = said("[providers.claude]\ncommand = \"m\"\nargs = 5\n");
+        assert!(
+            stock[0].contains("runs dux's own claude provider"),
+            "{stock:?}"
+        );
+        let section = said("[ui]\nright_width_pct = \"a\"\nstatus_clear_seconds = \"b\"\n");
+        assert_eq!(section.len(), 2, "{section:?}");
+        assert!(
+            section
+                .iter()
+                .all(|detail| detail.contains("dux server resets all of [ui] to its defaults")),
+            "{section:?}"
+        );
+        // The recovery the load runs is the plan the wording reads.
+        let doc: toml::Table =
+            toml::from_str("[ui]\nright_width_pct = \"a\"\nstatus_clear_seconds = \"b\"\n")
+                .unwrap();
+        assert_eq!(
+            recovery_plan(&doc),
+            vec![Recovery::ResetSection {
+                section: "ui".to_string()
+            }]
+        );
+    }
+
+    /// The reason `get` gives for a value its section's reset took names the
+    /// siblings that caused it.
+    #[test]
+    fn a_reset_section_names_the_fields_that_caused_it() {
+        let raw =
+            "[ui]\nleft_width_pct = 40\nright_width_pct = \"a\"\nstatus_clear_seconds = \"b\"\n";
+        let corrections = load_corrections_of(raw);
+        let (_, reason) = corrections
+            .iter()
+            .find(|(key, _)| key == "ui")
+            .expect("the reset is recorded");
+        assert!(reason.contains("dux server resets all of [ui]"), "{reason}");
+        assert!(reason.contains("[ui] right_width_pct"), "{reason}");
+        assert!(reason.contains("[ui] status_clear_seconds"), "{reason}");
+    }
+
+    /// Each `[server]` setting names exactly the flags `resolve_server_plan`
+    /// lets take its place: a bad host only `--bind`, port 0 `--port` too.
+    #[test]
+    fn the_overriding_flags_are_the_ones_the_plan_honours() {
+        let server = |raw: &str| load_config_from_text(raw).server;
+        let plan = |raw: &str, bind: Option<&str>, port: Option<u16>| {
+            resolve_server_plan(
+                &server(raw),
+                &ServerCliOverrides {
+                    bind: bind.map(str::to_string),
+                    port,
+                    no_tailscale: true,
+                },
+                None,
+            )
+            .is_ok()
+        };
+        let host = "[server]\nhost = \"localhost\"\n";
+        assert!(!plan(host, None, Some(4000)));
+        assert!(plan(host, Some("127.0.0.1:4000"), None));
+        assert_eq!(ServerFileSetting::Host.overriding_flags(), "--bind");
+        let port = "[server]\nport = 0\n";
+        assert!(plan(port, None, Some(4000)));
+        assert!(plan(port, Some("127.0.0.1:4000"), None));
+        assert_eq!(
+            ServerFileSetting::Port.overriding_flags(),
+            "--port or --bind"
+        );
+    }
+
+    fn load_config_from_text(raw: &str) -> Config {
+        recover_config(raw).expect("loads")
+    }
+
+    /// A key name that is itself the problem is placed by its line, never
+    /// repeated: a global or project env name, and an unknown `[server.auth]`
+    /// setting (a password typed as a key, say).
+    #[test]
+    fn a_name_that_is_the_problem_is_placed_by_its_line() {
+        let token = "sk-proj-AbCdEf0123456789";
+        let cases = [
+            (format!("[env]\n{token} = \"1\"\n"), "line 2"),
+            (
+                format!(
+                    "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n[projects.env]\n{token} = \"1\"\n"
+                ),
+                "line 5",
+            ),
+            (format!("[server.auth]\n{token} = \"1\"\n"), "line 2"),
+            (format!("[env]\n{token} = 5\n"), "line 2"),
+        ];
+        for (raw, line) in cases {
+            let messages: Vec<String> = start_problems_of(&raw)
+                .into_iter()
+                .map(|problem| problem.message)
+                .collect();
+            assert!(!messages.is_empty(), "{raw}");
+            assert!(
+                messages.iter().all(|message| !message.contains(token)),
+                "{messages:?}"
+            );
+            assert!(
+                messages.iter().any(|message| message.contains(line)),
+                "{raw}: {messages:?}"
+            );
+        }
+        // A valid name that only says which variable still names it.
+        let messages: Vec<String> = start_problems_of("[env]\nFOO = \"${\"\n")
+            .into_iter()
+            .map(|problem| problem.message)
+            .collect();
+        assert!(
+            messages[0].contains("global env variable FOO"),
+            "{messages:?}"
         );
     }
 }

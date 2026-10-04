@@ -17,7 +17,7 @@ use anyhow::{Result, anyhow, bail};
 use dux_core::auth::{Password, PasswordPolicy, StrengthLabel};
 use dux_core::config::{DuxPaths, StartProblem, Surface};
 use dux_core::config_keys::{self, GetValue, Key, SecretKind, SetPasswordError, WritePolicy};
-use dux_core::reload_signal::SignalOutcome;
+use dux_core::reload_signal::{NoReloadHandler, SignalOutcome};
 use zeroize::Zeroizing;
 
 /// What the live strength line measures against: the configured minimums
@@ -230,7 +230,7 @@ fn stopping(problems: &[StartProblem], surface: Surface, reload: bool) -> Vec<&S
         .iter()
         .filter(|problem| problem.stops(surface))
         .filter(|problem| {
-            !(reload && surface == Surface::DuxServer && problem.dux_server_overridable)
+            !(reload && surface == Surface::DuxServer && problem.dux_server_override.is_some())
         })
         .collect()
 }
@@ -244,9 +244,19 @@ fn write_surface_verdicts(out: &mut dyn Write, problems: &[StartProblem]) -> Res
     if problems.is_empty() {
         return Ok(());
     }
+    // A problem dux server's command line gets past names exactly the flag
+    // that does, from the same place `dux server` decides with.
     let list = |out: &mut dyn Write, problems: &[&StartProblem]| -> Result<()> {
         for problem in problems {
-            writeln!(out, "  - {}", problem.detail)?;
+            match problem.dux_server_override {
+                Some(setting) => writeln!(
+                    out,
+                    "  - {} (a dux server started with {} gets past this one)",
+                    problem.detail.trim_end_matches('.'),
+                    setting.overriding_flags()
+                )?,
+                None => writeln!(out, "  - {}", problem.detail)?,
+            }
         }
         Ok(())
     };
@@ -276,8 +286,8 @@ fn write_surface_verdicts(out: &mut dyn Write, problems: &[StartProblem]) -> Res
     } else if !start.is_empty() {
         writeln!(
             out,
-            "dux server applies it (a running dux server reloads it now), but a dux server \
-             started without --port or --bind will not start with this file until:"
+            "dux server applies it (a running dux server reloads it now), but a new dux server \
+             will not start with this file until:"
         )?;
         list(out, &start)?;
     } else {
@@ -519,45 +529,63 @@ fn user_inputs() -> Vec<String> {
 /// the file is said above it (see [`write_surface_verdicts`]), so this says
 /// only what was done about the running dux, never that the change applies.
 fn reload_sentence(outcome: &SignalOutcome, problems_remain: bool) -> String {
-    if problems_remain {
-        return match outcome {
-            SignalOutcome::Sent { pid } => format!(
-                "Asked the running dux (PID {pid}) to reload its config: if it is a kind that \
-                 refuses this file, it keeps its current settings until the problems above are \
-                 fixed. It says whether the reload worked in its status line, in the web UI's \
-                 notifications and in dux.log."
-            ),
-            SignalOutcome::NotRunning => "dux is not running. A terminal UI or dux server started \
-                                          now reads this file as said above, and a kind that \
-                                          refuses it will not start until the problems above \
-                                          are fixed."
-                .to_string(),
-            SignalOutcome::Failed { pid, reason } => {
-                let pid = pid.map_or_else(|| "<pid>".to_string(), |pid| pid.to_string());
-                format!(
-                    "The change is saved, but the running dux could not be told to reload \
-                     ({reason}); if it is a kind that refuses this file, it would keep its \
-                     current settings anyway until the problems above are fixed. Run Reload \
-                     config in dux, or `kill -USR1 {pid}`."
-                )
-            }
-        };
-    }
+    let then = if problems_remain {
+        " A kind that refuses this file will not start with it until the problems above are \
+         fixed."
+    } else {
+        ""
+    };
+    // `kill -USR1` is offered only for a dux that has said it handles the
+    // signal: sent to one that does not, it stops that dux.
+    let by_hand = |pid: &Option<u32>| match pid {
+        Some(pid) => format!("Run Reload config in dux, or `kill -USR1 {pid}`."),
+        None => "Run Reload config in dux.".to_string(),
+    };
     match outcome {
+        SignalOutcome::Sent { pid } if problems_remain => format!(
+            "Asked the running dux (PID {pid}) to reload its config: if it is a kind that \
+             refuses this file, it keeps its current settings until the problems above are \
+             fixed. It says whether the reload worked in its status line, in the web UI's \
+             notifications and in dux.log."
+        ),
         SignalOutcome::Sent { pid } => format!(
             "Asked the running dux (PID {pid}) to reload its config. It says whether the \
              reload worked in its status line, in the web UI's notifications and in dux.log."
         ),
+        SignalOutcome::NotRunning if problems_remain => "dux is not running. A terminal UI or \
+                                                         dux server started now reads this \
+                                                         file as said above, and a kind that \
+                                                         refuses it will not start until the \
+                                                         problems above are fixed."
+            .to_string(),
         SignalOutcome::NotRunning => {
             "dux is not running, so the change applies the next time it starts.".to_string()
         }
-        SignalOutcome::Failed { pid, reason } => {
-            let pid = pid.map_or_else(|| "<pid>".to_string(), |pid| pid.to_string());
-            format!(
-                "The change is saved, but the running dux could not be told to reload ({reason}). \
-                 Run Reload config in dux, or `kill -USR1 {pid}`."
-            )
-        }
+        SignalOutcome::NotSignalled {
+            pid,
+            why: NoReloadHandler::OlderVersion,
+        } => format!(
+            "The running dux (PID {pid}) is an older version that cannot reload its config while \
+             running; the change applies when you restart it.{then}"
+        ),
+        SignalOutcome::NotSignalled {
+            pid,
+            why: NoReloadHandler::NotCaught,
+        } => format!(
+            "The running dux (PID {pid}) does not handle the reload signal right now, so it was \
+             not sent one; run Reload config in it, or the change applies when you restart \
+             it.{then}"
+        ),
+        SignalOutcome::Failed { pid, reason } if problems_remain => format!(
+            "The change is saved, but the running dux could not be told to reload ({reason}); \
+             if it is a kind that refuses this file, it would keep its current settings anyway \
+             until the problems above are fixed. {}",
+            by_hand(pid)
+        ),
+        SignalOutcome::Failed { pid, reason } => format!(
+            "The change is saved, but the running dux could not be told to reload ({reason}). {}",
+            by_hand(pid)
+        ),
     }
 }
 
@@ -1742,5 +1770,132 @@ mod names_fields_and_per_surface_get_tests {
             !out.contains("terminal_font_size = 999") || err.contains("terminal_font_size"),
             "get ui reports a font size of 999, which dux does not use, and says nothing:\n{out}{err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod overridable_problems_name_their_flag_tests {
+    use super::*;
+
+    struct NoSecrets;
+    impl SecretSource for NoSecrets {
+        fn read_stdin(&mut self) -> Result<Password> {
+            unreachable!()
+        }
+        fn prompt_twice(
+            &mut self,
+            _: &str,
+            _: Option<Meter<'_>>,
+        ) -> Result<Option<(Password, Password)>> {
+            unreachable!()
+        }
+    }
+
+    /// With a `[server] host` that is not an IP already in the file, a set of
+    /// an unrelated key says a dux server started "without --port or --bind"
+    /// will not start, which tells the user `--port` is enough. It is not:
+    /// only `--bind` replaces the host, and `dux server --port N` refuses the
+    /// same file.
+    #[test]
+    fn set_says_port_alone_lets_dux_server_start_past_a_bad_host() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        std::fs::write(&paths.config_path, "[server]\nhost = \"localhost\"\n").unwrap();
+        let args: Vec<String> = ["ui.left_width_pct", "30"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut out = Vec::new();
+        run_set(&args, &paths, &mut NoSecrets, &mut out).expect("set of an unrelated key");
+        let said = String::from_utf8(out).unwrap();
+        let config = dux_core::config::load_config_file(&paths.config_path).unwrap();
+        let with_port_only = dux_core::config::resolve_server_plan(
+            &config.server,
+            &dux_core::config::ServerCliOverrides {
+                bind: None,
+                port: Some(4000),
+                no_tailscale: true,
+            },
+            None,
+        );
+        assert!(
+            with_port_only.is_err(),
+            "precondition: dux server --port refuses this host"
+        );
+        assert!(
+            !said.contains("started without --port or --bind will not start"),
+            "set tells the user --port gets dux server past the host, which it does not:\n{said}"
+        );
+    }
+
+    /// The bad host's line names `--bind` as the one flag that gets dux
+    /// server past it.
+    #[test]
+    fn a_bad_host_names_bind_as_the_flag_that_gets_past_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        std::fs::write(&paths.config_path, "[server]\nhost = \"localhost\"\n").unwrap();
+        let mut out = Vec::new();
+        run_set(
+            &["ui.left_width_pct".to_string(), "30".to_string()],
+            &paths,
+            &mut NoSecrets,
+            &mut out,
+        )
+        .expect("set");
+        let said = String::from_utf8(out).unwrap();
+        assert!(
+            said.contains("(a dux server started with --bind gets past this one)"),
+            "{said}"
+        );
+        assert!(!said.contains("--port or --bind gets past"), "{said}");
+    }
+
+    /// A dux with no reload handler is never signalled, and is said to be an
+    /// older version whose change applies when it restarts.
+    #[test]
+    fn an_older_dux_is_told_apart_and_never_promised_a_reload() {
+        let said = reload_sentence(
+            &SignalOutcome::NotSignalled {
+                pid: 42,
+                why: NoReloadHandler::OlderVersion,
+            },
+            false,
+        );
+        assert_eq!(
+            said,
+            "The running dux (PID 42) is an older version that cannot reload its config while \
+             running; the change applies when you restart it."
+        );
+        let said = reload_sentence(
+            &SignalOutcome::NotSignalled {
+                pid: 42,
+                why: NoReloadHandler::NotCaught,
+            },
+            true,
+        );
+        assert!(said.contains("not sent one"), "{said}");
+        assert!(!said.contains("kill -USR1"), "{said}");
+        // A holder that could not be identified is never offered `kill`.
+        let said = reload_sentence(
+            &SignalOutcome::Failed {
+                pid: None,
+                reason: "x".to_string(),
+            },
+            false,
+        );
+        assert!(!said.contains("kill -USR1"), "{said}");
     }
 }

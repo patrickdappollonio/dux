@@ -981,63 +981,118 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
             refused_by,
         });
     };
-    // What the load changes of what the file says, each by the setting (or
-    // entry) it is about, with the value the file gives it.
+    // What the load uses in place of what the file says is found by
+    // comparing the two, for every key: the load's own record says why
+    // (the correction or recovery step that covers it, a sibling included),
+    // and a difference it has no record of is still reported.
     let dotted = path.join(".");
     let corrected: Vec<(String, String)> = crate::config::load_corrections_of(raw);
-    if node.is_some_and(toml::Value::is_table) {
+    let covering = |key: &str| {
+        corrected
+            .iter()
+            .find(|(scope, _)| key == scope || key.starts_with(&format!("{scope}.")))
+    };
+    let reason_at = |key: &str| {
+        covering(key).map_or_else(
+            || "that is how dux server's load reads the file".to_string(),
+            |(_, reason)| reason.clone(),
+        )
+    };
+    let split = |key: &str| -> Vec<String> { key.split('.').map(str::to_string).collect() };
+    if let Some(table) = node.filter(|node| node.is_table()) {
         // A table is shown as the file writes it (the load filling in its
-        // defaults is not a correction), with every entry inside it that the
-        // load changes or drops listed.
-        let prefix = format!("{dotted}.");
-        let corrections = corrected
-            .into_iter()
-            .filter(|(key, _)| key.starts_with(&prefix))
-            .filter_map(|(key, reason)| {
-                let at: Vec<String> = key.split('.').map(str::to_string).collect();
-                let in_file = value_at(&file, &at).map(render)?;
-                let used = used_at(&at);
-                (used.as_deref() != Some(in_file.as_str())).then_some(Correction {
+        // defaults is not a correction), with every entry inside it whose
+        // value the load changes or drops listed. An entry dropped whole (a
+        // provider, a retired block) is listed once, at the entry.
+        let mut leaves = Vec::new();
+        leaves_of(table, &mut path.clone(), &mut leaves);
+        let mut corrections: Vec<Correction> = Vec::new();
+        for (at, value) in leaves {
+            let key = at.join(".");
+            if corrections
+                .iter()
+                .any(|done| done.used.is_none() && key.starts_with(&format!("{}.", done.path)))
+            {
+                continue;
+            }
+            let in_file = render(value);
+            let used = used_at(&at);
+            if !compared(value) || used.as_deref() == Some(in_file.as_str()) {
+                continue;
+            }
+            let whole = covering(&key).filter(|(scope, _)| {
+                *scope != key
+                    && scope.starts_with(&format!("{dotted}."))
+                    && used_at(&split(scope)).is_none()
+            });
+            corrections.push(match whole {
+                Some((scope, reason)) => Correction {
+                    path: scope.clone(),
+                    in_file: value_at(&file, &split(scope))
+                        .map(render)
+                        .unwrap_or_default(),
+                    used: None,
+                    reason: reason.clone(),
+                },
+                None => Correction {
+                    reason: reason_at(&key),
                     path: key,
                     in_file,
                     used,
-                    reason,
-                })
-            })
-            .collect();
+                },
+            });
+        }
         return Ok(GetReport {
-            value: GetValue::Set(in_file),
+            value: GetValue::Set(render(table)),
             corrections,
             refused_by,
         });
     }
     // A single setting: what the file says, unless the load uses something
     // else for it (or drops the entry holding it), which it says why for.
-    let reason = (used.as_deref() != Some(in_file.as_str()))
-        .then(|| {
-            corrected
-                .into_iter()
-                .find(|(key, _)| dotted == *key || dotted.starts_with(&format!("{key}.")))
-                .map(|(_, reason)| reason)
-        })
-        .flatten();
-    let Some(reason) = reason else {
+    if node.is_some_and(|node| !compared(node)) || used.as_deref() == Some(in_file.as_str()) {
         return Ok(GetReport {
             value: GetValue::Set(in_file),
             corrections: Vec::new(),
             refused_by,
         });
-    };
+    }
     Ok(GetReport {
         value: used.clone().map_or(GetValue::Unset, GetValue::Set),
         corrections: vec![Correction {
+            reason: reason_at(&dotted),
             path: dotted,
             in_file,
             used,
-            reason,
         }],
         refused_by,
     })
+}
+
+/// Every value inside `value` that is not itself a table, with its path
+/// (`path` extended), in file order.
+fn leaves_of<'a>(
+    value: &'a toml::Value,
+    path: &mut Vec<String>,
+    found: &mut Vec<(Vec<String>, &'a toml::Value)>,
+) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, child) in table {
+                path.push(key.clone());
+                leaves_of(child, path, found);
+                path.pop();
+            }
+        }
+        leaf => found.push((path.clone(), leaf)),
+    }
+}
+
+/// Whether a value from the file can be compared with what the load uses
+/// by its text: an array of tables (the projects) reads back with every
+/// default filled in, which is not a correction, so it is not.
+fn compared(value: &toml::Value) -> bool {
+    !matches!(value, toml::Value::Array(items) if items.iter().any(toml::Value::is_table))
 }
 
 /// The value at the dotted `path` inside `value`, if there is one.
@@ -1873,7 +1928,7 @@ port = 3890
         );
         assert!(message.contains("[ui] left_width_pct"), "{message}");
         assert!(
-            message.contains("dux server would use the default"),
+            message.contains("dux server reads it as its default"),
             "{message}"
         );
         assert!(!message.contains("wide"), "{message}");

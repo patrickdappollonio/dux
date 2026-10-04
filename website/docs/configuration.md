@@ -116,7 +116,14 @@ change, a block after failed logins), never by dux saving its other settings.
 
 > [!TIP]
 > After editing `config.toml` by hand, you can ask a running dux to reload it without
-> touching the app: `kill -USR1 <pid>`. The PID is in `dux.lock`, next to the config.
+> touching the app: `kill -USR1 <pid>`. The PID is the first line of `dux.lock`, next to the config.
+
+> [!CAUTION]
+> `kill -USR1` stops a dux older than this release instead of reloading it, and every
+> agent and terminal it runs stops with it. A dux that handles the signal says so in
+> `dux.lock`: a second line reading `reload-signal=usr1` under its PID. Without that
+> line, restart dux instead. `dux config set` checks this for you and never signals an
+> older dux.
 
 ### What `dux config diff` shows, and what it holds back
 
