@@ -687,4 +687,47 @@ fn a_switch_to_a_remote_only_branch_checks_the_branch_it_creates() {
     assert!(error.contains("project \"p2-name\""), "{error}");
     assert!(other.join(".git").exists());
     assert_eq!(crate::git::current_branch(&repo).unwrap(), "main");
+    assert!(
+        !crate::git::local_branch_exists(&repo, "feat"),
+        "the refusal leaves no local branch behind"
+    );
+}
+
+/// A refused switch to a branch that was already local keeps that branch:
+/// only what dux created for the switch goes.
+#[test]
+fn a_refused_switch_keeps_a_local_branch_dux_did_not_create() {
+    let (mut engine, tmp) = test_engine();
+    let repo = tmp.path().join("repo");
+    init(&repo);
+    std::fs::write(repo.join(".gitignore"), "vendor/\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "ignore vendor"]);
+    git(&repo, &["switch", "-q", "-c", "feat"]);
+    std::fs::write(repo.join("vendor"), "a file\n").unwrap();
+    git(&repo, &["add", "-f", "vendor"]);
+    git(&repo, &["commit", "-m", "vendor is a file"]);
+    git(&repo, &["switch", "-q", "main"]);
+    engine
+        .projects
+        .push(sample_project("p1", repo.to_str().unwrap()));
+    let other = repo.join("vendor").join("lib");
+    own_repository(&other);
+    engine
+        .projects
+        .push(sample_project("p2", other.to_str().unwrap()));
+    let guard = engine.checkout_move_guard();
+    let probe = repo.clone();
+
+    let result = std::thread::spawn(move || {
+        crate::git::switch_branch(&probe, "feat", &guard).map_err(|e| format!("{e:#}"))
+    })
+    .join()
+    .unwrap();
+
+    assert!(result.is_err(), "the switch is refused");
+    assert!(
+        crate::git::local_branch_exists(&repo, "feat"),
+        "the user's own branch is kept"
+    );
 }

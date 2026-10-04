@@ -1178,29 +1178,75 @@ fn create_tracking_branch_from(repo_path: &Path, name: &str, remote: &str) -> Re
 /// `checkout.guess`, which dux cannot see through. `git switch` rather than
 /// `git checkout` because it is single-purpose and rejects the detached-HEAD
 /// and file-restore surprises `checkout` silently allows. Returns git's raw
-/// stderr on failure so callers can surface the concrete reason. Requires git
-/// >= 2.23.
+/// stderr on failure so callers can surface the concrete reason. A refused
+/// switch removes the local branch it created. Requires git >= 2.23.
 pub fn switch_branch(
     repo_path: &Path,
     branch_name: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
 ) -> Result<()> {
     let local = format!("refs/heads/{branch_name}");
-    let target = match crate::checkout_move::commit_id(repo_path, &local)? {
-        Some(id) => id,
+    let (target, created) = match crate::checkout_move::commit_id(repo_path, &local)? {
+        Some(id) => (id, false),
         None => {
             let remote = tracking_remote(repo_path, branch_name)?;
             create_tracking_branch_from(repo_path, branch_name, &remote)?;
-            crate::checkout_move::commit_id(repo_path, &local)?.ok_or_else(|| {
+            let id = crate::checkout_move::commit_id(repo_path, &local)?.ok_or_else(|| {
                 anyhow!(
                     "dux did not switch to branch {branch_name}: the local branch it created \
                      from {remote} cannot be read back"
                 )
-            })?
+            })?;
+            (id, true)
         }
     };
-    let _clearance = guard.clear(repo_path, &target, "switch to the branch")?;
+    let _clearance = match guard.clear(repo_path, &target, "switch to the branch") {
+        Ok(clearance) => clearance,
+        Err(refused) => {
+            // A refused switch leaves nothing behind: the branch dux created
+            // for it a moment ago goes again, unless something has moved it.
+            if created {
+                remove_created_branch(repo_path, branch_name, &target);
+            }
+            return Err(refused);
+        }
+    };
     run_switch(repo_path, branch_name)
+}
+
+/// Delete local branch `name`, which dux created at `created_at` a moment
+/// ago, only while it still points there. Best-effort: a branch that cannot
+/// be removed is logged and kept.
+fn remove_created_branch(repo_path: &Path, name: &str, created_at: &str) {
+    let still_there = crate::checkout_move::commit_id(repo_path, &format!("refs/heads/{name}"))
+        .ok()
+        .flatten()
+        .is_some_and(|id| id == created_at);
+    if !still_there {
+        return;
+    }
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "branch",
+            "-D",
+            "--",
+            name,
+        ])
+        .stdin(Stdio::null())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => crate::logger::warn(&format!(
+            "{:#}",
+            git_failure("git branch -D", repo_path, &output)
+        )),
+        Err(err) => crate::logger::warn(&format!(
+            "could not remove branch {name} that dux created for a refused switch in {}: {err}",
+            repo_path.display()
+        )),
+    }
 }
 
 fn run_switch(repo_path: &Path, branch_name: &str) -> Result<()> {
