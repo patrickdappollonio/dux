@@ -598,8 +598,58 @@ pub fn create_dir(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
     if resolves_into_git_dir(worktree, ancestor) {
         anyhow::bail!("refusing to create a directory inside the git directory: {rel_path}");
     }
-    std::fs::create_dir_all(&path)
-        .map_err(|e| anyhow::anyhow!("cannot create directory {rel_path}: {e}"))?;
+    create_dir_from_root(worktree, rel_path)
+}
+
+/// Create `rel_path`'s missing components one at a time, each relative to the
+/// directory handle of the one before it, starting from a handle on the ROOT
+/// opened without creating it.
+///
+/// `create_dir_all` on the joined path would happily recreate the root itself:
+/// a worktree removed while the request was in flight came back as an empty
+/// directory with no git registration behind it. Pinned this way, a root that
+/// is gone fails the open, and one removed after the open fails the first
+/// `mkdirat` (an unlinked directory takes no new entries), so the root is never
+/// recreated. Symlinked intermediate directories are still followed, exactly
+/// as before; containment was checked by the caller.
+fn create_dir_from_root(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    let mut fd = rustix::fs::open(
+        worktree,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "cannot create directory {rel_path}: the folder it belongs in is gone ({e}). It may \
+             have been removed."
+        )
+    })?;
+    #[cfg(test)]
+    tests::run_before_create_hook();
+    let components: Vec<_> = Path::new(rel_path).components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let name = component.as_os_str();
+        let last = index + 1 == components.len();
+        // `mkdirat` applies the umask, as `create_dir_all` did.
+        match rustix::fs::mkdirat(&fd, name, Mode::from_bits_truncate(0o777)) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) if !last => {}
+            Err(rustix::io::Errno::EXIST) => {
+                anyhow::bail!("refusing to create directory, entry already exists: {rel_path}")
+            }
+            Err(e) => anyhow::bail!("cannot create directory {rel_path}: {e}"),
+        }
+        if !last {
+            fd = rustix::fs::openat(
+                &fd,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| anyhow::anyhow!("cannot create directory {rel_path}: {e}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -1617,6 +1667,35 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
         assert!(create_dir(dir.path(), "escape/nested/dir").is_err());
         assert!(!outside.path().join("nested").exists());
+    }
+
+    thread_local! {
+        static BEFORE_CREATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Runs, once, the hook a test armed for the moment between `create_dir`'s
+    /// checks and its creation: the window a worktree removal can land in.
+    pub(super) fn run_before_create_hook() {
+        if let Some(hook) = BEFORE_CREATE.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// The root passed every check and was then removed (the agent's worktree
+    /// went while the request was in flight). Creating `a/b` must fail rather
+    /// than bring the removed worktree back as an empty directory.
+    #[test]
+    fn create_dir_never_recreates_a_root_removed_after_its_checks() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("wt");
+        std::fs::create_dir(&root).unwrap();
+        let doomed = root.clone();
+        BEFORE_CREATE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || std::fs::remove_dir_all(&doomed).unwrap()));
+        });
+        assert!(create_dir(&root, "a/b").is_err());
+        assert!(!root.exists(), "the removed worktree must stay removed");
     }
 
     // --- rename_entry ---
