@@ -1384,7 +1384,7 @@ fn config_schema() -> Vec<ConfigEntry> {
              #\n\
              # That asks for the password twice without echoing it, shows how strong\n\
              # it is, and stores only its hash below (`--stdin` reads it from a pipe\n\
-             # for scripts). A running dux picks up any `dux config set` at once.\n\
+             # for scripts). A running dux is asked to reload after each `dux config set`.\n\
              #\n\
              # dux refuses to start, and a reload refuses to change anything, while\n\
              # this section is invalid: a misspelled key, a value of the wrong type,\n\

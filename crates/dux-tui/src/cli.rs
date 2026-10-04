@@ -80,7 +80,8 @@ dux config: manage the dux configuration file
 Subcommands:
   dux config path          Print the config file path
   dux config get <setting> Print one setting's value, for example
-                           `dux config get server.port`
+                           `dux config get server.port`. Values that can
+                           hold secrets (env, projects) need --show
   dux config set <setting> <value>
                            Change one setting, keeping the file's comments,
                            and tell a running dux to reload. Lists are one
@@ -88,7 +89,8 @@ Subcommands:
   dux config set server.auth.password
                            Set the web UI password: asked for twice without
                            echo, with a strength meter. Never a command-line
-                           argument; add --stdin to pipe it in instead
+                           argument; add --stdin to pipe it in instead.
+                           env.<NAME> values are asked for the same way
   dux config diff          Show settings that differ from defaults (summary;
                            [env] and project details are summarized, never
                            printed, so it is safe to paste into a bug report)

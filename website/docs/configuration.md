@@ -57,12 +57,20 @@ dux config set providers.claude.command claude
 
 - `get` prints what `config.toml` says, or the default when the file leaves the setting
   out (a note on stderr says so, so the value alone is what a script captures). It also
-  works on a file dux refuses to start with, which is how you look at the broken part.
+  works when `[server.auth]` is invalid and dux refuses to start, which is how you look at
+  the broken part.
+- If `config.toml` is not valid TOML at all, `get` and `set` refuse it too and name the
+  line that is wrong. Fix that line by hand (or copy back a backup), then carry on.
 - `set` checks the value before writing it: a number has to be a number in range, a
   setting with a fixed set of values has to be one of them, and a list is written whole as
   one TOML array. Only that one line of the file changes; every comment stays.
 - Providers are named by their name (`providers.<name>.<field>`, a new name adds a
   provider), and environment variables by theirs (`env.<NAME>`).
+- Environment values are treated as secrets, since that is where API tokens live.
+  `dux config set env.GITHUB_TOKEN` asks for the value without echoing it (or reads it
+  from a pipe with `--stdin`) and never takes it as an argument, and it reports only that
+  the value was updated. `get` on `env`, an `env.<NAME>` value or `projects` says whether
+  it is set but prints the value only when you add `--show`.
 - A misspelled setting is refused with the closest real one: `there is no setting called
   server.prot; did you mean server.port?`
 - `[[projects]]`, `[keys]` and `[macros]` are read with `get` but not written with `set`,
@@ -70,10 +78,17 @@ dux config set providers.claude.command claude
 - A key whose own name contains a dot cannot be named this way. Edit the file for that
   one.
 
-After writing, `set` tells a dux that is running to reload its config, and says whether
-it did. If dux is not running, the change applies the next time it starts. Several
-programs writing the file at once (a `set`, a save from dux itself) take turns rather than
-undoing each other's changes.
+After writing, `set` asks a running dux to reload its config, and says whether it could
+ask. The running dux reports how the reload went in its status line, in the web UI's
+notifications and in `dux.log`; two `set`s in quick succession are both picked up. If dux
+is not running, the change applies the next time it starts.
+
+Writers take turns on the file, and a save dux makes from its own settings only writes the
+settings that changed inside dux since it last read the file. So a value you `set`, or
+edit by hand, while dux runs stays as you wrote it unless you then change that same
+setting inside dux before it reloads. The `[server.auth]` section is only ever changed by
+an explicit change to it (`set`, a password change, a block after failed logins), never by
+dux saving its other settings.
 
 > [!TIP]
 > After editing `config.toml` by hand, you can ask a running dux to reload it without
@@ -197,9 +212,10 @@ address from `blocked_addresses` and the block lifts at once.
 > of the wrong type, a `password_hash` dux will not use, or a `config.toml` that is not
 > valid TOML at all stops dux from starting, with a message naming the file and the
 > problem, and a reload while it runs changes nothing until the file is fixed.
-> `dux config get` and `dux config set` keep working, so you can inspect and repair it
-> from the command line. `dux config set` itself refuses any value that would leave the
-> section in that state.
+> When the section is invalid, `dux config get` and `dux config set` keep working, so
+> you can inspect and repair it from the command line. When the file is not valid TOML,
+> they refuse it too; fix the line the error names by hand. `dux config set` itself
+> refuses any value that would leave the section invalid.
 
 `dux config regenerate --yes` writes fresh defaults, which have no password; it says so
 when the config it replaces had one.
