@@ -554,9 +554,21 @@ fn run_restore_docs(paths: &DuxPaths, yes: bool) -> Result<()> {
 
     // Back up BEFORE committing. The writer below is atomic, which protects
     // against a torn file, but not against "the result was not what I wanted".
-    let backup_path = backup_config(&paths.config_path, &raw)?;
-
-    dux_core::config_write::write_config_secure(&paths.config_path, &restored.text)
+    // Both happen inside the config write lock, on the file as it is NOW (a
+    // `dux config set` that landed since the preview above included), so the
+    // [server.auth] written is the one the file holds at that moment.
+    let (backup_path, restored) =
+        dux_core::config_write::replace_config_file(&paths.config_path, |current| {
+            let current = current.ok_or_else(|| {
+                anyhow!(
+                    "{} disappeared; nothing was written",
+                    paths.config_path.display()
+                )
+            })?;
+            let restored = config::restore_documentation(current)?;
+            let backup_path = backup_config(&paths.config_path, current)?;
+            Ok((restored.text.clone(), (backup_path, restored)))
+        })
         .with_context_path(&paths.config_path)?;
 
     println!("documentation restored in {}", paths.config_path.display());
@@ -617,8 +629,9 @@ fn backup_config(config_path: &Path, raw: &str) -> Result<PathBuf> {
         counter += 1;
     }
 
-    #[allow(deprecated)] // blessed sync-direct: CLI-only one-shot; also gives the backup 0600
-    dux_core::config_write::write_config_secure(&candidate, raw).with_context_path(&candidate)?;
+    // Called inside the config write lock (see `run_restore_docs`); 0600.
+    dux_core::config_write::write_beside_config_locked(&candidate, raw)
+        .with_context_path(&candidate)?;
     Ok(candidate)
 }
 

@@ -2868,6 +2868,15 @@ pub enum ConfigLoadProblem {
     AuthInvalid(String),
 }
 
+impl ConfigLoadProblem {
+    /// What went wrong, in words, without the advice around it.
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Unreadable(reason) | Self::NotToml(reason) | Self::AuthInvalid(reason) => reason,
+        }
+    }
+}
+
 /// A [`ConfigLoadProblem`] with the file it is about.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigLoadError {

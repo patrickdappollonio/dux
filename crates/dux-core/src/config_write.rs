@@ -507,6 +507,37 @@ fn item_text(item: &Item) -> String {
     }
 }
 
+/// Replace the whole file with what `render` makes of its current text
+/// (`None` when there is no file), reading that text only once the
+/// [`ConfigFileLock`] is held, so a writer that finishes while this one waits
+/// is part of what `render` sees. For the whole-file writers that depend on
+/// what the file holds now: recovering the last working config, restoring the
+/// documentation. The result's `[server.auth]` is checked before it lands.
+pub fn replace_config_file<T>(
+    config_path: &Path,
+    render: impl FnOnce(Option<&str>) -> Result<(String, T)>,
+) -> Result<T> {
+    let _lock = ConfigFileLock::acquire(config_path)?;
+    let current = match fs::read_to_string(config_path) {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", config_path.display()));
+        }
+    };
+    let (text, outcome) = render(current.as_deref())?;
+    check_auth_before_write(config_path, &text)?;
+    write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;
+    Ok(outcome)
+}
+
+/// Write a private (0600) file beside the config while the caller holds the
+/// [`ConfigFileLock`] inside [`replace_config_file`]'s `render`: a backup of
+/// the file being replaced. Taking the lock again there would wait forever.
+pub fn write_beside_config_locked(path: &Path, contents: &str) -> Result<()> {
+    write_config_atomic_unlocked(path, contents, Durability::Fsync)
+}
+
 /// The ONE way to change specific keys of `config.toml` while anything else
 /// may be writing it: take the [`ConfigFileLock`], re-read the file as it is
 /// on disk NOW, let `change` edit only the keys it means to, check the result,
@@ -4274,6 +4305,38 @@ second_note = \"nowhere to go\"
             std::fs::read_to_string(&path)
                 .unwrap()
                 .contains("port = 4002")
+        );
+    }
+
+    /// A whole-file replacement reads the current file only once it holds the
+    /// lock, so a writer that finishes while it waits is seen, not lost.
+    #[test]
+    fn a_replacement_reads_the_file_inside_the_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").expect("seed");
+        let held = ConfigFileLock::acquire(&path).expect("lock");
+        let replacer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                replace_config_file(&path, |current| {
+                    Ok((current.unwrap_or_default().replace("# x", "# seen"), ()))
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        // The other writer lands while the replacement waits on the lock.
+        write_config_atomic_unlocked(
+            &path,
+            "[ui]\n# x\nleft_width_pct = 33\n",
+            Durability::NoFsync,
+        )
+        .expect("other writer");
+        drop(held);
+        replacer.join().expect("join").expect("replace");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[ui]\n# seen\nleft_width_pct = 33\n"
         );
     }
 
