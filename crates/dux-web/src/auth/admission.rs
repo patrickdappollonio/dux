@@ -53,24 +53,34 @@ use dux_core::config::{AddressBlock, ServerAuthConfig};
 
 use super::provenance::{Classification, ClientClass};
 
-/// What failures are counted against: a client's address, or the one bucket
-/// shared by every request whose address dux cannot verify.
+/// What failures are counted against. A verified address and a claimed one
+/// are separate key spaces (decided, after review): a request can claim any
+/// address it likes, so if claims shared a counter with the device really at
+/// that address, an outsider could slow that device down and get it banned.
+/// A verified device's wait and ban depend only on failures that came,
+/// verified, from that address.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum TrackKey {
-    Addr(IpAddr),
+    /// An address dux verified: the only key that can lead to a ban.
+    Verified(IpAddr),
+    /// An address an unverified request claimed: slowed, never banned.
+    Claimed(IpAddr),
+    /// The one bucket every unverified request shares.
     Unverified,
 }
 
 impl TrackKey {
     /// Every key a client's failures count against: its verified address
-    /// alone, or the address it claims (if any) and the shared bucket.
+    /// alone, or the address it claims (if any) and the shared bucket. This
+    /// is the only place a key is made, so a claim can never become a
+    /// verified key.
     fn of(c: &Classification) -> Vec<Self> {
         let canonical = dux_core::config_auth::canonical;
         if let Some(ip) = c.verified_ip {
-            return vec![Self::Addr(canonical(ip))];
+            return vec![Self::Verified(canonical(ip))];
         }
         c.claimed_ip
-            .map(|ip| Self::Addr(canonical(ip)))
+            .map(|ip| Self::Claimed(canonical(ip)))
             .into_iter()
             .chain(std::iter::once(Self::Unverified))
             .collect()
@@ -260,7 +270,7 @@ impl Admission {
         let mut strike = Strike::Counted;
         for key in keys {
             let count = inner.count(cfg, key, window, now);
-            let TrackKey::Addr(ip) = key else {
+            let (TrackKey::Verified(ip) | TrackKey::Claimed(ip)) = key else {
                 continue;
             };
             if cfg.max_failed_logins == 0
@@ -270,11 +280,15 @@ impl Admission {
             {
                 continue;
             }
-            if c.verified_ip.is_some() {
-                inner.tracked.remove(&key);
-                strike = Strike::Block(ip);
-            } else if count == cfg.max_failed_logins {
-                strike = Strike::UnverifiedLimit(ip);
+            match key {
+                TrackKey::Verified(_) => {
+                    inner.tracked.remove(&key);
+                    strike = Strike::Block(ip);
+                }
+                TrackKey::Claimed(_) if count == cfg.max_failed_logins => {
+                    strike = Strike::UnverifiedLimit(ip);
+                }
+                TrackKey::Claimed(_) | TrackKey::Unverified => {}
             }
         }
         strike
@@ -484,6 +498,34 @@ mod tests {
             "and not again on every failure after it"
         );
         assert!(!a.is_blocked(&[], &claimed), "nothing was banned");
+    }
+
+    #[test]
+    fn a_claim_never_counts_against_the_verified_device_at_that_address() {
+        let a = Admission::default();
+        let c = ServerAuthConfig {
+            max_failed_logins: 2,
+            max_failed_logins_per_minute: 0,
+            ..cfg()
+        };
+        let t0 = Instant::now();
+        for _ in 0..3 {
+            a.record_failure(&c, &claiming("198.51.100.7"), t0);
+        }
+        assert_eq!(
+            a.check_attempt_login(&c, &net("198.51.100.7"), t0),
+            Ok(()),
+            "the claims did not make the verified device wait"
+        );
+        assert_eq!(
+            a.record_failure(&c, &net("198.51.100.7"), t0),
+            Strike::Counted,
+            "its first own failure is its first"
+        );
+        assert_eq!(
+            a.record_failure(&c, &net("198.51.100.7"), t0 + Duration::from_secs(60)),
+            Strike::Block("198.51.100.7".parse().unwrap())
+        );
     }
 
     #[test]

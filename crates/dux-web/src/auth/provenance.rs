@@ -5,13 +5,14 @@
 //!
 //! - The connection itself ([`Arrival`]): the address dux was reached at and
 //!   the peer's address, as the kernel reported them for the accepted socket.
-//!   A connection to a loopback address is from this machine; one to this
-//!   machine's Tailscale address FROM a Tailscale address is from the tailnet
-//!   (only a tailnet peer can send from one there), except FROM one of this
-//!   machine's own Tailscale addresses (a relay on this machine looks exactly
-//!   like that) or while dux knows of a forward to its port (which may be aimed
-//!   at that listener too): those are the network. Anything else is the
-//!   network.
+//!   A connection to a loopback address is from this machine. One to an
+//!   address the CURRENT Tailscale look reported as this machine's, from a
+//!   peer in Tailscale's ranges, is from the tailnet; the ranges alone never
+//!   are, because carrier-grade NAT, Cloudflare WARP and cloud VPCs use them
+//!   too. A connection FROM any of this machine's own addresses (the one it
+//!   reached, a Tailscale one, any interface's) is the network and unverified,
+//!   since a relay on this machine looks exactly like that. Anything else is
+//!   the network, verified by its peer address.
 //! - Tailscale's Funnel marker (`Tailscale-Funnel-Request`), which Tailscale's
 //!   serve proxy sets on every request that came through Funnel and strips from
 //!   client input: the internet. A client that sends it itself only makes its
@@ -308,10 +309,26 @@ fn is_tailscale(ip: IpAddr) -> bool {
     }
 }
 
-/// Why a connection from this machine's own Tailscale address is not the
-/// tailnet.
-const SELF_RELAY: &str = "the connection came from this machine's own Tailscale address, as \
-     a relay on this machine (socat, `ssh -L`, a proxy, a Funnel TCP forward) does too";
+/// Why a connection from one of this machine's own addresses is not this
+/// machine or the tailnet.
+const OWN_ADDRESS: &str = "the connection came from one of this machine's own addresses, as a \
+     relay on this machine (socat, `ssh -L`, a proxy, a Funnel TCP forward) does too";
+
+/// Whether a direct connection came from this machine itself: its peer is the
+/// address it reached, one of this machine's Tailscale addresses from the
+/// current look, or an address on one of this machine's interfaces. The ONE
+/// own-address check for every listener (decided, after review): a connection
+/// this machine opens to its own non-loopback address leaves FROM one of its
+/// own addresses, and dux cannot tell the owner from a relay on this machine
+/// aimed there, so it is the network, never this machine; and it is never
+/// written anywhere or banned, because the address is this machine's.
+fn own_address(peer: IpAddr, local: IpAddr, exposure: &Exposure, interfaces: &[IpAddr]) -> bool {
+    peer == local
+        || exposure.own_tailscale_ip(peer)
+        || interfaces
+            .iter()
+            .any(|own| dux_core::config_auth::canonical(*own) == peer)
+}
 
 /// What a request would be if the exposure gate were open: the only way a
 /// request becomes this machine or the tailnet.
@@ -331,12 +348,19 @@ enum Candidate {
 /// and the exposure gate ([`Exposure::trust_gate`]) is then applied in ONE
 /// place, so no branch can hand out this machine or the tailnet without
 /// passing it (decided, after review: the forwarded branch once skipped it).
-pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
+///
+/// `interfaces` are the addresses on this machine's network interfaces, for
+/// the own-address check.
+pub fn classify(
+    facts: &RequestFacts,
+    exposure: &Exposure,
+    interfaces: &[IpAddr],
+) -> Classification {
     let base = untrusted_base(facts);
     let Some(arrival) = facts.arrival else {
         return base;
     };
-    let candidate = match candidate(facts, exposure, arrival, &base) {
+    let candidate = match candidate(facts, exposure, interfaces, arrival, &base) {
         Ok(candidate) => candidate,
         Err(untrusted) => return untrusted,
     };
@@ -423,6 +447,7 @@ fn untrusted_base(facts: &RequestFacts) -> Classification {
 fn candidate(
     facts: &RequestFacts,
     exposure: &Exposure,
+    interfaces: &[IpAddr],
     arrival: Arrival,
     base: &Classification,
 ) -> Result<Candidate, Classification> {
@@ -436,26 +461,27 @@ fn candidate(
         // traffic only from loopback, and honouring the marker from a LAN
         // client turned its verified, bannable address into an unverified
         // claim that is only slowed.
-        let verified = Classification {
-            verified_ip: Some(peer),
-            claimed_ip: None,
-            ..base.clone()
-        };
-        if !(is_tailscale(local) && is_tailscale(peer)) {
-            return Err(verified);
-        }
-        // A connection this machine opens to its own Tailscale address leaves
-        // FROM that address, so any relay on this machine aimed there looks
-        // like a peer. dux cannot tell a local user from a relay, so it fails
-        // closed (decided). Never written anywhere: it is this machine.
-        if peer == local || exposure.own_tailscale_ip(peer) {
+        if own_address(peer, local, exposure, interfaces) {
             return Err(Classification {
-                loopback_distrusted: Some(SELF_RELAY),
+                loopback_distrusted: Some(OWN_ADDRESS),
                 claimed_ip: None,
                 ..base.clone()
             });
         }
-        return Ok(Candidate::TailnetPeer { peer });
+        // The tailnet only when the connection reached one of this machine's
+        // Tailscale addresses as the CURRENT look reported them, from a peer
+        // in Tailscale's ranges (decided, after review). The ranges alone
+        // prove nothing: carrier-grade NAT, Cloudflare WARP and cloud VPCs
+        // hand out 100.64.0.0/10 too, so with no current look (no CLI, a
+        // failed look, `tailscale = "no"`) nothing is the tailnet by range.
+        if exposure.own_tailscale_ip(local) && is_tailscale(peer) {
+            return Ok(Candidate::TailnetPeer { peer });
+        }
+        return Err(Classification {
+            verified_ip: Some(peer),
+            claimed_ip: None,
+            ..base.clone()
+        });
     }
     // Tailscale terminates TLS for every Funnel, so a Funnel request reached
     // the browser over HTTPS: encrypted, and its cookie may be Secure. Only
@@ -535,7 +561,7 @@ mod tests {
         pairs: &[(&str, &str)],
         exposure: &Exposure,
     ) -> Classification {
-        classify(&RequestFacts::of(arrival, &headers(pairs)), exposure)
+        classify(&RequestFacts::of(arrival, &headers(pairs)), exposure, &[])
     }
 
     fn served(url: &str, funnel: bool) -> Exposure {
@@ -546,6 +572,21 @@ mod tests {
                     url: url.to_string(),
                     funnel,
                 }],
+                own_ips: vec![OWN_TAILSCALE.parse().unwrap()],
+                ..IdentityFacts::default()
+            }),
+        }
+    }
+
+    /// This machine's Tailscale address in the looks below.
+    const OWN_TAILSCALE: &str = "100.101.102.103";
+
+    /// A successful look that found nothing but this machine's address.
+    fn looked() -> Exposure {
+        Exposure {
+            funnel: FunnelState::Open,
+            identity: Some(IdentityFacts {
+                own_ips: vec![OWN_TAILSCALE.parse().unwrap()],
                 ..IdentityFacts::default()
             }),
         }
@@ -631,7 +672,7 @@ mod tests {
         let c = class_of(
             arrival("100.101.102.104:5", "100.101.102.103:3890"),
             &[],
-            &Exposure::default(),
+            &looked(),
         );
         assert_eq!(c.class, ClientClass::Tailnet);
         assert!(c.transport_encrypted);
@@ -639,23 +680,56 @@ mod tests {
         let spoofed = class_of(
             arrival("192.168.1.9:5", "100.101.102.103:3890"),
             &[],
-            &Exposure::default(),
+            &looked(),
         );
         assert_eq!(spoofed.class, ClientClass::Network);
-        let lan = class_of(
-            arrival("192.168.1.9:5", "192.168.1.2:3890"),
-            &[],
-            &Exposure::default(),
-        );
+        let lan = class_of(arrival("192.168.1.9:5", "192.168.1.2:3890"), &[], &looked());
         assert_eq!(lan.class, ClientClass::Network);
         assert!(!lan.transport_encrypted);
         // A tailnet address claimed by a LAN client through a wildcard listener.
-        let wildcard_lan = class_of(
-            arrival("100.64.0.9:5", "192.168.1.2:3890"),
+        let wildcard_lan = class_of(arrival("100.64.0.9:5", "192.168.1.2:3890"), &[], &looked());
+        assert_eq!(wildcard_lan.class, ClientClass::Network);
+    }
+
+    #[test]
+    fn the_tailscale_ranges_alone_never_make_the_tailnet() {
+        // No current look: nothing is the tailnet by range.
+        let no_look = class_of(
+            arrival("100.101.102.104:5", "100.101.102.103:3890"),
             &[],
             &Exposure::default(),
         );
-        assert_eq!(wildcard_lan.class, ClientClass::Network);
+        assert_eq!(no_look.class, ClientClass::Network);
+        assert!(!no_look.transport_encrypted);
+        assert_eq!(
+            no_look.verified_ip,
+            Some("100.101.102.104".parse().unwrap()),
+            "still the address it connected from"
+        );
+        // A carrier-grade NAT interface that is not this machine's Tailscale
+        // address, with a current look.
+        let cgnat = class_of(arrival("100.72.9.9:5", "100.64.20.5:3890"), &[], &looked());
+        assert_eq!(cgnat.class, ClientClass::Network);
+    }
+
+    #[test]
+    fn a_peer_on_any_of_this_machines_own_addresses_is_the_network_and_unverified() {
+        let interfaces: Vec<IpAddr> = vec!["192.168.1.2".parse().unwrap()];
+        for (peer, local) in [
+            ("192.168.1.2:5", "192.168.1.2:3890"),
+            ("192.168.1.2:5", "100.101.102.103:3890"),
+            ("192.168.1.2:5", "10.0.0.4:3890"),
+        ] {
+            let c = classify(
+                &RequestFacts::of(arrival(peer, local), &HeaderMap::new()),
+                &looked(),
+                &interfaces,
+            );
+            assert_eq!(c.class, ClientClass::Network, "{peer} -> {local}");
+            assert_eq!(c.verified_ip, None, "never banned: {peer} -> {local}");
+            assert_eq!(c.claimed_ip, None);
+            assert!(c.loopback_distrusted.is_some());
+        }
     }
 
     #[test]
@@ -926,6 +1000,7 @@ mod tests {
             funnel: FunnelState::Open,
             identity: Some(IdentityFacts {
                 forward_to_dux: true,
+                own_ips: vec![OWN_TAILSCALE.parse().unwrap()],
                 ..IdentityFacts::default()
             }),
         };

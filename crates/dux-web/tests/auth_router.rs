@@ -76,6 +76,24 @@ struct Dux {
     reloads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// This machine's Tailscale address, as a successful look reports it.
+fn own_tailscale_ips() -> Vec<std::net::IpAddr> {
+    vec![TAILNET.local.ip()]
+}
+
+/// What every router here starts with unless a test says otherwise: a
+/// successful Tailscale look that found nothing reaching dux, naming this
+/// machine's Tailscale address, which is what makes `TAILNET` the tailnet.
+fn tailnet_exposure() -> dux_web::exposure::ExposureCell {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let exposure = ExposureCell::new(FunnelState::Open);
+    exposure.set_identity(Some(IdentityFacts {
+        own_ips: own_tailscale_ips(),
+        ..IdentityFacts::default()
+    }));
+    exposure
+}
+
 impl Dux {
     fn start(auth: &str) -> Self {
         Self::start_tuned(auth, |params| params)
@@ -106,9 +124,11 @@ impl Dux {
             handle,
             Router::<AppState>::new(),
             tune(
-                RouterParams::plain_http().with_auth_reload(Arc::new(move || {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                })),
+                RouterParams::plain_http()
+                    .with_live_exposure(tailnet_exposure())
+                    .with_auth_reload(Arc::new(move || {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    })),
             ),
         );
         Self { app, tmp, reloads }
@@ -1761,6 +1781,7 @@ fn exposure_with_route(
     let exposure = ExposureCell::new(funnel);
     exposure.set_identity(Some(IdentityFacts {
         forward_to_dux,
+        own_ips: own_tailscale_ips(),
         routes: vec![dux_core::tailscale::ServeRoute {
             url: "https://box.tail0000.ts.net".to_string(),
             funnel: false,
@@ -1918,5 +1939,162 @@ async fn a_flood_from_less_trusted_clients_never_slows_a_verified_device() {
     assert_eq!(
         dux.login(TAILNET, PASSWORD).await.status,
         StatusCode::NO_CONTENT
+    );
+}
+
+// ── Claimed against verified, the tailnet by look, own addresses ─────────
+
+const MY_LAPTOP: Arrival = Arrival {
+    peer: SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 7)),
+        50000,
+    ),
+    local: SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 10)),
+        3890,
+    ),
+};
+
+/// A wrong login through a proxy on this machine dux cannot vouch for (plain
+/// nginx `proxy_pass` passes the client's own X-Forwarded-For through), the
+/// claimed address chosen by the attacker.
+async fn forged_wrong_login(dux: &Dux, claimed: &str) -> Answer {
+    dux.send(
+        THIS_MACHINE,
+        Req::new(Method::POST, "/api/v1/auth/login")
+            .json(json!({ "password": "wrong guess" }))
+            .header("x-forwarded-for", claimed),
+    )
+    .await
+}
+
+/// Unverified failures must never lock out a verified device. An attacker
+/// whose forwarded requests CLAIM a verified device's address piles failures
+/// onto the same counter the verified device is judged by, so that device's
+/// first honest typo blocks it and writes its address to config.toml.
+#[tokio::test]
+async fn claimed_failures_never_count_toward_a_verified_device_ban() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 3\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 0",
+    );
+    for _ in 0..3 {
+        let answer = forged_wrong_login(&dux, "198.51.100.7").await;
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{}", answer.body);
+    }
+    assert!(
+        !dux.config().contains("198.51.100.7"),
+        "the unverified claim itself is never written"
+    );
+    // The real device at that address, verified, types its password wrong once.
+    let typo = dux
+        .send(
+            MY_LAPTOP,
+            Req::new(Method::POST, "/api/v1/auth/login").json(json!({ "password": "typo" })),
+        )
+        .await;
+    assert_eq!(
+        (typo.status, typo.error().as_deref()),
+        (StatusCode::UNAUTHORIZED, Some("wrong_password")),
+        "one typo from the verified device was answered: {}",
+        typo.body
+    );
+    assert!(
+        !dux.config().contains("198.51.100.7"),
+        "the verified device was banned and written to config.toml after one typo: {}",
+        dux.config()
+    );
+}
+
+/// The same collision with the slow-down on: one forged failure makes the
+/// verified device wait before its correct password is even checked.
+#[tokio::test]
+async fn a_claimed_failure_never_slows_the_verified_device_at_that_address() {
+    let dux =
+        Dux::with_password("failed_login_delay_seconds = 5\nmax_failed_logins_per_minute = 0");
+    let forged = forged_wrong_login(&dux, "198.51.100.7").await;
+    assert_eq!(forged.status, StatusCode::UNAUTHORIZED, "{}", forged.body);
+    let mine = dux.login(MY_LAPTOP, PASSWORD).await;
+    assert_eq!(
+        mine.status,
+        StatusCode::NO_CONTENT,
+        "the verified device's correct password was refused: {}",
+        mine.body
+    );
+}
+
+/// A peer counts as the tailnet only when dux can prove it. A connection
+/// whose two ends merely fall in 100.64.0.0/10 (carrier-grade NAT, Cloudflare
+/// WARP, a cloud VPC) on an address that is NOT this machine's Tailscale
+/// address is not a tailnet device, yet it skips the password under the
+/// default `require`.
+#[tokio::test]
+async fn a_cgnat_peer_on_a_non_tailscale_address_is_not_the_tailnet() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    // A successful look: this machine's Tailscale address is 100.101.102.103.
+    let exposure = ExposureCell::new(FunnelState::Open);
+    exposure.set_identity(Some(IdentityFacts {
+        own_ips: vec!["100.101.102.103".parse().unwrap()],
+        ..IdentityFacts::default()
+    }));
+    let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
+        move |p| p.with_live_exposure(exposure)
+    });
+    // dux bound to every address; this connection arrived on the machine's
+    // carrier-grade NAT interface address, from another host on that segment.
+    let cgnat = Arrival {
+        peer: "100.72.9.9:50000".parse().unwrap(),
+        local: "100.64.20.5:3890".parse().unwrap(),
+    };
+    assert_auth_required(
+        &dux.get(cgnat, "/api/v1/projects").await,
+        "a CGNAT neighbour on a non-Tailscale interface",
+    );
+    let status = dux.status(cgnat, None).await;
+    assert_eq!(status["client_class"], "network", "{status}");
+}
+
+/// The same with Tailscale not installed at all (a failed look for a missing
+/// CLI leaves the exposure open with no identity): nothing proves a tailnet.
+#[tokio::test]
+async fn without_tailscale_a_cgnat_peer_is_not_the_tailnet() {
+    use dux_web::exposure::{ExposureCell, FunnelState};
+    let exposure = ExposureCell::new(FunnelState::Open);
+    let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
+        move |p| p.with_live_exposure(exposure)
+    });
+    let cgnat = Arrival {
+        peer: "100.72.9.9:50000".parse().unwrap(),
+        local: "100.64.20.5:3890".parse().unwrap(),
+    };
+    assert_auth_required(
+        &dux.get(cgnat, "/api/v1/projects").await,
+        "a CGNAT neighbour with no Tailscale on this machine",
+    );
+}
+
+/// "This machine is never blocked." A connection this machine makes to its own
+/// non-loopback address (the owner opening the LAN URL, or any relay on this
+/// machine aimed there) comes FROM that address, and dux bans and writes it.
+#[tokio::test]
+async fn this_machine_through_its_own_lan_address_is_never_written_to_the_blocklist() {
+    let dux = Dux::with_password(
+        "max_failed_logins = 2\nfailed_login_delay_seconds = 0\nmax_failed_logins_per_minute = 0",
+    );
+    let own = Arrival {
+        peer: "192.0.2.10:50000".parse().unwrap(),
+        local: "192.0.2.10:3890".parse().unwrap(),
+    };
+    for _ in 0..3 {
+        let _ = dux
+            .send(
+                own,
+                Req::new(Method::POST, "/api/v1/auth/login").json(json!({ "password": "nope" })),
+            )
+            .await;
+    }
+    assert!(
+        !dux.config().contains("192.0.2.10"),
+        "this machine's own address was written to the blocklist: {}",
+        dux.config()
     );
 }

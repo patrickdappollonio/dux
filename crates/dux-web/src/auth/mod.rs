@@ -217,6 +217,9 @@ pub struct AuthSetup {
 pub struct AuthState {
     live: Arc<LiveAuth>,
     exposure: Option<ExposureCell>,
+    /// The addresses on this machine's network interfaces, for the
+    /// own-address check; read at start and again on the reach clock.
+    interfaces: std::sync::RwLock<Arc<Vec<IpAddr>>>,
     reach: Reach,
     pub(crate) sessions: sessions::Sessions,
     pub(crate) admission: admission::Admission,
@@ -298,6 +301,7 @@ impl AuthState {
         let state = Arc::new(Self {
             live: setup.live,
             exposure: setup.exposure,
+            interfaces: std::sync::RwLock::new(Arc::new(own_interfaces())),
             reach: Reach {
                 bound_ips: setup.bound_ips,
                 tailscale_leg: setup.tailscale_leg,
@@ -337,6 +341,37 @@ impl AuthState {
             .unwrap_or_default()
     }
 
+    /// This machine's interface addresses as last read.
+    fn interfaces(&self) -> Arc<Vec<IpAddr>> {
+        Arc::clone(
+            &self
+                .interfaces
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    /// Read the interface addresses again; a change re-judges open sockets.
+    async fn refresh_interfaces(&self) {
+        let Ok(fresh) = tokio::task::spawn_blocking(own_interfaces).await else {
+            return;
+        };
+        let changed = {
+            let mut slot = self
+                .interfaces
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let changed = **slot != fresh;
+            if changed {
+                *slot = Arc::new(fresh);
+            }
+            changed
+        };
+        if changed {
+            self.bump();
+        }
+    }
+
     pub(crate) fn subscribe_exposure(&self) -> Option<tokio::sync::watch::Receiver<Exposure>> {
         self.exposure.as_ref().map(ExposureCell::subscribe)
     }
@@ -353,7 +388,7 @@ impl AuthState {
     /// session's last use (any request counts as activity).
     pub(crate) async fn assess(&self, facts: RequestFacts, headers: &HeaderMap) -> Assessment {
         let snapshot = self.snapshot();
-        let classification = provenance::classify(&facts, &self.exposure());
+        let classification = provenance::classify(&facts, &self.exposure(), &self.interfaces());
         let blocked = self.admission.is_blocked(&snapshot.blocks, &classification);
         let cookie_port = facts.arrival.map_or(0, |arrival| arrival.local.port());
         let mut session = None;
@@ -392,7 +427,7 @@ impl AuthState {
         session: Option<&TokenDigest>,
     ) -> Option<u16> {
         let snapshot = self.snapshot();
-        let classification = provenance::classify(facts, &self.exposure());
+        let classification = provenance::classify(facts, &self.exposure(), &self.interfaces());
         if self.admission.is_blocked(&snapshot.blocks, &classification) {
             return Some(socket::CLOSE_BLOCKED);
         }
@@ -718,6 +753,18 @@ fn flush_period(config: &ServerAuthConfig) -> std::time::Duration {
 }
 
 /// How often the reach behind the no-password alarm is looked at.
+/// This machine's own interface addresses, canonical and sorted so two reads
+/// compare equal when nothing changed.
+fn own_interfaces() -> Vec<IpAddr> {
+    let mut addrs: Vec<IpAddr> = dux_core::tailscale::interfaces()
+        .into_iter()
+        .map(|(_, ip)| dux_core::config_auth::canonical(ip))
+        .collect();
+    addrs.sort();
+    addrs.dedup();
+    addrs
+}
+
 const REACH_LOOK: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The auth layer's background work, for the life of the serve's runtime.
@@ -783,7 +830,10 @@ async fn maintain(state: Arc<AuthState>) {
             _ = flush.tick() => {
                 state.sessions.flush(idle_ms(&state.snapshot().config)).await;
             }
-            _ = reach.tick() => warning.check(&state),
+            _ = reach.tick() => {
+                warning.check(&state);
+                state.refresh_interfaces().await;
+            }
         }
     }
 }

@@ -571,6 +571,16 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
         let tailnet_dux = Dux::start(DuxOptions::local().with_tailnet(4100)).await;
         let peer = tailnet_dux.client_on(4100).await;
         peer.wait_answering().await;
+        // A peer is the tailnet only once dux's first Tailscale look has named
+        // the address it reached, so wait for that look rather than racing it.
+        dux_journeys::eventually(
+            "the first Tailscale look",
+            Duration::from_secs(30),
+            || async {
+                (peer.auth_status().await["client_class"] == json!("tailnet")).then_some(())
+            },
+        )
+        .await;
         let set = peer
             .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
             .await;
