@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::config_write::{Durability, save_config_with};
+use crate::config_write::{Durability, save_config_three_way};
 use crate::worker::WorkerEvent;
 
 const QUIET_WINDOW: Duration = Duration::from_millis(250);
@@ -25,6 +25,9 @@ enum WriteMsg {
     Flush(SyncSender<()>),
     Pause(SyncSender<()>),
     Resume,
+    /// The config as dux last read it from disk (startup, a reload), the
+    /// base every following save is a three-way patch against.
+    SetBase(Box<Config>),
     /// Stop the writer thread unconditionally, obeyed even while paused. Sent by
     /// `Drop` so shutdown never depends on channel disconnect (a `QuiesceGuard`
     /// holds a sender clone, so the channel can stay connected) or on guard drop
@@ -89,11 +92,15 @@ impl ConfigWriteQueue {
     fn build(config_path: PathBuf, status_lane: Option<Sender<WorkerEvent>>) -> Self {
         let (tx, rx) = mpsc::channel();
         let lazy_inflight = Arc::new(AtomicUsize::new(0));
+        // Read here, before the thread starts, so the base is the file as it
+        // was when the queue was made. A file that cannot be loaded leaves no
+        // base, and saves fall back to the full patch.
+        let base = crate::config::load_config_file(&config_path).ok();
         let writer = thread::Builder::new()
             .name("config-writer".into())
             .spawn({
                 let lazy_inflight = lazy_inflight.clone();
-                move || writer_loop(rx, config_path, lazy_inflight, status_lane)
+                move || writer_loop(rx, config_path, base, lazy_inflight, status_lane)
             })
             .expect("spawn config-writer thread");
         ConfigWriteQueue {
@@ -153,6 +160,14 @@ impl ConfigWriteQueue {
                 }
             }
         }
+    }
+
+    /// Tell the writer what the file held when dux last read it (a reload just
+    /// adopted it). Every later save writes only the keys memory changed
+    /// since, so a key someone else set on disk is never undone. Ordered with
+    /// the saves on the same channel.
+    pub fn set_base(&self, config: Config) {
+        let _ = self.tx.send(WriteMsg::SetBase(Box::new(config)));
     }
 
     /// Exit-time drain: write any pending lazy, bounded by a timeout.
@@ -282,6 +297,7 @@ fn decr_inflight(counter: &AtomicUsize) {
 fn writer_loop(
     rx: Receiver<WriteMsg>,
     path: PathBuf,
+    base: Option<Config>,
     lazy_inflight: Arc<AtomicUsize>,
     status_lane: Option<Sender<WorkerEvent>>,
 ) {
@@ -290,7 +306,7 @@ fn writer_loop(
     let counter = lazy_inflight.clone();
     // Note: under panic = "abort" this guard is inert (the process aborts); it is active under the default unwind strategy.
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        writer_loop_inner(rx, path, lazy_inflight, status_lane)
+        writer_loop_inner(rx, path, base, lazy_inflight, status_lane)
     })) {
         let msg = panic
             .downcast_ref::<&str>()
@@ -316,9 +332,11 @@ enum WriterControl {
 fn writer_loop_inner(
     rx: Receiver<WriteMsg>,
     path: PathBuf,
+    base: Option<Config>,
     lazy_inflight: Arc<AtomicUsize>,
     status_lane: Option<Sender<WorkerEvent>>,
 ) {
+    let mut base = base;
     let mut pending: Option<Config> = None;
     let mut deadline: Option<Instant> = None;
 
@@ -330,6 +348,7 @@ fn writer_loop_inner(
                 &rx,
                 &path,
                 &lazy_inflight,
+                &mut base,
                 &mut pending,
                 &mut deadline,
                 status_lane.as_ref(),
@@ -366,12 +385,13 @@ fn handle_writer_input(
     rx: &Receiver<WriteMsg>,
     path: &std::path::Path,
     lazy_inflight: &AtomicUsize,
+    base: &mut Option<Config>,
     pending: &mut Option<Config>,
     deadline: &mut Option<Instant>,
     status_lane: Option<&Sender<WorkerEvent>>,
 ) -> WriterControl {
     match input {
-        Ok(None) => flush_pending(path, pending, deadline, status_lane),
+        Ok(None) => flush_pending(path, base, pending, deadline, status_lane),
         Err(WriterDisconnected) => return WriterControl::Stop,
         Ok(Some(WriteMsg::Lazy(config))) => {
             decr_inflight(lazy_inflight);
@@ -383,35 +403,41 @@ fn handle_writer_input(
         Ok(Some(WriteMsg::Eager { config, reply })) => {
             *pending = None;
             *deadline = None;
-            let result =
-                save_config_with(path, &config, Durability::Fsync).map_err(|e| format!("{e:#}"));
-            if let Err(error) = &result {
-                crate::logger::error(&format!("eager config write failed: {error}"));
+            let result = save_config_three_way(path, base.as_ref(), &config, Durability::Fsync)
+                .map_err(|e| format!("{e:#}"));
+            match &result {
+                Ok(()) => *base = Some(config),
+                Err(error) => crate::logger::error(&format!("eager config write failed: {error}")),
             }
             let _ = reply.send(result);
         }
         Ok(Some(WriteMsg::Flush(ack))) => {
-            flush_pending(path, pending, deadline, status_lane);
+            flush_pending(path, base, pending, deadline, status_lane);
             let _ = ack.send(());
         }
         Ok(Some(WriteMsg::Pause(ack))) => {
-            flush_pending(path, pending, deadline, status_lane);
+            flush_pending(path, base, pending, deadline, status_lane);
             let _ = ack.send(());
             debug_assert!(pending.is_none());
-            if !run_paused_writer(rx, lazy_inflight) {
+            if !run_paused_writer(rx, lazy_inflight, base) {
                 return WriterControl::Stop;
             }
         }
         Ok(Some(WriteMsg::Resume)) => {}
+        Ok(Some(WriteMsg::SetBase(config))) => *base = Some(*config),
         Ok(Some(WriteMsg::Shutdown)) => {
-            flush_pending(path, pending, deadline, status_lane);
+            flush_pending(path, base, pending, deadline, status_lane);
             return WriterControl::Stop;
         }
     }
     WriterControl::Continue
 }
 
-fn run_paused_writer(rx: &Receiver<WriteMsg>, lazy_inflight: &AtomicUsize) -> bool {
+fn run_paused_writer(
+    rx: &Receiver<WriteMsg>,
+    lazy_inflight: &AtomicUsize,
+    base: &mut Option<Config>,
+) -> bool {
     let mut depth = 1usize;
     loop {
         match rx.recv() {
@@ -433,20 +459,27 @@ fn run_paused_writer(rx: &Receiver<WriteMsg>, lazy_inflight: &AtomicUsize) -> bo
                 depth = depth.saturating_add(1);
                 let _ = ack.send(());
             }
+            Ok(WriteMsg::SetBase(config)) => *base = Some(*config),
         }
     }
 }
 
 fn flush_pending(
     path: &std::path::Path,
+    base: &mut Option<Config>,
     pending: &mut Option<Config>,
     deadline: &mut Option<Instant>,
     status_lane: Option<&Sender<WorkerEvent>>,
 ) {
     *deadline = None;
-    if let Some(cfg) = pending.take()
-        && let Err(e) = save_config_with(path, &cfg, Durability::NoFsync)
-    {
+    let Some(cfg) = pending.take() else {
+        return;
+    };
+    let result = save_config_three_way(path, base.as_ref(), &cfg, Durability::NoFsync);
+    if result.is_ok() {
+        *base = Some(cfg);
+    }
+    if let Err(e) = result {
         crate::logger::error(&format!("lazy config write failed: {e:#}"));
         // Nothing asked for this write and nothing is waiting on its answer, so
         // the only sign of the failure is the preference reverting the next time
@@ -466,6 +499,50 @@ mod tests {
 
     fn read(path: &std::path::Path) -> String {
         std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    /// The reviewer's repro: `dux config set` changes a key on disk, an
+    /// unrelated lazy save is still pending in the running dux, the reload's
+    /// quiesce flushes it, and the set value must survive into the reload.
+    #[test]
+    fn a_pending_lazy_save_never_undoes_a_key_set_on_disk() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\ncopy_on_select = true\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let loaded: Config = toml::from_str(&read(&path)).unwrap();
+        q.set_base(loaded.clone());
+
+        // `dux config set ui.left_width_pct 33`, from another process.
+        let key = crate::config_keys::lookup("ui.left_width_pct").unwrap();
+        crate::config_keys::set_plain(&path, &key, "33").unwrap();
+
+        let mut memory = loaded;
+        memory.ui.copy_on_select = false;
+        q.save_lazy(memory);
+        drop(q.quiesce());
+        q.flush();
+
+        let after: Config = toml::from_str(&read(&path)).unwrap();
+        assert_eq!(after.ui.left_width_pct, 33, "{}", read(&path));
+        assert!(!after.ui.copy_on_select);
+    }
+
+    /// With no base set yet, the writer reads one from the file when it starts.
+    #[test]
+    fn the_writer_takes_its_first_base_from_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let memory: Config = toml::from_str(&read(&path)).unwrap();
+        std::fs::write(&path, "[ui]\nleft_width_pct = 44\n").unwrap();
+        q.save_eager(memory).unwrap();
+        assert!(
+            read(&path).contains("left_width_pct = 44"),
+            "{}",
+            read(&path)
+        );
     }
 
     #[test]

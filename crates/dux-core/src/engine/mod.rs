@@ -2632,6 +2632,10 @@ impl Engine {
     /// applies a reload its own way, so both call this rather than relying on
     /// the other's path.
     pub fn retune_after_config_swap(&mut self) {
+        // The config just adopted is what the file holds now, so it is the
+        // base the writer's three-way saves patch against: a key someone else
+        // sets on disk afterwards is never undone by a save from memory.
+        self.config_writer.set_base(self.config.clone());
         crate::logger::set_level(&self.config.logging.level);
         crate::logger::set_rotation(&self.config.logging);
         self.pr_poll_interval_secs.store(

@@ -6994,6 +6994,32 @@ mod tests {
         }
     }
 
+    /// The web's "recover config" keeps the file's own `[server.auth]`: a
+    /// password set on disk after this dux started is not replaced by the
+    /// running config's (here, none).
+    #[tokio::test]
+    async fn recovering_the_config_keeps_the_files_server_auth() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let hash = dux_core::auth::hash_password(&dux_core::auth::Password::new(
+            "set on disk after dux started".to_string(),
+        ))
+        .expect("hash");
+        std::fs::write(
+            &paths.config_path,
+            format!("[server.auth]\npassword_hash = \"{hash}\"\n"),
+        )
+        .expect("write");
+        handle
+            .apply_wire(WireCommand::RecoverConfig {})
+            .await
+            .expect("recover");
+        let after = std::fs::read_to_string(&paths.config_path).expect("read");
+        let auth = dux_core::config::auth_section_of(&after).expect("valid");
+        assert_eq!(auth.password_hash, hash, "{after}");
+    }
+
     /// A reload that meets an unreadable `[server.auth]` changes nothing at
     /// all, not even the settings beside it that are fine, and says why; the
     /// next good file applies as usual.

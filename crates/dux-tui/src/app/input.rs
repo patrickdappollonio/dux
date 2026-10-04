@@ -13170,10 +13170,20 @@ not_a_real_action = ["x"]
         // RecoverConfig is synchronous: it writes through the engine while
         // holding the quiesce barrier and returns the FINAL status directly.
         // There is no trailing Busy (which would never clear) and nothing to drain.
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
-        assert_eq!(
-            app.status.message(),
-            "Restored the last working configuration to config.toml."
+        // The file was not TOML, so its [server.auth] could not be kept, and
+        // the status says the running password setting was written instead.
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert!(
+            app.status
+                .message()
+                .starts_with("Restored the last working configuration to config.toml."),
+            "{}",
+            app.status.message()
+        );
+        assert!(
+            app.status.message().contains("no password"),
+            "{}",
+            app.status.message()
         );
 
         assert!(matches!(app.prompt, PromptState::None));
@@ -13181,6 +13191,43 @@ not_a_real_action = ["x"]
             std::fs::read_to_string(&app.engine.paths.config_path).expect("read recovered");
         let parsed: Config = toml::from_str(&recovered).expect("parse recovered config");
         assert_eq!(parsed.ui.right_width_pct, 42);
+    }
+
+    /// Recovering after a failed reload keeps the file's own `[server.auth]`
+    /// when it reads, never the running dux's older one: a password set with
+    /// `dux config set` after dux started must survive the recovery.
+    #[test]
+    fn recovering_keeps_the_files_server_auth_rather_than_the_running_one() {
+        let hash = |text: &str| {
+            dux_core::auth::hash_password(&dux_core::auth::Password::new(text.to_string()))
+                .expect("hash")
+        };
+        let mut app = test_app(default_bindings());
+        app.engine.config.server.auth.password_hash = hash("the password dux started with");
+        let newer = hash("the password set afterwards");
+        std::fs::write(
+            &app.engine.paths.config_path,
+            format!(
+                "[keys]\nnot_a_real_action = [\"x\"]\n\n[server.auth]\npassword_hash = \"{newer}\"\n"
+            ),
+        )
+        .expect("write config");
+        app.prompt = PromptState::ConfigReloadFailed {
+            error: "unknown action".to_string(),
+            recover_old_config: true,
+            focus: ConfigReloadFailedFocus::Apply,
+            scroll: 0,
+        };
+        app.resolve_config_reload_failed(true);
+        let recovered: Config =
+            toml::from_str(&std::fs::read_to_string(&app.engine.paths.config_path).expect("read"))
+                .expect("parse");
+        assert_eq!(recovered.server.auth.password_hash, newer);
+        assert!(
+            app.status.message().contains("[server.auth] was kept"),
+            "{}",
+            app.status.message()
+        );
     }
 
     /// A long, multi-line error must be reachable with the keyboard, and the

@@ -133,8 +133,28 @@ const CONFIG_WRITE_LOCK_NAME: &str = ".config-write.lock";
 /// leaves no orphan and never a partial real file. Holds the
 /// [`ConfigFileLock`] for the write.
 pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) -> Result<()> {
+    check_auth_before_write(path, contents)?;
     let _lock = ConfigFileLock::acquire(path)?;
     write_config_atomic_unlocked(path, contents, durability)
+}
+
+/// Refuse to write `contents` when its `[server.auth]` would not load: dux
+/// refuses to start with such a file, so no writer may produce one. Every
+/// write path checks this before anything lands.
+fn check_auth_before_write(path: &Path, contents: &str) -> Result<()> {
+    if let Err(problem) = crate::config::auth_section_of(contents) {
+        let reason = match problem {
+            crate::config::ConfigLoadProblem::AuthInvalid(reason)
+            | crate::config::ConfigLoadProblem::NotToml(reason)
+            | crate::config::ConfigLoadProblem::Unreadable(reason) => reason,
+        };
+        anyhow::bail!(
+            "that write would leave [server.auth] in {} invalid, and dux refuses to start \
+             with an invalid [server.auth]; nothing was written.\n{reason}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// [`write_config_atomic`] for a caller already holding the lock.
@@ -200,18 +220,132 @@ pub fn patch_config_file_with(
     config: &Config,
     durability: Durability,
 ) -> Result<()> {
-    // Read and write under one lock, so an update another process made since
-    // this dux last loaded the file (a `dux config set`, a ban) is in `doc`
-    // before this patch runs, and the auth keys the patch never overwrites
-    // keep it.
+    patch_config_file_three_way(config_path, None, config, durability)
+}
+
+/// Patch the file from memory, three ways: `base` is the config as dux last
+/// read it, `ours` is memory now, and the file on disk is theirs. Only keys
+/// whose value in `ours` differs from `base` are written, so a key someone
+/// else changed on disk since (a `dux config set`, a hand edit) and memory did
+/// not change keeps the disk value. A key the file lacks is still filled in
+/// from memory, which is how a new setting reaches an older file. With no
+/// `base` every managed key counts as changed, the old full patch.
+///
+/// `[server.auth]` is never written from memory at all (see
+/// [`mutate_config_file`]). Reading and writing happen under one
+/// [`ConfigFileLock`], and the result's `[server.auth]` is checked first.
+pub fn patch_config_file_three_way(
+    config_path: &Path,
+    base: Option<&Config>,
+    ours: &Config,
+    durability: Durability,
+) -> Result<()> {
     let _lock = ConfigFileLock::acquire(config_path)?;
     let raw = fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     let mut doc: DocumentMut = raw
         .parse()
         .with_context(|| format!("failed to parse {}", config_path.display()))?;
-    apply_patches(&mut doc, config);
-    write_config_atomic_unlocked(config_path, &doc.to_string(), durability)
+    match base {
+        Some(base) => apply_patches_three_way(&mut doc, base, ours),
+        None => apply_patches(&mut doc, ours),
+    }
+    let text = doc.to_string();
+    check_auth_before_write(config_path, &text)?;
+    write_config_atomic_unlocked(config_path, &text, durability)
+}
+
+/// [`save_config_with`] for the config writer, which knows its base.
+pub fn save_config_three_way(
+    config_path: &Path,
+    base: Option<&Config>,
+    ours: &Config,
+    durability: Durability,
+) -> Result<()> {
+    if config_path.exists() {
+        patch_config_file_three_way(config_path, base, ours, durability)
+    } else {
+        write_config_atomic(config_path, &render_config_documented(ours), durability)
+    }
+}
+
+/// Apply to `disk` only what changed between `base` and `ours`, by running the
+/// ordinary patch twice (once with each) over copies of the file and copying
+/// across the items where the two results differ.
+fn apply_patches_three_way(disk: &mut DocumentMut, base: &Config, ours: &Config) {
+    let mut with_ours = disk.clone();
+    apply_patches(&mut with_ours, ours);
+    let mut with_base = disk.clone();
+    apply_patches(&mut with_base, base);
+    let original = disk.clone();
+    merge_changed(
+        disk.as_table_mut(),
+        original.as_table(),
+        with_base.as_table(),
+        with_ours.as_table(),
+    );
+    // Retired keys still go on every save, as they always have.
+    for (section, key) in RETIRED_KEYS {
+        remove_table_key(disk, section, key);
+    }
+}
+
+/// Keys dux once wrote and every save removes (see `apply_patches`).
+const RETIRED_KEYS: &[(&str, &str)] = &[
+    ("defaults", "commit_prompt"),
+    ("defaults", "prompt_for_name"),
+    ("server", "tailscale_enabled"),
+    ("server", "max_websocket_connections"),
+];
+
+fn merge_changed(target: &mut Table, original: &Table, base: &Table, ours: &Table) {
+    for (key, ours_item) in ours.iter() {
+        let Some(base_item) = base.get(key) else {
+            target.insert(key, ours_item.clone());
+            continue;
+        };
+        if original.get(key).is_none() {
+            // Missing from the file: fill it in, as every save always has.
+            target.insert(key, ours_item.clone());
+            continue;
+        }
+        match (base_item, ours_item, original.get(key), target.get_mut(key)) {
+            (
+                Item::Table(base_table),
+                Item::Table(ours_table),
+                Some(Item::Table(original_table)),
+                Some(Item::Table(target_table)),
+            ) => merge_changed(target_table, original_table, base_table, ours_table),
+            _ => {
+                if item_text(base_item) != item_text(ours_item) {
+                    target.insert(key, ours_item.clone());
+                }
+            }
+        }
+    }
+    // Removed in memory (an env variable, a provider): present after the
+    // base patch, gone after ours. An entry the base patch drops too was
+    // added on disk by someone else, so it stays.
+    let gone: Vec<String> = original
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .filter(|key| base.get(key).is_some() && ours.get(key).is_none())
+        .collect();
+    for key in gone {
+        target.remove(&key);
+    }
+}
+
+/// An item's TOML text without the comments and spacing around it.
+fn item_text(item: &Item) -> String {
+    match item {
+        Item::Value(value) => {
+            let mut value = value.clone();
+            value.decor_mut().clear();
+            value.to_string()
+        }
+        other => other.to_string(),
+    }
 }
 
 /// The ONE way to change specific keys of `config.toml` while anything else
@@ -265,15 +399,12 @@ pub fn mutate_config_file<T>(
     Ok(outcome)
 }
 
-/// Add the `[server.auth]` keys the document lacks, with the running values.
-///
-/// Never overwrites a key the file already has, and leaves the section alone
-/// entirely when it is not an ordinary table. Every other managed key is
-/// written from memory on each save, but these change from outside the
-/// running dux (`dux config set`, a ban, a password change), and a save from a
-/// memory that has not caught up yet would otherwise quietly put the old
-/// password back or lift a ban. Only [`mutate_config_file`] changes them.
-fn fill_missing_auth_keys(doc: &mut DocumentMut, auth: &crate::config::ServerAuthConfig) {
+/// Write the whole `[server.auth]` section from `auth`, for a render of a
+/// fresh file (first creation, recovery) and nothing else. A save from
+/// memory never calls this: these keys change from outside the running dux
+/// (`dux config set`, a ban, a password change), so only
+/// [`mutate_config_file`] changes them in an existing file.
+fn render_auth_section(doc: &mut DocumentMut, auth: &crate::config::ServerAuthConfig) {
     let Some(server) = doc
         .entry("server")
         .or_insert_with(|| Item::Table(Table::new()))
@@ -295,9 +426,7 @@ fn fill_missing_auth_keys(doc: &mut DocumentMut, auth: &crate::config::ServerAut
         return;
     };
     for (key, item) in rendered.iter() {
-        if !table.contains_key(key) {
-            table.insert(key, item.clone());
-        }
+        table.insert(key, item.clone());
     }
 }
 
@@ -314,7 +443,7 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
 
 pub fn save_config_with(config_path: &Path, config: &Config, durability: Durability) -> Result<()> {
     if config_path.exists() {
-        patch_config_file_with(config_path, config, durability)
+        patch_config_file_three_way(config_path, None, config, durability)
     } else {
         // FIRST CREATION. This must emit the fully-commented template, not the
         // plain one: "the config file is the documentation" (CLAUDE.md), and the
@@ -386,6 +515,7 @@ pub fn write_config_plain_with(
 pub fn render_config_plain(config: &Config) -> String {
     let mut doc = DocumentMut::new();
     apply_patches(&mut doc, config);
+    render_auth_section(&mut doc, &config.server.auth);
     doc.to_string()
 }
 
@@ -796,8 +926,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.server.file_drop_max_concurrency as usize,
     );
 
-    // --- [server.auth] (fill in only; see fill_missing_auth_keys) ---
-    fill_missing_auth_keys(doc, &config.server.auth);
+    // [server.auth] is deliberately absent: see `render_auth_section`.
 
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
@@ -3758,31 +3887,81 @@ second_note = \"nowhere to go\"
         assert!(after.contains("203.0.113.7"), "the ban survives:\n{after}");
     }
 
+    /// Saves from memory never write `[server.auth]`: not a changed key, not
+    /// a missing one. A key the user deleted by hand stays deleted.
     #[test]
-    fn a_save_fills_in_auth_keys_the_file_lacks_from_memory() {
+    fn a_save_from_memory_never_writes_server_auth_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // The user removed `require` (and everything else) by hand.
+        let before = "[server]\nport = 4000\n\n[server.auth]\nmax_failed_logins = 3\n";
+        std::fs::write(&path, before).expect("seed");
+        let mut config = Config::default();
+        config.server.auth.require = crate::config::AuthRequire::Everywhere;
+        config.server.auth.password_hash = a_hash("a stale password in memory");
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+
+        let after = std::fs::read_to_string(&path).expect("read");
+        let auth = after
+            .split("[server.auth]")
+            .nth(1)
+            .expect("section kept")
+            .split("\n[")
+            .next()
+            .unwrap_or_default();
+        assert_eq!(auth.trim(), "max_failed_logins = 3", "untouched:\n{after}");
+        let mut no_auth = DocumentMut::new();
+        apply_patches(&mut no_auth, &config);
+        assert!(
+            no_auth.get("server").and_then(|s| s.get("auth")).is_none(),
+            "apply_patches has no auth keys at all"
+        );
+    }
+
+    /// Every write path refuses a result whose `[server.auth]` would stop dux
+    /// from starting.
+    #[test]
+    fn writes_refuse_a_result_with_an_invalid_server_auth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let broken = "[server.auth]\npassword_hash = \"hunter2\"\n";
+        assert!(write_config_atomic(&path, broken, Durability::NoFsync).is_err());
+        assert!(!path.exists(), "nothing was written");
+        // A file broken on disk is not saved over from memory either.
+        std::fs::write(&path, broken).expect("seed");
+        assert!(patch_config_file_with(&path, &Config::default(), Durability::NoFsync).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    /// The three-way save: a key changed on disk by someone else, and not in
+    /// memory, keeps the disk value; a key changed in memory is written.
+    #[test]
+    fn a_three_way_save_keeps_a_disk_change_memory_did_not_make() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[server]\nport = 4000\n\n[server.auth]\nrequire = \"tailnet\"\n",
+            "[ui]\n# how wide\nleft_width_pct = 20\ncopy_on_select = true\n",
         )
         .expect("seed");
-        let mut config = Config::default();
-        config.server.auth.require = crate::config::AuthRequire::Everywhere;
-        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
-
-        let after = std::fs::read_to_string(&path).expect("read");
-        let parsed: Config = toml::from_str(&after).expect("valid config");
-        assert_eq!(
-            parsed.server.auth.require,
-            crate::config::AuthRequire::Tailnet,
-            "a present key is the file's:\n{after}"
-        );
+        let base: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // `dux config set ui.left_width_pct 33` happens on disk.
+        std::fs::write(
+            &path,
+            "[ui]\n# how wide\nleft_width_pct = 33\ncopy_on_select = true\n",
+        )
+        .expect("external set");
+        let mut ours = base.clone();
+        ours.ui.copy_on_select = false;
+        save_config_three_way(&path, Some(&base), &ours, Durability::NoFsync).expect("save");
+        let after: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after.ui.left_width_pct, 33, "the disk change survives");
+        assert!(!after.ui.copy_on_select, "the memory change lands");
         assert!(
-            after.contains("session_idle_seconds = 60"),
-            "missing keys appear:\n{after}"
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("# how wide")
         );
-        assert!(after.contains("password_hash = \"\""), "{after}");
     }
 
     #[test]

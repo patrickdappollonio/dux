@@ -846,11 +846,46 @@ impl Engine {
                         "Config writer is busy; please retry.",
                     )));
                 }
-                let body = self.surface.recover_render(&self.config);
+                // The running config may be older than the file's [server.auth]
+                // (a `dux config set`, a ban since dux started), so the file's
+                // own section is kept whenever it reads. Only when it cannot be
+                // read is the running one written back, and the status says so.
+                let mut recovered = self.config.clone();
+                let auth_note = match std::fs::read_to_string(&self.paths.config_path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|raw| {
+                        crate::config::auth_section_of(&raw).map_err(|p| match p {
+                            crate::config::ConfigLoadProblem::AuthInvalid(r)
+                            | crate::config::ConfigLoadProblem::NotToml(r)
+                            | crate::config::ConfigLoadProblem::Unreadable(r) => r,
+                        })
+                    }) {
+                    Ok(auth) => {
+                        recovered.server.auth = auth;
+                        None
+                    }
+                    Err(reason) => Some(format!(
+                        "The file's [server.auth] could not be read, so the running dux's web \
+                         password settings were written back ({}); check them with `dux config \
+                         get server.auth`. What could not be read: {reason}",
+                        if recovered.server.auth.has_password() {
+                            "a password is set"
+                        } else {
+                            "no password is set"
+                        }
+                    )),
+                };
+                let body = self.surface.recover_render(&recovered);
                 match crate::config_write::write_config_secure(&self.paths.config_path, &body) {
-                    Ok(()) => Ok(EventReaction::Status(StatusUpdate::info(
-                        "Restored the last working configuration to config.toml.",
-                    ))),
+                    Ok(()) => Ok(EventReaction::Status(match auth_note {
+                        None => StatusUpdate::info(
+                            "Restored the last working configuration to config.toml. Its \
+                             [server.auth] was kept as the file had it.",
+                        ),
+                        Some(note) => StatusUpdate::warning(format!(
+                            "Restored the last working configuration to config.toml. {note}"
+                        )),
+                    })),
                     Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
                         "Couldn't restore the last working configuration: {e:#}"
                     )))),

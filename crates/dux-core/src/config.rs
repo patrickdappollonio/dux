@@ -3063,11 +3063,16 @@ fn table_into_config(table: toml::Table) -> Result<Config, String> {
 /// silent fallback to defaults, because the default is "no password". A
 /// start then refuses to run and a reload keeps the running config.
 pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
+    load_config_file(&paths.config_path)
+}
+
+/// [`load_config`] for a bare file path.
+pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, ConfigLoadError> {
     let fail = |problem| ConfigLoadError {
-        path: paths.config_path.clone(),
+        path: config_path.to_path_buf(),
         problem,
     };
-    let mut config = match std::fs::read_to_string(&paths.config_path) {
+    let mut config = match std::fs::read_to_string(config_path) {
         Ok(raw) => {
             // One-time migration notice: the single `[server] max_websocket_connections`
             // cap was split into three per-class caps. The unknown key is ignored on
