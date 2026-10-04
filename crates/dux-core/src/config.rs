@@ -4032,6 +4032,11 @@ fn schema_step(parent: &[String], segment: &str) -> SchemaStep {
         let mut whole: Vec<&str> = parts.clone();
         whole.push(segment);
         crate::config_write::ORPHANED_CONFIG_SECTIONS.contains(&whole.as_slice())
+            // A setting dux accepts on the command line with no key of its
+            // own in the file (`server.auth.password`) is dux's word too.
+            || crate::config_keys::VIRTUAL_KEYS
+                .iter()
+                .any(|(name, _)| *name == whole.as_slice())
     };
     // `password_hash` is dux's own word wherever it is written: a misplaced
     // one is named as what it is (see `misplaced_auth_problem_list`).
@@ -4101,9 +4106,8 @@ fn first_hidden(segments: &[String]) -> Option<(usize, bool)> {
 
 /// The entry at `segments` (its last one hidden), placed by its line in
 /// `raw`, inside `within` (the printed table around it, if any).
-fn line_placeholder(raw: &str, segments: &[String], within: Option<&str>) -> String {
-    let steps: Vec<KeyStep<'_>> = segments.iter().map(|s| KeyStep::Key(s)).collect();
-    match (line_of_key(raw, &steps), within) {
+fn line_placeholder(raw: &str, steps: &[KeyStep<'_>], within: Option<&str>) -> String {
+    match (line_of_key(raw, steps), within) {
         (Some(line), Some(table)) => format!("the entry on line {line} of [{table}]"),
         (Some(line), None) => format!("the entry on line {line}"),
         (None, Some(table)) => format!("an entry of [{table}] whose name is not shown"),
@@ -4116,14 +4120,75 @@ fn line_placeholder(raw: &str, segments: &[String], within: Option<&str>) -> Str
 /// [providers]`) where a segment may not be repeated (see the schema rule
 /// above).
 pub fn shown_path(raw: &str, segments: &[String]) -> String {
-    let Some((index, rest_known)) = first_hidden(segments) else {
-        return dotted(segments);
+    let parts: Vec<PathPart<'_>> = segments.iter().map(|s| PathPart::Key(s)).collect();
+    shown_parts(raw, &parts)
+}
+
+/// One step of a path that may run through an array of tables: a key, or
+/// the index of an entry (`projects[0]`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathPart<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+/// [`shown_path`] for a path that may run through arrays of tables. An
+/// index takes nothing from the schema: the keys of an entry are judged
+/// against that array's own schema (`[[projects]]` against a project's), so
+/// an array the schema does not know is itself placed by its line, and so is
+/// every key under it.
+pub fn shown_parts(raw: &str, parts: &[PathPart<'_>]) -> String {
+    let keys: Vec<String> = parts
+        .iter()
+        .filter_map(|part| match part {
+            PathPart::Key(key) => Some((*key).to_string()),
+            PathPart::Index(_) => None,
+        })
+        .collect();
+    // Where each key sits among the parts.
+    let at: Vec<usize> = parts
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| matches!(part, PathPart::Key(_)))
+        .map(|(index, _)| index)
+        .collect();
+    let printed = |parts: &[PathPart<'_>]| {
+        let mut out = String::new();
+        for part in parts {
+            match part {
+                PathPart::Key(key) => {
+                    if !out.is_empty() {
+                        out.push('.');
+                    }
+                    out.push_str(&dotted(&[(*key).to_string()]));
+                }
+                PathPart::Index(index) => out.push_str(&format!("[{index}]")),
+            }
+        }
+        out
     };
-    let table = (index > 0).then(|| dotted(&segments[..index]));
-    let entry = line_placeholder(raw, &segments[..=index], table.as_deref());
-    let rest = &segments[index + 1..];
+    let Some((hidden, rest_known)) = first_hidden(&keys) else {
+        return printed(parts);
+    };
+    let part = at[hidden];
+    // The steps to the hidden key, an index taken with the key before it.
+    let mut steps: Vec<KeyStep<'_>> = Vec::new();
+    for (index, step) in parts[..=part].iter().enumerate() {
+        match step {
+            PathPart::Key(key) => match parts.get(index + 1) {
+                Some(PathPart::Index(entry)) if index < part => {
+                    steps.push(KeyStep::Entry(key, *entry));
+                }
+                _ => steps.push(KeyStep::Key(key)),
+            },
+            PathPart::Index(_) => {}
+        }
+    }
+    let table = (part > 0).then(|| printed(&parts[..part]));
+    let entry = line_placeholder(raw, &steps, table.as_deref());
+    let rest = &parts[part + 1..];
     if rest_known && !rest.is_empty() {
-        format!("{} of {entry}", dotted(rest))
+        format!("{} of {entry}", printed(rest))
     } else {
         entry
     }
@@ -4159,7 +4224,8 @@ pub fn name_is_hidden(_raw: &str, segments: &[String]) -> bool {
 /// `[env] the entry on line 2` where a segment may not be repeated.
 fn shown_place(raw: &str, segments: &[String]) -> String {
     if let Some((index, rest_known)) = first_hidden(segments) {
-        let entry = line_placeholder(raw, &segments[..=index], None);
+        let steps: Vec<KeyStep<'_>> = segments[..=index].iter().map(|s| KeyStep::Key(s)).collect();
+        let entry = line_placeholder(raw, &steps, None);
         let rest = &segments[index + 1..];
         let what = if rest_known && !rest.is_empty() {
             format!("{} of {entry}", dotted(rest))

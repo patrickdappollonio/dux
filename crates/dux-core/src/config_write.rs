@@ -2674,35 +2674,18 @@ enum PathSeg {
 }
 
 /// Render a path for display: `server.acme.production`, `projects[0].custom_key`.
-/// A path of keys only goes through the one formatter
-/// ([`crate::config::shown_path`]) against the file's text `raw`, so a name
-/// that breaks its map's rule is placed by its line, never printed.
+/// Every path, an index into an array of tables included, goes through the
+/// one formatter ([`crate::config::shown_parts`]) against the file's text
+/// `raw`, so a name that breaks its schema is placed by its line, never printed.
 fn path_display(raw: &str, path: &[PathSeg]) -> String {
-    let keys: Option<Vec<String>> = path
+    let parts: Vec<crate::config::PathPart<'_>> = path
         .iter()
         .map(|seg| match seg {
-            PathSeg::Key(key) => Some(key.clone()),
-            PathSeg::Index(_) => None,
+            PathSeg::Key(key) => crate::config::PathPart::Key(key),
+            PathSeg::Index(index) => crate::config::PathPart::Index(*index),
         })
         .collect();
-    if let Some(keys) = keys {
-        return crate::config::shown_path(raw, &keys);
-    }
-    let mut out = String::new();
-    for seg in path {
-        match seg {
-            PathSeg::Key(k) => {
-                if !out.is_empty() {
-                    out.push('.');
-                }
-                out.push_str(k);
-            }
-            PathSeg::Index(i) => {
-                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("[{i}]"));
-            }
-        }
-    }
-    out
+    crate::config::shown_parts(raw, &parts)
 }
 
 /// The path's keys when it holds no array index, for drop-list matching
@@ -4893,7 +4876,12 @@ id = \"b\"
             out.contains("custom_note = \"do not lose me\""),
             "out:\n{out}"
         );
-        assert_eq!(report.preserved, vec!["projects[0].custom_note"]);
+        // A key the project schema does not know is placed by its line: it
+        // may be anything pasted where a name goes.
+        assert_eq!(
+            report.preserved,
+            vec!["the entry on line 3 of [projects[0]]"]
+        );
         assert!(report.dropped.is_empty());
     }
 
@@ -4928,10 +4916,13 @@ second_note = \"nowhere to go\"
         let out = rendered.to_string();
         assert!(out.contains("note = \"kept\""), "out:\n{out}");
         assert!(!out.contains("second_note"), "out:\n{out}");
-        assert_eq!(report.preserved, vec!["projects[0].note"]);
+        assert_eq!(
+            report.preserved,
+            vec!["the entry on line 3 of [projects[0]]"]
+        );
         assert_eq!(
             report.unplaceable,
-            vec!["projects[1].id", "projects[1].second_note"],
+            vec!["projects[1].id", "the entry on line 7 of [projects[1]]"],
             "a key that could not be placed must be named, not vanish"
         );
         assert!(

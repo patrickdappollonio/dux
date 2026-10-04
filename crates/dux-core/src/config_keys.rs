@@ -178,9 +178,12 @@ impl Key {
 pub enum KeyError {
     /// Not a well-formed path.
     Malformed(String),
-    /// No such setting; `suggestion` is the closest one there is.
+    /// No such setting. `known` is the longest start of the path that is a
+    /// setting or table (empty when none is); the rest is never repeated,
+    /// since it may be a value typed where a name goes. `suggestion` is the
+    /// closest setting directly below `known`.
     Unknown {
-        path: String,
+        known: String,
         suggestion: Option<String>,
     },
 }
@@ -189,15 +192,20 @@ impl fmt::Display for KeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed(reason) => f.write_str(reason),
-            Self::Unknown { path, suggestion } => {
-                write!(f, "there is no setting called {path}")?;
+            Self::Unknown { known, suggestion } => {
+                if known.is_empty() {
+                    write!(f, "there is no setting with that name")?;
+                } else {
+                    write!(f, "{known} has no setting below it with that name")?;
+                }
                 match suggestion {
-                    Some(close) => write!(f, "; did you mean {close}?"),
+                    Some(close) => write!(f, "; did you mean {close}?")?,
                     None => write!(
                         f,
                         "; `dux config path` shows the file, whose comments list every setting"
-                    ),
+                    )?,
                 }
+                write!(f, " Values are never given in the path.")
             }
         }
     }
@@ -264,10 +272,23 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
             path: segments,
             shape,
         }),
-        None => Err(KeyError::Unknown {
-            path: path.to_string(),
-            suggestion: suggest(path),
-        }),
+        None => {
+            // The longest start of the path that names a setting or table;
+            // what follows it is never repeated (it may be a value).
+            let known = (0..segments.len())
+                .rev()
+                .find(|len| {
+                    let prefix = &segments[..*len];
+                    *len > 0
+                        && (shape_of(prefix).is_some()
+                            || VIRTUAL_KEYS.iter().any(|(name, _)| *name == prefix))
+                })
+                .unwrap_or(0);
+            Err(KeyError::Unknown {
+                known: crate::config::shown_path("", &segments[..known]),
+                suggestion: suggest(&segments[..known], &segments[known]),
+            })
+        }
     }
 }
 
@@ -358,20 +379,23 @@ fn known_paths() -> Vec<Vec<String>> {
     out
 }
 
-fn suggest(path: &str) -> Option<String> {
-    let mut best: Option<(usize, String)> = None;
+/// The setting directly below `known` whose name is closest to `typed` (the
+/// segment typed after it), printed through the one formatter, when it is
+/// close enough to be the one meant.
+fn suggest(known: &[String], typed: &str) -> Option<String> {
+    let mut best: Option<(usize, Vec<String>)> = None;
     for candidate in known_paths() {
-        // Compared as the setting is typed and printed, through the one
-        // formatter.
-        let candidate = crate::config::shown_path("", &candidate);
-        let distance = edit_distance(path, &candidate);
+        if candidate.len() != known.len() + 1 || !candidate.starts_with(known) {
+            continue;
+        }
+        let distance = edit_distance(typed, &candidate[known.len()]);
         if best.as_ref().is_none_or(|(d, _)| distance < *d) {
             best = Some((distance, candidate));
         }
     }
     let (distance, candidate) = best?;
-    let allowed = (path.chars().count() / 3).max(2);
-    (distance <= allowed).then_some(candidate)
+    let allowed = (typed.chars().count() / 3).max(2);
+    (distance <= allowed).then(|| crate::config::shown_path("", &candidate))
 }
 
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -1482,7 +1506,7 @@ port = 3890
         assert_eq!(
             err,
             KeyError::Unknown {
-                path: "ui.left_widht_pct".to_string(),
+                known: "ui".to_string(),
                 suggestion: Some("ui.left_width_pct".to_string())
             }
         );
