@@ -336,21 +336,21 @@ fn writer_loop_inner(
     lazy_inflight: Arc<AtomicUsize>,
     status_lane: Option<Sender<WorkerEvent>>,
 ) {
-    let mut base = base;
-    let mut pending: Option<Config> = None;
-    let mut deadline: Option<Instant> = None;
+    let mut state = WriterState {
+        base,
+        pending: None,
+        deadline: None,
+    };
 
     loop {
-        let input = receive_writer_input(&rx, deadline);
+        let input = receive_writer_input(&rx, state.deadline);
         if matches!(
             handle_writer_input(
                 input,
                 &rx,
                 &path,
                 &lazy_inflight,
-                &mut base,
-                &mut pending,
-                &mut deadline,
+                &mut state,
                 status_lane.as_ref(),
             ),
             WriterControl::Stop
@@ -380,53 +380,60 @@ fn receive_writer_input(
     }
 }
 
+/// What the writer thread carries between messages: the base its three-way
+/// saves patch against, and the coalesced lazy save waiting for its deadline.
+struct WriterState {
+    base: Option<Config>,
+    pending: Option<Config>,
+    deadline: Option<Instant>,
+}
+
 fn handle_writer_input(
     input: Result<Option<WriteMsg>, WriterDisconnected>,
     rx: &Receiver<WriteMsg>,
     path: &std::path::Path,
     lazy_inflight: &AtomicUsize,
-    base: &mut Option<Config>,
-    pending: &mut Option<Config>,
-    deadline: &mut Option<Instant>,
+    state: &mut WriterState,
     status_lane: Option<&Sender<WorkerEvent>>,
 ) -> WriterControl {
     match input {
-        Ok(None) => flush_pending(path, base, pending, deadline, status_lane),
+        Ok(None) => flush_pending(path, state, status_lane),
         Err(WriterDisconnected) => return WriterControl::Stop,
         Ok(Some(WriteMsg::Lazy(config))) => {
             decr_inflight(lazy_inflight);
-            *pending = Some(config);
-            if deadline.is_none() {
-                *deadline = Some(Instant::now() + QUIET_WINDOW);
+            state.pending = Some(config);
+            if state.deadline.is_none() {
+                state.deadline = Some(Instant::now() + QUIET_WINDOW);
             }
         }
         Ok(Some(WriteMsg::Eager { config, reply })) => {
-            *pending = None;
-            *deadline = None;
-            let result = save_config_three_way(path, base.as_ref(), &config, Durability::Fsync)
-                .map_err(|e| format!("{e:#}"));
+            state.pending = None;
+            state.deadline = None;
+            let result =
+                save_config_three_way(path, state.base.as_ref(), &config, Durability::Fsync)
+                    .map_err(|e| format!("{e:#}"));
             match &result {
-                Ok(()) => *base = Some(config),
+                Ok(()) => state.base = Some(config),
                 Err(error) => crate::logger::error(&format!("eager config write failed: {error}")),
             }
             let _ = reply.send(result);
         }
         Ok(Some(WriteMsg::Flush(ack))) => {
-            flush_pending(path, base, pending, deadline, status_lane);
+            flush_pending(path, state, status_lane);
             let _ = ack.send(());
         }
         Ok(Some(WriteMsg::Pause(ack))) => {
-            flush_pending(path, base, pending, deadline, status_lane);
+            flush_pending(path, state, status_lane);
             let _ = ack.send(());
-            debug_assert!(pending.is_none());
-            if !run_paused_writer(rx, lazy_inflight, base) {
+            debug_assert!(state.pending.is_none());
+            if !run_paused_writer(rx, lazy_inflight, &mut state.base) {
                 return WriterControl::Stop;
             }
         }
         Ok(Some(WriteMsg::Resume)) => {}
-        Ok(Some(WriteMsg::SetBase(config))) => *base = Some(*config),
+        Ok(Some(WriteMsg::SetBase(config))) => state.base = Some(*config),
         Ok(Some(WriteMsg::Shutdown)) => {
-            flush_pending(path, base, pending, deadline, status_lane);
+            flush_pending(path, state, status_lane);
             return WriterControl::Stop;
         }
     }
@@ -466,18 +473,16 @@ fn run_paused_writer(
 
 fn flush_pending(
     path: &std::path::Path,
-    base: &mut Option<Config>,
-    pending: &mut Option<Config>,
-    deadline: &mut Option<Instant>,
+    state: &mut WriterState,
     status_lane: Option<&Sender<WorkerEvent>>,
 ) {
-    *deadline = None;
-    let Some(cfg) = pending.take() else {
+    state.deadline = None;
+    let Some(cfg) = state.pending.take() else {
         return;
     };
-    let result = save_config_three_way(path, base.as_ref(), &cfg, Durability::NoFsync);
+    let result = save_config_three_way(path, state.base.as_ref(), &cfg, Durability::NoFsync);
     if result.is_ok() {
-        *base = Some(cfg);
+        state.base = Some(cfg);
     }
     if let Err(e) = result {
         crate::logger::error(&format!("lazy config write failed: {e:#}"));
