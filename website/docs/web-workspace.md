@@ -170,6 +170,10 @@ clone that sat on the wrong branch.
 > a terminal working there, and says which. Any other ignored folder git still deletes, so
 > move such a folder aside first if it matters.
 
+> [!NOTE]
+> These pulls and switches never update submodules, even when your git config sets
+> `submodule.recurse`. Run `git submodule update` yourself when you want them to follow.
+
 Only one of **Pull project**, **Check out default branch…** and **Change base branch…**
 runs on a project at a time; starting another while one is running is refused and names
 the one in progress.

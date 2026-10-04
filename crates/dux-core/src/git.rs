@@ -1013,6 +1013,38 @@ pub fn has_origin_remote(repo_path: &Path) -> Result<bool> {
     Ok(status.success())
 }
 
+/// A git command dux runs that moves files in a working tree, or fills a new
+/// one. THE one way to build such a command, so none can forget what follows.
+#[derive(Clone, Copy, Debug)]
+enum TreeMove {
+    Switch,
+    Merge,
+    /// Restoring a path from the index (a discard).
+    Checkout,
+    WorktreeAdd,
+}
+
+/// `git <subcommand>` in `repo` for a [`TreeMove`], never recursing into
+/// submodules whatever `submodule.recurse` the user has set: the move check
+/// ([`crate::checkout_move`]) looks at this repository's own tree only, so git
+/// must change exactly that and nothing inside a submodule. The
+/// `--no-recurse-submodules` flag goes wherever the subcommand takes it
+/// (measured on git 2.53: `switch` and `checkout` take it; `merge` and
+/// `worktree add` refuse it, and the config override is what keeps them out).
+fn tree_move(repo: &Path, kind: TreeMove) -> Command {
+    let mut command = Command::new("git");
+    command
+        .args(["-c", "submodule.recurse=false", "-C"])
+        .arg(repo);
+    match kind {
+        TreeMove::Switch => command.args(["switch", "--no-recurse-submodules"]),
+        TreeMove::Checkout => command.args(["checkout", "--no-recurse-submodules"]),
+        TreeMove::Merge => command.arg("merge"),
+        TreeMove::WorktreeAdd => command.args(["worktree", "add"]),
+    };
+    command
+}
+
 /// Fast-forwards `branch` from `origin`: a fetch, the check that the move
 /// removes no folder something lives in ([`crate::checkout_move`]), then a
 /// fast-forward merge of exactly what was fetched. A `git pull` would fetch and
@@ -1062,15 +1094,8 @@ fn pull_origin_branch(
     } else {
         None
     };
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "merge",
-            "--ff-only",
-            "--no-edit",
-            &incoming,
-        ])
+    let output = tree_move(repo_path, TreeMove::Merge)
+        .args(["--ff-only", "--no-edit", &incoming])
         .output()?;
     if !output.status.success() {
         return Err(git_failure("git merge --ff-only", repo_path, &output));
@@ -1258,17 +1283,11 @@ fn remove_created_branch(repo_path: &Path, name: &str, created_at: &str) {
 }
 
 fn run_switch(repo_path: &Path, branch_name: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "switch",
-            // `--` so the branch is read as a REF and never as an option.
-            // Without it `git switch --detach` detaches HEAD instead of
-            // failing. Measured on git 2.55.
-            "--",
-            branch_name,
-        ])
+    let output = tree_move(repo_path, TreeMove::Switch)
+        // `--` so the branch is read as a REF and never as an option.
+        // Without it `git switch --detach` detaches HEAD instead of failing.
+        // Measured on git 2.55.
+        .args(["--", branch_name])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -1357,8 +1376,8 @@ pub struct BranchChoice {
     /// branch and for one that exists only on origin.
     pub name: String,
     /// `Local` when `refs/heads/<name>` exists; `Remote` when only
-    /// `refs/remotes/origin/<name>` does, so choosing it first creates the
-    /// local branch ([`create_tracking_branch`]).
+    /// `refs/remotes/origin/<name>` does, so switching to it first creates
+    /// the local branch ([`switch_branch`]).
     pub location: BranchLocation,
     /// The folder of ANOTHER worktree that has this branch checked out, which
     /// makes git refuse to check it out in the project folder too. `None` for a
@@ -1546,16 +1565,6 @@ pub fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> R
         ));
     }
     Ok(())
-}
-
-/// Create local branch `name` tracking `origin/<name>`, without switching to it.
-///
-/// Explicit rather than left to `git switch`'s guessing, which depends on the
-/// user's `checkout.guess` and on how many remotes carry the name (measured on
-/// git 2.53). The start point is fully qualified and the name follows `--`, so
-/// a dash-leading name is refused as a branch name, never obeyed as a flag.
-pub fn create_tracking_branch(repo_path: &Path, name: &str) -> Result<()> {
-    create_tracking_branch_from(repo_path, name, "origin")
 }
 
 /// How much of a branch exists only on this machine, and whether there was
@@ -1973,21 +1982,12 @@ pub fn add_worktree_existing_branch_at(
     if let Some(parent) = worktree_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let repo = repo_path.to_string_lossy();
-    let worktree = worktree_path.to_string_lossy();
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo.as_ref(),
-            "worktree",
-            "add",
-            worktree.as_ref(),
-            // `--` so the commit-ish is read as a REF and never as an option.
-            // Without it `git worktree add <path> --force` obeys the flag and
-            // checks out HEAD instead. Measured on git 2.55.
-            "--",
-            branch_name,
-        ])
+    let output = tree_move(repo_path, TreeMove::WorktreeAdd)
+        .arg(worktree_path)
+        // `--` so the commit-ish is read as a REF and never as an option.
+        // Without it `git worktree add <path> --force` obeys the flag and
+        // checks out HEAD instead. Measured on git 2.55.
+        .args(["--", branch_name])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -2208,7 +2208,6 @@ pub fn add_worktree_new_branch_at(
     if let Some(parent) = worktree_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let repo = repo_path.to_string_lossy();
     let worktree = worktree_path.to_string_lossy();
     // Resolve the start point to an object id BEFORE handing it to
     // `worktree add`: a `--` separator is not enough at this call shape
@@ -2231,16 +2230,8 @@ pub fn add_worktree_new_branch_at(
         )?),
         None => None,
     };
-    let mut command = Command::new("git");
-    command.args([
-        "-C",
-        repo.as_ref(),
-        "worktree",
-        "add",
-        "-b",
-        branch_name,
-        worktree.as_ref(),
-    ]);
+    let mut command = tree_move(repo_path, TreeMove::WorktreeAdd);
+    command.args(["-b", branch_name, worktree.as_ref()]);
     if let Some(resolved_start) = resolved_start.as_deref() {
         // Defence in depth alongside the resolve above.
         command.arg("--").arg(resolved_start);
@@ -4876,16 +4867,10 @@ pub fn discard_confirmed<'c>(
         }
         _ => {}
     }
-    let wt = worktree_path.to_string_lossy();
-    let output = Command::new("git")
-        .args([
-            "--literal-pathspecs",
-            "-C",
-            wt.as_ref(),
-            "checkout",
-            "--",
-            file_path,
-        ])
+    let output = tree_move(worktree_path, TreeMove::Checkout)
+        // The path is a path, never a glob or magic pathspec.
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .args(["--", file_path])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -8469,7 +8454,7 @@ mod tests {
         run_git(repo.path(), &["fetch", "-q", "origin"]);
         run_git(repo.path(), &["config", "checkout.guess", "false"]);
 
-        create_tracking_branch(repo.path(), "develop").unwrap();
+        create_tracking_branch_from(repo.path(), "develop", "origin").unwrap();
 
         assert!(local_branch_exists(repo.path(), "develop"));
         let upstream = run_git_capture(
@@ -8498,11 +8483,11 @@ mod tests {
         );
         run_git(repo.path(), &["fetch", "-q", "origin"]);
 
-        let refused = create_tracking_branch(repo.path(), "--force");
+        let refused = create_tracking_branch_from(repo.path(), "--force", "origin");
         assert!(refused.is_err(), "expected a refusal: {refused:?}");
         assert!(!local_branch_exists(repo.path(), "--force"));
 
-        create_tracking_branch(repo.path(), "foo/-bar").unwrap();
+        create_tracking_branch_from(repo.path(), "foo/-bar", "origin").unwrap();
         assert!(local_branch_exists(repo.path(), "foo/-bar"));
     }
 

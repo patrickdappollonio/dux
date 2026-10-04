@@ -141,6 +141,11 @@ from the remote you want first.
 > deletes, as it would in your own terminal, so move such a folder aside first if it
 > matters. The same goes for an agent's **Pull** and for **Pull project**.
 
+> [!NOTE]
+> dux's own pulls and branch switches never update submodules, even when your git config
+> sets `submodule.recurse`: the submodule pointer moves, the submodule's files stay where
+> they are. Run `git submodule update` yourself when you want them to follow.
+
 ### Pulling before create
 
 By default dux pulls the leading branch first, so the new agent starts from the freshest
