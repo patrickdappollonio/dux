@@ -4,6 +4,7 @@
 // per-browser: it writes `last_seen_version`, the same row the TUI reads, which is why this
 // feature keeps no localStorage flag.
 
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 import { getConnectionId } from "./connection"
 import type { ReleaseNotesView } from "./bootstrapApi"
 
@@ -32,13 +33,14 @@ export const firstLoadApi = {
   dismiss: async (): Promise<void> => {
     let resp: Response
     try {
-      resp = await fetch("/api/v1/first-load/dismiss", {
+      resp = await apiFetch("/api/v1/first-load/dismiss", {
         method: "POST",
         credentials: "same-origin",
         headers: headers(),
         body: "{}",
       })
-    } catch {
+    } catch (e) {
+      rethrowAuthInterruption(e)
       throw new Error("Could not reach the server.")
     }
     if (!resp.ok) {
@@ -53,11 +55,12 @@ export const firstLoadApi = {
   fetchReleaseNotes: async (): Promise<ReleaseNotesView> => {
     let resp: Response
     try {
-      resp = await fetch("/api/v1/release-notes", {
+      resp = await apiFetch("/api/v1/release-notes", {
         credentials: "same-origin",
         headers: headers(),
       })
-    } catch {
+    } catch (e) {
+      rethrowAuthInterruption(e)
       throw new ReleaseNotesFetchError("Could not reach the server.", 0)
     }
     if (!resp.ok) {

@@ -8,6 +8,8 @@
 //
 // Deliberately narrow: this identifies the run, never a schema or data shape.
 
+import { apiFetch } from "./apiFetch"
+
 export interface ServerIdentity {
   /** The binary's display version ("vX.Y.Z", or "development"). */
   version: string
@@ -19,7 +21,7 @@ export interface ServerIdentity {
 // document. Null means unknown, which `serverChanged` treats as no evidence.
 export async function fetchServerIdentity(): Promise<ServerIdentity | null> {
   try {
-    const resp = await fetch("/api/v1/build", {
+    const resp = await apiFetch("/api/v1/build", {
       credentials: "same-origin",
       cache: "no-store",
     })

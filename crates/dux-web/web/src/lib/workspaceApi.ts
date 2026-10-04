@@ -2,6 +2,7 @@
 // the core-computed sidebar model in one GET. The `projects.changed` /
 // `sessions.changed` events over `/ws/events` tell the client when to re-GET,
 // and a non-2xx throws a `WorkspaceFetchError` carrying the HTTP status.
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 import type { AgentWorkspaceWire } from "@/lib/agentWorkspace"
 import { stripBidiControls } from "@/lib/bidi"
 import type {
@@ -48,8 +49,9 @@ export class WorkspaceFetchError extends Error {
 export async function fetchWorkspace(): Promise<Spine> {
   let resp: Response
   try {
-    resp = await fetch("/api/v1/workspace", { credentials: "same-origin" })
-  } catch {
+    resp = await apiFetch("/api/v1/workspace", { credentials: "same-origin" })
+  } catch (e) {
+    rethrowAuthInterruption(e)
     // The request never reached the server (offline, DNS, CORS).
     throw new WorkspaceFetchError("Could not reach the server.", 0)
   }

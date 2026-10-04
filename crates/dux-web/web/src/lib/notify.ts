@@ -6,10 +6,16 @@
 // except `sticky`, which waits for the user, and a busy spinner, which sonner
 // never auto-closes at all and which this module's leak guard retires by
 // replacing it with a warning rather than taking it off the screen.
+//
+// Nothing is raised while the page is signed out, blocked or broken
+// (`authGate.ts`): that page is on screen and says what happened, and every
+// failure behind it is the sign-out's echo. Dropped, not queued, so signing in
+// does not replay a burst of stale errors.
 
 import { createElement, Fragment, type ReactNode } from "react"
 import { toast } from "sonner"
 
+import { authPaused } from "./authGate"
 import { type Prose, proseText, renderProse } from "./prose"
 
 /// What a notification says: a finished sentence, or a sentence built from
@@ -116,6 +122,7 @@ function raiseFinal(tone: string, message: ReactNode, duration: number, id?: str
 /// configured `ui.status_clear_seconds`, graded by tone, unless `sticky` is set.
 export function notify(tone: FinalTone, message: Notice, opts: NotifyOptions = {}): void {
   if (!noticeText(message)) return
+  if (authPaused()) return
   // This raise supersedes anything on the id, including a spinner whose guard is
   // still pending.
   if (opts.id !== undefined) cancelBusyGuard(opts.id)
@@ -174,6 +181,7 @@ export function notifyBusy(
   opts: { id: string; origin?: BusyOrigin },
 ): void {
   if (!noticeText(message)) return
+  if (authPaused()) return
   const duration = statusToastDuration("busy", null)
   const origin = opts.origin ?? "wire"
   // Whatever was armed for this id is now stale: this call replaces the toast.

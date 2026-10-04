@@ -4,6 +4,7 @@
 //
 // A non-2xx is thrown as a `ChangesFetchError` carrying the HTTP status.
 
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 import { changesRequestTimeoutMs } from "./connectionTiming"
 import type { ChangedFileView } from "./types"
 
@@ -121,8 +122,9 @@ async function fetchJsonWithDeadline<T>(
   try {
     let resp: Response
     try {
-      resp = await fetch(url, { credentials: "same-origin", signal: controller.signal })
-    } catch {
+      resp = await apiFetch(url, { credentials: "same-origin", signal: controller.signal })
+    } catch (e) {
+      rethrowAuthInterruption(e)
       // The request never reached the server (offline, DNS, CORS). Status 0 so
       // the caller treats it as retryable, not a 404 "session gone".
       throw stopped(new ChangesFetchError("Could not reach the server.", 0))

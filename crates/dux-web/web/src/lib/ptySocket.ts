@@ -28,6 +28,7 @@
 // loop.
 
 import { assertNever } from "./assertNever"
+import { wsUrl } from "./apiBase"
 import { ReconnectingSocket } from "./reconnectingSocket"
 import { appSocketGivenUp } from "./appSocketGiveUp"
 import { onServerValidated, serverValidated } from "./serverValidated"
@@ -40,28 +41,22 @@ import type { TerminalOwnerRef } from "./terminalOwner"
 // the application-private range, so it cannot collide with a protocol code.
 export const PROVIDER_UNAVAILABLE_CLOSE = 4001
 
-// Derive the WebSocket scheme from the page protocol: a hardcoded `ws://` would
-// be blocked as mixed content under HTTPS. Read at call time, not module load, so
-// the URL builders import safely anywhere and tests can stub `location`.
-function wsScheme(): string {
-  return location.protocol === "https:" ? "wss:" : "ws:"
-}
 
 // The agent session's slot-tab PTY socket URL: an alias for
 // `tabPtyUrl(sessionId, <that agent's slot tab>)`, which the server resolves.
 // Connecting launches or resumes the provider.
 export function agentPtyUrl(sessionId: string): string {
-  return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(
+  return wsUrl(`/ws/sessions/${encodeURIComponent(
     sessionId,
-  )}/pty`
+  )}/pty`)
 }
 
 // A companion terminal's PTY socket URL, nested under its owning session so the
 // server can enforce that the terminal belongs to that session.
 export function terminalPtyUrl(sessionId: string, terminalId: string): string {
-  return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(
+  return wsUrl(`/ws/sessions/${encodeURIComponent(
     sessionId,
-  )}/terminals/${encodeURIComponent(terminalId)}/pty`
+  )}/terminals/${encodeURIComponent(terminalId)}/pty`)
 }
 
 // A project terminal's PTY socket URL, nested under its owning project so the
@@ -70,18 +65,18 @@ export function projectTerminalPtyUrl(
   projectId: string,
   terminalId: string,
 ): string {
-  return `${wsScheme()}//${location.host}/ws/projects/${encodeURIComponent(
+  return wsUrl(`/ws/projects/${encodeURIComponent(
     projectId,
-  )}/terminals/${encodeURIComponent(terminalId)}/pty`
+  )}/terminals/${encodeURIComponent(terminalId)}/pty`)
 }
 
 // A standalone terminal's PTY socket URL, un-nested because it has no owner to
 // nest under. The server still refuses an owned terminal at this address, so it
 // is not a way around the nested routes' cross-owner checks.
 export function standaloneTerminalPtyUrl(terminalId: string): string {
-  return `${wsScheme()}//${location.host}/ws/terminals/${encodeURIComponent(
+  return wsUrl(`/ws/terminals/${encodeURIComponent(
     terminalId,
-  )}/pty`
+  )}/pty`)
 }
 
 // A terminal's PTY socket URL, chosen by its owner. Which route a terminal is
@@ -108,9 +103,9 @@ export function terminalSocketUrl(
 // the session-slot tab included, which `agentPtyUrl` aliases. Connecting launches
 // a dormant tab's provider, resuming or not per the server's dynamic decision.
 export function tabPtyUrl(sessionId: string, tabId: string): string {
-  return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(
+  return wsUrl(`/ws/sessions/${encodeURIComponent(
     sessionId,
-  )}/tabs/${encodeURIComponent(tabId)}/pty`
+  )}/tabs/${encodeURIComponent(tabId)}/pty`)
 }
 
 interface PtyControlFrame {

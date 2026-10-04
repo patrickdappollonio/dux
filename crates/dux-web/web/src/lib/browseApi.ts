@@ -1,13 +1,15 @@
 // HTTP client for the stateless utility reads the add-project and new-agent dialogs need. A
 // non-2xx throws, so the caller can surface a toast and clear its loading state.
 
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 import type { DirEntryView } from "./types"
 
 async function get<T>(path: string): Promise<T> {
   let resp: Response
   try {
-    resp = await fetch(path, { credentials: "same-origin" })
-  } catch {
+    resp = await apiFetch(path, { credentials: "same-origin" })
+  } catch (e) {
+    rethrowAuthInterruption(e)
     throw new Error("Could not reach the server.")
   }
   if (!resp.ok) {
@@ -22,13 +24,14 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body: unknown): Promise<T> {
   let resp: Response
   try {
-    resp = await fetch(path, {
+    resp = await apiFetch(path, {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     })
-  } catch {
+  } catch (e) {
+    rethrowAuthInterruption(e)
     throw new Error("Could not reach the server.")
   }
   if (!resp.ok) {

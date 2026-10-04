@@ -5,6 +5,7 @@
 // The server validates and persists to `config.toml`, then emits `config.changed`
 // so every client refetches its bootstrap document.
 
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 import { getConnectionId } from "./connection"
 import type { SettingValue } from "./settingsDescriptors"
 import type { MacroView } from "./types"
@@ -15,7 +16,7 @@ async function send(method: string, path: string, body: unknown): Promise<void> 
   if (id) headers["x-connection-id"] = id
   let resp: Response
   try {
-    resp = await fetch(path, {
+    resp = await apiFetch(path, {
       method,
       credentials: "same-origin",
       headers,
@@ -24,7 +25,8 @@ async function send(method: string, path: string, body: unknown): Promise<void> 
       // disables its whole form while one is pending.
       signal: AbortSignal.timeout(15_000),
     })
-  } catch {
+  } catch (e) {
+    rethrowAuthInterruption(e)
     throw new Error("Could not reach the server.")
   }
   if (!resp.ok) {
@@ -81,7 +83,7 @@ export const configApi = {
     if (id) headers["x-connection-id"] = id
     let resp: Response
     try {
-      resp = await fetch("/api/v1/server/tailscale-mode", {
+      resp = await apiFetch("/api/v1/server/tailscale-mode", {
         method: "POST",
         credentials: "same-origin",
         headers,
@@ -90,7 +92,8 @@ export const configApi = {
         // address detection), so a slow answer is still an answer.
         signal: AbortSignal.timeout(15_000),
       })
-    } catch {
+    } catch (e) {
+      rethrowAuthInterruption(e)
       throw new Error("Could not reach the server.")
     }
     if (!resp.ok) {
@@ -132,8 +135,9 @@ export const configApi = {
   readRawConfig: async (): Promise<string> => {
     let resp: Response
     try {
-      resp = await fetch("/api/v1/config/raw", { credentials: "same-origin" })
-    } catch {
+      resp = await apiFetch("/api/v1/config/raw", { credentials: "same-origin" })
+    } catch (e) {
+      rethrowAuthInterruption(e)
       throw new Error("Could not reach the server.")
     }
     if (!resp.ok) {

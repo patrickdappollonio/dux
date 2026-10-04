@@ -9,6 +9,7 @@
 // changed-files recompute broadcast to every client; a terminal root has no
 // agent and broadcasts nothing.
 
+import { apiFetch } from "./apiFetch"
 import { rootApiBase, type EditorRoot } from "@/lib/editorRoot"
 import type { DirEntry } from "@/lib/fileTree"
 import type { WorktreeEntryInfo } from "@/lib/fileInfo"
@@ -115,7 +116,7 @@ export class FileConflictError extends FileApiError {
 }
 
 async function postFile<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  const resp = await fetch(path, {
+  const resp = await apiFetch(path, {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
@@ -152,7 +153,7 @@ async function postFileNoContent(
   path: string,
   body: Record<string, unknown>,
 ): Promise<void> {
-  const resp = await fetch(path, {
+  const resp = await apiFetch(path, {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },

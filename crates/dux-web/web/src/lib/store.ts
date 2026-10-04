@@ -1,4 +1,6 @@
 import { useSyncExternalStore } from "react"
+import { wsUrl } from "./apiBase"
+import { initAuthGate, onAuthOpen, probeAfterDrop } from "./authGate"
 import { sanitizeAgentName } from "./agentName"
 import { git } from "./git"
 import {
@@ -1096,14 +1098,11 @@ export function seedStaticSnapshot(patch: Partial<DuxState>): void {
   setState(patch)
 }
 
-// Derive the WebSocket scheme from the page protocol so an HTTPS deployment uses
-// `wss://` (a hardcoded `ws://` would be blocked as mixed content under HTTPS).
-const wsScheme = hasBrowser && location.protocol === "https:" ? "wss:" : "ws:"
-
-// The host half of the same URL. Off-browser there is no page to derive it from
-// and no socket will ever be opened (`boot()` is skipped), so the placeholder
-// only has to keep the `EventsSocket` constructor happy.
-const wsHost = hasBrowser ? location.host : "localhost"
+// The app socket's URL, from the one helper every socket URL comes from.
+// Off-browser there is no page to derive it from and no socket will ever be
+// opened (`boot()` is skipped), so the placeholder only has to keep the
+// `EventsSocket` constructor happy.
+const eventsSocketUrl = hasBrowser ? wsUrl("/ws/events") : "ws://localhost/ws/events"
 
 // The single JSON socket for the whole app (`/ws/events`), separate from the
 // per-PTY byte sockets (`lib/ptySocket.ts`). It carries resource-change events
@@ -1111,9 +1110,7 @@ const wsHost = hasBrowser ? location.host : "localhost"
 // `status`/`status_cleared` toasts), and owns the connection-state UX (the
 // status-bar indicator). Exported so tests can drive
 // its callbacks / inspect its interest set; connected on boot.
-export const eventsSocket = new EventsSocket(
-  `${wsScheme}//${wsHost}/ws/events`,
-)
+export const eventsSocket = new EventsSocket(eventsSocketUrl)
 
 // App-wide coarse topics, subscribed once at module load: added to the interest
 // set immediately (sent on the first open, re-sent on every reconnect), so the
@@ -1322,6 +1319,24 @@ eventsSocket.onOpen = () => {
   // this generation lands. (On the boot open this only risks re-applying the
   // document the boot fetch just applied, which is idempotent.)
   resetAppliedWorkspaceRev()
+  const id = state.selectedSessionId
+  if (id === null) return
+  setState({ changes: loadingChanges(id) })
+  void restartChanges(id)
+}
+
+// Signed back in after the session ended underneath the page. Everything that
+// failed while signed out was dropped, so the app refetches as it does after an
+// outage. An app socket that stayed open has no `onOpen` coming, so this does
+// the refetch itself; one that was closed is reopened by its own sign-in
+// subscription, and its `onOpen` refetches. The boot latch is cleared either
+// way: a boot whose first loads were refused must not skip the recovery.
+function resumeAfterSignIn(): void {
+  skipNextEventsOnOpenLoad = false
+  if (state.conn !== "open") return
+  armReconnectDeepLink()
+  loadBootstrap()
+  loadWorkspace()
   const id = state.selectedSessionId
   if (id === null) return
   setState({ changes: loadingChanges(id) })
@@ -2125,6 +2140,10 @@ eventsSocket.onConn = (conn) => {
   // the server may have been replaced in the gap. The next `onOpen`'s probe
   // re-publishes it.
   if (conn === "closed" || conn === "failed") clearServerValidated()
+  // A server refuses the upgrade of a signed-out socket before it can send a
+  // close code, and the browser reports that as an ordinary failure. So a drop
+  // asks the status route whether the session is still there.
+  if (conn === "closed" || conn === "failed") void probeAfterDrop()
   // The per-session changed-files subscription re-establishes on reconnect in
   // `eventsSocket.onOpen` (which also refetches); nothing to re-arm here.
 }
@@ -2180,9 +2199,10 @@ function showStatusToast(
   notifyStatus(tone, message, { id, sticky })
 }
 
-// Boot: connect the events socket and fetch the initial workspace data. No
-// /api/me round-trip is needed -- the server is a trusted-local tool with no
-// login gate. Setting booted synchronously lets tests use it as a settled signal.
+// Boot: connect the events socket and fetch the initial workspace data. Runs
+// once the sign-in gate opens (`authGate.ts`): straight away for a signed-in
+// browser or a server with no password in the way, after the login otherwise.
+// Setting booted synchronously lets tests use it as a settled signal.
 function boot(): void {
   setState({ booted: true })
   // This driver owns the initial load, so the first onOpen must not duplicate it
@@ -2199,8 +2219,17 @@ function boot(): void {
 }
 // Off-browser (a build-time static render) there is no server to talk to and no
 // socket to open, so the store simply stays at its initial state until whoever
-// is rendering seeds it. In a browser and under jsdom this runs exactly as before.
-if (hasBrowser) boot()
+// is rendering seeds it. In a browser and under jsdom the sign-in gate decides
+// when: every move into signed-in boots the app the first time and refetches
+// after that. The URL is never touched on the way, so the position the page was
+// loaded at (or was on when the session ended) is the one it lands on.
+if (hasBrowser) {
+  onAuthOpen(() => {
+    if (state.booted) resumeAfterSignIn()
+    else boot()
+  })
+  void initAuthGate()
+}
 
 // Browser/hardware Back and Forward. Registered ONCE at module scope (never in a
 // React effect) so it survives re-renders and shell switches. The browser has

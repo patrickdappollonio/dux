@@ -4,6 +4,7 @@
 //
 // A non-2xx is thrown as a `BootstrapFetchError` carrying the HTTP status.
 
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 import type { DropPasteProfile } from "./fileDrop"
 import type { FlatSortKey } from "./flatList"
 import type { MacroView } from "./types"
@@ -251,8 +252,9 @@ export class BootstrapFetchError extends Error {
 export async function fetchBootstrap(): Promise<Bootstrap> {
   let resp: Response
   try {
-    resp = await fetch("/api/v1/bootstrap", { credentials: "same-origin" })
-  } catch {
+    resp = await apiFetch("/api/v1/bootstrap", { credentials: "same-origin" })
+  } catch (e) {
+    rethrowAuthInterruption(e)
     // The request never reached the server (offline, DNS, CORS).
     throw new BootstrapFetchError("Could not reach the server.", 0)
   }

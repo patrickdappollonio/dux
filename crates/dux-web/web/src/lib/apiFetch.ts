@@ -35,6 +35,13 @@ export function isAuthInterruption(e: unknown): e is AuthInterruptedError {
   return e instanceof AuthInterruptedError
 }
 
+/// For a helper that turns a thrown fetch into its own "could not reach the
+/// server" error: an auth interruption is not that, and must reach the caller as
+/// itself.
+export function rethrowAuthInterruption(e: unknown): void {
+  if (isAuthInterruption(e)) throw e
+}
+
 export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   if (authPaused()) throw new AuthInterruptedError()
   const sentIn = authEpoch()

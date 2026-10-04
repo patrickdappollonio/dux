@@ -3,6 +3,8 @@
 // The server single-flights and caches for a second, so browsers polling in step cost one walk.
 
 // One process inside a sampled tree.
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
+
 export interface ProcessInfoView {
   name: string
   pid: number
@@ -55,11 +57,12 @@ export const resourcesApi = {
   async get(signal?: AbortSignal): Promise<ResourcesResponse> {
     let resp: Response
     try {
-      resp = await fetch("/api/v1/resources", {
+      resp = await apiFetch("/api/v1/resources", {
         credentials: "same-origin",
         signal,
       })
     } catch (e) {
+      rethrowAuthInterruption(e)
       // An aborted poll is not a failure to surface; rethrow so the caller can ignore it.
       if (e instanceof DOMException && e.name === "AbortError") throw e
       throw new ResourcesFetchError("Could not reach the server.", 0)

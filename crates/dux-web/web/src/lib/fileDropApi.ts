@@ -6,6 +6,8 @@
 // upload handler injecting the path would walk straight past that gate. The
 // caller pastes the returned path over its own already-gated socket.
 
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
+
 export interface SavedDropResponse {
   path: string
   saved_name: string
@@ -39,13 +41,14 @@ export async function uploadDroppedFile(
   if (opts.dir !== undefined) params.set("dir", opts.dir)
   let resp: Response
   try {
-    resp = await fetch(`/api/v1/file-drop?${params.toString()}`, {
+    resp = await apiFetch(`/api/v1/file-drop?${params.toString()}`, {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/octet-stream" },
       body: file,
     })
-  } catch {
+  } catch (e) {
+    rethrowAuthInterruption(e)
     throw new FileDropApiError("could not reach the server", 0)
   }
   if (!resp.ok) {

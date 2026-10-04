@@ -418,3 +418,49 @@ describe("the busy leak guard", () => {
     expect(toast.dismiss).toHaveBeenCalledTimes(1)
   })
 })
+
+describe("while the page is signed out", () => {
+  // The login, blocked or broken page is on screen and every failure behind it
+  // is the sign-out's echo, so nothing is raised; the page itself says what
+  // happened. Signing back in lifts the hold.
+  const statusOf = (signedIn: boolean) =>
+    new Response(
+      JSON.stringify({ password_set: true, required_here: true, signed_in: signedIn }),
+      { status: 200 },
+    )
+
+  afterEach(async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => statusOf(true)))
+    const gate = await import("./authGate")
+    await gate.probeAuth()
+    vi.unstubAllGlobals()
+  })
+
+  it("raises nothing, busy spinners included", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => statusOf(false)))
+    const gate = await import("./authGate")
+    gate.reportUnauthorized()
+    expect(gate.getAuthPhase().kind).toBe("signed_out")
+    notifyError("Could not load the workspace.")
+    notifyInfo("Saved.")
+    notifyBusy("Creating agent", { id: "b1" })
+    notifyStatus("warning", "late", { id: "w1" })
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(toast.info).not.toHaveBeenCalled()
+    expect(toast.loading).not.toHaveBeenCalled()
+    expect(toast.warning).not.toHaveBeenCalled()
+  })
+
+  it("raises again once signed back in", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => statusOf(false)))
+    const gate = await import("./authGate")
+    gate.reportUnauthorized()
+    vi.stubGlobal("fetch", vi.fn(async () => statusOf(true)))
+    // The first settles the probe the sign-out started; the second asks anew.
+    await gate.probeAuth()
+    await gate.probeAuth()
+    expect(gate.getAuthPhase().kind).toBe("open")
+    notifyError("Could not load the workspace.")
+    expect(toast.error).toHaveBeenCalledTimes(1)
+  })
+})

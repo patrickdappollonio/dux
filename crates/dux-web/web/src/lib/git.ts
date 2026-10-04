@@ -7,6 +7,7 @@
 // is a git-tracked file inside the worktree, so the UI never has to. Project-scoped
 // operations live in `projectsApi`.
 
+import { apiFetch } from "./apiFetch"
 import { getConnectionId } from "./connection"
 
 async function postGit(
@@ -23,7 +24,7 @@ async function postGit(
     const id = getConnectionId()
     if (id) headers["x-connection-id"] = id
   }
-  const resp = await fetch(path, {
+  const resp = await apiFetch(path, {
     method: "POST",
     credentials: "same-origin",
     headers,
@@ -64,7 +65,7 @@ async function postGitJson<T>(
   path: string,
   body: Record<string, unknown>,
 ): Promise<T> {
-  const resp = await fetch(path, {
+  const resp = await apiFetch(path, {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },

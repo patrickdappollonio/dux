@@ -1,3 +1,4 @@
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 import { getConnectionId } from "./connection"
 
 type RequestErrorFactory = (
@@ -60,13 +61,14 @@ export function createJsonRequest(
     let response: Response
     try {
       if (mapSerializationErrors) payload = serializeJsonBody(body)
-      response = await fetch(path, {
+      response = await apiFetch(path, {
         method,
         credentials: "same-origin",
         headers,
         body: payload,
       })
-    } catch {
+    } catch (e) {
+      rethrowAuthInterruption(e)
       throw createError("Could not reach the server.", 0, "")
     }
 
