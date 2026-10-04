@@ -720,7 +720,6 @@ impl Engine {
             ops: self.removal_coordination.ops.clone(),
             project,
             paths: self.paths.clone(),
-            sessions: self.sessions.clone(),
             requested: requested.to_path_buf(),
             delete_branch,
             wait: self.removal_wait(),

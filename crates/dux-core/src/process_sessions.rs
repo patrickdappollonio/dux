@@ -38,6 +38,39 @@ const PURGE_POLL: Duration = Duration::from_millis(50);
 /// on the same clock, when the leader was already gone.
 const START_TIME_SLACK: u64 = 2_000_000_000;
 
+/// The sessions whose leader dux spawned and has not reaped yet. dux is the
+/// parent of every PTY's child and of every startup command, so until dux
+/// itself reaps the leader its pid stays allocated (a zombie at worst) and the
+/// session number cannot have been handed to anybody else: such a session is
+/// led, whatever the process table says. That matters where the table cannot
+/// show a zombie at all (macOS, where `sysinfo` leaves zombies out). The
+/// table's own view of a live or zombie leader is the second source.
+static UNREAPED: std::sync::LazyLock<Mutex<HashSet<ProcessSession>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// dux spawned `session`'s leader as its own child.
+pub fn note_spawned(session: ProcessSession) {
+    UNREAPED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(session);
+}
+
+/// dux reaped `session`'s leader: from now on its number proves nothing.
+pub fn note_reaped(session: ProcessSession) {
+    UNREAPED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&session);
+}
+
+fn leader_unreaped(session: &ProcessSession) -> bool {
+    UNREAPED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(session)
+}
+
 /// A start time the platform would not give (another user's process on
 /// macOS). Every membership rule fails closed on it: such a process is a
 /// member when its session or its parent chain says so, because a start time
@@ -309,12 +342,13 @@ pub fn members(
             // is reaped, so its session number cannot have been handed out
             // again. A start time the platform would not give (another
             // user's process on macOS) fails closed: it counts.
-            by_pid.get(&session.sid).is_some_and(|leader| {
-                leader.sid == Some(leader.pid)
-                    && (leader.start_time == UNKNOWN_START
-                        || (leader.start_time + START_TIME_SLACK >= session.started_at
-                            && leader.start_time <= session.started_at + START_TIME_SLACK))
-            })
+            leader_unreaped(session)
+                || by_pid.get(&session.sid).is_some_and(|leader| {
+                    leader.sid == Some(leader.pid)
+                        && (leader.start_time == UNKNOWN_START
+                            || (leader.start_time + START_TIME_SLACK >= session.started_at
+                                && leader.start_time <= session.started_at + START_TIME_SLACK))
+                })
         })
         .map(|session| {
             (
@@ -551,11 +585,121 @@ pub fn describe(rows: &[ProcRow]) -> String {
 #[derive(Clone, Default)]
 pub struct AgentProcessRegistry {
     inner: Arc<Mutex<RegistryInner>>,
-    /// Held across each write to the database, from reading the registry to
-    /// committing it: writers on different threads (a leader-exit record, the
-    /// startup prune, the engine) otherwise commit in a different order than
-    /// they read, and an older picture overwrites a newer one.
-    persist: Arc<Mutex<()>>,
+}
+
+/// One write for the registry's writer thread, numbered in the order the
+/// registry changed.
+enum WriteJob {
+    /// The whole registry, into its own table.
+    Registry {
+        seq: u64,
+        stored: Vec<StoredSession>,
+    },
+    /// What the registry knows in a pending removal's folder, merged into
+    /// its row.
+    Pending {
+        seq: u64,
+        row: String,
+        snapshot: RegistrySnapshot,
+    },
+}
+
+/// How far the writer thread has got.
+#[derive(Default)]
+struct WriterProgress {
+    /// The highest change number written (or given up on, with a warning).
+    done: Mutex<u64>,
+    advanced: std::sync::Condvar,
+}
+
+/// The registry's database writer: one thread with one long-lived
+/// connection. Changes are handed to it and never waited for on the thread
+/// that made them (the engine's), so a database another process or thread
+/// has locked can slow the writes down but never the UI. Consecutive
+/// whole-registry writes coalesce, the latest winning; pending-row merges are
+/// written in order.
+struct RegistryWriter {
+    tx: std::sync::mpsc::Sender<WriteJob>,
+    progress: Arc<WriterProgress>,
+}
+
+impl RegistryWriter {
+    fn spawn(db_path: std::path::PathBuf) -> Option<Self> {
+        let (tx, rx) = std::sync::mpsc::channel::<WriteJob>();
+        let progress = Arc::new(WriterProgress::default());
+        let thread_progress = Arc::clone(&progress);
+        std::thread::Builder::new()
+            .name("process-registry-writer".to_string())
+            .spawn(move || Self::run(&db_path, &rx, &thread_progress))
+            .map_err(|err| {
+                crate::logger::warn(&format!(
+                    "could not start saving the process sessions dux starts: {err}"
+                ));
+            })
+            .ok()?;
+        Some(Self { tx, progress })
+    }
+
+    fn run(
+        db_path: &std::path::Path,
+        rx: &std::sync::mpsc::Receiver<WriteJob>,
+        progress: &WriterProgress,
+    ) {
+        let mut store: Option<crate::storage::SessionStore> = None;
+        // Ends when every registry handle (and with it the sender) is gone,
+        // after writing what was already queued.
+        while let Ok(first) = rx.recv() {
+            let mut batch = vec![first];
+            batch.extend(rx.try_iter());
+            let mut latest_registry: Option<(u64, Vec<StoredSession>)> = None;
+            let mut pending: Vec<(String, RegistrySnapshot)> = Vec::new();
+            let mut through = 0;
+            for job in batch {
+                match job {
+                    WriteJob::Registry { seq, stored } => {
+                        through = through.max(seq);
+                        latest_registry = Some((seq, stored));
+                    }
+                    WriteJob::Pending { seq, row, snapshot } => {
+                        through = through.max(seq);
+                        pending.push((row, snapshot));
+                    }
+                }
+            }
+            if store.is_none() {
+                match crate::storage::SessionStore::open(db_path) {
+                    Ok(opened) => store = Some(opened),
+                    Err(err) => crate::logger::warn(&format!(
+                        "could not open the session database to save the process sessions dux \
+                         started: {err:#}"
+                    )),
+                }
+            }
+            if let Some(store) = &store {
+                for (row, snapshot) in &pending {
+                    if let Err(err) = store.merge_pending_removal_registry(row, snapshot) {
+                        crate::logger::warn(&format!(
+                            "could not keep a pending removal current with what runs in its \
+                             folder: {err:#}"
+                        ));
+                    }
+                }
+                if let Some((_, stored)) = &latest_registry
+                    && let Err(err) = store.replace_process_registry(stored)
+                {
+                    crate::logger::warn(&format!(
+                        "could not save the process sessions dux started: {err:#}"
+                    ));
+                }
+            }
+            let mut done = progress
+                .done
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *done = (*done).max(through);
+            progress.advanced.notify_all();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -583,6 +727,10 @@ struct RegistryInner {
     /// table there on every change and read back at the next start, and
     /// pending removals are kept current in it.
     pending_store: Option<std::path::PathBuf>,
+    /// The writer thread, once a database is attached.
+    writer: Option<RegistryWriter>,
+    /// The number of the latest change handed to the writer.
+    queued: u64,
     /// Leader-exit recordings started and not yet written, by session: a
     /// removal reading what was recorded for a session waits for these first.
     recording: HashMap<ProcessSession, usize>,
@@ -602,6 +750,8 @@ struct RegistryInner {
     /// The registry went past a cap with every session still live, and that
     /// has been logged.
     cap_overrun_logged: bool,
+    /// The session of each agent's startup command that is running right now.
+    startup_sessions: HashMap<String, ProcessSession>,
 }
 
 /// One registered session, as a pending removal's row records it: the
@@ -850,7 +1000,26 @@ impl AgentProcessRegistry {
                 continue;
             }
             let pids: Vec<u32> = running.iter().map(|row| row.pid).collect();
-            let cwds = crate::file_drop::process_cwds(&pids);
+            let report = crate::file_drop::process_cwds(&pids);
+            // Fails closed: a process whose folder could not be read may be
+            // standing in this one.
+            if let Some(row) = running.iter().find(|row| report.unknown.contains(&row.pid)) {
+                let who = label.unwrap_or_else(|| "a process dux started".to_string());
+                return Some(format!(
+                    "dux could not check where its terminals and processes are working: it \
+                     could not read the current folder of {} (pid {}), started by {who}{}, so \
+                     it cannot rule out that it is standing in this folder; close it or try \
+                     again",
+                    row.name,
+                    row.pid,
+                    report
+                        .failure
+                        .as_deref()
+                        .map(|why| format!(" ({why})"))
+                        .unwrap_or_default()
+                ));
+            }
+            let cwds = report.found;
             if let Some(row) = running.iter().find(|row| {
                 cwds.get(&row.pid)
                     .is_some_and(|cwd| crate::worktree_ops::path_key(cwd).starts_with(&folder))
@@ -908,7 +1077,7 @@ impl AgentProcessRegistry {
     pub fn watch_pending(&self, row_id: &str, folder: &std::path::Path, db_path: &std::path::Path) {
         {
             let mut inner = self.lock();
-            inner.pending_store = Some(db_path.to_path_buf());
+            Self::ensure_writer(&mut inner, db_path);
             inner
                 .pending_folders
                 .insert(row_id.to_string(), crate::worktree_ops::path_key(folder));
@@ -921,79 +1090,108 @@ impl AgentProcessRegistry {
         self.lock().pending_folders.remove(row_id);
     }
 
-    /// THE write path into pending rows: every registry change in or under a
-    /// folder with a pending removal lands here, at the moment it happens.
-    fn sync_pending(&self, changed: &std::path::Path) {
-        let _writing = self.persist.lock().unwrap_or_else(|e| e.into_inner());
-        self.persist_all_locked();
-        let changed = crate::worktree_ops::path_key(changed);
-        let (store, rows) = {
-            let inner = self.lock();
-            let Some(store) = inner.pending_store.clone() else {
-                return;
-            };
-            let rows: Vec<(String, std::path::PathBuf)> = inner
-                .pending_folders
-                .iter()
-                .filter(|(_, folder)| changed.starts_with(folder))
-                .map(|(row, folder)| (row.clone(), folder.clone()))
-                .collect();
-            (store, rows)
+    /// Start the writer for `db_path`, if none runs yet.
+    fn ensure_writer(inner: &mut RegistryInner, db_path: &std::path::Path) {
+        if inner.writer.is_none() {
+            inner.pending_store = Some(db_path.to_path_buf());
+            inner.writer = RegistryWriter::spawn(db_path.to_path_buf());
+        }
+    }
+
+    /// Hand the writer one job, numbered now, under the registry's lock, so
+    /// the numbers follow the order the registry changed in.
+    fn enqueue(inner: &mut RegistryInner, job: impl FnOnce(u64) -> WriteJob) {
+        let Some(writer) = &inner.writer else {
+            return;
         };
-        if rows.is_empty() {
+        let seq = inner.queued + 1;
+        if writer.tx.send(job(seq)).is_ok() {
+            inner.queued = seq;
+        }
+    }
+
+    /// THE write path into the database: every registry change lands here,
+    /// at the moment it happens, as a job for the writer thread. The whole
+    /// registry goes into its own table, and what is known in or under a
+    /// folder with a pending removal into that removal's row. Never waits.
+    fn sync_pending(&self, changed: &std::path::Path) {
+        let changed = crate::worktree_ops::path_key(changed);
+        let mut inner = self.lock();
+        if inner.writer.is_none() {
             return;
         }
-        let written = crate::storage::SessionStore::open(&store).and_then(|store| {
-            for (row, folder) in &rows {
-                store.merge_pending_removal_registry(row, &self.snapshot_in(folder))?;
-            }
-            Ok(())
-        });
-        if let Err(err) = written {
-            crate::logger::warn(&format!(
-                "could not keep a pending removal current with what runs in {}: {err:#}",
-                changed.display()
-            ));
+        let stored = Self::stored_locked(&inner);
+        Self::enqueue(&mut inner, |seq| WriteJob::Registry { seq, stored });
+        let rows: Vec<(String, std::path::PathBuf)> = inner
+            .pending_folders
+            .iter()
+            .filter(|(_, folder)| changed.starts_with(folder))
+            .map(|(row, folder)| (row.clone(), folder.clone()))
+            .collect();
+        for (row, folder) in rows {
+            let snapshot = Self::snapshot_in_locked(&inner, &folder);
+            Self::enqueue(&mut inner, |seq| WriteJob::Pending { seq, row, snapshot });
         }
     }
 
-    /// Write the whole registry into its table, so a later start knows what
-    /// this run started even after a clean quit. Part of the one write path.
+    /// Hand the whole registry to the writer. Part of the one write path.
     fn persist_all(&self) {
-        let _writing = self.persist.lock().unwrap_or_else(|e| e.into_inner());
-        self.persist_all_locked();
+        let mut inner = self.lock();
+        if inner.writer.is_none() {
+            return;
+        }
+        let stored = Self::stored_locked(&inner);
+        Self::enqueue(&mut inner, |seq| WriteJob::Registry { seq, stored });
     }
 
-    /// [`Self::persist_all`] with the write lock already held.
-    fn persist_all_locked(&self) {
-        let (store, stored) = {
+    /// The registry as its table keeps it.
+    fn stored_locked(inner: &RegistryInner) -> Vec<StoredSession> {
+        let live = inner
+            .sessions
+            .iter()
+            .flat_map(|(owner, list)| list.iter().map(move |entry| (Some(owner.clone()), entry)));
+        let retired = inner.retired.iter().map(|entry| (None, entry));
+        live.chain(retired)
+            .map(|(owner, (session, folder))| StoredSession {
+                standalone: Self::is_standalone_entry(inner, owner.as_deref(), session),
+                owner,
+                session: *session,
+                folder: folder.clone(),
+                survivors: inner.survivors.get(session).cloned().unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// Wait, at most `timeout`, until every change made so far is in the
+    /// database. `true` once it is (at once when no database is attached).
+    /// A removal asks this before git runs, so the record a later start
+    /// recovers from is never behind a deletion that already happened.
+    /// Blocking: a worker thread's call.
+    pub fn flush(&self, timeout: Duration) -> bool {
+        let (target, progress) = {
             let inner = self.lock();
-            let Some(store) = inner.pending_store.clone() else {
-                return;
-            };
-            let live = inner.sessions.iter().flat_map(|(owner, list)| {
-                list.iter().map(move |entry| (Some(owner.clone()), entry))
-            });
-            let retired = inner.retired.iter().map(|entry| (None, entry));
-            let stored: Vec<StoredSession> = live
-                .chain(retired)
-                .map(|(owner, (session, folder))| StoredSession {
-                    standalone: Self::is_standalone_entry(&inner, owner.as_deref(), session),
-                    owner,
-                    session: *session,
-                    folder: folder.clone(),
-                    survivors: inner.survivors.get(session).cloned().unwrap_or_default(),
-                })
-                .collect();
-            (store, stored)
+            match &inner.writer {
+                Some(writer) => (inner.queued, Arc::clone(&writer.progress)),
+                None => return true,
+            }
         };
-        let written = crate::storage::SessionStore::open(&store)
-            .and_then(|store| store.replace_process_registry(&stored));
-        if let Err(err) = written {
-            crate::logger::warn(&format!(
-                "could not save the process sessions dux started: {err:#}"
-            ));
+        let deadline = Instant::now() + timeout;
+        let mut done = progress
+            .done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *done < target {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            done = progress
+                .advanced
+                .wait_timeout(done, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
         }
+        true
     }
 
     /// Attach the session database: read back what an earlier run of dux
@@ -1006,7 +1204,7 @@ impl AgentProcessRegistry {
             .and_then(|store| store.load_process_registry());
         {
             let mut inner = self.lock();
-            inner.pending_store = Some(db_path.to_path_buf());
+            Self::ensure_writer(&mut inner, db_path);
             match loaded {
                 Ok(stored) => {
                     for entry in stored.into_iter().filter(|e| e.session.is_this_boot()) {
@@ -1145,8 +1343,12 @@ impl AgentProcessRegistry {
     /// (live or retired, any owner) with its owner's kind, and the members
     /// recorded for each.
     pub fn snapshot_in(&self, folder: &std::path::Path) -> RegistrySnapshot {
-        let folder = crate::worktree_ops::path_key(folder);
         let inner = self.lock();
+        Self::snapshot_in_locked(&inner, folder)
+    }
+
+    fn snapshot_in_locked(inner: &RegistryInner, folder: &std::path::Path) -> RegistrySnapshot {
+        let folder = crate::worktree_ops::path_key(folder);
         let live = inner
             .sessions
             .iter()
@@ -1161,7 +1363,7 @@ impl AgentProcessRegistry {
                 entries: vec![RegistryEntry {
                     session: *session,
                     folder: started_in.clone(),
-                    standalone: Self::is_standalone_entry(&inner, owner, session),
+                    standalone: Self::is_standalone_entry(inner, owner, session),
                 }],
                 survivors: inner
                     .survivors
@@ -1384,6 +1586,11 @@ impl AgentProcessRegistry {
     pub fn startup_running(&self, agent_id: &str) -> bool {
         self.lock().startup_runs.contains_key(agent_id)
     }
+
+    /// The session of `agent_id`'s startup command, while it runs.
+    pub fn startup_session_of(&self, agent_id: &str) -> Option<ProcessSession> {
+        self.lock().startup_sessions.get(agent_id).copied()
+    }
 }
 
 /// The claim on an agent's one startup-command run. Registers the run's
@@ -1397,6 +1604,10 @@ pub struct StartupRunGuard {
 impl StartupRunGuard {
     pub fn register_session(&self, session: ProcessSession, folder: &std::path::Path) {
         self.registry.register(&self.agent_id, session, folder);
+        self.registry
+            .lock()
+            .startup_sessions
+            .insert(self.agent_id.clone(), session);
     }
 
     /// What to call the run's processes in a sentence.
@@ -1425,6 +1636,7 @@ impl StartupRunGuard {
 impl Drop for StartupRunGuard {
     fn drop(&mut self) {
         let mut inner = self.registry.lock();
+        inner.startup_sessions.remove(&self.agent_id);
         let deleted = inner.startup_runs.remove(&self.agent_id).unwrap_or(false);
         if deleted {
             // The agent's own forget already ran; a session registered after

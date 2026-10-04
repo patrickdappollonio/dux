@@ -266,6 +266,9 @@ fn a_session_registered_after_the_delete_is_kept_current_in_the_pending_row() {
         .expect("spawn the startup command");
     let session = ProcessSession::started_now(command.id());
     claim.run.register_session(session, &worktree);
+    // The registry's writer thread saves each change a moment after it is
+    // made (never on the engine thread); the crash comes after that moment.
+    assert!(first.process_registry.flush(Duration::from_secs(10)));
 
     let row = crash(first);
     // The crash released dux's hold; the command itself keeps running.

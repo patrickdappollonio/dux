@@ -370,6 +370,7 @@ fn the_registry_table_round_trips_and_prunes_dead_sessions() {
     let mut child = child.spawn().unwrap();
     let live = crate::process_sessions::ProcessSession::started_now(child.id());
     engine.process_registry.register("s-live", live, &folder);
+    assert!(engine.process_registry.flush(Duration::from_secs(10)));
     drop(engine);
 
     let reloaded = crate::engine::test_support::test_engine_at(tmp.path());

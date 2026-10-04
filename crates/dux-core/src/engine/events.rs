@@ -690,6 +690,9 @@ pub(crate) struct RemovalCoordinationInputs<'a> {
     /// folder. The same as `registry` except for a removal resumed at a start,
     /// whose `registry` is the one its row was written with.
     pub(crate) live: crate::process_sessions::AgentProcessRegistry,
+    /// The session database, for the last look's occupancy question over the
+    /// agents and projects as they are now.
+    pub(crate) db_path: std::path::PathBuf,
 }
 
 /// The removal itself, shared by the delete's worker and the next start's
@@ -720,6 +723,7 @@ pub(crate) fn perform_deferred_removal(
         waiting_tx,
         registry,
         live,
+        db_path,
     } = coordination;
     // Held outside the unwind boundary, so even a panic below finishes it.
     let mut lease = None;
@@ -786,7 +790,13 @@ pub(crate) fn perform_deferred_removal(
         // more (every create, launch and terminal is refused once a removal
         // has claimed it), so whatever is found here arrived before the claim
         // and has not gone. Anything that still occupies the folder keeps it.
-        if let Some(occupant) = occupant_after_wait(leading, &registry, &live, processes) {
+        if let Some(occupant) = occupant_after_wait(
+            leading,
+            &registry,
+            &live,
+            processes,
+            Some((&db_path, Some(session_id))),
+        ) {
             return Err(occupied_after_wait_message(
                 &managed.worktree_path,
                 &occupant,
@@ -804,6 +814,12 @@ pub(crate) fn perform_deferred_removal(
                 crate::home_path::shorten_home(std::path::Path::new(&managed.worktree_path)),
                 wait.as_secs()
             ));
+        }
+        // The record a later start recovers from is never behind a deletion
+        // that already happened: everything the registry has learnt so far is
+        // in the database before git deletes anything.
+        if let Some(message) = record_not_saved(&[&registry, &live], &managed.worktree_path) {
+            return Err(message);
         }
         // A rename that landed while this removal waited moved the branch, so
         // it is deleted by the name it has NOW.
@@ -900,12 +916,25 @@ pub(crate) fn occupant_after_wait(
     registry: &crate::process_sessions::AgentProcessRegistry,
     live: &crate::process_sessions::AgentProcessRegistry,
     processes: &crate::engine::RemovalProcesses,
+    stored: Option<(&std::path::Path, Option<&str>)>,
 ) -> Option<String> {
     if lease
         .holders()
         .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
     {
         return Some("an agent is being created in it".to_string());
+    }
+    // The one occupancy rule over the agents and projects as the session
+    // database has them now: a project added inside the folder, an agent
+    // made there. `stored` names the database and the agent this removal is
+    // for, which is never in its own way.
+    if let Some((db_path, removing)) = stored {
+        match super::pending_removals::stored_occupant(db_path, lease.ops(), lease.path(), removing)
+        {
+            Ok(Some(occupant)) => return Some(occupant.reason()),
+            Ok(None) => {}
+            Err(message) => return Some(message),
+        }
     }
     let unknown: Vec<_> = registry
         .sessions_in(lease.path())
@@ -929,6 +958,32 @@ pub(crate) fn occupant_after_wait(
     // Where every process dux follows is standing NOW: a shell that was
     // `cd`'d into the folder while the removal waited occupies it too.
     live.cwd_occupant(lease.path(), &processes.sessions)
+}
+
+/// How long a removal waits for the registry's writer to save what it knows
+/// before git runs.
+const RECORD_SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The final when the registry's record could not be saved before git would
+/// run: the worktree is kept rather than deleted ahead of the record a later
+/// start would recover from. `None` once it is saved. Blocking.
+pub(crate) fn record_not_saved(
+    registries: &[&crate::process_sessions::AgentProcessRegistry],
+    folder: &str,
+) -> Option<String> {
+    if registries
+        .iter()
+        .all(|registry| registry.flush(RECORD_SAVE_WAIT))
+    {
+        return None;
+    }
+    Some(format!(
+        "the worktree at {} was kept: dux could not save its record of what it started there \
+         within {} seconds (the session database may be busy). Remove it from the worktree \
+         manager in a moment.",
+        crate::home_path::shorten_home(std::path::Path::new(folder)),
+        RECORD_SAVE_WAIT.as_secs()
+    ))
 }
 
 /// The final when a process dux started (and is not ending for this removal)
@@ -2010,6 +2065,10 @@ impl Engine {
                 .find(|project| project.id == project_id)
                 .cloned()
         });
+        // Which agents SHARE this worktree (several agents of a project may
+        // work in one): identity, not occupancy. Whether anything lives in it
+        // or anywhere inside it is decided by the occupancy rule (containment)
+        // before the removal runs, and keeps the worktree, naming what.
         let other_sessions_on_worktree = self.sessions.iter().any(|s| {
             s.id != session.id
                 && crate::project_browser::same_directory(s.directory(), session.directory())
@@ -2116,6 +2175,45 @@ impl Engine {
         })
     }
 
+    /// End a deleted agent's running startup command, and whatever it has
+    /// started, off the engine thread, with the close grace. Said out loud
+    /// only when it would not stop; the run itself reports how it ended.
+    fn end_deleted_agents_startup_command(
+        &self,
+        label: String,
+        startup: crate::process_sessions::ProcessSession,
+    ) {
+        let registry = self.process_registry.clone();
+        let grace = self.individual_close_grace();
+        let tx = self.worker_tx.clone();
+        let failed_label = label.clone();
+        let spawned = std::thread::Builder::new()
+            .name("startup-command-stop".to_string())
+            .spawn(move || {
+                let known = registry.survivors_of(&[startup]);
+                let outcome = crate::process_sessions::purge(
+                    &mut crate::process_sessions::SystemProcesses,
+                    &[startup],
+                    &known,
+                    grace,
+                );
+                if let crate::process_sessions::PurgeOutcome::Survivors(left) = outcome {
+                    let _ = tx.send(WorkerEvent::PollerStatus(StatusUpdate::warning(format!(
+                        "Agent \"{label}\" was deleted, but its startup command would not stop: \
+                         {} still running. Stop it yourself.",
+                        crate::process_sessions::describe(&left)
+                    ))));
+                }
+            });
+        if let Err(err) = spawned {
+            logger::warn(&format!(
+                "could not stop the startup command of deleted agent \"{failed_label}\" \
+                 (session {}): {err}",
+                startup.sid
+            ));
+        }
+    }
+
     fn begin_session_tab_shutdown(
         &mut self,
         session: &AgentSession,
@@ -2137,7 +2235,14 @@ impl Engine {
             if session.workspace.as_managed().is_none() {
                 self.process_registry.mark_standalone(&session.id);
             }
+            // A startup command still running is a process dux started for
+            // this agent, ended like its terminals are, whether or not the
+            // worktree goes.
+            let startup = self.process_registry.startup_session_of(&session.id);
             let _ = self.process_registry.forget_agent(&session.id);
+            if let Some(startup) = startup {
+                self.end_deleted_agents_startup_command(session.display_label(), startup);
+            }
             return;
         };
 
@@ -2357,6 +2462,10 @@ impl Engine {
                 .find(|project| project.id == project_id)
                 .cloned()
         });
+        // Which agents SHARE this worktree (several agents of a project may
+        // work in one): identity, not occupancy. Whether anything lives in it
+        // or anywhere inside it is decided by the occupancy rule (containment)
+        // before the removal runs, and keeps the worktree, naming what.
         let other_sessions_on_worktree = self.sessions.iter().any(|s| {
             s.id != session.id
                 && crate::project_browser::same_directory(s.directory(), session.directory())
@@ -2538,6 +2647,7 @@ impl Engine {
                     waiting_tx: Some(&tx),
                     registry,
                     live,
+                    db_path: db_path.clone(),
                 },
             );
             // Finished one way or the other: a failure has told the user what

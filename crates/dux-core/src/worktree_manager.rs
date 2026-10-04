@@ -289,12 +289,6 @@ pub struct AdmittedRemoval {
     pub(crate) ops: WorktreeOps,
     pub(crate) project: Project,
     pub(crate) paths: DuxPaths,
-    /// The agents as they were when the removal was admitted. Admission
-    /// claims nothing, so an agent can still be created or attached on this
-    /// folder between admission and the claim: the re-check under the claim
-    /// therefore reads the agents again from the session store (see
-    /// [`live_sessions`]) and refuses on either answer.
-    pub(crate) sessions: Vec<AgentSession>,
     pub(crate) requested: PathBuf,
     pub(crate) delete_branch: bool,
     pub(crate) wait: std::time::Duration,
@@ -302,28 +296,6 @@ pub struct AdmittedRemoval {
     /// before git runs, and the registry for the last look after the wait.
     pub(crate) processes: crate::engine::RemovalProcesses,
     pub(crate) registry: crate::process_sessions::AgentProcessRegistry,
-}
-
-/// The agents as they are now: every row in the session store, which the
-/// engine writes on its own thread before an agent appears anywhere else and
-/// before its create releases the folder it was made in, plus the ones the
-/// removal was admitted against. Reading the store is the hop back to the
-/// engine's live state that a worker can make without the engine's thread.
-/// A store that cannot be read refuses the removal: deleting a folder on a
-/// guess about who lives in it is the direction dux cannot undo.
-fn live_sessions(paths: &DuxPaths, admitted: &[AgentSession]) -> Result<Vec<AgentSession>, String> {
-    let stored = crate::storage::SessionStore::open(&paths.sessions_db_path)
-        .and_then(|store| store.load_sessions())
-        .map_err(|e| {
-            format!("dux could not read its list of agents to confirm nothing lives in the folder ({e:#}); nothing was removed")
-        })?;
-    let mut live = admitted.to_vec();
-    for session in stored {
-        if !live.iter().any(|known| known.id == session.id) {
-            live.push(session);
-        }
-    }
-    Ok(live)
 }
 
 impl AdmittedRemoval {
@@ -341,7 +313,6 @@ impl AdmittedRemoval {
             ops,
             project,
             paths,
-            sessions,
             requested,
             delete_branch,
             wait,
@@ -355,9 +326,14 @@ impl AdmittedRemoval {
         let classified = git::list_worktrees(Path::new(&project.path))
             .map_err(|e| format!("{e:#}"))
             .map(|worktrees| {
+                // Only which worktrees are dux's: who occupies one is never
+                // decided by matching paths, but by the occupancy rule below.
                 resolve_removal(
                     crate::project_browser::classify_project_worktrees(
-                        &project, &paths, &sessions, worktrees,
+                        &project,
+                        &paths,
+                        &[],
+                        worktrees,
                     ),
                     &requested,
                 )
@@ -379,26 +355,30 @@ impl AdmittedRemoval {
             crate::worktree_ops::RemovalClaim::Join(_) => return Ok(RemovalOutcome::BeingRemoved),
         };
         // Re-validated under the claim, now that nothing new can start in the
-        // folder: the listing, the agents as they are NOW (an agent created
-        // or attached after admission has its row written before its create
-        // lets go of the folder), and any agent still being created there.
-        let reclassified = live_sessions(&paths, &sessions).and_then(|live| {
-            git::list_worktrees(Path::new(&project.path))
-                .map_err(|e| format!("{e:#}"))
-                .map(|worktrees| {
-                    resolve_removal(
-                        crate::project_browser::classify_project_worktrees(
-                            &project, &paths, &live, worktrees,
-                        ),
-                        &requested,
-                    )
-                })
-        });
+        // folder: the listing, and the one occupancy rule (containment, never
+        // path equality) over the agents and projects as the session database
+        // has them NOW, an agent still being created there included. An
+        // agent created or attached, or a project added, after admission has
+        // its row written before it lets go of the folder.
+        let reclassified = git::list_worktrees(Path::new(&project.path))
+            .map_err(|e| format!("{e:#}"))
+            .map(|worktrees| {
+                resolve_removal(
+                    crate::project_browser::classify_project_worktrees(
+                        &project,
+                        &paths,
+                        &[],
+                        worktrees,
+                    ),
+                    &requested,
+                )
+            });
         let refused = refusal(reclassified).or_else(|| {
-            lease
-                .holders()
-                .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
-                .then_some(Ok(RemovalOutcome::Attached))
+            match crate::engine::stored_occupant(&paths.sessions_db_path, &ops, &requested, None) {
+                Ok(None) => None,
+                Ok(Some(occupant)) => Some(Ok(occupant.manager_outcome())),
+                Err(message) => Some(Err(message)),
+            }
         });
         if let Some(refused) = refused {
             // Dropping the lease unfinished withdraws the claim.
@@ -433,11 +413,23 @@ impl AdmittedRemoval {
             &requested_text,
         )
         .and_then(|()| {
-            match crate::engine::occupant_after_wait(&lease, &registry, &registry, &processes) {
+            match crate::engine::occupant_after_wait(
+                &lease,
+                &registry,
+                &registry,
+                &processes,
+                Some((&paths.sessions_db_path, None)),
+            ) {
                 Some(occupant) => Err(crate::engine::occupied_after_wait_message(
                     &requested_text,
                     &occupant,
                 )),
+                None => Ok(()),
+            }
+        });
+        let checked = checked.and_then(|()| {
+            match crate::engine::record_not_saved(&[&registry], &requested_text) {
+                Some(message) => Err(message),
                 None => Ok(()),
             }
         });
@@ -459,8 +451,7 @@ impl AdmittedRemoval {
             lease.finish(Err(message.clone()));
             return Err(message);
         }
-        let outcome =
-            remove_managed_worktree(&project, &paths, &sessions, &requested, delete_branch);
+        let outcome = remove_managed_worktree(&project, &paths, &[], &requested, delete_branch);
         lease.finish(match &outcome {
             Ok(RemovalOutcome::Removed {
                 branch: Some(branch),

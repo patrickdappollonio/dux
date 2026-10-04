@@ -816,7 +816,7 @@ fn the_last_look_keeps_a_folder_something_new_runs_in() {
     };
 
     let known = crate::engine::RemovalProcesses::none();
-    let occupant = crate::engine::occupant_after_wait(&lease, &registry, &registry, &known);
+    let occupant = crate::engine::occupant_after_wait(&lease, &registry, &registry, &known, None);
     let _ = sleeper.kill();
     let _ = sleeper.wait();
     let occupant = occupant.expect("the folder is occupied");
@@ -830,7 +830,9 @@ fn the_last_look_keeps_a_folder_something_new_runs_in() {
         sessions: vec![late],
         ..crate::engine::RemovalProcesses::none()
     };
-    assert!(crate::engine::occupant_after_wait(&lease, &registry, &registry, &ended).is_none());
+    assert!(
+        crate::engine::occupant_after_wait(&lease, &registry, &registry, &ended, None).is_none()
+    );
 }
 
 /// A terminal's shell started a background job (in a process group of its

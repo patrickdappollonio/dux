@@ -2072,6 +2072,13 @@ impl Engine {
         }
         self.process_registry
             .wait_for_all_recordings(SHUTDOWN_RECORD_WAIT);
+        // Saved before the quit finishes: the writer thread does not outlive
+        // the process.
+        if !self.process_registry.flush(SHUTDOWN_RECORD_WAIT) {
+            crate::logger::warn(
+                "dux quit before it finished saving what its terminals and agents left running",
+            );
+        }
     }
 
     /// Resolve live tab IDs so sessions owned only by an extra tab are detached.

@@ -1546,7 +1546,7 @@ pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let cwd = process_cwds(&[pid]).remove(&pid).ok_or_else(|| {
+        let cwd = process_cwds(&[pid]).found.remove(&pid).ok_or_else(|| {
             DropDirError::Io(std::io::Error::other(format!(
                 "lsof could not report the working directory of process {pid}"
             )))
@@ -1555,41 +1555,135 @@ pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
     }
 }
 
-/// The current working directory of each of `pids` that can be asked, as the
-/// path the platform reports: `/proc/<pid>/cwd` on Linux, one `lsof` call for
-/// all of them on macOS (see [`open_process_cwd`] for what each can and
-/// cannot promise). A process that is gone, or not ours to ask, is left out.
-/// Blocking.
-pub fn process_cwds(pids: &[u32]) -> std::collections::HashMap<u32, PathBuf> {
+/// Where each of a set of processes is working, as far as dux could find
+/// out. A process that is gone is in neither list; one that is still there but
+/// whose folder could not be read is in `unknown`, and a caller deciding
+/// whether a folder is free must treat it as possibly standing there.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CwdReport {
+    pub found: std::collections::HashMap<u32, PathBuf>,
+    pub unknown: Vec<u32>,
+    /// Why the unknown ones are unknown, in words, when there is one reason
+    /// for all of them (`lsof` failed, or timed out).
+    pub failure: Option<String>,
+}
+
+/// How long one `lsof` call may take before it is given up on.
+#[cfg(any(not(target_os = "linux"), test))]
+const LSOF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The current working directory of each of `pids`, as the path the platform
+/// reports: `/proc/<pid>/cwd` on Linux, one bounded `lsof` call for all of
+/// them on macOS (see [`open_process_cwd`] for what each can and cannot
+/// promise). Fails closed: a process that is still there and could not be
+/// asked is reported as unknown, never left out. Blocking.
+pub fn process_cwds(pids: &[u32]) -> CwdReport {
     #[cfg(target_os = "linux")]
     {
-        pids.iter()
-            .filter_map(|pid| {
-                let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
-                Some((*pid, cwd))
-            })
-            .collect()
+        let mut report = CwdReport::default();
+        for pid in pids {
+            match std::fs::read_link(format!("/proc/{pid}/cwd")) {
+                Ok(cwd) => {
+                    report.found.insert(*pid, cwd);
+                }
+                // Still there and not ours to read (another user's process):
+                // unknown. A process that is gone, or a zombie, is nowhere.
+                Err(_) if process_can_answer(*pid) => report.unknown.push(*pid),
+                Err(_) => {}
+            }
+        }
+        report
     }
     #[cfg(not(target_os = "linux"))]
     {
-        if pids.is_empty() {
-            return std::collections::HashMap::new();
+        process_cwds_with(pids, run_lsof)
+    }
+}
+
+/// [`process_cwds`] with the `lsof` call handed in, so a failing or silent
+/// `lsof` can be tested. `run` answers `lsof -Fpn`'s output, or why it gave
+/// none.
+#[cfg(any(not(target_os = "linux"), test))]
+fn process_cwds_with(
+    pids: &[u32],
+    run: impl FnOnce(&[u32]) -> Result<Vec<u8>, String>,
+) -> CwdReport {
+    if pids.is_empty() {
+        return CwdReport::default();
+    }
+    match run(pids) {
+        Ok(stdout) => {
+            let found = lsof_cwd_paths(&stdout);
+            // A pid lsof did not report is unknown unless it is gone: lsof
+            // also stays silent about a process it may not look into.
+            let unknown = pids
+                .iter()
+                .copied()
+                .filter(|pid| !found.contains_key(pid) && process_can_answer(*pid))
+                .collect();
+            CwdReport {
+                found,
+                unknown,
+                failure: None,
+            }
         }
-        let list = pids
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        // lsof exits non-zero when any one of the pids has gone, while still
-        // printing the rest, so its output is read whatever its status.
-        match std::process::Command::new("lsof")
-            .args(["-a", "-d", "cwd", "-Fpn", "-p", &list])
-            .output()
-        {
-            Ok(output) => lsof_cwd_paths(&output.stdout),
-            Err(_) => std::collections::HashMap::new(),
+        Err(failure) => CwdReport {
+            found: std::collections::HashMap::new(),
+            unknown: pids
+                .iter()
+                .copied()
+                .filter(|pid| process_can_answer(*pid))
+                .collect(),
+            failure: Some(failure),
+        },
+    }
+}
+
+/// Run `lsof -a -d cwd -Fpn -p <pids>`, bounded by [`LSOF_TIMEOUT`]. lsof
+/// exits non-zero when any one of the pids has gone while still printing the
+/// rest, so its output is read whatever its status.
+#[cfg(any(not(target_os = "linux"), test))]
+fn run_lsof(pids: &[u32]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let list = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut child = std::process::Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-Fpn", "-p", &list])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|err| format!("lsof could not be started ({err})"))?;
+    let mut stdout = child.stdout.take().ok_or("lsof gave no output")?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = std::time::Instant::now() + LSOF_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "lsof did not answer within {} seconds",
+                    LSOF_TIMEOUT.as_secs()
+                ));
+            }
+            Err(err) => return Err(format!("lsof could not be waited for ({err})")),
         }
     }
+    reader
+        .join()
+        .map_err(|_| "lsof's output could not be read".to_string())
 }
 
 /// Every process's working directory out of `lsof -Fpn` output: a `p` line
@@ -1660,9 +1754,33 @@ mod tests {
         assert_eq!(found.get(&34), Some(&PathBuf::from("/work/with space")));
     }
 
+    /// A failed `lsof` fails closed: every live process asked about is
+    /// unknown, with the reason, and a gone one is simply not there.
+    #[test]
+    fn a_failed_lsof_leaves_every_live_process_unknown() {
+        let me = std::process::id();
+        let gone = u32::MAX - 7;
+        let report = process_cwds_with(&[me, gone], |_| Err("lsof could not be started".into()));
+        assert_eq!(report.unknown, vec![me]);
+        assert!(report.found.is_empty());
+        assert_eq!(report.failure.as_deref(), Some("lsof could not be started"));
+        // lsof answering for some pids and not for a live one: that one is
+        // unknown too.
+        let report = process_cwds_with(&[me], |_| Ok(b"p1\nfcwd\nn/\n".to_vec()));
+        assert_eq!(report.unknown, vec![me]);
+        assert_eq!(report.failure, None);
+    }
+
+    /// The bounded `lsof` runner answers rather than hanging, whatever lsof
+    /// does (here: whether or not it is installed).
+    #[test]
+    fn running_lsof_answers() {
+        let _ = run_lsof(&[std::process::id()]);
+    }
+
     #[test]
     fn this_processs_own_folder_is_read() {
-        let found = process_cwds(&[std::process::id()]);
+        let found = process_cwds(&[std::process::id()]).found;
         assert_eq!(
             found.get(&std::process::id()),
             Some(&std::env::current_dir().unwrap())

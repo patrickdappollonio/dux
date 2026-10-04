@@ -1953,6 +1953,9 @@ impl App {
         };
         let target = match &session.workspace {
             dux_core::model::AgentWorkspace::Managed(managed) => {
+                // Agents SHARING this worktree (identity, not occupancy): the
+                // dialog then offers no removal. Anything living inside it is
+                // found by the occupancy rule when the removal runs.
                 let worktree_shared = self.engine.sessions.iter().any(|s| {
                     s.id != session.id
                         && dux_core::project_browser::same_directory(

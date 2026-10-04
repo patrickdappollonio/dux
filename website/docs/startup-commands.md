@@ -113,9 +113,11 @@ says so.
 > on is not in the startup log; send its output to a file of its own if you want to read
 > it later.
 
-Deleting an agent with its worktree stops a startup command that is still running, along
-with anything it left running in the background, before the worktree is removed. A run cut
-short that way keeps no log, because the agent's logs go with it.
+Deleting an agent stops a startup command that is still running, along with what it has
+started so far, whether or not the worktree goes too. Deleting it with its worktree also
+stops whatever an earlier run left running in the background, before the worktree is
+removed. A run cut short that way keeps no log, because the agent's logs go with it, and if
+the command will not stop, dux says so.
 
 > [!NOTE]
 > Env and startup commands are project-scoped, so editing them from an agent changes the

@@ -46,6 +46,7 @@ pub enum WorktreeOpKind {
     EditorWrite,
     Upload,
     GitChange,
+    AddProject,
 }
 
 impl WorktreeOpKind {
@@ -62,6 +63,7 @@ impl WorktreeOpKind {
             Self::EditorWrite => "a save from the editor",
             Self::Upload => "a file upload",
             Self::GitChange => "a change to its files from the changes pane",
+            Self::AddProject => "a project being added there",
         }
     }
 }
@@ -519,6 +521,11 @@ pub struct RemovalLease {
 impl RemovalLease {
     pub fn path(&self) -> &Path {
         &self.key
+    }
+
+    /// The registry this lease was taken in.
+    pub fn ops(&self) -> &WorktreeOps {
+        &self.ops
     }
 
     /// The operations still holding the path.

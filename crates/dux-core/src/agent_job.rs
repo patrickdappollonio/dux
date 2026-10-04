@@ -101,6 +101,7 @@ fn rollback_created_worktree(
             waiting_tx: None,
             registry: registry.clone(),
             live: registry.clone(),
+            db_path: rollback.db_path.clone(),
         },
     );
     match result {
@@ -131,6 +132,7 @@ struct Rollback {
     grace: std::time::Duration,
     wait: std::time::Duration,
     worker_tx: Sender<WorkerEvent>,
+    db_path: PathBuf,
 }
 
 /// A copy of uncommitted changes planned by a per-request arm and executed in
@@ -1624,6 +1626,7 @@ fn launch_managed_create(
         grace: crate::config::shutdown_grace(config.shutdown_timeout_seconds),
         wait: std::time::Duration::from_secs(u64::from(config.removal_wait_seconds)),
         worker_tx: worker_tx.clone(),
+        db_path: paths.sessions_db_path.clone(),
     };
     let ManagedCreatePlan {
         project,

@@ -320,15 +320,19 @@ pub fn run_claimed_startup_command(
             .spawn()
             .with_context(|| format!("failed to run startup command through {shell}"))?;
         let process = crate::process_sessions::ProcessSession::started_now(child.id());
+        crate::process_sessions::note_spawned(process);
         guard.register_session(process, std::path::Path::new(&run.managed.worktree_path));
         guard.label(process, "an agent's startup command");
         // Dropped here, so the only copies of the capture files' descriptors
         // left are the command's own (and those of anything it starts).
         drop(command);
         let mut child = child;
-        let status = child
-            .wait()
-            .with_context(|| format!("failed to run startup command through {shell}"))?;
+        let status = child.wait();
+        if status.is_ok() {
+            crate::process_sessions::note_reaped(process);
+        }
+        let status =
+            status.with_context(|| format!("failed to run startup command through {shell}"))?;
         // The command (the session's leader) has exited: what it left running
         // is recorded now, the only evidence those processes are dux's later.
         guard.record_survivors(process);
@@ -351,11 +355,22 @@ pub fn run_claimed_startup_command(
     })();
 
     if guard.agent_deleted() {
+        // Said as it happened: the delete ends the command, but a command
+        // that finished first, or would not stop, is not "stopped". The logs
+        // went with the agent, so none is pointed at.
+        let label = run.session.display_label();
+        let how = match &result {
+            Ok(outcome) if outcome.code.is_some() => format!(
+                "the command finished on its own first (exit status {})",
+                format_exit_code(outcome.code)
+            ),
+            Ok(_) => "dux stopped the command".to_string(),
+            Err(err) => format!("dux could not follow the command to its end ({err:#})"),
+        };
         return StartupCommandResult {
             status: Err(format!(
-                "agent \"{}\" was deleted while its startup command was running, so dux \
-                 stopped the command and kept no log of it",
-                run.session.display_label()
+                "agent \"{label}\" was deleted while its startup command was running: {how}, \
+                 and no log of the run was kept because the agent's logs were deleted with it"
             )),
             session_id: run.session.id,
             project_name: run.project.name,
@@ -889,6 +904,36 @@ mod tests {
                 .iter()
                 .any(|session| session.sid == pid as u32),
             "its session is registered for the agent"
+        );
+    }
+
+    /// review8: an agent deleted with its worktree KEPT while its startup
+    /// command runs: nothing ends the command, it runs to completion (here it
+    /// succeeds), and the result still tells the user dux stopped it.
+    #[test]
+    fn review8_a_keep_worktree_delete_does_not_claim_it_stopped_the_command() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        let done = tmp.path().join("done.txt");
+        let run = sleeper_run(
+            tmp.path(),
+            &format!("echo $$ > pid.txt; sleep 1; echo ok > '{}'", done.display()),
+        );
+        let thread_paths = paths.clone();
+        let thread_registry = registry.clone();
+        let handle =
+            std::thread::spawn(move || run_startup_command(&thread_paths, run, &thread_registry));
+        wait_for_pid(&tmp.path().join("pid.txt"));
+        // What a keep-worktree delete does: the record goes, nothing is ended.
+        delete_agent_logs(&paths, "project-1", "session-1").expect("delete logs");
+        let _ = registry.forget_agent("session-1");
+        let result = handle.join().expect("run thread");
+        assert!(done.exists(), "the command ran to completion");
+        let err = result.status.expect_err("the run reports the deletion");
+        assert!(
+            !err.contains("dux stopped the command"),
+            "the command ran to completion, but the user is told: {err}"
         );
     }
 

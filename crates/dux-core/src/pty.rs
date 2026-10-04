@@ -1203,6 +1203,9 @@ impl PtyClient {
         let process_session = child
             .process_id()
             .map(crate::process_sessions::ProcessSession::started_now);
+        if let Some(session) = process_session {
+            crate::process_sessions::note_spawned(session);
+        }
 
         Ok(Self {
             master: pair.master,
@@ -1710,6 +1713,9 @@ impl PtyClient {
             return Some(status.clone());
         }
         let status = self.child.try_wait().ok().flatten()?;
+        if let Some(session) = self.process_session {
+            crate::process_sessions::note_reaped(session);
+        }
         self.reaped = Some((status.clone(), Instant::now()));
         Some(status)
     }
@@ -2125,7 +2131,11 @@ impl Drop for PtyClient {
         // was unavailable above (without it, `wait` could block on a child that
         // nothing has asked to exit).
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        if self.child.wait().is_ok()
+            && let Some(session) = self.process_session
+        {
+            crate::process_sessions::note_reaped(session);
+        }
         // With the child group dead, the PTY slave is fully released (the slave
         // fd itself was dropped at spawn time; the child group held the last
         // references). The master read then returns EOF (on Linux, EIO, which

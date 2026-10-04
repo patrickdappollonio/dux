@@ -138,7 +138,8 @@ because dux never removes a standalone agent's folder: delete that agent, or mov
 out, first. The same holds when you delete the worktree's own agent with the worktree box
 ticked: the worktree is kept and dux names the standalone agent. Once a removal of a folder
 has begun, nothing new starts in it or in any folder inside it: a new agent, a standalone
-agent, a relaunch or a terminal is refused and says why.
+agent, a relaunch, a terminal or a project added there is refused and says why. A worktree
+that holds a dux project's repository is never removed.
 
 > [!TIP]
 > This is where you remove the branch of a worktree that has no agent. A worktree that does

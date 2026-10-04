@@ -1214,6 +1214,20 @@ impl Engine {
             return Ok(project_added_reaction(project, project_id, message));
         }
 
+        // Held while the project is written: a removal of a folder around
+        // the repository waits for the add and then sees the project, and an
+        // add into a folder already being removed is refused.
+        let _hold = match self.worktree_ops().hold(
+            std::path::Path::new(&project.path),
+            crate::worktree_ops::WorktreeOpKind::AddProject,
+        ) {
+            Ok(hold) => hold,
+            Err(refused) => {
+                return Ok(EventReaction::Status(StatusUpdate::error(
+                    refused.sentence("add a project there"),
+                )));
+            }
+        };
         self.session_store
             .upsert_project(&crate::config::ProjectConfig {
                 id: project.id.clone(),

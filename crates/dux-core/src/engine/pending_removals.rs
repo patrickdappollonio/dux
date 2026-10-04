@@ -48,51 +48,22 @@ impl Engine {
         removing: Option<&str>,
         stopping: StoppingProcesses,
     ) -> Option<Occupant> {
-        let inside = |dir: &std::path::Path| crate::worktree_ops::folder_contains(folder, dir);
-        let agents: Vec<&crate::model::AgentSession> = self
-            .sessions
-            .iter()
-            .filter(|s| Some(s.id.as_str()) != removing)
-            .filter(|s| inside(std::path::Path::new(s.directory())))
-            .collect();
-        if let Some(agent) = agents
-            .iter()
-            .find(|s| s.workspace.as_managed().is_none())
-            .or_else(|| agents.first())
-        {
-            return Some(Occupant::Agent {
-                id: agent.id.clone(),
-                label: agent.display_label(),
-                directory: agent.directory().to_string(),
-                standalone: agent.workspace.as_managed().is_none(),
-                exact: crate::worktree_ops::path_key(std::path::Path::new(agent.directory()))
-                    == crate::worktree_ops::path_key(folder),
-            });
-        }
-        if let Some(project) = self
+        let projects: Vec<(String, String)> = self
             .projects
             .iter()
-            .find(|project| inside(std::path::Path::new(&project.path)))
-        {
-            return Some(Occupant::Project {
-                name: project.name.clone(),
-                path: project.path.clone(),
-            });
-        }
-        if self
-            .removal_coordination
-            .ops
-            .holders(folder)
-            .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
-        {
-            return Some(Occupant::BeingCreated);
-        }
-        self.pty_occupants_in(folder)
-            .into_iter()
-            .find(|(_, _, terminating)| {
-                !terminating || matches!(stopping, StoppingProcesses::Occupy)
-            })
-            .map(|(_, what, _)| Occupant::Process(what))
+            .map(|project| (project.name.clone(), project.path.clone()))
+            .collect();
+        occupant_in(
+            folder,
+            removing,
+            stopping,
+            &OccupancyFacts {
+                agents: &self.sessions,
+                projects: &projects,
+                ops: &self.removal_coordination.ops,
+                ptys: self.pty_occupants(),
+            },
+        )
     }
 
     /// The sentence for an agent delete's removal that must not run because the
@@ -365,6 +336,7 @@ impl Engine {
                     waiting_tx: None,
                     registry,
                     live,
+                    db_path: db_path.clone(),
                 },
             );
             super::events::forget_pending_removal_in(&db_path, &row.session_id);
@@ -482,6 +454,121 @@ impl Engine {
     }
 }
 
+/// What [`occupant_in`] decides from: the agents (live or dormant), the
+/// projects by name and repository path, the path registry, and the PTYs dux
+/// runs, each with the folder it started in, what to call it, and whether it
+/// is stopping.
+pub(crate) struct OccupancyFacts<'a> {
+    pub(crate) agents: &'a [crate::model::AgentSession],
+    pub(crate) projects: &'a [(String, String)],
+    pub(crate) ops: &'a crate::worktree_ops::WorktreeOps,
+    pub(crate) ptys: Vec<(
+        std::path::PathBuf,
+        Option<crate::process_sessions::ProcessSession>,
+        &'static str,
+        bool,
+    )>,
+}
+
+/// THE occupancy rule (see `Engine::folder_occupant`), on facts handed in, so
+/// the engine thread and a removal worker reading the session database ask it
+/// the same way. Every test is containment, never path equality: anything
+/// whose folder is `folder` or anywhere inside it occupies it.
+pub(crate) fn occupant_in(
+    folder: &std::path::Path,
+    removing: Option<&str>,
+    stopping: StoppingProcesses,
+    facts: &OccupancyFacts<'_>,
+) -> Option<Occupant> {
+    let inside = |dir: &std::path::Path| crate::worktree_ops::folder_contains(folder, dir);
+    let agents: Vec<&crate::model::AgentSession> = facts
+        .agents
+        .iter()
+        .filter(|s| Some(s.id.as_str()) != removing)
+        .filter(|s| inside(std::path::Path::new(s.directory())))
+        .collect();
+    if let Some(agent) = agents
+        .iter()
+        .find(|s| s.workspace.as_managed().is_none())
+        .or_else(|| agents.first())
+    {
+        return Some(Occupant::Agent {
+            id: agent.id.clone(),
+            label: agent.display_label(),
+            directory: agent.directory().to_string(),
+            standalone: agent.workspace.as_managed().is_none(),
+            exact: crate::worktree_ops::path_key(std::path::Path::new(agent.directory()))
+                == crate::worktree_ops::path_key(folder),
+        });
+    }
+    if let Some((name, path)) = facts
+        .projects
+        .iter()
+        .find(|(_, path)| inside(std::path::Path::new(path)))
+    {
+        return Some(Occupant::Project {
+            name: name.clone(),
+            path: path.clone(),
+        });
+    }
+    if facts
+        .ops
+        .holders(folder)
+        .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
+    {
+        return Some(Occupant::BeingCreated);
+    }
+    facts
+        .ptys
+        .iter()
+        .filter(|(dir, ..)| inside(dir))
+        .find(|(_, _, _, terminating)| {
+            !terminating || matches!(stopping, StoppingProcesses::Occupy)
+        })
+        .map(|(_, _, what, _)| Occupant::Process(what))
+}
+
+/// [`occupant_in`] from a worker thread: the agents and projects as the
+/// session database has them now (each is written there on the engine thread
+/// before it appears anywhere else), and the path registry. The PTYs are the
+/// worker's own business (it ends or counts their processes itself). A
+/// database that cannot be read fails closed, with why.
+pub(crate) fn stored_occupant(
+    db_path: &std::path::Path,
+    ops: &crate::worktree_ops::WorktreeOps,
+    folder: &std::path::Path,
+    removing: Option<&str>,
+) -> Result<Option<Occupant>, String> {
+    let (agents, projects) = crate::storage::SessionStore::open(db_path)
+        .and_then(|store| Ok((store.load_sessions()?, store.load_projects()?)))
+        .map_err(|e| {
+            format!(
+                "dux could not read its list of agents and projects to confirm nothing lives in \
+                 the folder ({e:#})"
+            )
+        })?;
+    let projects: Vec<(String, String)> = projects
+        .into_iter()
+        .map(|project| {
+            (
+                project.name.clone().unwrap_or_else(|| project.path.clone()),
+                project.path,
+            )
+        })
+        .collect();
+    Ok(occupant_in(
+        folder,
+        removing,
+        StoppingProcesses::Occupy,
+        &OccupancyFacts {
+            agents: &agents,
+            projects: &projects,
+            ops,
+            ptys: Vec::new(),
+        },
+    ))
+}
+
 /// Whether processes still stopping in a folder are in the way of removing it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoppingProcesses {
@@ -513,6 +600,22 @@ pub(crate) enum Occupant {
 }
 
 impl Occupant {
+    /// What the worktree manager answers when this is in the way of a
+    /// removal: an agent whose own worktree it is holds it; anything else
+    /// makes it busy, with what.
+    pub(crate) fn manager_outcome(&self) -> crate::worktree_manager::RemovalOutcome {
+        match self {
+            Occupant::Agent {
+                exact: true,
+                standalone: false,
+                ..
+            } => crate::worktree_manager::RemovalOutcome::Attached,
+            other => crate::worktree_manager::RemovalOutcome::Busy {
+                reason: other.reason(),
+            },
+        }
+    }
+
     /// What is in the way, as a phrase for the manager's row and refusal.
     pub(crate) fn reason(&self) -> String {
         let folder =

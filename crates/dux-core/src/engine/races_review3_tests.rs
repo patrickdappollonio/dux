@@ -400,6 +400,8 @@ fn a_survivor_recorded_after_the_delete_is_written_into_the_pending_row() {
         .register(UNOWNED_PTYS, session, &worktree);
     let found = crate::process_sessions::survivors_at_leader_exit(session);
     engine.process_registry.record_survivors(session, &found);
+    // Written by the registry's writer thread, never the engine's.
+    assert!(engine.process_registry.flush(Duration::from_secs(10)));
 
     let rows = engine
         .session_store
