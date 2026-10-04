@@ -27,6 +27,7 @@
 pub mod api;
 pub mod browser;
 pub mod client;
+pub mod container;
 pub mod dux;
 pub mod image;
 pub mod sidecars;
@@ -45,6 +46,15 @@ pub const DUX_PORT: u16 = 3890;
 /// The address the stand-in Tailscale reports and gives the container's
 /// loopback. Obviously fake, inside Tailscale's CGNAT range.
 pub const TAILNET_IP: &str = "100.101.102.103";
+
+/// The stand-in tailnet PEER's address: a second address on the container's
+/// loopback that the tailnet relay connects from, so dux sees a tailnet
+/// connection from somebody other than itself. The entrypoint adds it beside
+/// [`TAILNET_IP`].
+pub const TAILNET_PEER_IP: &str = "100.101.102.104";
+
+/// This machine's tailnet name in the stand-in's answers (obviously fake).
+pub const TAILNET_NAME: &str = "journey-box.example-tailnet.ts.net";
 
 /// A password every journey that sets one uses: long and random-looking enough
 /// to clear the default minimum length and strength score.

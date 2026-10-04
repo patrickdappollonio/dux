@@ -7,50 +7,45 @@
 
 use std::time::Duration;
 
-use testcontainers::bollard::models::HostConfig;
 use testcontainers::core::WaitFor;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
+use crate::container::{identity, labelled, share_namespace_of};
 use crate::dux::Dux;
-use crate::util::{eventually, suffix};
-
-/// The nginx image the proxy journeys pull. Pinned to a major line so a new
-/// release cannot change what a forwarding header looks like under a journey.
-pub const NGINX_IMAGE: (&str, &str) = ("nginx", "1-alpine");
-
-/// The Caddy image the TLS journeys pull.
-pub const CADDY_IMAGE: (&str, &str) = ("caddy", "2-alpine");
+use crate::image::{Reaper, pinned_parts};
+use crate::util::eventually;
 
 /// One proxy container. Removed when dropped.
 pub struct Sidecar {
     container: ContainerAsync<GenericImage>,
+    _reaper: Reaper,
     name: String,
 }
 
+/// Start `image_key` (a pinned image from journey-images.env) with `config`
+/// copied to `config_path`, inside `dux`'s network namespace.
 async fn start_in(
     dux: &Dux,
-    image: (&str, &str),
+    image_key: &str,
+    kind: &str,
     config_path: &str,
     config: &str,
-    ready: WaitFor,
 ) -> Sidecar {
-    let name = format!("dux-journeys-{}-{}", image.0, suffix());
-    let namespace = format!("container:{}", dux.id());
-    let container = GenericImage::new(image.0, image.1)
-        .with_wait_for(ready)
-        .with_container_name(&name)
-        .with_label("dux-journeys", "1")
+    let (image, tag) = pinned_parts(image_key);
+    let (name, reaper, logs) = identity(kind);
+    let request = GenericImage::new(image, tag).with_wait_for(WaitFor::millis(200));
+    let container = labelled(request.into(), &name, &logs)
         .with_copy_to(config_path.to_string(), config.as_bytes().to_vec())
-        .with_host_config_modifier(move |host: &mut HostConfig| {
-            host.network_mode = Some(namespace.clone());
-            host.publish_all_ports = Some(false);
-            host.port_bindings = None;
-        })
+        .with_host_config_modifier(share_namespace_of(dux.id()))
         .start()
         .await
-        .unwrap_or_else(|err| panic!("start the {} sidecar {name}: {err}", image.0));
-    Sidecar { container, name }
+        .unwrap_or_else(|err| panic!("start the {kind} sidecar {name}: {err}"));
+    Sidecar {
+        container,
+        _reaper: reaper,
+        name,
+    }
 }
 
 impl Sidecar {
@@ -59,10 +54,10 @@ impl Sidecar {
     pub async fn nginx(dux: &Dux, conf: &str, ports: &[u16]) -> Sidecar {
         let sidecar = start_in(
             dux,
-            NGINX_IMAGE,
+            "JOURNEY_NGINX_IMAGE",
+            "nginx",
             "/etc/nginx/conf.d/default.conf",
             conf,
-            WaitFor::millis(200),
         )
         .await;
         for port in ports {
@@ -76,10 +71,10 @@ impl Sidecar {
     pub async fn caddy(dux: &Dux, caddyfile: &str, ports: &[u16]) -> Sidecar {
         let sidecar = start_in(
             dux,
-            CADDY_IMAGE,
+            "JOURNEY_CADDY_IMAGE",
+            "caddy",
             "/etc/caddy/Caddyfile",
             caddyfile,
-            WaitFor::millis(200),
         )
         .await;
         for port in ports {
@@ -115,19 +110,86 @@ impl Sidecar {
     }
 }
 
-/// Wait until `port` inside the shared namespace accepts a request.
+/// Wait until something listens on `port` inside the shared namespace.
 async fn wait_listening(dux: &Dux, port: u16, scheme: &str) {
     eventually(
         &format!("a sidecar listening on {scheme} port {port}"),
         Duration::from_secs(30),
         || async {
-            let run = dux
-                .exec(&format!(
-                    "curl -ks -o /dev/null --max-time 2 {scheme}://127.0.0.1:{port}/healthz"
-                ))
-                .await;
-            (run.code == 0).then_some(())
+            dux.listening()
+                .await
+                .iter()
+                .any(|address| address.ends_with(&format!(":{port}")))
+                .then_some(())
         },
     )
     .await;
+}
+
+/// The port Caddy's stand-in for `tailscale serve` listens on (in dux's
+/// namespace; published by dux).
+pub const SERVE_PORT: u16 = 8443;
+
+/// The port Caddy's ordinary HTTPS reverse proxy listens on.
+pub const PROXY_PORT: u16 = 9443;
+
+/// The stand-in `tailscale serve status --json`: an HTTPS route on this
+/// machine's tailnet name, port 443, proxying to dux's port. It is what lets
+/// dux confirm that a forwarded request came through `tailscale serve`.
+pub fn serve_route_json() -> String {
+    format!(
+        r#"{{"TCP":{{"443":{{"HTTPS":true}}}},"Web":{{"{name}:443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:{port}"}}}}}}}}}}"#,
+        name = crate::TAILNET_NAME,
+        port = crate::DUX_PORT
+    )
+}
+
+/// Caddy terminating TLS beside dux, twice:
+///
+/// - On [`SERVE_PORT`], a stand-in for the `tailscale serve` route in
+///   [`serve_route_json`]: TLS for this machine's tailnet name, and the request
+///   forwarded the way Tailscale's serve proxy forwards it, with Tailscale's
+///   identity headers and the `Host` and `Origin` a browser at `https://<name>/`
+///   sends. The only thing the real path has that this one does not is port 443
+///   on the outside, so the stand-in rewrites the ephemeral published port away.
+/// - On [`PROXY_PORT`], an ordinary HTTPS reverse proxy for `127.0.0.1`: no
+///   identity headers, and the `Host` the client sent.
+pub fn serve_and_proxy_caddyfile() -> String {
+    let name = crate::TAILNET_NAME;
+    let dux = crate::DUX_PORT;
+    format!(
+        "{{
+  admin off
+  skip_install_trust
+  default_sni 127.0.0.1
+}}
+
+https://{name}:{SERVE_PORT} {{
+  tls internal
+  reverse_proxy 127.0.0.1:{dux} {{
+    header_up Host {name}
+    header_up Origin https://{name}
+    header_up Tailscale-User-Login \"owner@example.com\"
+    header_up Tailscale-User-Name \"Owner\"
+  }}
+}}
+
+https://127.0.0.1:{PROXY_PORT} {{
+  tls internal
+  reverse_proxy 127.0.0.1:{dux}
+}}
+"
+    )
+}
+
+/// A client that reaches the `tailscale serve` stand-in the way a browser at
+/// `https://<tailnet name>/` does: TLS for that name, trusting `root`, delivered
+/// to the port dux published for it.
+pub async fn serve_client(dux: &Dux, root: &[u8]) -> crate::Client {
+    let port = dux.host_port(SERVE_PORT).await;
+    crate::Client::with_root_at(
+        &format!("https://{}:{port}", crate::TAILNET_NAME),
+        root,
+        std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+    )
 }

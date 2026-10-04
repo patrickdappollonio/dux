@@ -328,6 +328,7 @@ host (`BASE_IMAGE=<image> ./up.sh`) or use the in-container build.
 | `Dockerfile` | Runtime image (glibc/git/node/tmux + claude/codex CLIs). The container journeys build it with `AGENT_CLIS=0` and `JOURNEY_TOOLS=1`: no agent CLIs, plus socat, curl and Chromium. |
 | `entrypoint.sh` | Seeds config + demo repos, then serves the web UI. Its opt-in switches (`DUX_BIND`, `DUX_FAKE_TAILSCALE`, `DUX_RELAYS`, `DUX_LAUNCH`, `DUX_RESTART_LOOP`, `DUX_TAIL_LOG`, hooks in `/journey/seed.d`) are for the container journeys in `crates/dux-journeys`; a preview sets none of them. |
 | `tailscale-stand-in.sh` | A stand-in `tailscale` CLI answering from files under `/data/tailscale`, installed only under `DUX_FAKE_TAILSCALE=1`. |
+| `journey-images.env` | The base, nginx and Caddy images the container journeys and their CI workflow use, pinned by digest. |
 | `fake-agent.sh` | Fake provider with live preview output and deterministic capture fixtures. |
 | `compose.yml` | Defines the isolated web preview and opt-in TUI capture service. |
 | `up.sh` | Host: build binary + start/restart the container. |

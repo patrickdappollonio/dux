@@ -3,6 +3,7 @@
 //! header, body) so a journey can look at `Set-Cookie` attributes as well as
 //! JSON.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -119,21 +120,35 @@ pub struct Client {
     origin: Option<String>,
     headers: Vec<(String, String)>,
     root: Option<Vec<u8>>,
+    resolve: Option<(String, SocketAddr)>,
 }
 
 impl Client {
     /// A client with an empty cookie jar for `base` (`http://127.0.0.1:port`).
     pub fn new(base: &str) -> Client {
-        Self::build(base, None)
+        Self::build(base, None, None)
     }
 
     /// A client for an HTTPS `base` that trusts `root_pem` (a sidecar's own
     /// certificate authority) and nothing else extra.
     pub fn with_root(base: &str, root_pem: &[u8]) -> Client {
-        Self::build(base, Some(root_pem))
+        Self::build(base, Some(root_pem), None)
     }
 
-    fn build(base: &str, root_pem: Option<&[u8]>) -> Client {
+    /// A client for an HTTPS `base` naming a host (a tailnet name) that it
+    /// reaches at `address` instead of through DNS, trusting `root_pem`: what a
+    /// browser at that name sends (its TLS name, `Host` and `Origin`), delivered
+    /// to a published port on this machine.
+    pub fn with_root_at(base: &str, root_pem: &[u8], address: SocketAddr) -> Client {
+        let host = Url::parse(base)
+            .expect("a base URL")
+            .host_str()
+            .expect("a host in the base URL")
+            .to_string();
+        Self::build(base, Some(root_pem), Some((host, address)))
+    }
+
+    fn build(base: &str, root_pem: Option<&[u8]>, resolve: Option<(String, SocketAddr)>) -> Client {
         let jar = Arc::new(Jar::default());
         let mut builder = reqwest::Client::builder()
             .cookie_provider(Arc::clone(&jar))
@@ -144,6 +159,9 @@ impl Client {
                 Certificate::from_pem(pem).expect("the sidecar's root certificate parses"),
             );
         }
+        if let Some((host, address)) = &resolve {
+            builder = builder.resolve(host, *address);
+        }
         let base = Url::parse(base).expect("a base URL");
         let origin = base.origin().ascii_serialization();
         Client {
@@ -153,6 +171,7 @@ impl Client {
             origin: Some(origin),
             headers: Vec::new(),
             root: root_pem.map(<[u8]>::to_vec),
+            resolve,
         }
     }
 
@@ -172,10 +191,53 @@ impl Client {
     /// A second client sharing nothing with this one but the address (and the
     /// certificate authority it trusts, and the headers it sends).
     pub fn fresh(&self) -> Client {
-        let mut other = Client::build(self.base.as_str(), self.root.as_deref());
+        let mut other = Client::build(
+            self.base.as_str(),
+            self.root.as_deref(),
+            self.resolve.clone(),
+        );
         other.headers = self.headers.clone();
         other.origin = self.origin.clone();
         other
+    }
+
+    /// Wait until `/healthz` answers 200 through this client's address. Polled
+    /// over raw TCP rather than reqwest, because a relay with nothing behind it
+    /// yet accepts and then drops the connection, which is a "not yet" here and
+    /// not a failure. (The Tailscale leg binds a moment after dux's first look
+    /// at the CLI, so a tailnet relay needs this.)
+    pub async fn wait_answering(&self) {
+        let url = self.base.clone();
+        let addr = format!(
+            "{}:{}",
+            url.host_str().expect("a host"),
+            url.port_or_known_default().expect("a port")
+        );
+        crate::util::eventually(
+            &format!("{url} to answer /healthz"),
+            Duration::from_secs(30),
+            || {
+                let addr = addr.clone();
+                async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut stream = tokio::net::TcpStream::connect(&addr).await.ok()?;
+                    let request = format!(
+                        "GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+                    );
+                    stream.write_all(request.as_bytes()).await.ok()?;
+                    let mut answer = Vec::new();
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        stream.read_to_end(&mut answer),
+                    )
+                    .await;
+                    String::from_utf8_lossy(&answer)
+                        .starts_with("HTTP/1.1 200")
+                        .then_some(())
+                }
+            },
+        )
+        .await;
     }
 
     pub fn base(&self) -> &Url {

@@ -38,7 +38,9 @@ auth = ["journeys"]
 # bind-mounted into a Linux container), so the dependencies are too. On macOS
 # the crate compiles to nothing whatever the features say.
 [target.'cfg(target_os = "linux")'.dependencies]
-testcontainers = { version = "0.28", default-features = false, optional = true }
+# `watchdog` removes every container this process started when it gets
+# SIGINT, SIGTERM or SIGQUIT (a Ctrl-C mid-run), instead of leaving them up.
+testcontainers = { version = "0.28", default-features = false, features = ["watchdog"], optional = true }
 tokio = { workspace = true, features = ["process", "io-util", "fs"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"], optional = true }
 tokio-tungstenite = { workspace = true, optional = true }

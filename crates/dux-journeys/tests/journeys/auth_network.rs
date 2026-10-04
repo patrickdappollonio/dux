@@ -3,39 +3,10 @@
 
 use std::time::Duration;
 
-use dux_journeys::{Client, Dux, DuxOptions, STRONG_PASSWORD, eventually, journey};
+use dux_journeys::{Dux, DuxOptions, STRONG_PASSWORD, eventually, journey};
 use serde_json::json;
 
 use crate::auth_login::assert_auth_required;
-
-/// Wait until the stand-in tailnet relay reaches dux's Tailscale listener (it
-/// binds a moment after dux's first look at the CLI).
-pub async fn wait_tailnet_leg(peer: &Client) {
-    let url = peer.base().clone();
-    let addr = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
-    eventually(
-        "the Tailscale leg to answer",
-        Duration::from_secs(30),
-        || {
-            let addr = addr.clone();
-            async move {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let mut stream = tokio::net::TcpStream::connect(&addr).await.ok()?;
-                let request =
-                    format!("GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-                stream.write_all(request.as_bytes()).await.ok()?;
-                let mut answer = Vec::new();
-                let _ =
-                    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut answer))
-                        .await;
-                String::from_utf8_lossy(&answer)
-                    .starts_with("HTTP/1.1 200")
-                    .then_some(())
-            }
-        },
-    )
-    .await;
-}
 
 /// Set `server.auth.require` through the CLI, which signals the running dux.
 async fn set_require(dux: &Dux, value: &str) {
@@ -86,7 +57,7 @@ async fn journey_06_require_decides_who_has_to_sign_in() {
         .await;
         let exposed = Dux::start(DuxOptions::exposed().with_password(STRONG_PASSWORD)).await;
         let peer = local.client_on(4100).await;
-        wait_tailnet_leg(&peer).await;
+        peer.wait_answering().await;
         let network = exposed.client().await;
 
         let tailnet_status = peer.auth_status().await;
@@ -195,7 +166,7 @@ async fn journey_a_headerless_forward_onto_loopback_is_not_this_machine() {
                 .with_password(STRONG_PASSWORD),
         )
         .await;
-        wait_tailnet_leg(&dux.client_on(4100).await).await;
+        dux.client_on(4100).await.wait_answering().await;
         let relayed = dux.client_on(4200).await;
 
         dux.set_fake_serve(&format!(

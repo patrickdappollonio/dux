@@ -5,14 +5,10 @@ use std::time::Duration;
 
 use dux_journeys::api::{add_demo_project, create_agent, session_id};
 use dux_journeys::util::suffix;
-use dux_journeys::ws::{Ended, connect, connect_ok};
+use dux_journeys::ws::{CLOSE_SIGNED_OUT, Ended, assert_accepted_then_closed, connect_ok};
 use dux_journeys::{Dux, DuxOptions, OTHER_STRONG_PASSWORD, STRONG_PASSWORD, journey};
 
-use crate::auth_login::assert_auth_required;
-
-/// The close code dux sends a socket whose session ended (signed out, revoked,
-/// password changed).
-const CLOSE_SIGNED_OUT: u16 = 4401;
+use crate::auth_login::{assert_auth_required, assert_network_class};
 
 /// Situation: `dux server` reachable from the network, password set, and
 /// `session_idle_seconds` lowered to 3 so a test can outwait it.
@@ -43,6 +39,7 @@ async fn journey_04_an_open_socket_keeps_the_session_alive_until_it_closes() {
         )
         .await;
         let client = dux.client().await;
+        assert_network_class(&client).await;
         client.login_ok(STRONG_PASSWORD).await;
 
         let mut tab = connect_ok(&client, "/ws/events").await;
@@ -100,6 +97,7 @@ async fn journey_05_a_quick_restart_lets_an_open_tab_straight_back_in() {
         )
         .await;
         let client = dux.client().await;
+        assert_network_class(&client).await;
         client.login_ok(STRONG_PASSWORD).await;
         let mut tab = connect_ok(&client, "/ws/events").await;
         assert_eq!(tab.hold_open(Duration::from_secs(1)).await, None);
@@ -151,6 +149,7 @@ async fn journey_signing_out_or_changing_the_password_closes_open_sockets() {
     journey("revocation", Duration::from_secs(300), async {
         let dux = Dux::start(DuxOptions::exposed().with_password(STRONG_PASSWORD)).await;
         let a = dux.client().await;
+        assert_network_class(&a).await;
         let b = a.fresh();
         a.login_ok(STRONG_PASSWORD).await;
         b.login_ok(STRONG_PASSWORD).await;
@@ -203,7 +202,13 @@ async fn journey_signing_out_or_changing_the_password_closes_open_sockets() {
             &b.get("/api/v1/projects").await,
             "a session from before the change",
         );
-        assert!(connect(&b, "/ws/events").await.is_err());
+        assert_accepted_then_closed(
+            &b,
+            "/ws/events",
+            CLOSE_SIGNED_OUT,
+            "a socket opened with a session from before the change",
+        )
+        .await;
         b.fresh().login_ok(OTHER_STRONG_PASSWORD).await;
     })
     .await;

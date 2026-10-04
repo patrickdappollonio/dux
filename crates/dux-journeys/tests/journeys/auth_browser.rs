@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use dux_journeys::browser::{Browser, WEBDRIVER_PORT};
-use dux_journeys::util::suffix;
+use dux_journeys::image::JourneyNetwork;
 use dux_journeys::{DUX_PORT, Dux, DuxOptions, STRONG_PASSWORD, eventually, journey};
 use fantoccini::Locator;
 
@@ -60,7 +60,7 @@ async fn sign_in(browser: &Browser, password: &str) {
 )]
 async fn journey_12a_login_page_warns_on_plain_http_and_returns_to_the_link() {
     journey("12a-browser-login", Duration::from_secs(300), async {
-        let network = format!("dux-journeys-net-{}", suffix());
+        let network = JourneyNetwork::create();
         let dux = Dux::start(
             DuxOptions::exposed()
                 .with_network(&network)
@@ -148,7 +148,7 @@ async fn journey_12b_no_eavesdropping_warning_on_this_machine() {
 )]
 async fn journey_12c_no_password_banner_until_told_never_again() {
     journey("12c-browser-banner", Duration::from_secs(300), async {
-        let network = format!("dux-journeys-net-{}", suffix());
+        let network = JourneyNetwork::create();
         let dux = Dux::start(DuxOptions::exposed().with_network(&network)).await;
         let browser = Browser::on_network(&network).await;
         let url = format!("http://{}:{DUX_PORT}/", dux.address().await);
@@ -210,7 +210,7 @@ async fn journey_12c_no_password_banner_until_told_never_again() {
 async fn journey_12d_weak_password_banner_after_signing_in() {
     journey("12d-browser-weak", Duration::from_secs(300), async {
         let weak = "password1234";
-        let network = format!("dux-journeys-net-{}", suffix());
+        let network = JourneyNetwork::create();
         let dux = Dux::start(
             DuxOptions::exposed()
                 .with_network(&network)

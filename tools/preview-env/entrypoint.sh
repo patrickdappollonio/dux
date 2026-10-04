@@ -105,7 +105,11 @@ EOF
   [ -f "$ts/serve.json" ] || echo "{}" > "$ts/serve.json"
   install -m 0755 /usr/local/share/dux-preview/tailscale-stand-in /usr/local/bin/tailscale
   ip addr show dev lo | grep -q "inet $ts_ip/" || ip addr add "$ts_ip/32" dev lo
-  echo "entrypoint: stand-in tailscale answering with $ts_ip"
+  # A second tailnet address for the stand-in PEER, so a relayed tailnet
+  # connection comes from somebody other than dux itself.
+  peer_ip="${DUX_TAILNET_PEER_IP:-100.101.102.104}"
+  ip addr show dev lo | grep -q "inet $peer_ip/" || ip addr add "$peer_ip/32" dev lo
+  echo "entrypoint: stand-in tailscale answering with $ts_ip (peer $peer_ip)"
   DUX_NO_TAILSCALE=0
 fi
 

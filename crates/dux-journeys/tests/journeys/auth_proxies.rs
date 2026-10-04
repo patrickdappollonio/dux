@@ -3,8 +3,12 @@
 
 use std::time::Duration;
 
-use dux_journeys::sidecars::Sidecar;
-use dux_journeys::{Client, DUX_PORT, Dux, DuxOptions, STRONG_PASSWORD, eventually, journey};
+use dux_journeys::sidecars::{
+    PROXY_PORT, SERVE_PORT, Sidecar, serve_and_proxy_caddyfile, serve_client, serve_route_json,
+};
+use dux_journeys::{
+    Client, DUX_PORT, Dux, DuxOptions, STRONG_PASSWORD, TAILNET_NAME, eventually, journey,
+};
 use serde_json::json;
 
 use crate::auth_login::{assert_auth_required, session_cookie};
@@ -147,61 +151,31 @@ async fn journey_07_behind_nginx_the_password_still_applies() {
     .await;
 }
 
-/// The stand-in `tailscale serve status --json`: an HTTPS route on this
-/// machine's tailnet name proxying to dux's port, which is what lets dux confirm
-/// that a forwarded request with Tailscale's identity headers came through it.
-fn serve_route() -> String {
-    format!(
-        r#"{{"TCP":{{"443":{{"HTTPS":true}}}},"Web":{{"journey-box.example-tailnet.ts.net:443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:{DUX_PORT}"}}}}}}}}}}"#
-    )
-}
-
-/// Caddy terminating TLS beside dux: port 8443 stands in for `tailscale serve`
-/// (it forwards with Tailscale's identity headers, as the real serve proxy
-/// does), port 9443 is an ordinary HTTPS reverse proxy with no identity.
-fn caddyfile() -> String {
-    format!(
-        "{{
-  admin off
-  skip_install_trust
-  default_sni 127.0.0.1
-}}
-
-https://127.0.0.1:8443 {{
-  tls internal
-  reverse_proxy 127.0.0.1:{DUX_PORT} {{
-    header_up Tailscale-User-Login \"owner@example.com\"
-    header_up Tailscale-User-Name \"Owner\"
-  }}
-}}
-
-https://127.0.0.1:9443 {{
-  tls internal
-  reverse_proxy 127.0.0.1:{DUX_PORT}
-}}
-"
-    )
-}
-
 /// Situation: dux on loopback with a password and `require = "everywhere"`, a
-/// stand-in Tailscale whose serve configuration routes HTTPS to dux's port,
-/// and Caddy terminating TLS in front of dux twice: once standing in for that
-/// `tailscale serve` route, once as an ordinary HTTPS proxy.
+/// stand-in Tailscale whose serve configuration routes HTTPS for this machine's
+/// tailnet name to dux's port, and Caddy terminating TLS in front of dux twice:
+/// once standing in for that `tailscale serve` route (TLS for the tailnet name,
+/// Tailscale's identity headers, and the `Host` and `Origin` a browser at
+/// `https://<name>/` sends), once as an ordinary HTTPS proxy for `127.0.0.1`.
 ///
 /// Task: a session cookie must be `Secure` when dux knows the browser reached it
 /// over HTTPS, must not be when it did not, and the owner must be able to force
-/// it for a proxy dux cannot vouch for.
+/// it for a proxy dux cannot vouch for. What dux vouches for is the confirmed
+/// serve route itself (its name and port in the `Host`), not a header a client
+/// could add.
 ///
 /// Action: sign in over HTTPS through the `tailscale serve` stand-in; sign in
 /// over plain HTTP from this machine; sign in over HTTPS through the ordinary
-/// proxy; set `server.auth.cookie_secure = "always"` and sign in through the
-/// ordinary proxy again.
+/// proxy, once plainly and once sending Tailscale's identity headers itself;
+/// set `server.auth.cookie_secure = "always"` and sign in through the ordinary
+/// proxy again.
 ///
 /// Result: through the confirmed `tailscale serve` route the cookie is `Secure`
 /// and the status reports an encrypted transport; over plain HTTP it is not
 /// `Secure`; through the ordinary proxy under `cookie_secure = "auto"` it is not
-/// `Secure` either, because dux never trusts an arbitrary `X-Forwarded-Proto`;
-/// with `always` it is.
+/// `Secure` either, with or without identity headers, because its `Host` is not
+/// the serve route's name and dux never trusts an arbitrary
+/// `X-Forwarded-Proto`; with `always` it is.
 #[tokio::test(flavor = "multi_thread")]
 #[cfg_attr(
     not(feature = "auth"),
@@ -209,12 +183,12 @@ https://127.0.0.1:9443 {{
 )]
 async fn journey_08_the_cookie_is_secure_exactly_when_dux_knows_it_is_https() {
     journey("08-https", Duration::from_secs(240), async {
-        let serve = serve_route();
+        let serve = serve_route_json();
         let dux = Dux::start(
             DuxOptions::local()
                 .with_tailnet(4100)
-                .with_published(8443)
-                .with_published(9443)
+                .with_published(SERVE_PORT)
+                .with_published(PROXY_PORT)
                 .with_hook(&format!(
                     "set -e\nmkdir -p /data/tailscale\nprintf '%s' '{serve}' > /data/tailscale/serve.json\n"
                 ))
@@ -222,12 +196,14 @@ async fn journey_08_the_cookie_is_secure_exactly_when_dux_knows_it_is_https() {
                 .with_config("server.auth.require", "everywhere"),
         )
         .await;
-        let caddy = Sidecar::caddy(&dux, &caddyfile(), &[8443, 9443]).await;
+        dux.client_on(4100).await.wait_answering().await;
+        let caddy =
+            Sidecar::caddy(&dux, &serve_and_proxy_caddyfile(), &[SERVE_PORT, PROXY_PORT]).await;
         let root = caddy.caddy_root().await;
-        let serve_port = dux.host_port(8443).await;
-        let proxy_port = dux.host_port(9443).await;
+        let proxy_port = dux.host_port(PROXY_PORT).await;
 
-        let via_serve = Client::with_root(&format!("https://127.0.0.1:{serve_port}"), &root);
+        let via_serve = serve_client(&dux, &root).await;
+        assert_eq!(via_serve.base().host_str(), Some(TAILNET_NAME));
         let status = via_serve.auth_status().await;
         assert_eq!(status["transport_encrypted"], json!(true), "{status}");
         let login = via_serve.login(STRONG_PASSWORD).await;
@@ -248,22 +224,40 @@ async fn journey_08_the_cookie_is_secure_exactly_when_dux_knows_it_is_https() {
         );
 
         let via_proxy = Client::with_root(&format!("https://127.0.0.1:{proxy_port}"), &root);
-        let login = via_proxy.login(STRONG_PASSWORD).await;
-        assert_eq!(login.status, 204, "{}", login.describe());
-        let (_, attributes) = session_cookie(&login);
-        assert!(
-            !attributes.contains(&"secure".to_string()),
-            "an arbitrary proxy's X-Forwarded-Proto is not trusted under auto: {attributes:?}"
-        );
+        let posing = via_proxy
+            .fresh()
+            .with_header("Tailscale-User-Login", "owner@example.com")
+            .with_header("Tailscale-User-Name", "Owner");
+        for (what, client) in [
+            ("an arbitrary proxy", &via_proxy),
+            ("an arbitrary proxy carrying client-sent identity headers", &posing),
+        ] {
+            let login = client.login(STRONG_PASSWORD).await;
+            assert_eq!(login.status, 204, "{what}: {}", login.describe());
+            let (_, attributes) = session_cookie(&login);
+            assert!(
+                !attributes.contains(&"secure".to_string()),
+                "{what} is not the confirmed serve route under auto: {attributes:?}"
+            );
+            assert_eq!(
+                client.auth_status().await["transport_encrypted"],
+                json!(false),
+                "{what} is not known to be encrypted end to end"
+            );
+        }
 
         let run = dux.config_set("server.auth.cookie_secure", "always").await;
         assert_eq!(run.code, 0, "{}", run.output());
-        eventually("cookie_secure = always to apply", Duration::from_secs(20), || async {
-            let login = via_proxy.fresh().login(STRONG_PASSWORD).await;
-            (login.status == 204)
-                .then(|| session_cookie(&login).1)
-                .filter(|attributes| attributes.contains(&"secure".to_string()))
-        })
+        eventually(
+            "cookie_secure = always to apply",
+            Duration::from_secs(20),
+            || async {
+                let login = via_proxy.fresh().login(STRONG_PASSWORD).await;
+                (login.status == 204)
+                    .then(|| session_cookie(&login).1)
+                    .filter(|attributes| attributes.contains(&"secure".to_string()))
+            },
+        )
         .await;
     })
     .await;

@@ -4,64 +4,71 @@
 //!
 //! Where the browser sits decides who dux thinks it is:
 //!
-//! - [`Browser::on_network`] puts it on a Docker network beside dux, a separate
+//! - [`Browser::on_network`] puts it on a journey network beside dux, a separate
 //!   machine as far as dux can tell: a client from the network.
 //! - [`Browser::beside`] puts it in dux's own network namespace, so it reaches
 //!   dux on loopback: this machine. dux must publish [`WEBDRIVER_PORT`] for it.
+//!
+//! chromedriver takes commands from exactly one address: the Docker gateway its
+//! container sees, which is where the host's connection through the published
+//! port arrives from. That port is published on the host's loopback only (see
+//! [`crate::container`]), so nothing beyond this machine can reach the driver.
 
 use std::time::Duration;
 
 use fantoccini::{Client as WebDriver, ClientBuilder, Locator};
 use hyper_util::client::legacy::connect::HttpConnector;
-use testcontainers::bollard::models::HostConfig;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
+use crate::container::{identity, labelled, loopback_publish, share_namespace_of};
 use crate::dux::Dux;
-use crate::image::journey_image;
-use crate::util::{eventually, suffix};
+use crate::image::{JourneyNetwork, Reaper, journey_image};
+use crate::util::eventually;
 
 /// The port chromedriver listens on inside its container.
 pub const WEBDRIVER_PORT: u16 = 4444;
 
-/// One browser. The session ends and the container is removed when dropped
-/// (call [`Browser::quit`] first for a clean session end).
+/// One browser. The container is removed when dropped (call [`Browser::quit`]
+/// first for a clean session end).
 pub struct Browser {
     pub driver: WebDriver,
-    _container: Option<ContainerAsync<GenericImage>>,
+    container: ContainerAsync<GenericImage>,
+    _reaper: Reaper,
 }
 
+/// chromedriver, allowing commands only from the container's default gateway.
 fn chromedriver_command() -> Vec<String> {
     vec![
-        "chromedriver".to_string(),
-        format!("--port={WEBDRIVER_PORT}"),
-        // The test process is outside the container, so the driver has to take
-        // a remote connection; it is reachable only through a loopback-published
-        // port on the host.
-        "--allowed-ips=".to_string(),
-        "--allowed-origins=*".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        format!(
+            "gateway=$(ip route show default | awk '{{print $3; exit}}') && \
+             exec chromedriver --port={WEBDRIVER_PORT} --allowed-ips=\"$gateway\""
+        ),
     ]
 }
 
 impl Browser {
-    /// A browser on `network`, which `dux` must also be on.
-    pub async fn on_network(network: &str) -> Browser {
+    /// A browser on `network`, which dux must also be on.
+    pub async fn on_network(network: &JourneyNetwork) -> Browser {
         let (image, tag) = journey_image().await;
-        let container = GenericImage::new(image, tag)
+        let (name, reaper, logs) = identity("browser");
+        let request = GenericImage::new(image, tag)
             .with_entrypoint("/usr/bin/env")
             .with_wait_for(WaitFor::message_on_stdout(
                 "ChromeDriver was started successfully",
             ))
-            .with_exposed_port(WEBDRIVER_PORT.tcp())
-            .with_container_name(format!("dux-journeys-browser-{}", suffix()))
-            .with_label("dux-journeys", "1")
-            .with_network(network)
+            .with_exposed_port(WEBDRIVER_PORT.tcp());
+        let container = labelled(request.into(), &name, &logs)
+            .with_host_config_modifier(loopback_publish(vec![WEBDRIVER_PORT]))
+            .with_network(network.name())
             .with_shm_size(512 * 1024 * 1024)
             .with_cmd(chromedriver_command())
             .start()
             .await
-            .unwrap_or_else(|err| panic!("start the browser container: {err}"));
+            .unwrap_or_else(|err| panic!("start the browser container {name}: {err}"));
         let port = container
             .get_host_port_ipv4(WEBDRIVER_PORT.tcp())
             .await
@@ -69,7 +76,8 @@ impl Browser {
         let driver = connect(port).await;
         Browser {
             driver,
-            _container: Some(container),
+            container,
+            _reaper: reaper,
         }
     }
 
@@ -77,30 +85,31 @@ impl Browser {
     /// have been started with `with_published(WEBDRIVER_PORT)`.
     pub async fn beside(dux: &Dux) -> Browser {
         let (image, tag) = journey_image().await;
-        let namespace = format!("container:{}", dux.id());
-        let _container = GenericImage::new(image, tag)
+        let (name, reaper, logs) = identity("browser");
+        let request = GenericImage::new(image, tag)
             .with_entrypoint("/usr/bin/env")
             .with_wait_for(WaitFor::message_on_stdout(
                 "ChromeDriver was started successfully",
-            ))
-            .with_container_name(format!("dux-journeys-browser-{}", suffix()))
-            .with_label("dux-journeys", "1")
+            ));
+        let container = labelled(request.into(), &name, &logs)
+            .with_host_config_modifier(share_namespace_of(dux.id()))
             .with_shm_size(512 * 1024 * 1024)
             .with_cmd(chromedriver_command())
-            .with_host_config_modifier(move |host: &mut HostConfig| {
-                host.network_mode = Some(namespace.clone());
-                host.publish_all_ports = Some(false);
-                host.port_bindings = None;
-            })
             .start()
             .await
-            .unwrap_or_else(|err| panic!("start the browser container: {err}"));
+            .unwrap_or_else(|err| panic!("start the browser container {name}: {err}"));
         let port = dux.host_port(WEBDRIVER_PORT).await;
         let driver = connect(port).await;
         Browser {
             driver,
-            _container: Some(_container),
+            container,
+            _reaper: reaper,
         }
+    }
+
+    /// The browser container's id, for inspecting what it publishes.
+    pub fn container_id(&self) -> &str {
+        self.container.id()
     }
 
     /// Go to `url` and wait for the document to finish loading.
@@ -156,7 +165,7 @@ impl Browser {
 
     /// End the WebDriver session.
     pub async fn quit(self) {
-        let _ = self.driver.close().await;
+        let _ = self.driver.clone().close().await;
     }
 }
 

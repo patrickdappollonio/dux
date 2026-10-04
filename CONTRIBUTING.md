@@ -202,10 +202,20 @@ The journeys for the web password login run only with `--features auth`. They
 were written before the feature, so until it is built they fail; that is what
 they are for. Without the feature they are listed as ignored, with the reason.
 
-Every container a journey starts is labelled `dux-journeys` and removed when the
-journey ends, pass or fail. If a run is killed halfway, clean up with
-`docker ps -aq --filter label=dux-journeys=1 | xargs -r docker rm -f`. The
-journeys never touch your own dux or the preview container. CI runs them on every
+Every container and network a journey starts is labelled `dux-journeys` and
+removed when the journey ends, pass, fail or timeout; Ctrl-C removes the
+containers too, and the next run removes whatever a killed run left. Every
+published port binds `127.0.0.1` only, so nothing a journey starts is reachable
+from your network. To clean up by hand:
+
+```bash
+docker ps -aq --filter label=dux-journeys=1 | xargs -r docker rm -f
+docker network ls -q --filter label=dux-journeys=1 | xargs -r docker network rm
+```
+
+The journeys never touch your own dux or the preview container. The nginx, Caddy
+and base images are pinned by digest in `tools/preview-env/journey-images.env`,
+which says how to move them forward. CI runs them on every
 push in `.github/workflows/journeys.yml`, cancelling the run for an older commit
 when a newer one arrives.
 

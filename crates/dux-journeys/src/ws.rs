@@ -91,6 +91,33 @@ pub async fn connect_ok(client: &Client, path: &str) -> Socket {
     }
 }
 
+/// The close code dux sends a socket whose session is missing, ended or revoked.
+pub const CLOSE_SIGNED_OUT: u16 = 4401;
+
+/// The close code dux sends a socket from a blocked address.
+pub const CLOSE_BLOCKED: u16 = 4403;
+
+/// Open `path` as `client` and require what dux does to a socket it will not
+/// serve: ACCEPT the upgrade (a refused upgrade reaches a browser as a bare
+/// network drop, code 1006, which it cannot tell from an outage) and then close
+/// it with `code`.
+pub async fn assert_accepted_then_closed(client: &Client, path: &str, code: u16, what: &str) {
+    let mut socket = match connect(client, path).await {
+        Ok(socket) => socket,
+        Err(refused) => panic!(
+            "{what}: the upgrade of {path} must be accepted and then closed with {code}, \
+             not refused with {} {}",
+            refused.status, refused.body
+        ),
+    };
+    let ended = socket.wait_ended(Duration::from_secs(10)).await;
+    assert_eq!(
+        ended,
+        Some(Ended::Closed(code)),
+        "{what}: {path} must close with {code}"
+    );
+}
+
 impl Socket {
     /// Send a text frame.
     pub async fn send_text(&mut self, text: &str) {

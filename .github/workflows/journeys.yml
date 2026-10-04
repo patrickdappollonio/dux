@@ -14,6 +14,10 @@ concurrency:
   group: journeys-${{ github.ref }}
   cancel-in-progress: true
 
+# Reading the repository is all this workflow does with its token.
+permissions:
+  contents: read
+
 env:
   # Which journeys run. `journeys` is every journey that works today (the smoke
   # journeys, which prove the harness). `auth` adds the journeys written first
@@ -64,6 +68,12 @@ jobs:
       - name: Build the dux binary
         run: cargo build --profile journeys --bin dux
 
+      # The third-party images (the journey image's base, nginx, Caddy), pinned
+      # by digest in the one file the harness reads too; how to move one forward
+      # is written at its top.
+      - name: Read the pinned images
+        run: grep -E '^JOURNEY_[A-Z_]+_IMAGE=' tools/preview-env/journey-images.env >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # The preview environment's image with its journey tools on and its agent
@@ -74,6 +84,7 @@ jobs:
         with:
           context: tools/preview-env
           build-args: |
+            BASE_IMAGE=${{ env.JOURNEY_BASE_IMAGE }}
             AGENT_CLIS=0
             JOURNEY_TOOLS=1
           labels: dux-journeys=1
@@ -86,8 +97,8 @@ jobs:
       # inside whichever journey happens to start the first proxy.
       - name: Pull the proxy images
         run: |
-          docker pull nginx:1-alpine
-          docker pull caddy:2-alpine
+          docker pull "$JOURNEY_NGINX_IMAGE"
+          docker pull "$JOURNEY_CADDY_IMAGE"
 
       - name: Build the journeys
         run: cargo test -p dux-journeys --features "$JOURNEY_FEATURES" --no-run
@@ -101,4 +112,4 @@ jobs:
         if: always()
         run: |
           docker ps -aq --filter label=dux-journeys=1 | xargs -r docker rm -f
-          docker network ls -q --filter name=dux-journeys | xargs -r docker network rm
+          docker network ls -q --filter label=dux-journeys=1 | xargs -r docker network rm

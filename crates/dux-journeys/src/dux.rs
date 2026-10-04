@@ -9,28 +9,29 @@
 //! - **This machine**: `curl` run inside the container against loopback.
 //!   [`Dux::inside`].
 //! - **A tailnet peer**: the host again, through a published port the container
-//!   relays onto the stand-in Tailscale address, so the connection arrives on
-//!   dux's Tailscale listener. [`Dux::client_on`] with a relay port.
+//!   relays onto the stand-in Tailscale address FROM a peer address of its own
+//!   ([`crate::TAILNET_PEER_IP`]), so the connection arrives on dux's Tailscale
+//!   listener from a tailnet address that is not dux's. [`Dux::client_on`] with
+//!   a relay port.
 //!
-//! The container is removed when the [`Dux`] drops, whether the journey passed
-//! or panicked; a panicking journey prints everything the container said first.
+//! Every published port binds the host's loopback only (see
+//! [`crate::container`]). The container is removed when the [`Dux`] drops,
+//! whether the journey passed, panicked or ran out of time, and a journey that
+//! fails prints everything the container said (see [`crate::journey`]).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
-use futures_util::FutureExt as _;
-use testcontainers::core::logs::LogFrame;
-use testcontainers::core::logs::consumer::LogConsumer;
 use testcontainers::core::{AccessMode, ExecCommand, IntoContainerPort, Mount, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 use crate::client::{Client, Response, parse_raw_response};
-use crate::image::{dux_binary, journey_image};
-use crate::util::{eventually, shell_quote, suffix};
-use crate::{DUX_PORT, TAILNET_IP};
+use crate::container::{identity, labelled, loopback_publish};
+use crate::image::{JourneyNetwork, Reaper, dux_binary, journey_image};
+use crate::util::{LogBuffer, eventually, shell_quote, suffix};
+use crate::{DUX_PORT, TAILNET_IP, TAILNET_PEER_IP};
 
 /// Where dux listens inside its container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,12 +97,14 @@ impl DuxOptions {
     }
 
     /// Put the stand-in `tailscale` CLI on PATH (answering with [`TAILNET_IP`])
-    /// and relay `relay_port` onto dux's Tailscale listener, so the host can be a
-    /// tailnet peer through it.
+    /// and relay `relay_port` onto dux's Tailscale listener from the peer's own
+    /// address ([`TAILNET_PEER_IP`]), so the host can be a tailnet peer through it.
     pub fn with_tailnet(mut self, relay_port: u16) -> Self {
         self.fake_tailscale = true;
-        self.relays
-            .push((relay_port, format!("{TAILNET_IP}:{DUX_PORT}")));
+        self.relays.push((
+            relay_port,
+            format!("{TAILNET_IP}:{DUX_PORT},bind={TAILNET_PEER_IP}"),
+        ));
         self
     }
 
@@ -176,11 +179,10 @@ impl DuxOptions {
         )
     }
 
-    /// Join a Docker network (created if it does not exist, removed with the
-    /// last container on it), so a browser or proxy container can reach dux by
-    /// its address there.
-    pub fn with_network(mut self, network: &str) -> Self {
-        self.network = Some(network.to_string());
+    /// Join a journey's own Docker network, so a browser container on it can
+    /// reach dux by its address there.
+    pub fn with_network(mut self, network: &JourneyNetwork) -> Self {
+        self.network = Some(network.name().to_string());
         self
     }
 }
@@ -212,24 +214,12 @@ impl Exec {
     }
 }
 
-/// Collects everything the container prints, for failure reports and for
-/// journeys that wait on a log line.
-#[derive(Clone, Default)]
-struct LogBuffer(Arc<Mutex<String>>);
-
-impl LogConsumer for LogBuffer {
-    fn accept<'a>(&'a self, record: &'a LogFrame) -> futures_util::future::BoxFuture<'a, ()> {
-        async move {
-            let text = String::from_utf8_lossy(record.bytes());
-            self.0.lock().expect("log buffer").push_str(&text);
-        }
-        .boxed()
-    }
-}
-
 /// One running dux. Dropping it removes the container.
 pub struct Dux {
     container: ContainerAsync<GenericImage>,
+    // After the container, so it drops second: it removes a container a
+    // cancelled start never handed over, and is a no-op otherwise.
+    _reaper: Reaper,
     logs: LogBuffer,
     bind: Bind,
     name: String,
@@ -239,31 +229,27 @@ impl Dux {
     /// Start a dux and wait until it answers.
     pub async fn start(options: DuxOptions) -> Dux {
         let (image_name, tag) = journey_image().await;
-        let name = format!("dux-journeys-{}", suffix());
-        let logs = LogBuffer::default();
+        let (name, reaper, logs) = identity("dux");
 
+        let mut ports = vec![DUX_PORT];
+        ports.extend(options.relays.iter().map(|(port, _)| *port));
+        ports.extend(options.published.iter().copied());
         let mut image = GenericImage::new(image_name, tag)
-            .with_wait_for(WaitFor::message_on_stdout("entrypoint: "))
-            .with_exposed_port(DUX_PORT.tcp());
-        for (port, _) in &options.relays {
-            image = image.with_exposed_port(port.tcp());
-        }
-        for port in &options.published {
+            .with_wait_for(WaitFor::message_on_stdout("entrypoint: "));
+        for port in &ports {
             image = image.with_exposed_port(port.tcp());
         }
 
         let binary = dux_binary();
-        let mut request = image
-            .with_container_name(&name)
-            .with_label("dux-journeys", "1")
+        let mut request = labelled(image.into(), &name, &logs)
+            .with_host_config_modifier(loopback_publish(ports))
             .with_mount(
                 Mount::bind_mount(binary.to_string_lossy(), "/usr/local/bin/dux")
                     .with_access_mode(AccessMode::ReadOnly),
             )
             .with_env_var("DUX_PORT", DUX_PORT.to_string())
             .with_env_var("DUX_TAIL_LOG", "1")
-            .with_startup_timeout(Duration::from_secs(120))
-            .with_log_consumer(logs.clone());
+            .with_startup_timeout(Duration::from_secs(120));
 
         request = match options.bind {
             Bind::Everywhere => request,
@@ -307,6 +293,7 @@ impl Dux {
             .unwrap_or_else(|err| panic!("start the dux container {name}: {err}"));
         let dux = Dux {
             container,
+            _reaper: reaper,
             logs,
             bind: options.bind,
             name,
@@ -454,7 +441,7 @@ impl Dux {
 
     /// Everything the container has printed so far (dux's output and dux.log).
     pub fn logs(&self) -> String {
-        self.logs.0.lock().expect("log buffer").clone()
+        self.logs.text()
     }
 
     /// Wait until the container has printed `needle`.
@@ -561,6 +548,40 @@ impl Dux {
             .to_string()
     }
 
+    /// The connections dux has accepted on its port right now, as the kernel
+    /// sees them: `(dux's local address, the peer's address)`, ports dropped.
+    /// This is the peer address dux itself is handed for each connection, so a
+    /// journey can prove which class of client it really was.
+    pub async fn observed_peers(&self) -> Vec<(String, String)> {
+        let listed = self
+            .exec_ok(&format!(
+                "ss -Htn state established '( sport = :{DUX_PORT} )' | awk '{{print $3, $4}}'"
+            ))
+            .await;
+        listed
+            .lines()
+            .filter_map(|line| {
+                let (local, peer) = line.split_once(' ')?;
+                Some((strip_port(local), strip_port(peer)))
+            })
+            .collect()
+    }
+
+    /// The addresses dux is listening on, ports included (`127.0.0.1:3890`).
+    pub async fn listening(&self) -> Vec<String> {
+        self.exec_ok("ss -Htln | awk '{print $4}'")
+            .await
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The host's own `docker inspect` view of this container's published
+    /// ports, for the test that nothing is published beyond loopback.
+    pub async fn published_bindings(&self) -> Vec<(String, String, String)> {
+        crate::container::published_bindings(self.id()).await
+    }
+
     /// This container's address on its Docker network, for a browser or proxy
     /// container on the same network. An IP literal, because dux's Host guard
     /// admits one for a wildcard bind and refuses a name nobody configured.
@@ -609,17 +630,16 @@ impl Dux {
     }
 }
 
-impl Drop for Dux {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            eprintln!(
-                "\n----- everything {} printed (dux output and dux.log) -----\n{}\n----- end of {} -----\n",
-                self.name,
-                self.logs(),
-                self.name
-            );
-        }
-    }
+/// `1.2.3.4:5` or `[::1]:5` without its port, and an IPv4-mapped IPv6 address
+/// as the IPv4 address it is.
+fn strip_port(address: &str) -> String {
+    let host = address
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(address)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    host.trim_start_matches("::ffff:").to_string()
 }
 
 /// A client on this machine: `curl` inside the dux container, against loopback,

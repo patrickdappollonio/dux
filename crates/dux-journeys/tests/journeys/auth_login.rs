@@ -6,7 +6,7 @@ use std::time::Duration;
 use dux_journeys::api::{add_demo_project, create_agent, projects, session_id};
 use dux_journeys::client::cookie_attributes;
 use dux_journeys::util::suffix;
-use dux_journeys::ws::{connect, connect_ok};
+use dux_journeys::ws::{CLOSE_BLOCKED, CLOSE_SIGNED_OUT, assert_accepted_then_closed, connect_ok};
 use dux_journeys::{
     Client, Dux, DuxOptions, OTHER_STRONG_PASSWORD, Response, STRONG_PASSWORD, journey,
 };
@@ -36,6 +36,18 @@ pub fn session_cookie(response: &Response) -> (String, Vec<String>) {
     (pair, cookie_attributes(raw))
 }
 
+/// Under `require = "network"`, `required_here` is true exactly for a client
+/// from the network: assert it, so a journey that means to act as one is
+/// proven to be one (and not, say, a forwarded loopback dux treats as local).
+pub async fn assert_network_class(client: &Client) {
+    let status = client.auth_status().await;
+    assert_eq!(
+        status["required_here"],
+        json!(true),
+        "this client must be a client from the network: {status}"
+    );
+}
+
 /// Situation: `dux server` reachable from the network, with a password set
 /// through `dux config set server.auth.password --stdin` and every other auth
 /// setting at its default (`require = "network"`, so the password applies to
@@ -44,12 +56,15 @@ pub fn session_cookie(response: &Response) -> (String, Vec<String>) {
 /// Task: a person on another machine signs in, looks at their projects, and
 /// signs out.
 ///
-/// Action: read the auth status; try to list projects; sign in with the right
-/// password; list projects; sign out; list projects again; then replay the
-/// cookie saved from before signing out.
+/// Action: read the auth status; fetch every public route; try to list
+/// projects; sign in with the right password; list projects; sign out; list
+/// projects again; then replay the cookie saved from before signing out.
 ///
-/// Result: the status says a password is set and needed here and that this
-/// client is signed out; `/healthz` stays public; listing before signing in is
+/// Result: the status says a password is set and needed here, that this client
+/// is signed out, that the config is not broken, and the minimums in force (12
+/// characters, score 2); the public routes (the page, its assets, the icons, the
+/// service worker, the manifest, `/healthz`) answer with no session; listing
+/// before signing in is
 /// refused with 401 `auth_required`; signing in answers 204 with one cookie that
 /// is `HttpOnly`, `SameSite=Strict`, `Path=/`, carries no `Domain`, and is not
 /// `Secure` on plain HTTP; the list then answers; signing out answers 204 and
@@ -70,14 +85,34 @@ async fn journey_01_sign_in_list_projects_sign_out_and_be_refused() {
         assert_eq!(status["password_set"], json!(true), "{status}");
         assert_eq!(status["required_here"], json!(true), "{status}");
         assert_eq!(status["signed_in"], json!(false), "{status}");
+        assert!(status["auth_broken"].is_null(), "{status}");
+        assert_eq!(status["minimum_password_length"], json!(12), "{status}");
+        assert_eq!(status["minimum_password_score"], json!(2), "{status}");
 
-        let health = client.get("/healthz").await;
-        assert_eq!(
-            health.status,
-            200,
-            "/healthz stays public: {}",
-            health.describe()
-        );
+        let page = client.get("/").await;
+        assert_eq!(page.status, 200, "the page is public: {}", page.describe());
+        let asset = page
+            .body
+            .split('"')
+            .find(|part| part.starts_with("/assets/"))
+            .unwrap_or_else(|| panic!("the page links an asset: {}", page.body))
+            .to_string();
+        for path in [
+            "/index.html",
+            asset.as_str(),
+            "/favicon.png",
+            "/sw.js",
+            "/manifest.webmanifest",
+            "/healthz",
+        ] {
+            let response = client.get(path).await;
+            assert_eq!(
+                response.status,
+                200,
+                "{path} is public: {}",
+                response.describe()
+            );
+        }
 
         assert_auth_required(&client.get("/api/v1/projects").await, "listing projects");
 
@@ -141,8 +176,9 @@ async fn journey_01_sign_in_list_projects_sign_out_and_be_refused() {
 /// create an agent; open its terminal socket with the session cookie, claim it,
 /// type `hello` and Enter; read the answer; close the socket.
 ///
-/// Result: both sockets are refused before signing in (the upgrade answers 401);
-/// after signing in every step works as it does with no password: the project
+/// Result: both sockets are accepted and then closed with 4401 before signing in
+/// (a refused upgrade would reach a browser as a bare network drop); after
+/// signing in every step works as it does with no password: the project
 /// is listed, the agent appears, and the terminal shows `you typed hello`.
 #[tokio::test(flavor = "multi_thread")]
 #[cfg_attr(
@@ -159,12 +195,14 @@ async fn journey_02_signed_in_person_adds_a_project_and_talks_to_an_agent() {
         .await;
         let client = dux.client().await;
 
-        let refused = connect(&client, "/ws/events").await.err();
-        assert_eq!(
-            refused.as_ref().map(|r| r.status),
-            Some(401),
-            "the events socket needs a session: {refused:?}"
-        );
+        assert_network_class(&client).await;
+        assert_accepted_then_closed(
+            &client,
+            "/ws/events",
+            CLOSE_SIGNED_OUT,
+            "the events socket before signing in",
+        )
+        .await;
 
         client.login_ok(STRONG_PASSWORD).await;
         let project = add_demo_project(&client).await;
@@ -177,15 +215,13 @@ async fn journey_02_signed_in_person_adds_a_project_and_talks_to_an_agent() {
         let name = format!("journey-{}", suffix());
         let id = session_id(&create_agent(&client, &project, &name).await);
 
-        let stranger = client.fresh();
-        let refused = connect(&stranger, &format!("/ws/sessions/{id}/pty"))
-            .await
-            .err();
-        assert_eq!(
-            refused.as_ref().map(|r| r.status),
-            Some(401),
-            "a terminal socket needs a session: {refused:?}"
-        );
+        assert_accepted_then_closed(
+            &client.fresh(),
+            &format!("/ws/sessions/{id}/pty"),
+            CLOSE_SIGNED_OUT,
+            "a terminal socket with no session",
+        )
+        .await;
 
         let mut pty = connect_ok(&client, &format!("/ws/sessions/{id}/pty")).await;
         pty.next_event("connected", Duration::from_secs(20))
@@ -217,14 +253,15 @@ async fn journey_02_signed_in_person_adds_a_project_and_talks_to_an_agent() {
 /// to; sign in again. Then, from this machine, fail more times than the limit
 /// and sign in with the right password.
 ///
-/// Result: the client's address (the one dux sees: the Docker bridge gateway)
-/// is appended to `[server.auth] blocked_addresses` in config.toml; from then
-/// on even the right password gets 403 `blocked` with a `where` naming the
-/// config file and the setting, and so does every other request and the socket
-/// upgrade; once the owner removes it, the right password signs in. From this
-/// machine the failures are slowed (429 with `Retry-After` is allowed) but
-/// never blocked: loopback never lands in the list and the right password still
-/// signs in.
+/// Result: any slow-down is a 429 carrying `Retry-After` and the same number
+/// as `retry_after_seconds` in its body; the client's address (the one dux sees:
+/// the Docker bridge gateway) is appended to `[server.auth] blocked_addresses`
+/// in config.toml; from then on even the right password gets 403 `blocked` with
+/// a `where` naming the config file and the setting, and so does the auth
+/// status, every other request, and the events socket (accepted, then closed
+/// with 4403); once the owner removes it, the right password signs in. From
+/// this machine the failures are slowed (429) but never blocked: loopback never
+/// lands in the list and the right password still signs in.
 #[tokio::test(flavor = "multi_thread")]
 #[cfg_attr(
     not(feature = "auth"),
@@ -281,10 +318,22 @@ async fn journey_03_repeated_failures_block_the_address_until_the_owner_lifts_it
             place.contains("config.toml") && place.contains("blocked_addresses"),
             "the refusal says where to lift the block: {place:?}"
         );
-        let other = client.get("/api/v1/projects").await;
-        assert_eq!(other.status, 403, "{}", other.describe());
-        let socket = connect(&client, "/ws/events").await.err();
-        assert_eq!(socket.map(|r| r.status), Some(403));
+        for path in ["/api/v1/projects", "/api/v1/auth/status"] {
+            let other = client.get(path).await;
+            assert_eq!(
+                (other.status, other.error_code().as_deref()),
+                (403, Some("blocked")),
+                "{path} from a blocked address: {}",
+                other.describe()
+            );
+        }
+        assert_accepted_then_closed(
+            &client,
+            "/ws/events",
+            CLOSE_BLOCKED,
+            "the events socket from a blocked address",
+        )
+        .await;
 
         // The owner's hand edit: empty the list, whether dux wrote it on one
         // line or across several, and leave everything else alone.
@@ -354,6 +403,12 @@ async fn wrong_password_until_counted(client: &Client) -> Response {
             .header("retry-after")
             .and_then(|v| v.parse().ok())
             .expect("a 429 carries Retry-After");
+        assert_eq!(
+            response.json()["retry_after_seconds"],
+            json!(wait),
+            "the body's retry_after_seconds matches Retry-After: {}",
+            response.describe()
+        );
         tokio::time::sleep(Duration::from_secs(wait.max(1))).await;
     }
 }
@@ -365,20 +420,25 @@ async fn wrong_password_until_counted(client: &Client) -> Response {
 /// else who can reach dux may do it first and lock the owner out.
 ///
 /// Action: from the network, try to set the first password; from this machine,
-/// set it; from the network, sign in with it, then try to change it with no
-/// current password and with a wrong one, then change it with the right one;
-/// replay the session from before the change. On the tailnet dux, set the first
-/// password through the tailnet.
+/// try a common one and a short one, then set a strong one; from the network,
+/// sign in with it, then try to change it with no current password and with a
+/// wrong one, then change it with the right one; replay the session from
+/// before the change. On the tailnet dux, set the first password through the
+/// tailnet.
 ///
 /// Result: the network attempt is refused (403) and leaves config.toml with no
-/// hash, while the status says `can_set_first_password` is false there; this
-/// machine's attempt answers 204, writes a `password_hash` that is an Argon2id
-/// PHC string (never the password), and the status everywhere says a password
-/// is set; the new password signs in from the network; a change without the
-/// current password or with a wrong one is refused and changes nothing; the
-/// change with the right one answers 204 and signs everyone out, so the old
-/// session is refused and the new password signs in. A tailnet peer may set the
-/// first password too.
+/// hash, while the status says `can_set_first_password` is false there; from
+/// this machine the common password gets 400 `weak_password` with its score and
+/// zxcvbn's feedback, the short one 400 `password_too_short` naming the minimum
+/// (12), and the strong one 204, writing a `password_hash` that is an Argon2id
+/// PHC string (never the password), after which the status everywhere says a
+/// password is set; the new password signs in from the network; a change with no
+/// current password is refused without claiming the client is signed out (not
+/// 401), and one with a wrong current password gets 403
+/// `wrong_current_password`, neither changing anything; the change with the
+/// right one answers 204 and signs everyone out, so the old session is refused
+/// and the new password signs in. A tailnet peer may set the first password
+/// too.
 #[tokio::test(flavor = "multi_thread")]
 #[cfg_attr(
     not(feature = "auth"),
@@ -406,6 +466,31 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
             inside.auth_status().await["can_set_first_password"],
             json!(true)
         );
+        let weak = inside
+            .post_json("/api/v1/auth/password", &json!({ "new": "password1234" }))
+            .await;
+        assert_eq!(
+            (weak.status, weak.error_code().as_deref()),
+            (400, Some("weak_password")),
+            "{}",
+            weak.describe()
+        );
+        let body = weak.json();
+        assert!(body["score"].is_number(), "{body}");
+        assert!(body["message"].is_string(), "{body}");
+        assert!(body["feedback"]["suggestions"].is_array(), "{body}");
+        let short = inside
+            .post_json("/api/v1/auth/password", &json!({ "new": "Qz7#vL9p" }))
+            .await;
+        assert_eq!(
+            (short.status, short.error_code().as_deref()),
+            (400, Some("password_too_short")),
+            "{}",
+            short.describe()
+        );
+        assert_eq!(short.json()["minimum"], json!(12));
+        assert!(!dux.config_text().await.contains("$argon2id$"));
+
         let set = inside
             .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
             .await;
@@ -421,17 +506,34 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
         network.login_ok(STRONG_PASSWORD).await;
         let before_change = network.cookie_header().expect("a session cookie");
 
-        for body in [
-            json!({ "new": OTHER_STRONG_PASSWORD }),
-            json!({ "current": "wrong-current-password-123", "new": OTHER_STRONG_PASSWORD }),
-        ] {
-            let refused = network.post_json("/api/v1/auth/password", &body).await;
-            assert!(
-                matches!(refused.status, 401 | 403),
-                "a change without the right current password is refused: {}",
-                refused.describe()
-            );
-        }
+        let missing = network
+            .post_json(
+                "/api/v1/auth/password",
+                &json!({ "new": OTHER_STRONG_PASSWORD }),
+            )
+            .await;
+        assert!(
+            matches!(missing.status, 400 | 403),
+            "a change with no current password is refused, and not as signed out: {}",
+            missing.describe()
+        );
+        let wrong = network
+            .post_json(
+                "/api/v1/auth/password",
+                &json!({ "current": "wrong-current-password-123", "new": OTHER_STRONG_PASSWORD }),
+            )
+            .await;
+        assert_eq!(
+            (wrong.status, wrong.error_code().as_deref()),
+            (403, Some("wrong_current_password")),
+            "{}",
+            wrong.describe()
+        );
+        assert_eq!(
+            network.get("/api/v1/projects").await.status,
+            200,
+            "a refused change leaves the session alone"
+        );
         let changed = network
             .post_json(
                 "/api/v1/auth/password",
@@ -452,7 +554,7 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
 
         let tailnet_dux = Dux::start(DuxOptions::local().with_tailnet(4100)).await;
         let peer = tailnet_dux.client_on(4100).await;
-        crate::auth_network::wait_tailnet_leg(&peer).await;
+        peer.wait_answering().await;
         let set = peer
             .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
             .await;
