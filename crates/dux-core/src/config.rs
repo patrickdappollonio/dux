@@ -2892,9 +2892,11 @@ impl std::fmt::Display for ConfigLoadError {
             ),
             ConfigLoadProblem::AuthInvalid(reason) => write!(
                 f,
-                "[server.auth] in {path} is invalid: {reason}. dux will not guess at a \
-                 password setting, so fix that section by hand, or set a new password with \
-                 `dux config set server.auth.password`."
+                "[server.auth] in {path} is invalid, and dux will not guess at a password \
+                 setting. Fix the setting named below by editing that file, or with \
+                 `dux config set server.auth.<setting> <value>` (`dux config get server.auth` \
+                 shows what the file holds; a new password is \
+                 `dux config set server.auth.password`).\n{reason}"
             ),
         }
     }
@@ -2915,9 +2917,10 @@ impl std::error::Error for ConfigLoadError {}
 /// not TOML at all, where the section cannot be found) is an error rather than
 /// a reset, because its default is "no password".
 fn recover_config(raw: &str) -> Result<Config, ConfigLoadProblem> {
+    let auth = auth_section_of(raw)?;
     let mut doc: toml::Table = toml::from_str::<toml::Table>(raw)
         .map_err(|e| ConfigLoadProblem::NotToml(e.to_string()))?;
-    let auth = take_auth_section(&mut doc)?;
+    take_auth_section(&mut doc)?;
     let mut config = recover_config_table(doc);
     config.server.auth = auth;
     Ok(config)
@@ -2943,10 +2946,28 @@ fn take_auth_section(doc: &mut toml::Table) -> Result<ServerAuthConfig, ConfigLo
 /// The `[server.auth]` section of a whole config file's text, read exactly as
 /// [`load_config`] reads it. A writer checks a candidate file with this
 /// before it lands, so nothing it writes can stop dux from starting.
+///
+/// Read from the user's own text, so an error quotes their file with its real
+/// line numbers rather than a re-serialized copy of the section.
 pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, ConfigLoadProblem> {
-    let mut doc: toml::Table = toml::from_str::<toml::Table>(raw)
-        .map_err(|e| ConfigLoadProblem::NotToml(e.to_string()))?;
-    take_auth_section(&mut doc)
+    // Only `server.auth` is read; every other key is ignored here.
+    #[derive(Deserialize)]
+    struct File {
+        #[serde(default)]
+        server: Option<ServerPart>,
+    }
+    #[derive(Deserialize)]
+    struct ServerPart {
+        #[serde(default)]
+        auth: Option<ServerAuthConfig>,
+    }
+    toml::from_str::<toml::Table>(raw).map_err(|e| ConfigLoadProblem::NotToml(e.to_string()))?;
+    let file: File =
+        toml::from_str(raw).map_err(|e| ConfigLoadProblem::AuthInvalid(e.to_string()))?;
+    Ok(file
+        .server
+        .and_then(|server| server.auth)
+        .unwrap_or_default())
 }
 
 /// Read one `server.auth` value through the same deserializer every other
@@ -4406,6 +4427,35 @@ mod tests {
             "correct horse battery staple".to_string(),
         ))
         .expect("hash")
+    }
+
+    /// The error points at the user's own file: its real line number and
+    /// text, not a re-serialized copy of the section.
+    #[test]
+    fn an_auth_error_quotes_the_users_own_file() {
+        let raw = "# my config\n\n[ui]\nleft_width_pct = 20\n\n[server.auth]\nrequire = \"lan\"\n";
+        let err = recover_config(raw).expect_err("refused");
+        let ConfigLoadProblem::AuthInvalid(reason) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(reason.contains("line 7"), "{reason}");
+        assert!(reason.contains("require = \"lan\""), "{reason}");
+    }
+
+    /// The advice fits any problem in the section, not only the password.
+    #[test]
+    fn the_auth_error_advice_names_the_ways_to_fix_any_key() {
+        let err = ConfigLoadError {
+            path: PathBuf::from("/x/config.toml"),
+            problem: ConfigLoadProblem::AuthInvalid("bad require".to_string()),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("dux config set server.auth.<setting>"),
+            "{text}"
+        );
+        assert!(text.contains("dux config get server.auth"), "{text}");
+        assert!(!text.contains("set a new password"), "{text}");
     }
 
     #[test]

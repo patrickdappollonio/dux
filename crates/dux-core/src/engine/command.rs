@@ -851,20 +851,29 @@ impl Engine {
                 // own section is kept whenever it reads. Only when it cannot be
                 // read is the running one written back, and the status says so.
                 let mut recovered = self.config.clone();
-                let auth_note = match std::fs::read_to_string(&self.paths.config_path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|raw| {
-                        crate::config::auth_section_of(&raw).map_err(|p| match p {
-                            crate::config::ConfigLoadProblem::AuthInvalid(r)
-                            | crate::config::ConfigLoadProblem::NotToml(r)
-                            | crate::config::ConfigLoadProblem::Unreadable(r) => r,
-                        })
-                    }) {
-                    Ok(auth) => {
+                // A missing file holds no newer password than the running one,
+                // so the running section is written with nothing to explain.
+                let disk_auth: Result<Option<crate::config::ServerAuthConfig>, String> =
+                    match std::fs::read_to_string(&self.paths.config_path) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                        Err(error) => Err(error.to_string()),
+                        Ok(raw) => {
+                            crate::config::auth_section_of(&raw)
+                                .map(Some)
+                                .map_err(|p| match p {
+                                    crate::config::ConfigLoadProblem::AuthInvalid(r)
+                                    | crate::config::ConfigLoadProblem::NotToml(r)
+                                    | crate::config::ConfigLoadProblem::Unreadable(r) => r,
+                                })
+                        }
+                    };
+                let auth_note = match disk_auth {
+                    Ok(None) => None,
+                    Ok(Some(auth)) => {
                         recovered.server.auth = auth;
-                        None
+                        Some(None)
                     }
-                    Err(reason) => Some(format!(
+                    Err(reason) => Some(Some(format!(
                         "The file's [server.auth] could not be read, so the running dux's web \
                          password settings were written back ({}); check them with `dux config \
                          get server.auth`. What could not be read: {reason}",
@@ -873,16 +882,19 @@ impl Engine {
                         } else {
                             "no password is set"
                         }
-                    )),
+                    ))),
                 };
                 let body = self.surface.recover_render(&recovered);
                 match crate::config_write::write_config_secure(&self.paths.config_path, &body) {
                     Ok(()) => Ok(EventReaction::Status(match auth_note {
                         None => StatusUpdate::info(
+                            "Restored the last working configuration to config.toml.",
+                        ),
+                        Some(None) => StatusUpdate::info(
                             "Restored the last working configuration to config.toml. Its \
                              [server.auth] was kept as the file had it.",
                         ),
-                        Some(note) => StatusUpdate::warning(format!(
+                        Some(Some(note)) => StatusUpdate::warning(format!(
                             "Restored the last working configuration to config.toml. {note}"
                         )),
                     })),
