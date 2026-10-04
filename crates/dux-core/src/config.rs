@@ -3495,7 +3495,7 @@ pub fn check_start(raw: &str) -> StartCheck {
     for (place, key, kind) in wrong_typed_settings(&rest, raw) {
         let what = Recovery::covering(&plan, &key).map_or_else(
             || "dux server reads it as its default".to_string(),
-            |r| r.said_of(&key),
+            |r| r.said_of(&key, raw),
         );
         check.problems.push(StartProblem::new(
             Problem::about(key, format!("{place}: {kind} ({what})")),
@@ -3997,25 +3997,35 @@ impl Recovery {
         plan.iter().find(|recovery| recovery.covers(key))
     }
 
+    /// What it drops or resets, as printed (through the one formatter, so
+    /// an entry whose name breaks its map's rule is placed by its line).
+    fn place(&self, raw: &str) -> String {
+        match self {
+            Self::DropField { section, field } => {
+                shown_place(raw, &[section.clone(), field.clone()])
+            }
+            Self::ResetSection { section } => format!("[{section}]"),
+        }
+    }
+
     /// What `dux server` does about the wrong value at `key`, which it covers.
-    fn said_of(&self, key: &str) -> String {
+    fn said_of(&self, key: &str, raw: &str) -> String {
+        let place = self.place(raw);
         match self {
             Self::DropField { .. } if self.key() == key => {
                 "dux server reads it as its default".to_string()
             }
-            Self::DropField { section, field } => {
-                let stock = section == "providers" && is_stock_provider(field);
-                if stock {
-                    format!(
-                        "dux server drops all of [{section}] {field} over it and runs dux's own \
-                         {field} provider"
-                    )
-                } else {
-                    format!("dux server drops all of [{section}] {field} over it")
-                }
+            // A stock provider's name follows the rule, so it may be said.
+            Self::DropField { section, field }
+                if section == "providers" && is_stock_provider(field) =>
+            {
+                format!(
+                    "dux server drops all of {place} over it and runs dux's own {field} provider"
+                )
             }
-            Self::ResetSection { section } => {
-                format!("dux server resets all of [{section}] to its defaults over it")
+            Self::DropField { .. } => format!("dux server drops all of {place} over it"),
+            Self::ResetSection { .. } => {
+                format!("dux server resets all of {place} to its defaults over it")
             }
         }
     }
@@ -4361,12 +4371,11 @@ pub fn load_corrections_of(raw: &str) -> Vec<(String, String)> {
                     let places: Vec<&str> =
                         causes.iter().map(|(place, _, _)| place.as_str()).collect();
                     let verb = if places.len() == 1 { "has" } else { "have" };
+                    let place = recovery.place(raw);
                     let what = match &recovery {
-                        Recovery::DropField { section, field } => {
-                            format!("dux server drops all of [{section}] {field}")
-                        }
-                        Recovery::ResetSection { section } => {
-                            format!("dux server resets all of [{section}] to its defaults")
+                        Recovery::DropField { .. } => format!("dux server drops all of {place}"),
+                        Recovery::ResetSection { .. } => {
+                            format!("dux server resets all of {place} to its defaults")
                         }
                     };
                     if places.is_empty() {
@@ -7274,7 +7283,7 @@ mod printed_paths_and_carried_values_tests {
     #[test]
     fn the_formatter_never_prints_a_name_that_breaks_its_rule() {
         let raw = "[env]\n\"sk-live-SECRET\" = 5\nGOOD = \"1\"\n\n\
-                   [providers.\"bad name!\"]\ncommand = \"x\"\n";
+                   [providers.\"bad name!\"]\ncommand = \"x\"\nargs = 5\n";
         assert_eq!(shown_key(raw, "ui.left_width_pct"), "ui.left_width_pct");
         assert_eq!(shown_key(raw, "env.GOOD"), "env.GOOD");
         assert_eq!(
@@ -7292,9 +7301,25 @@ mod printed_paths_and_carried_values_tests {
             ),
             "command of the entry on line 5 of [providers]"
         );
-        // Problem sentences go through it too.
-        for problem in start_problems_of(raw) {
+        // Problem sentences and the load's reasons go through it too: the
+        // wrong-typed field inside the badly named provider is placed by the
+        // provider's line, never by its name.
+        let problems = start_problems_of(raw);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.message.contains("args of the entry on line 5")),
+            "{problems:?}"
+        );
+        for problem in problems {
             assert!(!problem.message.contains("SECRET"), "{problem:?}");
+            assert!(!problem.message.contains("bad name!"), "{problem:?}");
+        }
+        for (_, reason) in load_corrections_of(raw) {
+            assert!(
+                !reason.contains("SECRET") && !reason.contains("bad name!"),
+                "{reason}"
+            );
         }
     }
 
