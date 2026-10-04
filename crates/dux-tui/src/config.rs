@@ -1494,7 +1494,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # before dux adds it to blocked_addresses below and says so in its log.\n\
                  # This machine is never blocked, only slowed down. Everyone behind one\n\
                  # shared address (an office, a phone carrier) is blocked together. 0\n\
-                 # never blocks anyone automatically. Default 5.",
+                 # never blocks anyone automatically (use it behind a proxy many people\n\
+                 # share an address through); the slow-down below still applies.\n\
+                 # Default 5.",
             )),
             value_fn: |c| FieldValue::U32(c.server.auth.max_failed_logins),
         },
@@ -1535,10 +1537,14 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Whether the sign-in cookie is marked Secure, which stops a browser from\n\
                  # ever sending it over plain HTTP:\n\
-                 #   \"auto\"   only when dux knows the browser reached it over HTTPS (default)\n\
+                 #   \"auto\"   only when dux knows the browser reached it over HTTPS: a\n\
+                 #            tailscale serve HTTPS route, or a Tailscale Funnel (default)\n\
                  #   \"always\" always; a browser on plain HTTP then cannot stay signed in\n\
                  #   \"never\"  never\n\
-                 # Use \"always\" when an HTTPS proxy dux cannot see is in front of it.",
+                 # Use \"always\" when an HTTPS proxy dux cannot see is in front of it.\n\
+                 # \"always\" also tells dux that browsers reach it over HTTPS, so the login\n\
+                 # page drops its warning that a password typed over plain HTTP can be\n\
+                 # overheard.",
             )),
             value_fn: |c| FieldValue::Str(c.server.auth.cookie_secure.as_str().to_string()),
         },

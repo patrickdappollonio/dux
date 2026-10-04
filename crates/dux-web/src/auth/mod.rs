@@ -442,7 +442,11 @@ impl AuthState {
             required_here: a.required,
             signed_in,
             client_class: class.as_str(),
-            transport_encrypted: a.classification.transport_encrypted,
+            // `cookie_secure = "always"` is the owner saying browsers reach dux
+            // over HTTPS through something dux cannot see into, so the
+            // plain-HTTP warning would be false there.
+            transport_encrypted: a.classification.transport_encrypted
+                || config.cookie_secure == dux_core::config::CookieSecure::Always,
             no_auth_warning: !password_set
                 && !config.disable_no_auth_warning
                 && (self.known_reachable() || class != ClientClass::ThisMachine),

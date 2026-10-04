@@ -396,6 +396,25 @@ mod tests {
         assert_eq!(a.tracked(), 0, "a blocked address's count is forgotten");
     }
 
+    /// `max_failed_logins = 0` (the setting for a proxy many people share an
+    /// address behind) never blocks anyone automatically, and the slow-down
+    /// still applies.
+    #[test]
+    fn zero_max_failed_logins_never_blocks_but_still_slows() {
+        let a = Admission::default();
+        let c = ServerAuthConfig {
+            max_failed_logins: 0,
+            ..cfg()
+        };
+        let ip = net("198.51.100.40");
+        let mut now = Instant::now();
+        for _ in 0..50 {
+            assert_eq!(a.record_failure(&c, &ip, now), None);
+            assert!(a.check_attempt_login(&c, &ip, now).is_err(), "slowed");
+            now += Duration::from_secs(31);
+        }
+    }
+
     #[test]
     fn this_machine_and_loopback_are_slowed_but_never_blocked() {
         let a = Admission::default();

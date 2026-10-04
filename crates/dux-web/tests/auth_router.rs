@@ -1306,3 +1306,49 @@ async fn when_dux_cannot_check_tailscale_this_machine_signs_in_and_is_told_why()
         refused.body
     );
 }
+
+/// Funnel traffic is always HTTPS (Tailscale terminates TLS for every Funnel),
+/// and `cookie_secure = "always"` is the owner saying browsers reach dux over
+/// HTTPS through something dux cannot see into: neither gets the plain-HTTP
+/// warning. Any other forwarded request keeps it.
+#[tokio::test]
+async fn https_paths_dux_knows_of_are_not_warned_about_plain_http() {
+    let dux = Dux::with_password("");
+    let funnel = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::GET, "/api/v1/auth/status")
+                .header("tailscale-funnel-request", "?1")
+                .header("x-forwarded-for", "198.51.100.30"),
+        )
+        .await
+        .json();
+    assert_eq!(funnel["client_class"], json!("internet"));
+    assert_eq!(funnel["transport_encrypted"], json!(true), "{funnel}");
+    let proxied = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::GET, "/api/v1/auth/status").header("x-forwarded-for", "198.51.100.30"),
+        )
+        .await
+        .json();
+    assert_eq!(proxied["transport_encrypted"], json!(false), "{proxied}");
+    assert_eq!(
+        dux.status(NETWORK, None).await["transport_encrypted"],
+        json!(false)
+    );
+
+    let fronted = Dux::with_password("cookie_secure = \"always\"");
+    assert_eq!(
+        fronted.status(NETWORK, None).await["transport_encrypted"],
+        json!(true)
+    );
+    let forwarded = fronted
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::GET, "/api/v1/auth/status").header("x-forwarded-for", "198.51.100.30"),
+        )
+        .await
+        .json();
+    assert_eq!(forwarded["transport_encrypted"], json!(true), "{forwarded}");
+}

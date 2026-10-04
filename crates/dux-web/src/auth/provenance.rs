@@ -248,9 +248,16 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
         unvouched_proxy,
         loopback_distrusted: None,
     };
+    // Tailscale terminates TLS for every Funnel, so a Funnel request reached
+    // the browser over HTTPS: encrypted, and its cookie may be Secure. Only
+    // Tailscale's serve proxy sets the marker (it strips client copies); a
+    // client that forges it on a direct request only makes itself the
+    // internet and loses its own cookie over plain HTTP.
     if facts.funnel_marker {
         return Classification {
             class: ClientClass::Internet,
+            transport_encrypted: true,
+            https_serve_route: true,
             ..network(false)
         };
     }
@@ -467,7 +474,8 @@ mod tests {
                 &served("https://box.tail.ts.net", false),
             );
             assert_eq!(c.class, ClientClass::Internet);
-            assert!(!c.transport_encrypted);
+            assert!(c.transport_encrypted, "Funnel is always HTTPS");
+            assert!(c.https_serve_route);
         }
     }
 
