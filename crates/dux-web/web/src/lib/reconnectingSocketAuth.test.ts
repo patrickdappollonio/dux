@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 class FakeWS {
   static OPEN = 1
   static instances: FakeWS[] = []
+  sent: unknown[] = []
   url: string
   readyState = 0
   onopen: (() => void) | null = null
@@ -19,7 +20,9 @@ class FakeWS {
     this.url = url
     FakeWS.instances.push(this)
   }
-  send(): void {}
+  send(data: unknown): void {
+    this.sent.push(data)
+  }
   close(code = 1000): void {
     this.readyState = 3
     this.onclose?.({ code })
@@ -162,5 +165,45 @@ describe("a socket closed for auth", () => {
     const before = FakeWS.instances.length
     await gate.signIn("pw")
     expect(FakeWS.instances.length).toBe(before)
+  })
+})
+
+describe("the order a socket says things in", () => {
+  it("reports an auth close to the gate before anyone hears a generic close", async () => {
+    const { gate, socket } = await load()
+    sockets.push(socket)
+    const phaseAtClose: string[] = []
+    socket.onConn = (c) => {
+      if (c === "closed") phaseAtClose.push(gate.getAuthPhase().kind)
+    }
+    socket.connect()
+    last().open()
+    statusBody = { password_set: true, required_here: true, signed_in: false }
+    last().triggerClose(4401)
+    expect(phaseAtClose).toEqual(["signed_out"])
+  })
+})
+
+describe("a PTY socket while signed out", () => {
+  it("sends no keystroke, no resize and no beat", async () => {
+    const gate = await import("./authGate")
+    const { PtySocket } = await import("./ptySocket")
+    const { noteServerValidated } = await import("./serverValidated")
+    await gate.initAuthGate()
+    noteServerValidated()
+    const sock = new PtySocket("ws://test/ws/sessions/s1/pty")
+    sockets.push(sock)
+    sock.connect()
+    const ws = last()
+    ws.open()
+    expect(sock.sendResize(24, 80)).toBe(true)
+    expect(ws.sent).toHaveLength(1)
+
+    statusBody = { password_set: true, required_here: true, signed_in: false }
+    gate.reportUnauthorized()
+    sock.sendInput(new TextEncoder().encode("rm -rf ~\r"))
+    expect(sock.sendResize(10, 20)).toBe(false)
+    expect(sock.sendBeat(1, true)).toBe(false)
+    expect(ws.sent).toHaveLength(1)
   })
 })

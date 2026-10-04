@@ -9,6 +9,7 @@ import { useDux } from "@/lib/store"
 import { rootKey } from "@/lib/editorRoot"
 import { standaloneEditorName } from "@/lib/standaloneEditorName"
 import { keyboardLikelyOpen } from "@/lib/viewport"
+import { SHELL_SAFE_TOP, shellHeight } from "@/lib/appViewport"
 
 // The standalone editor surface: a whole browser tab that is nothing but the
 // editor, at `#/editor/<root>[/<mode>/<encoded-path>]`. It is a full second SPA
@@ -42,11 +43,10 @@ export function StandaloneEditorShell() {
       onDragOver={swallowMissedFileDrop}
       onDrop={swallowMissedFileDrop}
       style={{
-        height:
-          constrainToKeyboard && viewportHeight !== null
-            ? viewportHeight
-            : "100svh",
-        paddingTop: "env(safe-area-inset-top)",
+        height: shellHeight(
+          constrainToKeyboard && viewportHeight !== null ? viewportHeight : null,
+        ),
+        paddingTop: SHELL_SAFE_TOP,
         paddingBottom: dropBottomInset ? 0 : "env(safe-area-inset-bottom)",
         paddingLeft: "env(safe-area-inset-left)",
         paddingRight: "env(safe-area-inset-right)",

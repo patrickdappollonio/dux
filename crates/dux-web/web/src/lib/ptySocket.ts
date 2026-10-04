@@ -29,6 +29,7 @@
 
 import { assertNever } from "./assertNever"
 import { wsUrl } from "./apiBase"
+import { authPaused } from "./authGate"
 import { ReconnectingSocket } from "./reconnectingSocket"
 import { appSocketGivenUp } from "./appSocketGiveUp"
 import { onServerValidated, serverValidated } from "./serverValidated"
@@ -390,7 +391,12 @@ export class PtySocket extends ReconnectingSocket {
   // Send PTY stdin as a Binary frame. A copy is sent so the buffer is a plain
   // `ArrayBuffer` (`WebSocket.send` rejects `ArrayBufferLike` under strict lib
   // typings) and the caller's view cannot mutate it in flight.
+  //
+  // Nothing at all goes out while the page is signed out: the app stays
+  // mounted under the login page, and a keystroke, a resize or a "viewed" beat
+  // from a page nobody signed in to must not reach the PTY.
   sendInput(bytes: Uint8Array): void {
+    if (authPaused()) return
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(bytes.slice().buffer)
     }
@@ -415,6 +421,7 @@ export class PtySocket extends ReconnectingSocket {
     takeover = false,
     expectedOwner?: string,
   ): boolean {
+    if (authPaused()) return false
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       const frame = takeover
         ? expectedOwner === undefined
@@ -440,6 +447,7 @@ export class PtySocket extends ReconnectingSocket {
   // Returns whether it went on the wire, so the heartbeat does not start a
   // deadline for a frame it never sent.
   sendBeat(n: number, viewed: boolean): boolean {
+    if (authPaused()) return false
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ beat: n, viewed }))
       return true

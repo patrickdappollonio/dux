@@ -56,8 +56,8 @@ import {
   SidebarInset,
   SidebarProvider,
 } from "@/components/ui/sidebar"
-import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { SHELL_HEIGHT_CLASS, SHELL_SAFE_TOP, shellHeight } from "@/lib/appViewport"
 import {
   useChromeGesture,
   useTheaterEscape,
@@ -76,7 +76,8 @@ import { usePaneCoverKnown, usePaneCoverOwned } from "@/lib/paneCover"
 import { topChromeHidden } from "@/lib/theater"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
-// Every dialog and the toaster, rendered once above whichever shell is active.
+// Every dialog, rendered once above whichever shell is active. The toaster is
+// not here: it lives at the page root (`AuthGate`), so toasts outlive the gate.
 // The standalone editor is a shell too and needs these, so nothing here may move
 // into the desktop or mobile tree; everything portals to the body and depends on
 // no shell-specific provider.
@@ -125,7 +126,6 @@ function GlobalOverlays() {
       <DeleteProjectDialog />
       <CheckoutDefaultBranchDialog />
       <ChangeBaseBranchDialog />
-      <Toaster />
       {/* Portals to the body and sits above every other surface, so DOM order
           here is irrelevant. */}
       <OfflineOverlay />
@@ -178,7 +178,7 @@ export function DesktopShell() {
           the chrome collapse (see `useTheaterGesture`), so the whole change
           costs one refit at the geometry it settles on. */}
       {theater ? null : <AppSidebar />}
-      <SidebarInset className="flex h-svh min-h-0 flex-col overflow-hidden">
+      <SidebarInset className={`flex ${SHELL_HEIGHT_CLASS} min-h-0 flex-col overflow-hidden`}>
         {/* Theater takes this stack and the band-plus-strip inside TerminalArea
             on the same flag, so the gesture above pays for one refit between
             them. The hidden Changes pane's reopen control lives in this header
@@ -269,11 +269,10 @@ function MobileApp() {
     <div
       className="flex min-h-0 flex-col overflow-hidden"
       style={{
-        height:
-          constrainToKeyboard && viewportHeight !== null
-            ? viewportHeight
-            : "100svh",
-        paddingTop: "env(safe-area-inset-top)",
+        height: shellHeight(
+          constrainToKeyboard && viewportHeight !== null ? viewportHeight : null,
+        ),
+        paddingTop: SHELL_SAFE_TOP,
         paddingBottom: dropBottomInset ? 0 : "env(safe-area-inset-bottom)",
         paddingLeft: "env(safe-area-inset-left)",
         paddingRight: "env(safe-area-inset-right)",

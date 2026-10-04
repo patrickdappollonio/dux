@@ -6,10 +6,10 @@ import type { AuthStatus } from "@/lib/authApi"
 import type { LoginAnswer } from "@/lib/authApi"
 
 const signIn = vi.fn<(password: string) => Promise<LoginAnswer>>()
-const probeAuth = vi.fn(async () => {})
+const retryAuthGate = vi.fn(async () => {})
 vi.mock("@/lib/authGate", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/authGate")>()
-  return { ...actual, signIn, probeAuth }
+  return { ...actual, signIn, retryAuthGate }
 })
 
 const { LoginPage, BlockedPage, BrokenPage } = await import("./LoginPage")
@@ -34,7 +34,7 @@ function status(overrides: Partial<AuthStatus> = {}): AuthStatus {
 afterEach(() => {
   cleanup()
   signIn.mockReset()
-  probeAuth.mockClear()
+  retryAuthGate.mockClear()
   vi.useRealTimers()
 })
 
@@ -76,12 +76,17 @@ describe("LoginPage", () => {
     signIn.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: 3 })
     render(<LoginPage status={status()} reason="required" />)
     await act(async () => submit("x"))
-    expect(screen.getByRole("alert").textContent).toContain("Try again in 3 seconds.")
+    // Announced once; the countdown itself is not a live region, so a screen
+    // reader is not read every second.
+    expect(screen.getByRole("alert").textContent).toBe("Too many attempts from this address.")
+    const countdown = screen.getByText("Try again in 3 seconds.")
+    expect(countdown.closest("[role=alert]")).toBeNull()
+    expect(countdown.closest("[aria-live=polite],[aria-live=assertive]")).toBeNull()
     expect(screen.getByRole("button", { name: "Sign in" })).toHaveProperty("disabled", true)
     await act(async () => {
       vi.advanceTimersByTime(1000)
     })
-    expect(screen.getByRole("alert").textContent).toContain("Try again in 2 seconds.")
+    expect(screen.getByText("Try again in 2 seconds.")).toBeTruthy()
     await act(async () => {
       vi.advanceTimersByTime(2000)
     })
@@ -92,7 +97,7 @@ describe("LoginPage", () => {
     signIn.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: null })
     render(<LoginPage status={status()} reason="required" />)
     await act(async () => submit("x"))
-    expect(screen.getByRole("alert").textContent).toContain("Wait a little")
+    expect(screen.getByText("Wait a little, then try again.")).toBeTruthy()
   })
 
   it("says so when the server cannot be reached", async () => {
@@ -109,9 +114,10 @@ describe("LoginPage", () => {
     expect(screen.getByRole("alert").textContent).toBe("cross-origin request rejected")
   })
 
-  it("does not submit an empty password", async () => {
+  it("asks for the password rather than submitting an empty one", async () => {
     render(<LoginPage status={status()} reason="required" />)
     await act(async () => submit(""))
+    expect(screen.getByRole("alert").textContent).toBe("Enter your password.")
     expect(signIn).not.toHaveBeenCalled()
   })
 
@@ -167,7 +173,7 @@ describe("BlockedPage", () => {
   it("asks again on Try again", async () => {
     render(<BlockedPage where={null} />)
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Try again" })))
-    expect(probeAuth).toHaveBeenCalled()
+    expect(retryAuthGate).toHaveBeenCalled()
   })
 })
 
@@ -188,7 +194,7 @@ describe("BrokenPage", () => {
   it("asks again on Try again", async () => {
     render(<BrokenPage detail="" />)
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Try again" })))
-    expect(probeAuth).toHaveBeenCalled()
+    expect(retryAuthGate).toHaveBeenCalled()
   })
 })
 
@@ -200,5 +206,27 @@ describe("the hooks the browser journeys hold on to", () => {
     expect(form.querySelector("input[type=password]")).not.toBeNull()
     expect(form.querySelector("button[type=submit]")).not.toBeNull()
     expect(screen.getByTestId("login-insecure-warning")).toBeTruthy()
+  })
+})
+
+describe("password managers", () => {
+  it("get a username to file the password under", () => {
+    render(<LoginPage status={status()} reason="required" />)
+    const user = document.querySelector("input[autocomplete=username]") as HTMLInputElement
+    expect(user).not.toBeNull()
+    expect(user.value).toBe("dux")
+    expect(user.form).toBe(screen.getByTestId("login-form"))
+    // Out of the tab order and away from screen readers: nobody types in it.
+    expect(user.tabIndex).toBe(-1)
+    expect(screen.getByLabelText("Password").getAttribute("autocomplete")).toBe("current-password")
+  })
+})
+
+describe("a sign-in that never answers", () => {
+  it("says dux did not answer in time", async () => {
+    signIn.mockResolvedValue({ kind: "unreachable", timedOut: true })
+    render(<LoginPage status={status()} reason="required" />)
+    await act(async () => submit("x"))
+    expect(screen.getByRole("alert").textContent).toContain("did not answer in time")
   })
 })

@@ -270,6 +270,7 @@ describe("the app menu the pill carries", () => {
     const topLevel = appMenuModel({
       ghAvailable: false,
       githubIntegrationEnabled: false,
+      canSignOut: false,
     }).filter((e) => e.kind !== "separator")
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
     for (const entry of topLevel) {

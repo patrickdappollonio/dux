@@ -6,16 +6,21 @@ import type { AuthStatus } from "@/lib/authApi"
 import type { AuthPhase } from "@/lib/authGate"
 
 let phase: AuthPhase = { kind: "checking" }
-const noteAuthStatus = vi.fn()
+const refreshAuthStatus = vi.fn(async () => {})
+const retryAuthGate = vi.fn(async () => {})
 vi.mock("@/lib/authGate", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/authGate")>()
-  return { ...actual, useAuthPhase: () => phase, noteAuthStatus }
+  return { ...actual, useAuthPhase: () => phase, refreshAuthStatus, retryAuthGate }
 })
 const postDismissNoAuthWarning = vi.fn(async () => {})
-vi.mock("@/lib/authApi", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/authApi")>()
+vi.mock("@/lib/authActions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/authActions")>()
   return { ...actual, postDismissNoAuthWarning }
 })
+// The toaster is the real one's stand-in: what matters is where it is mounted.
+vi.mock("@/components/ui/sonner", () => ({
+  Toaster: () => <section data-testid="toaster" />,
+}))
 const openCustomizeWebapp = vi.fn()
 vi.mock("@/lib/store", () => ({ openCustomizeWebapp }))
 const notifySuccess = vi.fn()
@@ -65,6 +70,49 @@ describe("AuthGate", () => {
     renderGate()
     expect(screen.queryByText("the app")).toBeNull()
     expect(screen.queryByLabelText("Password")).toBeNull()
+  })
+
+  it("never leaves the first look blank: it says it is connecting after a moment", async () => {
+    vi.useFakeTimers()
+    phase = { kind: "checking" }
+    renderGate()
+    expect(screen.queryByText(/Connecting to dux/)).toBeNull()
+    await act(async () => {
+      vi.advanceTimersByTime(1500)
+    })
+    expect(screen.getByText(/Connecting to dux/)).toBeTruthy()
+    vi.useRealTimers()
+  })
+
+  it("says it cannot reach dux, with a Retry, when the first look got no answer", async () => {
+    phase = { kind: "unreachable", timedOut: true }
+    renderGate()
+    expect(screen.getByRole("heading", { name: "Can't reach dux" })).toBeTruthy()
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry" })))
+    expect(retryAuthGate).toHaveBeenCalled()
+  })
+
+  it("stops on an explicit page when the server keeps refusing a session it calls valid", async () => {
+    phase = { kind: "stuck" }
+    renderGate()
+    expect(
+      screen.getByRole("heading", { name: "dux keeps refusing this browser" }),
+    ).toBeTruthy()
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Try again" })))
+    expect(retryAuthGate).toHaveBeenCalled()
+  })
+
+  it("keeps the toaster mounted at the root in every phase", () => {
+    for (const p of [
+      { kind: "checking" },
+      { kind: "open", status: null },
+      { kind: "signed_out", status: status(), reason: "expired" },
+    ] as AuthPhase[]) {
+      phase = p
+      renderGate()
+      expect(screen.getAllByTestId("toaster")).toHaveLength(1)
+      cleanup()
+    }
   })
 
   it("renders the app when open", () => {
@@ -129,9 +177,9 @@ describe("the no-password banner", () => {
       fireEvent.click(screen.getByRole("button", { name: "Don't show again" })),
     )
     expect(postDismissNoAuthWarning).toHaveBeenCalledTimes(1)
-    expect(noteAuthStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ no_auth_warning: false }),
-    )
+    // Hidden at once, and the status read again rather than patched by hand.
+    expect(screen.queryByTestId("no-auth-banner")).toBeNull()
+    expect(refreshAuthStatus).toHaveBeenCalled()
     expect(notifySuccess).toHaveBeenCalledTimes(1)
     expect(JSON.stringify(notifySuccess.mock.calls[0][0])).toContain(
       "disable_no_auth_warning",
@@ -192,5 +240,84 @@ describe("the hooks the browser journeys hold on to", () => {
     expect(screen.getByTestId("no-auth-banner").getAttribute("role")).toBe("alert")
     expect(screen.getByTestId("no-auth-banner-never").textContent).toBe("Don't show again")
     expect(screen.getByTestId("weak-password-banner").getAttribute("role")).toBe("status")
+  })
+})
+
+describe("signing out of a page that was in use", () => {
+  it("keeps the app mounted under the login page, hidden and inert", () => {
+    phase = { kind: "open", status: null }
+    const { rerender } = renderGate()
+    const app = screen.getByText("the app")
+    phase = { kind: "signed_out", status: status(), reason: "expired" }
+    rerender(
+      <AuthGate>
+        <div>the app</div>
+      </AuthGate>,
+    )
+    // The same node: nothing remounted, so editors, drafts and dialogs survive.
+    expect(screen.getByText("the app")).toBe(app)
+    const shell = screen.getByTestId("app-shell")
+    expect(shell.hasAttribute("inert")).toBe(true)
+    expect(shell.style.visibility).toBe("hidden")
+    expect(shell.getAttribute("aria-hidden")).toBe("true")
+    expect(screen.getByLabelText("Password")).toBeTruthy()
+  })
+
+  it("comes back visible and live on signing in again", () => {
+    phase = { kind: "open", status: null }
+    const { rerender } = renderGate()
+    phase = { kind: "signed_out", status: status(), reason: "expired" }
+    rerender(<AuthGate><div>the app</div></AuthGate>)
+    phase = { kind: "open", status: null }
+    rerender(<AuthGate><div>the app</div></AuthGate>)
+    const shell = screen.getByTestId("app-shell")
+    expect(shell.hasAttribute("inert")).toBe(false)
+    expect(shell.style.visibility).toBe("")
+  })
+
+  it("makes everything portalled outside the app inert too, and gives it back", () => {
+    const portal = document.createElement("div")
+    portal.id = "a-dialog-portal"
+    document.body.appendChild(portal)
+    phase = { kind: "open", status: null }
+    const { rerender } = renderGate()
+    phase = { kind: "signed_out", status: status(), reason: "expired" }
+    rerender(<AuthGate><div>the app</div></AuthGate>)
+    expect(portal.hasAttribute("inert")).toBe(true)
+    phase = { kind: "open", status: null }
+    rerender(<AuthGate><div>the app</div></AuthGate>)
+    expect(portal.hasAttribute("inert")).toBe(false)
+    portal.remove()
+  })
+
+  it("never mounts the app for a page that was signed out from the start", () => {
+    phase = { kind: "signed_out", status: status(), reason: "required" }
+    renderGate()
+    expect(screen.queryByText("the app")).toBeNull()
+  })
+})
+
+describe("banners in the layout", () => {
+  it("sit in flow above the app, not over it", () => {
+    phase = { kind: "open", status: status({ no_auth_warning: true }) }
+    renderGate()
+    const stack = screen.getByTestId("auth-banners")
+    expect(stack.className).not.toContain("fixed")
+    const app = screen.getByText("the app")
+    expect(stack.compareDocumentPosition(app) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it("read the status again when they first show", () => {
+    phase = { kind: "open", status: status({ no_auth_warning: true }) }
+    renderGate()
+    expect(refreshAuthStatus).toHaveBeenCalled()
+  })
+
+  it("keep their buttons at the touch floor on a coarse pointer", () => {
+    phase = { kind: "open", status: status({ no_auth_warning: true, weak_password: true }) }
+    renderGate()
+    for (const b of screen.getAllByRole("button")) {
+      expect(b.className).toContain("pointer-coarse:min-h-11")
+    }
   })
 })

@@ -86,10 +86,11 @@ export interface AppMenuContext {
    *  not work and so must never be gated on `ghAvailable`. */
   githubIntegrationEnabled: boolean
   /** Whether this browser holds a session it can end: a password is set and
-   *  this page signed in with it. Absent means no, because on a server with no
-   *  password, or a connection the password does not apply to, there is nothing
-   *  to sign out of and an entry that did nothing would be a lie. */
-  canSignOut?: boolean
+   *  this page signed in with it. False on a server with no password, or a
+   *  connection the password does not apply to, where there is nothing to sign
+   *  out of and an entry that did nothing would be a lie. Required, so a new
+   *  anchor cannot silently leave Sign out off by saying nothing. */
+  canSignOut: boolean
 }
 
 /**

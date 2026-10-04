@@ -288,15 +288,16 @@ export abstract class ReconnectingSocket {
       // the very wait it is supposed to be lengthening.
       this.clearSettleTimer()
       this.ws = null
-      this.onConn("closed")
-      if (this.closedByUser) return
       // The session is over, or this address is blocked. Not a failure of the
       // connection, so no budget is spent and nothing is scheduled: the gate puts
-      // the login page up, and signing in resumes this socket.
-      if (isAuthCloseCode(event.code)) {
-        reportSocketAuthClose(event.code)
-        return
-      }
+      // the login page up, and signing in resumes this socket. Reported BEFORE
+      // the generic close below, so whoever hears that close (the store's drop
+      // probe above all) already finds the page signed out rather than
+      // guessing at why.
+      const authClose = !this.closedByUser && isAuthCloseCode(event.code)
+      if (authClose) reportSocketAuthClose(event.code)
+      this.onConn("closed")
+      if (this.closedByUser || authClose) return
       // A server may close with an app-specific code meaning "do not retry", such
       // as a PTY whose provider is gone, where re-subscribing would relaunch a
       // doomed provider. `shouldReconnect()` surfaces the stop state and returns

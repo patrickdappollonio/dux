@@ -45,8 +45,6 @@ describe("passwordMinimums", () => {
 
 describe("passwordWrite", () => {
   const mins = { length: 12, score: 2 }
-  const strong = { score: 4 as const, label: "Excellent", hint: null }
-  const weak = { score: 1 as const, label: "Fair", hint: "Add another word or two." }
   const draft = (over: Partial<{ current: string; next: string; confirm: string }> = {}) => ({
     current: "",
     next: "",
@@ -55,7 +53,7 @@ describe("passwordWrite", () => {
   })
 
   it("writes nothing when nothing was typed", () => {
-    expect(passwordWrite(draft(), { passwordSet: true, mins, strength: null })).toEqual({
+    expect(passwordWrite(draft(), { passwordSet: true, mins })).toEqual({
       kind: "none",
     })
   })
@@ -64,7 +62,6 @@ describe("passwordWrite", () => {
     const w = passwordWrite(draft({ next: "a".repeat(20), confirm: "a".repeat(20) }), {
       passwordSet: true,
       mins,
-      strength: strong,
     })
     expect(w).toEqual({ kind: "invalid", message: "Type your current password to change it." })
   })
@@ -75,38 +72,21 @@ describe("passwordWrite", () => {
     const w = passwordWrite(draft({ next: short, confirm: short }), {
       passwordSet: false,
       mins,
-      strength: strong,
     })
     expect(w).toEqual({ kind: "invalid", message: "Use at least 12 characters." })
   })
 
-  it("refuses one below the minimum score, with the meter's label and hint", () => {
+  it("does not refuse on the meter's score: the server decides", () => {
     const pw = "aaaaaaaaaaaaaaa"
-    const w = passwordWrite(draft({ next: pw, confirm: pw }), {
-      passwordSet: false,
-      mins,
-      strength: weak,
-    })
-    expect(w).toEqual({
-      kind: "invalid",
-      message: "That password is too easy to guess (Fair; dux asks for at least Good). Add another word or two.",
-    })
-  })
-
-  it("waits for the meter before deciding", () => {
-    const pw = "glacier mango typewriter"
-    const w = passwordWrite(draft({ next: pw, confirm: pw }), {
-      passwordSet: false,
-      mins,
-      strength: null,
-    })
-    expect(w.kind).toBe("invalid")
+    expect(
+      passwordWrite(draft({ next: pw, confirm: pw }), { passwordSet: false, mins }),
+    ).toEqual({ kind: "write", next: pw })
   })
 
   it("refuses two new passwords that differ", () => {
     const w = passwordWrite(
       draft({ next: "glacier mango typewriter", confirm: "glacier mango typewritter" }),
-      { passwordSet: false, mins, strength: strong },
+      { passwordSet: false, mins },
     )
     expect(w).toEqual({ kind: "invalid", message: "The two new passwords do not match." })
   })
@@ -117,7 +97,6 @@ describe("passwordWrite", () => {
       passwordWrite(draft({ current: "old one here", next: pw, confirm: pw }), {
         passwordSet: true,
         mins,
-        strength: strong,
       }),
     ).toEqual({ kind: "write", current: "old one here", next: pw })
   })
@@ -128,7 +107,6 @@ describe("passwordWrite", () => {
       passwordWrite(draft({ next: pw, confirm: pw }), {
         passwordSet: false,
         mins,
-        strength: strong,
       }),
     ).toEqual({ kind: "write", next: pw })
   })

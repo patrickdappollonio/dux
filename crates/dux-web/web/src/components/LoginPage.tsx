@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import type { AuthStatus, LoginAnswer } from "@/lib/authApi"
-import { probeAuth, signIn, type SignOutReason } from "@/lib/authGate"
+import { retryAuthGate, signIn, type SignOutReason } from "@/lib/authGate"
 import { DEFAULT_FAVICON_HREF } from "@/lib/favicon"
 
 // The pages the sign-in gate shows instead of the app: the login form, the
@@ -65,25 +65,35 @@ function PlainHttpWarning() {
   )
 }
 
-function failureText(answer: Exclude<LoginAnswer, { kind: "ok" }>, seconds: number | null): string {
-  switch (answer.kind) {
+type Failure = Exclude<LoginAnswer, { kind: "ok" }> | { kind: "empty" }
+
+// The sentence the alert region announces. A rate limit's countdown is NOT in
+// it: the alert is read once, and the seconds tick in a quiet element beside it.
+function failureText(failure: Failure): string {
+  switch (failure.kind) {
+    case "empty":
+      return "Enter your password."
     case "wrong":
       return "That password did not work. Try again."
     case "rate_limited":
-      return seconds !== null && seconds > 0
-        ? `Too many attempts from this address. Try again in ${seconds} ${seconds === 1 ? "second" : "seconds"}.`
-        : seconds === null
-          ? "Too many attempts from this address. Wait a little, then try again."
-          : "You can try again now."
+      return "Too many attempts from this address."
     case "unreachable":
-      return "Could not reach dux. Check that it is still running, then try again."
+      return failure.timedOut
+        ? "dux did not answer in time. Check that it is still running, then try again."
+        : "Could not reach dux. Check that it is still running, then try again."
     case "refused":
-      return answer.message
+      return failure.message
     case "blocked":
     case "broken":
       // The gate has already replaced this page with the right one.
       return ""
   }
+}
+
+function countdownText(seconds: number | null): string {
+  if (seconds === null) return "Wait a little, then try again."
+  if (seconds <= 0) return "You can try again now."
+  return `Try again in ${seconds} ${seconds === 1 ? "second" : "seconds"}.`
 }
 
 export function LoginPage({
@@ -96,7 +106,7 @@ export function LoginPage({
   const fieldId = useId()
   const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
-  const [failure, setFailure] = useState<Exclude<LoginAnswer, { kind: "ok" }> | null>(null)
+  const [failure, setFailure] = useState<Failure | null>(null)
   // When a rate limit lifts, as `Date.now()`, and the seconds left until then.
   const [retryAt, setRetryAt] = useState<number | null>(null)
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null)
@@ -117,7 +127,12 @@ export function LoginPage({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (busy || waiting || password === "") return
+    if (busy || waiting) return
+    if (password === "") {
+      setFailure({ kind: "empty" })
+      fieldRef.current?.focus()
+      return
+    }
     setBusy(true)
     setFailure(null)
     const answer = await signIn(password)
@@ -138,10 +153,7 @@ export function LoginPage({
     fieldRef.current?.focus()
   }
 
-  const message =
-    failure === null
-      ? ""
-      : failureText(failure, failure.kind === "rate_limited" ? secondsLeft : null)
+  const message = failure === null ? "" : failureText(failure)
 
   return (
     <Shell title="Sign in to dux">
@@ -153,18 +165,33 @@ export function LoginPage({
         onSubmit={(e) => void submit(e)}
         noValidate
       >
+        {/* dux has one owner and no user names, but password managers file a
+            password under a user name; this gives them one. Off-screen rather
+            than `hidden`, which some managers skip, and out of the tab order
+            and the accessibility tree, because nobody types in it. */}
+        <input
+          type="text"
+          name="username"
+          autoComplete="username"
+          value="dux"
+          readOnly
+          tabIndex={-1}
+          aria-hidden="true"
+          className="sr-only"
+        />
         <label htmlFor={fieldId} className="text-sm font-medium">
           Password
         </label>
         <Input
           ref={fieldRef}
           id={fieldId}
+          name="password"
           type="password"
           autoComplete="current-password"
           autoFocus
           value={password}
           disabled={busy}
-          aria-invalid={failure?.kind === "wrong" ? true : undefined}
+          aria-invalid={failure?.kind === "wrong" || failure?.kind === "empty" ? true : undefined}
           aria-describedby={message ? `${fieldId}-error` : undefined}
           onChange={(e) => setPassword(e.target.value)}
           className="h-10"
@@ -172,6 +199,11 @@ export function LoginPage({
         {message ? (
           <p id={`${fieldId}-error`} role="alert" className="text-sm text-destructive">
             {message}
+          </p>
+        ) : null}
+        {failure?.kind === "rate_limited" ? (
+          <p className="text-sm text-muted-foreground">
+            {countdownText(retryAt === null && secondsLeft === null ? null : secondsLeft)}
           </p>
         ) : null}
         {/* Filled: committing the password is the page's one primary act. */}
@@ -183,7 +215,9 @@ export function LoginPage({
   )
 }
 
-function TryAgain() {
+// Every gate page's way out. It always asks afresh, so a request still hanging
+// from before cannot hold it, and it comes back enabled however that ends.
+function RetryButton({ label }: { label: string }) {
   const [busy, setBusy] = useState(false)
   return (
     <Button
@@ -192,10 +226,10 @@ function TryAgain() {
       disabled={busy}
       onClick={() => {
         setBusy(true)
-        void probeAuth("required").finally(() => setBusy(false))
+        void retryAuthGate().finally(() => setBusy(false))
       }}
     >
-      Try again
+      {label}
     </Button>
   )
 }
@@ -211,11 +245,14 @@ export function BlockedPage({ where }: { where: string | null }) {
         Whoever runs dux can remove the address there and reload the config; dux
         also adds an address on its own after too many failed sign-ins.
       </p>
-      <TryAgain />
+      <RetryButton label="Try again" />
     </Shell>
   )
 }
 
+// The detail is shown only when the server sent one, which it does only to
+// this machine and the tailnet; everyone else gets the same sentence without
+// it, so the page never depends on it.
 export function BrokenPage({ detail }: { detail: string }) {
   return (
     <Shell title="Sign-in is misconfigured">
@@ -231,7 +268,48 @@ export function BrokenPage({ detail }: { detail: string }) {
           {detail}
         </pre>
       ) : null}
-      <TryAgain />
+      <RetryButton label="Try again" />
+    </Shell>
+  )
+}
+
+export function UnreachablePage({ timedOut }: { timedOut: boolean }) {
+  return (
+    <Shell title="Can't reach dux">
+      <p className="text-sm text-muted-foreground">
+        {timedOut
+          ? "dux did not answer in time, so this page cannot tell whether it needs a password yet. "
+          : "This page could not reach dux to ask whether it needs a password. "}
+        Check that dux is still running and that this device can reach it, then
+        retry.
+      </p>
+      <RetryButton label="Retry" />
+    </Shell>
+  )
+}
+
+export function StuckPage() {
+  return (
+    <Shell title="dux keeps refusing this browser">
+      <p className="text-sm text-muted-foreground">
+        dux says this browser is signed in, then refuses its requests as if it
+        were not, several times in a row. Rather than keep flipping between the
+        app and the sign-in page, this page has stopped. Something between this
+        browser and dux may be dropping the session cookie, or dux may have just
+        restarted. Try again, and if this keeps happening, check{" "}
+        <InlineCode>dux.log</InlineCode>.
+      </p>
+      <RetryButton label="Try again" />
+    </Shell>
+  )
+}
+
+export function CheckingPage() {
+  return (
+    <Shell title="Connecting to dux…">
+      <p className="text-center text-sm text-muted-foreground">
+        Asking dux whether this browser needs to sign in.
+      </p>
     </Shell>
   )
 }

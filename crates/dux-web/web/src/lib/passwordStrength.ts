@@ -89,11 +89,13 @@ export type PasswordWrite =
   | { kind: "write"; current?: string; next: string }
 
 /// What Save does with the password fields: nothing (left empty), refuse with a
-/// sentence, or send. `strength` is the meter's reading of `next`, null while it
-/// is still being computed.
+/// sentence, or send. Only what the browser can know for certain is checked
+/// here: the current password is there, the length minimum, and the repeat.
+/// The strength score is the meter's to show and the server's to decide, so it
+/// never blocks a Save; a refusal comes back from the server and shows inline.
 export function passwordWrite(
   draft: PasswordDraft,
-  ctx: { passwordSet: boolean; mins: PasswordMinimums; strength: Strength | null },
+  ctx: { passwordSet: boolean; mins: PasswordMinimums },
 ): PasswordWrite {
   if (draft.current === "" && draft.next === "" && draft.confirm === "") {
     return { kind: "none" }
@@ -104,20 +106,6 @@ export function passwordWrite(
   // Characters, not UTF-16 units or bytes, matching what the user counts.
   if ([...draft.next].length < ctx.mins.length) {
     return { kind: "invalid", message: `Use at least ${ctx.mins.length} characters.` }
-  }
-  if (ctx.strength === null) {
-    return {
-      kind: "invalid",
-      message: "Still checking how strong that password is. Try Save again in a moment.",
-    }
-  }
-  if (ctx.strength.score < ctx.mins.score) {
-    const wanted = STRENGTH_LABELS[Math.max(0, Math.min(4, ctx.mins.score))]
-    const hint = ctx.strength.hint ? ` ${ctx.strength.hint}` : ""
-    return {
-      kind: "invalid",
-      message: `That password is too easy to guess (${ctx.strength.label}; dux asks for at least ${wanted}).${hint}`,
-    }
   }
   if (draft.confirm !== draft.next) {
     return { kind: "invalid", message: "The two new passwords do not match." }

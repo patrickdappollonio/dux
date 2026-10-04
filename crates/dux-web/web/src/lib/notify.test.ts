@@ -432,8 +432,9 @@ describe("while the page is signed out", () => {
   afterEach(async () => {
     vi.stubGlobal("fetch", vi.fn(async () => statusOf(true)))
     const gate = await import("./authGate")
-    await gate.probeAuth()
+    await gate.probeAuth("expired", { fresh: true })
     vi.unstubAllGlobals()
+    vi.useRealTimers()
   })
 
   it("raises nothing, busy spinners included", async () => {
@@ -462,5 +463,53 @@ describe("while the page is signed out", () => {
     expect(gate.getAuthPhase().kind).toBe("open")
     notifyError("Could not load the workspace.")
     expect(toast.error).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("a spinner across a sign-out", () => {
+  const statusOf = (signedIn: boolean) =>
+    new Response(
+      JSON.stringify({ password_set: true, required_here: true, signed_in: signedIn }),
+      { status: 200 },
+    )
+
+  afterEach(async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => statusOf(true)))
+    const gate = await import("./authGate")
+    await gate.probeAuth("expired", { fresh: true })
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it("is retired when the page signs out, and its guard never fires a false warning later", async () => {
+    vi.useFakeTimers()
+    const gate = await import("./authGate")
+    notifyBusy("Creating agent", { id: "op1" })
+    expect(toast.loading).toHaveBeenCalledTimes(1)
+    vi.stubGlobal("fetch", vi.fn(async () => statusOf(false)))
+    gate.reportUnauthorized()
+    expect(toast.dismiss).toHaveBeenCalledWith("op1")
+    // Its final arrives while signed out and is dropped.
+    notifySuccess("Agent created.", { id: "op1" })
+    // Signed back in, and the old guard's window passes.
+    vi.stubGlobal("fetch", vi.fn(async () => statusOf(true)))
+    await gate.probeAuth("expired", { fresh: true })
+    expect(gate.getAuthPhase().kind).toBe("open")
+    vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 2)
+    expect(toast.warning).not.toHaveBeenCalled()
+  })
+
+  it("a final dropped while signed out still takes its spinner and guard with it", async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal("fetch", vi.fn(async () => statusOf(false)))
+    const gate = await import("./authGate")
+    gate.reportUnauthorized()
+    notifyBusy("Pulling", { id: "op2" })
+    notifyError("Pull failed.", { id: "op2" })
+    expect(toast.dismiss).toHaveBeenCalledWith("op2")
+    vi.stubGlobal("fetch", vi.fn(async () => statusOf(true)))
+    await gate.probeAuth("expired", { fresh: true })
+    vi.advanceTimersByTime(BUSY_TOAST_MAX_MS * 2)
+    expect(toast.warning).not.toHaveBeenCalled()
   })
 })

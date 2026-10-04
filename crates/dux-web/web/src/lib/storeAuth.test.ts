@@ -319,3 +319,14 @@ describe("signing out from the menu", () => {
     expect(store.getSnapshot().selectedTarget).toMatchObject({ sessionId: "s1" })
   })
 })
+
+describe("a config change announced by the server", () => {
+  it("re-reads the sign-in status as well as the bootstrap", async () => {
+    const { store } = await loadSignedIn("")
+    const statusReads = () =>
+      fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/v1/auth/status")).length
+    const before = statusReads()
+    store.eventsSocket.onEvent({ event: "config.changed" })
+    await vi.waitFor(() => expect(statusReads()).toBe(before + 1))
+  })
+})

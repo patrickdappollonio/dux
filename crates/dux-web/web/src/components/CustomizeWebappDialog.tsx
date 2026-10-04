@@ -38,8 +38,14 @@ import {
   type SettingDescriptor,
   type SettingValue,
 } from "@/lib/settingsDescriptors"
-import { postPassword, type AuthStatus } from "@/lib/authApi"
-import { afterPasswordChange, reportUnauthorized, useAuthPhase } from "@/lib/authGate"
+import { postPassword } from "@/lib/authActions"
+import type { AuthStatus } from "@/lib/authApi"
+import {
+  afterPasswordChange,
+  refreshAuthStatus,
+  reportUnauthorized,
+  useAuthPhase,
+} from "@/lib/authGate"
 import { configApi } from "@/lib/configApi"
 import {
   STRENGTH_LABELS,
@@ -414,29 +420,46 @@ function SettingRow({
 
 const EMPTY_PASSWORD_DRAFT: PasswordDraft = { current: "", next: "", confirm: "" }
 
-// The meter's reading of `password`, or null while it is being computed (or for
-// an empty field). Keyed by the password it was computed for, so a slow answer
-// for an earlier keystroke is never shown against a later one.
-function usePasswordStrength(password: string): Strength | null {
-  const [reading, setReading] = useState<{ password: string; strength: Strength } | null>(
-    null,
-  )
+interface StrengthReading {
+  /** The meter's reading, or null while it is computed or when it failed. */
+  strength: Strength | null
+  /** The dictionaries did not load, so there is no reading to show. */
+  failed: boolean
+  /** Load them again. */
+  retry: () => void
+}
+
+// The meter's reading of `password`. Keyed by the password it was computed for,
+// so a slow answer for an earlier keystroke is never shown against a later one.
+// Advisory only: nothing here can hold up a Save.
+function usePasswordStrength(password: string): StrengthReading {
+  const [reading, setReading] = useState<{
+    password: string
+    attempt: number
+    strength: Strength | null
+  } | null>(null)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     if (password === "") return
     let live = true
-    estimateStrength(password)
-      .then((strength) => {
-        if (live) setReading({ password, strength })
-      })
-      .catch(() => {
-        // The dictionaries failed to load; the next keystroke asks again, and
-        // Save says it is still checking rather than guessing.
-      })
+    estimateStrength(password).then(
+      (strength) => {
+        if (live) setReading({ password, attempt, strength })
+      },
+      () => {
+        if (live) setReading({ password, attempt, strength: null })
+      },
+    )
     return () => {
       live = false
     }
-  }, [password])
-  return reading !== null && reading.password === password ? reading.strength : null
+  }, [password, attempt])
+  const current = reading !== null && reading.password === password && reading.attempt === attempt
+  return {
+    strength: current ? reading.strength : null,
+    failed: current && reading.strength === null,
+    retry: () => setAttempt((n) => n + 1),
+  }
 }
 
 function StrengthMeter({ strength, minScore }: { strength: Strength; minScore: number }) {
@@ -464,12 +487,18 @@ function StrengthMeter({ strength, minScore }: { strength: Strength; minScore: n
       </div>
       <p className="text-xs text-muted-foreground">
         Strength: <span className={cn("font-medium", below && "text-destructive")}>{strength.label}</span>
-        {below ? `, below the ${STRENGTH_LABELS[Math.min(4, minScore)]} this dux asks for` : ""}
+        {below
+          ? `, below the ${STRENGTH_LABELS[Math.min(4, minScore)]} this dux asks for, so it will probably refuse it`
+          : ""}
       </p>
       {strength.hint ? <p className="text-xs text-muted-foreground">{strength.hint}</p> : null}
     </div>
   )
 }
+
+// On a coarse pointer the fields meet the touch floor at any width; with a mouse
+// they keep the shared input height, stacked a gap-3 apart.
+const PASSWORD_FIELD_CLASS = "pointer-coarse:min-h-11 w-full md:w-64"
 
 function PasswordField({
   id,
@@ -497,7 +526,7 @@ function PasswordField({
         autoComplete={autoComplete}
         value={value}
         disabled={disabled}
-        className="max-md:min-h-10 w-full md:w-64"
+        className={PASSWORD_FIELD_CLASS}
         onChange={(e) => onChange(e.target.value)}
       />
     </div>
@@ -506,14 +535,15 @@ function PasswordField({
 
 // The one row that is not a `SettingRow`: three fields, a meter and its own
 // error line, all of it sent through the `"password"` write target by Save.
-// Which fields show is the server's answer about this connection: change (a
-// password is set), set the first one (allowed from here), or neither.
+// Which fields show is the server's answer about this connection, read again
+// each time Preferences opens: change (a password is set), set the first one
+// (allowed from here), or neither.
 function PasswordSettingRow({
   d,
   status,
   draft,
   onDraft,
-  strength,
+  reading,
   error,
   disabled,
 }: {
@@ -521,7 +551,7 @@ function PasswordSettingRow({
   status: AuthStatus | null
   draft: PasswordDraft
   onDraft: (next: PasswordDraft) => void
-  strength: Strength | null
+  reading: StrengthReading
   error: string | null
   disabled: boolean
 }) {
@@ -531,7 +561,7 @@ function PasswordSettingRow({
   const mins = status ? passwordMinimums(status) : null
   const unavailable =
     status === null
-      ? "dux could not read its sign-in status, so the password cannot be changed from here right now. Reopen Preferences to try again."
+      ? "dux could not read its sign-in status, so the password cannot be changed from here right now. Close Preferences and open it again to ask once more."
       : "No password is set. The first one can only be set from this machine, from your tailnet, or by running `dux config set server.auth.password` where dux runs."
   return (
     <div className="flex flex-col gap-3 py-3 first:pt-0">
@@ -542,7 +572,7 @@ function PasswordSettingRow({
         <p className="text-xs text-muted-foreground">{renderInlineCode(d.description)}</p>
         {editable && mins ? (
           <p className="text-xs text-muted-foreground">
-            {`At least ${mins.length} characters, rated ${STRENGTH_LABELS[Math.min(4, mins.score)]} or better. Leave these empty to keep the current password.`}
+            {`At least ${mins.length} characters. The meter shows how hard it is to guess; dux asks for ${STRENGTH_LABELS[Math.min(4, mins.score)]} or better and says so if it refuses. Leave these empty to keep the current password.`}
           </p>
         ) : (
           <p className="text-xs text-muted-foreground">{renderInlineCode(unavailable)}</p>
@@ -568,9 +598,23 @@ function PasswordSettingRow({
             disabled={disabled}
             onChange={(next) => onDraft({ ...draft, next })}
           />
-          {draft.next !== "" && strength !== null ? (
+          {draft.next !== "" && reading.strength !== null ? (
             <div className="md:w-64">
-              <StrengthMeter strength={strength} minScore={mins.score} />
+              <StrengthMeter strength={reading.strength} minScore={mins.score} />
+            </div>
+          ) : null}
+          {draft.next !== "" && reading.failed ? (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span>The strength meter did not load. Save still works.</span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="pointer-coarse:min-h-11"
+                onClick={reading.retry}
+              >
+                Load the strength meter again
+              </Button>
             </div>
           ) : null}
           <PasswordField
@@ -744,7 +788,12 @@ function CustomizeWebappForm({
   const authStatus = authPhase.kind === "open" ? authPhase.status : null
   const [passwordDraft, setPasswordDraft] = useState<PasswordDraft>(EMPTY_PASSWORD_DRAFT)
   const [passwordError, setPasswordError] = useState<string | null>(null)
-  const strength = usePasswordStrength(passwordDraft.next)
+  const strengthReading = usePasswordStrength(passwordDraft.next)
+  // Opening Preferences reads the sign-in status again, so the row shows what
+  // the server says now (a password set from the CLI a moment ago included).
+  useEffect(() => {
+    void refreshAuthStatus()
+  }, [])
 
   // The pre-touch baseline for a row. Any field the store tracks an optimistic
   // override for must read the override-aware selector rather than raw bootstrap:
@@ -795,7 +844,11 @@ function CustomizeWebappForm({
         reportUnauthorized()
         return false
       case "unreachable":
-        setPasswordError("Could not reach dux, so the password was not changed. Try again.")
+        setPasswordError(
+          answer.timedOut
+            ? "dux did not answer in time, so the password may not have changed. Check by signing in again, or try once more."
+            : "Could not reach dux, so the password was not changed. Try again.",
+        )
         return false
     }
   }
@@ -811,7 +864,6 @@ function CustomizeWebappForm({
       ? passwordWrite(passwordDraft, {
           passwordSet: authStatus.password_set,
           mins: passwordMinimums(authStatus),
-          strength,
         })
       : ({ kind: "none" } as const)
     if (pw.kind === "invalid") {
@@ -916,7 +968,7 @@ function CustomizeWebappForm({
                           setPasswordDraft(next)
                           setPasswordError(null)
                         }}
-                        strength={strength}
+                        reading={strengthReading}
                         error={passwordError}
                         disabled={saving}
                       />

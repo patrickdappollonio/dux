@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react"
 import { wsUrl } from "./apiBase"
-import { initAuthGate, onAuthOpen, probeAfterDrop } from "./authGate"
+import { initAuthGate, onAuthOpen, probeAfterDrop, refreshAuthStatus } from "./authGate"
 import { sanitizeAgentName } from "./agentName"
 import { git } from "./git"
 import {
@@ -1178,6 +1178,9 @@ function routeEvent(event: EventsServerMessage): void {
       return
     case "config.changed":
       loadBootstrap()
+      // A password or a `[server.auth]` change (from the CLI, a hand edit plus
+      // reload, or another browser) moves what the banners and Preferences show.
+      void refreshAuthStatus()
       return
     case "workspace":
       applyPushedWorkspace(event)

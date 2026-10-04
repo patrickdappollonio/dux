@@ -60,7 +60,7 @@ function walk(entries: AppMenuEntry[]): AppMenuEntry[] {
 }
 
 // Most tests build the fullest menu: gh available, so the from-PR entry exists.
-const ctx = { ghAvailable: true, githubIntegrationEnabled: true }
+const ctx = { ghAvailable: true, githubIntegrationEnabled: true, canSignOut: false }
 
 describe("appMenuModel", () => {
   beforeEach(() => vi.clearAllMocks())
@@ -120,7 +120,7 @@ describe("appMenuModel", () => {
           : { kind: e.kind, id: e.id },
       )
     for (const ghAvailable of [true, false]) {
-      const model = appMenuModel({ ghAvailable, githubIntegrationEnabled: true })
+      const model = appMenuModel({ ghAvailable, githubIntegrationEnabled: true, canSignOut: false })
       const agentSub = findSubmenu(model, "new-agent")
       expect(agentSub?.title).toBe("New")
       expect(shape(agentSub?.entries)).toEqual(
@@ -162,7 +162,7 @@ describe("appMenuModel", () => {
   // stale answer too, and would take every running agent with it.
   it("offers the GitHub re-check while the integration is on, whatever gh says", () => {
     const ids = (githubIntegrationEnabled: boolean, ghAvailable: boolean) =>
-      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled })).map(
+      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled, canSignOut: false })).map(
         (e) => e.id,
       )
     expect(ids(true, false)).toContain("recheck-github")
@@ -181,7 +181,7 @@ describe("appMenuModel", () => {
 
   it("hides the from-PR agent variant when gh is unavailable", () => {
     const ids = (ghAvailable: boolean) =>
-      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled: true })).map((e) => e.id)
+      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled: true, canSignOut: false })).map((e) => e.id)
     expect(ids(true)).toContain("new-agent-from-pr")
     expect(ids(false)).not.toContain("new-agent-from-pr")
   })

@@ -112,6 +112,7 @@ describe("AppMenu", () => {
     const topLevel = appMenuModel({
       ghAvailable: true,
       githubIntegrationEnabled: true,
+      canSignOut: false,
     }).filter((e) => e.kind !== "separator")
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
     expect(rendered).toHaveLength(topLevel.length)
@@ -143,6 +144,7 @@ describe("AppMenu", () => {
     const submenus = appMenuModel({
       ghAvailable: true,
       githubIntegrationEnabled: true,
+      canSignOut: false,
     }).filter((e) => e.kind === "submenu")
     expect(subTriggers).toHaveLength(submenus.length)
     for (const t of subTriggers) {
@@ -279,6 +281,7 @@ describe("AppMenu", () => {
     const model = appMenuModel({
       ghAvailable: true,
       githubIntegrationEnabled: true,
+      canSignOut: false,
     })
     expect(walk(model).length).toBeGreaterThan(model.length)
   })

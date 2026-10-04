@@ -1,10 +1,10 @@
 // The page's sign-in state, and the one place every unauthorized answer lands.
 //
 // The app boots only once this says `open`: a signed-in browser, or a server
-// where no password applies to this connection. Signed out, blocked and broken
-// each show a page of their own instead of the app, and while the page is in
-// any of them nothing protected is sent (`authPaused`), sockets hold their
-// retries, and no toast is raised.
+// where no password applies to this connection. Signed out, blocked, broken,
+// unreachable and stuck each show a page of their own over the app, and while
+// the page is in any of them nothing protected is sent (`authPaused`), sockets
+// hold their retries and their sends, and no toast is raised.
 //
 // Every fetch helper reports through `apiFetch.ts` and every socket through its
 // close code (4401 signed out or revoked, 4403 blocked), so a session that ends
@@ -13,9 +13,21 @@
 // failed upgrade as 1006), so a dropped app socket asks the status route
 // (`probeAfterDrop`).
 //
-// The EPOCH moves each time the page leaves `open`. A request remembers the
-// epoch it was sent in, and an answer that lands in a later one belongs to a
-// session that is over, so it is dropped rather than applied.
+// Two counters keep late answers in their place:
+// - The EPOCH moves each time the page leaves `open`. A request remembers the
+//   epoch it was sent in, so an ended session's refusal is not reported
+//   against the session that replaced it (`apiFetch.ts`).
+// - The GENERATION moves on every phase change that is not a probe's own
+//   answer: a sign-in, a sign-out, a refusal, a socket close. A status probe
+//   remembers the generation it was asked in, and its answer is dropped if the
+//   page moved since, or if an answer to a probe asked LATER has already
+//   landed (probes are numbered, so an old answer never undoes a newer one).
+//
+// THE CIRCUIT BREAKER. A protected route that refuses the session while the
+// status route says the session is fine would otherwise loop: sign out, read
+// the status, reopen, refuse again. Each such disagreement reopens only after
+// an exponential delay, and the third in a row stops on a page that says so.
+// A protected request that succeeds forgets the count.
 //
 // What signing out does NOT do: reload the page or touch `location.hash`. The
 // store, the editor's drafts and the URL all live in page memory and survive a
@@ -28,11 +40,10 @@ import {
   fetchAuthStatus,
   normalizeAuthStatus,
   postLogin,
-  postLogout,
   type LoginAnswer,
-  type LogoutAnswer,
   type StatusAnswer,
 } from "./authApi"
+import { postLogout, type LogoutAnswer } from "./authActions"
 
 export { normalizeAuthStatus }
 export type { AuthStatus }
@@ -59,11 +70,16 @@ export type SignOutReason =
 
 export type AuthPhase =
   | { kind: "checking" }
-  /** `status` is null when the server could not be asked. */
+  /** `status` is null when the server answered without the document. */
   | { kind: "open"; status: AuthStatus | null }
   | { kind: "signed_out"; status: AuthStatus | null; reason: SignOutReason }
   | { kind: "blocked"; where: string | null }
   | { kind: "broken"; detail: string }
+  /** The first look got no answer at all. */
+  | { kind: "unreachable"; timedOut: boolean }
+  /** The circuit breaker tripped: the server keeps refusing a session its
+   * own status route calls valid. */
+  | { kind: "stuck" }
 
 /// What a status answer means for the page. Broken auth wins over everything:
 /// a password the server cannot check is not a password the page can ask for.
@@ -77,13 +93,17 @@ export function phaseForStatus(status: AuthStatus): AuthPhase {
 
 let phase: AuthPhase = { kind: "checking" }
 let epoch = 0
+let generation = 0
+let probeSeq = 0
+let appliedProbeSeq = 0
 const listeners = new Set<() => void>()
 const openListeners = new Set<() => void>()
 
-function setPhase(next: AuthPhase): void {
+function setPhase(next: AuthPhase, fromProbe = false): void {
   const wasOpen = phase.kind === "open"
   const isOpen = next.kind === "open"
   if (wasOpen && !isOpen) epoch++
+  if (!fromProbe) generation++
   phase = next
   for (const l of [...listeners]) l()
   if (isOpen && !wasOpen) for (const l of [...openListeners]) l()
@@ -98,11 +118,11 @@ export function authEpoch(): number {
   return epoch
 }
 
-/// Whether protected work must wait: the page is on its login, blocked or
-/// broken screen. Not while the first answer is still coming, because nothing
+/// Whether protected work must wait: the page is on one of the gate's own
+/// pages. Not while the first answer is still coming, because nothing
 /// protected is sent then anyway and a page that never asks must still work.
 export function authPaused(): boolean {
-  return phase.kind === "signed_out" || phase.kind === "blocked" || phase.kind === "broken"
+  return phase.kind !== "open" && phase.kind !== "checking"
 }
 
 export function subscribeAuth(listener: () => void): () => void {
@@ -133,62 +153,166 @@ export function currentAuthStatus(): AuthStatus | null {
   return phase.kind === "open" || phase.kind === "signed_out" ? phase.status : null
 }
 
-function applyAnswer(answer: StatusAnswer, signedOutReason: SignOutReason): void {
+// ---- The circuit breaker ----------------------------------------------------
+
+/// Disagreements in a row before the page stops on the stuck page.
+export const MAX_AUTH_DISAGREEMENTS = 3
+/// The first reopen delay; each disagreement doubles it.
+export const AUTH_DISAGREEMENT_BASE_MS = 1000
+
+let disagreements = 0
+
+/// A protected request succeeded in the current session: whatever disagreed
+/// before has stopped disagreeing.
+export function noteProtectedSuccess(): void {
+  disagreements = 0
+}
+
+// ---- Applying answers -------------------------------------------------------
+
+// Who is applying: the first look, a direct read of its own (a sign-in, a
+// password change), a probe, or a probe that follows a refusal.
+type Origin = "init" | "direct" | "probe" | "after_refusal"
+
+function applyAnswer(answer: StatusAnswer, reason: SignOutReason, origin: Origin): void {
+  // A probe's answer moves the page without moving the generation, so a newer
+  // probe still in flight is not invalidated by an older one landing first.
+  const fromProbe = origin === "probe" || origin === "after_refusal"
   switch (answer.kind) {
     case "status": {
       const next = phaseForStatus(answer.status)
-      setPhase(next.kind === "signed_out" ? { ...next, reason: signedOutReason } : next)
+      if (next.kind === "signed_out") {
+        setPhase({ ...next, reason }, fromProbe)
+        return
+      }
+      if (next.kind === "open" && origin === "after_refusal") {
+        reopenAfterDisagreement(next)
+        return
+      }
+      setPhase(next, fromProbe)
       return
     }
     case "blocked":
-      setPhase({ kind: "blocked", where: answer.where })
+      setPhase({ kind: "blocked", where: answer.where }, fromProbe)
       return
     case "broken":
-      setPhase({ kind: "broken", detail: answer.detail })
+      setPhase({ kind: "broken", detail: answer.detail }, fromProbe)
       return
     case "unknown":
-      // No evidence either way. A page with nothing yet boots, and the
-      // offline overlay or the next 401 says what is really wrong; a page
-      // already somewhere stays there.
-      if (phase.kind === "checking") setPhase({ kind: "open", status: null })
+      // The server answered without the document (an older dux): no password
+      // to ask for. A page already somewhere stays there.
+      if (phase.kind === "checking") setPhase({ kind: "open", status: null }, fromProbe)
+      return
+    case "unreachable":
+      // A page already somewhere stays there, and the offline overlay speaks.
+      if (phase.kind !== "checking") return
+      // On the first look, a request that failed at once (the server is down,
+      // the network is off) boots the app, whose offline overlay already says
+      // that and keeps retrying; one that hung until the deadline gets its own
+      // page with a Retry, because nothing else would ever say anything.
+      setPhase(
+        answer.timedOut
+          ? { kind: "unreachable", timedOut: true }
+          : { kind: "open", status: null },
+        fromProbe,
+      )
       return
   }
+}
+
+// A protected route refused the session and the status route says it is
+// fine. Reopen, but only after a delay that doubles each time, and stop on the
+// stuck page once it has happened often enough.
+function reopenAfterDisagreement(next: AuthPhase): void {
+  disagreements++
+  if (disagreements >= MAX_AUTH_DISAGREEMENTS) {
+    setPhase({ kind: "stuck" })
+    return
+  }
+  const at = generation
+  setTimeout(
+    () => {
+      if (generation === at) setPhase(next)
+    },
+    AUTH_DISAGREEMENT_BASE_MS * 2 ** (disagreements - 1),
+  )
 }
 
 /// The first look, run once by the store at load.
 export async function initAuthGate(): Promise<void> {
-  applyAnswer(await fetchAuthStatus(), "required")
+  const at = generation
+  const answer = await fetchAuthStatus()
+  if (generation !== at) return
+  applyAnswer(answer, "required", "init")
 }
 
-let probe: Promise<void> | null = null
-
-/// Ask again and settle on the answer; one in flight however many ask.
-export function probeAuth(reason: SignOutReason = "expired"): Promise<void> {
-  if (probe) return probe
-  probe = fetchAuthStatus()
-    .then((answer) => applyAnswer(answer, reason))
-    .finally(() => {
-      probe = null
-    })
-  return probe
+/// Look again from a gate page that has a Retry: the unreachable page, the
+/// stuck page, the blocked and broken pages.
+export async function retryAuthGate(): Promise<void> {
+  disagreements = 0
+  if (phase.kind === "unreachable" || phase.kind === "stuck") setPhase({ kind: "checking" })
+  if (phase.kind === "checking") {
+    await initAuthGate()
+    return
+  }
+  await probeAuth("required", { fresh: true })
 }
+
+let probe: { generation: number; promise: Promise<void> } | null = null
+
+/// Ask again and settle on the answer. Callers asking in the same generation
+/// share one request; `fresh` always asks anew (a Try again must not wait on a
+/// request that may be hanging). An answer that lands after the page moved is
+/// dropped, whoever asked for it.
+export function probeAuth(
+  reason: SignOutReason = "expired",
+  opts: { fresh?: boolean; origin?: Origin } = {},
+): Promise<void> {
+  if (!opts.fresh && probe !== null && probe.generation === generation) return probe.promise
+  const at = generation
+  const seq = ++probeSeq
+  const origin = opts.origin ?? "probe"
+  const promise = fetchAuthStatus().then((answer) => {
+    if (generation !== at || seq < appliedProbeSeq) return
+    appliedProbeSeq = seq
+    applyAnswer(answer, reason, origin)
+  })
+  const entry = { generation: at, promise }
+  probe = entry
+  void promise.finally(() => {
+    if (probe === entry) probe = null
+  })
+  return promise
+}
+
+// Set while an explicit sign-out is out: everything it causes (the server
+// closing this page's sockets, the drop probes that follow) reads as the
+// sign-out it is, not as a session that ended by itself.
+let signingOut = false
 
 /// The app socket dropped: if the page thinks it is signed in, check, because
 /// a refused upgrade looks exactly like a network failure from here.
 export function probeAfterDrop(): Promise<void> {
-  if (phase.kind !== "open") return Promise.resolve()
+  if (phase.kind !== "open" || signingOut) return Promise.resolve()
   return probeAuth("expired")
 }
 
+/// The status of an open page, read again: Preferences opening, the banners
+/// showing, a config change announced by the server.
+export function refreshAuthStatus(): Promise<void> {
+  if (phase.kind !== "open") return Promise.resolve()
+  return probeAuth("expired", { fresh: true })
+}
+
 /// A protected request was answered 401: the session is gone.
-export function reportUnauthorized(reason: SignOutReason = "expired"): void {
-  if (phase.kind === "signed_out" || phase.kind === "blocked" || phase.kind === "broken") {
-    return
-  }
+export function reportUnauthorized(): void {
+  if (phase.kind !== "open" && phase.kind !== "checking") return
+  const reason: SignOutReason = signingOut ? "signed_out" : "expired"
   setPhase({ kind: "signed_out", status: currentAuthStatus(), reason })
   // Refresh what the login page shows (the transport warning, the first
-  // password rule); the session itself is already known to be over.
-  void probeAuth(reason)
+  // password rule). During a sign-out the answer is only a refresh; otherwise
+  // a "signed in" answer is a disagreement for the breaker.
+  void probeAuth(reason, { origin: signingOut ? "probe" : "after_refusal" })
 }
 
 export function reportBlocked(where: string | null): void {
@@ -219,8 +343,9 @@ export async function signIn(password: string): Promise<LoginAnswer> {
   const answer = await postLogin(password)
   switch (answer.kind) {
     case "ok": {
+      disagreements = 0
       const after = await fetchAuthStatus()
-      if (after.kind === "unknown") {
+      if (after.kind === "unknown" || after.kind === "unreachable") {
         setPhase({ kind: "open", status: null })
         return answer
       }
@@ -235,11 +360,7 @@ export async function signIn(password: string): Promise<LoginAnswer> {
         setPhase({ kind: "signed_out", status: after.status, reason: "required" })
         return { kind: "refused", message: COOKIE_NOT_KEPT }
       }
-      if (after.kind === "status" && after.status.auth_broken === null) {
-        setPhase({ kind: "open", status: after.status })
-        return answer
-      }
-      applyAnswer(after, "required")
+      applyAnswer(after, "required", "direct")
       return answer
     }
     case "blocked":
@@ -253,30 +374,34 @@ export async function signIn(password: string): Promise<LoginAnswer> {
   }
 }
 
-/// End this browser's session. Only a server that answered moves the page to
-/// the login screen: a sign-out that never arrived has not happened.
+/// End this browser's session. The reason is settled before the request goes
+/// out, so the socket closes and drop probes the sign-out itself causes cannot
+/// relabel it "your session ended". Only a server that answered moves the page
+/// to the login screen: a sign-out that never arrived has not happened.
 export async function signOut(): Promise<LogoutAnswer> {
-  const answer = await postLogout()
-  if (answer.kind === "ok") {
-    setPhase({ kind: "signed_out", status: currentAuthStatus(), reason: "signed_out" })
-    void probeAuth("signed_out")
+  signingOut = true
+  try {
+    const answer = await postLogout()
+    if (answer.kind === "ok") {
+      setPhase({ kind: "signed_out", status: currentAuthStatus(), reason: "signed_out" })
+      void probeAuth("signed_out")
+    }
+    return answer
+  } finally {
+    signingOut = false
   }
-  return answer
 }
 
 /// The password changed and the server signed every browser out, this one
 /// included. Asks where that leaves this page: a connection the password does
 /// not apply to stays open.
 export async function afterPasswordChange(): Promise<void> {
+  const at = generation
   const answer = await fetchAuthStatus()
+  if (generation !== at) return
   if (answer.kind === "status" && answer.status.required_here && !answer.status.signed_in) {
     setPhase({ kind: "signed_out", status: answer.status, reason: "password_changed" })
     return
   }
-  applyAnswer(answer, "password_changed")
-}
-
-/// Replace the status an open page holds (a banner dismissed, a fresh read).
-export function noteAuthStatus(status: AuthStatus): void {
-  if (phase.kind === "open") setPhase({ kind: "open", status })
+  applyAnswer(answer, "password_changed", "direct")
 }

@@ -105,7 +105,9 @@ describe("apiFetch", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it("drops an answer that lands after the session it was asked in has ended", async () => {
+  // A request sent in one session whose answer lands after that session ended
+  // and a new one began.
+  async function straddle(answer: Response) {
     const { api, gate } = await load()
     await gate.initAuthGate()
     let release!: () => void
@@ -115,15 +117,51 @@ describe("apiFetch", () => {
         : url.endsWith("/auth/login")
           ? Promise.resolve(new Response(null, { status: 204 }))
           : new Promise((resolve) => {
-            release = () => resolve(json(200, { stale: true }))
-          })
-    const pending = api.apiFetch("/api/v1/workspace").catch((e: unknown) => e)
+              release = () => resolve(answer)
+            })
+    const pending = api.apiFetch("/api/v1/sessions/s1/kill", { method: "POST" }).then(
+      (r) => r,
+      (e: unknown) => e,
+    )
     await vi.waitFor(() => expect(release).toBeTypeOf("function"))
-    // The session ends and a new one starts while the request is in flight.
+    routes = async (url) =>
+      url.endsWith("/auth/status")
+        ? json(200, { required_here: true, signed_in: false })
+        : url.endsWith("/auth/login")
+          ? new Response(null, { status: 204 })
+          : json(200, {})
     gate.reportUnauthorized()
+    routes = async (url) =>
+      url.endsWith("/auth/login")
+        ? new Response(null, { status: 204 })
+        : json(200, { required_here: true, signed_in: true })
     await gate.signIn("again")
+    expect(gate.getAuthPhase().kind).toBe("open")
     release()
-    expect(api.isAuthInterruption(await pending)).toBe(true)
+    return { api, gate, result: await pending }
+  }
+
+  it("delivers a 2xx that lands after the session it was sent in ended, because the work was done", async () => {
+    const { result } = await straddle(json(200, { done: true }))
+    expect(result).toBeInstanceOf(Response)
+    expect(await (result as Response).json()).toEqual({ done: true })
+  })
+
+  it("does not let an ended session's 401 sign the new session out", async () => {
+    const { api, gate, result } = await straddle(json(401, { error: "auth_required" }))
+    expect(api.isAuthInterruption(result)).toBe(true)
+    expect(gate.getAuthPhase().kind).toBe("open")
+  })
+
+  it("says a request refused before sending was not sent", async () => {
+    const { api, gate } = await load()
+    routes = async (url) =>
+      url.endsWith("/auth/status")
+        ? json(200, { required_here: true, signed_in: false, password_set: true })
+        : json(200, {})
+    await gate.initAuthGate()
+    const err = await api.apiFetch("/api/v1/workspace").catch((e: unknown) => e)
+    expect(String((err as Error).message)).toContain("not sent")
   })
 
   it("lets a network failure through as the caller's own error", async () => {

@@ -145,3 +145,28 @@ describe("a helper while signed out", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+describe("the protected auth routes report a 401 to the gate too", () => {
+  it("logout", async () => {
+    const gate = await import("./authGate")
+    const { postLogout } = await import("./authActions")
+    expect(await postLogout()).toEqual({ kind: "ok" })
+    expect(gate.getAuthPhase().kind).toBe("signed_out")
+  })
+
+  it("password", async () => {
+    const gate = await import("./authGate")
+    const { postPassword } = await import("./authActions")
+    expect(await postPassword({ current: "a", next: "b" })).toEqual({ kind: "signed_out" })
+    expect(gate.getAuthPhase().kind).toBe("signed_out")
+  })
+
+  it("dismissing the no-password warning", async () => {
+    const gate = await import("./authGate")
+    const { postDismissNoAuthWarning } = await import("./authActions")
+    const { isAuthInterruption } = await import("./apiFetch")
+    const err = await postDismissNoAuthWarning().catch((e: unknown) => e)
+    expect(isAuthInterruption(err)).toBe(true)
+    expect(gate.getAuthPhase().kind).toBe("signed_out")
+  })
+})

@@ -41,21 +41,34 @@ vi.mock("@/components/SimpleTooltip", () => ({
 let phase: AuthPhase
 const afterPasswordChange = vi.fn(async () => {})
 const reportUnauthorized = vi.fn()
+const refreshAuthStatus = vi.fn(async () => {})
 vi.mock("@/lib/authGate", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/authGate")>()
-  return { ...actual, useAuthPhase: () => phase, afterPasswordChange, reportUnauthorized }
+  return {
+    ...actual,
+    useAuthPhase: () => phase,
+    afterPasswordChange,
+    reportUnauthorized,
+    refreshAuthStatus,
+  }
 })
 const postPassword = vi.fn()
-vi.mock("@/lib/authApi", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/authApi")>()
+vi.mock("@/lib/authActions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/authActions")>()
   return { ...actual, postPassword }
 })
+// How many meter loads fail before one works.
+let strengthFailures = 0
 // A deterministic meter: the score is the number of spaces, capped at 4.
 vi.mock("@/lib/passwordStrength", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/passwordStrength")>()
   return {
     ...actual,
     estimateStrength: async (pw: string): Promise<Strength> => {
+      if (strengthFailures > 0) {
+        strengthFailures--
+        throw new Error("chunk failed to load")
+      }
       const score = Math.min(4, pw.split(" ").length - 1) as Strength["score"]
       return {
         score,
@@ -119,6 +132,8 @@ beforeEach(() => {
   seed()
   phase = { kind: "open", status: status() }
   postPassword.mockReset().mockResolvedValue({ kind: "ok" })
+  strengthFailures = 0
+  refreshAuthStatus.mockClear()
   afterPasswordChange.mockClear()
   reportUnauthorized.mockClear()
   closeCustomizeWebapp.mockClear()
@@ -190,15 +205,53 @@ describe("the password row", () => {
     expect(closeCustomizeWebapp).not.toHaveBeenCalled()
   })
 
-  it("refuses below the minimum score without sending", async () => {
+  it("shows a low score but sends anyway, because the server decides", async () => {
     render(<CustomizeWebappDialog />)
     type("Current password", "the old password")
     type("New password", "correcthorsebattery")
     type("New password again", "correcthorsebattery")
     await waitFor(() => expect(screen.getByRole("meter").getAttribute("aria-valuetext")).toBe("Weak"))
     await save()
-    expect(postPassword).not.toHaveBeenCalled()
+    expect(postPassword).toHaveBeenCalledWith({
+      current: "the old password",
+      next: "correcthorsebattery",
+    })
+  })
+
+  it("shows the server's refusal of a weak password under the row", async () => {
+    postPassword.mockResolvedValue({
+      kind: "refused",
+      message: "That password is too easy to guess, so dux refused it.",
+      score: 1,
+    })
+    render(<CustomizeWebappDialog />)
+    type("Current password", "the old password")
+    type("New password", "correcthorsebattery")
+    type("New password again", "correcthorsebattery")
+    await save()
     expect(screen.getByRole("alert").textContent).toContain("too easy to guess")
+  })
+
+  it("does not lock Save when the meter cannot load, and offers to load it again", async () => {
+    strengthFailures = 1
+    // Refused, so the fields stay and the meter can be asked for again after.
+    postPassword.mockResolvedValue({ kind: "refused", message: "no", score: null })
+    render(<CustomizeWebappDialog />)
+    type("Current password", "the old password")
+    type("New password", STRONG)
+    type("New password again", STRONG)
+    const retry = await screen.findByRole("button", { name: "Load the strength meter again" })
+    await save()
+    expect(postPassword).toHaveBeenCalledWith({ current: "the old password", next: STRONG })
+    await act(async () => fireEvent.click(retry))
+    await waitFor(() =>
+      expect(screen.getByRole("meter").getAttribute("aria-valuetext")).toBe("Strong"),
+    )
+  })
+
+  it("reads the sign-in status again every time Preferences opens", () => {
+    render(<CustomizeWebappDialog />)
+    expect(refreshAuthStatus).toHaveBeenCalledTimes(1)
   })
 
   it("refuses a mismatched repeat", async () => {
@@ -281,16 +334,18 @@ describe("the password row", () => {
     expect(document.body.textContent).toContain("dux config set server.auth.password")
   })
 
-  it("says it cannot be changed here when the sign-in status is unknown", () => {
+  it("says it cannot be changed here when the sign-in status is unknown, and asks again", () => {
     phase = { kind: "open", status: null }
     render(<CustomizeWebappDialog />)
     expect(screen.queryByLabelText("New password")).toBeNull()
+    // Reopening really does ask again: opening is what reads the status.
+    expect(refreshAuthStatus).toHaveBeenCalled()
   })
 
   it("keeps the password fields at the touch floor", () => {
     render(<CustomizeWebappDialog />)
     for (const label of ["Current password", "New password", "New password again"]) {
-      expect(screen.getByLabelText(label).className).toContain("max-md:min-h-10")
+      expect(screen.getByLabelText(label).className).toContain("pointer-coarse:min-h-11")
     }
   })
 })

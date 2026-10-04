@@ -1,12 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS } from "./connectionTiming"
+
 import {
   fetchAuthStatus,
   normalizeAuthStatus,
-  postDismissNoAuthWarning,
   postLogin,
-  postLogout,
-  postPassword,
   retryAfterSeconds,
 } from "./authApi"
 
@@ -30,6 +29,13 @@ function stubFetch(res: Response | (() => Promise<Response>)) {
   const fn = vi.fn(async () => (typeof res === "function" ? res() : res))
   vi.stubGlobal("fetch", fn)
   return fn
+}
+
+// A fetch that only ends when its signal aborts it.
+function hang(_input: unknown, init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))
+  })
 }
 
 const FULL = {
@@ -119,14 +125,23 @@ describe("fetchAuthStatus", () => {
     })
   })
 
-  it("answers unknown when the server cannot be reached", async () => {
+  it("answers unreachable when the server cannot be reached", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
         throw new TypeError("network")
       }),
     )
-    expect(await fetchAuthStatus()).toEqual({ kind: "unknown" })
+    expect(await fetchAuthStatus()).toEqual({ kind: "unreachable", timedOut: false })
+  })
+
+  it("gives up on a status read that never answers, after the request deadline", async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal("fetch", vi.fn(hang))
+    const pending = fetchAuthStatus()
+    await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS * 1000)
+    expect(await pending).toEqual({ kind: "unreachable", timedOut: true })
+    vi.useRealTimers()
   })
 
   it("answers unknown for a route this server does not have", async () => {
@@ -199,7 +214,24 @@ describe("postLogin", () => {
         throw new TypeError("network")
       }),
     )
-    expect(await postLogin("x")).toEqual({ kind: "unreachable" })
+    expect(await postLogin("x")).toEqual({ kind: "unreachable", timedOut: false })
+  })
+
+  it("gives up on a sign-in that never answers, after the request deadline", async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal("fetch", vi.fn(hang))
+    const pending = postLogin("x")
+    await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS * 1000)
+    expect(await pending).toEqual({ kind: "unreachable", timedOut: true })
+    vi.useRealTimers()
+  })
+
+  it("never shows a JSON refusal raw", async () => {
+    stubFetch(reply(500, { error: "something_else" }))
+    expect(await postLogin("x")).toEqual({
+      kind: "refused",
+      message: "dux refused to sign in (HTTP 500).",
+    })
   })
 
   it("reads any other refusal with the server's words", async () => {
@@ -208,100 +240,5 @@ describe("postLogin", () => {
       kind: "refused",
       message: "cross-origin request rejected",
     })
-  })
-})
-
-describe("postLogout", () => {
-  it("posts to the logout route and reads 204 as done", async () => {
-    const fn = stubFetch(reply(204, undefined))
-    expect(await postLogout()).toEqual({ kind: "ok" })
-    const [path, init] = fn.mock.calls[0] as unknown as [string, RequestInit]
-    expect(path).toBe("/api/v1/auth/logout")
-    expect(init.method).toBe("POST")
-  })
-
-  it("reads a 401 as already signed out", async () => {
-    stubFetch(reply(401, { error: "auth_required" }))
-    expect(await postLogout()).toEqual({ kind: "ok" })
-  })
-
-  it("reads a network failure as unreachable", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new TypeError("network")
-      }),
-    )
-    expect(await postLogout()).toEqual({ kind: "unreachable" })
-  })
-})
-
-describe("postPassword", () => {
-  it("sends current and new, and reads 204 as changed", async () => {
-    const fn = stubFetch(reply(204, undefined))
-    expect(await postPassword({ current: "old one", next: "new one" })).toEqual({
-      kind: "ok",
-    })
-    const [path, init] = fn.mock.calls[0] as unknown as [string, RequestInit]
-    expect(path).toBe("/api/v1/auth/password")
-    expect(JSON.parse(init.body as string)).toEqual({ current: "old one", new: "new one" })
-  })
-
-  it("leaves current out for a first password", async () => {
-    const fn = stubFetch(reply(204, undefined))
-    await postPassword({ next: "first password here" })
-    const [, init] = fn.mock.calls[0] as unknown as [string, RequestInit]
-    expect(JSON.parse(init.body as string)).toEqual({ new: "first password here" })
-  })
-
-  it("reads a 400 with its message and strength result", async () => {
-    stubFetch(
-      reply(400, {
-        error: "weak_password",
-        message: "That password is too weak.",
-        score: 1,
-        feedback: { warning: "This is a top-100 common password.", suggestions: [] },
-      }),
-    )
-    expect(await postPassword({ next: "password1" })).toEqual({
-      kind: "refused",
-      message: "That password is too weak.",
-      score: 1,
-    })
-  })
-
-  it("falls back to the strength warning, then the body text", async () => {
-    stubFetch(reply(400, { feedback: { warning: "Too short." } }))
-    expect(await postPassword({ next: "a" })).toMatchObject({ message: "Too short." })
-    stubFetch(new Response("current password is wrong", { status: 403 }))
-    expect(await postPassword({ current: "a", next: "b" })).toEqual({
-      kind: "refused",
-      message: "current password is wrong",
-      score: null,
-    })
-  })
-
-  it("reads auth_required as signed out", async () => {
-    stubFetch(reply(401, { error: "auth_required" }))
-    expect(await postPassword({ current: "a", next: "b" })).toEqual({
-      kind: "signed_out",
-    })
-  })
-})
-
-describe("postDismissNoAuthWarning", () => {
-  it("posts to the dismiss route", async () => {
-    const fn = stubFetch(reply(204, undefined))
-    await postDismissNoAuthWarning()
-    const [path, init] = fn.mock.calls[0] as unknown as [string, RequestInit]
-    expect(path).toBe("/api/v1/auth/dismiss-no-auth-warning")
-    expect(init.method).toBe("POST")
-  })
-
-  it("throws the server's words on a refusal", async () => {
-    stubFetch(new Response("could not write config.toml", { status: 500 }))
-    await expect(postDismissNoAuthWarning()).rejects.toThrow(
-      "could not write config.toml",
-    )
   })
 })

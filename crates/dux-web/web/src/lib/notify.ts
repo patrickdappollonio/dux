@@ -15,7 +15,7 @@
 import { createElement, Fragment, type ReactNode } from "react"
 import { toast } from "sonner"
 
-import { authPaused } from "./authGate"
+import { authPaused, subscribeAuth } from "./authGate"
 import { type Prose, proseText, renderProse } from "./prose"
 
 /// What a notification says: a finished sentence, or a sentence built from
@@ -118,11 +118,32 @@ function raiseFinal(tone: string, message: ReactNode, duration: number, id?: str
   else toast.success(message, options)
 }
 
+// Take a spinner off the screen along with its guard, without saying anything.
+function retireBusy(id: string): void {
+  cancelBusyGuard(id)
+  toast.dismiss(id)
+}
+
+// Going to a gate page retires every spinner on screen. Its final, if one
+// comes, is dropped while signed out; a server still running the operation
+// re-sends its busy once this page is back, so nothing real is lost, and
+// nothing stale comes back as a "still waiting" warning.
+subscribeAuth(() => {
+  if (!authPaused()) return
+  for (const id of [...busyGuards.keys()]) retireBusy(id)
+})
+
 /// Raise a final (non-busy) notification. The window comes from the user's
 /// configured `ui.status_clear_seconds`, graded by tone, unless `sticky` is set.
 export function notify(tone: FinalTone, message: Notice, opts: NotifyOptions = {}): void {
   if (!noticeText(message)) return
-  if (authPaused()) return
+  if (authPaused()) {
+    // Dropped, but whatever it would have replaced goes with it: a spinner
+    // left behind would have its guard warn, after the next sign-in, about
+    // an operation that has long ended.
+    if (opts.id !== undefined) retireBusy(opts.id)
+    return
+  }
   // This raise supersedes anything on the id, including a spinner whose guard is
   // still pending.
   if (opts.id !== undefined) cancelBusyGuard(opts.id)
@@ -181,7 +202,10 @@ export function notifyBusy(
   opts: { id: string; origin?: BusyOrigin },
 ): void {
   if (!noticeText(message)) return
-  if (authPaused()) return
+  if (authPaused()) {
+    retireBusy(opts.id)
+    return
+  }
   const duration = statusToastDuration("busy", null)
   const origin = opts.origin ?? "wire"
   // Whatever was armed for this id is now stale: this call replaces the toast.

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS } from "./connectionTiming"
+
 // The gate is module state, so every test imports a fresh copy.
 type Gate = typeof import("./authGate")
 
@@ -23,6 +25,13 @@ const NO_PASSWORD = {
   required_here: false,
   signed_in: false,
   no_auth_warning: true,
+}
+
+// A fetch that only ends when its signal aborts it.
+function hang(_input: unknown, init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))
+  })
 }
 
 // A server double answering the auth routes from mutable state.
@@ -100,13 +109,34 @@ describe("initAuthGate", () => {
     expect(g.authPaused()).toBe(true)
   })
 
-  it("opens when the server cannot say, so a network failure is the offline overlay's to report", async () => {
+  it("boots when the first look fails at once, so the offline overlay says the server is down", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
         throw new TypeError("network")
       }),
     )
+    const g = await load()
+    await g.initAuthGate()
+    expect(g.getAuthPhase()).toEqual({ kind: "open", status: null })
+  })
+
+  it("says so after the deadline when the first look never answers, and Retry asks again", async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal("fetch", vi.fn(hang))
+    const g = await load()
+    const first = g.initAuthGate()
+    await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS * 1000)
+    await first
+    expect(g.getAuthPhase()).toEqual({ kind: "unreachable", timedOut: true })
+    vi.stubGlobal("fetch", fetchMock)
+    await g.retryAuthGate()
+    expect(g.getAuthPhase().kind).toBe("open")
+    vi.useRealTimers()
+  })
+
+  it("opens for a server that answers without the document, an older dux", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })))
     const g = await load()
     await g.initAuthGate()
     expect(g.getAuthPhase()).toEqual({ kind: "open", status: null })
@@ -271,7 +301,7 @@ describe("signOut", () => {
         throw new TypeError("network")
       }),
     )
-    expect(await g.signOut()).toEqual({ kind: "unreachable" })
+    expect(await g.signOut()).toEqual({ kind: "unreachable", timedOut: false })
     expect(g.getAuthPhase().kind).toBe("open")
   })
 })
@@ -317,5 +347,144 @@ describe("hasSessionToEnd", () => {
     expect(g.hasSessionToEnd({ kind: "open", status: st({ password_set: false }) })).toBe(false)
     expect(g.hasSessionToEnd({ kind: "open", status: null })).toBe(false)
     expect(g.hasSessionToEnd({ kind: "checking" })).toBe(false)
+  })
+})
+
+describe("stale probe answers", () => {
+  it("an answer asked before a sign-in does not undo it", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    let release!: () => void
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        if (String(input).endsWith("/auth/status")) {
+          return new Promise<Response>((resolve) => {
+            release = () => resolve(json(200, SIGNED_OUT))
+          })
+        }
+        return fetchMock(input)
+      }),
+    )
+    g.reportUnauthorized()
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"))
+    const stale = release
+    // The sign-in reads its own, fresh status.
+    vi.stubGlobal("fetch", fetchMock)
+    await g.signIn("pw")
+    expect(g.getAuthPhase().kind).toBe("open")
+    stale()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(g.getAuthPhase().kind).toBe("open")
+  })
+
+  it("a hung probe does not hold up a fresh one", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    vi.stubGlobal("fetch", vi.fn(hang))
+    void g.probeAuth("expired")
+    statusBody = SIGNED_OUT
+    vi.stubGlobal("fetch", fetchMock)
+    await g.probeAuth("expired", { fresh: true })
+    expect(g.getAuthPhase().kind).toBe("signed_out")
+  })
+})
+
+describe("an explicit sign-out", () => {
+  it("wins over the socket close and drop probe it causes", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    let finish!: () => void
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        if (String(input).endsWith("/auth/logout")) {
+          return new Promise<Response>((resolve) => {
+            finish = () => resolve(json(204, undefined))
+          })
+        }
+        return Promise.resolve(json(200, SIGNED_OUT))
+      }),
+    )
+    const out = g.signOut()
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"))
+    // The server closes this page's sockets while the logout is still out.
+    void g.probeAfterDrop()
+    g.reportSocketAuthClose(4401)
+    finish()
+    await out
+    await new Promise((r) => setTimeout(r, 0))
+    expect(g.getAuthPhase()).toMatchObject({ kind: "signed_out", reason: "signed_out" })
+  })
+})
+
+describe("the circuit breaker", () => {
+  it("backs off when a refusal and the status disagree, then stops on an explicit page", async () => {
+    vi.useFakeTimers()
+    const g = await load()
+    await g.initAuthGate()
+    // Status keeps saying signed in; protected routes keep refusing.
+    g.reportUnauthorized()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(g.getAuthPhase().kind).toBe("signed_out")
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(g.getAuthPhase().kind).toBe("open")
+
+    g.reportUnauthorized()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(g.getAuthPhase().kind).toBe("signed_out")
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(g.getAuthPhase().kind).toBe("open")
+
+    g.reportUnauthorized()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(g.getAuthPhase().kind).toBe("stuck")
+    vi.useRealTimers()
+  })
+
+  it("forgets the disagreements once a protected request succeeds", async () => {
+    vi.useFakeTimers()
+    const g = await load()
+    await g.initAuthGate()
+    for (let i = 0; i < 5; i++) {
+      g.reportUnauthorized()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(g.getAuthPhase().kind).toBe("open")
+      g.noteProtectedSuccess()
+    }
+    vi.useRealTimers()
+  })
+
+  it("Try again from the stuck page asks afresh", async () => {
+    vi.useFakeTimers()
+    const g = await load()
+    await g.initAuthGate()
+    for (let i = 0; i < 3; i++) {
+      g.reportUnauthorized()
+      await vi.advanceTimersByTimeAsync(5000)
+    }
+    expect(g.getAuthPhase().kind).toBe("stuck")
+    await g.retryAuthGate()
+    expect(g.getAuthPhase().kind).toBe("open")
+    vi.useRealTimers()
+  })
+})
+
+describe("refreshAuthStatus", () => {
+  it("re-reads the status of an open page", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    statusBody = { ...SIGNED_IN, weak_password: true }
+    await g.refreshAuthStatus()
+    expect(g.getAuthPhase()).toMatchObject({ kind: "open", status: { weak_password: true } })
+  })
+
+  it("does nothing on a page that is not open", async () => {
+    statusBody = SIGNED_OUT
+    const g = await load()
+    await g.initAuthGate()
+    fetchMock.mockClear()
+    await g.refreshAuthStatus()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
