@@ -1211,8 +1211,8 @@ fn create_tracking_branch_from(repo_path: &Path, name: &str, remote: &str) -> Re
 /// `checkout.guess`, which dux cannot see through. `git switch` rather than
 /// `git checkout` because it is single-purpose and rejects the detached-HEAD
 /// and file-restore surprises `checkout` silently allows. Returns git's raw
-/// stderr on failure so callers can surface the concrete reason. A refused
-/// switch removes the local branch it created. Requires git >= 2.23.
+/// stderr on failure so callers can surface the concrete reason. A switch
+/// that fails removes the local branch it created. Requires git >= 2.23.
 pub fn switch_branch(
     repo_path: &Path,
     branch_name: &str,
@@ -1233,18 +1233,16 @@ pub fn switch_branch(
             (id, true)
         }
     };
-    let _clearance = match guard.clear(repo_path, &target, "switch to the branch") {
-        Ok(clearance) => clearance,
-        Err(refused) => {
-            // A refused switch leaves nothing behind: the branch dux created
-            // for it a moment ago goes again, unless something has moved it.
-            if created {
-                remove_created_branch(repo_path, branch_name, &target);
-            }
-            return Err(refused);
-        }
-    };
-    run_switch(repo_path, branch_name)
+    let switched = guard
+        .clear(repo_path, &target, "switch to the branch")
+        .and_then(|_clearance| run_switch(repo_path, branch_name));
+    // A switch that did not happen, refused by the move check or by git
+    // itself, leaves nothing behind: the branch dux created for it a moment
+    // ago goes again, unless something has moved it.
+    if switched.is_err() && created {
+        remove_created_branch(repo_path, branch_name, &target);
+    }
+    switched
 }
 
 /// Delete local branch `name`, which dux created at `created_at` a moment

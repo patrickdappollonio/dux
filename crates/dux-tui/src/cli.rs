@@ -670,11 +670,27 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                                 .map(|project| canonical_or_original(Path::new(&project.path))),
                         );
                     }
+                    // What dux started in a folder the reset removes is ended
+                    // first, the way a removal ends it; a folder something
+                    // still runs in is kept and reported.
+                    let kept = end_recorded_processes(paths, &store);
+                    let kept_folders: Vec<PathBuf> =
+                        kept.iter().map(|leftover| leftover.path.clone()).collect();
+                    leftovers.extend(kept);
                     let mut removed = 0usize;
                     for session in &sessions {
                         let Some(managed) = session.workspace.as_managed() else {
                             continue;
                         };
+                        // Kept when something still runs in it, or in a folder
+                        // around it (a session started above the worktree).
+                        let worktree = Path::new(&managed.worktree_path);
+                        if kept_folders.iter().any(|folder| {
+                            dux_core::worktree_ops::folder_contains(worktree, folder)
+                                || dux_core::worktree_ops::folder_contains(folder, worktree)
+                        }) {
+                            continue;
+                        }
                         match remove_session_worktree(paths, managed, &occupied_folders) {
                             SessionWorktreeReset::Removed => removed += 1,
                             SessionWorktreeReset::Skipped => {}
@@ -682,6 +698,7 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                         }
                     }
                     println!("{}", removed_worktrees_line(removed));
+                    occupied_folders.extend(kept_folders);
                 }
                 Err(error) => {
                     eprintln!("warning: could not load sessions from database: {error}");
@@ -704,6 +721,74 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
     leftovers.extend(swept);
     remove_file_with_message(&paths.sessions_db_path)?;
     Ok(leftovers)
+}
+
+/// End every process session an earlier run of dux started (this boot only:
+/// a session from another boot is void) in or under the managed worktrees
+/// root, before the reset removes anything there and before the database that
+/// recorded them goes: SIGTERM, the configured shutdown grace, then SIGKILL,
+/// the same as an agent delete's removal. A standalone agent's processes are
+/// never ended. Answers each folder that must be kept because something there
+/// still runs (one that would not stop, or a standalone agent's), with why.
+fn end_recorded_processes(paths: &DuxPaths, store: &SessionStore) -> Vec<ResetLeftover> {
+    let stored = match store.load_process_registry() {
+        Ok(stored) => stored,
+        Err(error) => {
+            eprintln!(
+                "warning: could not read the processes dux recorded starting, so none was \
+                 ended before the reset: {error}"
+            );
+            return Vec::new();
+        }
+    };
+    let grace = dux_core::config::shutdown_grace(
+        dux_core::config::load_config(paths).shutdown_timeout_seconds,
+    );
+    let mut kept: Vec<ResetLeftover> = Vec::new();
+    for entry in stored
+        .into_iter()
+        .filter(|entry| entry.session.is_this_boot())
+    {
+        if !dux_core::worktree_ops::folder_contains(&paths.worktrees_root, &entry.folder) {
+            continue;
+        }
+        let sessions = [entry.session];
+        let reason = if entry.standalone {
+            let running = dux_core::process_sessions::members(
+                &dux_core::process_sessions::read_process_table(),
+                &sessions,
+                &entry.survivors,
+                std::process::id(),
+            );
+            (!running.is_empty()).then(|| {
+                format!(
+                    "a standalone agent's process dux started is still running there ({}), and \
+                     dux never stops one",
+                    dux_core::process_sessions::describe(&running)
+                )
+            })
+        } else {
+            match dux_core::process_sessions::purge(
+                &mut dux_core::process_sessions::SystemProcesses,
+                &sessions,
+                &entry.survivors,
+                grace,
+            ) {
+                dux_core::process_sessions::PurgeOutcome::Clean { .. } => None,
+                dux_core::process_sessions::PurgeOutcome::Survivors(rows) => Some(format!(
+                    "{} that dux started there would not stop",
+                    dux_core::process_sessions::describe(&rows)
+                )),
+            }
+        };
+        if let Some(reason) = reason {
+            kept.push(ResetLeftover {
+                path: entry.folder,
+                reason,
+            });
+        }
+    }
+    kept
 }
 
 /// Clear the managed worktrees root entry by entry, leaving every entry that
@@ -975,6 +1060,154 @@ mod tests {
     use crate::config::{self, Config};
     use crate::keybindings::RuntimeBindings;
     use crate::model::{AgentSession, ProviderKind, SessionStatus};
+
+    /// Review 21: a startup command's job that dux left running (recorded in
+    /// the saved process registry for agent m1, in m1's worktree) is still
+    /// running when `dux config reset --all` runs. The reset neither ends it
+    /// nor keeps the folder: it removes the worktree out from under it, and the
+    /// registry that recorded it goes with the database, so nothing of dux's
+    /// can ever end it again.
+    #[test]
+    fn review21_factory_reset_removes_a_worktree_a_recorded_dux_job_still_runs_in() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        let worktree = paths.worktrees_root.join("proj").join("feat");
+        fs::create_dir_all(&worktree).expect("worktree");
+        let mut command = std::process::Command::new("sleep");
+        command.arg("60").current_dir(&worktree);
+        unsafe {
+            command.pre_exec(|| {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        let mut job = command.spawn().expect("spawn the job");
+        let session = dux_core::process_sessions::ProcessSession::started_now(job.id());
+        let now = Utc::now();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .upsert_session(&AgentSession {
+                id: "m1".to_string(),
+                slot_tab_id: "m1-slot".to_string(),
+                provider: ProviderKind::new("claude"),
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: "p1".to_string(),
+                        project_path: None,
+                        source_branch: "main".to_string(),
+                        branch_name: "feat".to_string(),
+                        initial_branch: "feat".to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: worktree.to_string_lossy().to_string(),
+                    },
+                ),
+                title: None,
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            })
+            .expect("upsert managed");
+        store
+            .replace_process_registry(&[dux_core::process_sessions::StoredSession {
+                owner: Some("m1".to_string()),
+                session,
+                folder: worktree.clone(),
+                standalone: false,
+                survivors: Vec::new(),
+                label: Some("an agent's startup command".to_string()),
+            }])
+            .expect("save the registry");
+        drop(store);
+
+        let _ = reset_agent_data(&paths);
+
+        let still_running = job.try_wait().expect("try_wait").is_none();
+        let _ = job.kill();
+        let _ = job.wait();
+        assert!(
+            worktree.exists() || !still_running,
+            "the reset removed {} while the dux job recorded there (pid {}) was still running in it",
+            worktree.display(),
+            job.id()
+        );
+    }
+
+    /// A process a standalone agent's run left in a managed folder is never
+    /// ended by a reset: the folder is kept, and listed with why.
+    #[test]
+    fn a_factory_reset_keeps_a_folder_a_recorded_standalone_process_runs_in() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        let folder = paths.worktrees_root.join("loose");
+        fs::create_dir_all(&folder).expect("folder");
+        let mut command = std::process::Command::new("sleep");
+        command.arg("60").current_dir(&folder);
+        // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
+        unsafe {
+            command.pre_exec(|| {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut job = Kill(command.spawn().expect("spawn the job"));
+        let session = dux_core::process_sessions::ProcessSession::started_now(job.0.id());
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .replace_process_registry(&[dux_core::process_sessions::StoredSession {
+                owner: Some("s1".to_string()),
+                session,
+                folder: folder.clone(),
+                standalone: true,
+                survivors: Vec::new(),
+                label: None,
+            }])
+            .expect("save the registry");
+        drop(store);
+
+        let leftovers = reset_agent_data(&paths).expect("reset");
+
+        assert!(
+            job.0.try_wait().expect("try_wait").is_none(),
+            "the standalone agent's process is left running"
+        );
+        assert!(folder.exists(), "its folder is kept");
+        assert!(
+            leftovers
+                .iter()
+                .any(|leftover| leftover.path == folder && leftover.reason.contains("standalone")),
+            "and listed with why: {:?}",
+            leftovers
+                .iter()
+                .map(|l| (&l.path, &l.reason))
+                .collect::<Vec<_>>()
+        );
+        assert!(!paths.sessions_db_path.exists(), "the database still goes");
+    }
 
     /// A factory reset must not remove a STANDALONE agent's folder, even when
     /// the user pointed that agent at a directory inside dux's own managed

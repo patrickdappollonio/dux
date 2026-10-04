@@ -488,6 +488,23 @@ fn removal_ends_a_startup_command_still_running_in_the_worktree() {
     let handle =
         std::thread::spawn(move || crate::startup::run_startup_command(&paths, run, &registry));
     wait_for_writers(&fx.pidfile, 1);
+    // The script writes its pid as soon as it runs, which can be before the
+    // run has recorded its session (a moment after the spawn, on another
+    // thread): the delete is a delete of a startup command dux knows about
+    // only once the registry has it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fx
+        .engine
+        .process_registry
+        .sessions_in(&fx.worktree)
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the run never recorded its session"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     let result = delete_and_wait(&mut fx.engine);
     // Whatever happened, nothing of the test's may keep running.

@@ -54,6 +54,8 @@ mod review19_tests;
 #[cfg(test)]
 mod review20_tests;
 #[cfg(test)]
+mod review21_tests;
+#[cfg(test)]
 mod review8_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -91,7 +93,7 @@ pub use lifecycle::{
     detached_agent_notice, format_shutdown_result, format_shutdown_start,
 };
 pub(crate) use pending_removals::{
-    OccupancyFacts, StoppingProcesses, is_symlink, link_occupant_in, occupant_in,
+    OccupancyFacts, Occupant, StoppingProcesses, is_symlink, link_occupant_in, occupant_in,
     recorded_at_or_through_link, stored_occupant,
 };
 pub use pr_sync_control::PrSyncControl;

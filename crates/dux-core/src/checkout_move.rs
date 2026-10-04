@@ -1,17 +1,19 @@
 //! The check in front of every pull and branch switch dux runs in a checkout.
 //!
-//! Moving a working tree to another commit makes git delete whatever stands
-//! where the incoming commit tracks a file: an ignored folder is expendable to
-//! git, so it goes, with everything in it. When that folder is a standalone
-//! agent's, a project's repository or another agent's worktree, that is the
-//! user's work and its history gone. dux knows which folders it must never
-//! remove, so before git moves anything it works out which folders the move
-//! would remove and asks the one occupancy rule about each, under a claim, the
-//! same way every destructive file operation does (see [`crate::destructive`]).
-//! A refusal moves nothing.
+//! Moving a working tree to another commit makes git replace whatever HEAD
+//! does not track and stands where the incoming commit needs room: an ignored
+//! folder where a file goes is deleted with everything in it, an ignored or
+//! untracked file where a file goes is overwritten, and one where a folder
+//! goes is replaced. When that place is, or lies in, a standalone agent's
+//! folder, another agent's worktree, a project's repository, or somewhere a
+//! process dux started is working, that is the user's work gone. So before git
+//! moves anything dux works out every such place from what is on disk, claims
+//! it, and asks the occupancy rule both ways: what lives in it, and what it
+//! lives in (short of the checkout itself, whose own agent and project contain
+//! every path in it). A refusal moves nothing.
 //!
-//! Only a folder dux knows about is protected: git can still remove any other
-//! ignored folder, and the docs say so.
+//! Only what dux knows about is protected: git can still replace any other
+//! ignored file or folder, and the docs say so.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -89,7 +91,7 @@ impl CheckoutMoveGuard {
 
     /// Clear moving `checkout`'s working tree from HEAD to the commit
     /// `target` (an object id), or refuse with the sentence that names the
-    /// folder and what lives in it. `what` is the act, for that sentence
+    /// place and what lives there. `what` is the act, for that sentence
     /// ("pull", "switch to the branch"). Blocking: runs git, reads the
     /// session database and the process table, so call it on a worker, right
     /// before the move, and keep the clearance until the move is done.
@@ -98,35 +100,120 @@ impl CheckoutMoveGuard {
             "checking what a pull or branch switch would remove",
         );
         let entries = incoming_entries(checkout, target)?;
-        let folders = folders_git_would_remove(checkout, &entries);
-        let mut claims = Vec::with_capacity(folders.len());
-        for folder in &folders {
+        let tracked = tracked_at_head(checkout, &candidate_paths(checkout, &entries))?;
+        let locations =
+            locations_git_would_replace(checkout, &entries, &|path| tracked.contains(path));
+        let mut claims = Vec::with_capacity(locations.len());
+        for location in &locations {
             let claim = self
                 .ops
                 .claim_for_destructive_as(
-                    folder,
+                    &location.path,
                     crate::worktree_ops::DESTRUCTIVE_CLAIM_WAIT,
                     CLAIMED_BY,
                 )
-                .map_err(|reason| {
-                    refusal(
-                        checkout,
-                        folder,
-                        what,
-                        &format!(
-                            "dux did not let git delete {}: {reason}.",
-                            crate::home_path::shorten_home(folder)
-                        ),
-                    )
-                })?;
+                .map_err(|reason| refusal(checkout, location, what, &reason))?;
             claims.push(claim);
         }
-        for (folder, claim) in folders.iter().zip(&claims) {
-            self.check(folder)
-                .clear(&[claim], "let git delete")
-                .map_err(|refused| refusal(checkout, folder, what, &refused.0))?;
+        for (location, claim) in locations.iter().zip(&claims) {
+            // What lives in it (a folder or a link removed whole) ...
+            if let Err((_, reason)) = self.check(&location.path).clear_or_say_why(&[claim]) {
+                return Err(refusal(checkout, location, what, &reason));
+            }
+            // ... and what it lives in.
+            if let Some(reason) = self.occupant_around(checkout, &location.path)? {
+                return Err(refusal(checkout, location, what, &reason));
+            }
         }
         Ok(MoveClearance { _claims: claims })
+    }
+
+    /// What `location` lies in: an agent's folder, a project's repository, a
+    /// PTY's folder, a session dux started there that still runs, a process
+    /// of dux's standing there, or an operation holding it. Only a folder
+    /// short of the checkout itself counts: the checkout's own agent and
+    /// project contain every path in it, and moving the checkout is theirs to
+    /// ask for. `Err` when the session database cannot be read (fail closed).
+    fn occupant_around(&self, checkout: &Path, location: &Path) -> Result<Option<String>> {
+        let around = |dir: &Path| {
+            crate::worktree_ops::folder_contains(dir, location)
+                && !crate::worktree_ops::folder_contains(dir, checkout)
+        };
+        let (stored_agents, stored_projects) = crate::storage::SessionStore::open(&self.db_path)
+            .and_then(|store| Ok((store.load_sessions()?, store.load_projects()?)))
+            .map_err(|e| {
+                anyhow!(
+                    "dux could not read its list of agents and projects to confirm nothing lives \
+                     there ({e:#})"
+                )
+            })?;
+        if let Some(agent) = self
+            .agents
+            .iter()
+            .chain(&stored_agents)
+            .find(|agent| around(Path::new(agent.directory())))
+        {
+            return Ok(Some(
+                crate::engine::Occupant::Agent {
+                    id: agent.id.clone(),
+                    label: agent.display_label(),
+                    directory: agent.directory().to_string(),
+                    standalone: agent.workspace.as_managed().is_none(),
+                    exact: false,
+                }
+                .reason(),
+            ));
+        }
+        let stored_projects: Vec<(String, String)> = stored_projects
+            .into_iter()
+            .map(|project| {
+                (
+                    project.name.clone().unwrap_or_else(|| project.path.clone()),
+                    project.path,
+                )
+            })
+            .collect();
+        if let Some((name, path)) = self
+            .projects
+            .iter()
+            .chain(&stored_projects)
+            .find(|(_, path)| around(Path::new(path)))
+        {
+            return Ok(Some(
+                crate::engine::Occupant::Project {
+                    name: name.clone(),
+                    path: path.clone(),
+                }
+                .reason(),
+            ));
+        }
+        if let Some((_, _, what, _)) = self.ptys.iter().find(|(dir, ..)| around(dir)) {
+            return Ok(Some((*what).to_string()));
+        }
+        if let Some((_, kinds)) = self.ops.holders_where(&|held| around(held)).first() {
+            return Ok(Some(format!(
+                "{} is running there",
+                crate::worktree_ops::describe_holders(kinds)
+            )));
+        }
+        let sessions = self
+            .registry
+            .sessions_matching(|started_in| around(started_in));
+        if !sessions.is_empty() {
+            let running = crate::process_sessions::members(
+                &crate::process_sessions::read_process_table(),
+                &sessions,
+                &self.registry.survivors_of(&sessions),
+                std::process::id(),
+            );
+            if !running.is_empty() {
+                return Ok(Some(format!(
+                    "something dux started there is still running ({})",
+                    crate::process_sessions::describe(&running)
+                )));
+            }
+        }
+        Ok(self.registry.cwd_occupant_where(&around, &[]))
     }
 
     /// The one occupancy rule for removing `folder` (the same question
@@ -177,14 +264,31 @@ impl CheckoutMoveGuard {
     }
 }
 
-/// The error for a move refused because of `folder`.
-fn refusal(checkout: &Path, folder: &Path, what: &str, reason: &str) -> anyhow::Error {
-    let relative = folder.strip_prefix(checkout).unwrap_or(folder);
+/// The error for a move refused because of `location`, with `reason` (a
+/// phrase) saying what is in the way.
+fn refusal(checkout: &Path, location: &Location, what: &str, reason: &str) -> anyhow::Error {
+    let relative = location
+        .path
+        .strip_prefix(checkout)
+        .unwrap_or(&location.path)
+        .display();
+    let change = match location.kind {
+        LocationKind::FolderWhereFileGoes => format!(
+            "tracks a file at {relative}, so git would delete the folder there with everything \
+             in it"
+        ),
+        LocationKind::Overwritten => format!(
+            "tracks {relative}, so git would overwrite the untracked file or link that stands \
+             there"
+        ),
+        LocationKind::FileWhereFolderGoes => format!(
+            "needs a folder at {relative}, so git would replace the untracked file or link that \
+             stands there"
+        ),
+    };
     anyhow!(
-        "{reason} The commit the {what} would check out tracks a file at {}, and git would \
-         delete that folder, with everything in it, to make room, so dux did not {what}; nothing \
-         in {} changed",
-        relative.display(),
+        "dux did not {what}: the commit it would check out {change}, and {reason}. Nothing in {} \
+         changed",
         crate::home_path::shorten_home(checkout)
     )
 }
@@ -301,34 +405,141 @@ fn parse_ls_tree(out: &[u8]) -> Vec<IncomingEntry> {
         .collect()
 }
 
-/// Every folder git would have to remove to write `entries` into
-/// `checkout`: a real folder standing where a file (or link) goes, and a
-/// symbolic link standing at any entry's path or anywhere on the way to one,
-/// a submodule's included (git replaces it rather than write through it). A
-/// folder on the way stays, since the incoming commit has a folder there too,
-/// and so does a real folder at a submodule's own path.
-fn folders_git_would_remove(checkout: &Path, entries: &[IncomingEntry]) -> Vec<PathBuf> {
-    let mut found: Vec<PathBuf> = Vec::new();
+/// What git would replace at one place on disk to write the incoming commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocationKind {
+    /// A real folder standing where a file goes: removed whole.
+    FolderWhereFileGoes,
+    /// An untracked file or link standing where a file goes: overwritten.
+    Overwritten,
+    /// An untracked file or link standing where a folder goes: replaced.
+    FileWhereFolderGoes,
+}
+
+/// One place git would overwrite or remove something HEAD does not track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Location {
+    path: PathBuf,
+    kind: LocationKind,
+}
+
+/// Every path in `checkout` the walk in [`locations_git_would_replace`] may
+/// ask HEAD about: each incoming path and each folder on the way to it.
+fn candidate_paths(checkout: &Path, entries: &[IncomingEntry]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let mut at = PathBuf::new();
+        for component in entry.path.components() {
+            at.push(component);
+            if std::fs::symlink_metadata(checkout.join(&at)).is_err() {
+                break;
+            }
+            if !paths.contains(&at) {
+                paths.push(at.clone());
+            }
+        }
+    }
+    paths
+}
+
+/// Which of `paths` (relative to `checkout`) HEAD tracks, as a file, a link or
+/// a submodule. One `cat-file --batch-check` for all of them. A path holding a
+/// newline cannot travel on its input and is answered "not tracked", which
+/// only ever makes the check ask more.
+fn tracked_at_head(
+    checkout: &Path,
+    paths: &[PathBuf],
+) -> Result<std::collections::HashSet<PathBuf>> {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    let mut tracked = std::collections::HashSet::new();
+    let Some(head) = commit_id(checkout, "HEAD")? else {
+        return Ok(tracked);
+    };
+    let asked: Vec<&PathBuf> = paths
+        .iter()
+        .filter(|path| !path.as_os_str().as_bytes().contains(&b'\n'))
+        .collect();
+    if asked.is_empty() {
+        return Ok(tracked);
+    }
+    let mut input = Vec::new();
+    for path in &asked {
+        input.extend_from_slice(head.as_bytes());
+        input.push(b':');
+        input.extend_from_slice(path.as_os_str().as_bytes());
+        input.push(b'\n');
+    }
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["cat-file", "--batch-check=%(objecttype)"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to run git cat-file in {}", checkout.display()))?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child.wait_with_output()?;
+    let _ = writer.join();
+    if !output.status.success() {
+        return Err(anyhow!(
+            "dux could not ask git what {} tracks",
+            crate::home_path::shorten_home(checkout)
+        ));
+    }
+    // One answer line per question, in order: a type, or `<object> missing`.
+    for (path, answer) in asked.iter().zip(output.stdout.split(|b| *b == b'\n')) {
+        if matches!(answer, b"blob" | b"commit") {
+            tracked.insert((*path).clone());
+        }
+    }
+    Ok(tracked)
+}
+
+/// Every place git would overwrite or remove something HEAD does not track to
+/// write `entries` into `checkout`: an untracked file or link where a file
+/// goes, a real folder or a link where a file goes, and an untracked file or
+/// link on the way to one, where a folder goes. A path HEAD tracks is an
+/// ordinary update, a folder on the way stays (the incoming commit has a
+/// folder there too), and so does a real folder at a submodule's own path.
+fn locations_git_would_replace(
+    checkout: &Path,
+    entries: &[IncomingEntry],
+    tracked: &dyn Fn(&Path) -> bool,
+) -> Vec<Location> {
+    let mut found: Vec<Location> = Vec::new();
     for entry in entries {
         let components: Vec<_> = entry.path.components().collect();
-        let mut at = checkout.to_path_buf();
+        let mut relative = PathBuf::new();
         for (index, component) in components.iter().enumerate() {
-            at.push(component);
+            relative.push(component);
+            let at = checkout.join(&relative);
             let Ok(meta) = std::fs::symlink_metadata(&at) else {
                 break;
             };
             let last = index + 1 == components.len();
-            // A real folder at a submodule's path is kept (git checks the
-            // submodule out into it); a link there is replaced by one.
-            if meta.file_type().is_symlink() || (last && meta.is_dir() && !entry.gitlink) {
-                if !found.contains(&at) {
-                    found.push(at.clone());
+            let kind = if meta.is_dir() && !meta.file_type().is_symlink() {
+                if !last {
+                    continue;
                 }
-                break;
+                // A real folder at a submodule's path is kept (git checks
+                // the submodule out into it).
+                (!entry.gitlink).then_some(LocationKind::FolderWhereFileGoes)
+            } else if tracked(&relative) {
+                None
+            } else if !last {
+                Some(LocationKind::FileWhereFolderGoes)
+            } else {
+                Some(LocationKind::Overwritten)
+            };
+            if let Some(kind) = kind
+                && !found.iter().any(|known| known.path == at)
+            {
+                found.push(Location { path: at, kind });
             }
-            if !meta.is_dir() {
-                break;
-            }
+            break;
         }
     }
     found
@@ -337,6 +548,14 @@ fn folders_git_would_remove(checkout: &Path, entries: &[IncomingEntry]) -> Vec<P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The places the walk finds, nothing tracked at HEAD.
+    fn places(root: &Path, entries: &[IncomingEntry]) -> Vec<(PathBuf, LocationKind)> {
+        locations_git_would_replace(root, entries, &|_| false)
+            .into_iter()
+            .map(|location| (location.path, location.kind))
+            .collect()
+    }
 
     #[test]
     fn a_folder_where_a_file_goes_is_removed_and_one_on_the_way_is_not() {
@@ -364,9 +583,16 @@ mod tests {
             },
         ];
         assert_eq!(
-            folders_git_would_remove(root, &entries),
-            vec![root.join("scratch")]
+            places(root, &entries),
+            vec![
+                (root.join("scratch"), LocationKind::FolderWhereFileGoes),
+                (root.join("plain"), LocationKind::Overwritten),
+            ]
         );
+        // A path HEAD tracks is an ordinary update.
+        let tracked =
+            locations_git_would_replace(root, &entries, &|path| path == Path::new("plain"));
+        assert_eq!(tracked.len(), 1);
     }
 
     #[test]
@@ -377,7 +603,7 @@ mod tests {
             path: "sub".into(),
             gitlink: true,
         }];
-        assert!(folders_git_would_remove(tmp.path(), &entries).is_empty());
+        assert!(places(tmp.path(), &entries).is_empty());
     }
 
     #[test]
@@ -393,8 +619,8 @@ mod tests {
             gitlink: true,
         }];
         assert_eq!(
-            folders_git_would_remove(&root, &entries),
-            vec![root.join("sub")]
+            places(&root, &entries),
+            vec![(root.join("sub"), LocationKind::Overwritten)]
         );
     }
 
@@ -411,8 +637,8 @@ mod tests {
             gitlink: true,
         }];
         assert_eq!(
-            folders_git_would_remove(&root, &entries),
-            vec![root.join("libs")]
+            places(&root, &entries),
+            vec![(root.join("libs"), LocationKind::FileWhereFolderGoes)]
         );
     }
 
@@ -429,8 +655,8 @@ mod tests {
             gitlink: false,
         }];
         assert_eq!(
-            folders_git_would_remove(&root, &entries),
-            vec![root.join("link")]
+            places(&root, &entries),
+            vec![(root.join("link"), LocationKind::FileWhereFolderGoes)]
         );
     }
 

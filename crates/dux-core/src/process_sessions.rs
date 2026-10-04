@@ -92,14 +92,13 @@ enum CwdVerdict<'a> {
 /// itself was started in or under the folder, so one unreadable process
 /// somewhere else never blocks a removal here. Pure: the reads are handed in.
 fn judge_cwds<'a>(
-    folder: &std::path::Path,
+    inside: &dyn Fn(&std::path::Path) -> bool,
     running: &'a [ProcRow],
     table: &[ProcRow],
     report: &crate::file_drop::CwdReport,
     session_folder: &std::path::Path,
 ) -> CwdVerdict<'a> {
     let by_pid: HashMap<u32, &ProcRow> = table.iter().map(|row| (row.pid, row)).collect();
-    let inside = |cwd: &std::path::Path| crate::worktree_ops::folder_contains(folder, cwd);
     let mut unknown: Option<&'a ProcRow> = None;
     for row in running {
         if let Some(cwd) = report.found.get(&row.pid) {
@@ -130,8 +129,7 @@ fn judge_cwds<'a>(
             Some(cwd) if inside(cwd) => return CwdVerdict::Inside(row),
             Some(_) => {}
             None => {
-                if crate::worktree_ops::folder_contains(folder, session_folder) && unknown.is_none()
-                {
+                if inside(session_folder) && unknown.is_none() {
                     unknown = Some(row);
                 }
             }
@@ -1129,6 +1127,20 @@ impl AgentProcessRegistry {
         folder: &std::path::Path,
         except: &[ProcessSession],
     ) -> Option<String> {
+        self.cwd_occupant_where(
+            &|dir| crate::worktree_ops::folder_contains(folder, dir),
+            except,
+        )
+    }
+
+    /// [`Self::cwd_occupant`] for any place `touches` picks: the first process
+    /// dux started whose current folder `touches` accepts (or, unreadable,
+    /// whose session was started in a folder it accepts).
+    pub fn cwd_occupant_where(
+        &self,
+        touches: &dyn Fn(&std::path::Path) -> bool,
+        except: &[ProcessSession],
+    ) -> Option<String> {
         type Tracked = (
             ProcessSession,
             std::path::PathBuf,
@@ -1175,7 +1187,7 @@ impl AgentProcessRegistry {
                     .clone()
                     .unwrap_or_else(|| "a process dux started".to_string())
             };
-            match judge_cwds(folder, &running, &table, &report, &started_in) {
+            match judge_cwds(touches, &running, &table, &report, &started_in) {
                 CwdVerdict::Clear => {}
                 CwdVerdict::Inside(row) => {
                     return Some(format!(
@@ -2067,7 +2079,7 @@ mod tests {
             .insert(100, std::path::PathBuf::from("/home/me"));
         assert_eq!(
             judge_cwds(
-                &folder,
+                &|dir| crate::worktree_ops::folder_contains(&folder, dir),
                 &running,
                 &table,
                 &report,
@@ -2081,7 +2093,7 @@ mod tests {
             .insert(100, std::path::PathBuf::from("/work/wt/src"));
         assert_eq!(
             judge_cwds(
-                &folder,
+                &|dir| crate::worktree_ops::folder_contains(&folder, dir),
                 &running,
                 &table,
                 &report,
@@ -2103,7 +2115,7 @@ mod tests {
         report.unknown.push(200);
         assert_eq!(
             judge_cwds(
-                &folder,
+                &|dir| crate::worktree_ops::folder_contains(&folder, dir),
                 &running,
                 &table,
                 &report,
@@ -2114,7 +2126,7 @@ mod tests {
         );
         assert_eq!(
             judge_cwds(
-                &folder,
+                &|dir| crate::worktree_ops::folder_contains(&folder, dir),
                 &running,
                 &table,
                 &report,

@@ -109,16 +109,25 @@ impl DestructiveCheck {
         claims: &[&'a crate::worktree_ops::DestructiveClaim],
         what: &str,
     ) -> Result<Cleared<'a>, Refused> {
+        self.clear_or_say_why(claims).map_err(|(path, reason)| {
+            Refused(format!(
+                "dux did not {what} {}: {reason}.",
+                crate::home_path::shorten_home(&path)
+            ))
+        })
+    }
+
+    /// [`Self::clear`], answering a refusal with the path and the bare reason
+    /// (a phrase), for a caller that words the sentence itself.
+    pub(crate) fn clear_or_say_why<'a>(
+        &self,
+        claims: &[&'a crate::worktree_ops::DestructiveClaim],
+    ) -> Result<Cleared<'a>, (PathBuf, String)> {
         crate::engine::destructive_guard::assert_off_engine_thread(
             "clearing a destructive operation",
         );
         for target in &self.targets {
-            let refused = |reason: String| {
-                Refused(format!(
-                    "dux did not {what} {}: {reason}.",
-                    crate::home_path::shorten_home(&target.path)
-                ))
-            };
+            let refused = |reason: String| (target.path.clone(), reason);
             if !claims.iter().any(|claim| claim.covers(&target.path)) {
                 return Err(refused(
                     "it was not claimed first, so something could still start in it".to_string(),

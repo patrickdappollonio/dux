@@ -133,13 +133,13 @@ from the remote you want first.
 > stay in the project folder, the same as with a checkout in your own terminal.
 
 > [!CAUTION]
-> When the branch you switch to (or pull in) has a tracked file at the same path as a
-> folder your `.gitignore` hides, git deletes that folder to make room: it treats ignored
-> files as disposable. dux refuses the switch or pull, and changes nothing, when that
-> folder holds something it knows about: an agent's worktree, a standalone agent's folder,
-> a project's repository, or a terminal working there. Any other ignored folder git still
-> deletes, as it would in your own terminal, so move such a folder aside first if it
-> matters. The same goes for an agent's **Pull** and for **Pull project**.
+> When the branch you switch to (or pull in) tracks a path where an ignored folder or file
+> stands, git deletes or overwrites it to make room: it treats ignored files as disposable.
+> dux refuses the switch or pull, and changes nothing, when that folder holds, or that file
+> sits inside, something it knows about: an agent's worktree, a standalone agent's folder,
+> a project's repository, or a terminal working there. Any other ignored folder or file git
+> still replaces, as it would in your own terminal, so move it aside first if it matters.
+> The same goes for an agent's **Pull** and for **Pull project**.
 
 > [!NOTE]
 > dux's own pulls and branch switches never update submodules, even when your git config

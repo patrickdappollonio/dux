@@ -163,12 +163,12 @@ clone that sat on the wrong branch.
 > conflict come along with it, the same as with **Check out default branch…**.
 
 > [!CAUTION]
-> Switching the project folder, **Pull project** and an agent's **Pull** make git delete a
-> folder your `.gitignore` hides when the incoming branch has a tracked file at that same
-> path: git treats ignored files as disposable. dux refuses, and changes nothing, when that
-> folder holds an agent's worktree, a standalone agent's folder, a project's repository or
-> a terminal working there, and says which. Any other ignored folder git still deletes, so
-> move such a folder aside first if it matters.
+> Switching the project folder, **Pull project** and an agent's **Pull** make git delete or
+> overwrite an ignored folder or file when the incoming branch tracks that same path: git
+> treats ignored files as disposable. dux refuses, and changes nothing, when that folder
+> holds, or that file sits inside, an agent's worktree, a standalone agent's folder, a
+> project's repository or a terminal working there, and says which. Any other ignored folder
+> or file git still replaces, so move it aside first if it matters.
 
 > [!NOTE]
 > These pulls and switches never update submodules, even when your git config sets

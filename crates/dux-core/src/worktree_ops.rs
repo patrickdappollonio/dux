@@ -576,6 +576,20 @@ impl WorktreeOps {
         self.lock().kinds_within(&Spelled::of(path.as_ref()))
     }
 
+    /// Every path an operation holds that `pick` accepts, with what holds it.
+    pub fn holders_where(
+        &self,
+        pick: &dyn Fn(&Path) -> bool,
+    ) -> Vec<(PathBuf, Vec<WorktreeOpKind>)> {
+        self.lock()
+            .paths
+            .values()
+            .filter(|entry| pick(&entry.spelled.lexical))
+            .map(|entry| (entry.spelled.lexical.clone(), entry.kinds()))
+            .filter(|(_, kinds)| !kinds.is_empty())
+            .collect()
+    }
+
     /// The refusal for starting something in `path` because a removal of it,
     /// or of a folder containing it, is under way; names the folder being
     /// removed. `None` when nothing covers it.
