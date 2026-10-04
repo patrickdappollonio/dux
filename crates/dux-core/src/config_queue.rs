@@ -78,26 +78,39 @@ impl ConfigWriteQueue {
     /// no engine behind them; every production site uses
     /// [`Self::with_status_lane`] instead, because a preference that silently
     /// failed to save is exactly the kind of thing nobody reads a log about.
+    ///
+    /// It has no base until [`Self::set_base`] gives it one, so its saves are
+    /// the full patch.
     pub fn new(config_path: PathBuf) -> Self {
-        Self::build(config_path, None)
+        Self::build(config_path, None, None)
+    }
+
+    /// A queue whose base is `loaded`, the config dux read: the exact text
+    /// that config was read from ([`Config::source_text`]), never a fresh
+    /// read, so a `dux config set` landing between the load and this call is
+    /// not taken for part of what dux read.
+    pub fn with_base(config_path: PathBuf, loaded: &Config) -> Self {
+        Self::build(config_path, None, base_of_loaded(loaded))
     }
 
     /// A queue that reports a failed deferred write on the engine's worker
     /// lane, so whichever surface is draining says the preference was not
-    /// saved.
-    pub fn with_status_lane(config_path: PathBuf, status_lane: Sender<WorkerEvent>) -> Self {
-        Self::build(config_path, Some(status_lane))
+    /// saved. Its base is `loaded`, as for [`Self::with_base`].
+    pub fn with_status_lane(
+        config_path: PathBuf,
+        status_lane: Sender<WorkerEvent>,
+        loaded: &Config,
+    ) -> Self {
+        Self::build(config_path, Some(status_lane), base_of_loaded(loaded))
     }
 
-    fn build(config_path: PathBuf, status_lane: Option<Sender<WorkerEvent>>) -> Self {
+    fn build(
+        config_path: PathBuf,
+        status_lane: Option<Sender<WorkerEvent>>,
+        base: Option<Base>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let lazy_inflight = Arc::new(AtomicUsize::new(0));
-        // Read here, before the thread starts, so the base is the file as it
-        // was when the queue was made. No readable file leaves no base, and
-        // saves fall back to the full patch.
-        let base = std::fs::read_to_string(&config_path)
-            .ok()
-            .and_then(|text| base_read_from(&text));
         let writer = thread::Builder::new()
             .name("config-writer".into())
             .spawn({
@@ -417,6 +430,12 @@ fn base_read_from(text: &str) -> Option<Base> {
     })
 }
 
+/// The first base: the loaded config's own text, or no base at all for a
+/// config read from no file (its saves are then the full patch).
+fn base_of_loaded(loaded: &Config) -> Option<Base> {
+    loaded.source_text.as_str().and_then(base_read_from)
+}
+
 /// The base for a config a reload adopted: the text it was read from, or,
 /// for a config read from no file, that config and the file as it is now.
 fn base_adopted(path: &std::path::Path, config: Config) -> Option<Base> {
@@ -594,9 +613,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[ui]\nleft_width_pct = 20\ncopy_on_select = true\n").unwrap();
-        let q = ConfigWriteQueue::new(path.clone());
         let loaded = crate::config::load_config_file(&path).unwrap();
-        q.set_base(loaded.clone());
+        let q = ConfigWriteQueue::with_base(path.clone(), &loaded);
 
         // `dux config set ui.left_width_pct 33`, from another process.
         let key = crate::config_keys::lookup("ui.left_width_pct").unwrap();
@@ -621,8 +639,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[ui]\nterminal_font_size = 500\n").unwrap();
-        let q = ConfigWriteQueue::new(path.clone());
         let memory = crate::config::load_config_file(&path).expect("load");
+        let q = ConfigWriteQueue::with_base(path.clone(), &memory);
         assert_ne!(memory.ui.terminal_font_size, 500, "corrected in memory");
         q.save_eager(memory.clone()).unwrap();
         let after: Config = toml::from_str(&read(&path)).unwrap();
@@ -640,8 +658,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[ui]\nleft_width_pct = 20\ncopy_on_select = true\n").unwrap();
-        let q = ConfigWriteQueue::new(path.clone());
         let mut memory = loaded(&path);
+        let q = ConfigWriteQueue::with_base(path.clone(), &memory);
         std::fs::write(&path, "[ui]\ncopy_on_select = true\n").unwrap();
         memory.ui.copy_on_select = false;
         q.save_eager(memory.clone()).unwrap();
@@ -659,8 +677,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
-        let q = ConfigWriteQueue::new(path.clone());
         let mut memory = loaded(&path);
+        let q = ConfigWriteQueue::with_base(path.clone(), &memory);
         std::fs::write(&path, "[ui]\n").unwrap();
         memory.ui.left_width_pct = 25;
         q.save_eager(memory.clone()).unwrap();
@@ -684,8 +702,8 @@ mod tests {
             "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\nstartup_command = \"make\"\n",
         )
         .unwrap();
-        let q = ConfigWriteQueue::new(path.clone());
         let mut memory = loaded(&path);
+        let q = ConfigWriteQueue::with_base(path.clone(), &memory);
         std::fs::write(&path, "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n").unwrap();
         memory.ui.copy_on_select = !memory.ui.copy_on_select;
         q.save_eager(memory.clone()).unwrap();
@@ -707,8 +725,8 @@ mod tests {
             "[[projects]]\npath = \"/tmp/p\"\n\n[ui]\nleft_width_pct = 20\n",
         )
         .unwrap();
-        let q = ConfigWriteQueue::new(path.clone());
         let mut memory = loaded(&path);
+        let q = ConfigWriteQueue::with_base(path.clone(), &memory);
         std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
         memory.ui.copy_on_select = !memory.ui.copy_on_select;
         q.save_eager(memory.clone()).unwrap();
@@ -724,8 +742,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[ui]\nleft_width_pct = 20\ncopy_on_select = true\n").unwrap();
-        let q = ConfigWriteQueue::new(path.clone());
-        let mut memory: Config = toml::from_str(&read(&path)).unwrap();
+        let mut memory = loaded(&path);
+        let q = ConfigWriteQueue::with_base(path.clone(), &memory);
         std::fs::write(&path, "[ui]\ncopy_on_select = true\n").unwrap();
         memory.ui.copy_on_select = false;
         q.save_eager(memory).unwrap();
@@ -734,14 +752,14 @@ mod tests {
         assert!(after.contains("copy_on_select = false"), "{after}");
     }
 
-    /// With no base set yet, the writer reads one from the file when it starts.
+    /// The writer's first base is the text the loaded config was read from.
     #[test]
-    fn the_writer_takes_its_first_base_from_the_file() {
+    fn the_writer_takes_its_first_base_from_the_loaded_text() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
-        let q = ConfigWriteQueue::new(path.clone());
-        let memory: Config = toml::from_str(&read(&path)).unwrap();
+        let memory = loaded(&path);
+        let q = ConfigWriteQueue::with_base(path.clone(), &memory);
         std::fs::write(&path, "[ui]\nleft_width_pct = 44\n").unwrap();
         q.save_eager(memory).unwrap();
         assert!(
@@ -771,7 +789,11 @@ mod tests {
     #[test]
     fn a_failed_lazy_write_reports_on_the_status_lane() {
         let (tx, rx) = mpsc::channel();
-        let q = ConfigWriteQueue::with_status_lane("/nonexistent/dir/config.toml".into(), tx);
+        let q = ConfigWriteQueue::with_status_lane(
+            "/nonexistent/dir/config.toml".into(),
+            tx,
+            &Config::default(),
+        );
 
         q.save_lazy(Config::default());
         q.flush();
@@ -1061,5 +1083,304 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(landed, "cap gate did not re-open after the barrier drained");
+    }
+}
+
+/// Adversarial review cases (fifth review), kept as regression tests.
+#[cfg(test)]
+mod adv_tests {
+    use super::*;
+    fn read(p: &std::path::Path) -> String {
+        std::fs::read_to_string(p).unwrap_or_default()
+    }
+    fn loaded(p: &std::path::Path) -> Config {
+        crate::config::load_config_file(p).unwrap()
+    }
+    /// A writer whose base is the file as dux loaded it, as dux builds it.
+    fn queue(p: &std::path::Path) -> ConfigWriteQueue {
+        ConfigWriteQueue::with_base(p.to_path_buf(), &loaded(p))
+    }
+
+    #[test]
+    fn adv_project_env_deletion_two_saves() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n\n[projects.env]\nTOK = \"secret\"\nKEEP = \"1\"\n").unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n\n[projects.env]\nKEEP = \"1\"\n",
+        )
+        .unwrap();
+        for i in 0..3 {
+            m.ui.right_width_pct = 30 + i;
+            q.save_eager(m.clone()).unwrap();
+        }
+        let a = read(&path);
+        println!("ENV:\n{a}");
+        assert!(!a.contains("TOK"), "{a}");
+    }
+
+    #[test]
+    fn adv_moved_project_and_memory_rename() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\nname = \"a\"\n",
+        )
+        .unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/q\"\nname = \"a\"\n",
+        )
+        .unwrap();
+        m.projects[0].name = Some("b".into());
+        q.save_eager(m.clone()).unwrap();
+        m.ui.right_width_pct = 33;
+        q.save_eager(m.clone()).unwrap();
+        let a = read(&path);
+        println!("MOVE:\n{a}");
+        assert_eq!(a.matches("[[projects]]").count(), 1, "{a}");
+        assert!(a.contains("/tmp/q") && a.contains("\"b\""), "{a}");
+    }
+
+    #[test]
+    fn adv_idless_projects_with_reload() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\npath = \"/tmp/a\"\n\n[[projects]]\npath = \"/tmp/b\"\n",
+        )
+        .unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        m.ui.right_width_pct = 31;
+        q.save_eager(m.clone()).unwrap();
+        let s1 = read(&path);
+        println!("S1:\n{s1}");
+        // reload
+        let mut m2 = loaded(&path);
+        q.set_base(m2.clone());
+        m2.ui.right_width_pct = 32;
+        q.save_eager(m2.clone()).unwrap();
+        // hand-add id-less project c; memory (stale m2) saves again
+        let t = read(&path) + "\n[[projects]]\npath = \"/tmp/c\"\n";
+        std::fs::write(&path, &t).unwrap();
+        println!("BEFORE34 has c: {}", read(&path).contains("/tmp/c"));
+        m2.ui.right_width_pct = 34;
+        q.save_eager(m2.clone()).unwrap();
+        println!("AFTER34 has c: {}", read(&path).contains("/tmp/c"));
+        m2.ui.right_width_pct = 35;
+        q.save_eager(m2.clone()).unwrap();
+        let a = read(&path);
+        println!("IDLESS:\n{a}");
+        assert_eq!(a.matches("[[projects]]").count(), 3, "{a}");
+        assert_eq!(a.matches("id = ").count(), 2, "{a}");
+    }
+
+    #[test]
+    fn adv_memory_added_project_hand_deleted_then_memory_removes_other() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n").unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        let mut p = m.projects[0].clone();
+        p.id = "n".into();
+        p.path = "/tmp/n".into();
+        m.projects.push(p);
+        q.save_eager(m.clone()).unwrap();
+        // hand delete n
+        std::fs::write(&path, "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n").unwrap();
+        m.ui.right_width_pct = 31;
+        q.save_eager(m.clone()).unwrap();
+        m.ui.right_width_pct = 32;
+        q.save_eager(m.clone()).unwrap();
+        let a = read(&path);
+        println!("ADDDEL:\n{a}");
+        assert!(!a.contains("/tmp/n"), "{a}");
+    }
+
+    #[test]
+    fn adv_set_between_two_lazy_saves() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# top\n[ui]\n# keep me\nleft_width_pct = 20\ncopy_on_select = true\n",
+        )
+        .unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        m.ui.copy_on_select = false;
+        q.save_eager(m.clone()).unwrap();
+        let key = crate::config_keys::lookup("ui.left_width_pct").unwrap();
+        crate::config_keys::set_plain(&path, &key, "40").unwrap();
+        m.ui.right_width_pct = 31;
+        q.save_eager(m.clone()).unwrap();
+        m.ui.copy_on_select = true;
+        q.save_eager(m.clone()).unwrap();
+        let a = read(&path);
+        println!("SET:\n{a}");
+        assert!(
+            a.contains("left_width_pct = 40") && a.contains("# keep me"),
+            "{a}"
+        );
+    }
+
+    #[test]
+    fn adv_whole_env_table_deleted_then_memory_adds_env() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[env]\nA = \"1\"\nB = \"2\"\n\n[ui]\nleft_width_pct = 20\n",
+        )
+        .unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        m.env.insert("C".into(), "3".into());
+        q.save_eager(m.clone()).unwrap();
+        m.ui.right_width_pct = 31;
+        q.save_eager(m.clone()).unwrap();
+        let a = read(&path);
+        println!("ENVT:\n{a}");
+        assert!(a.contains("C = \"3\"") && !a.contains("A = "), "{a}");
+    }
+
+    #[test]
+    fn adv_hand_added_things_survive_two_saves() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n\n[env]\nA = \"1\"\n\n[macros]\nm1 = \"x\"\n").unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        let t = read(&path)
+            .replace("[env]\nA = \"1\"\n", "[env]\nA = \"1\"\nHAND_ENV = \"2\"\n")
+            .replace("m1 = \"x\"\n", "m1 = \"x\"\nhand_macro = \"y\"\n")
+            + "\n[[projects]]\nid = \"c\"\npath = \"/tmp/c\"\n\n[providers.handprov]\ncommand = \"foo\"\n";
+        std::fs::write(&path, &t).unwrap();
+        for i in 0..3 {
+            m.ui.right_width_pct = 30 + i;
+            q.save_eager(m.clone()).unwrap();
+            let a = read(&path);
+            assert!(a.contains("/tmp/c"), "save {i}: hand project kept:\n{a}");
+            assert!(a.contains("HAND_ENV"), "save {i}: hand env kept:\n{a}");
+            assert!(a.contains("hand_macro"), "save {i}: hand macro kept:\n{a}");
+            assert!(a.contains("handprov"), "save {i}: hand provider kept:\n{a}");
+        }
+    }
+
+    #[test]
+    fn adv_env_path_project() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\npath = \"$HOME/p\"\n\n[[projects]]\nid = \"q\"\npath = \"$HOME/q\"\n",
+        )
+        .unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        println!(
+            "mem paths: {:?}",
+            m.projects
+                .iter()
+                .map(|p| p.path.clone())
+                .collect::<Vec<_>>()
+        );
+        for i in 0..2 {
+            m.ui.right_width_pct = 30 + i;
+            q.save_eager(m.clone()).unwrap();
+        }
+        let a = read(&path);
+        assert_eq!(a.matches("[[projects]]").count(), 2, "{a}");
+    }
+
+    /// The same with an id-less hand-added project, and after a reload.
+    #[test]
+    fn adv_hand_added_idless_project_survives_saves_and_a_reload() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n").unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        let t = read(&path) + "\n[[projects]]\npath = \"/tmp/hand\"\n";
+        std::fs::write(&path, &t).unwrap();
+        for i in 0..3 {
+            m.ui.right_width_pct = 30 + i;
+            q.save_eager(m.clone()).unwrap();
+            assert!(
+                read(&path).contains("/tmp/hand"),
+                "save {i}:\n{}",
+                read(&path)
+            );
+        }
+        // A reload: memory and base become the file as it is now (hand
+        // project and all, its id minted by this read), then two saves.
+        m = loaded(&path);
+        q.set_base(m.clone());
+        for i in 0..2 {
+            m.ui.right_width_pct = 40 + i;
+            q.save_eager(m.clone()).unwrap();
+            assert!(
+                read(&path).contains("/tmp/hand"),
+                "after reload {i}:\n{}",
+                read(&path)
+            );
+        }
+    }
+
+    /// A project dux removed, then added back to the file by hand, stays.
+    #[test]
+    fn adv_a_project_removed_in_dux_then_re_added_by_hand_survives() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n\n[[projects]]\nid = \"b\"\npath = \"/tmp/b\"\n",
+        )
+        .unwrap();
+        let q = queue(&path);
+        let mut m = loaded(&path);
+        m.projects.retain(|p| p.id != "b");
+        q.save_eager(m.clone()).unwrap();
+        assert!(!read(&path).contains("/tmp/b"), "removed by dux");
+        let t = read(&path) + "\n[[projects]]\nid = \"b\"\npath = \"/tmp/b\"\n";
+        std::fs::write(&path, &t).unwrap();
+        for i in 0..3 {
+            m.ui.right_width_pct = 30 + i;
+            q.save_eager(m.clone()).unwrap();
+            assert!(read(&path).contains("/tmp/b"), "save {i}:\n{}", read(&path));
+        }
+    }
+
+    /// A `set` that lands between dux loading the file and building its
+    /// writer is not reverted: the writer's base is the loaded text, not a
+    /// fresh read.
+    #[test]
+    fn adv_a_set_between_load_and_writer_build_survives() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let mut m = loaded(&path);
+        let key = crate::config_keys::lookup("ui.left_width_pct").unwrap();
+        crate::config_keys::set_plain(&path, &key, "40").unwrap();
+        let q = ConfigWriteQueue::with_base(path.clone(), &m);
+        m.ui.copy_on_select = !m.ui.copy_on_select;
+        q.save_eager(m.clone()).unwrap();
+        m.ui.right_width_pct = 31;
+        q.save_eager(m).unwrap();
+        assert!(
+            read(&path).contains("left_width_pct = 40"),
+            "{}",
+            read(&path)
+        );
     }
 }

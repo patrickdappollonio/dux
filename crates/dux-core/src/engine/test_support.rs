@@ -38,6 +38,7 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
     let config_writer = crate::config_queue::ConfigWriteQueue::with_status_lane(
         paths.config_path.clone(),
         worker_tx.clone(),
+        &crate::config::Config::default(),
     );
     let engine = Engine {
         // Stock provider names, harmless commands: a test that launches an agent

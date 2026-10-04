@@ -135,6 +135,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
     let config_writer = dux_core::config_queue::ConfigWriteQueue::with_status_lane(
         paths.config_path.clone(),
         worker_tx.clone(),
+        &dux_core::config::Config::default(),
     );
     let engine = dux_core::engine::Engine {
         config: dux_core::test_provider::harmless_config(),

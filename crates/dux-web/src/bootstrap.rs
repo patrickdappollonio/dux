@@ -134,7 +134,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
 
     let github_integration_enabled = config.ui.github_integration;
     let config_writer =
-        ConfigWriteQueue::with_status_lane(paths.config_path.clone(), worker_tx.clone());
+        ConfigWriteQueue::with_status_lane(paths.config_path.clone(), worker_tx.clone(), &config);
 
     let mut engine = Engine {
         config,

@@ -674,14 +674,16 @@ fn merge_array_of_tables(
         merged.push(out);
     }
     // In the file but matched by nothing memory has: removed in memory when
-    // the base had it, added on disk by someone else when it did not.
+    // the base CONFIG had it (and memory no longer does), added on disk by
+    // someone else otherwise. Only the base config answers this: what dux
+    // has seen of the file says nothing about what memory removed, and
+    // asking it would drop an entry added by hand on the save after it was
+    // first written, or one dux removed and the user put back.
     for (i, entry) in disks.iter().enumerate() {
         if disk_used[i] {
             continue;
         }
-        let in_base = find_entry(&bases, &base_used, entry).is_some()
-            || find_entry(&raws, &raw_used, entry).is_some();
-        if !in_base {
+        if find_entry(&bases, &base_used, entry).is_none() {
             merged.push((*entry).clone());
         }
     }

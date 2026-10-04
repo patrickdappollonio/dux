@@ -4190,6 +4190,7 @@ impl App {
         let config_writer = dux_core::config_queue::ConfigWriteQueue::with_status_lane(
             paths.config_path.clone(),
             worker_tx.clone(),
+            &config,
         );
         let engine = Engine {
             config,
