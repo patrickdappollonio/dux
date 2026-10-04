@@ -467,59 +467,100 @@ struct DrainState {
     discarding: bool,
     /// The pipe reached end of input (every holder closed it).
     ended: bool,
+    /// The reader thread should stop and close its end: the pipe was handed
+    /// to a drain process that outlives dux.
+    stop: bool,
+    /// A second handle on the read end, kept for handing the pipe on.
+    spare: Option<std::os::fd::OwnedFd>,
 }
 
+/// How often the reader thread looks up from the pipe to see whether it was
+/// asked to stop.
+const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl OutputDrain {
-    /// Start draining `pipe` on a thread of its own. The thread reads until
-    /// every holder of the pipe has closed it (the command, and any job it
-    /// left running), keeping what it reads until [`Self::finish`] and
-    /// throwing it away after, so it never holds dux up and never lets a
+    /// Start draining `pipe` on a thread of its own, keeping what it reads
+    /// until [`Self::finish`]. The thread never holds dux up and never lets a
     /// writer block.
-    fn start(pipe: Option<impl std::io::Read + Send + 'static>) -> Self {
-        let Some(mut pipe) = pipe else {
+    fn start(pipe: Option<impl Into<std::os::fd::OwnedFd>>) -> Self {
+        let Some(pipe) = pipe else {
             return Self { shared: None };
         };
+        let fd: std::os::fd::OwnedFd = pipe.into();
         let shared = std::sync::Arc::new(DrainShared::default());
+        shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spare = fd.try_clone().ok();
         let drain = std::sync::Arc::clone(&shared);
         let spawned = std::thread::Builder::new()
             .name("startup-output".to_string())
-            .spawn(move || {
-                let mut buf = [0u8; 8192];
-                loop {
-                    let read = crate::io_retry::retry_on_interrupt(|| pipe.read(&mut buf));
-                    let mut state = drain
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match read {
-                        Ok(0) | Err(_) => {
-                            state.ended = true;
-                            drain.changed.notify_all();
-                            return;
-                        }
-                        Ok(n) => {
-                            if !state.discarding {
-                                let room = OUTPUT_LOG_CAP.saturating_sub(state.kept.len());
-                                state.kept.extend_from_slice(&buf[..n.min(room)]);
-                            }
-                        }
-                    }
-                }
-            });
+            .spawn(move || Self::read_until_done(&fd, &drain));
         match spawned {
             Ok(_) => Self {
                 shared: Some(shared),
             },
-            // No reader: the pipe is dropped with this closure's environment,
-            // so a writer gets a broken pipe rather than blocking.
             Err(_) => Self { shared: None },
+        }
+    }
+
+    fn read_until_done(fd: &std::os::fd::OwnedFd, drain: &DrainShared) {
+        use rustix::event::{PollFd, PollFlags, Timespec};
+        let mut buf = [0u8; 8192];
+        let timeout = Timespec {
+            tv_sec: 0,
+            tv_nsec: i64::try_from(DRAIN_POLL.as_nanos()).unwrap_or(100_000_000),
+        };
+        loop {
+            if drain
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stop
+            {
+                // Handed on: the drain process reads from here, and this
+                // thread's end closes as it returns.
+                return;
+            }
+            let mut fds = [PollFd::new(fd, PollFlags::IN)];
+            match rustix::event::poll(&mut fds, Some(&timeout)) {
+                Ok(0) => continue,
+                Err(rustix::io::Errno::INTR) => continue,
+                _ => {}
+            }
+            let read = crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(fd, &mut buf));
+            let mut state = drain
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match read {
+                Ok(0) | Err(_) => {
+                    state.ended = true;
+                    drain.changed.notify_all();
+                    return;
+                }
+                Ok(n) => {
+                    if !state.discarding {
+                        let room = OUTPUT_LOG_CAP.saturating_sub(state.kept.len());
+                        state.kept.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                }
+            }
         }
     }
 
     /// What was read, once the command has exited: everything if the pipe
     /// closes within [`OUTPUT_SETTLE`] (nothing else holds it), otherwise
-    /// what had arrived by then. The reader goes on discarding until the pipe
-    /// closes.
+    /// what had arrived by then.
+    ///
+    /// When something the command left running still holds the pipe, the
+    /// pipe has to outlive dux, or that job's next write after dux quits
+    /// raises SIGPIPE and kills it. So the read end is handed to a small
+    /// drain process of its own (see [`spawn_output_drain`]), which reads and
+    /// discards until the last writer closes, and dux's own copies close. If
+    /// that cannot start, this thread keeps discarding for as long as dux
+    /// runs, and the log says the job may lose its output when dux quits.
     fn finish(self) -> Vec<u8> {
         let Some(shared) = self.shared else {
             return Vec::new();
@@ -541,8 +582,61 @@ impl OutputDrain {
                 .0;
         }
         state.discarding = true;
-        std::mem::take(&mut state.kept)
+        let kept = std::mem::take(&mut state.kept);
+        let spare = state.spare.take();
+        if !state.ended
+            && let Some(spare) = spare
+        {
+            match spawn_output_drain(spare) {
+                Ok(()) => state.stop = true,
+                Err(err) => crate::logger::warn(&format!(
+                    "could not hand a startup command's output to a drain of its own ({err}); \
+                     a job it left running may lose its output channel when dux quits"
+                )),
+            }
+        }
+        kept
     }
+}
+
+/// Start the process that keeps a left-running job's output pipe open after
+/// dux quits: `sh -c 'exec cat >/dev/null'` reading the pipe, in a session of
+/// its own and with `/` as its folder so it never stands in a worktree. It
+/// exits by itself when the last writer closes the pipe. dux does not follow
+/// it as one of the agent's processes and never waits on it: a thread of its
+/// own reaps it whenever it ends.
+fn spawn_output_drain(read_end: std::os::fd::OwnedFd) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "exec cat >/dev/null"])
+        .current_dir("/")
+        .stdin(std::process::Stdio::from(read_end))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: the hook runs in the forked child before exec and calls only
+    // `setsid`, which is async-signal-safe and touches no Rust state.
+    unsafe {
+        command.pre_exec(|| {
+            rustix::process::setsid().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    #[cfg(test)]
+    SPAWNED_DRAINS.with(|drains| drains.borrow_mut().push(child.id()));
+    let _ = std::thread::Builder::new()
+        .name("startup-output-drain-reaper".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The drain processes this thread's startup runs started.
+    static SPAWNED_DRAINS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The refusal for a second startup-command run of one agent while the first
@@ -652,7 +746,7 @@ mod tests {
 
     use crate::model::{ProjectBranchStatus, ProviderKind, SessionStatus};
 
-    fn test_paths(root: &Path) -> DuxPaths {
+    pub(super) fn test_paths(root: &Path) -> DuxPaths {
         DuxPaths {
             root: root.to_path_buf(),
             config_path: root.join("config.toml"),
@@ -662,7 +756,7 @@ mod tests {
         }
     }
 
-    fn test_project(root: &Path) -> Project {
+    pub(super) fn test_project(root: &Path) -> Project {
         Project {
             id: "project-1".to_string(),
             name: "demo".to_string(),
@@ -680,7 +774,7 @@ mod tests {
         }
     }
 
-    fn test_session(worktree: &Path) -> AgentSession {
+    pub(super) fn test_session(worktree: &Path) -> AgentSession {
         let now = Utc::now();
         AgentSession {
             id: "session-1".to_string(),
@@ -1297,5 +1391,226 @@ mod tests {
             "the job wrote {size} bytes into {stdout:?}, an unlinked file in dux's own folder \
              that nothing reads and no listing shows"
         );
+    }
+}
+
+#[cfg(test)]
+mod review16_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Runs only when the parent test asks for it, in a process of its own:
+    /// it stands in for a dux that runs a startup command and then quits.
+    #[test]
+    #[ignore]
+    fn review16_helper_run_startup_command_then_quit() {
+        let Ok(dir) = std::env::var("DUX_REVIEW16_DIR") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let pidfile = dir.join("job.pid");
+        let session = super::tests::test_session(&dir);
+        let run = StartupCommandRun {
+            project: super::tests::test_project(&dir),
+            managed: session.workspace.as_managed().unwrap().clone(),
+            session,
+            command: format!(
+                "(while true; do echo tick; sleep 0.1; done) & echo $! > '{}'; exit 0",
+                pidfile.display()
+            ),
+            terminal: crate::config::StartupCommandTerminalConfig {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string()],
+            },
+            env: Vec::new(),
+        };
+        let paths = super::tests::test_paths(&dir);
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        let result = run_startup_command(&paths, run, &registry);
+        assert!(result.status.is_ok(), "{:?}", result.status);
+        // dux quits now (the process exits when this test returns).
+    }
+
+    /// The docs say a job the startup command leaves running in the
+    /// background keeps running after the command exits. It does, only for
+    /// as long as dux does: its output is a pipe whose only reader is a dux
+    /// thread, so when dux quits the job's next write gets SIGPIPE and the
+    /// job (a dev server, say) is killed.
+    #[test]
+    fn review16_a_left_running_job_survives_dux_quitting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let status = std::process::Command::new(exe)
+            .args([
+                "startup::review16_tests::review16_helper_run_startup_command_then_quit",
+                "--exact",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("DUX_REVIEW16_DIR", tmp.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "the helper run failed");
+        let pidfile = tmp.path().join("job.pid");
+        let job: i32 = fs::read_to_string(&pidfile)
+            .expect("job pid")
+            .trim()
+            .parse()
+            .unwrap();
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(1500));
+        let alive = std::path::Path::new(&format!("/proc/{job}")).exists()
+            && !fs::read_to_string(format!("/proc/{job}/stat"))
+                .unwrap_or_default()
+                .contains(") Z");
+        // Clean up the job's whole group, whatever happened.
+        if let Some(pid) = rustix::process::Pid::from_raw(job) {
+            if let Ok(pgid) = rustix::process::getpgid(Some(pid)) {
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+            }
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+        let _ = started;
+        assert!(
+            alive,
+            "the job the startup command left running died once dux quit: its stdout was a \
+             pipe only dux read, so its next write raised SIGPIPE"
+        );
+    }
+
+    fn alive(pid: u32) -> bool {
+        fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            !stat
+                .rsplit(')')
+                .next()
+                .unwrap_or("")
+                .trim_start()
+                .starts_with('Z')
+        })
+    }
+
+    fn wait_gone(pid: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while alive(pid) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    /// A command that leaves nothing running holding its output gets no
+    /// drain process: its pipes close with it.
+    #[test]
+    fn no_drain_is_started_when_nothing_holds_the_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = super::tests::test_paths(tmp.path());
+        let session = super::tests::test_session(tmp.path());
+        SPAWNED_DRAINS.with(|drains| drains.borrow_mut().clear());
+        let result = run_startup_command(
+            &paths,
+            StartupCommandRun {
+                project: super::tests::test_project(tmp.path()),
+                managed: session.workspace.as_managed().unwrap().clone(),
+                session,
+                command: "echo done; (sleep 0.1 >/dev/null 2>&1 &) ; exit 0".to_string(),
+                terminal: crate::config::StartupCommandTerminalConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string()],
+                },
+                env: Vec::new(),
+            },
+            &crate::process_sessions::AgentProcessRegistry::default(),
+        );
+        assert!(result.status.is_ok(), "{:?}", result.status);
+        assert!(
+            SPAWNED_DRAINS.with(|drains| drains.borrow().is_empty()),
+            "no drain for a command whose output nothing else holds"
+        );
+    }
+
+    /// The drain process a left-running job's output is handed to stands in
+    /// `/`, belongs to no session dux follows, never occupies the worktree,
+    /// and ends by itself once the job is ended by a removal.
+    #[test]
+    fn the_drain_never_occupies_the_worktree_and_ends_with_the_job() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+        let paths = super::tests::test_paths(tmp.path());
+        let session = super::tests::test_session(&worktree);
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        SPAWNED_DRAINS.with(|drains| drains.borrow_mut().clear());
+        let result = run_startup_command(
+            &paths,
+            StartupCommandRun {
+                project: super::tests::test_project(tmp.path()),
+                managed: session.workspace.as_managed().unwrap().clone(),
+                session,
+                // A job that leaves the worktree and keeps writing.
+                command: "(cd /; while true; do echo tick; sleep 0.1; done) & exit 0".to_string(),
+                terminal: crate::config::StartupCommandTerminalConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string()],
+                },
+                env: Vec::new(),
+            },
+            &registry,
+        );
+        // Whatever happens below, the job's session is ended when the test
+        // ends, and with it the drains (their last writer closes).
+        struct EndSessions(Vec<crate::process_sessions::ProcessSession>);
+        impl Drop for EndSessions {
+            fn drop(&mut self) {
+                for session in &self.0 {
+                    if let Some(group) = rustix::process::Pid::from_raw(session.sid as i32) {
+                        let _ = rustix::process::kill_process_group(
+                            group,
+                            rustix::process::Signal::KILL,
+                        );
+                    }
+                }
+            }
+        }
+        let sessions = registry.sessions_in(&worktree);
+        let _end = EndSessions(sessions.clone());
+        assert!(result.status.is_ok(), "{:?}", result.status);
+        let drains = SPAWNED_DRAINS.with(|drains| drains.borrow().clone());
+        // The job holds both of the command's output streams: one drain each.
+        assert_eq!(drains.len(), 2, "each held stream was handed to a drain");
+        for drain in &drains {
+            assert!(alive(*drain), "the drain runs while the job does");
+            assert_eq!(
+                fs::read_link(format!("/proc/{drain}/cwd")).unwrap(),
+                std::path::PathBuf::from("/")
+            );
+        }
+        // Not in the worktree's way: no tracked session holds it, and its
+        // folder is `/`.
+        assert_eq!(registry.cwd_occupant(&worktree, &[]), None);
+        // A removal of the worktree ends the job (a session dux recorded
+        // there) and is not held up by the drains, which then end by
+        // themselves.
+        assert!(!sessions.is_empty());
+        let outcome = crate::process_sessions::purge(
+            &mut crate::process_sessions::SystemProcesses,
+            &sessions,
+            &registry.survivors_of(&sessions),
+            Duration::from_secs(1),
+        );
+        assert!(
+            matches!(outcome, crate::process_sessions::PurgeOutcome::Clean { .. }),
+            "{outcome:?}"
+        );
+        for drain in &drains {
+            assert!(
+                wait_gone(*drain),
+                "the drain ended once the last writer closed"
+            );
+        }
     }
 }

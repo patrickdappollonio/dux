@@ -109,9 +109,10 @@ says so.
 
 > [!NOTE]
 > A job the command leaves running in the background keeps running in the agent's
-> worktree after the command exits, and after the agent starts. What it prints from then
-> on is not in the startup log; send its output to a file of its own if you want to read
-> it later.
+> worktree after the command exits, after the agent starts, and after dux quits. What it
+> prints once the command has finished is discarded: it is not in the startup log and is
+> not kept anywhere else. Send its output to a file of its own if you want to read it
+> later.
 
 Deleting an agent stops a startup command that is still running, along with what it has
 started so far, whether or not the worktree goes too. Deleting it with its worktree also
