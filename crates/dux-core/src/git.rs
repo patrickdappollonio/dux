@@ -2707,16 +2707,49 @@ fn branch_still_exists(repo_path: &Path, branch_name: &str) -> bool {
 ///
 /// `--force`, so a worktree with uncommitted work is removed anyway: every
 /// caller must confirm with the user first.
+///
+/// One attempt. A failure git may get past on a second try (the worktree is
+/// still registered and still there) is a [`RemovalWorthRetrying`]; the
+/// caller retries, and only after looking at the folder again, because a
+/// retry made on the strength of the first look could delete something that
+/// walked in since.
 pub fn remove_worktree_keep_branch(repo_path: &Path, worktree_path: &Path) -> Result<()> {
-    remove_worktree_keep_branch_after(repo_path, worktree_path, WORKTREE_REMOVAL_RETRY_PAUSE)
+    let output = run_worktree_remove(repo_path, worktree_path)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    if worktree_path.exists() && worktree_is_registered(repo_path, worktree_path) {
+        return Err(anyhow::Error::new(RemovalWorthRetrying {
+            git_error: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }));
+    }
+    finish_failed_removal(repo_path, worktree_path, &output)
 }
 
 /// How long a worktree removal that failed while git still had the worktree
-/// registered waits before its one retry. Long enough for a process that was
-/// writing into the folder to have been stopped, short enough to sit inside
-/// the removal's spinner. Not a user setting: the removal is already bounded
-/// by the close grace, and this is one pause on a failure path.
+/// registered waits before its one retry (which looks at the folder again
+/// first). Long enough for a process that was writing into the folder to have
+/// been stopped, short enough to sit inside the removal's spinner. Not a user
+/// setting: the removal is already bounded by the close grace, and this is
+/// one pause on a failure path.
 pub const WORKTREE_REMOVAL_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `git worktree remove --force` failed while git still lists the worktree
+/// and its folder is still there: a transient refusal (something writing into
+/// it a moment ago) a second attempt may get past, once the folder has been
+/// looked at again.
+#[derive(Debug)]
+pub struct RemovalWorthRetrying {
+    pub git_error: String,
+}
+
+impl std::fmt::Display for RemovalWorthRetrying {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "git worktree remove failed: {}", self.git_error)
+    }
+}
+
+impl std::error::Error for RemovalWorthRetrying {}
 
 fn run_worktree_remove(repo_path: &Path, worktree_path: &Path) -> Result<std::process::Output> {
     Ok(Command::new("git")
@@ -2734,34 +2767,20 @@ fn run_worktree_remove(repo_path: &Path, worktree_path: &Path) -> Result<std::pr
         .output()?)
 }
 
-/// [`remove_worktree_keep_branch`] with the retry pause as a parameter, so a
-/// test does not sit through it.
-///
-/// A failed `git worktree remove --force` is the "Directory not empty" case
-/// when something is still writing into the folder. git deletes the files,
-/// finds the folder refilled, and fails its last `rmdir`; by then it has
-/// ALREADY dropped the worktree's registration (it carries on to the admin
-/// directory whatever the work tree did), so the same command a second time
-/// can only answer "is not a working tree". The retry is therefore made only
-/// while git still lists the worktree. Otherwise the folder is left to the
-/// user with a [`LeftoverWorktreeFolder`] saying exactly that: dux never
-/// deletes a worktree's files itself, that is git's job.
-pub(crate) fn remove_worktree_keep_branch_after(
+/// What a failed `git worktree remove --force` leaves, said. A failure is
+/// usually the "Directory not empty" case when something is still writing
+/// into the folder. git deletes the files, finds the folder refilled, and
+/// fails its last `rmdir`; by then it has ALREADY dropped the worktree's
+/// registration (it carries on to the admin directory whatever the work tree
+/// did), so the same command a second time can only answer "is not a working
+/// tree". The folder is then left to the user with a
+/// [`LeftoverWorktreeFolder`] saying exactly that: dux never deletes a
+/// worktree's files itself, that is git's job.
+fn finish_failed_removal(
     repo_path: &Path,
     worktree_path: &Path,
-    retry_pause: std::time::Duration,
+    output: &std::process::Output,
 ) -> Result<()> {
-    let mut output = run_worktree_remove(repo_path, worktree_path)?;
-    if !output.status.success()
-        && worktree_path.exists()
-        && worktree_is_registered(repo_path, worktree_path)
-    {
-        std::thread::sleep(retry_pause);
-        output = run_worktree_remove(repo_path, worktree_path)?;
-    }
-    if output.status.success() {
-        return Ok(());
-    }
     if !worktree_path.exists() {
         // The worktree is already gone from disk. Forget THIS registration, if
         // git still has one, and nothing else: a bare `git worktree prune` is
@@ -8589,7 +8608,7 @@ mod tests {
             .unwrap();
         assert!(locked.status.success());
 
-        let err = remove_worktree_keep_branch_after(repo.path(), &wt, std::time::Duration::ZERO)
+        let err = remove_worktree_keep_branch(repo.path(), &wt)
             .expect_err("a locked worktree is not removed");
         assert!(err.downcast_ref::<LeftoverWorktreeFolder>().is_none());
         assert!(
@@ -8723,8 +8742,8 @@ mod tests {
         let away = repo.path().join("unreachable-away");
         std::fs::rename(&sibling, &away).unwrap();
 
-        let err = remove_worktree_keep_branch_after(repo.path(), &wt, std::time::Duration::ZERO)
-            .expect_err("the folder is left over");
+        let err =
+            remove_worktree_keep_branch(repo.path(), &wt).expect_err("the folder is left over");
         assert!(err.downcast_ref::<LeftoverWorktreeFolder>().is_some());
 
         std::fs::rename(&away, &sibling).unwrap();

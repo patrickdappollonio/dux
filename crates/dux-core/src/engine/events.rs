@@ -770,59 +770,65 @@ pub(crate) fn perform_deferred_removal(
             }
         };
         processes_ended?;
-        wait_then_last_look(
-            leading,
-            &managed.worktree_path,
-            wait,
-            |holders| {
-                if let Some(tx) = waiting_tx {
-                    let _ = tx.send(crate::worker::WorkerEvent::WorktreeRemoveWaiting {
-                        session_id: session_id.to_string(),
-                        waiting_for: crate::worktree_ops::describe_holders(holders),
-                    });
-                }
-            },
-            &[&registry, &live],
-            || {
-                occupant_after_wait(
-                    leading,
-                    &registry,
-                    &live,
-                    processes,
-                    Some((&db_path, Some(session_id))),
-                )
-            },
-        )?;
-        // A rename that landed while this removal waited moved the branch, so
-        // it is deleted by the name it has NOW.
-        let branch_name = leading.renamed(&managed.branch_name);
-        let initial_branch = leading.renamed(&managed.initial_branch);
+        let leading: &crate::worktree_ops::RemovalLease = leading;
+        let look = || {
+            wait_then_last_look(
+                leading,
+                &managed.worktree_path,
+                wait,
+                |holders| {
+                    if let Some(tx) = waiting_tx {
+                        let _ = tx.send(crate::worker::WorkerEvent::WorktreeRemoveWaiting {
+                            session_id: session_id.to_string(),
+                            waiting_for: crate::worktree_ops::describe_holders(holders),
+                        });
+                    }
+                },
+                &[&registry, &live],
+                || {
+                    occupant_after_wait(
+                        leading,
+                        &registry,
+                        &live,
+                        processes,
+                        Some((&db_path, Some(session_id))),
+                    )
+                },
+            )
+        };
         // The gate every delete applies: unasked, only branches dux
         // created are dux's to delete, and the delete dialog's answer
         // overrides that in either direction.
-        if managed
+        let delete_branches = managed
             .branch_provenance
-            .resolve_branch_deletion(delete_branch)
-        {
-            crate::git::remove_worktree(
-                std::path::Path::new(project_path),
-                std::path::Path::new(&managed.worktree_path),
-                &branch_name,
-                // The BIRTH branch too; see `git::remove_worktree`.
-                Some(initial_branch.as_str()),
-            )
-            .map(RemovedBranches::Deleted)
-            .map_err(|e| format!("{e:#}"))
-        } else {
-            crate::git::remove_worktree_keep_branch(
-                std::path::Path::new(project_path),
-                std::path::Path::new(&managed.worktree_path),
-            )
-            .map(|()| {
-                RemovedBranches::Kept(branch_kept_reason(managed.branch_provenance, delete_branch))
-            })
-            .map_err(|e| format!("{e:#}"))
-        }
+            .resolve_branch_deletion(delete_branch);
+        remove_after_last_look(look, || {
+            // A rename that landed while this removal waited moved the
+            // branch, so it is deleted by the name it has NOW.
+            let branch_name = leading.renamed(&managed.branch_name);
+            let initial_branch = leading.renamed(&managed.initial_branch);
+            if delete_branches {
+                crate::git::remove_worktree(
+                    std::path::Path::new(project_path),
+                    std::path::Path::new(&managed.worktree_path),
+                    &branch_name,
+                    // The BIRTH branch too; see `git::remove_worktree`.
+                    Some(initial_branch.as_str()),
+                )
+                .map(RemovedBranches::Deleted)
+            } else {
+                crate::git::remove_worktree_keep_branch(
+                    std::path::Path::new(project_path),
+                    std::path::Path::new(&managed.worktree_path),
+                )
+                .map(|()| {
+                    RemovedBranches::Kept(branch_kept_reason(
+                        managed.branch_provenance,
+                        delete_branch,
+                    ))
+                })
+            }
+        })
     }))
     .unwrap_or_else(|payload| {
         let reason = crate::engine::spawn_worker::format_panic_payload(payload);
@@ -895,11 +901,6 @@ pub(crate) fn occupant_after_wait(
         .contains(&crate::worktree_ops::WorktreeOpKind::CreateAgent)
     {
         return Some("an agent is being created in it".to_string());
-    }
-    // A spawn that began before the folder was claimed registers its session
-    // in a moment; nothing new can begin now that it is claimed.
-    if !live.wait_for_spawns(lease.path(), crate::process_sessions::SPAWN_WAIT) {
-        return Some("something dux is starting in it has not finished starting".to_string());
     }
     // The one occupancy rule over the agents and projects as the session
     // database has them now: a project added inside the folder, an agent
@@ -982,15 +983,24 @@ pub(crate) fn cwd_keeps(
 
 /// THE order every removal keeps between holding its claim and running git,
 /// so it cannot drift between the agent delete, the worktree manager and a
-/// failed create's rollback: first every wait (the operations holding paths
-/// in the folder, a removal or destructive claim of a folder around or
-/// inside it, the registry's record reaching the database), THEN the last
-/// look (the whole occupancy rule, working directories included), and then
-/// the caller runs git with nothing blocking in between. A look taken before
-/// a wait is stale by the time git runs: a shell `cd`'d into the folder
-/// during the wait would lose it. `on_waiting` is told what the removal is
-/// waiting for, when anything. `last_look` answers what still occupies the
-/// folder. Blocking: a worker thread's call.
+/// failed create's rollback:
+///
+/// 1. HOLDS: the operations holding paths in the folder finish;
+/// 2. CLAIMS: a removal or destructive claim of a folder around or inside it
+///    finishes;
+/// 3. SPAWNS: every process dux began starting in the folder before it was
+///    claimed has its session registered;
+/// 4. FLUSH: the registry's record, those sessions included, reaches the
+///    database;
+/// 5. LAST LOOK: the whole occupancy rule, working directories included;
+/// 6. and then the caller runs git with nothing blocking in between.
+///
+/// A look taken before a wait is stale by the time git runs: a shell `cd`'d
+/// into the folder during the wait would lose it. A caller that runs git
+/// again (see [`remove_after_last_look`]) goes through all of it again first.
+/// `on_waiting` is told what the removal is waiting for, when anything.
+/// `last_look` answers what still occupies the folder. Blocking: a worker
+/// thread's call.
 pub(crate) fn wait_then_last_look(
     lease: &crate::worktree_ops::RemovalLease,
     folder: &str,
@@ -999,6 +1009,8 @@ pub(crate) fn wait_then_last_look(
     registries: &[&crate::process_sessions::AgentProcessRegistry],
     last_look: impl FnOnce() -> Option<String>,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    removal_steps::note("holds");
     let holders = lease.holders();
     if !holders.is_empty() {
         on_waiting(&holders);
@@ -1014,6 +1026,8 @@ pub(crate) fn wait_then_last_look(
     // the changes pane's delete of one, never runs at the same time as this
     // one: wait for the earlier one. If it took this folder with it, git
     // finds it gone and only forgets its registration.
+    #[cfg(test)]
+    removal_steps::note("claims");
     if !lease.wait_for_overlapping_removals(wait) {
         return Err(format!(
             "the worktree at {} was kept: a removal of a folder around or inside it was still \
@@ -1022,11 +1036,30 @@ pub(crate) fn wait_then_last_look(
             wait.as_secs()
         ));
     }
+    // A spawn that began before the claim registers its session in a
+    // moment; nothing new can begin now that the folder is claimed.
+    #[cfg(test)]
+    removal_steps::note("spawns");
+    for registry in registries {
+        if !registry.wait_for_spawns(
+            std::path::Path::new(folder),
+            crate::process_sessions::SPAWN_WAIT,
+        ) {
+            return Err(occupied_after_wait_message(
+                folder,
+                "something dux is starting in it has not finished starting",
+            ));
+        }
+    }
     // The record a later start recovers from is never behind a deletion that
-    // already happened.
+    // already happened, the sessions just registered included.
+    #[cfg(test)]
+    removal_steps::note("flush");
     if let Some(message) = record_not_saved(registries, folder) {
         return Err(message);
     }
+    #[cfg(test)]
+    removal_steps::note("look");
     // Last: nothing new can take the folder any more (every create, launch,
     // terminal and add is refused under the claim), so whatever is found here
     // arrived before the claim and has not gone, or is a process dux started
@@ -1034,6 +1067,49 @@ pub(crate) fn wait_then_last_look(
     match last_look() {
         Some(occupant) => Err(occupied_after_wait_message(folder, &occupant)),
         None => Ok(()),
+    }
+}
+
+/// Run `remove` (the git step) right after `look` (a full
+/// [`wait_then_last_look`]), and when git refuses in a way worth one more try
+/// ([`crate::git::RemovalWorthRetrying`]: the worktree is still registered and
+/// still there), pause and go through the whole look again before the one
+/// retry. git never runs a second time on the strength of a look taken before
+/// the first. Blocking: a worker thread's call.
+pub(crate) fn remove_after_last_look<T>(
+    look: impl Fn() -> Result<(), String>,
+    remove: impl Fn() -> anyhow::Result<T>,
+) -> Result<T, String> {
+    look()?;
+    match remove() {
+        Err(err)
+            if err
+                .downcast_ref::<crate::git::RemovalWorthRetrying>()
+                .is_some() =>
+        {
+            std::thread::sleep(crate::git::WORKTREE_REMOVAL_RETRY_PAUSE);
+            look()?;
+            remove().map_err(|e| format!("{e:#}"))
+        }
+        other => other.map_err(|e| format!("{e:#}")),
+    }
+}
+
+/// The steps [`wait_then_last_look`] took, in order, on this thread (test
+/// builds only), so a test can pin the order.
+#[cfg(test)]
+pub(crate) mod removal_steps {
+    std::thread_local! {
+        static STEPS: std::cell::RefCell<Vec<&'static str>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn note(step: &'static str) {
+        STEPS.with(|steps| steps.borrow_mut().push(step));
+    }
+
+    pub(crate) fn take() -> Vec<&'static str> {
+        STEPS.with(|steps| std::mem::take(&mut *steps.borrow_mut()))
     }
 }
 
@@ -4189,6 +4265,7 @@ impl Engine {
                 self.process_folder_repo_status_ready(session_id, status)
             }
             WorkerEvent::StatusOpCompleted { resolved } => resolved.into_reaction(),
+            WorkerEvent::WorktreeFilesChanged => EventReaction::ReloadChangedFiles,
             WorkerEvent::PullCompleted {
                 repo_path,
                 target,

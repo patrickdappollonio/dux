@@ -458,6 +458,24 @@ pub fn spelled_same(a: &Path, b: &Path) -> bool {
     spelled_under(a, b) && spelled_under(b, a)
 }
 
+/// A key two spellings of one relative path share under the same comparison
+/// as [`spelled_same`]: case folded on macOS, as written elsewhere. For
+/// comparing many names read from disk against paths git reports.
+pub fn case_key(path: &Path) -> PathBuf {
+    case_key_with(path, cfg!(target_os = "macos"))
+}
+
+/// [`case_key`] with the case rule spelled out, so it can be tested on either
+/// platform.
+pub fn case_key_with(path: &Path, ignore_case: bool) -> PathBuf {
+    if !ignore_case {
+        return path.to_path_buf();
+    }
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+        .collect()
+}
+
 fn under_with_case(inner: &Path, outer: &Path, ignore_case: bool) -> bool {
     if !ignore_case {
         return inner.starts_with(outer);

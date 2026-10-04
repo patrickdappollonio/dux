@@ -138,54 +138,80 @@ fn judge_cwds<'a>(
     unknown.map_or(CwdVerdict::Clear, CwdVerdict::Unknown)
 }
 
-/// Where a session's running processes stand, judged by the same rule a
-/// removal's last look uses ([`AgentProcessRegistry::cwd_occupant`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SessionWhereabouts {
-    /// Nothing of it is running, or nothing stands where `touches` accepts.
-    Clear,
-    /// This process stands there.
-    Inside {
-        pid: u32,
-        name: String,
-        cwd: std::path::PathBuf,
-    },
-    /// Where this process stands could not be read, and its session was
-    /// started somewhere `touches` accepts: possibly there.
-    Unknown { pid: u32, name: String },
-}
-
-/// [`SessionWhereabouts`] for one recorded session (started in
-/// `started_in`, with the members recorded at its leader's exit). Blocking:
+/// Every running process of one recorded session whose working directory
+/// `touches` accepts, each judged by the same rule a removal's last look uses
+/// ([`AgentProcessRegistry::cwd_occupant`]), one process at a time. Blocking:
 /// reads the process table and each member's working directory.
-pub fn session_whereabouts(
+pub fn session_processes_where(
     session: ProcessSession,
     started_in: &std::path::Path,
     known: &[ProcessIdentity],
     touches: &dyn Fn(&std::path::Path) -> bool,
-) -> SessionWhereabouts {
+) -> Vec<ProcRow> {
     let table = read_process_table();
     let running = members(&table, &[session], known, std::process::id());
     if running.is_empty() {
-        return SessionWhereabouts::Clear;
+        return Vec::new();
     }
     let pids: Vec<u32> = running.iter().map(|row| row.pid).collect();
     let report = crate::file_drop::process_cwds(&pids);
-    match judge_cwds(touches, &running, &table, &report, started_in) {
-        CwdVerdict::Clear => SessionWhereabouts::Clear,
-        CwdVerdict::Inside(row) => SessionWhereabouts::Inside {
-            pid: row.pid,
-            name: row.name.clone(),
-            cwd: report
-                .found
-                .get(&row.pid)
-                .cloned()
-                .unwrap_or_else(|| started_in.to_path_buf()),
-        },
-        CwdVerdict::Unknown(row) => SessionWhereabouts::Unknown {
-            pid: row.pid,
-            name: row.name.clone(),
-        },
+    (0..running.len())
+        .filter(|&index| {
+            !matches!(
+                judge_cwds(
+                    touches,
+                    &running[index..=index],
+                    &table,
+                    &report,
+                    started_in
+                ),
+                CwdVerdict::Clear
+            )
+        })
+        .map(|index| running[index].clone())
+        .collect()
+}
+
+/// End exactly these processes, and nothing else of their sessions: SIGTERM
+/// and SIGHUP, SIGKILL whatever is left once `grace` has passed, then wait up
+/// to [`KILL_SETTLE`] more. Answers the ones still running after that.
+/// Blocking: a worker thread's call.
+pub fn end_exactly(rows: &[ProcRow], grace: Duration) -> Vec<ProcRow> {
+    let wanted: HashSet<ProcessIdentity> = rows.iter().map(ProcRow::identity).collect();
+    let alive = || -> Vec<ProcRow> {
+        read_process_table()
+            .into_iter()
+            // A zombie has exited: nothing of it is running any more.
+            .filter(|row| !row.exited && wanted.contains(&row.identity()))
+            .collect()
+    };
+    let signal = |pid: u32, signal: rustix::process::Signal| {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+            let _ = rustix::process::kill_process(pid, signal);
+        }
+    };
+    let start = Instant::now();
+    for row in alive() {
+        signal(row.pid, rustix::process::Signal::TERM);
+        signal(row.pid, rustix::process::Signal::HUP);
+    }
+    let mut killed = false;
+    loop {
+        let left = alive();
+        if left.is_empty() {
+            return left;
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= grace + KILL_SETTLE {
+            return left;
+        }
+        if elapsed >= grace && !killed {
+            for row in &left {
+                signal(row.pid, rustix::process::Signal::KILL);
+            }
+            killed = true;
+        }
+        std::thread::sleep(PURGE_POLL);
     }
 }
 

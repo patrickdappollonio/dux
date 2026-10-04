@@ -1929,6 +1929,13 @@ mod tests {
         std::fs::write(worktree.join("notes.md/a.txt"), "a\n").unwrap();
 
         app.resolve_confirm_discard_file(true);
+        // The discard runs on a worker; its final replaces the busy.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.status.tone() == StatusTone::Busy {
+            assert!(Instant::now() < deadline, "the discard never finished");
+            app.drain_events();
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         assert_eq!(app.status.tone(), StatusTone::Error);
         assert!(

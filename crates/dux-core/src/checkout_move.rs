@@ -104,6 +104,15 @@ impl CheckoutMoveGuard {
         let tracked = tracked_at_head(checkout, &candidate_paths(checkout, entries))?;
         let mut locations =
             locations_git_would_replace(checkout, entries, &|path| tracked.contains(path));
+        for deleted in &changes.deleted {
+            let at = checkout.join(deleted);
+            if crate::engine::is_symlink(&at) && !locations.iter().any(|known| known.path == at) {
+                locations.push(Location {
+                    path: at,
+                    kind: LocationKind::LinkRemoved,
+                });
+            }
+        }
         for folder in folders_left_empty(checkout, &changes) {
             if !locations.iter().any(|known| known.path == folder) {
                 locations.push(Location {
@@ -299,14 +308,16 @@ fn refusal(checkout: &Path, location: &Location, what: &str, reason: &str) -> an
             "tracks a file at {relative}, so git would delete the folder there with everything \
              in it"
         ),
-        LocationKind::Overwritten => format!(
-            "tracks {relative}, so git would overwrite the untracked file or link that stands \
+        LocationKind::Overwritten => {
+            format!("tracks {relative}, so git would overwrite the file or link that stands there")
+        }
+        LocationKind::FileWhereFolderGoes => format!(
+            "needs a folder at {relative}, so git would replace the file or link that stands \
              there"
         ),
-        LocationKind::FileWhereFolderGoes => format!(
-            "needs a folder at {relative}, so git would replace the untracked file or link that \
-             stands there"
-        ),
+        LocationKind::LinkRemoved => {
+            format!("deletes {relative}, so git would remove the link that stands there")
+        }
         LocationKind::FolderEmptied => format!(
             "deletes everything in {relative}, so git would remove the folder itself once it is \
              empty"
@@ -438,8 +449,14 @@ fn parse_raw_diff(out: &[u8]) -> IncomingChanges {
 /// are answered; the ones inside them go with them. A folder whose contents
 /// cannot be read is answered as removed, which only makes the check ask.
 fn folders_left_empty(checkout: &Path, changes: &IncomingChanges) -> Vec<PathBuf> {
-    use std::collections::HashSet;
-    let deleted: HashSet<&Path> = changes.deleted.iter().map(PathBuf::as_path).collect();
+    let ignore_case = cfg!(target_os = "macos");
+    // Names read from disk are compared with git's paths under the one
+    // spelling rule: case folded where the filesystem folds it.
+    let deleted: std::collections::HashSet<PathBuf> = changes
+        .deleted
+        .iter()
+        .map(|path| crate::worktree_ops::case_key_with(path, ignore_case))
+        .collect();
     let mut candidates: Vec<PathBuf> = Vec::new();
     for path in &changes.deleted {
         let mut at = path.parent();
@@ -457,12 +474,12 @@ fn folders_left_empty(checkout: &Path, changes: &IncomingChanges) -> Vec<PathBuf
         changes
             .entries
             .iter()
-            .any(|entry| entry.path.starts_with(folder))
+            .any(|entry| crate::worktree_ops::spelled_under(&entry.path, folder))
     };
     let mut removed: Vec<PathBuf> = candidates
         .into_iter()
         .filter(|folder| {
-            !written_under(folder) && only_deleted_paths_in(checkout, folder, &deleted)
+            !written_under(folder) && only_deleted_paths_in(checkout, folder, &deleted, ignore_case)
         })
         .collect();
     // Outermost only.
@@ -483,14 +500,17 @@ fn folders_left_empty(checkout: &Path, changes: &IncomingChanges) -> Vec<PathBuf
 fn only_deleted_paths_in(
     checkout: &Path,
     folder: &Path,
-    deleted: &std::collections::HashSet<&Path>,
+    deleted: &std::collections::HashSet<PathBuf>,
+    ignore_case: bool,
 ) -> bool {
+    let is_deleted =
+        |path: &Path| deleted.contains(&crate::worktree_ops::case_key_with(path, ignore_case));
     let at = checkout.join(folder);
     let Ok(meta) = std::fs::symlink_metadata(&at) else {
         return true;
     };
     if !meta.is_dir() || meta.file_type().is_symlink() {
-        return deleted.contains(folder);
+        return is_deleted(folder);
     }
     let Ok(listing) = std::fs::read_dir(&at) else {
         return true;
@@ -504,9 +524,9 @@ fn only_deleted_paths_in(
             .file_type()
             .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink());
         let gone = if is_dir {
-            only_deleted_paths_in(checkout, &child, deleted)
+            only_deleted_paths_in(checkout, &child, deleted, ignore_case)
         } else {
-            deleted.contains(child.as_path())
+            is_deleted(&child)
         };
         if !gone {
             return false;
@@ -535,12 +555,14 @@ fn parse_ls_tree(out: &[u8]) -> Vec<IncomingEntry> {
 enum LocationKind {
     /// A real folder standing where a file goes: removed whole.
     FolderWhereFileGoes,
-    /// An untracked file or link standing where a file goes: overwritten.
+    /// An untracked file, or any link, standing where a file goes: overwritten.
     Overwritten,
-    /// An untracked file or link standing where a folder goes: replaced.
+    /// An untracked file, or any link, standing where a folder goes: replaced.
     FileWhereFolderGoes,
     /// A folder whose every entry the move deletes: removed once empty.
     FolderEmptied,
+    /// A link the move deletes, tracked or not.
+    LinkRemoved,
 }
 
 /// One place git would overwrite or remove something HEAD does not track.
@@ -625,12 +647,13 @@ fn tracked_at_head(
     Ok(tracked)
 }
 
-/// Every place git would overwrite or remove something HEAD does not track to
-/// write `entries` into `checkout`: an untracked file or link where a file
-/// goes, a real folder or a link where a file goes, and an untracked file or
-/// link on the way to one, where a folder goes. A path HEAD tracks is an
-/// ordinary update, a folder on the way stays (the incoming commit has a
-/// folder there too), and so does a real folder at a submodule's own path.
+/// Every place git would overwrite or remove something to write `entries`
+/// into `checkout`: an untracked file, or any link, where a file goes; a real
+/// folder where a file goes; and an untracked file, or any link, on the way to
+/// one, where a folder goes. A FILE HEAD tracks is an ordinary update of its
+/// content; a link never is, tracked or not. A folder on the way stays (the
+/// incoming commit has a folder there too), and so does a real folder at a
+/// submodule's own path.
 fn locations_git_would_replace(
     checkout: &Path,
     entries: &[IncomingEntry],
@@ -654,7 +677,10 @@ fn locations_git_would_replace(
                 // A real folder at a submodule's path is kept (git checks
                 // the submodule out into it).
                 (!entry.gitlink).then_some(LocationKind::FolderWhereFileGoes)
-            } else if tracked(&relative) {
+            } else if tracked(&relative) && !meta.file_type().is_symlink() {
+                // An ordinary update of a file's content. A link is never
+                // that: removing or replacing it removes what it is, which
+                // may be an agent's folder or a project's path recorded at it.
                 None
             } else if !last {
                 Some(LocationKind::FileWhereFolderGoes)
@@ -675,6 +701,63 @@ fn locations_git_would_replace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_read_from_disk_match_git_paths_under_the_case_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("Docs")).unwrap();
+        std::fs::write(tmp.path().join("Docs/Guide.md"), "g").unwrap();
+        let deleted: std::collections::HashSet<PathBuf> = [Path::new("docs/guide.md")]
+            .iter()
+            .map(|path| crate::worktree_ops::case_key_with(path, true))
+            .collect();
+        assert!(
+            only_deleted_paths_in(tmp.path(), Path::new("Docs"), &deleted, true),
+            "a case-folding filesystem: git's docs/guide.md is the Docs/Guide.md on disk"
+        );
+        let exact: std::collections::HashSet<PathBuf> =
+            [PathBuf::from("docs/guide.md")].into_iter().collect();
+        assert!(
+            !only_deleted_paths_in(tmp.path(), Path::new("Docs"), &exact, false),
+            "a case-sensitive one: they are different files"
+        );
+        assert_eq!(
+            crate::worktree_ops::case_key_with(Path::new("A/B"), true),
+            crate::worktree_ops::case_key_with(Path::new("a/b"), true)
+        );
+        assert_ne!(
+            crate::worktree_ops::case_key_with(Path::new("A/B"), false),
+            crate::worktree_ops::case_key_with(Path::new("a/b"), false)
+        );
+    }
+
+    #[test]
+    fn a_tracked_link_is_never_an_ordinary_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(tmp.path(), root.join("work")).unwrap();
+        std::fs::write(root.join("plain"), "x").unwrap();
+        let entries = vec![
+            IncomingEntry {
+                path: "work".into(),
+                gitlink: false,
+            },
+            IncomingEntry {
+                path: "plain".into(),
+                gitlink: false,
+            },
+        ];
+        let found = locations_git_would_replace(&root, &entries, &|_| true);
+        assert_eq!(
+            found
+                .into_iter()
+                .map(|location| (location.path, location.kind))
+                .collect::<Vec<_>>(),
+            vec![(root.join("work"), LocationKind::Overwritten)],
+            "the tracked link is judged; the tracked file is an ordinary update"
+        );
+    }
 
     /// The places the walk finds, nothing tracked at HEAD.
     fn places(root: &Path, entries: &[IncomingEntry]) -> Vec<(PathBuf, LocationKind)> {

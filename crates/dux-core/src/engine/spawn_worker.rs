@@ -189,6 +189,36 @@ impl Engine {
         E: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
+        self.spawn_status_op_with(op, work, false)
+    }
+
+    /// [`Self::spawn_status_op`] for work that changes a worktree's files:
+    /// its completion also has the surfaces read the changed-files listing
+    /// again, so the change shows the moment it is done.
+    pub fn spawn_changes_op<T, E, F>(
+        &mut self,
+        op: crate::engine::StatusOp<T, E>,
+        work: F,
+    ) -> EventReaction
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        self.spawn_status_op_with(op, work, true)
+    }
+
+    fn spawn_status_op_with<T, E, F>(
+        &mut self,
+        op: crate::engine::StatusOp<T, E>,
+        work: F,
+        reloads_changes: bool,
+    ) -> EventReaction
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
         // Stamp the command origin onto the pending busy and capture it for the
         // deferred final: `current_origin` is reset by the time the worker
         // completes, so the scope must travel on the `ResolvedFinal`.
@@ -228,6 +258,9 @@ impl Engine {
                     }
                     .with_scope(origin);
                     let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
+                    if reloads_changes {
+                        let _ = tx.send(WorkerEvent::WorktreeFilesChanged);
+                    }
                 })
                 .map(|_| ())
         };

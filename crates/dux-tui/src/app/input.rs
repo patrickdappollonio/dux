@@ -8398,34 +8398,22 @@ impl App {
         // folder-driven gate applies here too: it refuses in a folder with no
         // repository rather than handing git a directory it cannot answer for.
         if confirm && let Some(worktree) = self.changes_worktree_for_selection() {
-            // Re-classify against LIVE git status at confirm time, then act on that
-            // fresh flag, so the delete-vs-restore decision and the destructive
-            // action agree with the worktree as it is NOW (not as it was when the
-            // prompt opened). This closes a data-loss window: a file that was
-            // untracked at prompt-open but became tracked before confirm would
-            // otherwise be deleted outright instead of restored from HEAD.
-            let is_untracked = match git::discard_classify(&worktree, &file_path) {
-                Ok(u) => u,
-                Err(e) => {
-                    // The live check refused (now staged, or nothing left to
-                    // discard). Surface it and leave the file untouched.
-                    self.set_error(format!("Discard failed: {e}"));
-                    return false;
-                }
-            };
-            // The prompt was a file's, and a file is what the discard may
-            // touch: a folder that has since taken the name is refused.
-            let reaction = self.engine.apply(Command::DiscardFile {
+            // Classified against LIVE git status on the discard's worker, right
+            // before it acts, so the delete-vs-restore decision and the
+            // destructive action agree with the worktree as it is THEN (not as
+            // it was when the prompt opened): a file that was untracked at
+            // prompt-open but became tracked before confirm is restored, never
+            // deleted. A refusal there (now staged, nothing left to discard)
+            // is the discard's final. The prompt was a file's, and a file is
+            // what the discard may touch: a folder that has since taken the
+            // name is refused.
+            // The listing is read again when the discard's worker finishes.
+            let reaction = self.engine.apply(Command::DiscardFileLive {
                 worktree_path: worktree,
                 path: file_path,
-                is_untracked,
-                confirmed: git::ConfirmedEntry::File,
             });
             match reaction {
-                Ok(reaction) => {
-                    self.apply_reaction(reaction);
-                    self.reload_changed_files();
-                }
+                Ok(reaction) => self.apply_reaction(reaction),
                 Err(e) => self.set_error(format!("Discard failed: {e}")),
             }
         }
@@ -26973,6 +26961,10 @@ cyan = "#00ffff"
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 53, 10));
 
         assert!(matches!(app.prompt, PromptState::None));
+        // The discard runs on a worker; its final replaces the busy.
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
         let contents = std::fs::read_to_string(
             PathBuf::from(
                 &app.engine.sessions[0]
@@ -27044,7 +27036,16 @@ cyan = "#00ffff"
         git(&["commit", "-m", "track ghost"]);
 
         app.resolve_confirm_discard_file(true);
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
 
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Error,
+            "the live check refuses: {}",
+            app.status.text()
+        );
         assert!(
             worktree.join("ghost.txt").exists(),
             "a file that became tracked-and-clean between prompt-open and confirm must NOT be deleted by discard",

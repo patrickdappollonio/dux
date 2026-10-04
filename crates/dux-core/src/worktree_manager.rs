@@ -241,8 +241,21 @@ pub fn remove_managed_worktree(
     requested: &Path,
     delete_branch: bool,
 ) -> Result<RemovalOutcome, String> {
+    remove_managed_worktree_once(project, paths, sessions, requested, delete_branch)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// [`remove_managed_worktree`], one git attempt, its error kept typed so a
+/// caller can tell a failure worth one more try (after another look).
+fn remove_managed_worktree_once(
+    project: &Project,
+    paths: &DuxPaths,
+    sessions: &[AgentSession],
+    requested: &Path,
+    delete_branch: bool,
+) -> anyhow::Result<RemovalOutcome> {
     let repo_path = PathBuf::from(&project.path);
-    let worktrees = git::list_worktrees(&repo_path).map_err(|e| format!("{e:#}"))?;
+    let worktrees = git::list_worktrees(&repo_path)?;
     let classified =
         crate::project_browser::classify_project_worktrees(project, paths, sessions, worktrees);
     match resolve_removal(classified, requested) {
@@ -255,8 +268,7 @@ pub fn remove_managed_worktree(
                 // branch here, because a worktree with no agent has no record of
                 // what it was born on.
                 Some(branch) => {
-                    let removed = git::remove_worktree(&repo_path, &path, branch, None)
-                        .map_err(|e| format!("{e:#}"))?;
+                    let removed = git::remove_worktree(&repo_path, &path, branch, None)?;
                     Ok(RemovalOutcome::Removed {
                         path,
                         branch: Some(BranchOutcome {
@@ -268,8 +280,7 @@ pub fn remove_managed_worktree(
                 // Either the request did not ask, or the worktree is detached
                 // and there is no branch to delete. Worktree only.
                 None => {
-                    git::remove_worktree_keep_branch(&repo_path, &path)
-                        .map_err(|e| format!("{e:#}"))?;
+                    git::remove_worktree_keep_branch(&repo_path, &path)?;
                     Ok(RemovalOutcome::Removed { path, branch: None })
                 }
             }
@@ -413,12 +424,15 @@ impl AdmittedRemoval {
             lease.finish(Err(message.clone()));
             return Err(message);
         }
-        let checked = crate::engine::end_agent_processes_before_removal(
+        if let Err(message) = crate::engine::end_agent_processes_before_removal(
             &processes,
             &registry,
             &requested_text,
-        )
-        .and_then(|()| {
+        ) {
+            lease.finish(Err(message.clone()));
+            return Err(message);
+        }
+        let look = || {
             crate::engine::wait_then_last_look(
                 &lease,
                 &requested_text,
@@ -435,12 +449,10 @@ impl AdmittedRemoval {
                     )
                 },
             )
+        };
+        let outcome = crate::engine::remove_after_last_look(look, || {
+            remove_managed_worktree_once(&project, &paths, &[], &worktree, delete_branch)
         });
-        if let Err(message) = checked {
-            lease.finish(Err(message.clone()));
-            return Err(message);
-        }
-        let outcome = remove_managed_worktree(&project, &paths, &[], &worktree, delete_branch);
         lease.finish(match &outcome {
             Ok(RemovalOutcome::Removed {
                 branch: Some(branch),

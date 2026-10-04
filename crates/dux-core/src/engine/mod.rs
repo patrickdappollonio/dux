@@ -58,6 +58,8 @@ mod review21_tests;
 #[cfg(test)]
 mod review22_tests;
 #[cfg(test)]
+mod review23_tests;
+#[cfg(test)]
 mod review8_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -78,7 +80,8 @@ pub use events::{
 };
 pub(crate) use events::{
     RemovalCoordinationInputs, cwd_keeps, end_agent_processes_before_removal, occupant_after_wait,
-    perform_deferred_removal, standalone_processes_keep, wait_then_last_look,
+    perform_deferred_removal, remove_after_last_look, standalone_processes_keep,
+    wait_then_last_look,
 };
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{

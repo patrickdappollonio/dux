@@ -491,6 +491,9 @@ pub enum WorkerEvent {
     StatusOpCompleted {
         resolved: crate::engine::ResolvedFinal,
     },
+    /// A worker changed a worktree's files (a discard) and has sent its final:
+    /// the changed-files listing is read again.
+    WorktreeFilesChanged,
     PullCompleted {
         repo_path: String,
         target: PullTarget,

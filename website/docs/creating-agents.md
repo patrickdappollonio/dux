@@ -140,7 +140,8 @@ from the remote you want first.
 > a project's repository, or a terminal working there. Any other ignored folder or file git
 > still replaces, as it would in your own terminal, so move it aside first if it matters.
 > Likewise, when the incoming commit deletes every file in a folder, git removes the folder
-> too, and dux refuses when one of those lives or works there. The same goes for an agent's
+> too, and when it deletes or replaces a link, even one the branch tracks, git removes the
+> link; dux refuses when one of those lives or works there. The same goes for an agent's
 > **Pull** and for **Pull project**.
 
 > [!NOTE]
