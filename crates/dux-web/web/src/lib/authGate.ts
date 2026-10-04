@@ -121,6 +121,13 @@ export function useAuthPhase(): AuthPhase {
   return useSyncExternalStore(subscribeAuth, getAuthPhase, getAuthPhase)
 }
 
+/// Whether this page holds a session it can end, which is what the app menu's
+/// Sign out asks. Not merely "a password is set": a connection the password
+/// does not apply to signed in with nothing.
+export function hasSessionToEnd(p: AuthPhase): boolean {
+  return p.kind === "open" && p.status !== null && p.status.password_set && p.status.signed_in
+}
+
 /// The latest status the page holds, whatever phase it is in.
 export function currentAuthStatus(): AuthStatus | null {
   return phase.kind === "open" || phase.kind === "signed_out" ? phase.status : null

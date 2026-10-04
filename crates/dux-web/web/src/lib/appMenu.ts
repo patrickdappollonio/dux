@@ -24,6 +24,7 @@ import {
   FolderKanban,
   GitPullRequestArrow,
   Globe,
+  LogOut,
   Plus,
   RefreshCw,
   Rocket,
@@ -32,8 +33,9 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react"
-import { notifyError } from "./notify"
+import { notifyError } from "@/lib/notify"
 
+import { signOut } from "@/lib/authGate"
 import { configApi } from "@/lib/configApi"
 import { addProjectMenuItems, newMenuItems } from "@/lib/creationMenus"
 import {
@@ -83,6 +85,11 @@ export interface AppMenuContext {
    *  `gh` works. It gates "Re-check GitHub", which exists for when `gh` does
    *  not work and so must never be gated on `ghAvailable`. */
   githubIntegrationEnabled: boolean
+  /** Whether this browser holds a session it can end: a password is set and
+   *  this page signed in with it. Absent means no, because on a server with no
+   *  password, or a connection the password does not apply to, there is nothing
+   *  to sign out of and an entry that did nothing would be a lie. */
+  canSignOut?: boolean
 }
 
 /**
@@ -272,6 +279,32 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
       icon: PartyPopper,
       run: () => openReleaseNotes(),
     },
+    // Last, behind its own separator, so it is never the item a hurried click
+    // lands on. No ellipsis and no confirm: it loses nothing (the URL and every
+    // unsaved draft stay in this page and come back with the next sign-in), and
+    // the login page that replaces the app says what happened.
+    ...(ctx.canSignOut
+      ? ([
+          { kind: "separator", id: "sep-sign-out" },
+          {
+            kind: "item",
+            id: "sign-out",
+            title: "Sign out",
+            icon: LogOut,
+            run: () => {
+              void signOut().then((answer) => {
+                if (answer.kind === "unreachable") {
+                  notifyError(
+                    "Could not reach dux to sign out, so this browser is still signed in. Try again once dux is reachable.",
+                  )
+                } else if (answer.kind === "refused") {
+                  notifyError(answer.message)
+                }
+              })
+            },
+          },
+        ] as AppMenuEntry[])
+      : []),
   ]
 }
 

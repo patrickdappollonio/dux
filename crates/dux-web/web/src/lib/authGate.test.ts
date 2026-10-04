@@ -307,3 +307,15 @@ describe("authPaused", () => {
     expect(g.authPaused()).toBe(false)
   })
 })
+
+describe("hasSessionToEnd", () => {
+  it("is true only for an open page signed in with a password", async () => {
+    const g = await load()
+    const st = (o: object) => g.normalizeAuthStatus({ password_set: true, signed_in: true, ...o })
+    expect(g.hasSessionToEnd({ kind: "open", status: st({}) })).toBe(true)
+    expect(g.hasSessionToEnd({ kind: "open", status: st({ signed_in: false }) })).toBe(false)
+    expect(g.hasSessionToEnd({ kind: "open", status: st({ password_set: false }) })).toBe(false)
+    expect(g.hasSessionToEnd({ kind: "open", status: null })).toBe(false)
+    expect(g.hasSessionToEnd({ kind: "checking" })).toBe(false)
+  })
+})

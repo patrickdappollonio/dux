@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { appMenuModel, type AppMenuEntry } from "@/lib/appMenu"
+import { hasSessionToEnd, useAuthPhase } from "@/lib/authGate"
 import { useDux } from "@/lib/store"
 
 // The desktop app menu renders `appMenuModel()` and hand-authors no items, so it
@@ -65,9 +66,11 @@ export function AppMenuBody() {
   const { bootstrap } = useDux()
   const ghAvailable = bootstrap?.gh_available ?? false
   const githubIntegrationEnabled = bootstrap?.github_integration ?? false
+  // Sign out exists only where this page holds a session to end.
+  const canSignOut = hasSessionToEnd(useAuthPhase())
   return (
     <AppMenuEntries
-      entries={appMenuModel({ ghAvailable, githubIntegrationEnabled })}
+      entries={appMenuModel({ ghAvailable, githubIntegrationEnabled, canSignOut })}
     />
   )
 }

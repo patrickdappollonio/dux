@@ -28,6 +28,12 @@ vi.mock("@/lib/store", () => ({
     bootstrap: { gh_available: ghAvailable, github_integration: true },
   }),
 }))
+// The sign-in state the menu reads to offer Sign out; tests flip it.
+let authPhase: import("@/lib/authGate").AuthPhase = { kind: "open", status: null }
+vi.mock("@/lib/authGate", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/authGate")>()
+  return { ...actual, useAuthPhase: () => authPhase }
+})
 vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => Promise.resolve() },
 }))
@@ -275,5 +281,30 @@ describe("AppMenu", () => {
       githubIntegrationEnabled: true,
     })
     expect(walk(model).length).toBeGreaterThan(model.length)
+  })
+})
+
+describe("Sign out in this menu", () => {
+  afterEach(() => {
+    authPhase = { kind: "open", status: null }
+  })
+
+  it("is offered to a page signed in with a password", async () => {
+    const { normalizeAuthStatus } = await import("@/lib/authApi")
+    authPhase = {
+      kind: "open",
+      status: normalizeAuthStatus({ password_set: true, signed_in: true }),
+    }
+    render(<AppMenu />)
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
+    await screen.findByRole("menu")
+    expect(screen.getByRole("menuitem", { name: "Sign out" })).toBeTruthy()
+  })
+
+  it("is absent where there is no session to end", async () => {
+    render(<AppMenu />)
+    fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))
+    await screen.findByRole("menu")
+    expect(screen.queryByRole("menuitem", { name: "Sign out" })).toBeNull()
   })
 })

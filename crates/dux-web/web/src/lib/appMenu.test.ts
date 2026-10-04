@@ -34,16 +34,21 @@ vi.mock("@/lib/store", () => ({
   openNewAgentPicker: (intent: string) => openNewAgentPicker(intent),
   createStandaloneTerminal: () => createStandaloneTerminal(),
 }))
+const signOut = vi.fn(async () => ({ kind: "ok" }) as { kind: string; message?: string })
+vi.mock("@/lib/authGate", () => ({ signOut: () => signOut() }))
+const notifyError = vi.fn()
+vi.mock("@/lib/notify", () => ({ notifyError: (m: unknown) => notifyError(m) }))
 vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => reload(), recheckGithub: () => recheckGithub() },
 }))
 
-import { FolderKanban, SquarePen } from "lucide-react"
+import { FolderKanban, LogOut, SquarePen } from "lucide-react"
 
 import {
   appMenuModel,
   findSubmenu,
   type AppMenuEntry,
+  type AppMenuItem,
 } from "@/lib/appMenu"
 import { addProjectMenuItems, newMenuItems } from "@/lib/creationMenus"
 
@@ -362,5 +367,50 @@ describe("findSubmenu", () => {
       },
     ]
     expect(findSubmenu(nested, "inner")?.title).toBe("Inner")
+  })
+})
+
+describe("Sign out", () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it("is absent where there is no session to end", () => {
+    expect(walk(appMenuModel(ctx)).some((e) => e.id === "sign-out")).toBe(false)
+    expect(
+      walk(appMenuModel({ ...ctx, canSignOut: false })).some((e) => e.id === "sign-out"),
+    ).toBe(false)
+  })
+
+  it("closes the menu, behind its own separator, as an immediate action", () => {
+    const model = appMenuModel({ ...ctx, canSignOut: true })
+    expect(model.slice(-2).map((e) => [e.kind, e.id])).toEqual([
+      ["separator", "sep-sign-out"],
+      ["item", "sign-out"],
+    ])
+    const item = model.at(-1) as AppMenuItem
+    // No ellipsis: it asks nothing and opens nothing.
+    expect(item.title).toBe("Sign out")
+    expect(item.icon).toBe(LogOut)
+  })
+
+  it("ends the session through the gate", async () => {
+    const item = appMenuModel({ ...ctx, canSignOut: true }).at(-1) as AppMenuItem
+    item.run()
+    await vi.waitFor(() => expect(signOut).toHaveBeenCalledTimes(1))
+    expect(notifyError).not.toHaveBeenCalled()
+  })
+
+  it("says so when the server could not be reached, because nothing changed", async () => {
+    signOut.mockResolvedValueOnce({ kind: "unreachable" })
+    const item = appMenuModel({ ...ctx, canSignOut: true }).at(-1) as AppMenuItem
+    item.run()
+    await vi.waitFor(() => expect(notifyError).toHaveBeenCalledTimes(1))
+    expect(String(notifyError.mock.calls[0][0])).toContain("still signed in")
+  })
+
+  it("passes the server's own refusal on", async () => {
+    signOut.mockResolvedValueOnce({ kind: "refused", message: "no" })
+    const item = appMenuModel({ ...ctx, canSignOut: true }).at(-1) as AppMenuItem
+    item.run()
+    await vi.waitFor(() => expect(notifyError).toHaveBeenCalledWith("no"))
   })
 })
