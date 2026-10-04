@@ -69,8 +69,11 @@ dux config set providers.claude.command claude
   is refused. When the section already has problems, `set` still fixes them one at a
   time: a change is refused only if it adds a problem, and after each change `set` lists
   what is still wrong, since dux will not start until all of it is fixed.
-- Providers are named by their name (`providers.<name>.<field>`, a new name adds a
-  provider), and environment variables by theirs (`env.<NAME>`).
+- Providers are named by their name (`providers.<name>.<field>`), and environment
+  variables by theirs (`env.<NAME>`). Changing one field of a built-in provider your file
+  does not list writes that provider out in full with your change, so it keeps working. A
+  new name adds a provider, starting with its command: `set providers.<name>.command`
+  first, and `set` refuses anything that would leave a provider without a command.
 - Environment values are treated as secrets, since that is where API tokens live.
   `dux config set env.GITHUB_TOKEN` asks for the value without echoing it (or reads it
   from a pipe with `--stdin`) and never takes it as an argument, and it reports only that

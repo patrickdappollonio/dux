@@ -427,7 +427,7 @@ fn check_alone(key: &Key, value: &Value) -> Result<(), String> {
             .ok()
             .and_then(|file| file.get("server")?.get("auth").cloned())
             .ok_or_else(|| "not a server.auth setting".to_string())?;
-        return crate::config_auth::rule_problems_of(auth).map(|_| ());
+        return crate::config_auth::check_types(auth);
     }
     toml::from_str::<Config>(&text)
         .map(|_| ())
@@ -528,7 +528,9 @@ fn write_value(
     let (previous, remaining_problems) =
         crate::config_write::mutate_config_file_repairing(config_path, missing, |doc| {
             let previous = value_in_doc(doc, path);
+            prepare_provider(doc, path)?;
             set_in_doc(doc, path, value)?;
+            check_provider_command(doc, path)?;
             Ok(previous)
         })?;
     Ok(SetReport {
@@ -537,6 +539,83 @@ fn write_value(
         now,
         remaining_problems,
     })
+}
+
+/// Before one field of a provider the file does not list is set: a
+/// provider dux ships is written as dux runs it (every default field), so
+/// the set changes that one field and nothing else, rather than leaving a
+/// table that reads back with an empty command. A provider dux does not
+/// know needs its command first. Providers are the one map of tables `set`
+/// can add an entry to (`env` holds plain values), so this is the one place
+/// a partial entry could read back as defaults.
+fn prepare_provider(doc: &mut DocumentMut, path: &[String]) -> Result<()> {
+    let [section, name, field] = path else {
+        return Ok(());
+    };
+    if section != "providers" {
+        return Ok(());
+    }
+    let listed = doc
+        .get("providers")
+        .and_then(Item::as_table_like)
+        .and_then(|providers| providers.get(name))
+        .is_some();
+    if listed {
+        return Ok(());
+    }
+    let shipped = crate::config::default_provider_commands()
+        .into_iter()
+        .find(|(shipped, _)| shipped == name)
+        .map(|(_, config)| config);
+    let Some(shipped) = shipped else {
+        if field == "command" {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "providers.{name} is not a provider dux knows, so it needs a command first: run \
+             `dux config set providers.{name}.command <command>`, then set {field}. Nothing was \
+             written."
+        );
+    };
+    let text = toml::to_string(&shipped).context("failed to render the provider's defaults")?;
+    let defaults: DocumentMut = text
+        .parse()
+        .context("failed to read the provider's defaults")?;
+    for (key, item) in defaults.iter() {
+        if let Some(value) = item.as_value() {
+            set_in_doc(
+                doc,
+                &["providers".to_string(), name.clone(), key.to_string()],
+                value.clone(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// After a provider field is set: the provider must still have a command,
+/// or dux could not start it.
+fn check_provider_command(doc: &DocumentMut, path: &[String]) -> Result<()> {
+    let [section, name, _] = path else {
+        return Ok(());
+    };
+    if section != "providers" {
+        return Ok(());
+    }
+    let file: toml::Table =
+        toml::from_str(&doc.to_string()).context("failed to read the change back")?;
+    let provider = file
+        .get("providers")
+        .and_then(|providers| providers.get(name))
+        .cloned()
+        .and_then(|provider| provider.try_into::<ProviderCommandConfig>().ok());
+    if provider.is_none_or(|provider| provider.command.trim().is_empty()) {
+        anyhow::bail!(
+            "that would leave providers.{name} with no command, so dux could not start it. \
+             Nothing was written."
+        );
+    }
+    Ok(())
 }
 
 fn value_in_doc(doc: &DocumentMut, path: &[String]) -> Option<String> {
@@ -582,15 +661,70 @@ impl fmt::Display for SetPasswordError {
 
 impl std::error::Error for SetPasswordError {}
 
-/// The password minimums `config_path` asks for right now. A file with no
-/// readable `[server.auth]` (missing, or broken) gets the defaults; the write
-/// itself re-checks the whole section before anything lands.
-pub fn current_password_policy(config_path: &Path) -> crate::auth::PasswordPolicy {
-    std::fs::read_to_string(config_path)
-        .ok()
-        .and_then(|raw| crate::config::auth_section_of(&raw).ok())
-        .unwrap_or_default()
-        .password_policy()
+/// The settings that make up the password policy.
+const PASSWORD_POLICY_KEYS: [&str; 3] = [
+    "minimum_password_length",
+    "minimum_password_score",
+    "max_password_bytes",
+];
+
+/// The password minimums `config_path` asks for right now, read key by key
+/// from the file, so a broken key elsewhere in `[server.auth]` never changes
+/// them. A file with no `[server.auth]` (or none at all) asks for the
+/// defaults. A policy key that does not read, or breaks its rule, is an
+/// error naming it: dux cannot tell what a new password has to meet, so it
+/// sets none until that key is fixed.
+pub fn current_password_policy(config_path: &Path) -> Result<crate::auth::PasswordPolicy> {
+    let defaults = crate::config::ServerAuthConfig::default().password_policy();
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(defaults),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", config_path.display()));
+        }
+    };
+    let file: toml::Table = toml::from_str(&raw).map_err(|e| {
+        anyhow::anyhow!(
+            "config.toml is not valid TOML ({}), so dux cannot tell what a new password has to \
+             meet; fix it first",
+            crate::config::describe_toml_error(&raw, &e)
+        )
+    })?;
+    let Some(server) = file.get("server") else {
+        return Ok(defaults);
+    };
+    let auth = match server.as_table() {
+        Some(server) => server.get("auth"),
+        None => anyhow::bail!(
+            "[server] in config.toml is not a table, so dux cannot tell what a new password \
+             has to meet; fix it first"
+        ),
+    };
+    let Some(auth) = auth else {
+        return Ok(defaults);
+    };
+    let Some(auth) = auth.as_table() else {
+        anyhow::bail!(
+            "server.auth in config.toml is not a table, so dux cannot tell what a new password \
+             has to meet; fix it first"
+        );
+    };
+    let policy: toml::Table = PASSWORD_POLICY_KEYS
+        .iter()
+        .filter_map(|key| auth.get(*key).map(|value| (key.to_string(), value.clone())))
+        .collect();
+    let problems = crate::config_auth::rule_problems_of(toml::Value::Table(policy.clone()));
+    if !problems.is_empty() {
+        anyhow::bail!(
+            "the password policy in [server.auth] is invalid ({}), so dux cannot tell what a \
+             new password has to meet. Fix that first with `dux config set \
+             server.auth.<setting> <value>`; no password was set.",
+            problems.join("; ")
+        );
+    }
+    crate::config::parse_auth_value(toml::Value::Table(policy))
+        .map(|auth| auth.password_policy())
+        .map_err(anyhow::Error::msg)
 }
 
 /// Check `password` against the minimums in `config_path`, hash it, and store
@@ -617,7 +751,7 @@ pub fn set_password_with(
     password: &Password,
     user_inputs: &[&str],
 ) -> Result<Strength, SetPasswordError> {
-    let policy = current_password_policy(config_path);
+    let policy = current_password_policy(config_path).map_err(SetPasswordError::Failed)?;
     let check = crate::auth::check_minimums(password, &policy, user_inputs);
     if !check.passes() {
         return Err(SetPasswordError::BelowMinimums(check));
@@ -1124,5 +1258,169 @@ port = 3890
             format!("{error:#}").contains("max_password_bytes"),
             "{error:#}"
         );
+    }
+
+    /// Every problem in `[server.auth]` is seen key by key, so a type error
+    /// in one key (an unknown `require`) never hides a problem a set adds
+    /// in another: that set is refused and nothing is written.
+    #[test]
+    fn a_set_adding_a_problem_is_refused_beside_a_type_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "[server.auth]\nrequire = \"lan\"\n";
+        std::fs::write(&path, text).unwrap();
+        let error = set_plain(
+            &path,
+            &lookup("server.auth.minimum_password_score").unwrap(),
+            "9",
+        )
+        .expect_err("a score of 9 is a new problem");
+        assert!(
+            format!("{error:#}").contains("minimum_password_score"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    /// Beside a type error, a set that repairs another key is allowed and
+    /// names every problem left, the type error included; fixing that one
+    /// is then allowed too.
+    #[test]
+    fn every_problem_beside_a_type_error_is_named_and_can_be_fixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[server.auth]\nrequire = \"lan\"\nsession_idle_seconds = 0\n",
+        )
+        .unwrap();
+        let report = set_plain(
+            &path,
+            &lookup("server.auth.session_idle_seconds").unwrap(),
+            "60",
+        )
+        .expect("repairs one problem");
+        assert_eq!(report.remaining_problems.len(), 1, "{report:?}");
+        assert!(
+            report.remaining_problems[0].contains("require"),
+            "{report:?}"
+        );
+        let report = set_plain(&path, &lookup("server.auth.require").unwrap(), "network")
+            .expect("fixes the problem it was told about");
+        assert!(report.remaining_problems.is_empty(), "{report:?}");
+        crate::config::auth_section_of(&std::fs::read_to_string(&path).unwrap())
+            .expect("valid again");
+    }
+
+    /// A new password meets the minimums the file sets, even while an
+    /// unrelated key of the section is invalid.
+    #[test]
+    fn a_new_password_meets_the_files_minimum_beside_an_unrelated_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[server.auth]\nminimum_password_length = 30\nrequire = \"lan\"\n",
+        )
+        .unwrap();
+        // 20 characters, strong by zxcvbn, below the configured 30.
+        let password = Password::new("vq8#Lz!t2Wm9rK@x4Np&".to_string());
+        let error = set_password(&path, &password, &[]).expect_err("too short");
+        assert!(
+            matches!(error, SetPasswordError::BelowMinimums(_)),
+            "{error}"
+        );
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("$argon2id$")
+        );
+        let policy = current_password_policy(&path).expect("readable policy");
+        assert_eq!(policy.minimum_length, 30);
+    }
+
+    /// A password policy key that is itself unreadable or invalid stops a
+    /// new password, naming the key to fix first: dux cannot know what the
+    /// password has to meet.
+    #[test]
+    fn a_broken_password_policy_key_stops_a_new_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let password = Password::new("vq8#Lz!t2Wm9rK@x4Np&-long-enough".to_string());
+        for (text, key) in [
+            (
+                "[server.auth]\nminimum_password_length = \"thirty\"\n",
+                "minimum_password_length",
+            ),
+            (
+                "[server.auth]\nminimum_password_score = 9\n",
+                "minimum_password_score",
+            ),
+            (
+                "[server.auth]\nmax_password_bytes = 0\n",
+                "max_password_bytes",
+            ),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let error = set_password(&path, &password, &[]).expect_err("refused");
+            assert!(error.to_string().contains(key), "{key}: {error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
+    }
+
+    /// Setting one field of a built-in provider the file does not list
+    /// writes that provider as dux runs it, with the one change: its command
+    /// stays.
+    #[test]
+    fn setting_one_field_of_an_unlisted_built_in_provider_keeps_its_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\n").unwrap();
+        let before = crate::config::load_config_file(&path).unwrap();
+        set_plain(
+            &path,
+            &lookup("providers.claude.args").unwrap(),
+            "[\"--verbose\"]",
+        )
+        .expect("set");
+        let after = crate::config::load_config_file(&path).unwrap();
+        let mut expected = before.providers.commands["claude"].clone();
+        expected.args = vec!["--verbose".to_string()];
+        assert_eq!(after.providers.commands["claude"], expected);
+    }
+
+    /// A provider dux does not know gets its command first: any other field
+    /// set on it alone is refused, and so is any set that leaves a provider
+    /// with an empty command.
+    #[test]
+    fn a_provider_is_never_left_without_a_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "[ui]\nleft_width_pct = 20\n";
+        std::fs::write(&path, text).unwrap();
+        let error = set_plain(&path, &lookup("providers.mine.args").unwrap(), "[\"-x\"]")
+            .expect_err("no command yet");
+        assert!(
+            format!("{error:#}").contains("providers.mine.command"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        set_plain(&path, &lookup("providers.mine.command").unwrap(), "mine").expect("command");
+        set_plain(&path, &lookup("providers.mine.args").unwrap(), "[\"-x\"]").expect("then args");
+        let config = crate::config::load_config_file(&path).unwrap();
+        assert_eq!(config.providers.commands["mine"].command, "mine");
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        for name in ["mine", "claude"] {
+            let error = set_plain(
+                &path,
+                &lookup(&format!("providers.{name}.command")).unwrap(),
+                "",
+            )
+            .expect_err("an empty command");
+            assert!(format!("{error:#}").contains("command"), "{error:#}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        }
     }
 }

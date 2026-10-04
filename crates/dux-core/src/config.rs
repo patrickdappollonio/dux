@@ -3005,7 +3005,7 @@ fn describe_config_error(raw: &str, message: &str, span: Option<std::ops::Range<
 /// The kind of problem in a parser or serde message, with any value it
 /// repeats taken out: `invalid type: string "x", expected u32` becomes
 /// `invalid type, expected u32`, and an unknown variant drops the variant.
-fn problem_kind(message: &str) -> String {
+pub(crate) fn problem_kind(message: &str) -> String {
     let message = message.lines().next().unwrap_or_default().trim();
     for prefix in ["invalid type", "invalid value", "invalid length"] {
         if let Some(rest) = message.strip_prefix(prefix) {
@@ -3241,10 +3241,7 @@ pub fn auth_problems_of(raw: &str) -> Vec<String> {
     if !auth.is_table() {
         return vec!["server.auth is not a table".to_string()];
     }
-    match crate::config_auth::rule_problems_of(auth.clone()) {
-        Ok(problems) => problems,
-        Err(error) => vec![problem_kind(&error)],
-    }
+    crate::config_auth::rule_problems_of(auth.clone())
 }
 
 /// Read one `server.auth` value through the same deserializer every other

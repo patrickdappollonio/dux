@@ -215,6 +215,12 @@ impl ServerAuthConfig {
     /// Problems name settings and positions, never values: they reach the
     /// status line, toasts and dux.log.
     pub fn problems(&self) -> Vec<String> {
+        self.problems_with(true)
+    }
+
+    /// [`Self::problems`], with the rules spanning keys only when
+    /// `cross_field`.
+    fn problems_with(&self, cross_field: bool) -> Vec<String> {
         let mut problems = Vec::new();
         if !self.password_hash.is_empty()
             && let Err(error) = crate::auth::validate_password_hash(&self.password_hash)
@@ -240,7 +246,8 @@ impl ServerAuthConfig {
                 "max_password_bytes must be 1 to {MAX_PASSWORD_BYTES_LIMIT}"
             ));
         }
-        if max_bytes_valid && self.minimum_password_length > self.max_password_bytes {
+        if cross_field && max_bytes_valid && self.minimum_password_length > self.max_password_bytes
+        {
             problems.push(
                 "minimum_password_length is larger than max_password_bytes, so no \
                  password could meet both"
@@ -265,14 +272,51 @@ impl ServerAuthConfig {
     }
 }
 
-/// Every rule a `server.auth` table breaks (see
-/// [`ServerAuthConfig::problems`]), or the type error that stops it being
-/// read at all.
-pub fn rule_problems_of(auth: toml::Value) -> Result<Vec<String>, String> {
-    let raw: RawServerAuthConfig = auth
-        .try_into()
-        .map_err(|e: toml::de::Error| e.message().to_string())?;
-    Ok(ServerAuthConfig::from_raw(raw).problems())
+/// Every problem a `server.auth` table has, key by key, so no problem hides
+/// another: each key that is not a setting, or whose value has the wrong
+/// type, is a problem of its own (named by its key, never by its value),
+/// and every rule is then checked on the keys that read (see
+/// [`ServerAuthConfig::problems`]). A rule spanning keys is checked only
+/// when every key it involves reads. A loader still refuses on any of them.
+pub fn rule_problems_of(auth: toml::Value) -> Vec<String> {
+    let toml::Value::Table(auth) = auth else {
+        return vec!["server.auth is not a table".to_string()];
+    };
+    let mut problems = Vec::new();
+    let mut readable = toml::Table::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    for (key, value) in auth {
+        let mut alone = toml::Table::new();
+        alone.insert(key.clone(), value.clone());
+        match toml::Value::Table(alone).try_into::<RawServerAuthConfig>() {
+            Ok(_) => {
+                readable.insert(key, value);
+            }
+            Err(error) => {
+                problems.push(format!(
+                    "{key}: {}",
+                    crate::config::problem_kind(error.message())
+                ));
+                unreadable.push(key);
+            }
+        }
+    }
+    let Ok(raw) = toml::Value::Table(readable).try_into::<RawServerAuthConfig>() else {
+        return problems;
+    };
+    let cross_field = !unreadable
+        .iter()
+        .any(|key| key == "minimum_password_length" || key == "max_password_bytes");
+    problems.extend(ServerAuthConfig::from_raw(raw).problems_with(cross_field));
+    problems
+}
+
+/// Whether every value in the `server.auth` table `auth` has its setting's
+/// type (rules aside), or the first that does not.
+pub fn check_types(auth: toml::Value) -> Result<(), String> {
+    auth.try_into::<RawServerAuthConfig>()
+        .map(|_| ())
+        .map_err(|e| e.message().to_string())
 }
 
 /// The on-disk shape, read with no rules beyond types and known keys; the

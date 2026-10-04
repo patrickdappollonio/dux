@@ -209,7 +209,13 @@ fn set_secret(
         key.policy,
         WritePolicy::Secret(SecretKind::PasswordHash { .. })
     );
-    let policy = config_keys::current_password_policy(&paths.config_path);
+    // A password is checked against the policy the file sets, read key by
+    // key; a policy key that does not read stops here, before asking.
+    let policy = if is_password {
+        config_keys::current_password_policy(&paths.config_path)?
+    } else {
+        dux_core::config::ServerAuthConfig::default().password_policy()
+    };
     let user_inputs = user_inputs();
     let inputs: Vec<&str> = user_inputs.iter().map(String::as_str).collect();
     let password = if parsed.stdin {
