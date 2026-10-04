@@ -4233,6 +4233,30 @@ args = [\"-l\"]
         assert_eq!(report.dropped, vec!["auth".to_string()]);
     }
 
+    /// The terminal UI binds `[server] port` only when the file has it serve,
+    /// so a port of 0 stops its start only then.
+    #[test]
+    fn a_port_of_zero_stops_the_terminal_ui_only_when_it_serves() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        fs::write(&paths.config_path, "[server]\nport = 0\n").unwrap();
+        ensure_config(&paths).expect("starts when it does not serve");
+        fs::write(
+            &paths.config_path,
+            "[server]\nport = 0\nserve_while_tui = true\n",
+        )
+        .unwrap();
+        let error = format!("{:#}", ensure_config(&paths).expect_err("refused"));
+        assert!(error.contains("port 0"), "{error}");
+    }
+
     #[test]
     fn ensure_config_refuses_to_start_when_server_auth_cannot_be_read() {
         let dir = tempfile::TempDir::new().expect("tempdir");

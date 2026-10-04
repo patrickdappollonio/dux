@@ -65,6 +65,10 @@ dux config set providers.claude.command claude
   problem (a host name where `server.host` needs an IP address, an environment variable
   name dux does not accept) is refused with the same message a start gives, and nothing
   is written.
+- A setting with a value of the wrong type (a word where a number goes) is read two ways:
+  `dux server` uses that setting's default and starts, while the terminal UI will not start
+  until it is fixed. `get` and `set` say so in those words, and `get` says the value in use
+  cannot be worked out until then.
 - If `config.toml` is not valid TOML at all, `get` and `set` refuse it too and name the
   line that is wrong. Fix that line by hand (or copy back a backup), then carry on.
 - `set` checks the value before writing it: a number has to be a number in range, a

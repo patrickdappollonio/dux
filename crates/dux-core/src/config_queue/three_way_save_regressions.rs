@@ -2171,6 +2171,12 @@ fn a_hand_deletion_survives_a_reload() {
 mod randomized_model {
     use super::*;
 
+    /// Seeds per randomized model. Each run is a few disk saves per step, so
+    /// this is kept small enough to add only seconds to every test run (the
+    /// review that wrote the model ran 300 of each, about 45 s); the seeds are
+    /// fixed, so every run checks the same sequences.
+    const SEEDS: u64 = 40;
+
     fn file(text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
@@ -2320,7 +2326,7 @@ mod randomized_model {
     #[test]
     fn random_hand_edits_saves_and_reloads_follow_the_three_way_rules() {
         let mut failures = Vec::new();
-        for seed in 1..=300u64 {
+        for seed in 1..=SEEDS {
             let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
             let (_dir, path) = file(
                 "[ui]\nleft_width_pct = 20\nright_width_pct = 25\ncopy_on_select = true\n\n[server]\nport = 3890\n\n[env]\nAA = \"a\"\nBB = \"b\"\n",
@@ -2486,7 +2492,7 @@ mod randomized_model {
         std::fs::create_dir_all(&r1).unwrap();
         std::fs::create_dir_all(&r2).unwrap();
         let mut failures = Vec::new();
-        for seed in 1..=300u64 {
+        for seed in 1..=SEEDS {
             let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
             let initial = format!(
                 "[[projects]]\nid = \"p1\"\npath = \"{}\"\nname = \"one\"\nstartup_command = \"make\"\n\n[[projects]]\nid = \"p2\"\npath = \"{}\"\nname = \"two\"\ndefault_provider = \"codex\"\n",

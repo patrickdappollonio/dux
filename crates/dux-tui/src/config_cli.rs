@@ -108,8 +108,8 @@ pub(crate) fn run_get(
             }
             writeln!(
                 err,
-                "(dux cannot load config.toml ({reason}), so the value it would use cannot be \
-                 worked out; what is shown is what the file says)"
+                "(the value dux would use cannot be worked out, because {reason}; what is shown \
+                 is what the file says)"
             )?;
         }
     }
@@ -1251,5 +1251,20 @@ port = 3890
         )
         .expect_err("refused");
         assert!(!format!("{error:#}").contains("hunter2"), "{error:#}");
+    }
+
+    /// A file the terminal UI refuses to start with (a wrong-typed setting)
+    /// is never reported by `set` as fine: the problem is listed, and the
+    /// closing line does not say the change applies at the next start.
+    #[test]
+    fn a_set_lists_a_problem_that_stops_the_terminal_ui_starting() {
+        let (_tmp, paths) = setup(Some("[ui]\nleft_width_pct = \"wide\"\n"));
+        let said = set(&paths, &["server.port", "4000"], &mut no_secrets()).expect("set");
+        crate::config::ensure_config(&paths).expect_err("the terminal UI refuses the file");
+        assert!(said.contains("the terminal UI will not start"), "{said}");
+        assert!(!said.contains("next time it starts"), "{said}");
+        let (out, err) = get(&paths, "ui.left_width_pct");
+        assert_eq!(out, "wide\n");
+        assert!(err.contains("cannot be worked out"), "{err}");
     }
 }

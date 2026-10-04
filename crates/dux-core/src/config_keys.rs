@@ -888,6 +888,16 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
             return Ok(GetValue::Unknown { in_file, reason });
         }
     };
+    // The terminal UI reads the file strictly where `dux server` recovers a
+    // setting: with any such setting, the value the terminal UI would use
+    // cannot be worked out, because it would not start at all.
+    let refusals = crate::config::terminal_ui_refusals_of(raw);
+    if !refusals.is_empty() {
+        return Ok(GetValue::Unknown {
+            in_file,
+            reason: refusals.join("; "),
+        });
+    }
     if let Some(value) = in_file {
         return Ok(GetValue::Set(value));
     }
@@ -1707,5 +1717,54 @@ port = 3890
         );
         set_plain(&path, &key, "[\"10.0.0.0/99\", \"also-not-an-address\"]")
             .expect_err("a new broken entry");
+    }
+
+    /// A wrong-typed setting is one `dux server` resets to its default but
+    /// the terminal UI refuses to start over: it is a start problem worded
+    /// for each, never showing the value, listed by a set that does not
+    /// touch it, and `get` says the value in use cannot be worked out.
+    #[test]
+    fn a_wrong_typed_setting_is_a_terminal_ui_start_problem() {
+        let (_dir, path) = temp_config("[ui]\nleft_width_pct = \"wide\"\n");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let problems = crate::config::start_problems_of(&text);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        let message = &problems[0].message;
+        assert!(
+            message.contains("the terminal UI will not start"),
+            "{message}"
+        );
+        assert!(message.contains("[ui] left_width_pct"), "{message}");
+        assert!(
+            message.contains("dux server would use the default"),
+            "{message}"
+        );
+        assert!(!message.contains("wide"), "{message}");
+        let report = set_plain(&path, &lookup("server.port").unwrap(), "4000")
+            .expect("a problem already there does not block");
+        assert_eq!(report.remaining_problems, vec![message.clone()]);
+        let GetValue::Unknown { in_file, reason } =
+            get(&text, &lookup("ui.right_width_pct").unwrap()).unwrap()
+        else {
+            panic!("expected Unknown");
+        };
+        assert_eq!(in_file, None);
+        assert!(
+            reason.contains("the terminal UI will not start"),
+            "{reason}"
+        );
+    }
+
+    /// `dux server` binds the port whatever the file says about serving, so
+    /// a new port 0 is refused in its words.
+    #[test]
+    fn a_port_of_zero_is_named_as_stopping_dux_server() {
+        let (_dir, path) = temp_config("[server]\nport = 3890\n");
+        let error = set_plain(&path, &lookup("server.port").unwrap(), "0").expect_err("port 0");
+        assert!(
+            format!("{error:#}")
+                .contains("dux server (and the terminal UI's background server) will not start"),
+            "{error:#}"
+        );
     }
 }

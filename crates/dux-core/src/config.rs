@@ -3321,16 +3321,15 @@ pub fn start_check_problems(config: &Config) -> Vec<String> {
     let mut problems = Vec::new();
     // The rules `resolve_server_plan` applies to the config itself, through
     // the same functions it uses: the host must be an IP literal, and the
-    // port must not be 0.
+    // port must not be 0. The terminal UI only binds the port when the file
+    // has it serve, so a port of 0 stops its start only then (see
+    // [`server_port_problem`] for `dux server`, which always binds it).
     match parse_server_host(&config.server.host) {
         Err(error) => problems.push(error),
-        Ok(host) => {
-            if let Some(problem) =
-                port_zero_problem(std::net::SocketAddr::new(host, config.server.port))
-            {
-                problems.push(problem);
-            }
+        Ok(_) if config.server.serve_while_tui => {
+            problems.extend(server_port_problem(config));
         }
+        Ok(_) => {}
     }
     // One problem per variable, named by the variable (and project), never
     // by its value, so a second bad variable is a new problem of its own and
@@ -3366,6 +3365,16 @@ fn env_variable_problem(name: &str, value: &str) -> Option<String> {
     }
 }
 
+/// Why `dux server`, and the terminal UI's background server, would not
+/// start with this config's `[server] port`, through the rule
+/// [`resolve_server_plan`] applies.
+fn server_port_problem(config: &Config) -> Option<String> {
+    let host = parse_server_host(&config.server.host).ok()?;
+    port_zero_problem(std::net::SocketAddr::new(host, config.server.port)).map(|problem| {
+        format!("dux server (and the terminal UI's background server) will not start: {problem}")
+    })
+}
+
 /// [`start_check_problems`], failing on the first.
 pub fn start_check(config: &Config) -> Result<()> {
     match start_check_problems(config).into_iter().next() {
@@ -3383,21 +3392,55 @@ pub fn start_problems_of(raw: &str) -> Vec<crate::config_auth::Problem> {
     // Every other start check runs on its own, on the rest of the file as a
     // start's per-field recovery reads it, whatever the auth checks found:
     // one problem never hides another, and none is listed twice.
-    if let Some(config) = recovered_config_beside_auth(raw) {
-        problems.extend(
-            start_check_problems(&config)
-                .into_iter()
-                .map(crate::config_auth::Problem::plain),
-        );
+    if let Some((config, recovered)) = recovered_config_beside_auth(raw) {
+        let mut checks = start_check_problems(&config);
+        // `dux server` binds the port whatever the file says about serving
+        // beside the terminal UI.
+        if !config.server.serve_while_tui {
+            checks.extend(server_port_problem(&config));
+        }
+        checks.extend(terminal_ui_refusals(&recovered));
+        problems.extend(checks.into_iter().map(crate::config_auth::Problem::plain));
     }
     problems
+}
+
+/// The settings `dux server` recovers (each reset to its default) but the
+/// terminal UI refuses to start over, which reads the file strictly. Never
+/// the values.
+pub fn terminal_ui_refusals_of(raw: &str) -> Vec<String> {
+    recovered_config_beside_auth(raw)
+        .map(|(_, recovered)| terminal_ui_refusals(&recovered))
+        .unwrap_or_default()
+}
+
+fn terminal_ui_refusals(recovered: &[RecoveredSetting]) -> Vec<String> {
+    recovered
+        .iter()
+        .map(|setting| {
+            format!(
+                "the terminal UI will not start with this file: {}: {} (dux server would use \
+                 the default)",
+                setting.place, setting.kind
+            )
+        })
+        .collect()
+}
+
+/// A setting per-field recovery reset to its default: where it is
+/// (`[ui] left_width_pct`, or a whole `[section]`) and what kind of problem
+/// it had, never its value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecoveredSetting {
+    place: String,
+    kind: String,
 }
 
 /// The config a start reads from everything in `raw` but `[server.auth]`:
 /// the load migrations, then per-field recovery, the provider defaults and
 /// the load corrections. Nothing about the password is read here, so no
 /// password problem can stop it. `None` only when `raw` is not TOML.
-fn recovered_config_beside_auth(raw: &str) -> Option<Config> {
+fn recovered_config_beside_auth(raw: &str) -> Option<(Config, Vec<RecoveredSetting>)> {
     let mut file = toml::from_str::<toml::Table>(raw).ok()?;
     if let Some(server) = file.get_mut("server").and_then(toml::Value::as_table_mut) {
         server.remove("auth");
@@ -3409,9 +3452,10 @@ fn recovered_config_beside_auth(raw: &str) -> Option<Config> {
         Err(_) => rest,
     };
     let table = toml::from_str::<toml::Table>(&migrated).ok()?;
-    let mut config = recover_config_table(table);
+    let mut recovered = Vec::new();
+    let mut config = recover_config_table_noting(table, &mut recovered);
     config.providers.ensure_defaults();
-    Some(apply_load_corrections(config))
+    Some((apply_load_corrections(config), recovered))
 }
 
 /// The config dux runs with from a whole file's text: read as a start reads
@@ -3482,6 +3526,11 @@ pub fn parse_auth_value(auth: toml::Value) -> Result<ServerAuthConfig, String> {
 
 /// The field-level recovery of every section but `[server.auth]`.
 fn recover_config_table(doc: toml::Table) -> Config {
+    recover_config_table_noting(doc, &mut Vec::new())
+}
+
+/// [`recover_config_table`], noting in `recovered` every setting it reset.
+fn recover_config_table_noting(doc: toml::Table, recovered: &mut Vec<RecoveredSetting>) -> Config {
     // Fast path: the whole document deserializes cleanly.
     if let Ok(cfg) = table_into_config(doc.clone()) {
         return cfg;
@@ -3502,6 +3551,14 @@ fn recover_config_table(doc: toml::Table) -> Config {
                 crate::logger::warn(&format!(
                     "config [{section}] {fk} is invalid; resetting it to its default"
                 ));
+                let mut alone = toml::Table::new();
+                if let Some(field) = tbl.get(fk) {
+                    alone.insert(fk.clone(), field.clone());
+                }
+                recovered.push(RecoveredSetting {
+                    place: format!("[{section}] {fk}"),
+                    kind: section_solo_problem(section, toml::Value::Table(alone)),
+                });
             }
             pruned.insert(section.clone(), toml::Value::Table(fixed));
             continue;
@@ -3509,6 +3566,10 @@ fn recover_config_table(doc: toml::Table) -> Config {
         crate::logger::warn(&format!(
             "config section [{section}] is invalid; resetting it to defaults"
         ));
+        recovered.push(RecoveredSetting {
+            place: format!("[{section}]"),
+            kind: section_solo_problem(section, value.clone()),
+        });
         pruned.remove(section);
     }
     match table_into_config(pruned) {
@@ -3559,6 +3620,18 @@ fn section_solo_ok(section: &str, value: toml::Value) -> bool {
     let mut t = toml::Table::new();
     t.insert(section.to_string(), value);
     table_into_config(t).is_ok()
+}
+
+/// What is wrong with a document containing only `section = value`, as the
+/// kind of problem with no value in it.
+fn section_solo_problem(section: &str, value: toml::Value) -> String {
+    let mut t = toml::Table::new();
+    t.insert(section.to_string(), value);
+    let text = toml::to_string(&t).unwrap_or_default();
+    match toml::from_str::<Config>(&text) {
+        Ok(_) => "invalid".to_string(),
+        Err(error) => problem_kind(error.message()),
+    }
 }
 
 /// Deserialize a `toml::Table` into a `Config`, round-tripping through a string so
