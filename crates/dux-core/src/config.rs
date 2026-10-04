@@ -2964,7 +2964,33 @@ fn problem_kind(message: &str) -> String {
             None => "unknown value".to_string(),
         };
     }
-    message.to_string()
+    // Anything else (a duplicate key, an unknown field, a parser complaint):
+    // whatever it quotes before ", expected" came from the file (a key name,
+    // and a key name can be a value pasted in the wrong place), so it goes.
+    // What follows ", expected" is dux's own vocabulary and stays.
+    match message.find(", expected ") {
+        Some(at) => format!(
+            "{}, expected {}",
+            without_quoted(&message[..at]),
+            &message[at + ", expected ".len()..]
+        ),
+        None => without_quoted(message),
+    }
+}
+
+/// `text` with every backtick-, double- and single-quoted span removed.
+fn without_quoted(text: &str) -> String {
+    let mut out = String::new();
+    let mut closing: Option<char> = None;
+    for c in text.chars() {
+        match closing {
+            Some(end) if c == end => closing = None,
+            Some(_) => {}
+            None if matches!(c, '`' | '"' | '\'') => closing = Some(c),
+            None => out.push(c),
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl ConfigLoadProblem {
@@ -4638,6 +4664,29 @@ mod tests {
     /// with no `=`, the continuation of a multi-line string, an element of a
     /// multi-line array, and a type error that would repeat the value. They
     /// say the line, the column, the key where known, and what is wrong.
+    /// A parser message about a duplicate or unknown key would name the key
+    /// the file wrote; that name is file text too, and can be a value pasted
+    /// where a key should be. It is never repeated.
+    #[test]
+    fn duplicate_and_unknown_key_errors_repeat_no_name_from_the_file() {
+        for (body, secret) in [
+            (
+                "[env]\nghp_dupsecret = \"1\"\nghp_dupsecret = \"2\"\n",
+                "ghp_dupsecret",
+            ),
+            (
+                "[server.auth]\nghp_unknownsecret = 1\n",
+                "ghp_unknownsecret",
+            ),
+            ("[server]\n[server]\n", "[server]"),
+        ] {
+            let err = recover_config(body).expect_err(body);
+            let text = err.reason().to_string();
+            assert!(!text.contains(secret), "{body:?}: {text}");
+            assert!(text.starts_with("line "), "{text}");
+        }
+    }
+
     /// Text inside a multi-line string or array is never read back as a key
     /// name: an error there says only where it is and what is wrong.
     #[test]
