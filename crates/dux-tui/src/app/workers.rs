@@ -987,6 +987,16 @@ impl App {
                 false,
             );
             if let Err(error) = cleanup {
+                // The delete's own busy is dismissed first, so it does not
+                // outlive the failure; the failure is the line that stays.
+                if let Some(op) = op {
+                    self.apply_reaction(
+                        op.resolve(&TuiDeleteOutcome::SucceededGone {
+                            our_busy_still_showing: false,
+                        })
+                        .into_reaction(),
+                    );
+                }
                 self.set_error(format!(
                     "Worktree removed but session cleanup failed: {error:#}"
                 ));

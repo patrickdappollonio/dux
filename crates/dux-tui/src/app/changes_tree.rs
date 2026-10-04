@@ -740,33 +740,14 @@ impl App {
                 return;
             }
         };
-        let busy = match op {
-            FolderOp::Stage => format!("Staging \"{label}\" ({count_words})\u{2026}"),
-            FolderOp::Unstage => format!("Unstaging \"{label}\" ({count_words})\u{2026}"),
-            FolderOp::Delete => format!("Deleting \"{label}\" ({count_words})\u{2026}"),
-        };
-        self.engine.register_status_key(&status_key);
-        self.status.set(
-            Instant::now(),
-            Some(status_key.clone()),
-            StatusTone::Busy,
-            busy,
-        );
-
-        let (tx, rx) = mpsc::channel();
-        let path = folder.path.clone();
-        // A delete removes everything under the folder: what lives there (a
-        // standalone agent, another agent's worktree, something dux started)
-        // is asked about on this thread, and the one blocking part of the
-        // answer is read on the worker, before anything is deleted.
         // A delete follows the one destructive protocol: the folder is
-        // claimed here first (without waiting: a removal running inside it
-        // refuses the delete), the occupancy question is asked under the
-        // claim, and the worker clears it right before deleting.
-        let target = worktree.join(&path);
-        // This is the UI thread: it only claims (in memory, never waiting)
-        // and asks the engine's own state; the clearance and the delete run
-        // on the worker below.
+        // claimed first, without waiting (a claim already held refuses it at
+        // once), the occupancy question is asked under the claim, and the
+        // worker clears it right before deleting. The claim comes BEFORE any
+        // status is shown for the delete, so a refusal is a plain error with
+        // no busy left open. This is the UI thread: it only claims (in
+        // memory) and asks the engine's own state.
+        let target = worktree.join(&folder.path);
         let _ui_thread = dux_core::engine::destructive_guard::engine_thread();
         let claim = if op == FolderOp::Delete {
             match self.engine.worktree_ops().claim_for_destructive_as(
@@ -786,6 +767,24 @@ impl App {
         } else {
             None
         };
+        let busy = match op {
+            FolderOp::Stage => format!("Staging \"{label}\" ({count_words})\u{2026}"),
+            FolderOp::Unstage => format!("Unstaging \"{label}\" ({count_words})\u{2026}"),
+            FolderOp::Delete => format!("Deleting \"{label}\" ({count_words})\u{2026}"),
+        };
+        self.engine.register_status_key(&status_key);
+        self.status.set(
+            Instant::now(),
+            Some(status_key.clone()),
+            StatusTone::Busy,
+            busy,
+        );
+
+        let (tx, rx) = mpsc::channel();
+        let path = folder.path.clone();
+        // What lives there (a standalone agent, another agent's worktree, a
+        // project, something dux started) is asked of the engine's state
+        // here; the blocking part of the answer is read on the worker.
         let destructive = self.engine.destructive_check(&target);
         // What the user confirmed they were deleting; the delete refuses if the
         // folder is no longer that when it runs.
@@ -1154,6 +1153,44 @@ mod tests {
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&staged.stdout).trim().is_empty());
+    }
+
+    /// Review 13: a changes-pane folder delete whose claim is refused leaves
+    /// its keyed busy open and its status key registered as live: no final
+    /// ever lands for it, so the "Deleting" spinner outlives the refusal.
+    #[test]
+    fn review13_a_refused_folder_delete_claim_retires_its_busy() {
+        let (mut app, worktree) = repo_app();
+        let target = worktree.join("node_modules");
+        let _other = app
+            .engine
+            .worktree_ops()
+            .claim_for_destructive(&target)
+            .expect("another delete holds the folder");
+        app.start_folder_op(FolderOp::Delete, &folder("node_modules/", "??", 13));
+        assert!(
+            app.changes_tree.pending_ops.is_empty(),
+            "refused: no worker"
+        );
+        let session_id = app.engine.sessions[0].id.clone();
+        let key = op_status_key(&session_id, "node_modules/");
+        let live = app.engine.status_op_is_live(&key);
+        let later = Instant::now() + Duration::from_secs(300);
+        app.status.tick(later, dux_core::statusline::BUSY_TIMEOUT);
+        let open_busy: Vec<_> = app
+            .status
+            .snapshot()
+            .into_iter()
+            .filter(|status| status.key.as_deref() == Some(key.as_str()) && status.tone == "busy")
+            .collect();
+        assert!(
+            open_busy.is_empty(),
+            "five minutes after the refusal the delete's busy is still open: {open_busy:?}"
+        );
+        assert!(
+            !live,
+            "the refused delete left its status key {key} registered as a live operation"
+        );
     }
 
     fn render_text(app: &mut App, width: u16, height: u16) -> Vec<String> {

@@ -40,6 +40,8 @@ mod review11_tests;
 #[cfg(test)]
 mod review12_tests;
 #[cfg(test)]
+mod review13_tests;
+#[cfg(test)]
 mod review8_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -2437,7 +2439,9 @@ impl Engine {
         let db_path = self.paths.sessions_db_path.clone();
         let action_for_panic = action.clone();
         let status_op_id_for_panic = status_op_id.clone();
-        self.spawn_background_worker(
+        let action_if_unspawned = action.clone();
+        let status_op_id_if_unspawned = status_op_id.clone();
+        let spawned = self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: "project-persistence".into(),
                 in_flight_key: None,
@@ -2515,6 +2519,19 @@ impl Engine {
                 });
             },
         );
+        // A worker that never started never answers: answer for it, so the
+        // save's busy gets its final.
+        if matches!(spawned, BackgroundSpawn::SpawnFailed) {
+            let _ = self
+                .worker_tx
+                .send(WorkerEvent::ProjectPersistenceCompleted {
+                    action: action_if_unspawned,
+                    result: Err(
+                        "dux could not start a worker thread to save the project".to_string()
+                    ),
+                    status_op_id: status_op_id_if_unspawned,
+                });
+        }
     }
 
     /// Validate a raw path string before registering it as a project. Checks
@@ -3425,6 +3442,7 @@ impl Engine {
     /// stale on arrival anyway.
     pub fn spawn_changed_files_refresh(&self, worktree: PathBuf) {
         let queue = Arc::clone(&self.changed_files_refresh);
+        let worktree_if_unspawned = worktree.clone();
         if !lock_changed_files_queue(&queue).request(worktree) {
             // A worker is already reading; it will pick this request up next.
             return;
@@ -3465,6 +3483,14 @@ impl Engine {
             // Release it or every later refresh silently waits on a worker that
             // does not exist.
             lock_changed_files_queue(&queue).abandon();
+            // And answer for it, so a refresh the surface is waiting on (and
+            // showing a busy for) gets its outcome.
+            let _ = self.worker_tx.send(WorkerEvent::ChangedFilesReady {
+                outcome: Err(
+                    "dux could not start a worker thread to read the changed files".to_string(),
+                ),
+                worktree: worktree_if_unspawned,
+            });
         }
     }
 
@@ -3581,7 +3607,9 @@ impl Engine {
         let sessions = self.sessions.clone();
         let project_id_for_panic = project.id.clone();
         let status_op_id_for_panic = status_op_id.clone();
-        self.spawn_background_worker(
+        let project_id_if_unspawned = project.id.clone();
+        let status_op_id_if_unspawned = status_op_id.clone();
+        let spawned = self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: format!("project-worktrees:{}", project.id),
                 in_flight_key: None,
@@ -3606,6 +3634,16 @@ impl Engine {
                 });
             },
         );
+        if matches!(spawned, BackgroundSpawn::SpawnFailed) {
+            let _ =
+                self.worker_tx.send(WorkerEvent::ProjectWorktreesReady {
+                    project_id: project_id_if_unspawned,
+                    result: Err(
+                        "dux could not start a worker thread to list the worktrees".to_string()
+                    ),
+                    status_op_id: status_op_id_if_unspawned,
+                });
+        }
     }
 
     /// List the worktrees the MANAGER may act on for a project (managed, not
@@ -3626,7 +3664,9 @@ impl Engine {
         let busy = self.busy_folders();
         let project_id_for_panic = project.id.clone();
         let status_op_id_for_panic = status_op_id.clone();
-        self.spawn_background_worker(
+        let project_id_if_unspawned = project.id.clone();
+        let status_op_id_if_unspawned = status_op_id.clone();
+        let spawned = self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: format!("manageable-worktrees:{}", project.id),
                 in_flight_key: None,
@@ -3649,6 +3689,16 @@ impl Engine {
                 });
             },
         );
+        if matches!(spawned, BackgroundSpawn::SpawnFailed) {
+            let _ =
+                self.worker_tx.send(WorkerEvent::ManageableWorktreesReady {
+                    project_id: project_id_if_unspawned,
+                    result: Err(
+                        "dux could not start a worker thread to list the worktrees".to_string()
+                    ),
+                    status_op_id: status_op_id_if_unspawned,
+                });
+        }
     }
 
     pub fn spawn_project_branch_status_checks(&mut self) {

@@ -173,16 +173,68 @@ struct Removal {
     renames: Vec<(String, String)>,
 }
 
-#[derive(Default)]
+/// A path as the registry compares it: both of its spellings (see
+/// [`spellings`]), or, for a destructive claim on a symbolic link, the
+/// lexical one only (deleting or moving a link leaves its target alone).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Spelled {
+    lexical: PathBuf,
+    canonical: PathBuf,
+    lexical_only: bool,
+}
+
+impl Spelled {
+    fn of(path: &Path) -> Self {
+        Self {
+            lexical: lexical_key(path),
+            canonical: path_key(path),
+            lexical_only: false,
+        }
+    }
+
+    /// The forms this path is compared under.
+    fn forms(&self) -> impl Iterator<Item = &PathBuf> {
+        std::iter::once(&self.lexical).chain((!self.lexical_only).then_some(&self.canonical))
+    }
+
+    /// THE registry comparison, the same rule as [`folder_contains`]: some
+    /// spelling of `inner` is some spelling of `self` or under it.
+    fn contains(&self, inner: &Spelled) -> bool {
+        inner
+            .forms()
+            .any(|inner| self.forms().any(|outer| inner.starts_with(outer)))
+    }
+
+    /// Whether the two name the same folder (each contains the other).
+    fn same(&self, other: &Spelled) -> bool {
+        self.contains(other) && other.contains(self)
+    }
+}
+
 struct PathEntry {
+    /// The path this entry is for, both spellings.
+    spelled: Spelled,
     /// RAII holds by id, and owner-keyed holds by owner.
     guarded: HashMap<u64, WorktreeOpKind>,
     owned: HashMap<HoldOwner, WorktreeOpKind>,
     removal: Option<Removal>,
     /// A destructive file operation's claim (an editor or changes-pane delete
-    /// or move), by id. A different kind from a removal: a removal never
-    /// joins one, it waits for it.
-    destructive: Option<(u64, &'static str)>,
+    /// or move): its id, what it is, and what it covers (a link's claim
+    /// covers the link alone). A different kind from a removal: a removal
+    /// never joins one, it waits for it.
+    destructive: Option<(u64, &'static str, Spelled)>,
+}
+
+impl PathEntry {
+    fn new(spelled: Spelled) -> Self {
+        Self {
+            spelled,
+            guarded: HashMap::new(),
+            owned: HashMap::new(),
+            removal: None,
+            destructive: None,
+        }
+    }
 }
 
 impl PathEntry {
@@ -212,80 +264,81 @@ struct State {
 }
 
 impl State {
-    /// A removal, or a destructive file operation, claimed on `key` or on
-    /// any folder containing it: the refusal for anything new there.
-    fn removal_covering(&self, key: &Path) -> Option<HoldRefused> {
-        self.paths
-            .iter()
-            .find(|(claimed, entry)| {
-                (entry.removal.is_some() || entry.destructive.is_some())
-                    && key_contains(claimed, key)
-            })
-            .map(|(claimed, entry)| HoldRefused {
-                path: claimed.clone(),
-                by: match entry.removal {
-                    Some(_) => None,
-                    None => entry.destructive.map(|(_, by)| by),
-                },
-            })
+    /// A removal, or a destructive file operation, claimed on `path` or on
+    /// any folder containing it, under any spelling: the refusal for
+    /// anything new there.
+    fn removal_covering(&self, path: &Spelled) -> Option<HoldRefused> {
+        self.paths.values().find_map(|entry| {
+            if entry.removal.is_some() && entry.spelled.contains(path) {
+                return Some(HoldRefused {
+                    path: entry.spelled.lexical.clone(),
+                    by: None,
+                });
+            }
+            entry
+                .destructive
+                .as_ref()
+                .filter(|(_, _, claimed)| claimed.contains(path))
+                .map(|(_, by, claimed)| HoldRefused {
+                    path: claimed.lexical.clone(),
+                    by: Some(*by),
+                })
+        })
     }
 
-    /// What an older removal or destructive claim overlapping `key` is, in
+    /// What an older removal or destructive claim overlapping `path` is, in
     /// words, when one is (see [`Self::overlapping_older`]).
-    fn overlapping_older_described(&self, key: &Path, id: u64) -> Option<String> {
-        self.paths.iter().find_map(|(other, entry)| {
-            let nested = key_contains(other, key) || key_contains(key, other);
-            if !nested {
-                return None;
-            }
-            if entry
-                .removal
-                .as_ref()
-                .is_some_and(|removal| removal.id < id && other.as_path() != key)
-            {
+    fn overlapping_older_described(&self, path: &Spelled, id: u64) -> Option<String> {
+        self.paths.values().find_map(|entry| {
+            if entry.removal.as_ref().is_some_and(|removal| {
+                removal.id < id
+                    && !entry.spelled.same(path)
+                    && (entry.spelled.contains(path) || path.contains(&entry.spelled))
+            }) {
                 return Some(format!(
                     "dux is still removing the worktree at {}",
-                    crate::home_path::shorten_home(other)
+                    crate::home_path::shorten_home(&entry.spelled.lexical)
                 ));
             }
             entry
                 .destructive
-                .filter(|(claim, _)| *claim < id)
-                .map(|(_, by)| {
+                .as_ref()
+                .filter(|(claim, _, claimed)| {
+                    *claim < id && (claimed.contains(path) || path.contains(claimed))
+                })
+                .map(|(_, by, claimed)| {
                     format!(
                         "{by} of {} is still running",
-                        crate::home_path::shorten_home(other)
+                        crate::home_path::shorten_home(&claimed.lexical)
                     )
                 })
         })
     }
 
     /// Whether a removal or destructive claim older than `id` is on a folder
-    /// that contains `key` or that `key` contains, other than the claim `id`
-    /// itself: two of them on nested folders never run at the same time, the
-    /// later one waits. A removal of the SAME path is not counted (it is
-    /// joined instead), but a destructive claim on the same path is.
-    fn overlapping_older(&self, key: &Path, id: u64) -> bool {
-        self.paths.iter().any(|(other, entry)| {
-            let nested = key_contains(other, key) || key_contains(key, other);
-            let removal = entry
-                .removal
-                .as_ref()
-                .is_some_and(|removal| removal.id < id && other.as_path() != key && nested);
-            let destructive = entry
-                .destructive
-                .is_some_and(|(claim, _)| claim < id && nested);
-            removal || destructive
-        })
+    /// that contains `path` or that `path` contains, under any spelling:
+    /// two of them on nested folders never run at the same time, the later
+    /// one waits. A removal of the SAME folder is not counted (it is joined
+    /// instead), but a destructive claim on the same folder is.
+    fn overlapping_older(&self, path: &Spelled, id: u64) -> bool {
+        self.overlapping_older_described(path, id).is_some()
     }
 
-    /// Every operation holding `key` or any folder inside it.
-    fn kinds_within(&self, key: &Path) -> Vec<WorktreeOpKind> {
+    /// Every operation holding `path` or any folder inside it, under any
+    /// spelling.
+    fn kinds_within(&self, path: &Spelled) -> Vec<WorktreeOpKind> {
         self.paths
-            .iter()
-            .filter(|(held, _)| key_contains(key, held))
-            .flat_map(|(_, entry)| entry.kinds())
+            .values()
+            .filter(|entry| path.contains(&entry.spelled))
+            .flat_map(|entry| entry.kinds())
             .collect()
+    }
+
+    /// The entry for `path` (keyed by its lexical spelling), made if new.
+    fn entry_for(&mut self, path: &Spelled) -> &mut PathEntry {
+        self.paths
+            .entry(path.lexical.clone())
+            .or_insert_with(|| PathEntry::new(path.clone()))
     }
 
     fn mint(&mut self) -> u64 {
@@ -389,11 +442,6 @@ pub fn folder_contains(outer: &Path, inner: &Path) -> bool {
         .any(|inner| outers.iter().any(|outer| inner.starts_with(outer)))
 }
 
-/// [`folder_contains`] for two keys already built.
-fn key_contains(outer: &Path, inner: &Path) -> bool {
-    inner.starts_with(outer)
-}
-
 impl WorktreeOps {
     pub fn new() -> Self {
         Self::default()
@@ -414,21 +462,16 @@ impl WorktreeOps {
         path: impl AsRef<Path>,
         kind: WorktreeOpKind,
     ) -> Result<WorktreeOpGuard, HoldRefused> {
-        let key = lexical_key(path.as_ref());
+        let spelled = Spelled::of(path.as_ref());
         let mut state = self.lock();
-        if let Some(refused) = state.removal_covering(&key) {
+        if let Some(refused) = state.removal_covering(&spelled) {
             return Err(refused);
         }
         let id = state.mint();
-        state
-            .paths
-            .entry(key.clone())
-            .or_default()
-            .guarded
-            .insert(id, kind);
+        state.entry_for(&spelled).guarded.insert(id, kind);
         Ok(WorktreeOpGuard {
             ops: self.clone(),
-            key,
+            key: spelled.lexical,
             id,
         })
     }
@@ -443,19 +486,14 @@ impl WorktreeOps {
         path: impl AsRef<Path>,
         kind: WorktreeOpKind,
     ) -> Result<(), HoldRefused> {
-        let key = lexical_key(path.as_ref());
+        let spelled = Spelled::of(path.as_ref());
         let mut state = self.lock();
-        if let Some(refused) = state.removal_covering(&key) {
+        if let Some(refused) = state.removal_covering(&spelled) {
             return Err(refused);
         }
         Self::release_owner_locked(&mut state, &owner);
-        state
-            .paths
-            .entry(key.clone())
-            .or_default()
-            .owned
-            .insert(owner.clone(), kind);
-        state.owners.insert(owner, key);
+        state.entry_for(&spelled).owned.insert(owner.clone(), kind);
+        state.owners.insert(owner, spelled.lexical);
         Ok(())
     }
 
@@ -503,23 +541,22 @@ impl WorktreeOps {
     /// The operations holding `path`, or any folder inside it, right now: a
     /// removal of `path` deletes those folders too.
     pub fn holders(&self, path: impl AsRef<Path>) -> Vec<WorktreeOpKind> {
-        let key = lexical_key(path.as_ref());
-        self.lock().kinds_within(&key)
+        self.lock().kinds_within(&Spelled::of(path.as_ref()))
     }
 
     /// The refusal for starting something in `path` because a removal of it,
     /// or of a folder containing it, is under way; names the folder being
     /// removed. `None` when nothing covers it.
     pub fn removal_refusal(&self, path: impl AsRef<Path>) -> Option<HoldRefused> {
-        let key = lexical_key(path.as_ref());
-        self.lock().removal_covering(&key)
+        self.lock().removal_covering(&Spelled::of(path.as_ref()))
     }
 
     /// Whether a removal of `path`, or of a folder containing it, has been
     /// announced and not yet finished.
     pub fn is_being_removed(&self, path: impl AsRef<Path>) -> bool {
-        let key = lexical_key(path.as_ref());
-        self.lock().removal_covering(&key).is_some()
+        self.lock()
+            .removal_covering(&Spelled::of(path.as_ref()))
+            .is_some()
     }
 
     /// Announce a removal of `path`. From now on new holds on it are refused.
@@ -527,25 +564,32 @@ impl WorktreeOps {
     /// it.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn announce_removal(&self, path: impl AsRef<Path>) -> RemovalClaim {
-        let key = lexical_key(path.as_ref());
+        let spelled = Spelled::of(path.as_ref());
         let mut state = self.lock();
-        let id = state.mint();
-        let entry = state.paths.entry(key.clone()).or_default();
-        if let Some(removal) = &entry.removal {
+        // A removal of the same folder, under either spelling, is joined.
+        if let Some((key, removal)) = state.paths.iter().find_map(|(key, entry)| {
+            entry
+                .removal
+                .as_ref()
+                .filter(|_| entry.spelled.same(&spelled))
+                .map(|removal| (key.clone(), removal))
+        }) {
             return RemovalClaim::Join(RemovalJoin {
                 key,
                 slot: Arc::clone(&removal.slot),
             });
         }
+        let id = state.mint();
         let slot = Arc::new(OutcomeSlot::default());
-        entry.removal = Some(Removal {
+        state.entry_for(&spelled).removal = Some(Removal {
             id,
             slot: Arc::clone(&slot),
             renames: Vec::new(),
         });
         RemovalClaim::Lead(RemovalLease {
             ops: self.clone(),
-            key,
+            key: spelled.lexical.clone(),
+            spelled,
             id,
             slot,
             finished: false,
@@ -601,10 +645,14 @@ impl WorktreeOps {
         wait: Duration,
         by: &'static str,
     ) -> Result<DestructiveClaim, String> {
-        let key = lexical_key(path);
+        // A claim on a link covers the link alone: deleting or moving one
+        // leaves its target where it is.
+        let mut spelled = Spelled::of(path);
+        spelled.lexical_only =
+            std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
         let claim = {
             let mut state = self.lock();
-            if let Some(covering) = state.removal_covering(&key) {
+            if let Some(covering) = state.removal_covering(&spelled) {
                 return Err(match covering.by {
                     None => format!(
                         "dux is removing the worktree at {}",
@@ -617,21 +665,24 @@ impl WorktreeOps {
                 });
             }
             let id = state.mint();
-            state.paths.entry(key.clone()).or_default().destructive = Some((id, by));
+            let mut entry_spelling = spelled.clone();
+            entry_spelling.lexical_only = false;
+            state.entry_for(&entry_spelling).destructive = Some((id, by, spelled.clone()));
             DestructiveClaim {
                 ops: self.clone(),
-                key,
+                key: spelled.lexical.clone(),
+                spelled,
                 id,
             }
         };
-        let holders = self.holders(&claim.key);
+        let holders = self.lock().kinds_within(&claim.spelled);
         if !holders.is_empty() {
             return Err(format!("{} is running in it", describe_holders(&holders)));
         }
-        if !self.wait_for_older_overlapping(&claim.key, claim.id, wait) {
+        if !self.wait_for_older_overlapping(&claim.spelled, claim.id, wait) {
             let what = self
                 .lock()
-                .overlapping_older_described(&claim.key, claim.id)
+                .overlapping_older_described(&claim.spelled, claim.id)
                 .unwrap_or_else(|| "another delete or removal there is still running".to_string());
             return Err(format!(
                 "{what} after {} seconds; try again once it has finished",
@@ -643,11 +694,11 @@ impl WorktreeOps {
 
     /// Block until no removal or destructive claim older than `id` overlaps
     /// `key` (see `State::overlapping_older`), or `timeout` passes (`false`).
-    fn wait_for_older_overlapping(&self, key: &Path, id: u64, timeout: Duration) -> bool {
+    fn wait_for_older_overlapping(&self, path: &Spelled, id: u64, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let mut state = self.lock();
         loop {
-            if !state.overlapping_older(key, id) {
+            if !state.overlapping_older(path, id) {
                 return true;
             }
             let now = Instant::now();
@@ -676,6 +727,7 @@ pub const DESTRUCTIVE_CLAIM_WAIT: Duration = Duration::from_secs(5);
 pub struct DestructiveClaim {
     ops: WorktreeOps,
     key: PathBuf,
+    spelled: Spelled,
     id: u64,
 }
 
@@ -704,7 +756,10 @@ impl Drop for DestructiveClaim {
         {
             let mut state = self.ops.lock();
             if let Some(entry) = state.paths.get_mut(&self.key)
-                && entry.destructive.is_some_and(|(id, _)| id == self.id)
+                && entry
+                    .destructive
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| *id == self.id)
             {
                 entry.destructive = None;
             }
@@ -774,6 +829,7 @@ impl std::fmt::Debug for RemovalClaim {
 pub struct RemovalLease {
     ops: WorktreeOps,
     key: PathBuf,
+    spelled: Spelled,
     id: u64,
     slot: Arc<OutcomeSlot>,
     finished: bool,
@@ -791,7 +847,7 @@ impl RemovalLease {
 
     /// The operations still holding the path.
     pub fn holders(&self) -> Vec<WorktreeOpKind> {
-        self.ops.holders(&self.key)
+        self.ops.lock().kinds_within(&self.spelled)
     }
 
     /// Block until nothing holds the path, or `timeout` passes. On a timeout,
@@ -800,7 +856,7 @@ impl RemovalLease {
         let deadline = Instant::now() + timeout;
         let mut state = self.ops.lock();
         loop {
-            let kinds = state.kinds_within(&self.key);
+            let kinds = state.kinds_within(&self.spelled);
             if kinds.is_empty() {
                 return Ok(());
             }
@@ -826,7 +882,7 @@ impl RemovalLease {
     /// the registration and nothing more. Run it on a worker thread only.
     pub fn wait_for_overlapping_removals(&self, timeout: Duration) -> bool {
         self.ops
-            .wait_for_older_overlapping(&self.key, self.id, timeout)
+            .wait_for_older_overlapping(&self.spelled, self.id, timeout)
     }
 
     /// `branch` as it is called now, following every rename recorded while

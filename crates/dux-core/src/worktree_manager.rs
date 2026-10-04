@@ -346,10 +346,17 @@ impl AdmittedRemoval {
         // Refused before anything is claimed: a path that is not a listed
         // worktree root of this project (a folder inside one, the checkout,
         // a home folder) never reads "being removed", not even briefly.
+        // The worktree git reports (canonical), never the spelling the
+        // request came in by: a request through a link to the worktree claims
+        // and waits on the worktree git will remove.
+        let worktree = match &classified {
+            Ok(RemovalResolution::Removable { path, .. }) => path.clone(),
+            _ => requested.clone(),
+        };
         if let Some(refused) = refusal(classified) {
             return refused;
         }
-        let lease = match ops.announce_removal(&requested) {
+        let lease = match ops.announce_removal(&worktree) {
             crate::worktree_ops::RemovalClaim::Lead(lease) => lease,
             crate::worktree_ops::RemovalClaim::Join(_) => return Ok(RemovalOutcome::BeingRemoved),
         };
@@ -373,7 +380,7 @@ impl AdmittedRemoval {
                 )
             });
         let refused = refusal(reclassified).or_else(|| {
-            match crate::engine::stored_occupant(&paths.sessions_db_path, &ops, &requested, None) {
+            match crate::engine::stored_occupant(&paths.sessions_db_path, &ops, &worktree, None) {
                 Ok(None) => None,
                 Ok(Some(occupant)) => Some(Ok(occupant.manager_outcome())),
                 Err(message) => Some(Err(message)),
@@ -386,7 +393,7 @@ impl AdmittedRemoval {
         }
         if let Err(still) = lease.wait_for_holders(wait) {
             let message = crate::engine::removal::removal_wait_expired_message(
-                &requested,
+                &worktree,
                 wait,
                 &describe_holders(&still),
             );
@@ -397,7 +404,7 @@ impl AdmittedRemoval {
         // terminal's job, a deleted agent's server) is ended first, and the
         // folder is looked at once more under the claim, the same as an agent
         // delete's removal does.
-        let requested_text = requested.to_string_lossy().into_owned();
+        let requested_text = worktree.to_string_lossy().into_owned();
         // A standalone agent's processes are never ended; while any run here
         // the folder is kept, before anything else is ended.
         if let Some(message) = crate::engine::standalone_processes_keep(&registry, &requested_text)
@@ -433,7 +440,7 @@ impl AdmittedRemoval {
             lease.finish(Err(message.clone()));
             return Err(message);
         }
-        let outcome = remove_managed_worktree(&project, &paths, &[], &requested, delete_branch);
+        let outcome = remove_managed_worktree(&project, &paths, &[], &worktree, delete_branch);
         lease.finish(match &outcome {
             Ok(RemovalOutcome::Removed {
                 branch: Some(branch),

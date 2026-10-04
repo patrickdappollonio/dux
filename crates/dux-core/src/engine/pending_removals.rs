@@ -323,7 +323,7 @@ impl Engine {
             .ops
             .announce_removal(&row.managed.worktree_path);
         let wait = self.removal_wait();
-        let _ = self.spawn_status_op(op, move || {
+        let reaction = self.spawn_status_op(op, move || {
             let result = perform_deferred_removal(
                 &row.session_id,
                 &row.project_path,
@@ -342,6 +342,13 @@ impl Engine {
             super::events::forget_pending_removal_in(&db_path, &row.session_id);
             result
         });
+        // The busy already went out on the worker lane; a worker that never
+        // started answers through the same lane, so it gets its final.
+        if let crate::engine::EventReaction::Status(status) = reaction
+            && status.tone != crate::statusline::StatusTone::Busy
+        {
+            let _ = self.worker_tx.send(WorkerEvent::PollerStatus(status));
+        }
     }
 }
 

@@ -3894,8 +3894,24 @@ impl App {
         let Some(pending) = self.pending_diff.as_ref() else {
             return;
         };
-        let Ok(answer) = pending.rx.try_recv() else {
-            return;
+        let answer = match pending.rx.try_recv() {
+            Ok(answer) => answer,
+            Err(mpsc::TryRecvError::Empty) => return,
+            // The worker is gone without an answer (it panicked): its busy
+            // gets a final rather than spinning forever.
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending_diff = None;
+                self.mark_frame_dirty();
+                self.status.set(
+                    Instant::now(),
+                    Some(DIFF_STATUS_KEY.to_string()),
+                    StatusTone::Error,
+                    "dux could not build the diff: the worker building it stopped before \
+                     answering. Open the file again to retry."
+                        .to_string(),
+                );
+                return;
+            }
         };
         let pending = self.pending_diff.take().expect("checked just above");
         self.mark_frame_dirty();

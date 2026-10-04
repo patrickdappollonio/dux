@@ -6892,6 +6892,11 @@ impl App {
             }
             dux_core::engine::BackgroundSpawn::SpawnFailed
             | dux_core::engine::BackgroundSpawn::AlreadyInFlight => {
+                // The busy was never shown, but its key was registered as a
+                // running operation: retire it, since no final will come.
+                if let Some(key) = pending.key.as_deref() {
+                    self.engine.retire_status_key(key);
+                }
                 self.engine
                     .revert_optimistic_rename(&sid, revert_previous_title);
                 self.rebuild_left_items();
