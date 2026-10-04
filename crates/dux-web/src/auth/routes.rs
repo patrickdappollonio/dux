@@ -420,6 +420,7 @@ async fn change_password(
     }
     let policy = config.password_policy();
     let words = dux_core::auth::guess_words();
+    let surface = state.engine.reload_surface();
     let written = tokio::task::spawn_blocking(move || {
         let refs: Vec<&str> = words.iter().map(String::as_str).collect();
         // Measured against the live minimums first, so the answer describes
@@ -432,12 +433,18 @@ async fn change_password(
         }
         let set =
             dux_core::config_keys::set_password_if_current(&config_path, &expected, &new, &refs)?;
-        if !set.remaining_problems.is_empty() {
-            return Ok(Err(set
-                .remaining_problems
-                .into_iter()
-                .map(|problem| problem.message)
-                .collect::<Vec<String>>()));
+        // Not in force only when the reload of THIS run refuses the file: the
+        // problems that stop the surface whose reload applies it, judged the
+        // way `start_refusal` judges them, never "any problem remains" (a file
+        // only the other surface refuses still loads here).
+        let stopping: Vec<String> = set
+            .remaining_problems
+            .into_iter()
+            .filter(|problem| stops_reload(problem, surface))
+            .map(|problem| problem.detail)
+            .collect();
+        if !stopping.is_empty() {
+            return Ok(Err(stopping));
         }
         // The hash now in the file is the one to apply at once; the reload
         // that follows brings the rest along.
@@ -520,4 +527,16 @@ async fn dismiss_no_auth_warning(State(state): State<AppState>) -> Response {
         Ok(Err(error)) => server_error(format!("Could not save that choice: {error:#}")),
         Err(error) => server_error(format!("Saving that choice stopped: {error}")),
     }
+}
+
+/// Whether `problem` makes the reload of `surface` refuse the file: exactly
+/// the rule [`dux_core::config::start_refusal`] applies, under which a
+/// `dux server` problem its command line takes the place of is not one.
+fn stops_reload(
+    problem: &dux_core::config::StartProblem,
+    surface: dux_core::config::Surface,
+) -> bool {
+    problem.stops(surface)
+        && !(surface == dux_core::config::Surface::DuxServer
+            && problem.dux_server_override.is_some())
 }

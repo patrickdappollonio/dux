@@ -25,6 +25,11 @@ use dux_core::worker::WorkerEvent;
 pub struct WebConfigSurface;
 
 impl ConfigSurface for WebConfigSurface {
+    /// Its reload refuses what stops `dux server`.
+    fn start_surface(&self) -> dux_core::config::Surface {
+        dux_core::config::Surface::DuxServer
+    }
+
     fn reload(&self, paths: DuxPaths, worker_tx: mpsc::Sender<WorkerEvent>) {
         std::thread::spawn(move || {
             // The guard guarantees a `ConfigReloadReady` is posted even if the

@@ -19,6 +19,13 @@ use crate::storage::SessionStore;
 pub struct TuiConfigSurface;
 
 impl ConfigSurface for TuiConfigSurface {
+    /// Its reload (`ensure_config`) refuses what stops the terminal UI. The
+    /// flip and the background server both run on this engine, so both judge
+    /// a file the terminal UI's way.
+    fn start_surface(&self) -> dux_core::config::Surface {
+        dux_core::config::Surface::TerminalUi
+    }
+
     fn reload(&self, paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
         thread::spawn(move || {
             // The guard guarantees a `ConfigReloadReady` is posted even if the

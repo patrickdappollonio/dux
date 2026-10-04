@@ -8959,6 +8959,10 @@ mod tests {
     struct RecordingConfigSurface(Arc<Mutex<Vec<String>>>);
 
     impl crate::engine::ConfigSurface for RecordingConfigSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
         fn reload(
             &self,
             _paths: crate::config::DuxPaths,
@@ -9015,6 +9019,10 @@ mod tests {
     struct FileReloadSurface;
 
     impl crate::engine::ConfigSurface for FileReloadSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
         fn reload(
             &self,
             paths: crate::config::DuxPaths,

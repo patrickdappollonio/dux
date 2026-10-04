@@ -8998,6 +8998,10 @@ mod tests {
     }
 
     impl crate::engine::ConfigSurface for MarkerReloadSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
         fn reload(
             &self,
             _paths: DuxPaths,
@@ -9130,6 +9134,10 @@ mod tests {
     struct FailingReloadSurface;
 
     impl crate::engine::ConfigSurface for FailingReloadSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
         fn reload(
             &self,
             _paths: DuxPaths,
@@ -9209,6 +9217,10 @@ mod tests {
     struct StuckReloadSurface;
 
     impl crate::engine::ConfigSurface for StuckReloadSurface {
+        fn start_surface(&self) -> crate::config::Surface {
+            crate::config::Surface::DuxServer
+        }
+
         fn reload(
             &self,
             _paths: DuxPaths,

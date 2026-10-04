@@ -6292,6 +6292,10 @@ mod config_surface_tests {
     struct WebConfigSurface;
 
     impl ConfigSurface for WebConfigSurface {
+        fn start_surface(&self) -> dux_core::config::Surface {
+            dux_core::config::Surface::DuxServer
+        }
+
         fn reload(&self, _paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
             // Drive completion through the guard, matching the production surfaces
             // so the test exercises the guarded completion path rather than a bare send.

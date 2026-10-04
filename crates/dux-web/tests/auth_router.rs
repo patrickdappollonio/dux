@@ -76,6 +76,29 @@ struct Dux {
     reloads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// An engine surface that judges a file the terminal UI's way, as the flip's
+/// and the background server's engine does. Its reload is never driven here.
+struct TerminalUiSurface;
+
+impl dux_core::engine::ConfigSurface for TerminalUiSurface {
+    fn start_surface(&self) -> dux_core::config::Surface {
+        dux_core::config::Surface::TerminalUi
+    }
+
+    fn reload(
+        &self,
+        _paths: dux_core::config::DuxPaths,
+        worker_tx: std::sync::mpsc::Sender<dux_core::worker::WorkerEvent>,
+    ) {
+        dux_core::engine::ReloadCompletionGuard::new(worker_tx)
+            .complete(Ok(dux_core::config::Config::default()));
+    }
+
+    fn recover_render(&self, config: &dux_core::config::Config) -> String {
+        dux_core::config_write::render_config_plain(config)
+    }
+}
+
 /// This machine's Tailscale address, as a successful look reports it.
 fn own_tailscale_ips() -> Vec<std::net::IpAddr> {
     vec![TAILNET.local.ip()]
@@ -100,6 +123,20 @@ impl Dux {
     }
 
     fn start_tuned(auth: &str, tune: impl FnOnce(RouterParams) -> RouterParams) -> Self {
+        Self::start_on(auth, tune, false)
+    }
+
+    /// A router whose engine reloads the way the terminal UI's does, as under
+    /// the flip and the background server.
+    fn start_as_terminal_ui(auth: &str) -> Self {
+        Self::start_on(auth, |params| params, true)
+    }
+
+    fn start_on(
+        auth: &str,
+        tune: impl FnOnce(RouterParams) -> RouterParams,
+        terminal_ui: bool,
+    ) -> Self {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let root = tmp.path().to_path_buf();
         let paths = dux_core::config::DuxPaths {
@@ -117,6 +154,9 @@ impl Dux {
         .unwrap();
         let mut engine = bootstrap_engine(&paths).unwrap();
         dux_core::test_provider::defuse_config(&mut engine.config);
+        if terminal_ui {
+            engine.surface = Box::new(TerminalUiSurface);
+        }
         let (handle, _join) = spawn_engine_thread(engine);
         let reloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&reloads);
@@ -1290,6 +1330,51 @@ async fn a_password_stored_beside_old_problems_is_said_not_to_be_in_force() {
         dux.status(NETWORK, None).await["password_set"],
         json!(false)
     );
+}
+
+/// "Not in force" is the serving surface's own verdict: a problem only the
+/// terminal UI refuses leaves the password in force under `dux server`, and
+/// is not in force under the flip or the background server, whose engine
+/// reloads the terminal UI's way.
+#[tokio::test]
+async fn not_in_force_is_decided_by_the_surface_serving_the_request() {
+    let broken_env = "[env]\nA = \"${\"\n";
+    let first_password =
+        || Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD }));
+
+    let server = Dux::start("");
+    std::fs::write(server.tmp.path().join("config.toml"), broken_env).unwrap();
+    let answer = server.send(THIS_MACHINE, first_password()).await;
+    assert_eq!(answer.status, StatusCode::NO_CONTENT, "{}", answer.body);
+    assert_eq!(
+        server.status(NETWORK, None).await["password_set"],
+        json!(true),
+        "in force under dux server"
+    );
+
+    let tui = Dux::start_as_terminal_ui("");
+    std::fs::write(tui.tmp.path().join("config.toml"), broken_env).unwrap();
+    let answer = tui.send(THIS_MACHINE, first_password()).await;
+    assert_eq!(
+        (answer.status, answer.error().as_deref()),
+        (StatusCode::CONFLICT, Some("password_not_in_force")),
+        "{}",
+        answer.body
+    );
+    assert!(tui.config().contains("password_hash = \"$argon2id$"));
+    assert_eq!(
+        tui.status(NETWORK, None).await["password_set"],
+        json!(false)
+    );
+
+    // A problem only dux server refuses is the mirror image: port 0 on its
+    // own stops a `dux server` start, but a running one was started past it
+    // (its reload judges the port by the command line), and the terminal UI
+    // does not mind it at all.
+    let tui = Dux::start_as_terminal_ui("");
+    std::fs::write(tui.tmp.path().join("config.toml"), "[server]\nport = 0\n").unwrap();
+    let answer = tui.send(THIS_MACHINE, first_password()).await;
+    assert_eq!(answer.status, StatusCode::NO_CONTENT, "{}", answer.body);
 }
 
 /// With `[server] tailscale = "no"` dux cannot check for a Funnel or forward, so

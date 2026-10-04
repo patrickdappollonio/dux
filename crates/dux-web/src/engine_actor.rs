@@ -724,6 +724,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             live_limits: Arc::clone(&live_limits),
             tailscale_mode_control: Arc::clone(&tailscale_mode_control),
             paths: Arc::new(engine.paths.clone()),
+            reload_surface: engine.surface.start_surface(),
             #[cfg(test)]
             refresh_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
@@ -828,6 +829,10 @@ pub struct EngineHandle {
     /// layer's own writes (a password, a ban, the warning's dismissal) and its
     /// stored sessions.
     paths: Arc<dux_core::config::DuxPaths>,
+    /// Which surface's start checks this engine's reload refuses a file by:
+    /// `dux server`'s, or the terminal UI's for the flip and the background
+    /// server, which run on the terminal UI's engine.
+    reload_surface: dux_core::config::Surface,
     /// Test-only tally of the worktrees [`Self::refresh_changed_files`] was asked
     /// to recompute, newest last. That call is fire-and-forget into the actor
     /// channel, so a route test has no other way to prove the request was made,
@@ -1600,6 +1605,11 @@ impl EngineHandle {
     /// Where this engine's config and session database live.
     pub fn paths(&self) -> Arc<dux_core::config::DuxPaths> {
         Arc::clone(&self.paths)
+    }
+
+    /// Which surface's start checks this engine's reload refuses a file by.
+    pub fn reload_surface(&self) -> dux_core::config::Surface {
+        self.reload_surface
     }
 
     /// The configured preferred editor name for the "open in editor" action
