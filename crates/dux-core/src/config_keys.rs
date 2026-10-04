@@ -627,12 +627,14 @@ fn check_provider_command(doc: &DocumentMut, path: &[String]) -> Result<()> {
     }
     let file: toml::Table =
         toml::from_str(&doc.to_string()).context("failed to read the change back")?;
-    let provider = file
+    // The command on its own: a problem in another field of the provider is
+    // that field's, and never reads as a missing command.
+    let command = file
         .get("providers")
         .and_then(|providers| providers.get(name))
-        .cloned()
-        .and_then(|provider| provider.try_into::<ProviderCommandConfig>().ok());
-    if provider.is_none_or(|provider| provider.command.trim().is_empty()) {
+        .and_then(|provider| provider.get("command"))
+        .and_then(toml::Value::as_str);
+    if command.is_none_or(|command| command.trim().is_empty()) {
         anyhow::bail!(
             "that would leave providers.{name} with no command, so dux could not start it. \
              Nothing was written."
@@ -861,18 +863,33 @@ pub enum GetValue {
 /// A value dux uses in place of what the file says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Correction {
+    /// The dotted setting it is about: the key asked for, or an entry inside
+    /// the table asked for.
+    pub path: String,
     /// What the file says, as TOML text (a string unquoted).
     pub in_file: String,
+    /// What dux uses, or `None` when the load drops the entry holding it.
+    pub used: Option<String>,
     /// Why dux uses something else: the load's own sentence.
     pub reason: String,
 }
 
-/// What `get` found, and, when the load uses something other than what the
-/// file says, what the file says and why.
+/// What `get` found: the value every surface that starts with the file
+/// uses, what the load changes of what the file says (each with why), and
+/// each surface that will not start with the file, with why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GetReport {
+    /// The value in use. [`GetValue::Unknown`] only when no surface starts
+    /// with the file.
     pub value: GetValue,
-    pub correction: Option<Correction>,
+    /// For a single setting, at most one: what the file says when dux uses
+    /// something else. For a table, one per entry inside it the load changes
+    /// or drops.
+    pub corrections: Vec<Correction>,
+    /// The surfaces that will not start with the file, each with why: their
+    /// value cannot be worked out. Empty when [`Self::value`] is unknown,
+    /// which says why itself.
+    pub refused_by: Vec<(crate::config::Surface, String)>,
 }
 
 /// The value dux uses for `key` with the file `raw` (see [`get_report`]).
@@ -880,19 +897,20 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
     get_report(raw, key).map(|report| report.value)
 }
 
-/// The value dux uses for `key` with the file `raw`: what the file says,
-/// after every correction and prune the load makes (an out-of-range value
-/// reset, a retired provider's stock block dropped), or the default when the
-/// file leaves it out. When the load uses something else, the report says
-/// what the file says and why. Reads the text itself rather than a loaded
-/// config, so it works on a file dux would refuse to start with: `get` is
-/// how you look at the broken part. For a [`WritePolicy::Secret`] key it
-/// reads where the secret is stored (the password's hash).
+/// The value a surface that starts with the file `raw` uses for `key`: what
+/// the file says, after every correction and prune the load makes (an
+/// out-of-range value reset, a retired provider's stock block dropped, a
+/// wrong-typed value `dux server` reads as its default), or the default when
+/// the file leaves it out. Every surface that starts with a file reads it
+/// through the same load, so they use the same value; a surface that will
+/// not start with it is named with why. A whole table is shown as the file
+/// writes it, with each entry inside it the load changes or drops listed.
+/// Reads the text itself rather than a loaded config, so it works on a file
+/// a surface would refuse to start with: `get` is how you look at the broken
+/// part. For a [`WritePolicy::Secret`] key it reads where the secret is
+/// stored (the password's hash).
 pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
-    let plain = |value| GetReport {
-        value,
-        correction: None,
-    };
+    use crate::config::Surface;
     let path: Vec<String> = match key.policy {
         WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => {
             stores_at.split('.').map(str::to_string).collect()
@@ -905,77 +923,127 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
             crate::config::describe_toml_error(raw, &e)
         )
     })?;
-    let mut node = Some(toml::Value::Table(doc));
-    for segment in &path {
-        node = node.and_then(|n| n.get(segment).cloned());
-    }
-    let in_file = node.as_ref().map(render);
-    // What dux runs with: the file through the loader a start uses.
+    let file = toml::Value::Table(doc);
+    let node = value_at(&file, &path);
+    let in_file = node.map(render);
+    let problems = crate::config::start_problems_of(raw);
+    let refusal = |surface: Surface| {
+        let reasons: Vec<&str> = problems
+            .iter()
+            .filter(|problem| problem.stops(surface))
+            .map(|problem| problem.detail.as_str())
+            .collect();
+        (!reasons.is_empty()).then(|| reasons.join("; "))
+    };
+    let refused_by: Vec<(Surface, String)> = [Surface::TerminalUi, Surface::DuxServer]
+        .into_iter()
+        .filter_map(|surface| refusal(surface).map(|why| (surface, why)))
+        .collect();
+    let unknown = |reason: String, in_file: Option<String>| GetReport {
+        value: GetValue::Unknown { in_file, reason },
+        corrections: Vec::new(),
+        refused_by: Vec::new(),
+    };
+    // What a starting surface runs with: the file through the load a start
+    // uses. A file that does not load stops every surface.
     let effective = match crate::config::effective_config_from_text(raw) {
-        Ok(config) => config,
+        Ok(config) if refused_by.len() < 2 => config,
+        Ok(_) => {
+            let named: Vec<String> = problems.iter().map(|p| p.message.clone()).collect();
+            return Ok(unknown(named.join("; "), in_file));
+        }
         Err(problem) => {
-            let named: Vec<String> = crate::config::start_problems_of(raw)
-                .into_iter()
-                .map(|problem| problem.message)
-                .collect();
+            let named: Vec<String> = problems.iter().map(|p| p.message.clone()).collect();
             let reason = if named.is_empty() {
                 problem.reason().to_string()
             } else {
                 named.join("; ")
             };
-            return Ok(plain(GetValue::Unknown { in_file, reason }));
+            return Ok(unknown(reason, in_file));
         }
     };
-    // A file a surface will not start with has no value in use there: say
-    // which surface and why, for any problem from the one list of start
-    // checks.
-    let problems: Vec<String> = crate::config::start_problems_of(raw)
-        .into_iter()
-        .map(|problem| problem.message)
-        .collect();
-    if !problems.is_empty() {
-        return Ok(plain(GetValue::Unknown {
-            in_file,
-            reason: problems.join("; "),
-        }));
-    }
-    let mut used = serde_json::to_value(&effective).ok();
-    for segment in &path {
-        used = used.and_then(|n| n.get(segment).cloned());
-    }
-    let used = match used {
-        Some(serde_json::Value::Null) | None => None,
-        Some(json) => toml::Value::try_from(json).ok().map(|value| render(&value)),
+    let effective = serde_json::to_value(&effective).ok();
+    let used_at = |at: &[String]| -> Option<String> {
+        let mut used = effective.clone();
+        for segment in at {
+            used = used.and_then(|n| n.get(segment).cloned());
+        }
+        match used {
+            Some(serde_json::Value::Null) | None => None,
+            Some(json) => toml::Value::try_from(json).ok().map(|value| render(&value)),
+        }
     };
+    let used = used_at(&path);
     let Some(in_file) = in_file else {
-        return Ok(plain(match used {
-            Some(value) => GetValue::Default(value),
-            None => GetValue::Unset,
-        }));
+        return Ok(GetReport {
+            value: used.map_or(GetValue::Unset, GetValue::Default),
+            corrections: Vec::new(),
+            refused_by,
+        });
     };
-    // What the file says, unless the load uses something else for this key
-    // (or drops the entry holding it), which it says why for. A whole table
-    // is shown as the file writes it: the load fills in its defaults, which
-    // is not a correction.
+    // What the load changes of what the file says, each by the setting (or
+    // entry) it is about, with the value the file gives it.
     let dotted = path.join(".");
-    let reason = (used.as_deref() != Some(in_file.as_str())
-        && !node.as_ref().is_some_and(toml::Value::is_table))
-    .then(|| {
-        crate::config::load_corrections_of(raw)
+    let corrected: Vec<(String, String)> = crate::config::load_corrections_of(raw);
+    if node.is_some_and(toml::Value::is_table) {
+        // A table is shown as the file writes it (the load filling in its
+        // defaults is not a correction), with every entry inside it that the
+        // load changes or drops listed.
+        let prefix = format!("{dotted}.");
+        let corrections = corrected
             .into_iter()
-            .find(|(corrected, _)| {
-                dotted == *corrected || dotted.starts_with(&format!("{corrected}."))
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .filter_map(|(key, reason)| {
+                let at: Vec<String> = key.split('.').map(str::to_string).collect();
+                let in_file = value_at(&file, &at).map(render)?;
+                let used = used_at(&at);
+                (used.as_deref() != Some(in_file.as_str())).then_some(Correction {
+                    path: key,
+                    in_file,
+                    used,
+                    reason,
+                })
             })
-            .map(|(_, reason)| reason)
-    })
-    .flatten();
+            .collect();
+        return Ok(GetReport {
+            value: GetValue::Set(in_file),
+            corrections,
+            refused_by,
+        });
+    }
+    // A single setting: what the file says, unless the load uses something
+    // else for it (or drops the entry holding it), which it says why for.
+    let reason = (used.as_deref() != Some(in_file.as_str()))
+        .then(|| {
+            corrected
+                .into_iter()
+                .find(|(key, _)| dotted == *key || dotted.starts_with(&format!("{key}.")))
+                .map(|(_, reason)| reason)
+        })
+        .flatten();
     let Some(reason) = reason else {
-        return Ok(plain(GetValue::Set(in_file)));
+        return Ok(GetReport {
+            value: GetValue::Set(in_file),
+            corrections: Vec::new(),
+            refused_by,
+        });
     };
     Ok(GetReport {
-        value: used.map_or(GetValue::Unset, GetValue::Set),
-        correction: Some(Correction { in_file, reason }),
+        value: used.clone().map_or(GetValue::Unset, GetValue::Set),
+        corrections: vec![Correction {
+            path: dotted,
+            in_file,
+            used,
+            reason,
+        }],
+        refused_by,
     })
+}
+
+/// The value at the dotted `path` inside `value`, if there is one.
+fn value_at<'a>(value: &'a toml::Value, path: &[String]) -> Option<&'a toml::Value> {
+    path.iter()
+        .try_fold(value, |node, segment| node.get(segment.as_str()))
 }
 
 fn render(value: &toml::Value) -> String {
@@ -1731,7 +1799,7 @@ port = 3890
     /// adding a bad host beside it is still refused.
     #[test]
     fn a_set_adding_a_start_problem_is_refused_beside_a_stray_password_hash() {
-        let (_dir, path) = temp_config("[defaults]\npassword_hash = \"x\"\n");
+        let (_dir, path) = temp_config("[server]\npassword_hash = \"x\"\n");
         let text = std::fs::read_to_string(&path).unwrap();
         let before = crate::config::start_problems_of(&text);
         assert_eq!(before.len(), 1, "{before:?}");
@@ -1739,7 +1807,7 @@ port = 3890
             .expect_err("a bad host is a new problem");
         assert!(format!("{error:#}").contains("not-an-ip"), "{error:#}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
-        let with_host = "[defaults]\npassword_hash = \"x\"\n[server]\nhost = \"not-an-ip\"\n";
+        let with_host = "[server]\npassword_hash = \"x\"\nhost = \"not-an-ip\"\n";
         assert_eq!(crate::config::start_problems_of(with_host).len(), 2);
     }
 
@@ -1790,7 +1858,8 @@ port = 3890
     /// A wrong-typed setting is one `dux server` resets to its default but
     /// the terminal UI refuses to start over: it is a start problem worded
     /// for each, never showing the value, listed by a set that does not
-    /// touch it, and `get` says the value in use cannot be worked out.
+    /// touch it, and `get` answers for `dux server`, which starts with the
+    /// file, naming the terminal UI as the surface that refuses it.
     #[test]
     fn a_wrong_typed_setting_is_a_terminal_ui_start_problem() {
         let (_dir, path) = temp_config("[ui]\nleft_width_pct = \"wide\"\n");
@@ -1816,15 +1885,15 @@ port = 3890
             .map(|problem| problem.message.as_str())
             .collect();
         assert_eq!(remaining, vec![message.as_str()]);
-        let GetValue::Unknown { in_file, reason } =
-            get(&text, &lookup("ui.right_width_pct").unwrap()).unwrap()
-        else {
-            panic!("expected Unknown");
-        };
-        assert_eq!(in_file, None);
+        let report = get_report(&text, &lookup("ui.left_width_pct").unwrap()).unwrap();
+        assert_eq!(report.value, GetValue::Set("20".to_string()), "{report:?}");
+        assert_eq!(report.corrections.len(), 1, "{report:?}");
+        assert_eq!(report.corrections[0].in_file, "wide");
+        assert_eq!(report.refused_by.len(), 1, "{report:?}");
+        assert_eq!(report.refused_by[0].0, crate::config::Surface::TerminalUi);
         assert!(
-            reason.contains("the terminal UI will not start"),
-            "{reason}"
+            report.refused_by[0].1.contains("[ui] left_width_pct"),
+            "{report:?}"
         );
     }
 

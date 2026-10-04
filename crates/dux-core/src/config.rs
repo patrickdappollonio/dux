@@ -3160,84 +3160,100 @@ fn take_auth_section(doc: &mut toml::Table) -> Result<ServerAuthConfig, ConfigLo
     parse_auth_value(auth).map_err(ConfigLoadProblem::AuthInvalid)
 }
 
-/// The `[server.auth]` section of a whole config file's text, read exactly as
-/// [`load_config`] reads it. A writer checks a candidate file with this
-/// before it lands, so nothing it writes can stop dux from starting.
+/// A password hash, or an `auth` table, where dux does not read one, and
+/// where a misplaced auth setting could plausibly be: a `password_hash` at
+/// the top level, directly under `[server]`, or inside an auth-like table (a
+/// table at the top level or under `[server]` whose name is within two edits
+/// of "auth": `[server.auht]`, `[server.Auth]`, a top-level `[auht]`), and
+/// each such auth-like table itself. dux would start without the password
+/// the user meant to set, so each is a problem that stops the start, named
+/// by where it is (never its value), saying where it belongs, and attributed
+/// to that place.
 ///
-/// Read from the user's own text, so an error quotes their file with its real
-/// line numbers rather than a re-serialized copy of the section.
-/// A password hash, or an `auth` table, where dux does not read one: a
-/// `password_hash` key anywhere outside `[server.auth]`, or a table at the
-/// top level or under `[server]` whose name is within two edits of "auth"
-/// (`[server.auht]`, `[server.Auth]`, a top-level `[auht]`). dux would start
-/// without the password the user meant to set, so each is a problem that
-/// stops the start, named by where it is (never its value) and saying where
-/// it belongs. Other unknown keys stay harmless.
+/// Never inside a table whose keys are names the user chose (`[env]`, a
+/// provider, a project, `[macros]`, `[keys]`): a variable or provider that
+/// happens to be named `password_hash` is not a password hash. Other unknown
+/// keys stay harmless.
 ///
-/// A top-level table named exactly `[auth]` is the one exception: it is the
-/// section the retired HTTP basic-auth feature wrote, real configs from
-/// before the upgrade still carry it (`username = "…"`), and the
-/// documentation restore cleans it up. It stops the start only when it
-/// holds a `password_hash`, which the first rule catches.
-pub fn misplaced_auth_problems(raw: &str) -> Vec<String> {
+/// A top-level table named exactly `[auth]` is the one exception to the
+/// table rule: it is the section the retired HTTP basic-auth feature wrote,
+/// real configs from before the upgrade still carry it (`username = "…"`),
+/// and the documentation restore cleans it up. It stops the start only when
+/// it holds a `password_hash`.
+pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem> {
+    use crate::config_auth::Problem;
     let Ok(file) = toml::from_str::<toml::Table>(raw) else {
         return Vec::new();
     };
-    let mut problems = Vec::new();
-    collect_stray_password_hashes(&file, &mut Vec::new(), &mut problems);
+    let stray = |place: String| {
+        Problem::about(
+            place.clone(),
+            format!(
+                "{place} is not read: a password hash belongs in [server.auth] as password_hash, \
+                 so dux will not start until it is moved there or removed"
+            ),
+        )
+    };
     let near_auth = |name: &str| {
         let name = name.to_lowercase();
         name == "auth" || edit_distance(&name, "auth") <= 2
     };
+    let mut problems = Vec::new();
+    if file.contains_key("password_hash") {
+        problems.push(stray("password_hash".to_string()));
+    }
     for (name, value) in &file {
-        if name != "auth" && value.is_table() && near_auth(name) {
-            problems.push(format!(
-                "[{name}] is not read: the web UI password settings belong in [server.auth], so \
-                 dux will not start until [{name}] is moved there or removed"
+        let Some(table) = value.as_table() else {
+            continue;
+        };
+        if !near_auth(name) {
+            continue;
+        }
+        if table.contains_key("password_hash") {
+            problems.push(stray(format!("{name}.password_hash")));
+        }
+        if name != "auth" {
+            problems.push(Problem::about(
+                name.clone(),
+                format!(
+                    "[{name}] is not read: the web UI password settings belong in [server.auth], \
+                     so dux will not start until [{name}] is moved there or removed"
+                ),
             ));
         }
     }
     if let Some(server) = file.get("server").and_then(toml::Value::as_table) {
+        if server.contains_key("password_hash") {
+            problems.push(stray("server.password_hash".to_string()));
+        }
         for (name, value) in server {
-            if name != "auth" && value.is_table() && near_auth(name) {
-                problems.push(format!(
+            let Some(table) = value.as_table() else {
+                continue;
+            };
+            if name == "auth" || !near_auth(name) {
+                continue;
+            }
+            if table.contains_key("password_hash") {
+                problems.push(stray(format!("server.{name}.password_hash")));
+            }
+            problems.push(Problem::about(
+                format!("server.{name}"),
+                format!(
                     "[server.{name}] is not read: the web UI password settings belong in \
                      [server.auth], so dux will not start until it is renamed or removed"
-                ));
-            }
+                ),
+            ));
         }
     }
     problems
 }
 
-fn collect_stray_password_hashes(
-    table: &toml::Table,
-    path: &mut Vec<String>,
-    problems: &mut Vec<String>,
-) {
-    for (key, value) in table {
-        path.push(key.clone());
-        let at_auth = path.len() == 3 && path[0] == "server" && path[1] == "auth";
-        if key == "password_hash" && !at_auth {
-            problems.push(format!(
-                "{} is not read: a password hash belongs in [server.auth] as password_hash, so \
-                 dux will not start until it is moved there or removed",
-                path.join(".")
-            ));
-        }
-        match value {
-            toml::Value::Table(child) => collect_stray_password_hashes(child, path, problems),
-            toml::Value::Array(items) => {
-                for item in items {
-                    if let toml::Value::Table(child) = item {
-                        collect_stray_password_hashes(child, path, problems);
-                    }
-                }
-            }
-            _ => {}
-        }
-        path.pop();
-    }
+/// [`misplaced_auth_problem_list`]'s sentences.
+pub fn misplaced_auth_problems(raw: &str) -> Vec<String> {
+    misplaced_auth_problem_list(raw)
+        .into_iter()
+        .map(|problem| problem.message)
+        .collect()
 }
 
 /// The Levenshtein distance between two short names.
@@ -3256,6 +3272,12 @@ fn edit_distance(a: &str, b: &str) -> usize {
     previous[b.len()]
 }
 
+/// The `[server.auth]` section of a whole config file's text, read exactly as
+/// [`load_config`] reads it. A writer checks a candidate file with this
+/// before it lands, so nothing it writes can stop dux from starting.
+///
+/// Read from the user's own text, so an error quotes their file with its real
+/// line numbers rather than a re-serialized copy of the section.
 pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, ConfigLoadProblem> {
     // Only `server.auth` is read; every other key is ignored here.
     #[derive(Deserialize)]
@@ -3441,9 +3463,9 @@ pub fn check_start(raw: &str) -> StartCheck {
             return check;
         }
     };
-    for message in misplaced_auth_problems(raw) {
-        check.problems.push(both(Problem::plain(message)));
-    }
+    check
+        .problems
+        .extend(misplaced_auth_problem_list(raw).into_iter().map(both));
     check
         .problems
         .extend(auth_section_problems(&file).into_iter().map(both));
@@ -3518,7 +3540,9 @@ pub fn start_refusal(raw: &str, surface: Surface) -> Option<String> {
 /// the file satisfied before. A rule that could not be judged before was
 /// not satisfied, so breaking it is not new. A list value's entries are
 /// known by their own text: an entry is new only when no entry of the old
-/// list had its text. Problems about other settings never block a set.
+/// list had its text. Problems about other settings never block a set. A
+/// problem about no setting at all is answerable whenever it is new, known
+/// by its id, so no problem is ever invisible to a set.
 pub fn problems_added_by_set<'a>(
     before: &StartCheck,
     after: &'a StartCheck,
@@ -3529,13 +3553,17 @@ pub fn problems_added_by_set<'a>(
             || other.starts_with(&format!("{key}."))
             || key.starts_with(&format!("{other}."))
     };
+    let is_new = |problem: &StartProblem| before.problems.iter().all(|old| old.id != problem.id);
     after
         .problems
         .iter()
-        .filter(|problem| problem.keys.iter().any(|other| related(other)))
         .filter(|problem| {
-            if problem.entry {
-                before.problems.iter().all(|old| old.id != problem.id)
+            if problem.keys.is_empty() {
+                is_new(problem)
+            } else if !problem.keys.iter().any(|other| related(other)) {
+                false
+            } else if problem.entry {
+                is_new(problem)
             } else if problem.cross_key {
                 let was_broken = before.problems.iter().any(|old| old.id == problem.id);
                 let was_unjudgeable = before.unjudgeable_rules.contains(&problem.id);
@@ -3568,39 +3596,62 @@ fn migrated_beside_auth(file: &toml::Table) -> Option<(toml::Table, Vec<(String,
     Some((toml::from_str::<toml::Table>(&migrated).ok()?, failures))
 }
 
-/// Every setting of the wrong type in `table`, each field judged on its
-/// own: (where it is, its dotted key, the kind of problem). A section that
-/// fails although none of its fields does on its own is listed whole.
+/// Every setting of the wrong type in `table`, each judged on its own down
+/// to the field that is wrong, inside a provider or any other table:
+/// (where it is, its dotted key, the kind of problem). A table that fails
+/// although none of its entries does on its own is listed whole.
 fn wrong_typed_settings(table: &toml::Table) -> Vec<(String, String, String)> {
     let mut found = Vec::new();
     for (section, value) in table {
-        if section_solo_ok(section, value.clone()) {
-            continue;
-        }
-        let mut any_field = false;
-        if let toml::Value::Table(fields) = value {
-            for (field, field_value) in fields {
-                let mut alone = toml::Table::new();
-                alone.insert(field.clone(), field_value.clone());
-                if !section_solo_ok(section, toml::Value::Table(alone.clone())) {
-                    any_field = true;
-                    found.push((
-                        format!("[{section}] {field}"),
-                        format!("{section}.{field}"),
-                        section_solo_problem(section, toml::Value::Table(alone)),
-                    ));
-                }
-            }
-        }
-        if !any_field {
-            found.push((
-                format!("[{section}]"),
-                section.clone(),
-                section_solo_problem(section, value.clone()),
-            ));
+        if !section_solo_ok(section, value.clone()) {
+            wrong_typed_inside(section, &mut Vec::new(), value, &mut found);
         }
     }
     found
+}
+
+/// [`wrong_typed_settings`] for `value`, at `inner` inside `section`, which
+/// fails on its own: the entries inside it that fail on their own, narrowed
+/// the same way, or `value` itself when none does.
+fn wrong_typed_inside(
+    section: &str,
+    inner: &mut Vec<String>,
+    value: &toml::Value,
+    found: &mut Vec<(String, String, String)>,
+) {
+    // `value` alone, at its place inside `section`.
+    let alone = |inner: &[String], value: &toml::Value| {
+        inner.iter().rev().fold(value.clone(), |child, key| {
+            let mut table = toml::Table::new();
+            table.insert(key.clone(), child);
+            toml::Value::Table(table)
+        })
+    };
+    let before = found.len();
+    if let toml::Value::Table(entries) = value {
+        for (key, entry) in entries {
+            inner.push(key.clone());
+            if !section_solo_ok(section, alone(inner, entry)) {
+                wrong_typed_inside(section, inner, entry, found);
+            }
+            inner.pop();
+        }
+    }
+    if found.len() == before {
+        let (place, key) = if inner.is_empty() {
+            (format!("[{section}]"), section.to_string())
+        } else {
+            (
+                format!("[{section}] {}", inner.join(".")),
+                format!("{section}.{}", inner.join(".")),
+            )
+        };
+        found.push((
+            place,
+            key,
+            section_solo_problem(section, alone(inner, value)),
+        ));
+    }
 }
 
 /// The checks a start makes on the config it read: the server host and
@@ -3739,10 +3790,7 @@ pub fn auth_problems_of(raw: &str) -> Vec<crate::config_auth::Problem> {
             ))];
         }
     };
-    let mut problems: Vec<crate::config_auth::Problem> = misplaced_auth_problems(raw)
-        .into_iter()
-        .map(crate::config_auth::Problem::plain)
-        .collect();
+    let mut problems = misplaced_auth_problem_list(raw);
     problems.extend(auth_section_problems(&file));
     problems
 }
@@ -4029,6 +4077,23 @@ pub fn load_corrections_of(raw: &str) -> Vec<(String, String)> {
         .parse::<toml_edit::DocumentMut>()
         .map(|doc| crate::config_migrate::retired_provider_prunes(&doc))
         .unwrap_or_default();
+    // A wrong-typed value `dux server` reads as its default (the terminal
+    // UI will not start with it at all).
+    if let Some((rest, _)) = toml::from_str::<toml::Table>(raw)
+        .ok()
+        .and_then(|file| migrated_beside_auth(&file))
+    {
+        found.extend(
+            wrong_typed_settings(&rest)
+                .into_iter()
+                .map(|(place, key, kind)| {
+                    (
+                        key,
+                        format!("{place}: {kind}, so it is read as its default"),
+                    )
+                }),
+        );
+    }
     if let Ok(config) = config_from_text_as_written(raw) {
         found.extend(load_corrections(config).1);
     }
@@ -6605,10 +6670,7 @@ max_websocket_connections = 16
                 "auth.password_hash",
             ),
             ("[auht]\nrequire = \"network\"\n".to_string(), "[auht]"),
-            (
-                format!("[ui]\npassword_hash = \"{hash}\"\n"),
-                "ui.password_hash",
-            ),
+            (format!("password_hash = \"{hash}\"\n"), "password_hash"),
             (
                 "[server.Auth]\nrequire = \"network\"\n".to_string(),
                 "server.Auth",
@@ -6624,6 +6686,53 @@ max_websocket_connections = 16
         // section real older configs carry (no password hash in it) still loads.
         recover_config("[ui]\nsomething_new = 1\n[server.limits]\nx = 1\n").expect("loads");
         recover_config("[auth]\nusername = \"ada\"\n").expect("the retired section loads");
+        // A name the user chose is never a misplaced hash, nor is a key of a
+        // section no auth setting could be meant for.
+        for body in [
+            "[env]\npassword_hash = \"x\"\n",
+            "[providers.password_hash]\ncommand = \"mytool\"\n",
+            "[providers.mytool]\ncommand = \"mytool\"\npassword_hash = \"x\"\n",
+            "[macros.password_hash]\ntext = \"x\"\n",
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n[projects.env]\npassword_hash = \"x\"\n",
+            "[ui]\npassword_hash = \"x\"\n",
+        ] {
+            assert_eq!(
+                misplaced_auth_problems(body),
+                Vec::<String>::new(),
+                "{body}"
+            );
+        }
+    }
+
+    /// A problem about no setting is answerable for any set that makes it
+    /// appear, and never for one that leaves it as it was.
+    #[test]
+    fn a_problem_about_no_setting_counts_against_a_set_whenever_it_is_new() {
+        let keyless = |message: &str| {
+            StartProblem::new(crate::config_auth::Problem::plain(message), true, true)
+        };
+        let check = |problems: Vec<StartProblem>| StartCheck {
+            problems,
+            unjudgeable_rules: Vec::new(),
+        };
+        let before = check(vec![keyless("already there")]);
+        let after = check(vec![keyless("already there"), keyless("new")]);
+        let added = problems_added_by_set(&before, &after, "ui.left_width_pct");
+        let added: Vec<&str> = added.iter().map(|p| p.detail.as_str()).collect();
+        assert_eq!(added, vec!["new"]);
+    }
+
+    /// A wrong-typed field inside a provider is a problem of that field, not
+    /// of the whole provider.
+    #[test]
+    fn a_wrong_typed_field_inside_a_provider_is_named_by_the_field() {
+        let problems = start_problems_of("[providers.mytool]\ncommand = \"m\"\nargs = \"oops\"\n");
+        let keys: Vec<&Vec<String>> = problems.iter().map(|p| &p.keys).collect();
+        assert_eq!(
+            keys,
+            vec![&vec!["providers.mytool.args".to_string()]],
+            "{problems:?}"
+        );
     }
 }
 

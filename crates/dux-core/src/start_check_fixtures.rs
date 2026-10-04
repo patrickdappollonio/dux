@@ -32,10 +32,16 @@ pub const FIXTURES: &[Fixture] = &[
         stops_dux_server: true,
     },
     Fixture {
-        name: "a password hash outside [server.auth]",
-        text: "[defaults]\npassword_hash = \"x\"\n",
+        name: "a password hash directly under [server]",
+        text: "[server]\npassword_hash = \"x\"\n",
         stops_terminal_ui: true,
         stops_dux_server: true,
+    },
+    Fixture {
+        name: "an environment variable and a provider named password_hash",
+        text: "[env]\npassword_hash = \"x\"\n\n[providers.password_hash]\ncommand = \"mytool\"\n",
+        stops_terminal_ui: false,
+        stops_dux_server: false,
     },
     Fixture {
         name: "a [server.auth] value out of range",

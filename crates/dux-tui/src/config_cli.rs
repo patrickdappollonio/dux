@@ -71,6 +71,17 @@ pub(crate) fn run_get(
     };
     let report = config_keys::get_report(&raw, &key)?;
     let hide = key.is_sensitive() && !show;
+    // Every surface that starts with the file uses the same value, so it is
+    // said once, for the surfaces that use it; each one that will not start
+    // is named on its own.
+    let refuses = |surface: Surface| report.refused_by.iter().any(|(s, _)| *s == surface);
+    let users = match (refuses(Surface::TerminalUi), refuses(Surface::DuxServer)) {
+        (false, false) => "dux",
+        (true, false) => "dux server",
+        (false, true) => "the terminal UI",
+        (true, true) => "dux",
+    };
+    let corrected = !report.corrections.is_empty();
     match report.value {
         GetValue::Set(_) if hide => writeln!(
             err,
@@ -83,12 +94,12 @@ pub(crate) fn run_get(
             match key.path.as_slice() {
                 [section, name, field] if section == "providers" && field == "command" => writeln!(
                     err,
-                    "(config.toml lists providers.{name} without a command, so as dux reads it \
-                     the command is empty: that provider has no command and cannot start)"
+                    "(config.toml lists providers.{name} without a command, so as {users} reads \
+                     it the command is empty: that provider has no command and cannot start)"
                 )?,
                 _ => writeln!(
                     err,
-                    "({path} is not in config.toml; as dux reads the file it is empty)"
+                    "({path} is not in config.toml; as {users} reads the file it is empty)"
                 )?,
             }
         }
@@ -96,14 +107,14 @@ pub(crate) fn run_get(
             writeln!(out, "{value}")?;
             writeln!(
                 err,
-                "({path} is not set in config.toml; dux uses this value)"
+                "({path} is not set in config.toml; {users} uses this value)"
             )?;
         }
-        GetValue::Unset if report.correction.is_some() => {}
+        GetValue::Unset if corrected => {}
         GetValue::Unset => writeln!(err, "{path} is not set")?,
         GetValue::Unknown { in_file, reason } => {
             match in_file {
-                Some(_) if key.is_sensitive() && !show => writeln!(
+                Some(_) if hide => writeln!(
                     err,
                     "{path} is set in config.toml; it can hold secrets, so its value is not \
                      printed. Add --show to print it."
@@ -118,28 +129,42 @@ pub(crate) fn run_get(
             )?;
         }
     }
-    if let Some(correction) = report.correction {
+    // One line per value the load changes: the setting asked for, or each
+    // entry inside the table asked for.
+    for correction in &report.corrections {
+        let at = &correction.path;
         let reason = correction.reason.trim_end_matches('.');
         let in_file = if hide {
-            "a value".to_string()
+            "a value"
         } else {
-            correction.in_file
+            correction.in_file.as_str()
         };
-        match config_keys::get(&raw, &key)? {
-            GetValue::Set(used) if !hide => writeln!(
+        match &correction.used {
+            Some(used) if !hide => writeln!(
                 err,
-                "(config.toml says {in_file}; dux uses {used} because {reason})"
+                "({at}: config.toml says {in_file}; {users} uses {used} because {reason})"
             )?,
-            GetValue::Set(_) => writeln!(
+            Some(_) => writeln!(
                 err,
-                "(config.toml says {in_file}; dux uses another because {reason})"
+                "({at}: config.toml says {in_file}; {users} uses another because {reason})"
             )?,
-            _ => writeln!(
+            None => writeln!(
                 err,
-                "(config.toml says {in_file}, but dux drops that entry when it loads the file, so \
-                 {path} is not set: {reason})"
+                "({at}: config.toml says {in_file}, but {users} drops that entry when it loads \
+                 the file, so it is not set: {reason})"
             )?,
         }
+    }
+    for (surface, why) in &report.refused_by {
+        let name = match surface {
+            Surface::TerminalUi => "the terminal UI",
+            Surface::DuxServer => "dux server",
+        };
+        writeln!(
+            err,
+            "({name} will not start with this file, so it has no value in use for {path}: \
+             {why})"
+        )?;
     }
     Ok(())
 }
@@ -1375,9 +1400,18 @@ port = 3890
         crate::config::ensure_config(&paths).expect_err("the terminal UI refuses the file");
         assert!(said.contains("the terminal UI will not start"), "{said}");
         assert!(!said.contains("next time it starts"), "{said}");
+        // `get` answers for dux server, which reads the wrong-typed value as
+        // its default, and names the terminal UI as refusing the file.
         let (out, err) = get(&paths, "ui.left_width_pct");
-        assert_eq!(out, "wide\n");
-        assert!(err.contains("cannot be worked out"), "{err}");
+        assert_eq!(out, "20\n");
+        assert!(
+            err.contains("config.toml says wide; dux server uses 20"),
+            "{err}"
+        );
+        assert!(
+            err.contains("the terminal UI will not start with this file"),
+            "{err}"
+        );
     }
 
     const STRONG_PASSWORD: &str = "violet-quarry-71-snowmelt-bracket\n";
@@ -1555,6 +1589,158 @@ mod set_speaks_per_surface_tests {
         assert!(
             !said.contains("not in force yet"),
             "set says the password is not in force, but a running dux server applies it:\n{said}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod names_fields_and_per_surface_get_tests {
+    use super::*;
+
+    struct Piped(&'static str);
+    impl SecretSource for Piped {
+        fn read_stdin(&mut self) -> Result<Password> {
+            Ok(Password::new(self.0.to_string()))
+        }
+        fn prompt_twice(
+            &mut self,
+            _: &str,
+            _: Option<Meter<'_>>,
+        ) -> Result<Option<(Password, Password)>> {
+            Ok(None)
+        }
+    }
+
+    fn paths_with(body: &str) -> (tempfile::TempDir, DuxPaths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        std::fs::write(&paths.config_path, body).unwrap();
+        (tmp, paths)
+    }
+
+    fn assert_set_adds_no_start_problem(list: &[&str], secrets: &mut dyn SecretSource) {
+        let before = "[server]\nport = 3890\n";
+        let (_tmp, paths) = paths_with(before);
+        assert_eq!(
+            dux_core::config::start_refusal(before, dux_core::config::Surface::TerminalUi),
+            None
+        );
+        let args: Vec<String> = list.iter().map(|s| s.to_string()).collect();
+        let mut out = Vec::new();
+        let result = run_set(&args, &paths, secrets, &mut out);
+        let after = std::fs::read_to_string(&paths.config_path).unwrap();
+        if result.is_ok() {
+            for surface in [
+                dux_core::config::Surface::TerminalUi,
+                dux_core::config::Surface::DuxServer,
+            ] {
+                assert_eq!(
+                    dux_core::config::start_refusal(&after, surface),
+                    None,
+                    "`dux config set {list:?}` succeeded on a file every surface started with, \
+                     and now {surface:?} refuses it:\n{after}"
+                );
+            }
+            crate::config::ensure_config(&paths).expect("the terminal UI still starts");
+        }
+    }
+
+    /// A provider named `password_hash` is an ordinary provider, but the set
+    /// writes it and then neither surface will start.
+    #[test]
+    fn setting_a_provider_named_password_hash_never_writes_a_file_dux_refuses() {
+        assert_set_adds_no_start_problem(
+            &["providers.password_hash.command", "mytool"],
+            &mut Piped(""),
+        );
+    }
+
+    /// Same for an environment variable named `password_hash`, a valid name
+    /// by the env rule dux starts with.
+    #[test]
+    fn setting_an_env_variable_named_password_hash_never_writes_a_file_dux_refuses() {
+        assert_set_adds_no_start_problem(&["env.password_hash", "--stdin"], &mut Piped("x"));
+    }
+
+    /// A wrong-typed `args` already in a provider blocks a set of another
+    /// key of that provider, although the set adds nothing.
+    #[test]
+    fn a_problem_already_in_a_providers_args_never_blocks_a_set_of_its_other_keys() {
+        let body = "[providers.mytool]\ncommand = \"mytool\"\nargs = \"oops\"\n";
+        let (_tmp, paths) = paths_with(body);
+        let mut out = Vec::new();
+        let result = run_set(
+            &[
+                "providers.mytool.install_hint".to_string(),
+                "brew install mytool".to_string(),
+            ],
+            &paths,
+            &mut Piped(""),
+            &mut out,
+        );
+        assert!(
+            result.is_ok(),
+            "a set of providers.mytool.install_hint was refused over a problem the file \
+             already had in providers.mytool.args: {:#}",
+            result.unwrap_err()
+        );
+    }
+
+    /// With a problem only the terminal UI refuses (an env value), dux server
+    /// starts and uses the file's port, but get says that value cannot be
+    /// worked out.
+    #[test]
+    fn get_reports_the_value_dux_server_uses_beside_a_terminal_ui_only_problem() {
+        let (_tmp, paths) = paths_with("[env]\nFOO = \"${\"\n\n[server]\nport = 4000\n");
+        let raw = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert_eq!(
+            dux_core::config::start_refusal(&raw, dux_core::config::Surface::DuxServer),
+            None,
+            "precondition: dux server starts with this file"
+        );
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run_get(&["server.port".to_string()], &paths, &mut out, &mut err).unwrap();
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            !err.contains("cannot be worked out"),
+            "dux server runs with port 4000, but get says:\n{err}"
+        );
+    }
+
+    /// `get ui` on a file whose ui.terminal_font_size dux corrects at load
+    /// prints the file's 999 as the value, and says nothing of the default
+    /// dux uses in its place.
+    #[test]
+    fn get_of_a_table_says_when_dux_uses_a_corrected_value_inside_it() {
+        let (_tmp, paths) = paths_with("[ui]\nterminal_font_size = 999\n");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run_get(
+            &["ui.terminal_font_size".to_string()],
+            &paths,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let single = String::from_utf8(out).unwrap();
+        assert!(
+            !single.contains("999"),
+            "precondition: the key itself reports the correction"
+        );
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run_get(&["ui".to_string()], &paths, &mut out, &mut err).unwrap();
+        let (out, err) = (
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        );
+        assert!(
+            !out.contains("terminal_font_size = 999") || err.contains("terminal_font_size"),
+            "get ui reports a font size of 999, which dux does not use, and says nothing:\n{out}{err}"
         );
     }
 }

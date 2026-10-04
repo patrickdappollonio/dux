@@ -4834,3 +4834,34 @@ mod port_zero_and_deprecated_key_start_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod entries_named_password_hash_start_tests {
+    use super::*;
+
+    /// An environment variable or a provider that happens to be named
+    /// `password_hash` is not a password hash; the terminal UI started with
+    /// such a file before the branch.
+    #[test]
+    fn the_terminal_ui_starts_with_an_env_variable_or_provider_named_password_hash() {
+        for body in [
+            "[env]\npassword_hash = \"x\"\n",
+            "[providers.password_hash]\ncommand = \"mytool\"\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let paths = DuxPaths {
+                config_path: root.join("config.toml"),
+                sessions_db_path: root.join("sessions.sqlite3"),
+                lock_path: root.join("dux.lock"),
+                worktrees_root: root.join("worktrees"),
+                root,
+            };
+            std::fs::write(&paths.config_path, body).unwrap();
+            let result = ensure_config(&paths)
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"));
+            assert!(result.is_ok(), "{body:?}: {result:?}");
+        }
+    }
+}
