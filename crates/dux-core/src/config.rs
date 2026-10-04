@@ -3198,15 +3198,169 @@ pub fn plaintext_password_problems(raw: &str) -> Vec<crate::config_auth::Problem
 /// file, `--show` included: it is never echoed.
 pub const PLAINTEXT_PASSWORD_NOT_SHOWN: &str = "(a plaintext password; not shown, and not read)";
 
-/// Whether the key at `path` (keys only) holds a plaintext password: its
-/// name is, in [`auth_key_form`], a setting the command line takes and the
-/// file never holds (`password`), and it is not a name the user chose (an
-/// `[env]` variable called that). No printer ever shows its value.
-pub fn is_plaintext_password_path(path: &[String]) -> bool {
-    let Some((last, parent)) = path.split_last() else {
-        return false;
+/// One step of a key path in a config file: a key as the file writes it (a
+/// quoted key holding dots is one key), or an entry of an array.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathStep {
+    Key(String),
+    Index(usize),
+}
+
+impl PathStep {
+    /// This step as the formatter takes it.
+    pub fn as_part(&self) -> PathPart<'_> {
+        match self {
+            PathStep::Key(key) => PathPart::Key(key),
+            PathStep::Index(index) => PathPart::Index(*index),
+        }
+    }
+}
+
+/// A plaintext password written in a config file, exactly where the start
+/// check found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaintextPassword {
+    /// The key's whole path as the start check's walk saw it.
+    pub steps: Vec<PathStep>,
+    /// The lines the key and its whole value sit on in the file's text,
+    /// counted from zero.
+    pub lines: std::ops::RangeInclusive<usize>,
+}
+
+/// THE answer to "is this a plaintext password": every plaintext password
+/// the start check finds in the file `raw` (the problems
+/// [`plaintext_password_problems`] gives), each with where it is. Every
+/// printer hides what this names and decides nothing of its own. Empty when
+/// `raw` is not TOML: a printer then prints none of the file's text.
+pub fn plaintext_passwords(raw: &str) -> Vec<PlaintextPassword> {
+    let Ok(file) = toml::from_str::<toml::Table>(raw) else {
+        return Vec::new();
     };
-    virtual_auth_setting(last).is_some() && !names_a_user_entry(parent)
+    let doc = toml_edit::Document::parse(raw).ok();
+    let last_line = raw.lines().count().saturating_sub(1);
+    plaintext_password_steps(&toml::Value::Table(file))
+        .into_iter()
+        .map(|steps| {
+            let lines = doc
+                .as_ref()
+                .and_then(|doc| extent_of(doc.as_item(), &steps))
+                .map_or(0..=last_line, |extent| {
+                    line_index(raw, extent.start)..=line_index(raw, extent.end.saturating_sub(1))
+                });
+            PlaintextPassword { steps, lines }
+        })
+        .collect()
+}
+
+/// The paths of the plaintext passwords the start check finds in the parsed
+/// file `file`.
+fn plaintext_password_steps(file: &toml::Value) -> Vec<Vec<PathStep>> {
+    let mut found = Vec::new();
+    misplaced_auth_settings(file, &mut AuthWalk::default(), &mut found);
+    found
+        .into_iter()
+        .filter(|misplaced| misplaced.virtual_path.is_some())
+        .map(|misplaced| misplaced.shown)
+        .collect()
+}
+
+/// The plaintext passwords the start check finds in `value`, judged as it
+/// sits at `path` (keys only, as a printer is asked for them) in a file that
+/// holds nothing else: what [`plaintext_passwords`] says of the same value
+/// in the user's file, for a printer that holds a value rather than the
+/// text it came from. Each is a whole path from the file's top.
+pub fn plaintext_passwords_at(path: &[String], value: &toml::Value) -> Vec<Vec<PathStep>> {
+    let mut file = value.clone();
+    for key in path.iter().rev() {
+        let mut table = toml::Table::new();
+        table.insert(key.clone(), file);
+        file = toml::Value::Table(table);
+    }
+    plaintext_password_steps(&file)
+}
+
+/// The zero-based line of byte `offset` in `raw`.
+fn line_index(raw: &str, offset: usize) -> usize {
+    raw[..offset.min(raw.len())].matches('\n').count()
+}
+
+/// A place in a parsed document: a whole item, a table in an array of
+/// tables, or a value inside an inline value.
+#[derive(Clone, Copy)]
+enum DocNode<'a> {
+    Item(&'a toml_edit::Item),
+    Table(&'a toml_edit::Table),
+    Value(&'a toml_edit::Value),
+}
+
+impl<'a> DocNode<'a> {
+    /// The child at `step`, with where its key starts.
+    fn child(self, step: &PathStep) -> Option<(DocNode<'a>, Option<usize>)> {
+        let key_start = |key: &toml_edit::Key| key.span().map(|span| span.start);
+        match (self, step) {
+            (
+                DocNode::Item(toml_edit::Item::Table(table)) | DocNode::Table(table),
+                PathStep::Key(key),
+            ) => {
+                let (key, child) = table.get_key_value(key)?;
+                Some((DocNode::Item(child), key_start(key)))
+            }
+            (
+                DocNode::Item(toml_edit::Item::Value(toml_edit::Value::InlineTable(table)))
+                | DocNode::Value(toml_edit::Value::InlineTable(table)),
+                PathStep::Key(key),
+            ) => {
+                let (key, child) = table.get_key_value(key)?;
+                Some((DocNode::Item(child), key_start(key)))
+            }
+            (DocNode::Item(toml_edit::Item::ArrayOfTables(tables)), PathStep::Index(index)) => {
+                Some((DocNode::Table(tables.get(*index)?), None))
+            }
+            (
+                DocNode::Item(toml_edit::Item::Value(toml_edit::Value::Array(items)))
+                | DocNode::Value(toml_edit::Value::Array(items)),
+                PathStep::Index(index),
+            ) => Some((DocNode::Value(items.get(*index)?), None)),
+            _ => None,
+        }
+    }
+
+    /// The bytes this node spans, everything below it included.
+    fn extent(self) -> Option<std::ops::Range<usize>> {
+        let (own, children): (Option<std::ops::Range<usize>>, Vec<DocNode<'a>>) = match self {
+            DocNode::Item(toml_edit::Item::Value(value)) | DocNode::Value(value) => {
+                (value.span(), Vec::new())
+            }
+            DocNode::Item(toml_edit::Item::Table(table)) | DocNode::Table(table) => (
+                table.span(),
+                table
+                    .iter()
+                    .map(|(_, child)| DocNode::Item(child))
+                    .collect(),
+            ),
+            DocNode::Item(toml_edit::Item::ArrayOfTables(tables)) => {
+                (None, tables.iter().map(DocNode::Table).collect())
+            }
+            DocNode::Item(toml_edit::Item::None) => (None, Vec::new()),
+        };
+        own.into_iter()
+            .chain(children.into_iter().filter_map(DocNode::extent))
+            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+    }
+}
+
+/// The bytes the key at `steps` and its whole value span in a parsed
+/// document.
+fn extent_of(root: &toml_edit::Item, steps: &[PathStep]) -> Option<std::ops::Range<usize>> {
+    let mut node = DocNode::Item(root);
+    let mut key_start = None;
+    for step in steps {
+        let (child, start) = node.child(step)?;
+        node = child;
+        key_start = start.or(key_start);
+    }
+    let extent = node.extent()?;
+    Some(key_start.map_or(extent.start, |start| start.min(extent.start))..extent.end)
 }
 
 /// [`misplaced_auth_problem_list`], each problem with whether it is a
@@ -3227,14 +3381,7 @@ fn misplaced_auth_problems_tagged(raw: &str) -> Vec<(crate::config_auth::Problem
         .map(|misplaced| {
             // Printed through the one formatter, array entries included; a
             // name it does not print is placed by its line.
-            let parts: Vec<PathPart<'_>> = misplaced
-                .shown
-                .iter()
-                .map(|step| match step {
-                    AuthStep::Key(key) => PathPart::Key(key),
-                    AuthStep::Index(index) => PathPart::Index(*index),
-                })
-                .collect();
+            let parts: Vec<PathPart<'_>> = misplaced.shown.iter().map(PathStep::as_part).collect();
             let shown = shown_parts(raw, &parts);
             let message = if let Some(path) = misplaced.virtual_path {
                 format!(
@@ -3260,17 +3407,11 @@ fn misplaced_auth_problems_tagged(raw: &str) -> Vec<(crate::config_auth::Problem
         .collect()
 }
 
-/// One step of [`misplaced_auth_settings`]' walk, as printed.
-enum AuthStep {
-    Key(String),
-    Index(usize),
-}
-
 /// Where [`misplaced_auth_settings`] is in the file.
 #[derive(Default)]
 struct AuthWalk {
     /// The path as printed: keys as written, array entries by index.
-    shown: Vec<AuthStep>,
+    shown: Vec<PathStep>,
     /// The keys as written, for attribution and the name rule.
     keys: Vec<String>,
     /// The keys with every quoted dotted key split into its parts: what the
@@ -3291,7 +3432,7 @@ struct AuthWalk {
 /// An auth setting [`misplaced_auth_settings`] found where dux does not read
 /// it.
 struct MisplacedAuth {
-    shown: Vec<AuthStep>,
+    shown: Vec<PathStep>,
     keys: Vec<String>,
     /// Whether it is a password hash, which is said as one.
     a_hash: bool,
@@ -3320,7 +3461,7 @@ fn misplaced_auth_settings(
                     && (walk.through_array
                         || walk.keys.first().map(String::as_str) != Some("projects"))
                     && names_a_user_entry(&walk.keys);
-                walk.shown.push(AuthStep::Key(key.clone()));
+                walk.shown.push(PathStep::Key(key.clone()));
                 walk.keys.push(key.clone());
                 if !a_name {
                     for (at, piece) in pieces.iter().enumerate() {
@@ -3338,14 +3479,7 @@ fn misplaced_auth_settings(
                             && is_exact_auth_setting(piece);
                         if !read_there {
                             found.push(MisplacedAuth {
-                                shown: walk
-                                    .shown
-                                    .iter()
-                                    .map(|step| match step {
-                                        AuthStep::Key(key) => AuthStep::Key(key.clone()),
-                                        AuthStep::Index(index) => AuthStep::Index(*index),
-                                    })
-                                    .collect(),
+                                shown: walk.shown.clone(),
                                 keys: walk.keys.clone(),
                                 a_hash: auth_key_form(piece) == auth_key_form("password_hash"),
                                 virtual_path: virtual_auth_setting(piece),
@@ -3373,7 +3507,7 @@ fn misplaced_auth_settings(
             walk.through_array = true;
             walk.through_other_array |= !the_projects_list;
             for (index, item) in items.iter().enumerate() {
-                walk.shown.push(AuthStep::Index(index));
+                walk.shown.push(PathStep::Index(index));
                 misplaced_auth_settings(item, walk, found);
                 walk.shown.pop();
             }
@@ -5781,6 +5915,88 @@ mod resolve_plan_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Every plaintext password the start check finds, with its whole path
+    /// as the walk saw it and the lines it spans, in every shape: through an
+    /// array of tables, a `[projects]` table, a quoted dotted key, over
+    /// several lines and as a table.
+    #[test]
+    fn plaintext_passwords_names_each_one_where_it_sits() {
+        use super::PathStep::{Index, Key};
+        let key = |name: &str| Key(name.to_string());
+        let cases: Vec<(&str, Vec<PathStep>, std::ops::RangeInclusive<usize>)> = vec![
+            (
+                "[[env]]\npassword = \"s\"\n",
+                vec![key("env"), Index(0), key("password")],
+                1..=1,
+            ),
+            (
+                "[projects.env]\npassword = \"s\"\n",
+                vec![key("projects"), key("env"), key("password")],
+                1..=1,
+            ),
+            (
+                "\"env.password\" = \"s\"\n",
+                vec![key("env.password")],
+                0..=0,
+            ),
+            (
+                "[server]\n\"auth.password\" = \"s\"\n",
+                vec![key("server"), key("auth.password")],
+                1..=1,
+            ),
+            (
+                "[ui]\nx = [{ password = \"s\" }]\n",
+                vec![key("ui"), key("x"), Index(0), key("password")],
+                1..=1,
+            ),
+            (
+                "[server.auth]\npassword = \"\"\"\ns\n\"\"\"\n",
+                vec![key("server"), key("auth"), key("password")],
+                1..=3,
+            ),
+            (
+                "[server.auth.password]\nvalue = \"s\"\n",
+                vec![key("server"), key("auth"), key("password")],
+                0..=1,
+            ),
+        ];
+        for (raw, steps, lines) in cases {
+            assert_eq!(
+                plaintext_passwords(raw),
+                vec![PlaintextPassword { steps, lines }],
+                "{raw:?}"
+            );
+            assert_eq!(plaintext_password_problems(raw).len(), 1, "{raw:?}");
+        }
+        // A project's own env variable called that is the user's name.
+        assert!(
+            plaintext_passwords("[[projects]]\npath = \"/p\"\nenv = { password = \"s\" }\n")
+                .is_empty()
+        );
+        assert!(plaintext_passwords("[env]\npassword = \"s\"\n").is_empty());
+        assert!(plaintext_passwords("password = \"s\"\nbroken =\n").is_empty());
+    }
+
+    /// A printer holding only a value judges it as the start check judges
+    /// the file it came from.
+    #[test]
+    fn plaintext_passwords_at_judges_a_value_where_it_sits() {
+        use super::PathStep::Key;
+        let value: toml::Value = toml::from_str::<toml::Table>("env = { password = \"s\" }\n")
+            .map(toml::Value::Table)
+            .expect("parses");
+        assert_eq!(
+            plaintext_passwords_at(&["projects".to_string()], &value),
+            vec![vec![
+                Key("projects".into()),
+                Key("env".into()),
+                Key("password".into())
+            ]]
+        );
+        let inner = value.get("env").expect("env").clone();
+        assert!(plaintext_passwords_at(&["env".to_string()], &inner).is_empty());
+    }
+
     use std::path::Path;
 
     use super::*;

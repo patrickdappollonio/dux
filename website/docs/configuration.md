@@ -183,8 +183,10 @@ It is careful with your data:
 - The preview holds back the same values `get` does: an `[env]` value, a project's
   values, a key binding dux cannot read and anything below a setting it does not
   recognize show as their name and `(not shown)`, and comments inside `[env]` and
-  `[projects]` are hidden too. Add `--show` to see them. A plaintext web UI password is
-  never shown, `--show` or not. `dux config regenerate` previews the same way.
+  `[projects]` (including one at the end of a header line) are hidden too. Add `--show`
+  to see them. A plaintext web UI password is never shown, `--show` or not.
+  `dux config regenerate` previews the same way, and when your file is not valid TOML
+  its preview shows none of it, `--show` included, and names the line to fix instead.
 - If the file cannot be parsed, the command refuses and changes nothing rather than
   falling back to defaults, which would throw your settings away.
 

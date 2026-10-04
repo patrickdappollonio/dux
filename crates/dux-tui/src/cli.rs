@@ -178,16 +178,20 @@ fn run_diff(paths: &DuxPaths, raw: bool) -> Result<()> {
 }
 
 fn run_diff_raw(_current_raw: &str, current: &Config) -> Result<()> {
+    print!("{}", raw_diff_text(current));
+    Ok(())
+}
+
+/// What `dux config diff --raw` prints for `current`.
+pub(crate) fn raw_diff_text(current: &Config) -> String {
     let bindings = RuntimeBindings::from_keys_config(&current.keys);
     let default_rendered = config::render_default_config();
     // Re-render current config to normalize it before diffing.
     let current_rendered = render_config_for_diff(current, &bindings);
     if current_rendered == default_rendered {
-        println!("config matches defaults, so there are no differences");
-        return Ok(());
+        return "config matches defaults, so there are no differences\n".to_string();
     }
-    print_unified_diff("default", "current", &default_rendered, &current_rendered);
-    Ok(())
+    unified_diff("default", "current", &default_rendered, &current_rendered)
 }
 
 fn run_diff_summary(current: &Config) -> Result<()> {
@@ -651,10 +655,6 @@ fn render_config_for_diff(config: &Config, bindings: &RuntimeBindings) -> String
     config::render_config_with(config, bindings)
 }
 
-fn print_unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) {
-    print!("{}", unified_diff(label_a, label_b, a, b));
-}
-
 fn unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) -> String {
     let diff = similar::TextDiff::from_lines(a, b);
     let mut out = format!("--- {label_a}\n+++ {label_b}\n");
@@ -668,30 +668,29 @@ fn unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) -> String {
 /// one value printer's rules (see `config_keys::shown_file_text`), so a
 /// plaintext password is never shown and, without `show`, nothing below a
 /// hidden key or in `[env]` or `[projects]` either.
-fn shown_for_preview(raw: &str, show: bool) -> String {
+fn shown_for_preview(raw: &str, show: bool) -> Result<String> {
     dux_core::config_keys::shown_file_text(raw, show, &crate::config::binding_is_understood)
+}
+
+/// The diff of `a` against `b`, each shown as a printer may show it; when
+/// either is not TOML, only why nothing of it is shown.
+fn preview(label_a: &str, label_b: &str, a: &str, b: &str, show: bool) -> String {
+    match (shown_for_preview(a, show), shown_for_preview(b, show)) {
+        (Ok(a), Ok(b)) => unified_diff(label_a, label_b, &a, &b),
+        (Err(error), _) | (_, Err(error)) => format!("{error:#}\n"),
+    }
 }
 
 /// What `dux config regenerate` previews: the user's file against the
 /// fresh default, each side shown as a printer may show it.
 pub(crate) fn regenerate_preview(current: &str, fresh: &str, show: bool) -> String {
-    unified_diff(
-        "current",
-        "default",
-        &shown_for_preview(current, show),
-        &shown_for_preview(fresh, show),
-    )
+    preview("current", "default", current, fresh, show)
 }
 
 /// What `dux config restore-docs` previews: the user's file against the
 /// documented one, each side shown as a printer may show it.
 pub(crate) fn restore_docs_preview(raw: &str, restored: &str, show: bool) -> String {
-    unified_diff(
-        "current",
-        "restored",
-        &shown_for_preview(raw, show),
-        &shown_for_preview(restored, show),
-    )
+    preview("current", "restored", raw, restored, show)
 }
 
 // ---------------------------------------------------------------------------
@@ -2325,3 +2324,7 @@ mod config_diff_names_tests {
 #[cfg(test)]
 #[path = "cli/preview_leak_tests.rs"]
 mod preview_leak_tests;
+
+#[cfg(test)]
+#[path = "cli/plaintext_shape_preview_tests.rs"]
+mod plaintext_shape_preview_tests;

@@ -1249,25 +1249,34 @@ pub const NOT_SHOWN: &str = "(not shown)";
 /// The user's config file `raw` as a printer may show it line by line (the
 /// previews of `dux config regenerate` and `restore-docs` diff it): every
 /// line dux can map to a key path goes through the same rules as the one
-/// value printer. A plaintext password is never shown, `show` or not; without
-/// `show`, a value whose path is hidden or sensitive (anything under an
-/// unknown key or a name that breaks its map's rule, an `[env]` value, a
+/// value printer. A plaintext password (each one [`crate::config::plaintext_passwords`]
+/// finds, by its path and by its lines) is never shown, `show` or not;
+/// without `show`, a value whose path is hidden or sensitive (anything under
+/// an unknown key or a name that breaks its map's rule, an `[env]` value, a
 /// project's values, a binding `binding_understood` refuses) is its key, as
 /// the formatter prints it, and `(not shown)`, and a comment inside a hidden
-/// or sensitive table is a placeholder too, since a comment can hold a pasted
-/// token as well. Every other line is as the user wrote it.
-pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) -> bool) -> String {
-    /// One step of a path: a key, or an entry of an array of tables.
-    #[derive(Clone)]
-    enum Step {
-        Key(String),
-        Index(usize),
-    }
+/// or sensitive table, a header's trailing one included, is a placeholder
+/// too, since a comment can hold a pasted token as well. Every other line is
+/// as the user wrote it.
+///
+/// An error, naming the parse problem by line and kind only, when `raw` is
+/// not TOML: dux cannot tell where anything sits in such a file, a secret
+/// included, so none of its text is shown, `show` or not.
+pub fn shown_file_text(
+    raw: &str,
+    show: bool,
+    binding_understood: &dyn Fn(&str) -> bool,
+) -> Result<String> {
+    use crate::config::PathStep as Step;
     /// What a line holds.
     enum Entry {
         Header {
             line: usize,
             path: Vec<Step>,
+            /// Whether it opens an entry of an array of tables.
+            array: bool,
+            /// The header itself, `[` to `]`, as written.
+            text: Option<std::ops::Range<usize>>,
         },
         Value {
             start: usize,
@@ -1284,12 +1293,7 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
         Plaintext,
     }
     fn parts(path: &[Step]) -> Vec<crate::config::PathPart<'_>> {
-        path.iter()
-            .map(|step| match step {
-                Step::Key(key) => crate::config::PathPart::Key(key),
-                Step::Index(index) => crate::config::PathPart::Index(*index),
-            })
-            .collect()
+        path.iter().map(Step::as_part).collect()
     }
     fn keys(path: &[Step]) -> Vec<String> {
         path.iter()
@@ -1299,34 +1303,21 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
             })
             .collect()
     }
-    let Ok(doc) = toml_edit::Document::parse(raw) else {
-        // Nothing can be mapped; a line that reads as a plaintext password is
-        // still never shown, and without `show` nothing of the file is.
-        if !show {
-            return "# (config.toml is not valid TOML, so its lines are not shown; add --show \
-                    to see them)\n"
-                .to_string();
-        }
-        return raw
-            .lines()
-            .map(|line| match line.split_once('=') {
-                Some((key, _))
-                    if crate::config::is_plaintext_password_path(&[key
-                        .trim()
-                        .trim_matches('"')
-                        .to_string()]) =>
-                {
-                    format!(
-                        "{} = {}",
-                        key.trim_end(),
-                        crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN
-                    )
-                }
-                _ => line.to_string(),
-            })
-            .map(|line| line + "\n")
-            .collect();
-    };
+    if let Err(error) = toml::from_str::<toml::Table>(raw) {
+        anyhow::bail!(
+            "config.toml is not valid TOML ({}), so dux cannot tell where anything sits in it, a \
+             secret included, and shows none of its lines, not even with --show; fix it first",
+            crate::config::describe_toml_error(raw, &error)
+        );
+    }
+    let doc = toml_edit::Document::parse(raw).map_err(|error| {
+        anyhow::anyhow!(
+            "config.toml is not valid TOML ({}), so dux cannot tell where anything sits in it, a \
+             secret included, and shows none of its lines, not even with --show; fix it first",
+            crate::config::describe_toml_edit_error(raw, &error)
+        )
+    })?;
+    let passwords = crate::config::plaintext_passwords(raw);
     let starts: Vec<usize> = std::iter::once(0)
         .chain(raw.match_indices('\n').map(|(at, _)| at + 1))
         .collect();
@@ -1364,6 +1355,8 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
                         out.push(Entry::Header {
                             line: line_of(span.start),
                             path: path.clone(),
+                            array: false,
+                            text: Some(span),
                         });
                     }
                     walk(child, path, out, line_of);
@@ -1375,6 +1368,8 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
                             out.push(Entry::Header {
                                 line: line_of(span.start),
                                 path: path.clone(),
+                                array: true,
+                                text: Some(span),
                             });
                         }
                         walk(child, path, out, line_of);
@@ -1394,19 +1389,21 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
         crate::config::first_hidden_part_of(&parts(path))
             || matches!(keys.first().map(String::as_str), Some("env" | "projects"))
     };
+    // Whether a plaintext password sits at, below or above `path`.
+    let plaintext = |path: &[Step]| {
+        passwords
+            .iter()
+            .any(|password| password.steps.starts_with(path) || path.starts_with(&password.steps))
+    };
     // What a value at `path` (and every key inside it) makes of its line.
     fn mask_of(
         path: &[Step],
         value: &toml_edit::Value,
         show: bool,
         held_back: &dyn Fn(&[Step]) -> bool,
-        keys: &dyn Fn(&[Step]) -> Vec<String>,
         binding_understood: &dyn Fn(&str) -> bool,
     ) -> Mask {
         let mut mask = Mask::Shown;
-        if crate::config::is_plaintext_password_path(&keys(path)) {
-            return Mask::Plaintext;
-        }
         if !show && held_back(path) {
             mask = Mask::Hidden;
         }
@@ -1429,28 +1426,14 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
                 for (key, child) in table.iter() {
                     let mut at = path.to_vec();
                     at.push(Step::Key(key.to_string()));
-                    mask = mask.max(mask_of(
-                        &at,
-                        child,
-                        show,
-                        held_back,
-                        keys,
-                        binding_understood,
-                    ));
+                    mask = mask.max(mask_of(&at, child, show, held_back, binding_understood));
                 }
             }
             toml_edit::Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
                     let mut at = path.to_vec();
                     at.push(Step::Index(index));
-                    mask = mask.max(mask_of(
-                        &at,
-                        item,
-                        show,
-                        held_back,
-                        keys,
-                        binding_understood,
-                    ));
+                    mask = mask.max(mask_of(&at, item, show, held_back, binding_understood));
                 }
             }
             _ => {}
@@ -1463,20 +1446,52 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
     let newline = |line: &str| if line.ends_with('\n') { "\n" } else { "" };
     let mut headers: Vec<(usize, Vec<Step>)> = Vec::new();
     let mut in_value = vec![false; lines.len()];
+    let mut is_header = vec![false; lines.len()];
     for entry in &entries {
         match entry {
-            Entry::Header { line, path } => {
+            Entry::Header {
+                line,
+                path,
+                array,
+                text,
+            } => {
                 headers.push((*line, path.clone()));
-                if !show
-                    && crate::config::first_hidden_part_of(&parts(path))
-                    && let Some(text) = lines.get(*line)
-                {
-                    shown[*line] = Some(format!(
-                        "[{}]{}",
-                        crate::config::shown_parts(raw, &parts(path)),
-                        newline(text)
-                    ));
+                let Some(line_text) = lines.get(*line) else {
+                    continue;
+                };
+                is_header[*line] = true;
+                if show || !held_back(path) {
+                    continue;
                 }
+                // Held back: the header as dux names it, and never the
+                // comment after it.
+                let (open, close) = if *array { ("[[", "]]") } else { ("[", "]") };
+                let header = match text {
+                    Some(span) if !crate::config::first_hidden_part_of(&parts(path)) => {
+                        raw[span.clone()].trim().to_string()
+                    }
+                    _ => {
+                        let named = if *array {
+                            &path[..path.len().saturating_sub(1)]
+                        } else {
+                            &path[..]
+                        };
+                        format!(
+                            "{open}{}{close}",
+                            crate::config::shown_parts(raw, &parts(named))
+                        )
+                    }
+                };
+                let after = text
+                    .as_ref()
+                    .map_or(*line_text, |span| raw.get(span.end..).unwrap_or_default());
+                let after = after.split('\n').next().unwrap_or_default();
+                let comment = if after.contains('#') {
+                    " # (comment not shown)"
+                } else {
+                    ""
+                };
+                shown[*line] = Some(format!("{header}{comment}{}", newline(line_text)));
             }
             Entry::Value {
                 start,
@@ -1489,7 +1504,11 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
                         *flag = true;
                     }
                 }
-                let mask = mask_of(path, value, show, &held_back, &keys, binding_understood);
+                let mask = if plaintext(path) {
+                    Mask::Plaintext
+                } else {
+                    mask_of(path, value, show, &held_back, binding_understood)
+                };
                 if mask == Mask::Shown {
                     continue;
                 }
@@ -1512,8 +1531,24 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
                     Mask::Plaintext => crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN,
                     _ => NOT_SHOWN,
                 };
+                // The value's own trailing comment goes with it.
+                let commented = value
+                    .decor()
+                    .suffix()
+                    .and_then(|suffix| {
+                        suffix
+                            .span()
+                            .and_then(|span| raw.get(span))
+                            .or_else(|| suffix.as_str())
+                    })
+                    .is_some_and(|suffix| suffix.contains('#'));
+                let comment = if commented {
+                    " # (comment not shown)"
+                } else {
+                    ""
+                };
                 shown[*start] = Some(format!(
-                    "{indent}{key_text} = {placeholder}{}",
+                    "{indent}{key_text} = {placeholder}{comment}{}",
                     newline(text)
                 ));
                 // A value written over several lines is one line here.
@@ -1522,6 +1557,23 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
                         *slot = None;
                     }
                 }
+            }
+        }
+    }
+    // Every line a plaintext password spans is masked above, by its path;
+    // one still as written (which no shape dux knows leaves) goes too.
+    for password in &passwords {
+        for line in password.lines.clone() {
+            if is_header.get(line) == Some(&false)
+                && let (Some(Some(now)), Some(was)) = (shown.get(line), lines.get(line))
+                && now == was
+                && !now.trim().is_empty()
+            {
+                shown[line] = Some(format!(
+                    "# {}{}",
+                    crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN,
+                    newline(was)
+                ));
             }
         }
     }
@@ -1540,7 +1592,7 @@ pub fn shown_file_text(raw: &str, show: bool, binding_understood: &dyn Fn(&str) 
             }
         }
     }
-    shown.into_iter().flatten().collect()
+    Ok(shown.into_iter().flatten().collect())
 }
 
 /// What `set` prints in place of a value that is, or holds, a table.
@@ -1581,12 +1633,16 @@ pub fn printed_value(
     if crate::config::path_is_hidden(path) {
         return None;
     }
-    if crate::config::is_plaintext_password_path(path) {
+    // Judged by the start check itself, never by a rule of the printer's own.
+    let passwords = crate::config::plaintext_passwords_at(path, value);
+    if passwords.iter().any(|password| is_at(password, path)) {
         return Some(crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN.to_string());
     }
     Some(match form {
-        ValueForm::Get => render(&names_hidden(raw, path, value)),
-        ValueForm::Line | ValueForm::Summary if holds_a_table(value) => {
+        ValueForm::Get => render(&names_hidden(raw, path, value, &passwords)),
+        // A password below `path` sits in a table, which is never written
+        // out on one line.
+        ValueForm::Line | ValueForm::Summary if holds_a_table(value) || !passwords.is_empty() => {
             A_TABLE_NOT_SHOWN.to_string()
         }
         ValueForm::Line => value.to_string(),
@@ -1606,32 +1662,59 @@ fn summarized(value: &toml::Value) -> String {
     }
 }
 
-/// `value`, at `path`, with every plaintext password below it (see
-/// [`crate::config::is_plaintext_password_path`]) replaced by the words that
-/// say what it is: the one rendering `--show` uses, which shows every name.
+/// Whether the plaintext password at `steps` is the key at `path` itself.
+fn is_at(steps: &[crate::config::PathStep], path: &[String]) -> bool {
+    steps.len() == path.len()
+        && steps
+            .iter()
+            .zip(path)
+            .all(|(step, key)| matches!(step, crate::config::PathStep::Key(at) if at == key))
+}
+
+/// `value`, at `path`, with every plaintext password the start check finds
+/// in it (see [`crate::config::plaintext_passwords_at`]) replaced by the
+/// words that say what it is: the one rendering `--show` uses, which shows
+/// every name.
 fn plaintext_masked(path: &[String], value: &toml::Value) -> toml::Value {
-    if crate::config::is_plaintext_password_path(path) {
-        return toml::Value::String(crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN.to_string());
+    use crate::config::PathStep;
+    fn masked(
+        at: &mut Vec<PathStep>,
+        value: &toml::Value,
+        passwords: &[Vec<PathStep>],
+    ) -> toml::Value {
+        if passwords.iter().any(|password| password == at) {
+            return toml::Value::String(crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN.to_string());
+        }
+        match value {
+            toml::Value::Table(table) => toml::Value::Table(
+                table
+                    .iter()
+                    .map(|(key, child)| {
+                        at.push(PathStep::Key(key.clone()));
+                        let child = masked(at, child, passwords);
+                        at.pop();
+                        (key.clone(), child)
+                    })
+                    .collect(),
+            ),
+            toml::Value::Array(items) => toml::Value::Array(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        at.push(PathStep::Index(index));
+                        let item = masked(at, item, passwords);
+                        at.pop();
+                        item
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
     }
-    match value {
-        toml::Value::Table(table) => toml::Value::Table(
-            table
-                .iter()
-                .map(|(key, child)| {
-                    let mut at = path.to_vec();
-                    at.push(key.clone());
-                    (key.clone(), plaintext_masked(&at, child))
-                })
-                .collect(),
-        ),
-        toml::Value::Array(items) => toml::Value::Array(
-            items
-                .iter()
-                .map(|item| plaintext_masked(path, item))
-                .collect(),
-        ),
-        other => other.clone(),
-    }
+    let passwords = crate::config::plaintext_passwords_at(path, value);
+    let mut at = path.iter().map(|key| PathStep::Key(key.clone())).collect();
+    masked(&mut at, value, &passwords)
 }
 
 /// Whether `value` is a table or holds one, in an array at any depth.
@@ -1646,21 +1729,22 @@ fn holds_a_table(value: &toml::Value) -> bool {
 /// `value`, at `path`, with every key below it the formatter does not name
 /// replaced by a marker naming its line, whose whole value is
 /// [`NOT_SHOWN`].
-fn names_hidden(raw: &str, path: &[String], value: &toml::Value) -> toml::Value {
-    /// One step of the walk: a key, or an element of an array.
-    enum Step {
-        Key(String),
-        Index(usize),
-    }
+fn names_hidden(
+    raw: &str,
+    path: &[String],
+    value: &toml::Value,
+    passwords: &[Vec<crate::config::PathStep>],
+) -> toml::Value {
+    use crate::config::PathStep as Step;
     fn parts(path: &[Step]) -> Vec<crate::config::PathPart<'_>> {
-        path.iter()
-            .map(|step| match step {
-                Step::Key(key) => crate::config::PathPart::Key(key),
-                Step::Index(index) => crate::config::PathPart::Index(*index),
-            })
-            .collect()
+        path.iter().map(Step::as_part).collect()
     }
-    fn shown(raw: &str, path: &mut Vec<Step>, value: &toml::Value) -> toml::Value {
+    fn shown(
+        raw: &str,
+        path: &mut Vec<Step>,
+        value: &toml::Value,
+        passwords: &[Vec<Step>],
+    ) -> toml::Value {
         match value {
             toml::Value::Table(table) => {
                 let mut out = toml::Table::new();
@@ -1670,19 +1754,12 @@ fn names_hidden(raw: &str, path: &[String], value: &toml::Value) -> toml::Value 
                     // Once a key is hidden, nothing below it is printed: its
                     // whole value (a table or an array can hold more names
                     // pasted in the wrong place) is the placeholder.
-                    let keys: Vec<String> = path
-                        .iter()
-                        .filter_map(|step| match step {
-                            Step::Key(key) => Some(key.clone()),
-                            Step::Index(_) => None,
-                        })
-                        .collect();
                     if crate::config::part_is_hidden(&at) {
                         out.insert(
                             format!("<{}>", crate::config::shown_parts(raw, &at)),
                             toml::Value::String(NOT_SHOWN.to_string()),
                         );
-                    } else if crate::config::is_plaintext_password_path(&keys) {
+                    } else if passwords.iter().any(|password| password == path) {
                         // A plaintext password is never echoed.
                         out.insert(
                             key.clone(),
@@ -1691,7 +1768,7 @@ fn names_hidden(raw: &str, path: &[String], value: &toml::Value) -> toml::Value 
                             ),
                         );
                     } else {
-                        out.insert(key.clone(), shown(raw, path, child));
+                        out.insert(key.clone(), shown(raw, path, child, passwords));
                     }
                     path.pop();
                 }
@@ -1703,7 +1780,7 @@ fn names_hidden(raw: &str, path: &[String], value: &toml::Value) -> toml::Value 
                     .enumerate()
                     .map(|(index, item)| {
                         path.push(Step::Index(index));
-                        let item = shown(raw, path, item);
+                        let item = shown(raw, path, item, passwords);
                         path.pop();
                         item
                     })
@@ -1713,7 +1790,7 @@ fn names_hidden(raw: &str, path: &[String], value: &toml::Value) -> toml::Value 
         }
     }
     let mut start: Vec<Step> = path.iter().map(|key| Step::Key(key.clone())).collect();
-    shown(raw, &mut start, value)
+    shown(raw, &mut start, value, passwords)
 }
 
 /// The table `in_use` (what dux uses at `path`) as `get` prints it: every
@@ -2502,7 +2579,7 @@ port = 3890
     fn a_file_shown_line_by_line_holds_back_what_a_printer_does() {
         let raw = "[ui]\nleft_width_pct = 25\n\n[env]\n# ghp_COMMENT_SECRET\nTOKEN = \"ghp_VALUE_SECRET\"\nLIST = [\n  \"ghp_MULTI_SECRET\",\n]\n\n[keys]\nquit = [\"ghp_BINDING_SECRET\"]\nnew_agent = [\"n\"]\n\n[server.auth]\npassword = \"ghp_PLAIN_SECRET\"\n";
         let understood = |binding: &str| binding.len() == 1;
-        let shown = shown_file_text(raw, false, &understood);
+        let shown = shown_file_text(raw, false, &understood).expect("parses");
         for secret in [
             "ghp_COMMENT_SECRET",
             "ghp_VALUE_SECRET",
@@ -2523,10 +2600,45 @@ port = 3890
         ] {
             assert!(shown.contains(line), "{line:?}:\n{shown}");
         }
-        let with_show = shown_file_text(raw, true, &understood);
+        let with_show = shown_file_text(raw, true, &understood).expect("parses");
         assert!(with_show.contains("ghp_VALUE_SECRET"), "{with_show}");
         assert!(with_show.contains("ghp_COMMENT_SECRET"), "{with_show}");
         assert!(!with_show.contains("ghp_PLAIN_SECRET"), "{with_show}");
+    }
+
+    /// A held-back table's header is its header alone: a comment after it
+    /// is a placeholder, as is one after a held-back value.
+    #[test]
+    fn a_held_back_header_and_value_lose_their_trailing_comments() {
+        let raw = "[env] # ghp_HEADER_SECRET\nA = \"v\" # ghp_VALUE_COMMENT\n\n[[projects]] # ghp_LIST_SECRET\npath = \"/tmp/x\"\n";
+        let shown = shown_file_text(raw, false, &|_| true).expect("parses");
+        for secret in ["ghp_HEADER_SECRET", "ghp_VALUE_COMMENT", "ghp_LIST_SECRET"] {
+            assert!(!shown.contains(secret), "{secret}:\n{shown}");
+        }
+        for line in [
+            "[env] # (comment not shown)\n",
+            "A = (not shown) # (comment not shown)\n",
+            "[[projects]] # (comment not shown)\n",
+            "path = (not shown)\n",
+        ] {
+            assert!(shown.contains(line), "{line:?}:\n{shown}");
+        }
+    }
+
+    /// A file that is not TOML shows none of its text, `show` or not, and
+    /// says where the parse stopped and why.
+    #[test]
+    fn a_file_that_is_not_toml_shows_nothing_of_itself() {
+        let raw = "[server.auth]\npassword = \"ghp_BROKEN_SECRET\"\nbroken =\n";
+        for show in [false, true] {
+            let error = format!(
+                "{:#}",
+                shown_file_text(raw, show, &|_| true).expect_err("not TOML")
+            );
+            assert!(!error.contains("ghp_BROKEN_SECRET"), "{error}");
+            assert!(error.contains("not valid TOML (line 3"), "{error}");
+            assert!(error.contains("fix it first"), "{error}");
+        }
     }
 
     #[test]

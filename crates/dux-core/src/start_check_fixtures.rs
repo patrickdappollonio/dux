@@ -388,6 +388,35 @@ pub const PLAINTEXT_PASSWORD_POSITIONS: &[&str] = &[
     "[auth]\nusername = \"u\"\npassword = \"{V}\"\n",
     "[ui]\nx = [{ password = \"{V}\" }]\n",
     "[server.auth]\npassword = [\"{V}\"]\n",
+    // Through an array of tables, a map of names written as an array.
+    "[[env]]\npassword = \"{V}\"\n",
+    "[[providers]]\npassword = \"{V}\"\n",
+    "macros = [{ password = \"{V}\" }]\n",
+    "[server]\nauth = [{ password = \"{V}\" }]\n",
+    "[[server.auth]]\npassword = \"{V}\"\n",
+    // A `[projects]` table is no list of projects, so its `env` holds no
+    // names; a project's own field is no name either.
+    "[projects.env]\npassword = \"{V}\"\n",
+    "[[projects]]\npath = \"/tmp/p\"\npassword = \"{V}\"\n",
+    // Quoted keys holding dots.
+    "\"env.password\" = \"{V}\"\n",
+    "[server]\n\"auth.password\" = \"{V}\"\n",
+    "\"server.auth.password\" = \"{V}\"\n",
+    "[\"server.auth\"]\npassword = \"{V}\"\n",
+    // Over several lines, with a trailing comment, and as a table.
+    "[server.auth]\npassword = \"\"\"\n{V}\n\"\"\"\n",
+    "[server.auth]\npassword = \"{V}\" # set by hand\n",
+    "[server.auth.password]\nvalue = \"{V}\"\n",
+];
+
+/// Files that are not TOML holding a plaintext password, `{V}` its value:
+/// dux cannot tell where anything sits in them.
+pub const BROKEN_PLAINTEXT_PASSWORD_FILES: &[&str] = &[
+    "server.auth.password = \"{V}\"\nbroken =\n",
+    "[server.auth]\n'password' = \"{V}\"\nbroken =\n",
+    "[server.auth]\npassword = \"\"\"\n{V}\n\"\"\"\nbroken =\n",
+    "[env]\nTOKEN = \"{V}\"\n[env\n",
+    "broken =\n[server.auth]\npassword = \"{V}\"\n",
 ];
 
 /// Token-like names, from a fixed seed: each holds a dot and a space, so it

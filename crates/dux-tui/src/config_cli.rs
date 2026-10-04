@@ -2175,3 +2175,6 @@ mod set_get_policy_projects_paths_tests;
 
 #[cfg(test)]
 mod plaintext_password_and_theme_tests;
+
+#[cfg(test)]
+mod plaintext_shape_get_tests;

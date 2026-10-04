@@ -7,8 +7,8 @@
 //! hashes.
 use super::*;
 use dux_core::start_check_fixtures::{
-    BINDING_VALUE_POSITIONS, NAME_POSITIONS as POSITIONS, PLAINTEXT_PASSWORD_POSITIONS,
-    PROJECT_VALUE_POSITIONS, VALUE_POSITIONS, name_tokens as tokens,
+    BINDING_VALUE_POSITIONS, BROKEN_PLAINTEXT_PASSWORD_FILES, NAME_POSITIONS as POSITIONS,
+    PLAINTEXT_PASSWORD_POSITIONS, PROJECT_VALUE_POSITIONS, VALUE_POSITIONS, name_tokens as tokens,
 };
 
 /// Every table `get` is asked for.
@@ -235,8 +235,39 @@ fn a_project_value_reaches_no_printer() {
     assert!(leaks.is_empty(), "{}", leaks.join("\n---\n"));
 }
 
-/// A plaintext password written in the file reaches no printer in any
-/// shape, and `--show` makes no exception for it.
+/// Everything dux prints about `body` with `--show`, where a printer takes
+/// it: every table `get` is asked for, the password itself, both previews,
+/// and `dux config diff --raw`.
+fn printed_with_show(body: &str) -> Vec<(String, String)> {
+    let mut said = previews(body, true);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = paths_in(tmp.path());
+    let mut asks: Vec<Vec<&str>> = TABLES.iter().map(|table| vec![*table, "--show"]).collect();
+    asks.push(vec!["server.auth.password"]);
+    asks.push(vec!["server.auth.password", "--show"]);
+    for args in asks {
+        std::fs::write(&paths.config_path, body).expect("seed");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+        let result = run_get(&args, &paths, &mut out, &mut err);
+        let mut text = String::from_utf8_lossy(&out).into_owned();
+        text.push_str(&String::from_utf8_lossy(&err));
+        if let Err(error) = result {
+            text.push_str(&format!("{error:#}"));
+        }
+        said.push((format!("get {}", args.join(" ")), text));
+    }
+    if let Ok(config) = toml::from_str::<dux_core::config::Config>(body) {
+        said.push((
+            "config diff --raw".to_string(),
+            crate::cli::raw_diff_text(&config),
+        ));
+    }
+    said
+}
+
+/// A plaintext password written in the file reaches no printer in any shape
+/// dux's own start check calls one, and `--show` makes no exception for it.
 #[test]
 fn a_plaintext_password_reaches_no_printer_even_with_show() {
     crate::config::install_canonical_renderer();
@@ -248,28 +279,37 @@ fn a_plaintext_password_reaches_no_printer_even_with_show() {
         for position in PLAINTEXT_PASSWORD_POSITIONS {
             let body = position.replace("{V}", bare);
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");
+            assert!(
+                !dux_core::config::plaintext_password_problems(&body).is_empty(),
+                "the start check does not call {body:?} a plaintext password"
+            );
             let mut said = printed(&body);
-            // `--show` makes no exception for a plaintext password.
-            said.extend(previews(&body, true));
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let paths = paths_in(tmp.path());
-            for args in [
-                vec!["server", "--show"],
-                vec!["server.auth", "--show"],
-                vec!["server.auth.password"],
-                vec!["server.auth.password", "--show"],
-            ] {
-                std::fs::write(&paths.config_path, &body).expect("seed");
-                let (mut out, mut err) = (Vec::new(), Vec::new());
-                let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-                let result = run_get(&args, &paths, &mut out, &mut err);
-                let mut text = String::from_utf8_lossy(&out).into_owned();
-                text.push_str(&String::from_utf8_lossy(&err));
-                if let Err(error) = result {
-                    text.push_str(&format!("{error:#}"));
+            said.extend(printed_with_show(&body));
+            for (printer, text) in said {
+                if text.contains(fragment) {
+                    leaks.push(format!("{printer} on {body:?}:\n{text}"));
                 }
-                said.push((format!("get {}", args.join(" ")), text));
             }
+        }
+    }
+    assert!(leaks.is_empty(), "{}", leaks.join("\n---\n"));
+}
+
+/// A file that is not TOML prints none of its text anywhere, `--show`
+/// included: dux cannot tell where a secret sits in it.
+#[test]
+fn a_file_that_is_not_toml_reaches_no_printer_even_with_show() {
+    crate::config::install_canonical_renderer();
+    let mut leaks = Vec::new();
+    for token in tokens() {
+        let fragment = &token[..12];
+        let quoted = toml::Value::String(token.clone()).to_string();
+        let bare = &quoted[1..quoted.len() - 1];
+        for broken in BROKEN_PLAINTEXT_PASSWORD_FILES {
+            let body = broken.replace("{V}", bare);
+            assert!(toml::from_str::<toml::Table>(&body).is_err(), "{body}");
+            let mut said = printed(&body);
+            said.extend(printed_with_show(&body));
             for (printer, text) in said {
                 if text.contains(fragment) {
                     leaks.push(format!("{printer} on {body:?}:\n{text}"));
