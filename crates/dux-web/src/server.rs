@@ -375,11 +375,11 @@ pub struct RouterParams {
     /// config catches up the way it does after `dux config set`. Defaults to
     /// raising SIGUSR1 at this process, which every serving mode reloads on.
     pub auth_reload: Arc<dyn Fn() + Send + Sync>,
-    /// Test seam: awaited by a PTY socket right before it checks its session
-    /// for the handshake, so a test can revoke the session in exactly that
-    /// window. `None` everywhere else.
+    /// Test seam: awaited by a PTY or events socket right before it checks its
+    /// session for its opening frames, so a test can revoke the session in
+    /// exactly that window. `None` everywhere else.
     #[doc(hidden)]
-    pub pty_opening_hook: Option<crate::auth::OpeningHook>,
+    pub socket_opening_hook: Option<crate::auth::OpeningHook>,
     /// The handle the Tailscale-mode route changes `[server] tailscale` through
     /// while dux serves. `None` on any path with no serve loop behind it, and in
     /// tests.
@@ -446,7 +446,7 @@ impl RouterParams {
             auth_reload: Arc::new(|| {
                 dux_core::reload_signal::request_reload();
             }),
-            pty_opening_hook: None,
+            socket_opening_hook: None,
             tailscale_mode_control: None,
             tailscale_forced_no: false,
             create_await_timeout: None,
@@ -650,10 +650,10 @@ impl RouterParams {
         self
     }
 
-    /// See [`RouterParams::pty_opening_hook`].
+    /// See [`RouterParams::socket_opening_hook`].
     #[doc(hidden)]
-    pub fn with_pty_opening_hook(mut self, hook: crate::auth::OpeningHook) -> Self {
-        self.pty_opening_hook = Some(hook);
+    pub fn with_socket_opening_hook(mut self, hook: crate::auth::OpeningHook) -> Self {
+        self.socket_opening_hook = Some(hook);
         self
     }
 
@@ -805,7 +805,7 @@ pub fn build_app(
         console: params.console.clone(),
         engine: Some(engine.clone()),
         reload: Arc::clone(&params.auth_reload),
-        opening_hook: params.pty_opening_hook.clone(),
+        opening_hook: params.socket_opening_hook.clone(),
     });
     let state = AppState {
         engine,
@@ -1049,10 +1049,10 @@ pub(crate) fn same_origin_allowed(headers: &HeaderMap) -> bool {
         // No Origin: a non-browser client. Allowed (documented tradeoff).
         return true;
     };
-    let origin = origin.to_str().ok().and_then(origin_host);
+    let origin = crate::auth::provenance::header_text(origin).and_then(origin_host);
     let host = headers
         .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
+        .and_then(crate::auth::provenance::header_text)
         .map(|h| h.to_string());
 
     matches!((origin, host), (Some(o), Some(h)) if o == h)
@@ -2882,6 +2882,17 @@ async fn handle_events_socket(
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
     let bus_rx = bus.subscribe();
 
+    // The session is judged again before any opening frame, and again before
+    // each of the snapshot and the late warnings (decided, after review): the
+    // loop's own watch starts only after them, and a socket signed out in the
+    // meantime must get its close and nothing else. Checked before the late
+    // warnings are TAKEN, too, so a refused socket cannot consume them.
+    if let Some(code) = socket_auth.opening_verdict().await {
+        let _ = sink.lock().await.send(auth_close(code)).await;
+        console.client_disconnected(peer_ip);
+        return;
+    }
+
     // First frame: hand the client its connection id (the `X-Connection-Id` REST
     // mutations echo back so their status toasts scope to this connection only).
     let _ = send_json(
@@ -2916,6 +2927,12 @@ async fn handle_events_socket(
     let workspace_rx = engine.workspace_docs();
     let workspace_alive = true;
 
+    if let Some(code) = socket_auth.verdict_now() {
+        let _ = sink.lock().await.send(auth_close(code)).await;
+        console.client_disconnected(peer_ip);
+        return;
+    }
+
     // Initial statuses: a client connecting mid-operation sees ALL active toasts
     // (keyed and anonymous) immediately, scoped to itself. An empty/fully-filtered
     // snapshot sends nothing.
@@ -2924,6 +2941,12 @@ async fn handle_events_socket(
             console.client_disconnected(peer_ip);
             return;
         }
+    }
+
+    if let Some(code) = socket_auth.verdict_now() {
+        let _ = sink.lock().await.send(auth_close(code)).await;
+        console.client_disconnected(peer_ip);
+        return;
     }
 
     // The warning and the error that were raised while NO browser was

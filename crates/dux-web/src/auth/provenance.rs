@@ -44,7 +44,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 use axum::extract::connect_info::Connected;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue};
 use axum::serve::IncomingStream;
 
 use crate::exposure::Exposure;
@@ -163,40 +163,27 @@ impl RequestFacts {
         let forwarded = FORWARDING_HEADERS
             .iter()
             .any(|name| headers.contains_key(*name));
-        // Every X-Forwarded-For header, in order: the last element of the last
-        // header is what the nearest proxy appended.
-        let xff: Vec<&str> = headers
-            .get_all("x-forwarded-for")
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .flat_map(|value| value.split(','))
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .collect();
-        let forwarded_client = xff.last().and_then(|part| parse_forwarded_address(part));
+        // Every X-Forwarded-For entry, in order: the last entry of the last
+        // header is what the nearest proxy appended. Parsed byte-wise (decided,
+        // after review): one non-ASCII byte in the part a client sent itself
+        // must never hide the address the proxy appended after it, which a
+        // whole-value text conversion would throw away with it.
+        let xff = header_entries(headers, "x-forwarded-for");
+        // The rightmost entry is judged on its own: one that does not read as
+        // an address leaves the request unproven (the network, unverified).
+        let forwarded_client = xff
+            .last()
+            .and_then(|entry| entry.and_then(parse_forwarded_address));
         let forwarded_for = xff
             .iter()
-            .filter_map(|part| parse_forwarded_address(part))
+            .filter_map(|entry| entry.and_then(parse_forwarded_address))
             .collect();
-        let mut other_named = Vec::new();
-        let mut note = |value: Option<IpAddr>| other_named.extend(value);
-        for value in headers.get_all("x-real-ip").iter() {
-            note(
-                value
-                    .to_str()
-                    .ok()
-                    .and_then(|v| parse_forwarded_address(v.trim())),
-            );
-        }
-        for value in headers.get_all("forwarded").iter() {
-            match value.to_str() {
-                Ok(value) => {
-                    for named in rfc7239_for(value) {
-                        note(named);
-                    }
-                }
-                Err(_) => note(None),
-            }
+        let mut other_named: Vec<IpAddr> = header_entries(headers, "x-real-ip")
+            .into_iter()
+            .filter_map(|entry| entry.and_then(parse_forwarded_address))
+            .collect();
+        for element in header_entries(headers, "forwarded").into_iter().flatten() {
+            other_named.extend(rfc7239_for(element).into_iter().flatten());
         }
         Self {
             arrival,
@@ -206,12 +193,37 @@ impl RequestFacts {
             other_named,
             host: headers
                 .get(axum::http::header::HOST)
-                .and_then(|h| h.to_str().ok())
+                .and_then(header_text)
                 .map(str::to_string),
-            identity_headers: headers.contains_key(IDENTITY_HEADER),
+            // An identity value that is not text proves nothing: it can only
+            // make a request stricter, never more trusted.
+            identity_headers: headers.get(IDENTITY_HEADER).and_then(header_text).is_some(),
+            // The marker is present whatever its bytes say: presence can only
+            // make a request stricter.
             funnel_marker: headers.contains_key(FUNNEL_MARKER),
         }
     }
+}
+
+/// A header value as text when its bytes are UTF-8. Never `to_str`, which
+/// refuses a whole value for one byte above 0x7F; the auth layer reads every
+/// header through this, or byte-wise.
+pub(crate) fn header_text(value: &HeaderValue) -> Option<&str> {
+    std::str::from_utf8(value.as_bytes()).ok()
+}
+
+/// Every comma-separated entry of every value of `name`, in order, split and
+/// trimmed byte-wise so each entry stands on its own: an entry that is not
+/// text is `None` and hides none of the others. Empty entries are dropped.
+fn header_entries<'h>(headers: &'h HeaderMap, name: &str) -> Vec<Option<&'h str>> {
+    headers
+        .get_all(name)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .map(<[u8]>::trim_ascii)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| std::str::from_utf8(entry).ok())
+        .collect()
 }
 
 /// The `for=` values of an RFC 7239 `Forwarded` header, one per element, as
@@ -1159,5 +1171,164 @@ mod tests {
             ]
         );
         assert_eq!(c.claimed_ip, Some("198.51.100.2".parse().unwrap()));
+    }
+
+    /// How much a class is trusted, for comparing two.
+    fn trust(class: ClientClass) -> u8 {
+        match class {
+            ClientClass::Internet => 0,
+            ClientClass::Network => 1,
+            ClientClass::Tailnet => 2,
+            ClientClass::ThisMachine => 3,
+        }
+    }
+
+    /// Random header bytes `HeaderValue` accepts: tab, visible ASCII, space,
+    /// and every byte above 0x7F. A small xorshift, so a failure replays.
+    struct Bytes(u64);
+
+    impl Bytes {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn value(&mut self) -> Vec<u8> {
+            let len = (self.next() % 24) as usize;
+            (0..len)
+                .map(|_| {
+                    loop {
+                        let byte = (self.next() % 256) as u8;
+                        if byte == b'\t' || (0x20..0x7f).contains(&byte) || byte >= 0x80 {
+                            break byte;
+                        }
+                    }
+                })
+                .collect()
+        }
+    }
+
+    /// One request shape: its connection, its headers, and the exposure it
+    /// is classified under.
+    type Scenario<'e> = (Option<Arrival>, Vec<(&'static str, Vec<u8>)>, &'e Exposure);
+
+    const AUTH_HEADERS: [&str; 9] = [
+        "x-forwarded-for",
+        "x-real-ip",
+        "forwarded",
+        "host",
+        "origin",
+        "cookie",
+        "tailscale-user-login",
+        "tailscale-user-name",
+        "tailscale-funnel-request",
+    ];
+
+    fn facts(arrival: Option<Arrival>, headers: &[(&str, Vec<u8>)]) -> RequestFacts {
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            if let Ok(value) = HeaderValue::from_bytes(value) {
+                map.append(
+                    axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    value,
+                );
+            }
+        }
+        RequestFacts::of(arrival, &map)
+    }
+
+    /// Whatever bytes a client puts in any header the auth layer reads, the
+    /// request is never more trusted than the same request without that
+    /// header, and it never stops naming an address it named without it, so
+    /// a blocked address named anywhere stays blocked.
+    #[test]
+    fn random_header_bytes_never_raise_trust_or_hide_an_address() {
+        let serve = served("https://box.tail.ts.net", false);
+        let text = |value: &str| value.as_bytes().to_vec();
+        let scenarios: Vec<Scenario<'_>> = vec![
+            (
+                arrival("127.0.0.1:1", LOOPBACK),
+                vec![
+                    ("host", text("box.tail.ts.net")),
+                    ("tailscale-user-login", text("owner@example.com")),
+                    ("x-forwarded-for", text("10.0.0.1, 100.64.0.9")),
+                    ("x-real-ip", text("203.0.113.9")),
+                ],
+                &serve,
+            ),
+            (arrival("127.0.0.1:1", LOOPBACK), vec![], &serve),
+            (
+                arrival("100.101.102.104:5", "100.101.102.103:3890"),
+                vec![("x-forwarded-for", text("203.0.113.9"))],
+                &serve,
+            ),
+            (
+                arrival("127.0.0.1:1", LOOPBACK),
+                vec![
+                    ("x-forwarded-for", text("10.0.0.1, 203.0.113.9")),
+                    ("forwarded", text("for=198.51.100.77")),
+                ],
+                &serve,
+            ),
+        ];
+        let mut bytes = Bytes(0x9e37_79b9_7f4a_7c15);
+        for (arrival, base, exposure) in &scenarios {
+            for header in AUTH_HEADERS {
+                let without: Vec<(&str, Vec<u8>)> =
+                    base.iter().filter(|(n, _)| *n != header).cloned().collect();
+                // Tailscale's identity header is part of the serve proof, so
+                // its presence is evidence by design: random bytes there are
+                // judged against a well-formed identity, never against none.
+                let baseline = if header == IDENTITY_HEADER {
+                    let mut with = without.clone();
+                    with.push((header, text("owner@example.com")));
+                    with
+                } else {
+                    without.clone()
+                };
+                let plain = classify(&facts(*arrival, &baseline), exposure, &[]);
+                let without_header = classify(&facts(*arrival, &without), exposure, &[]);
+                for _ in 0..200 {
+                    let mut with = without.clone();
+                    with.push((header, bytes.value()));
+                    let c = classify(&facts(*arrival, &with), exposure, &[]);
+                    assert!(
+                        trust(c.class) <= trust(plain.class),
+                        "{header} = {:?} raised {:?} to {:?}",
+                        with.last(),
+                        plain.class,
+                        c.class
+                    );
+                    for ip in &without_header.named {
+                        assert!(
+                            c.named.contains(ip),
+                            "{header} = {:?} hid {ip}",
+                            with.last()
+                        );
+                    }
+                }
+            }
+        }
+        // Garbage before a proxy's own appended entry, in one value, never
+        // hides that entry.
+        for _ in 0..500 {
+            let mut value = bytes.value();
+            value.extend_from_slice(b", 203.0.113.9");
+            let c = classify(
+                &facts(
+                    arrival("127.0.0.1:1", LOOPBACK),
+                    &[("x-forwarded-for", value.clone())],
+                ),
+                &serve,
+                &[],
+            );
+            assert!(
+                c.named.contains(&"203.0.113.9".parse().unwrap()),
+                "{:?} hid the appended address",
+                String::from_utf8_lossy(&value)
+            );
+        }
     }
 }

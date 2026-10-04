@@ -52,14 +52,20 @@ pub(crate) fn clear(port: u16, secure: bool) -> HeaderValue {
 /// the same host can plant one with this name and a narrower `Path`, which the
 /// browser then sends FIRST, and reading only the first would hide the real
 /// session behind it.
+///
+/// Parsed byte-wise, one pair at a time (decided, after review): another app
+/// on the same host can set a cookie whose value is UTF-8, and reading the
+/// header as text would throw away every pair with it, the session included.
+/// A pair that is not ASCII is skipped on its own.
 pub(crate) fn read_all(headers: &HeaderMap, port: u16) -> Vec<String> {
     let wanted = name(port);
     headers
         .get_all(axum::http::header::COOKIE)
         .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .filter_map(|pair| pair.trim().split_once('='))
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b';'))
+        .map(<[u8]>::trim_ascii)
+        .filter(|pair| pair.is_ascii())
+        .filter_map(|pair| std::str::from_utf8(pair).ok()?.split_once('='))
         .filter(|(key, value)| *key == wanted && !value.is_empty())
         .map(|(_, value)| value.to_string())
         .collect()

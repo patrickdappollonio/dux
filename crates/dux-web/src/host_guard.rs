@@ -417,7 +417,7 @@ async fn host_allowlist_middleware(
     let host = request
         .headers()
         .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok());
+        .and_then(crate::auth::provenance::header_text);
     match host {
         Some(h) if allowlist.allows_host(h) => next.run(request).await,
         Some(_) => (

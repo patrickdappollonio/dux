@@ -3038,7 +3038,7 @@ async fn a_pty_socket_signed_out_while_subscribing_gets_no_bytes() {
             "password_hash = \"{}\"\nrequire = \"everywhere\"",
             hash_of(PASSWORD)
         ),
-        move |p| p.with_pty_opening_hook(hook),
+        move |p| p.with_socket_opening_hook(hook),
     );
     let cookie = dux.signed_in(THIS_MACHINE).await;
     let created = dux
@@ -3064,6 +3064,262 @@ async fn a_pty_socket_signed_out_while_subscribing_gets_no_bytes() {
         let first = tokio::time::timeout(Duration::from_secs(1), socket.next()).await;
         panic!("the socket never reached its opening check: {first:?}");
     }
+    let out = server
+        ._dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/logout").cookie(&cookie),
+        )
+        .await;
+    assert_eq!(out.status, StatusCode::NO_CONTENT, "{}", out.body);
+    release.notify_waiters();
+    let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("the socket answered");
+    match first {
+        Some(Ok(Message::Close(Some(frame)))) => assert_eq!(u16::from(frame.code), 4401),
+        other => panic!("the first frame after a sign-out was not the 4401 close: {other:?}"),
+    }
+}
+
+// ── Header bytes that are not text ────────────────────────────────────────
+
+/// Send `path` from `from` with raw header bytes (values that are legal HTTP
+/// obs-text but not visible ASCII).
+async fn send_raw(dux: &Dux, from: Arrival, path: &str, headers: &[(&str, &[u8])]) -> Answer {
+    let mut builder = Request::builder().method(Method::GET).uri(path);
+    if !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("host")) {
+        builder = builder.header("host", "localhost");
+    }
+    for (name, value) in headers {
+        builder = builder.header(
+            *name,
+            axum::http::HeaderValue::from_bytes(value).expect("legal obs-text header value"),
+        );
+    }
+    let mut built = builder.body(Body::empty()).unwrap();
+    built
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(from));
+    let response = dux.app.clone().oneshot(built).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    Answer {
+        status,
+        headers,
+        body: String::from_utf8_lossy(&bytes).into_owned(),
+    }
+}
+
+/// A blocked client behind a proxy on this machine (nginx's
+/// `$proxy_add_x_forwarded_for` appends the real client to whatever the client
+/// sent, in ONE header value) puts a single non-ASCII byte in its own
+/// X-Forwarded-For. The value no longer reads as text, so dux drops the whole
+/// header, the real address the proxy appended included, and the blocklist
+/// never sees it.
+#[tokio::test]
+async fn an_obs_text_byte_in_x_forwarded_for_must_not_hide_a_blocked_client() {
+    let dux = Dux::start("blocked_addresses = [\"203.0.113.9\"]");
+    // Control: the plain shape is refused.
+    let plain = send_raw(
+        &dux,
+        THIS_MACHINE,
+        "/api/v1/projects",
+        &[("x-forwarded-for", b"10.0.0.1, 203.0.113.9")],
+    )
+    .await;
+    assert_eq!(plain.error().as_deref(), Some("blocked"), "{}", plain.body);
+    // The same request with one obs-text byte in the client's own part.
+    let poisoned = send_raw(
+        &dux,
+        THIS_MACHINE,
+        "/api/v1/projects",
+        &[("x-forwarded-for", b"\xff, 203.0.113.9")],
+    )
+    .await;
+    assert_eq!(
+        poisoned.error().as_deref(),
+        Some("blocked"),
+        "a blocked client escaped the blocklist with one byte: {} {}",
+        poisoned.status,
+        poisoned.body
+    );
+}
+
+/// A tailnet device banned by dux comes back through `tailscale serve` with a
+/// non-ASCII byte in an X-Forwarded-For of its own, which the serve proxy
+/// joins with the address it appends. dux then no longer sees the banned
+/// address at all and serves it.
+#[tokio::test]
+async fn a_banned_tailnet_device_must_stay_banned_through_tailscale_serve() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let exposure = ExposureCell::new(FunnelState::Open);
+    exposure.set_identity(Some(IdentityFacts {
+        routes: vec![dux_core::tailscale::ServeRoute {
+            url: "https://box.tail0000.ts.net".to_string(),
+            funnel: false,
+        }],
+        own_ips: own_tailscale_ips(),
+        ..IdentityFacts::default()
+    }));
+    let dux = Dux::start_tuned("blocked_addresses = [\"100.64.0.9\"]", {
+        let cell = exposure.clone();
+        move |p| p.with_live_exposure(cell)
+    });
+    let serve = |xff: &'static [u8]| -> Vec<(&'static str, &'static [u8])> {
+        vec![
+            ("host", b"box.tail0000.ts.net"),
+            ("tailscale-user-login", b"owner@example.com"),
+            ("x-forwarded-for", xff),
+        ]
+    };
+    let plain = send_raw(
+        &dux,
+        THIS_MACHINE,
+        "/api/v1/projects",
+        &serve(b"100.64.0.9"),
+    )
+    .await;
+    assert_eq!(plain.error().as_deref(), Some("blocked"), "{}", plain.body);
+    let poisoned = send_raw(
+        &dux,
+        THIS_MACHINE,
+        "/api/v1/projects",
+        &serve(b"\xc3\xa9, 100.64.0.9"),
+    )
+    .await;
+    assert_eq!(
+        poisoned.error().as_deref(),
+        Some("blocked"),
+        "the banned tailnet device got in: {} {}",
+        poisoned.status,
+        poisoned.body
+    );
+}
+
+/// Cookies are not isolated by port, so any other web app on the same host
+/// (or a page planting one, the case review 6 was about) can put a cookie
+/// whose value carries UTF-8 into the one Cookie header the browser sends.
+/// dux then reads no cookie at all and the owner's real session is ignored:
+/// every request is 401 and signing in again changes nothing.
+#[tokio::test]
+async fn a_utf8_cookie_from_another_app_must_not_hide_the_session() {
+    let dux = Dux::with_password("require = \"everywhere\"");
+    let cookie = dux.signed_in(NETWORK).await;
+    let ok = send_raw(
+        &dux,
+        NETWORK,
+        "/api/v1/projects",
+        &[("cookie", cookie.as_bytes())],
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::OK, "control: {}", ok.body);
+    let header = format!("theme=caf\u{e9}; {cookie}");
+    let answer = send_raw(
+        &dux,
+        NETWORK,
+        "/api/v1/projects",
+        &[("cookie", header.as_bytes())],
+    )
+    .await;
+    assert_eq!(
+        answer.status,
+        StatusCode::OK,
+        "a valid session beside another app's UTF-8 cookie was ignored: {}",
+        answer.body
+    );
+}
+
+/// With a password set, the same byte turns a banned tailnet device into an
+/// unverified network client that may guess again (and, unverified, can never
+/// be banned again).
+#[tokio::test]
+async fn a_banned_tailnet_device_cannot_guess_again_through_tailscale_serve() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let exposure = ExposureCell::new(FunnelState::Open);
+    exposure.set_identity(Some(IdentityFacts {
+        routes: vec![dux_core::tailscale::ServeRoute {
+            url: "https://box.tail0000.ts.net".to_string(),
+            funnel: false,
+        }],
+        own_ips: own_tailscale_ips(),
+        ..IdentityFacts::default()
+    }));
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nblocked_addresses = [\"100.64.0.9\"]",
+            hash_of(PASSWORD)
+        ),
+        {
+            let cell = exposure.clone();
+            move |p| p.with_live_exposure(cell)
+        },
+    );
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/auth/login")
+        .header("host", "box.tail0000.ts.net")
+        .header("origin", "https://box.tail0000.ts.net")
+        .header("content-type", "application/json")
+        .header("tailscale-user-login", "owner@example.com");
+    builder = builder.header(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_bytes(b"\xff, 100.64.0.9").unwrap(),
+    );
+    let mut built = builder
+        .body(Body::from(
+            json!({ "password": "a wrong guess" }).to_string(),
+        ))
+        .unwrap();
+    built
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(THIS_MACHINE));
+    let response = dux.app.clone().oneshot(built).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "the banned device's password guess was checked"
+    );
+}
+
+/// The events socket checks its session before its opening frames too: one
+/// signed out while it opens gets the 4401 close, not its connection id, the
+/// status snapshot or the late warnings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_events_socket_signed_out_while_opening_gets_nothing() {
+    use tokio_tungstenite::tungstenite::Message;
+    let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let hook: dux_web::auth::OpeningHook = {
+        let release = Arc::clone(&release);
+        Arc::new(move || {
+            let reached_tx = reached_tx.clone();
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                let _ = reached_tx.send(());
+                release.notified().await;
+            })
+        })
+    };
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nrequire = \"everywhere\"",
+            hash_of(PASSWORD)
+        ),
+        move |p| p.with_socket_opening_hook(hook),
+    );
+    let cookie = dux.signed_in(THIS_MACHINE).await;
+    let server = Serve::start(dux).await;
+    let (_, value) = cookie.split_once('=').unwrap();
+    let on_server = format!("dux_session_{}={value}", server.addr.port());
+    let mut socket = server.connect("/ws/events", &[], Some(&on_server)).await;
+    tokio::time::timeout(Duration::from_secs(10), reached_rx.recv())
+        .await
+        .expect("the socket reached its opening check")
+        .unwrap();
     let out = server
         ._dux
         .send(

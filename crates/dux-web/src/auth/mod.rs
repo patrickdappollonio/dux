@@ -321,7 +321,7 @@ pub struct AuthSetup {
     pub engine: Option<crate::engine_actor::EngineHandle>,
     /// Asks the running dux to reload its config after dux wrote to it.
     pub reload: Arc<dyn Fn() + Send + Sync>,
-    /// Test seam: see [`crate::server::RouterParams::pty_opening_hook`].
+    /// Test seam: see [`crate::server::RouterParams::socket_opening_hook`].
     pub opening_hook: Option<OpeningHook>,
 }
 

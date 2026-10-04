@@ -70,8 +70,7 @@ fn is_websocket_upgrade(request: &Request) -> bool {
     request
         .headers()
         .get(axum::http::header::UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"))
 }
 
 /// The JSON refusals of the contract.
