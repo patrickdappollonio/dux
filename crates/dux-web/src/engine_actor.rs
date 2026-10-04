@@ -3553,12 +3553,19 @@ fn handle_apply_wire_request(
                 let _ = engine.apply_reloaded_config(reloaded);
                 *config_disk_ahead = false;
             }
-            // Kept ahead: the running config stays as it was, and the next
+            // Kept ahead, and the command refused: applying it would save a
+            // memory that never saw the disk edits over them. The next
             // config-mutating command tries again once the file is fixed.
-            Err(error) => dux_core::logger::warn(&format!(
-                "[server] config.toml changed on disk but was not adopted, so the running \
-                 settings are unchanged: {error}"
-            )),
+            Err(error) => {
+                let message = format!(
+                    "config.toml was changed outside dux and cannot be loaded, so this change \
+                     was not made and the running settings are unchanged. Fix the file, then \
+                     try again: {error}"
+                );
+                dux_core::logger::warn(&format!("[server] {message}"));
+                let _ = reply.send(Err(message));
+                return;
+            }
         }
     }
 
@@ -6992,6 +6999,32 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// A file saved from the web editor and then broken by hand cannot be
+    /// adopted; a settings change then must be refused out loud rather than
+    /// written over the disk edits from a memory that never saw them.
+    #[tokio::test]
+    async fn a_settings_change_is_refused_while_an_unadoptable_disk_edit_waits() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        handle
+            .write_raw_config("[ui]\nleft_width_pct = 25\n".to_string())
+            .await
+            .expect("raw save");
+        let broken = "[ui]\nleft_width_pct = 26\n\n[server.auth]\nrequire = \"lan\"\n";
+        std::fs::write(&paths.config_path, broken).expect("hand edit");
+        let refusal = handle
+            .apply_wire(WireCommand::SetSettings(dux_core::wire::SettingsPatch {
+                copy_on_select: Some(false),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("refused");
+        assert!(refusal.contains("server.auth"), "{refusal}");
+        assert!(refusal.contains("was not made"), "{refusal}");
+        assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), broken);
     }
 
     /// The web's "recover config" keeps the file's own `[server.auth]`: a
