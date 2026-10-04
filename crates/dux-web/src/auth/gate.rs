@@ -9,7 +9,12 @@
 //!
 //! Both numbers are read from the live config on every entry, so a reload
 //! applies to the next attempt. A waiter that gives up (its request dropped)
-//! leaves the queue on the way out, so an abandoned request never holds a slot.
+//! leaves the queue on the way out, so an abandoned request never holds a
+//! queue place. A RUNNING check is different (decided, after review): its
+//! permit is owned and moved into the blocking work, so the slot is released
+//! only when Argon2 actually finishes, never when the request that asked for it
+//! goes away. Otherwise a client could start a check, hang up, and start
+//! another, running far more Argon2 work at once than the limit allows.
 
 use tokio::sync::Notify;
 
@@ -26,9 +31,10 @@ pub(crate) struct CheckGate {
     freed: Notify,
 }
 
-/// A running check's slot, released when dropped.
-pub(crate) struct CheckPermit<'a> {
-    gate: &'a CheckGate,
+/// A running check's slot, released when dropped. It owns its gate so it can
+/// travel into the blocking work.
+pub(crate) struct CheckPermit {
+    gate: std::sync::Arc<CheckGate>,
 }
 
 /// The gate is full: every check slot is taken and the queue is too.
@@ -45,16 +51,18 @@ impl CheckGate {
     /// Take a check slot, waiting in the queue when they are all busy, or
     /// answer [`GateFull`] at once when the queue is full too.
     pub(crate) async fn enter(
-        &self,
+        self: &std::sync::Arc<Self>,
         running: u32,
         queue: u32,
-    ) -> Result<CheckPermit<'_>, GateFull> {
+    ) -> Result<CheckPermit, GateFull> {
         let running = running.max(1);
         {
             let mut counts = self.lock();
             if counts.running < running {
                 counts.running += 1;
-                return Ok(CheckPermit { gate: self });
+                return Ok(CheckPermit {
+                    gate: std::sync::Arc::clone(self),
+                });
             }
             if counts.waiting >= queue {
                 return Err(GateFull);
@@ -72,7 +80,9 @@ impl CheckGate {
                     counts.running += 1;
                     counts.waiting -= 1;
                     std::mem::forget(waiting);
-                    return Ok(CheckPermit { gate: self });
+                    return Ok(CheckPermit {
+                        gate: std::sync::Arc::clone(self),
+                    });
                 }
             }
             freed.await;
@@ -98,7 +108,7 @@ impl Drop for WaitingSlot<'_> {
     }
 }
 
-impl Drop for CheckPermit<'_> {
+impl Drop for CheckPermit {
     fn drop(&mut self) {
         self.gate.lock().running -= 1;
         self.gate.freed.notify_waiters();
@@ -156,7 +166,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_queue_of_zero_refuses_as_soon_as_every_slot_is_busy() {
-        let gate = CheckGate::default();
+        let gate = std::sync::Arc::new(CheckGate::default());
         let _held = gate.enter(1, 0).await.expect("slot");
         assert_eq!(gate.enter(1, 0).await.err(), Some(GateFull));
     }

@@ -1356,3 +1356,231 @@ async fn https_paths_dux_knows_of_are_not_warned_about_plain_http() {
         .json();
     assert_eq!(forwarded["transport_encrypted"], json!(true), "{forwarded}");
 }
+
+// ── First adversarial review: relays, posing proxies, abandoned checks and
+//    addresses a client chooses ─────────────────────────────────────────────
+
+/// A relay on this machine aimed at dux's own Tailscale address (socat, `ssh
+/// -L`, a reverse proxy, `tailscale funnel --tcp`) connects FROM that address,
+/// so peer and listener are the same Tailscale address. dux cannot tell that
+/// from a person, so it is the network.
+#[tokio::test]
+async fn a_connection_from_dux_own_tailscale_address_is_the_network() {
+    let dux = Dux::with_password("");
+    let ts: std::net::IpAddr = "100.101.102.103".parse().unwrap();
+    let relayed = Arrival {
+        peer: SocketAddr::new(ts, 41000),
+        local: SocketAddr::new(ts, 3890),
+    };
+    assert_auth_required(&dux.get(relayed, "/api/v1/projects").await, "a self-relay");
+    assert_eq!(
+        dux.status(relayed, None).await["client_class"],
+        json!("network")
+    );
+    assert_eq!(
+        dux.get(TAILNET, "/api/v1/projects").await.status,
+        StatusCode::OK
+    );
+}
+
+/// While dux knows of a forward to its port, the Tailscale listener is
+/// distrusted like loopback: the forward may be aimed at either.
+#[tokio::test]
+async fn a_known_forward_distrusts_the_tailscale_listener_too() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let exposure = ExposureCell::new(FunnelState::Funnel);
+    exposure.set_identity(Some(IdentityFacts {
+        funnel_any: true,
+        forward_to_dux: true,
+        ..IdentityFacts::default()
+    }));
+    let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
+        let cell = exposure.clone();
+        move |p| p.with_live_exposure(cell)
+    });
+    assert_auth_required(
+        &dux.get(TAILNET, "/api/v1/projects").await,
+        "tailnet under a forward",
+    );
+}
+
+/// A LAN client through another proxy on this machine that keeps its Host and
+/// passes its headers cannot pose as `tailscale serve`: that proxy's
+/// X-Forwarded-For names a LAN address, which tailscale serve never reports.
+#[tokio::test]
+async fn a_lan_client_through_another_local_proxy_is_not_tailscale_serve() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let exposure = ExposureCell::new(FunnelState::Open);
+    exposure.set_identity(Some(IdentityFacts {
+        routes: vec![dux_core::tailscale::ServeRoute {
+            url: "https://box.tail0000.ts.net".to_string(),
+            funnel: false,
+        }],
+        ..IdentityFacts::default()
+    }));
+    let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
+        let cell = exposure.clone();
+        move |p| p.with_live_exposure(cell)
+    });
+    let via = |xff: &str, extra: Option<(&str, &str)>| {
+        let mut req = Req::new(Method::GET, "/api/v1/projects")
+            .header("host", "box.tail0000.ts.net")
+            .header("tailscale-user-login", "owner@example.com")
+            .header("x-forwarded-for", xff);
+        if let Some((name, value)) = extra {
+            req = req.header(name, value);
+        }
+        req
+    };
+    assert_auth_required(
+        &dux.send(THIS_MACHINE, via("192.168.1.50", None)).await,
+        "LAN XFF",
+    );
+    assert_auth_required(
+        &dux.send(
+            THIS_MACHINE,
+            via("100.64.0.9", Some(("x-real-ip", "192.168.1.50"))),
+        )
+        .await,
+        "a non-Tailscale X-Real-IP",
+    );
+    assert_auth_required(
+        &dux.send(
+            THIS_MACHINE,
+            via("100.64.0.9", Some(("forwarded", "for=192.168.1.50"))),
+        )
+        .await,
+        "a non-Tailscale Forwarded",
+    );
+    assert_eq!(
+        dux.send(THIS_MACHINE, via("100.64.0.9", None)).await.status,
+        StatusCode::OK,
+        "the real tailscale serve shape is still the tailnet"
+    );
+}
+
+/// The blocklist applies to every address a request names: behind a proxy
+/// that names the client in X-Real-IP or Forwarded, the client is blocked.
+#[tokio::test]
+async fn the_blocklist_applies_to_any_address_a_request_names() {
+    let dux = Dux::with_password("blocked_addresses = [\"198.51.100.0/24\", \"2001:db8::/32\"]");
+    for (name, value) in [
+        ("x-real-ip", "198.51.100.9"),
+        ("forwarded", "for=198.51.100.9"),
+        ("forwarded", "for=\"[2001:db8::7]:4711\";proto=https"),
+        ("forwarded", "for=192.0.2.1, for=198.51.100.9:80"),
+        ("x-forwarded-for", "198.51.100.9, 192.0.2.4"),
+    ] {
+        let answer = dux
+            .send(
+                THIS_MACHINE,
+                Req::new(Method::GET, "/api/v1/auth/status").header(name, value),
+            )
+            .await;
+        assert_eq!(
+            answer.error().as_deref(),
+            Some("blocked"),
+            "{name}: {value}"
+        );
+    }
+}
+
+/// A client cannot get an address of its choosing written into the owner's
+/// blocklist: a proxy that sets only X-Real-IP passes the client's own
+/// X-Forwarded-For through, so neither is verified, and such a ban stays out
+/// of config.toml while the guesses are still slowed.
+#[tokio::test]
+async fn a_client_chosen_address_is_never_written_to_the_blocklist() {
+    let dux = Dux::with_password("max_failed_logins = 2\nfailed_login_delay_seconds = 0");
+    for _ in 0..3 {
+        let answer = dux
+            .send(
+                THIS_MACHINE,
+                Req::new(Method::POST, "/api/v1/auth/login")
+                    .json(json!({ "password": "wrong" }))
+                    .header("x-real-ip", "203.0.113.66")
+                    .header("x-forwarded-for", "192.0.2.200"),
+            )
+            .await;
+        assert!(answer.status.is_client_error(), "{}", answer.body);
+    }
+    let config = dux.config();
+    assert!(
+        !config.contains("192.0.2.200") && !config.contains("203.0.113.66"),
+        "{config}"
+    );
+}
+
+/// Rotating the claimed address does not escape the slow-down: every
+/// unverified forwarded request shares one bucket as well as its own.
+#[tokio::test]
+async fn rotating_claimed_addresses_shares_one_slow_down() {
+    let dux = Dux::with_password("failed_login_delay_seconds = 5");
+    let try_from = |n: u8| {
+        Req::new(Method::POST, "/api/v1/auth/login")
+            .json(json!({ "password": "wrong" }))
+            .header("x-forwarded-for", &format!("192.0.2.{n}"))
+    };
+    let first = dux.send(THIS_MACHINE, try_from(1)).await;
+    assert_eq!(first.status, StatusCode::UNAUTHORIZED, "{}", first.body);
+    let second = dux.send(THIS_MACHINE, try_from(2)).await;
+    assert_eq!(
+        second.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        second.body
+    );
+}
+
+/// A client that sends a login and hangs up while it is checked must not free
+/// the check's slot: the Argon2 run keeps going, so the slot is held until it
+/// finishes, and its wrong guess is still counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_login_holds_its_slot_until_the_check_ends_and_still_counts() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = Serve::start(Dux::with_password(
+        "max_concurrent_password_checks = 1\npassword_check_queue = 0\n\
+         failed_login_delay_seconds = 5\nmax_failed_logins_per_minute = 0",
+    ))
+    .await;
+    let body = json!({ "password": "a wrong guess" }).to_string();
+    let request = |xff: &str| {
+        format!(
+            "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: {xff}\r\n\
+             Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let send = |xff: String| {
+        let addr = server.addr;
+        let req = request(&xff);
+        async move {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut answer = String::new();
+            s.read_to_string(&mut answer).await.unwrap();
+            answer.lines().next().unwrap_or_default().to_string()
+        }
+    };
+    let mut abandoned = tokio::net::TcpStream::connect(server.addr).await.unwrap();
+    abandoned
+        .write_all(request("198.51.100.77").as_bytes())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    drop(abandoned);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let busy = send("198.51.100.78".to_string()).await;
+    assert!(
+        busy.contains("429"),
+        "a second check ran beside the abandoned one: {busy}"
+    );
+    // Once it has finished, its failure is counted: the shared slow-down for
+    // unverified forwarded requests now asks this one to wait too.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let after = send("198.51.100.79".to_string()).await;
+    assert!(
+        after.contains("429"),
+        "the abandoned guess was not counted: {after}"
+    );
+}

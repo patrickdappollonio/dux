@@ -254,8 +254,8 @@ The rest of the section, each documented inline in `config.toml`:
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `session_idle_seconds` | `60` | How long a signed-in browser stays signed in with nothing happening. An open dux tab keeps it alive, so a tab left waiting on an agent never signs out. |
-| `max_failed_logins` | `5` | Failed logins one address may make before it is added to `blocked_addresses`. `0` never blocks. |
-| `blocked_addresses` | `[]` | Addresses and CIDR ranges dux refuses outright, with or without a password. Yours to edit. |
+| `max_failed_logins` | `5` | Failed logins one address may make before it is added to `blocked_addresses`. Only an address dux can verify is added (a direct connection, or one through your `tailscale serve`); behind another proxy dux keeps slowing the logins down and its log names the address for you to add by hand. `0` never blocks. |
+| `blocked_addresses` | `[]` | Addresses and CIDR ranges dux refuses outright, with or without a password. A request matches when any address it names does, forwarding headers included. Yours to edit. |
 | `failed_login_window_seconds` | `900` | How long a failed login counts against its address. |
 | `failed_login_delay_seconds` | `1` | The wait after a failed login, doubling with each further one. |
 | `failed_login_max_delay_seconds` | `30` | The longest that wait grows. |

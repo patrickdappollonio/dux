@@ -7,7 +7,10 @@
 //!   the peer's address, as the kernel reported them for the accepted socket.
 //!   A connection to a loopback address is from this machine; one to this
 //!   machine's Tailscale address FROM a Tailscale address is from the tailnet
-//!   (only a tailnet peer can send from one there); anything else is the
+//!   (only a tailnet peer can send from one there), except FROM one of this
+//!   machine's own Tailscale addresses (a relay on this machine looks exactly
+//!   like that) or while dux knows of a forward to its port (which may be aimed
+//!   at that listener too): those are the network. Anything else is the
 //!   network.
 //! - Tailscale's Funnel marker (`Tailscale-Funnel-Request`), which Tailscale's
 //!   serve proxy sets on every request that came through Funnel and strips from
@@ -17,7 +20,9 @@
 //!   (`X-Forwarded-For`, `Forwarded` or `X-Real-IP` present): the tailnet only
 //!   when it came through a confirmed, non-Funnel `tailscale serve` route to
 //!   dux whose name and port its `Host` matches, carrying Tailscale's identity
-//!   headers and no Funnel marker. Anything else forwarded is the network: a
+//!   headers and no Funnel marker, whose rightmost `X-Forwarded-For` entry is a
+//!   Tailscale address, and with no `X-Real-IP` or `Forwarded` naming anything
+//!   else. Anything else forwarded is the network: a
 //!   `100.64.0.0/10` address in a header proves nothing, and there is no
 //!   general trusted-proxy setting.
 //! - A loopback request with NO forwarding header is this machine, except while
@@ -29,6 +34,11 @@
 //! A proxy on this machine that adds no forwarding header at all is
 //! indistinguishable from this machine; that is what `require = "everywhere"`
 //! is for, and what the one-time proxy warning points at.
+//!
+//! Classification also says which addresses a request names (the blocklist
+//! applies to all of them), which one dux can VERIFY (the only kind an
+//! automatic ban writes to `config.toml`), and which one an unverified forward
+//! merely claims (slowed in memory, never written).
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -129,7 +139,16 @@ pub struct RequestFacts {
     /// Whether any forwarding header is present.
     pub forwarded: bool,
     /// The rightmost `X-Forwarded-For` address: the one the nearest proxy saw.
+    /// `None` when that element is missing or does not read as an address.
     pub forwarded_client: Option<IpAddr>,
+    /// Every address `X-Forwarded-For` names, in order.
+    pub forwarded_for: Vec<IpAddr>,
+    /// Every address `X-Real-IP` and RFC 7239 `Forwarded: for=` name.
+    pub other_named: Vec<IpAddr>,
+    /// Whether `X-Real-IP` or `Forwarded` carries a value that names no
+    /// Tailscale address (one that does not read as an address counts).
+    /// Tailscale's serve proxy never sets either to anything else.
+    pub other_names_beyond_tailscale: bool,
     /// The `Host` header, as sent.
     pub host: Option<String>,
     /// Whether Tailscale's identity headers are present.
@@ -146,18 +165,55 @@ impl RequestFacts {
             .any(|name| headers.contains_key(*name));
         // Every X-Forwarded-For header, in order: the last element of the last
         // header is what the nearest proxy appended.
-        let forwarded_client = headers
+        let xff: Vec<&str> = headers
             .get_all("x-forwarded-for")
             .iter()
             .filter_map(|value| value.to_str().ok())
             .flat_map(|value| value.split(','))
             .map(str::trim)
-            .rfind(|part| !part.is_empty())
-            .and_then(parse_forwarded_address);
+            .filter(|part| !part.is_empty())
+            .collect();
+        let forwarded_client = xff.last().and_then(|part| parse_forwarded_address(part));
+        let forwarded_for = xff
+            .iter()
+            .filter_map(|part| parse_forwarded_address(part))
+            .collect();
+        let mut other_named = Vec::new();
+        let mut other_names_beyond_tailscale = false;
+        let mut note = |value: Option<IpAddr>| match value {
+            Some(ip) => {
+                if !is_tailscale(dux_core::config_auth::canonical(ip)) {
+                    other_names_beyond_tailscale = true;
+                }
+                other_named.push(ip);
+            }
+            None => other_names_beyond_tailscale = true,
+        };
+        for value in headers.get_all("x-real-ip").iter() {
+            note(
+                value
+                    .to_str()
+                    .ok()
+                    .and_then(|v| parse_forwarded_address(v.trim())),
+            );
+        }
+        for value in headers.get_all("forwarded").iter() {
+            match value.to_str() {
+                Ok(value) => {
+                    for named in rfc7239_for(value) {
+                        note(named);
+                    }
+                }
+                Err(_) => note(None),
+            }
+        }
         Self {
             arrival,
             forwarded,
             forwarded_client,
+            forwarded_for,
+            other_named,
+            other_names_beyond_tailscale,
             host: headers
                 .get(axum::http::header::HOST)
                 .and_then(|h| h.to_str().ok())
@@ -168,7 +224,26 @@ impl RequestFacts {
     }
 }
 
-/// An `X-Forwarded-For` element as an address: a bare address, a bracketed
+/// The `for=` values of an RFC 7239 `Forwarded` header, one per element, as
+/// addresses: quoted or not, an IPv6 address in brackets, either with a port.
+/// An element whose `for` is not an address (`unknown`, an obfuscated name) is
+/// `None`; an element with no `for` at all names nothing.
+fn rfc7239_for(value: &str) -> Vec<Option<IpAddr>> {
+    value
+        .split(',')
+        .filter_map(|element| {
+            element.split(';').find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                key.trim().eq_ignore_ascii_case("for").then(|| {
+                    let value = value.trim().trim_matches('"');
+                    parse_forwarded_address(value)
+                })
+            })
+        })
+        .collect()
+}
+
+/// An address as a forwarding header names it: a bare address, a bracketed
 /// IPv6 one, or either with a port.
 fn parse_forwarded_address(part: &str) -> Option<IpAddr> {
     if let Ok(ip) = part.parse::<IpAddr>() {
@@ -186,22 +261,35 @@ fn parse_forwarded_address(part: &str) -> Option<IpAddr> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Classification {
     pub class: ClientClass,
-    /// The address failures are counted against and bans apply to: the peer,
-    /// or for a forwarded request the rightmost forwarded address. `None` when
-    /// a forwarded request named no readable address.
-    pub client_ip: Option<IpAddr>,
+    /// Every address the request names: the peer, every `X-Forwarded-For`
+    /// entry, `X-Real-IP` and every `Forwarded: for=`. The blocklist applies to
+    /// all of them: a client that lies about its address can only get itself
+    /// refused, and an honest proxy's real client is caught whichever header
+    /// that proxy uses. dux cannot know which header a given proxy overwrites.
+    pub named: Vec<IpAddr>,
+    /// The client address dux can VERIFY, and so the only one an automatic ban
+    /// ever writes to `blocked_addresses`: the direct peer on a listener that
+    /// is not loopback, or the forwarded address of a request proven to come
+    /// through `tailscale serve`. `None` for everything else.
+    pub verified_ip: Option<IpAddr>,
+    /// The address an unverified forwarded request claims (the rightmost
+    /// `X-Forwarded-For`, else the last of `X-Real-IP` and `Forwarded`). Its
+    /// failures are slowed under it in memory, and never written anywhere.
+    pub claimed_ip: Option<IpAddr>,
     /// Whether the path from the browser to dux is known to be encrypted:
-    /// loopback never leaves the machine, and the tailnet is WireGuard
-    /// end to end.
+    /// loopback never leaves the machine, the tailnet is WireGuard end to end,
+    /// and a Funnel is HTTPS.
     pub transport_encrypted: bool,
     /// Whether the request came through a confirmed `tailscale serve` route
-    /// served over HTTPS, the one case dux knows the browser used HTTPS.
+    /// served over HTTPS, or through a Funnel: the cases dux knows the browser
+    /// used HTTPS.
     pub https_serve_route: bool,
     /// Whether the request was forwarded by a proxy dux cannot vouch for, the
     /// case the one-time proxy warning is about.
     pub unvouched_proxy: bool,
-    /// Why a plain loopback request was counted as the network rather than
-    /// this machine (see [`Exposure::loopback_distrust_reason`]), or `None`.
+    /// Why a request that reached dux from this machine (over loopback, or
+    /// from this machine's own Tailscale address) was counted as the network
+    /// rather than this machine or the tailnet, or `None`.
     pub loopback_distrusted: Option<&'static str>,
 }
 
@@ -220,45 +308,52 @@ fn is_tailscale(ip: IpAddr) -> bool {
     }
 }
 
+/// Why a connection from this machine's own Tailscale address is not the
+/// tailnet.
+const SELF_RELAY: &str = "the connection came from this machine's own Tailscale address, as \
+     a relay on this machine (socat, `ssh -L`, a proxy, a Funnel TCP forward) does too";
+
 /// Classify one request. See the module doc for the rules.
 pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
     let canonical = dux_core::config_auth::canonical;
+    let mut named: Vec<IpAddr> = Vec::new();
+    if let Some(arrival) = facts.arrival {
+        named.push(canonical(arrival.peer.ip()));
+    }
+    named.extend(facts.forwarded_for.iter().copied().map(canonical));
+    named.extend(facts.other_named.iter().copied().map(canonical));
+    named.dedup();
+    let claimed = facts
+        .forwarded_client
+        .or_else(|| facts.other_named.last().copied())
+        .map(canonical);
+    let base = Classification {
+        class: ClientClass::Network,
+        named,
+        verified_ip: None,
+        claimed_ip: claimed,
+        transport_encrypted: false,
+        https_serve_route: false,
+        unvouched_proxy: false,
+        loopback_distrusted: None,
+    };
     let Some(arrival) = facts.arrival else {
-        return Classification {
-            class: ClientClass::Network,
-            client_ip: facts.forwarded_client.map(canonical),
-            transport_encrypted: false,
-            https_serve_route: false,
-            unvouched_proxy: false,
-            loopback_distrusted: None,
-        };
+        return base;
     };
     let local = canonical(arrival.local.ip());
     let peer = canonical(arrival.peer.ip());
-    let client_ip = if facts.forwarded && local.is_loopback() {
-        facts.forwarded_client.map(canonical)
-    } else {
-        Some(peer)
-    };
-    let network = |unvouched_proxy: bool| Classification {
-        class: ClientClass::Network,
-        client_ip,
-        transport_encrypted: false,
-        https_serve_route: false,
-        unvouched_proxy,
-        loopback_distrusted: None,
-    };
     // Tailscale terminates TLS for every Funnel, so a Funnel request reached
     // the browser over HTTPS: encrypted, and its cookie may be Secure. Only
     // Tailscale's serve proxy sets the marker (it strips client copies); a
     // client that forges it on a direct request only makes itself the
-    // internet and loses its own cookie over plain HTTP.
+    // internet and loses its own cookie over plain HTTP. The address it names
+    // is still only claimed: the marker proves nothing about it.
     if facts.funnel_marker {
         return Classification {
             class: ClientClass::Internet,
             transport_encrypted: true,
             https_serve_route: true,
-            ..network(false)
+            ..base
         };
     }
     if local.is_loopback() {
@@ -266,45 +361,89 @@ pub fn classify(facts: &RequestFacts, exposure: &Exposure) -> Classification {
             if let Some(reason) = exposure.loopback_distrust_reason() {
                 return Classification {
                     loopback_distrusted: Some(reason),
-                    ..network(false)
+                    claimed_ip: None,
+                    ..base
                 };
             }
             return Classification {
                 class: ClientClass::ThisMachine,
-                client_ip,
+                verified_ip: Some(peer),
+                claimed_ip: None,
                 transport_encrypted: true,
-                https_serve_route: false,
-                unvouched_proxy: false,
-                loopback_distrusted: None,
+                ..base
             };
         }
+        // Proven to come through `tailscale serve` only when everything
+        // Tailscale's serve proxy sets is there and nothing it never sets is:
+        // the route's own name and port in the Host, the identity headers, the
+        // nearest hop's X-Forwarded-For naming a Tailscale address (a LAN
+        // client named by another proxy on this machine never is), and no
+        // X-Real-IP or Forwarded naming anything else (decided: a proxy that
+        // keeps the client's Host and passes its headers on is how a LAN
+        // client would otherwise pose as the tailnet).
         let route = facts
             .host
             .as_deref()
             .and_then(|host| exposure.confirmed_route(host));
-        return match route {
-            Some(route) if facts.identity_headers => Classification {
-                class: ClientClass::Tailnet,
-                client_ip,
-                transport_encrypted: true,
-                https_serve_route: route.is_https(),
-                unvouched_proxy: false,
-                loopback_distrusted: None,
+        let tailnet_hop = facts
+            .forwarded_client
+            .map(canonical)
+            .filter(|ip| is_tailscale(*ip));
+        return match (route, tailnet_hop) {
+            (Some(route), Some(client))
+                if facts.identity_headers && !facts.other_names_beyond_tailscale =>
+            {
+                Classification {
+                    class: ClientClass::Tailnet,
+                    verified_ip: Some(client),
+                    claimed_ip: None,
+                    transport_encrypted: true,
+                    https_serve_route: route.is_https(),
+                    ..base
+                }
+            }
+            _ => Classification {
+                unvouched_proxy: true,
+                ..base
             },
-            _ => network(true),
         };
     }
+    // A direct peer on a listener that is not loopback is the client itself.
     if is_tailscale(local) && is_tailscale(peer) {
+        // A connection this machine opens to its own Tailscale address leaves
+        // FROM that address, so any relay on this machine aimed there looks
+        // like a peer. dux cannot tell a local user from a relay, so it fails
+        // closed (decided).
+        if peer == local || exposure.own_tailscale_ip(peer) {
+            return Classification {
+                loopback_distrusted: Some(SELF_RELAY),
+                claimed_ip: None,
+                ..base
+            };
+        }
+        // A forward dux knows of may be aimed at this listener as well as at
+        // loopback (decided), so it is distrusted the same way.
+        if exposure.forward_known() {
+            return Classification {
+                loopback_distrusted: exposure.loopback_distrust_reason(),
+                verified_ip: Some(peer),
+                claimed_ip: None,
+                ..base
+            };
+        }
         return Classification {
             class: ClientClass::Tailnet,
-            client_ip,
+            verified_ip: Some(peer),
+            claimed_ip: None,
             transport_encrypted: true,
-            https_serve_route: false,
-            unvouched_proxy: false,
-            loopback_distrusted: None,
+            ..base
         };
     }
-    network(false)
+    Classification {
+        verified_ip: Some(peer),
+        claimed_ip: None,
+        ..base
+    }
 }
 
 #[cfg(test)]
@@ -436,7 +575,7 @@ mod tests {
         );
         assert_eq!(c.class, ClientClass::Tailnet);
         assert!(c.transport_encrypted);
-        assert_eq!(c.client_ip, Some("100.101.102.104".parse().unwrap()));
+        assert_eq!(c.verified_ip, Some("100.101.102.104".parse().unwrap()));
         let spoofed = class_of(
             arrival("192.168.1.9:5", "100.101.102.103:3890"),
             &[],
@@ -490,7 +629,7 @@ mod tests {
         let c = class_of(arrival("127.0.0.1:1", LOOPBACK), &through_serve, &exposure);
         assert_eq!(c.class, ClientClass::Tailnet);
         assert!(c.transport_encrypted && c.https_serve_route);
-        assert_eq!(c.client_ip, Some("100.64.0.9".parse().unwrap()));
+        assert_eq!(c.verified_ip, Some("100.64.0.9".parse().unwrap()));
 
         // No identity headers: not provably Tailscale serve.
         let bare = class_of(
@@ -544,7 +683,8 @@ mod tests {
             &Exposure::default(),
         );
         assert_eq!(c.class, ClientClass::Network);
-        assert_eq!(c.client_ip, Some("198.51.100.7".parse().unwrap()));
+        assert_eq!(c.claimed_ip, Some("198.51.100.7".parse().unwrap()));
+        assert_eq!(c.verified_ip, None, "a claim is not verified");
         // Duplicate headers: the last element of the last one.
         let dup = class_of(
             arrival("127.0.0.1:1", LOOPBACK),
@@ -554,7 +694,7 @@ mod tests {
             ],
             &Exposure::default(),
         );
-        assert_eq!(dup.client_ip, Some("198.51.100.8".parse().unwrap()));
+        assert_eq!(dup.claimed_ip, Some("198.51.100.8".parse().unwrap()));
         // A header from a client that reached a non-loopback listener directly is
         // not a proxy's: the peer is the client.
         let direct = class_of(
@@ -563,7 +703,7 @@ mod tests {
             &Exposure::default(),
         );
         assert_eq!(direct.class, ClientClass::Network);
-        assert_eq!(direct.client_ip, Some("198.51.100.9".parse().unwrap()));
+        assert_eq!(direct.verified_ip, Some("198.51.100.9".parse().unwrap()));
         // Unreadable: no address to count against.
         let junk = class_of(
             arrival("127.0.0.1:1", LOOPBACK),
@@ -571,7 +711,7 @@ mod tests {
             &Exposure::default(),
         );
         assert_eq!(junk.class, ClientClass::Network);
-        assert_eq!(junk.client_ip, None);
+        assert_eq!(junk.claimed_ip, None);
         // A port or brackets around the address.
         for (value, want) in [
             ("198.51.100.1:443", "198.51.100.1"),
@@ -583,7 +723,7 @@ mod tests {
                 &[("x-forwarded-for", value)],
                 &Exposure::default(),
             );
-            assert_eq!(c.client_ip, Some(want.parse().unwrap()), "{value}");
+            assert_eq!(c.claimed_ip, Some(want.parse().unwrap()), "{value}");
         }
         // Tailscale identity headers alone, from anywhere, mean nothing.
         let posing = class_of(
@@ -611,6 +751,149 @@ mod tests {
     fn an_unrecorded_connection_is_the_network() {
         let c = class_of(None, &[], &Exposure::default());
         assert_eq!(c.class, ClientClass::Network);
-        assert_eq!(c.client_ip, None);
+        assert_eq!(c.claimed_ip, None);
+        assert_eq!(c.verified_ip, None);
+    }
+
+    #[test]
+    fn this_machine_own_tailscale_address_is_the_network() {
+        let to_self = class_of(
+            arrival("100.101.102.103:5", "100.101.102.103:3890"),
+            &[],
+            &Exposure::default(),
+        );
+        assert_eq!(to_self.class, ClientClass::Network);
+        assert!(to_self.loopback_distrusted.is_some());
+        assert_eq!(
+            to_self.verified_ip, None,
+            "never blocked: it is this machine"
+        );
+        // Another of this machine's own addresses (its IPv4 reaching its IPv6).
+        let own = Exposure {
+            funnel: FunnelState::Open,
+            identity: Some(IdentityFacts {
+                own_ips: vec![
+                    "100.101.102.103".parse().unwrap(),
+                    "fd7a:115c:a1e0::1".parse().unwrap(),
+                ],
+                ..IdentityFacts::default()
+            }),
+        };
+        let other_own = class_of(
+            arrival("[fd7a:115c:a1e0::1]:5", "[fd7a:115c:a1e0::9]:3890"),
+            &[],
+            &own,
+        );
+        assert_eq!(other_own.class, ClientClass::Network);
+        let peer = class_of(
+            arrival("100.101.102.104:5", "100.101.102.103:3890"),
+            &[],
+            &own,
+        );
+        assert_eq!(peer.class, ClientClass::Tailnet);
+    }
+
+    #[test]
+    fn a_known_forward_distrusts_the_tailscale_listener() {
+        let forward = Exposure {
+            funnel: FunnelState::Open,
+            identity: Some(IdentityFacts {
+                forward_to_dux: true,
+                ..IdentityFacts::default()
+            }),
+        };
+        let c = class_of(
+            arrival("100.101.102.104:5", "100.101.102.103:3890"),
+            &[],
+            &forward,
+        );
+        assert_eq!(c.class, ClientClass::Network);
+        assert!(c.loopback_distrusted.unwrap().contains("TCP forward"));
+    }
+
+    #[test]
+    fn serve_is_proven_only_when_the_nearest_hop_names_a_tailscale_address() {
+        let exposure = served("https://box.tail.ts.net", false);
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut headers = vec![
+                ("host", "box.tail.ts.net"),
+                ("tailscale-user-login", "owner@example.com"),
+            ];
+            headers.extend_from_slice(extra);
+            class_of(arrival("127.0.0.1:1", LOOPBACK), &headers, &exposure)
+        };
+        assert_eq!(
+            with(&[("x-forwarded-for", "192.168.1.9")]).class,
+            ClientClass::Network,
+            "a LAN address is never what tailscale serve reports"
+        );
+        assert_eq!(
+            with(&[("x-forwarded-for", "192.168.1.9, 100.64.0.9")]).class,
+            ClientClass::Tailnet,
+            "only the nearest hop decides"
+        );
+        assert_eq!(
+            with(&[
+                ("x-forwarded-for", "100.64.0.9"),
+                ("x-real-ip", "192.168.1.9")
+            ])
+            .class,
+            ClientClass::Network
+        );
+        assert_eq!(
+            with(&[
+                ("x-forwarded-for", "100.64.0.9"),
+                ("forwarded", "for=\"[2001:db8::1]:443\"")
+            ])
+            .class,
+            ClientClass::Network
+        );
+        assert_eq!(
+            with(&[
+                ("x-forwarded-for", "100.64.0.9"),
+                ("forwarded", "for=unknown")
+            ])
+            .class,
+            ClientClass::Network,
+            "a name that is not an address fails closed"
+        );
+        assert_eq!(
+            with(&[
+                ("x-forwarded-for", "100.64.0.9"),
+                ("x-real-ip", "100.64.0.9")
+            ])
+            .class,
+            ClientClass::Tailnet
+        );
+    }
+
+    #[test]
+    fn every_address_a_request_names_is_collected() {
+        let c = class_of(
+            arrival("127.0.0.1:1", LOOPBACK),
+            &[
+                ("x-forwarded-for", "198.51.100.1, 198.51.100.2"),
+                ("x-real-ip", "198.51.100.3"),
+                (
+                    "forwarded",
+                    "for=198.51.100.4;proto=https, For=\"[2001:db8::5]:8443\", for=\"198.51.100.6:80\"",
+                ),
+            ],
+            &Exposure::default(),
+        );
+        let named: Vec<String> = c.named.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            named,
+            [
+                "127.0.0.1",
+                "198.51.100.1",
+                "198.51.100.2",
+                "198.51.100.3",
+                "198.51.100.4",
+                "2001:db8::5",
+                "198.51.100.6"
+            ]
+        );
+        assert_eq!(c.claimed_ip, Some("198.51.100.2".parse().unwrap()));
     }
 }

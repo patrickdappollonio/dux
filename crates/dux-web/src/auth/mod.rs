@@ -220,7 +220,7 @@ pub struct AuthState {
     reach: Reach,
     pub(crate) sessions: sessions::Sessions,
     pub(crate) admission: admission::Admission,
-    pub(crate) gate: gate::CheckGate,
+    pub(crate) gate: Arc<gate::CheckGate>,
     /// Bumped whenever something an open socket depends on changed: the
     /// section, a session ended, an address was blocked.
     revision: tokio::sync::watch::Sender<u64>,
@@ -304,7 +304,7 @@ impl AuthState {
             },
             sessions,
             admission: admission::Admission::default(),
-            gate: gate::CheckGate::default(),
+            gate: Arc::default(),
             revision: tokio::sync::watch::Sender::new(0),
             weak: std::sync::Mutex::new(None),
             proxy_warned: AtomicBool::new(false),
@@ -485,8 +485,14 @@ impl AuthState {
     /// slow-down, the global limit and the check gate, counting a wrong one
     /// (and blocking the address when it reaches the limit). Also measures a
     /// right one against today's minimums.
+    ///
+    /// Once a check slot is taken, the check and its accounting run in a task
+    /// of their own that outlives the request (decided, after review): the
+    /// slot is held by the blocking work until Argon2 finishes, and a wrong
+    /// guess is counted (and may block) even when the client hung up first, so
+    /// hanging up neither frees a slot early nor makes a guess free.
     pub(crate) async fn verify(
-        &self,
+        self: &Arc<Self>,
         c: &Classification,
         password: Password,
         kind: admission::CheckKind,
@@ -519,18 +525,40 @@ impl AuthState {
         {
             return Verify::Wait(wait);
         }
-        let policy = snapshot.config.password_policy();
-        let checked = tokio::task::spawn_blocking(move || {
-            let outcome = dux_core::auth::verify_password(&password, &hash);
-            let weak = matches!(outcome, Ok(true)) && {
-                let words = dux_core::auth::guess_words();
-                let words: Vec<&str> = words.iter().map(String::as_str).collect();
-                !dux_core::auth::check_minimums(&password, &policy, &words).passes()
-            };
-            (outcome, weak)
-        })
-        .await;
-        drop(permit);
+        let state = Arc::clone(self);
+        let c = c.clone();
+        let check = tokio::spawn(async move {
+            let policy = snapshot.config.password_policy();
+            let checked = tokio::task::spawn_blocking(move || {
+                let outcome = dux_core::auth::verify_password(&password, &hash);
+                let weak = matches!(outcome, Ok(true)) && {
+                    let words = dux_core::auth::guess_words();
+                    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+                    !dux_core::auth::check_minimums(&password, &policy, &words).passes()
+                };
+                // Released here, as the Argon2 work ends, whatever became of
+                // the request.
+                drop(permit);
+                (outcome, weak)
+            })
+            .await;
+            state.settle(&snapshot, &c, checked).await
+        });
+        match check.await {
+            Ok(verdict) => verdict,
+            Err(error) => Verify::Failed(format!("the password check stopped: {error}")),
+        }
+    }
+
+    /// Account for one finished check: count a wrong guess (blocking or
+    /// reporting at the limit) and forget the client's failures after a right
+    /// one.
+    async fn settle(
+        &self,
+        snapshot: &AuthSnapshot,
+        c: &Classification,
+        checked: Result<(Result<bool, dux_core::auth::AuthError>, bool), tokio::task::JoinError>,
+    ) -> Verify {
         match checked {
             Ok((Ok(true), weak)) => {
                 if self.snapshot().generation != snapshot.generation {
@@ -550,16 +578,32 @@ impl AuthState {
                     .admission
                     .record_failure(&snapshot.config, c, Instant::now())
                 {
-                    Some(ip) => {
+                    admission::Strike::Block(ip) => {
                         self.block(ip).await;
                         Verify::Blocked
                     }
-                    None => Verify::Wrong,
+                    admission::Strike::UnverifiedLimit(ip) => {
+                        self.speaker.unverified_limit(
+                            ip,
+                            snapshot.config.max_failed_logins,
+                            &self.config_path_text(),
+                        );
+                        Verify::Wrong
+                    }
+                    admission::Strike::Counted => Verify::Wrong,
                 }
             }
             Ok((Err(error), _)) => Verify::Failed(error.to_string()),
             Err(error) => Verify::Failed(format!("the password check stopped: {error}")),
         }
+    }
+
+    /// The config file's path for a log line, or its name when this serve has
+    /// none.
+    fn config_path_text(&self) -> String {
+        self.config_path
+            .as_ref()
+            .map_or_else(|| "config.toml".to_string(), |p| p.display().to_string())
     }
 
     /// Note how the password that just signed in measures up, saying so once
@@ -601,10 +645,7 @@ impl AuthState {
             .and_then(|written| written),
             None => Err(anyhow::anyhow!("this server has no config file")),
         };
-        let path = self
-            .config_path
-            .as_ref()
-            .map_or_else(|| "config.toml".to_string(), |p| p.display().to_string());
+        let path = self.config_path_text();
         match outcome {
             Ok(
                 dux_core::config_keys::BanWrite::Written

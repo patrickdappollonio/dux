@@ -66,6 +66,9 @@ pub struct IdentityFacts {
     pub forward_to_dux: bool,
     /// The `tailscale serve` web routes that end at dux.
     pub routes: Vec<ServeRoute>,
+    /// This machine's own Tailscale addresses. A connection FROM one of them is
+    /// this machine, possibly a relay on it, and never the tailnet.
+    pub own_ips: Vec<std::net::IpAddr>,
 }
 
 impl IdentityFacts {
@@ -75,6 +78,7 @@ impl IdentityFacts {
             funnel_any: identity.funnel,
             forward_to_dux: identity.forward_to_dux,
             routes: identity.serve.clone(),
+            own_ips: identity.status.tailscale_ips.clone(),
         }
     }
 }
@@ -147,6 +151,26 @@ impl Exposure {
                 .identity
                 .as_ref()
                 .is_some_and(|facts| facts.forward_to_dux)
+    }
+
+    /// Whether dux knows of a raw TCP forward onto its port. Such a forward may
+    /// be aimed at the Tailscale listener as well as at loopback, so both are
+    /// distrusted while it stands.
+    pub fn forward_known(&self) -> bool {
+        self.identity
+            .as_ref()
+            .is_some_and(|facts| facts.forward_to_dux)
+    }
+
+    /// Whether `ip` is one of this machine's own Tailscale addresses, as the
+    /// last successful look reported them.
+    pub fn own_tailscale_ip(&self, ip: std::net::IpAddr) -> bool {
+        self.identity.as_ref().is_some_and(|facts| {
+            facts
+                .own_ips
+                .iter()
+                .any(|own| dux_core::config_auth::canonical(*own) == ip)
+        })
     }
 
     /// Whether a Funnel is on for anything on this machine.

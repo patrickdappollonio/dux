@@ -1492,6 +1492,12 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Failed logins one address may make within failed_login_window_seconds\n\
                  # before dux adds it to blocked_addresses below and says so in its log.\n\
+                 # dux only adds an address it can verify: a client connected to it\n\
+                 # directly, or one that came through your tailscale serve. Behind any\n\
+                 # other proxy the address is only what the request claims, so dux\n\
+                 # writes nothing, keeps slowing those logins down (all such traffic\n\
+                 # together, too, so changing the claim does not help), and its log\n\
+                 # names the address for you to add by hand if you trust the proxy.\n\
                  # This machine is never blocked, only slowed down. Everyone behind one\n\
                  # shared address (an office, a phone carrier) is blocked together. 0\n\
                  # never blocks anyone automatically (use it behind a proxy many people\n\
@@ -1505,10 +1511,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Addresses and ranges dux refuses before anything else, with or without a\n\
                  # password: single addresses (\"203.0.113.7\", \"2001:db8::1\") or CIDR\n\
-                 # ranges (\"203.0.113.0/24\"). Yours to edit: add a scanner you keep\n\
-                 # seeing, or remove an address dux blocked after failed logins (yours,\n\
-                 # if you mistyped). An entry that does not parse makes this section\n\
-                 # invalid. Default empty.",
+                 # ranges (\"203.0.113.0/24\"). A request is refused when ANY address it\n\
+                 # names matches: where it connected from, and every address in its\n\
+                 # X-Forwarded-For, X-Real-IP and Forwarded headers, so an entry works\n\
+                 # behind a proxy too. Yours to edit: add a scanner you keep seeing, or\n\
+                 # remove an address dux blocked after failed logins (yours, if you\n\
+                 # mistyped). An entry that does not parse makes this section invalid.\n\
+                 # Default empty.",
             )),
             value_fn: |c| FieldValue::StrList(c.server.auth.blocked_addresses.clone()),
         },

@@ -100,6 +100,17 @@ impl Speaker {
         );
     }
 
+    /// An address dux could not verify reached `max_failed_logins`: say so,
+    /// and that nothing was written.
+    pub(crate) fn unverified_limit(&self, ip: IpAddr, failures: u32, path: &str) {
+        self.say(
+            Loudness::Warning,
+            BLOCKED_KEY,
+            &unverified_limit_sentence(ip, failures, path),
+            false,
+        );
+    }
+
     fn exposed(&self, reach: &[String], funnel: bool) {
         self.say(
             Loudness::Alarm,
@@ -170,6 +181,16 @@ fn blocked_sentence(ip: IpAddr, failures: u32, path: &str, kept: &BanKept) -> St
     }
 }
 
+/// An unverified forwarded address at the limit. Decided: it is NOT written,
+/// because the address is only what the request claimed and writing it would
+/// let anyone fill the blocklist with addresses of their choosing.
+fn unverified_limit_sentence(ip: IpAddr, failures: u32, path: &str) -> String {
+    let ip = dux_core::config_auth::canonical(ip);
+    format!(
+        "{failures} failed sign-ins came through a proxy claiming to be {ip}. dux did not add it          to blocked_addresses because it could not verify that address (the proxy is not a          confirmed tailscale serve route, so the client may have chosen it); it keeps slowing          those sign-ins down. If you trust the proxy, add {ip} to blocked_addresses in the          [server.auth] section of {path} by hand and reload the config."
+    )
+}
+
 /// Follows whether the no-password alarm is due, saying it when it becomes
 /// true and withdrawing its status when it stops being true.
 #[derive(Default)]
@@ -194,6 +215,16 @@ impl ExposedWarning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unverified_address_at_the_limit_says_it_was_not_written_and_how_to_add_it() {
+        let text = unverified_limit_sentence("203.0.113.9".parse().unwrap(), 10, "/x/config.toml");
+        assert!(text.contains("203.0.113.9"), "{text}");
+        assert!(text.contains("did not add it"), "{text}");
+        assert!(text.contains("could not verify"), "{text}");
+        assert!(text.contains("by hand"), "{text}");
+        assert!(text.contains("/x/config.toml"), "{text}");
+    }
 
     #[test]
     fn the_alarm_names_the_reach_the_risk_and_the_fix() {
