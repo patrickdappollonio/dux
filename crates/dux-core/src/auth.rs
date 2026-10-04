@@ -318,6 +318,10 @@ pub enum MinimumFailure {
     TooWeak { score: u8, minimum: u8 },
     /// More bytes than `max_password_bytes`.
     TooLong { bytes: usize, maximum: u32 },
+    /// A control character (Unicode category Cc: a line break, a tab, NUL,
+    /// DEL), which a browser's password field cannot type, so the web login
+    /// could never match the password. Says nothing of where or which.
+    ControlCharacter,
 }
 
 impl fmt::Display for MinimumFailure {
@@ -340,6 +344,11 @@ impl fmt::Display for MinimumFailure {
                 "it is {bytes} bytes long and the most the login accepts is {maximum} \
                  (max_password_bytes)"
             ),
+            Self::ControlCharacter => write!(
+                f,
+                "the password cannot contain line breaks, tabs or other control characters, \
+                 because a browser's password field cannot type them"
+            ),
         }
     }
 }
@@ -359,8 +368,12 @@ impl MinimumCheck {
     }
 }
 
-/// Compare `password` against `policy`. Every failing minimum is listed, not
-/// only the first, so one message can say everything that needs changing.
+/// Compare `password` against `policy`, the one check every way of setting a
+/// password goes through (the command line's prompt and `--stdin`, and the
+/// web UI's password route), before anything is hashed. Every failing minimum
+/// is listed, not only the first, so one message can say everything that
+/// needs changing. A control character fails it whatever the policy says: a
+/// browser's password field cannot type one, so the login would be locked.
 pub fn check_minimums(
     password: &Password,
     policy: &PasswordPolicy,
@@ -387,6 +400,10 @@ pub fn check_minimums(
             bytes,
             maximum: policy.maximum_bytes,
         });
+    }
+    // `char::is_control` is exactly Unicode category Cc.
+    if password.expose().chars().any(char::is_control) {
+        failures.push(MinimumFailure::ControlCharacter);
     }
     MinimumCheck { strength, failures }
 }
@@ -603,6 +620,35 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, MinimumFailure::TooLong { .. }))
         );
+    }
+
+    /// Unicode category Cc, in any position, fails the check whatever the
+    /// policy: a browser's password field cannot type it. Characters outside
+    /// Cc (a space, an accent, an emoji, a direction mark) are typeable.
+    #[test]
+    fn a_password_holding_a_control_character_is_refused() {
+        for control in [
+            '\n', '\r', '\t', '\0', '\u{7f}', '\u{1b}', '\u{85}', '\u{9f}',
+        ] {
+            for at in [0, STRONG.len() / 2, STRONG.len()] {
+                let mut text = STRONG.to_string();
+                text.insert(at, control);
+                let check = check_minimums(&pw(&text), &policy(), &[]);
+                assert!(
+                    check.failures.contains(&MinimumFailure::ControlCharacter),
+                    "{control:?} at {at}: {check:?}"
+                );
+            }
+        }
+        // The refusal never repeats the password.
+        let said = MinimumFailure::ControlCharacter.to_string();
+        assert!(!said.contains("staple"), "{said}");
+        for typeable in [' ', '\u{e9}', '\u{1f600}', '\u{200f}', '\u{a0}'] {
+            let mut text = STRONG.to_string();
+            text.push(typeable);
+            let check = check_minimums(&pw(&text), &policy(), &[]);
+            assert!(check.passes(), "{typeable:?}: {check:?}");
+        }
     }
 
     #[test]

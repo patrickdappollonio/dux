@@ -794,6 +794,11 @@ impl HiddenEntry {
             ""
         } else if check
             .failures
+            .contains(&dux_core::auth::MinimumFailure::ControlCharacter)
+        {
+            ", has a control character"
+        } else if check
+            .failures
             .iter()
             .any(|f| matches!(f, dux_core::auth::MinimumFailure::TooShort { .. }))
         {
@@ -2073,5 +2078,8 @@ mod names_under_unknown_keys_tests;
 
 #[cfg(test)]
 mod hidden_values_tests;
+
+#[cfg(test)]
+mod password_control_characters_tests;
 #[cfg(test)]
 mod restore_report_and_unknown_path_tests;

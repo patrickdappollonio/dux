@@ -188,7 +188,11 @@ printf '%s\n' "$PW" | dux config set server.auth.password --stdin   # for script
 ```
 
 The prompt never echoes what you type, and rates the password from weak through fair,
-good and strong to excellent as you go. The password is never accepted as a command-line
+good and strong to excellent as you go. `--stdin` drops one trailing line break, the one
+`printf '%s\n'` or a file's last line adds. A password cannot contain a line break, a tab
+or any other control character, because a browser's password field cannot type one: a
+pipe holding one more line break (a file ending in a blank line) is refused, and nothing
+is changed. The password is never accepted as a command-line
 argument, where shell history and the process list would keep it. What lands in
 `config.toml` is only its Argon2id hash, at `server.auth.password_hash`;
 `dux config get server.auth.password` prints that hash. Changing or clearing the

@@ -744,6 +744,19 @@ pub enum SetPasswordError {
 impl fmt::Display for SetPasswordError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // A password no browser can type is refused on that alone: its
+            // length and strength are beside the point.
+            Self::BelowMinimums(check)
+                if check
+                    .failures
+                    .contains(&crate::auth::MinimumFailure::ControlCharacter) =>
+            {
+                write!(
+                    f,
+                    "{}. Nothing was changed.",
+                    crate::auth::MinimumFailure::ControlCharacter
+                )
+            }
             Self::BelowMinimums(check) => {
                 let reasons: Vec<String> = check.failures.iter().map(ToString::to_string).collect();
                 write!(f, "that password was not set: {}", reasons.join("; and "))?;
