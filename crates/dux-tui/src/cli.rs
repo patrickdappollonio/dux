@@ -43,6 +43,18 @@ pub fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
             println!("{}", paths.config_path.display());
             Ok(())
         }
+        "get" => crate::config_cli::run_get(
+            &args[1..],
+            paths,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
+        "set" => crate::config_cli::run_set(
+            &args[1..],
+            paths,
+            &mut crate::config_cli::TerminalSecrets,
+            &mut std::io::stdout(),
+        ),
         "" | "--help" | "-h" => {
             print_config_help();
             Ok(())
@@ -67,6 +79,16 @@ dux config: manage the dux configuration file
 
 Subcommands:
   dux config path          Print the config file path
+  dux config get <setting> Print one setting's value, for example
+                           `dux config get server.port`
+  dux config set <setting> <value>
+                           Change one setting, keeping the file's comments,
+                           and tell a running dux to reload. Lists are one
+                           TOML array: '[\"a\", \"b\"]'
+  dux config set server.auth.password
+                           Set the web UI password: asked for twice without
+                           echo, with a strength meter. Never a command-line
+                           argument; add --stdin to pipe it in instead
   dux config diff          Show settings that differ from defaults (summary;
                            [env] and project details are summarized, never
                            printed, so it is safe to paste into a bug report)
@@ -428,6 +450,9 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
                 return Ok(());
             }
             print_unified_diff("current", "default", &current, &fresh);
+            if let Some(note) = regenerate_password_note(&current) {
+                println!("\n{note}");
+            }
             println!("\nRun `dux config regenerate --yes` to overwrite with these defaults.");
         } else {
             println!("no config file exists; regenerate --yes will create one at:");
@@ -436,11 +461,30 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
         return Ok(());
     }
 
+    let note = fs::read_to_string(&paths.config_path)
+        .ok()
+        .and_then(|current| regenerate_password_note(&current));
     paths.ensure_dirs()?;
     dux_core::config_write::write_config_secure(&paths.config_path, &fresh)
         .with_context_path(&paths.config_path)?;
     println!("config regenerated at {}", paths.config_path.display());
+    if let Some(note) = note {
+        println!("{note}");
+    }
     Ok(())
+}
+
+/// Fresh defaults have no password, so regenerating a config that has one
+/// opens the web UI to whoever can reach it. Said in words rather than left
+/// to one line of the diff.
+fn regenerate_password_note(current: &str) -> Option<&'static str> {
+    dux_core::config::auth_section_of(current)
+        .ok()
+        .filter(|auth| auth.has_password())
+        .map(|_| {
+            "Note: this removes the web UI password (server.auth.password_hash). Set it again \
+             afterwards with `dux config set server.auth.password`."
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,6 +1361,16 @@ mod tests {
             changes,
             vec!["server.auth.blocked_addresses: 2 addresses configured".to_string()]
         );
+    }
+
+    #[test]
+    fn regenerate_warns_that_it_removes_a_password() {
+        let with = format!(
+            "[server.auth]\npassword_hash = \"{}\"\n",
+            a_valid_password_hash()
+        );
+        assert!(regenerate_password_note(&with).is_some_and(|n| n.contains("password")));
+        assert_eq!(regenerate_password_note("[server]\nport = 1\n"), None);
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod clipboard;
 mod config;
+mod config_cli;
 mod config_saver;
 mod diff;
 // The terminal-focus grace state machine is core-owned (`dux_core::focus`),
@@ -101,8 +102,11 @@ pub fn run(
                 Some(acquire_lock_or_exit(&paths.lock_path))
             }
 
-            // Everything else is read-only or prints help, so there is no
-            // shared state to protect.
+            // `set` deliberately runs beside a live dux: its write takes the
+            // config file's own lock (never this one, which the running dux
+            // holds for its whole life), and it then signals that dux to
+            // reload. Everything else is read-only or prints help, so there
+            // is no shared state to protect.
             _ => None,
         };
 
@@ -207,6 +211,11 @@ pub fn help_text() -> &'static str {
           workspace, so keep a non-loopback bind on a network you trust.\n\n\
          Config subcommands:\n\
           dux config path          Print the config file path\n\
+          dux config get <setting> Print one setting, e.g. server.port\n\
+          dux config set <setting> <value>\n\
+                                   Change one setting and reload a running dux\n\
+          dux config set server.auth.password\n\
+                                   Set the web UI password (asked for, or --stdin)\n\
           dux config diff          Show settings that differ from defaults.\n\
                                    [env] and project details are summarized,\n\
                                    never printed: safe to paste into a report.\n\
@@ -255,6 +264,22 @@ mod tests {
             help.contains("dux server"),
             "--help must name the `dux server` subcommand:\n{help}"
         );
+    }
+
+    #[test]
+    fn help_names_config_get_and_set_and_the_password() {
+        let help = help_text();
+        for needle in [
+            "dux config get",
+            "dux config set",
+            "server.auth.password",
+            "--stdin",
+        ] {
+            assert!(
+                help.contains(needle),
+                "--help must mention {needle}:\n{help}"
+            );
+        }
     }
 
     /// The flags `parse_server_args` already accepts must be discoverable from

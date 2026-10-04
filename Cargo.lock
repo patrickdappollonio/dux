@@ -1103,6 +1103,7 @@ dependencies = [
  "toml_edit 0.25.11+spec-1.1.0",
  "unicode-segmentation",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
