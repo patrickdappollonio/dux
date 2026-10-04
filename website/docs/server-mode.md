@@ -1,6 +1,6 @@
 ---
 title: Server mode overview
-description: The three ways to serve the web UI, the startup banner, the no-login trust model, and every [server] config key with its default.
+description: The three ways to serve the web UI, the startup banner, the optional password and the trust model, and every [server] config key with its default.
 group: Web UI
 order: 60
 ---
@@ -44,14 +44,14 @@ When stdout goes to a file or a pipe while stderr is still your terminal, every 
 and error it prints, and the shutdown's progress, also goes to stderr, so
 `dux server > access.log` never hides a warning or leaves your terminal silent while it
 stops. When both go to the same place (`> log 2>&1`, `nohup`, a service manager's
-journal) each line is written once. A non-loopback address's "no login" warning goes to
-stderr the moment dux knows it, before anything else loads, whenever stdout is not your
-terminal; on an interactive terminal the log line says it.
+journal) each line is written once. With no password set, a non-loopback address's
+warning goes to stderr the moment dux knows it, before anything else loads, whenever
+stdout is not your terminal; on an interactive terminal the log line says it.
 
 Two accepted oddities: `dux server | tee log` shows a warning twice on your terminal,
 once through `tee` and once on stderr; and where stdout and stderr are two separate
-pipes that something merges later (a container runtime, supervisord), the "no login"
-warning can land twice in the merged log.
+pipes that something merges later (a container runtime, supervisord), that
+no-password warning can land twice in the merged log.
 After that it keeps a timestamped log going: browsers connecting and leaving, one line
 per request (the access log), your Tailscale address coming and going, and the shutdown
 when you stop it. Any warning about the start itself, a missing Tailscale for one, is
@@ -223,51 +223,59 @@ Which to reach for:
 - **The background mode** when you want to keep working in the terminal and still pick
   the same agent up on the couch.
 
-## The trust model, stated plainly
+## Who can get in
 
-dux is a single-tenant, trusted-access tool.
-
-> [!WARNING]
-> **There is no login. None.** No password, no token, no user accounts, and nothing to
-> turn on in config. Access control is delegated entirely to where you bind and who can
-> reach it.
+dux is a single-tenant, trusted-access tool: one owner, one workspace. It is safe to put on
+a network with the right config, and the config is yours to get right. dux protects what
+it can and says loudly when a setup is risky, but it serves the setup you chose.
 
 > [!CAUTION]
-> **Everyone who can reach the server shares one workspace.** They can attach to any
-> agent or terminal, browse the server's filesystem through the project picker, run git
-> actions, and see every session. Do not expose it to people you would not hand a
-> terminal on that machine.
+> **Everyone who gets in shares one workspace.** They can attach to any agent or
+> terminal, browse the server's filesystem through the project picker, run git actions,
+> and see every session. Let in only people you would hand a terminal on that machine.
 
-Where dux binds:
+Three things decide who gets in:
 
-- **Loopback by default.** `127.0.0.1:3890` is reachable only from the machine dux runs
-  on.
-- **Tailscale, opt-out.** Unless `tailscale = "no"`, dux also binds your machine's
-  Tailscale address, so your tailnet devices can reach it over WireGuard with no further
-  gate. On the default `"auto"` dux binds that address whenever the interface is there,
-  drops the listener when it goes, and binds it again when it comes back, with no
-  restart. See [Reaching dux over Tailscale](/docs/tailscale).
-- **A background listener lasts as long as dux does.** `serve_while_tui = true` means a
-  server runs for the whole time your terminal UI is open.
+- **Where dux listens.** Loopback by default: `127.0.0.1:3890` is reachable only from
+  the machine dux runs on. Unless `tailscale = "no"`, dux also listens on your Tailscale
+  address, so your tailnet devices reach it over WireGuard; on the default `"auto"` that
+  listener comes and goes with the interface, with no restart (see
+  [Reaching dux over Tailscale](/docs/tailscale)). `serve_while_tui = true` means a
+  listener exists for as long as your terminal UI is open.
+- **The password.** Optional, one password for one owner, set with
+  `dux config set server.auth.password`. Once it is set, `[server.auth] require` decides
+  who is asked for it; by default that is everyone except this machine and your own
+  tailnet. See [The web password](/docs/web-login).
+- **`blocked_addresses`.** Addresses and ranges dux refuses outright, with or without a
+  password. dux adds to it after repeated failed sign-ins, and you can add to it too.
+
+The safe shapes:
+
+- **Loopback only**, the default. Nothing leaves the machine.
+- **Your own tailnet.** Fine without a password when the tailnet is only you; set one,
+  with `require = "tailnet"`, when other people share it.
+- **A LAN or public address**, `--bind 0.0.0.0:3890` and friends, **with a password**.
+  Over plain HTTP the password and the session can be read on the way, so prefer HTTPS:
+  `tailscale serve`, or a reverse proxy of your own with `require = "everywhere"`.
+  [Hosting dux on the public internet](/docs/public-hosting) is a worked example.
+
+> [!WARNING]
+> **No password on anything wider than loopback is on you.** dux still serves it, and
+> warns in red as it starts (in `dux server`'s output, the flip's log viewer, or the
+> terminal UI's status line for the background server) and with a red banner in every
+> browser. Anyone who can reach that address controls your agents and worktrees.
 
 > [!WARNING]
 > **In a container, dux cannot see a Tailscale outside it.** A Tailscale on the host or in
 > a sidecar container is invisible from inside dux's container, so when dux runs in one and
 > sees no Tailscale, it serves and prints a warning once at start: it cannot tell whether
-> something outside publishes its port, it has no login, and anything that can reach the
-> port can drive your terminals. Keep that port private to your own network. See
+> something outside publishes its port, and a connection relayed onto that port looks like
+> this machine. Keep the port private to your own network, or set a password with
+> `require = "everywhere"`. See
 > [When Tailscale isn't there](/docs/tailscale#when-tailscale-isnt-there).
 
-> [!CAUTION]
-> **Anything wider is on you.** Binding a LAN or public address (say
-> `--bind 0.0.0.0:3890`) puts your agents and worktrees in reach of anyone who can hit
-> that address, with no login in front. dux prints a loud warning before it does this.
-> Put it behind a trusted reverse proxy or keep it on Tailscale.
-> [Hosting dux behind a login](/docs/public-hosting) is one worked example: TLS,
-> `oauth2-proxy` with GitHub, and dux on a private network.
-
-Two automatic defenses always run. They are about browser attacks, not user
-authentication:
+Two automatic defenses always run as well. They stop a hostile web page from using your
+own browser against your server, and they do nothing about a person who opens the URL:
 
 - A **Host-header allowlist**, so a malicious page cannot DNS-rebind your browser into
   the server.
@@ -302,16 +310,18 @@ port = 3890
 # watching, so the listener comes and goes with your tailnet connection; "yes"
 # binds it once and then stops looking; "no" never binds it. If the
 # tailscale CLI is missing or the daemon is down, dux warns and keeps
-# listening. Unless this is "no", dux also refuses every request while a
-# Tailscale Funnel forwards to it, or while Tailscale is on this machine but
-# dux cannot ask it; "no" turns those checks off.
+# listening. Unless this is "no", dux also watches for a Tailscale Funnel or
+# forward to its port, and while one is there, or while it cannot ask, it
+# treats requests from this machine as the network ([server.auth] require).
+# On "no" it cannot check at all, so it does that the whole time.
 tailscale = "auto"
 
 # Serve the web UI in the background while the terminal UI keeps running, on
 # loopback plus the Tailscale address, exactly like the palette flip binds. Off
 # by default. The start-background-server and stop-background-server palette
 # commands flip it while dux runs and save the choice back here. With this on,
-# a listener exists for as long as dux does, and there is no login.
+# a listener exists for as long as dux does; [server.auth] decides who is
+# asked for a password.
 serve_while_tui = false
 
 # Extra Host header values to accept when a request is not same-origin. List a
@@ -385,6 +395,10 @@ itself (see [The workspace in the browser](/docs/web-workspace)).
 What dropping or pasting a file does, and where it lands, is in
 [Dropping and pasting files onto an agent](/docs/dropping-files).
 
+The password and its neighbours have a section of their own, `[server.auth]`, listed with
+every default in [Configuration](/docs/configuration#the-web-password-serverauth). Unlike
+most of `[server]`, all of it applies on a reload.
+
 Server mode shares the rest of your config with the TUI. The `[capabilities]` switches
 that bridge an agent's notifications and clipboard writes into the browser are covered in
 [Terminal capabilities](/docs/terminal-capabilities), and the general config file lives
@@ -404,7 +418,14 @@ You do not need shell access to the machine to change settings:
 
 - **Configuration → Edit config file…** in the cog menu opens a raw Monaco TOML editor
   over your actual `config.toml`. Saving writes the file but does not apply it live, so
-  run **Reload config** from the same submenu afterward.
+  run **Reload config** from the same submenu afterward. If the file changed on disk since
+  you opened it (a `dux config set`, a blocked address, another editor), the save is
+  refused and nothing is written; you choose between reloading the file, which drops your
+  edits, and keeping on editing so you can copy what you need first. An edit that sets,
+  changes or removes the web password is refused whole; change the password in
+  **Preferences…** instead, which asks for the current one. So is an edit that changes
+  `[server] host` or `allowed_hosts`, including through an older setting name that dux
+  turns into one of them: those stay a change you make in the file from a terminal.
 - **Global environment…** opens a dialog for workspace-wide environment variables that
   every project inherits, which any project can override with its own project-level
   environment settings.
@@ -423,5 +444,7 @@ You do not need shell access to the machine to change settings:
 - [Reaching dux over Tailscale](/docs/tailscale): how the tailnet address is found and
   bound, how dux answers to your MagicDNS name, HTTPS with `tailscale serve`, the QR
   codes, and what plain HTTP costs you.
-- [Hosting dux behind a login](/docs/public-hosting): a reverse proxy plus
-  `oauth2-proxy` with GitHub in one Compose file.
+- [The web password](/docs/web-login): set a password, decide who is asked for it,
+  and what it does and does not protect against.
+- [Hosting dux on the public internet](/docs/public-hosting): a reverse proxy in front,
+  with the dux password or `oauth2-proxy` and GitHub sign-in, in one Compose file.

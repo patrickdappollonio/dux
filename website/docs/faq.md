@@ -110,13 +110,16 @@ it is happy under `systemd`, `tmux`, or anything else that keeps a process alive
 
 ### Is there a login?
 
-No, and that is deliberate: dux is a single-tenant, trusted-access tool.
+An optional one: a single password for a single owner, set with
+`dux config set server.auth.password`. There are no user accounts, so everyone who signs
+in shares the one workspace. By default it is asked of everyone except the machine dux
+runs on and your own tailnet. See [The web password](/docs/web-login).
 
 > [!WARNING]
-> There is no password, no token, and no user accounts. Anyone who can reach the port
-> gets the whole workspace, including typing into your agents. That is why it binds
-> `127.0.0.1` by default. See
-> [the trust model](/docs/server-mode#the-trust-model-stated-plainly).
+> Until you set it there is no password at all, and anyone who can reach the port gets
+> the whole workspace, including typing into your agents. That is why dux binds
+> `127.0.0.1` by default, and why it warns in red when it is reachable beyond this machine
+> without one. See [Who can get in](/docs/server-mode#who-can-get-in).
 
 ### Is server mode a hosted service? Does my code leave my machine?
 
@@ -144,8 +147,8 @@ hands it back. Your agents keep running through every one of these transitions. 
 ### Can I reach it from my phone?
 
 Yes. dux binds your Tailscale address by default, so any device on your tailnet can
-open it, and you can turn that leg on or off while dux is serving. Read [Reaching dux over Tailscale](/docs/tailscale) first, because there is no
-login in front of it.
+open it, and you can turn that leg on or off while dux is serving. Read [Reaching dux over Tailscale](/docs/tailscale) first: by default
+your tailnet is not asked for a password, and a shared tailnet is wider than it sounds.
 
 ## Configuration
 
@@ -159,6 +162,11 @@ login in front of it.
 Yes. It stores portable intent, not secrets; env values stay as `${VAR}`
 references. See
 [environment variables and portable paths](/docs/configuration#environment-variables-and-portable-paths).
+
+The one thing to think about is the web password: the file holds only its hash, never the
+password, but anyone who can read the hash can try guesses offline. Use a long, generated
+password, and keep the repository private if you can. See
+[What the password cannot do](/docs/web-login#what-the-password-cannot-do).
 
 ### How do I see what I've changed, or get the latest defaults?
 

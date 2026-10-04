@@ -1,10 +1,10 @@
 ---
-// dux has no authentication of any kind, so "host it anywhere" is only true as
-// "host it behind something that authenticates". That sentence is the section's
-// second paragraph rather than a footnote, and the card for the two built-in
-// guards (the Host allowlist and the same-origin check) says outright that they
-// are not access control: they stop a browser being tricked into talking to your
-// dux, and do nothing about a person who visits the URL.
+// dux's password is optional and off until it is set, so "host it anywhere" is
+// only true as "host it with a gate and HTTPS in front". That sentence is the
+// section's second paragraph rather than a footnote, and the card for the two
+// built-in guards (the Host allowlist and the same-origin check) says outright
+// that they are not access control: they stop a browser being tricked into
+// talking to your dux, and do nothing about a person who visits the URL.
 //
 // The topology is laid out by Graphviz at build time and emitted as inline SVG
 // (see src/lib/graphviz.mjs). The DOT below names classes and never colors, so
@@ -32,11 +32,11 @@ const topology = `digraph server_mode {
     margin=16;
 
     proxy [class="d-tls",  label=<reverse proxy<br/><font point-size="9">terminates TLS</font>>];
-    gate  [class="d-gate", label=<oauth2&#45;proxy<br/><font point-size="9">decides who you are</font>>];
+    gate  [class="d-gate", label=<the dux password<br/><font point-size="9">or oauth2&#45;proxy in front</font>>];
     dux   [class="d-app",  label=<dux server<br/><font point-size="9">claude &#183; codex &#183; git &#183; gh</font>>];
 
     proxy -> gate [label="  http"];
-    gate  -> dux  [label="  http, private"];
+    gate  -> dux  [label="  signed in"];
   }
 
   client -> proxy [label="  https"];
@@ -63,13 +63,14 @@ const topology = `digraph server_mode {
       </p>
       <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
         Then comes the part everyone skips, so here it is first:{" "}
-        <strong class="text-[color:var(--color-text)]">dux has no login.</strong>{" "}
-        None. Not a weak one, not a default password, not a token you forgot to
-        rotate. There is no authentication layer in dux at all, and none is
-        planned, because the job belongs to the thing in front of it. So
-        "host it anywhere" is really "host it behind something that
-        authenticates you, over HTTPS". Do that and this is a genuinely lovely
-        way to work. Skip it and you have published a shell.
+        <strong class="text-[color:var(--color-text)]">the password is off until you set one.</strong>{" "}
+        dux ships with an optional one, a single password for a single owner,
+        and one{" "}
+        <span class="mono text-[color:var(--color-text)]">dux config set</span>{" "}
+        turns it on. Until then anyone who reaches the port gets your agents,
+        and dux says so in red. So "host it anywhere" is really "host it with
+        a password, or a sign-in proxy, over HTTPS". Do that and this is a
+        genuinely lovely way to work. Skip it and you have published a shell.
       </p>
     </div>
 
@@ -77,8 +78,8 @@ const topology = `digraph server_mode {
       <Diagram
         class="diagram--full"
         dot={topology}
-        caption="Nothing installed on your side. Everything past the login has already been let in."
-        label="A browser or phone reaches a reverse proxy over HTTPS; the proxy hands the request to oauth2-proxy, which passes it to dux server on a private network."
+        caption="Nothing installed on your side. Everything past the gate has already been let in."
+        label="A browser or phone reaches a reverse proxy over HTTPS; the proxy hands the request to the gate, the dux password or oauth2-proxy, and only a signed-in request reaches dux server."
       />
     </div>
 
@@ -107,11 +108,12 @@ const topology = `digraph server_mode {
             </strong>
           </div>
           <p class="mt-2 text-sm text-[color:var(--color-muted)]">
-            There are no user accounts, so there is nothing to scope anything
-            to. Whoever gets in can attach to any agent or terminal, type into a
-            session someone else is using, run git, and browse the server's
-            filesystem through the project picker. That is deliberate for a
-            per-developer tool. It is also exactly why the gate goes in front.
+            One password, one owner, no user accounts, so there is nothing to
+            scope anything to. Whoever gets in can attach to any agent or
+            terminal, type into a session someone else is using, run git, and
+            browse the server's filesystem through the project picker. That is
+            deliberate for a per-developer tool. It is also exactly why the gate
+            matters.
           </p>
         </div>
 
@@ -163,7 +165,7 @@ const topology = `digraph server_mode {
 
     <div class="mt-6 flex flex-wrap gap-3">
       <a href="/docs/public-hosting" class="btn btn-primary">
-        Put it behind oauth2-proxy →
+        Host it on the internet →
       </a>
       <a href="/docs/server-mode" class="btn btn-ghost">
         Server mode overview

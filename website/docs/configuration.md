@@ -32,9 +32,11 @@ value.
 A handful of subcommands handle the file without you hunting for it:
 
 - `dux config path` prints the absolute path to the active config file.
-- `dux config get <setting>` prints one setting's value.
+- `dux config get <setting>` prints one setting's value (`--show` prints one that can
+  hold secrets).
 - `dux config set <setting> <value>` changes one setting and tells a running dux to pick
-  it up.
+  it up. For a secret, leave the value out to be asked for it, or pipe it in with
+  `--stdin`.
 - `dux config diff` shows what you have changed from the defaults.
 - `dux config regenerate` previews the latest canonical template, so you can see new
   options after an upgrade.
@@ -53,7 +55,7 @@ A setting is named by its table and key, joined with dots:
 ```bash
 dux config get server.port               # 3890
 dux config set server.port 4000
-dux config set ui.theme "catppuccin-mocha"
+dux config set ui.theme "catppuccin_mocha"
 dux config set server.allowed_hosts '["dux.example.com", "box.example.com"]'
 dux config set providers.claude.command claude
 ```
@@ -102,6 +104,12 @@ dux config set providers.claude.command claude
   up to 1 MiB, from a pipe with `--stdin`) and never takes it as an argument, and it
   reports only that the value was updated. `get` on `env`, an `env.<NAME>` value or `projects` says whether
   it is set but prints the value only when you add `--show`.
+- The web password is `server.auth.password`, a setting with no line of its own: `set`
+  asks for it (or reads `--stdin`), checks it against your minimums, and stores only its
+  hash. See [the web password](#the-web-password-serverauth).
+- A value that itself starts with two dashes goes after `--`, which ends the flags:
+  `dux config set server.title -- "--staging--"`. A single dash, as in a negative number, needs
+  nothing.
 - A misspelled setting is refused with the closest real one. The message repeats only the
   part of the name that exists, never what you typed after it, in case that was a value
   typed where a name goes: `server has no setting below it with that name; did you mean
@@ -205,30 +213,29 @@ It is careful with your data:
 - If the file cannot be parsed, the command refuses and changes nothing rather than
   falling back to defaults, which would throw your settings away.
 
-## The web UI password (`[server.auth]`)
+## The web password (`[server.auth]`)
 
-The web UI can ask for a password: one password for one owner, guarding the same single
-workspace as always. Set it from a terminal:
+The web UI's optional password and everything around it. How to set it, who is asked for
+it, and what it does and does not protect against are in
+[The web password](/docs/web-login); this is the reference.
 
 ```bash
-dux config set server.auth.password          # asks twice, shows how strong it is
+dux config set server.auth.password                                 # asks twice, rates it as you type
 printf '%s\n' "$PW" | dux config set server.auth.password --stdin   # for scripts
+dux config set server.auth.password_hash ""                         # remove the password
 ```
 
-The prompt never echoes what you type, and rates the password from weak through fair,
-good and strong to excellent as you go. `--stdin` drops one trailing line break, the one
-`printf '%s\n'` or a file's last line adds. A password cannot contain a line break, a tab
-or any other control character, because a browser's password field cannot type one: a
-pipe holding one more line break (a file ending in a blank line) is refused, and nothing
-is changed. The password is never accepted as a command-line
-argument, where shell history and the process list would keep it. What lands in
-`config.toml` is only its Argon2id hash, at `server.auth.password_hash`;
-`dux config get server.auth.password` prints that hash. Changing or clearing the
-password signs every browser out. To remove it, run
-`dux config set server.auth.password_hash ""`. While the file has a password setting
-where dux does not read it (a `minimum-password-length` spelled with dashes, say),
-setting a password is refused until that is fixed: dux cannot tell which minimum you
-meant.
+`server.auth.password` is the one setting `set` never takes as an argument, where shell
+history and the process list would keep it. The prompt never echoes what you type.
+`--stdin` drops one trailing line break, the one `printf '%s\n'` or a file's last line
+adds, and refuses to read from a terminal, where what you typed would show. A password
+cannot contain a line break, a tab or any other control character, because a browser's
+password field cannot type one: a pipe holding one more line break (a file ending in a
+blank line) is refused, and nothing is changed. What `set` stores is the password's
+Argon2id hash at `password_hash`, and `get` on either key prints that hash. Changing or
+clearing it signs every browser out. While the file has a password setting where dux does
+not read it (a `minimum-password-length` spelled with dashes, say), setting a password is
+refused until that is fixed: dux cannot tell which minimum you meant.
 
 > [!IMPORTANT]
 > dux reads the password only from `[server.auth]`. A `password_hash` anywhere else, or a
@@ -237,54 +244,28 @@ meant.
 > without the password you meant to set. The message names where the key is and where it
 > belongs.
 
-> [!WARNING]
-> The hash is safe to keep in a dotfiles repository in the sense that it is not your
-> password, but anyone who has it can try guesses offline as fast as their hardware
-> allows, and no ban slows that down. Use a long, unique, generated password.
-
-A new password has to meet two minimums, checked whenever dux sees the password itself
-(when you set it, and every time you log in with it):
-
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `minimum_password_length` | `12` | The fewest characters a password may have. |
-| `minimum_password_score` | `2` | The lowest strength, from 0 (weak) to 4 (excellent). |
-
-The strength is an estimate of how many guesses a password would take, counting
-dictionary words, names, dates, keyboard runs and l33t spellings against it, which is why
-there are no rules about symbols or capitals: `P@ssw0rd!` rates weak, and four uncommon
-words rate excellent. `set` refuses a password below either minimum and says why. A hash
-pasted into the file by hand is only checked against them at your first login with it.
-
-Where the password is asked for, once one is set, is `require`:
-
-- `"network"` (the default): everyone except this machine and your own tailnet.
-- `"tailnet"`: everyone except this machine.
-- `"everywhere"`: every request, this machine included. Use this behind a reverse proxy
-  on the same machine, which makes outside visitors look local.
-
-The rest of the section, each documented inline in `config.toml`:
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `session_idle_seconds` | `60` | How long a signed-in browser stays signed in with nothing happening. An open dux tab keeps it alive, so a tab left waiting on an agent never signs out. |
-| `max_failed_logins` | `5` | Failed logins one address may make before it is added to `blocked_addresses`. An IPv6 client is also counted by its /64, and when its addresses together reach the limit the whole /64 is added as one range; never for this machine's own network, link-local `fe80::` addresses, your tailnet or IPv4, which are counted one address at a time. Only an address dux can verify is added (a direct connection, or one through your `tailscale serve`); behind another proxy dux keeps slowing the logins down and its log names the address for you to add by hand. `0` never blocks. |
-| `blocked_addresses` | `[]` | Addresses and CIDR ranges dux refuses outright, with or without a password. A request matches when any address it names does, forwarding headers included. Loopback never matches: an entry covering it is accepted, warned about and ignored. dux adds single addresses, or an IPv6 /64 as one range that replaces the addresses of it already listed. Yours to edit. |
-| `failed_login_window_seconds` | `900` | How long a failed login counts against its address. |
-| `failed_login_delay_seconds` | `1` | The wait after a failed login or a wrong current password, doubling with each further one. |
+| `password_hash` | `""` | The password's Argon2id hash, or empty for no password. Set it with the command above rather than by hand. |
+| `require` | `"network"` | Who is asked for the password: `"network"` (everyone but this machine and your tailnet), `"tailnet"` (everyone but this machine) or `"everywhere"`. Use `"everywhere"` behind a reverse proxy. |
+| `minimum_password_length` | `12` | The fewest characters a new password may have. |
+| `minimum_password_score` | `2` | The lowest strength a new password may have, from 0 (weak) through fair, good and strong to 4 (excellent). |
+| `session_idle_seconds` | `60` | How long a browser stays signed in with nothing happening. An open dux tab counts as something happening. At least 1. |
+| `max_failed_logins` | `5` | Failed sign-ins one address may make within the window before dux adds it to `blocked_addresses`. An IPv6 client on the network is also counted by its /64, and when the addresses of one /64 together reach the limit, the whole /64 is added as one range; never for this machine's own network, link-local `fe80::` addresses, your tailnet or IPv4, which are counted one address at a time. Only an address dux can verify is added (a direct connection, or one through your `tailscale serve`); behind another proxy dux keeps slowing the sign-ins down and its log names the address for you to add by hand. `0` never blocks; the slow-down still applies. |
+| `blocked_addresses` | `[]` | Addresses and CIDR ranges refused outright, with or without a password. A request matches when any address it names does, forwarding headers included. Loopback never matches: an entry covering it is accepted, warned about and ignored. dux adds single addresses, or an IPv6 /64 as one range that replaces the addresses of it already listed. Yours to edit. |
+| `failed_login_window_seconds` | `900` | How long a failed sign-in counts against its address. |
+| `failed_login_delay_seconds` | `1` | The wait after a failed sign-in or a wrong current password, doubling with each further one. This machine waits too. `0` turns it off. |
 | `failed_login_max_delay_seconds` | `30` | The longest that wait grows. |
-| `max_failed_logins_per_minute` | `30` | Failures from many addresses together before they are told to slow down. Counted apart for the internet and unverified proxies, for devices on your network, and for sign-ins on this machine; tailnet devices and this machine are only slowed one address at a time. Visitors through a `tailscale serve` TCP forward look exactly like this machine and share its count. |
-| `disable_no_auth_warning` | `false` | Hides the web UI's red warning about having no password. Its "don't show again" sets this. |
-| `cookie_secure` | `"auto"` | Whether the sign-in cookie is marked Secure: `"auto"`, `"always"` or `"never"`. |
-| `max_concurrent_password_checks` | `2` | Password checks run at once, which bounds what a flood of login attempts costs. |
-| `password_check_queue` | `8` | Logins that may wait for a free check; more are turned away at once. |
-| `max_password_bytes` | `1024` | The longest password the login accepts. |
-| `max_tracked_addresses` | `10000` | Addresses whose failed logins dux remembers at once. |
-| `max_blocked_addresses` | `1000` | How long `blocked_addresses` may grow through dux's own additions. |
+| `max_failed_logins_per_minute` | `30` | Failures from many addresses together before they are told to wait out the minute. Counted apart for the internet and unverified proxies, and for devices on your network; your tailnet devices and this machine are only slowed one address at a time. Visitors through a `tailscale serve` TCP forward look exactly like this machine and share its count. `0` turns it off. |
+| `disable_no_auth_warning` | `false` | Hides the browser's red no-password banner. Its "Don't show again" button sets this. |
+| `cookie_secure` | `"auto"` | Whether the sign-in cookie is marked Secure: `"auto"` (when dux knows the browser used HTTPS: a `tailscale serve` HTTPS route or a Tailscale Funnel), `"always"` or `"never"`. `"always"` also tells dux browsers reach it over HTTPS, so the sign-in page drops its plain-HTTP warning. |
+| `max_concurrent_password_checks` | `2` | Password checks run at once. Each costs about 19 MiB and some CPU on purpose, so this bounds what a flood of attempts costs. At least 1. |
+| `password_check_queue` | `8` | Sign-ins that may wait for a free check; more are told to try again shortly. |
+| `max_password_bytes` | `1024` | The longest password accepted, in bytes, from 1 to 65536 and no smaller than `minimum_password_length`. |
+| `max_tracked_addresses` | `10000` | Addresses whose failed sign-ins dux remembers at once; the stalest is forgotten first. At least 1. |
+| `max_blocked_addresses` | `1000` | How long `blocked_addresses` may grow through dux's own additions. Past it, a new block holds until dux restarts. |
 
-This machine is never blocked, only slowed down. Everyone behind one shared address (an
-office network, a phone carrier) is blocked together, so if that is you, remove the
-address from `blocked_addresses` and the block lifts at once.
+Every one of them applies on a reload, with no restart.
 
 > [!IMPORTANT]
 > A mistake in `[server.auth]` is never read as "no password". A misspelled key, a value

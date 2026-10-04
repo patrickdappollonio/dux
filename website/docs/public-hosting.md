@@ -1,21 +1,28 @@
 ---
-title: Hosting dux behind a login
-description: A reverse proxy plus oauth2-proxy plus dux in one Docker Compose file, with GitHub sign-in restricted to an org, a team, or named accounts, and what breaks when a piece is missing.
+title: Hosting dux on the public internet
+description: TLS in front, then either dux's own password or oauth2-proxy with GitHub sign-in restricted to an org, a team, or named accounts, in one Docker Compose file, and what breaks when a piece is missing.
 group: Web UI
 order: 66
 ---
 
-> [!CAUTION]
-> **There is no authentication layer in dux at all.** No password, no token, no
-> accounts, and nothing that can be turned on in config. Anyone who can open the URL
-> gets the whole workspace: every agent, every terminal, a shell on the machine through
-> those terminals, git, and the server's filesystem through the project picker. This is
-> [the trust model](/docs/server-mode#the-trust-model-stated-plainly), and everything
-> below exists to compensate for it.
+Put dux on a box with a real uplink and reach it from anywhere. That is safe with the right
+config, and this page is that config: a TLS terminator in front, a gate that asks who you
+are, and dux on a private network where nothing but the proxy can see it.
 
-So the login has to live in front of dux. This page is one way to build that: a TLS
-terminator, `oauth2-proxy` doing GitHub sign-in restricted to your org or to accounts you
-name, and dux on a private network where nothing but the proxy can see it.
+> [!CAUTION]
+> **Whoever gets past the gate gets the whole workspace**: every agent, every terminal, a
+> shell on the machine through those terminals, git, and the server's filesystem through
+> the project picker. dux has one password for one owner and no accounts. See
+> [Who can get in](/docs/server-mode#who-can-get-in).
+
+There are two gates to choose from, and you can stack them:
+
+- **dux's own password.** One password, set with `dux config set server.auth.password`,
+  asked of everyone with `require = "everywhere"`. Nothing extra to run. See
+  [The web password](/docs/web-login).
+- **`oauth2-proxy` with GitHub sign-in**, restricted to your org, a team, or accounts you
+  name. Each person signs in as themselves, with whatever second factor GitHub asks them
+  for, and the proxy's log says who did what.
 
 > [!TIP]
 > If you do not actually need the public internet, you do not need any of this.
@@ -26,7 +33,78 @@ name, and dux on a private network where nothing but the proxy can see it.
 > Nothing about the Host allowlist or the same-origin check is access control. They
 > stop a hostile web page tricking *your* browser into driving your server, which is a
 > real attack and worth defending, and they do nothing at all about a person who simply
-> visits the URL. If you read "dux has two automatic defenses" and relaxed, unrelax.
+> visits the URL.
+
+## The simple version: Caddy and the dux password
+
+Two containers, and only Caddy publishes a port:
+
+```yaml
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  dux:
+    build: ./dux                      # see "Building the dux image" below
+    restart: unless-stopped
+    command: ["dux", "server", "--bind", "0.0.0.0:3890", "--no-tailscale"]
+    volumes:
+      - dux_config:/root/.config/dux
+      - ./code:/root/code
+
+volumes:
+  caddy_data:
+  caddy_config:
+  dux_config:
+```
+
+```caddyfile
+dux.example.com {
+	reverse_proxy dux:3890
+}
+```
+
+Then the dux side, in the container's `config.toml`:
+
+```toml
+[server]
+allowed_hosts = ["dux.example.com"]
+
+[server.auth]
+require       = "everywhere"   # Caddy is a proxy; say so rather than relying on how it connects
+cookie_secure = "always"       # the browser speaks HTTPS to Caddy; dux cannot see that
+max_failed_logins = 0          # every visitor arrives from Caddy's address; see below
+```
+
+and the password, set inside the container where nothing echoes it:
+
+```bash
+docker compose exec dux dux config set server.auth.password
+```
+
+> [!WARNING]
+> **Every visitor looks like Caddy to dux.** Caddy reaches dux over the Compose network,
+> so dux sees one address for everybody, and the failed-sign-in slow-down and the block
+> treat all your visitors as one person. Left at its default, five wrong guesses by
+> anyone would block Caddy itself, and with it everyone. `max_failed_logins = 0` turns the
+> automatic block off; the slow-down still applies to everyone together, and a long,
+> generated password is what actually stops guessing. If you would rather have per-person
+> limits and an audit trail, put `oauth2-proxy` in front as below.
+
+## The GitHub version: oauth2-proxy in front
+
+The rest of this page builds the second gate: a TLS terminator, `oauth2-proxy` doing GitHub
+sign-in restricted to your org or to accounts you name, and dux behind it. Setting a dux
+password as well costs nothing, and it is still the gate if someone ever reaches dux
+around the proxy.
 
 ## The shape of it
 
@@ -166,8 +244,8 @@ services:
     restart: unless-stopped
     # Binds every interface INSIDE the container. That is not an exposure:
     # with no published port, the container's only neighbours are the other two
-    # services. dux prints a warning about the non-loopback bind on startup and
-    # in this topology that warning is expected.
+    # services. With no dux password set, dux prints a red warning about the
+    # non-loopback bind on startup, and in this topology that warning is expected.
     command: ["dux", "server", "--bind", "0.0.0.0:3890", "--no-tailscale"]
     volumes:
       # Your config, your session database and your log. Keep it on a named
@@ -284,8 +362,8 @@ once.
 If containerising your dev environment is not appealing, run `dux server` on the host and
 delete the `dux` service. One gotcha: the proxy container cannot reach a host-loopback
 bind, so dux has to bind an address the container can route to, and the "no published port"
-protection goes with it. Firewall that port, and remember the firewall is then the only
-thing between the internet and a workspace with no login.
+protection goes with it. Firewall that port, and set a dux password: without one, the
+firewall is the only thing between the internet and your workspace.
 
 ## What each piece is doing
 
@@ -296,7 +374,7 @@ writes from an agent, desktop notifications, and PWA install.
 and it is the same set here.
 
 **`oauth2-proxy`** is the login. Without it, or reachable around it, you have published a
-shell to the internet.
+shell to the internet, unless a dux password is set behind it.
 
 **The GitHub restriction flags** are what make the login mean something, since
 `--provider=github` on its own authenticates *any* GitHub account. Set at least one:
@@ -312,7 +390,8 @@ shell to the internet.
 > **The absent `ports:` entry on the `dux` service** is doing more work than any flag here.
 > It makes "you cannot get to dux without passing the proxy" a property of the network
 > rather than a promise. Add a published port for a quick test and you have removed the
-> login for as long as it is there.
+> GitHub sign-in for as long as it is there, leaving the dux password, if you set one, as
+> the only gate.
 
 ## What this does not give you
 
@@ -325,17 +404,17 @@ shell to the internet.
 > So restrict the gate to people you would hand a terminal on that machine. An org-wide
 > `--github-org` on a company with a thousand engineers is a thousand people with a shell.
 
-**dux reads no `X-Forwarded-*` headers at all**, even though Caddy sets three and
-`oauth2-proxy` adds `X-Forwarded-User` and `X-Forwarded-Email` on top. So dux's access log
-carries no client identity: it records only the timestamp, method, path, status and
-latency. Your audit trail lives in the proxy's logs, not in dux's.
+**dux keeps no record of who someone is.** It ignores the `X-Forwarded-User` and
+`X-Forwarded-Email` headers `oauth2-proxy` adds, and its access log carries no client
+identity: it records only the timestamp, method, path, status and latency. Your audit
+trail lives in the proxy's logs, not in dux's.
 
 > [!CAUTION]
-> Do not use Tailscale Funnel, `ngrok`, `cloudflared` in its no-authentication mode, or
-> anything else that publishes the port to the anonymous internet, as a shortcut around
-> this page. The point of every paragraph above is that something has to ask who you are
-> before dux answers. A tunnel that skips that step has not made this easier, it has
-> made it public.
+> A tunnel that publishes the port to the anonymous internet (Tailscale Funnel, `ngrok`,
+> `cloudflared` in its no-authentication mode) is only as safe as the gate behind it.
+> With a dux password set and `require = "everywhere"`, visitors get the sign-in page;
+> without one, a tunnel has not made this easier, it has made your shell public. Tailscale
+> Funnel has its own section in [The web password](/docs/web-login#tailscale-serve-and-funnel).
 
 ## When it does not work
 
@@ -419,13 +498,16 @@ so check the `oauth2-proxy` logs, which name the org it wanted and the orgs it s
 ### The console shows one client IP for everybody
 
 dux's per-request access log records no IP at all. Its connect and disconnect lines do
-print a peer address, and since dux reads no forwarded headers that address is the proxy's
-for every client. Use the proxy's logs to know who did something.
+print a peer address, and since the proxy connects to dux over the network, that address
+is the proxy's for every client. A dux password's slow-down and blocks see the same single
+address, as [the simple version](#the-simple-version-caddy-and-the-dux-password) warns.
+Use the proxy's logs to know who did something.
 
 ## Where to go next
 
-- [Server mode overview](/docs/server-mode): the trust model in full, every `[server]`
-  key with its default, the startup banner, and graceful shutdown.
+- [Server mode overview](/docs/server-mode): who can get in, every `[server]` key with
+  its default, the startup banner, and graceful shutdown.
+- [The web password](/docs/web-login): `require`, bans, the cookie, and the honest limits.
 - [Reaching dux over Tailscale](/docs/tailscale): the private-network answer, which
   needs none of this page and is what the maintainer actually uses.
 - [The workspace in the browser](/docs/web-workspace): what you get once you are in,

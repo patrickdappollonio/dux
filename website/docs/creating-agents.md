@@ -418,9 +418,11 @@ below them, each row naming its branch and saying whether there is uncommitted w
 ![The terminal UI confirmation for deleting a worktree, naming the path, warning about the uncommitted changes, and offering a ticked checkbox that also deletes the branch.](/screens/tui-worktree-delete-confirm.png)
 
 Worktrees a live agent is holding are listed but unselectable: removing one from under a
-running session leaves it broken. Delete the agent instead. A worktree whose agent was just
-deleted is listed under **Being removed** until it is gone, and cannot be removed a second
-time.
+running session leaves it broken. Delete the agent instead. A worktree something else is
+still using (an agent being created in it, a terminal open in it, the CLI of an agent you
+just deleted still stopping, a standalone agent working inside it) sits with them, and its
+row says `in use:` and what. A worktree whose agent was just deleted is listed under
+**Being removed** until it is gone, and cannot be removed a second time.
 
 Either manager is how you remove a branch belonging to a worktree that has no agent. For a
 worktree that does have one, the agent's own delete dialog is the place: it names the

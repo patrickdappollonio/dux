@@ -183,8 +183,8 @@ still starts.
 
 ## Where to go next
 
-- [Server mode overview](/docs/server-mode): the web UI, how to start it, and the
-  no-login trust model to understand before you expose it.
+- [Server mode overview](/docs/server-mode): the web UI, how to start it, and who can
+  get in, with or without the optional password, before you expose it.
 - [The workspace in the browser](/docs/web-workspace): the browser layout, its
   terminals, and the phone experience.
 - [Reaching dux over Tailscale](/docs/tailscale): open your workspace on your phone,
