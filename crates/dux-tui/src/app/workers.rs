@@ -553,10 +553,12 @@ impl App {
                 // A commit's final: a landed commit clears the typed message, a
                 // refused one leaves it for another try.
                 if tone != StatusTone::Busy
-                    && key.is_some()
-                    && key.as_deref() == self.pending_commit.as_deref()
+                    && let (Some(key), Some((pending, committed))) = (&key, &self.pending_commit)
+                    && key == pending
                 {
-                    if tone == StatusTone::Info {
+                    // Only the message that was committed is cleared: one typed
+                    // since, for the next commit, stays.
+                    if tone == StatusTone::Info && self.commit_input.text == *committed {
                         self.commit_input.clear();
                     }
                     self.pending_commit = None;

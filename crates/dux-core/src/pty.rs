@@ -2156,15 +2156,30 @@ impl Drop for PtyClient {
                 "PtyClient::drop: kill_process_group failed: {err}"
             ));
         }
-        // Reap the direct child so it does not linger as a zombie. After the
-        // group kill the child is already dead, so this `kill` returns at once;
-        // it remains the fallback that actually signals the child when its PID
-        // was unavailable above (without it, `wait` could block on a child that
-        // nothing has asked to exit).
-        let _ = self.child.kill();
-        // Recorded before the reap, for the reason `try_wait` gives.
-        if self.child_exit_unreaped(true) == Some(true) {
-            self.fire_leader_exit_hook();
+        // The order on every exit path: the child is signalled, seen to exit
+        // WITHOUT being reaped, what it left running is recorded, and only
+        // then is it reaped (see `try_wait` for why). portable-pty's
+        // `Child::kill` is never called while the pid is known: it reaps the
+        // child itself (its `kill` ends in a `try_wait`), which would put the
+        // reap before the record. The direct child is signalled here as well
+        // as its group, in case the group signal above did not reach it.
+        match self
+            .child
+            .process_id()
+            .and_then(|pid| rustix::process::Pid::from_raw(pid as i32))
+        {
+            Some(pid) => {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                if self.child_exit_unreaped(true) == Some(true) {
+                    self.fire_leader_exit_hook();
+                }
+            }
+            // No pid to signal or wait on: the library's own kill is the only
+            // way to ask the child to exit, and nothing is recorded for a
+            // child dux cannot name.
+            None => {
+                let _ = self.child.kill();
+            }
         }
         if self.child.wait().is_ok()
             && let Some(session) = self.process_session
@@ -5961,6 +5976,34 @@ mod tests {
         assert!(
             !client.is_live(),
             "a reaped child is not running, whatever is still holding the PTY open"
+        );
+    }
+
+    /// Review 25: a client dropped while its child still runs. The drop's
+    /// `child.kill()` (portable-pty's) already REAPS the child through its
+    /// own `try_wait`, so the WNOWAIT wait after it finds nothing and the
+    /// leader-exit hook only runs after the reap, the order the drop's own
+    /// comment ("Recorded before the reap") promises never happens.
+    #[test]
+    fn review25_a_dropped_clients_hook_runs_before_its_leader_is_reaped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let args = vec!["-c".to_string(), "exec sleep 300".to_string()];
+        let client = PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+        let pid = client.child_process_id().expect("a pid");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
+        let record = std::sync::Arc::clone(&seen);
+        client.set_leader_exit_hook(Box::new(move || {
+            // An unreaped zombie still has its /proc entry; a reaped child has none.
+            let unreaped = std::path::Path::new(&format!("/proc/{pid}")).exists();
+            *record.lock().unwrap() = Some(unreaped);
+        }));
+        thread::sleep(std::time::Duration::from_millis(100));
+        drop(client);
+        let seen = *seen.lock().unwrap();
+        assert_eq!(
+            seen,
+            Some(true),
+            "the leader-exit hook ran after the leader {pid} was reaped (None: never ran)"
         );
     }
 

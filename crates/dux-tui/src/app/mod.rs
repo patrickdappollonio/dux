@@ -250,9 +250,11 @@ pub struct App {
     pub(crate) files_search: TextInput,
     pub(crate) files_search_active: bool,
     pub(crate) commit_input: TextInput,
-    /// The status key of a commit running on a worker: its success final
-    /// clears `commit_input`.
-    pub(crate) pending_commit: Option<String>,
+    /// A commit running on a worker: its status key, and the message it
+    /// committed. Its success final clears `commit_input` only while the box
+    /// still holds exactly that message, so a message typed for the next
+    /// commit meanwhile is never wiped.
+    pub(crate) pending_commit: Option<(String, String)>,
     pub(crate) left_width_pct: u16,
     pub(crate) right_width_pct: u16,
     pub(crate) terminal_pane_height_pct: u16,

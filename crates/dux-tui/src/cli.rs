@@ -637,6 +637,9 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
     // a standalone agent at a directory inside dux's managed area, which dux
     // did not make.
     let mut occupied_folders: Vec<PathBuf> = Vec::new();
+    // The same folders as recorded (never resolved), for the link rule: a
+    // link in the root is kept when one of these is at or through it.
+    let mut recorded_folders: Vec<PathBuf> = Vec::new();
     let mut leftovers: Vec<ResetLeftover> = Vec::new();
     if paths.sessions_db_path.exists() {
         match SessionStore::open(&paths.sessions_db_path) {
@@ -659,6 +662,7 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                         if session.workspace.as_managed().is_none() {
                             occupied_folders
                                 .push(canonical_or_original(Path::new(session.directory())));
+                            recorded_folders.push(PathBuf::from(session.directory()));
                         }
                     }
                     // A project's repository is the user's too: a worktree
@@ -669,6 +673,8 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                                 .iter()
                                 .map(|project| canonical_or_original(Path::new(&project.path))),
                         );
+                        recorded_folders
+                            .extend(projects.iter().map(|project| PathBuf::from(&project.path)));
                     }
                     // What dux started in a folder the reset removes is ended
                     // first, the way a removal ends it; a folder something
@@ -702,6 +708,7 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                         }
                     }
                     println!("{}", removed_worktrees_line(removed));
+                    recorded_folders.extend(kept_folders.iter().cloned());
                     occupied_folders.extend(kept_folders);
                 }
                 Err(error) => {
@@ -721,7 +728,12 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
     // entry and continue-on-error, so one folder something is still writing
     // into is reported rather than stopping the reset before the database and
     // config go.
-    let swept = sweep_worktrees_root(&paths.worktrees_root, &occupied_folders, &leftovers);
+    let swept = sweep_worktrees_root(
+        &paths.worktrees_root,
+        &occupied_folders,
+        &recorded_folders,
+        &leftovers,
+    );
     leftovers.extend(swept);
     remove_file_with_message(&paths.sessions_db_path)?;
     Ok(leftovers)
@@ -749,14 +761,21 @@ fn folders_reset_removes(
         .filter(|worktree| git::is_under(&paths.worktrees_root, worktree))
         .filter(|worktree| !holds_something(worktree))
         .collect();
+    // Each entry at its own LEXICAL path. A link entry is only unlinked, so
+    // it removes no folder: nothing working in its target is ever ended.
     if let Ok(entries) = fs::read_dir(&paths.worktrees_root) {
         removing.extend(
             entries
                 .flatten()
-                .map(|entry| canonical_or_original(&entry.path()))
+                .filter(|entry| !entry.file_type().is_ok_and(|kind| kind.is_symlink()))
+                .map(|entry| entry.path())
                 .filter(|entry| !holds_something(entry)),
         );
     }
+    // A managed worktree that is itself a link is only unlinked too.
+    removing.retain(|folder| {
+        !fs::symlink_metadata(folder).is_ok_and(|meta| meta.file_type().is_symlink())
+    });
     removing
 }
 
@@ -765,11 +784,12 @@ fn folders_reset_removes(
 /// anything and before the database that recorded it goes, with the same
 /// SIGTERM, configured grace and SIGKILL as an agent delete's removal:
 ///
-/// - a session STARTED in or under the managed worktrees root is ended whole;
-/// - a session started anywhere else (a project or standalone terminal) has
-///   only the processes ended whose working directory is in or under that
-///   root, read natively and judged by the same rule a removal's last look
-///   uses; the rest of it, working elsewhere, is left alone;
+/// - only a process whose working directory, read natively and judged by
+///   the same rule a removal's last look uses, is in or under a folder the
+///   reset removes is ended, whatever folder its session started in; the
+///   rest of the session, working elsewhere, is left alone;
+/// - a process whose working directory cannot be read keeps the folder its
+///   session started in, and is never killed on a guess;
 /// - a standalone agent's processes are never ended.
 ///
 /// Answers each folder that must be kept because something there still runs
@@ -804,79 +824,71 @@ fn end_recorded_processes(
         .into_iter()
         .filter(|entry| entry.session.is_this_boot())
     {
-        let sessions = [entry.session];
-        let working_there = ps::session_processes_where(
+        // Only processes WORKING in a folder the reset removes are ended,
+        // whatever folder their session started in: a job that moved into a
+        // folder the reset keeps (a project's repository) is the user's and
+        // is left running. This is deliberately unlike deleting an agent,
+        // which ends that agent's own sessions whole because the user asked
+        // for the agent to go; a reset carries no such intent toward a job
+        // working elsewhere.
+        let found = ps::session_processes_where(
             entry.session,
             &entry.folder,
             &entry.survivors,
             &under_root,
         );
-        // Where to keep and report: where its processes work, else where it
-        // started.
-        let place = || {
-            let found = dux_core::file_drop::process_cwds(
-                &working_there.iter().map(|row| row.pid).collect::<Vec<_>>(),
+        if found.inside.is_empty() && found.unknown.is_empty() {
+            continue;
+        }
+        // Where to keep and report: where its processes work.
+        let working_in = || {
+            let read = dux_core::file_drop::process_cwds(
+                &found.inside.iter().map(|row| row.pid).collect::<Vec<_>>(),
             );
-            working_there
+            found
+                .inside
                 .iter()
                 .find_map(|row| {
-                    found
-                        .found
+                    read.found
                         .get(&row.pid)
                         .filter(|cwd| under_root(cwd))
                         .cloned()
                 })
                 .unwrap_or_else(|| entry.folder.clone())
         };
-        let started_under = under_root(&entry.folder);
-        if entry.standalone {
-            let running = ps::members(
-                &ps::read_process_table(),
-                &sessions,
-                &entry.survivors,
-                std::process::id(),
-            );
-            if (started_under && !running.is_empty()) || !working_there.is_empty() {
-                kept.push(ResetLeftover {
-                    path: place(),
-                    reason: format!(
-                        "a standalone agent's process dux started is still running there ({}), \
-                         and dux never stops one",
-                        ps::describe(if working_there.is_empty() {
-                            &running
-                        } else {
-                            &working_there
-                        })
-                    ),
-                });
-            }
-            continue;
-        }
-        let survivors = if started_under {
-            match ps::purge(&mut ps::SystemProcesses, &sessions, &entry.survivors, grace) {
-                ps::PurgeOutcome::Clean { .. } => Vec::new(),
-                ps::PurgeOutcome::Survivors(rows) => rows,
-            }
-        } else if working_there.is_empty() {
-            continue;
-        } else {
-            let path = place();
-            let left = ps::end_exactly(&working_there, grace);
-            if !left.is_empty() {
-                kept.push(ResetLeftover {
-                    path,
-                    reason: format!("{} that dux started would not stop", ps::describe(&left)),
-                });
-            }
-            continue;
-        };
-        if !survivors.is_empty() {
+        // A process whose working directory cannot be read may be standing in
+        // the folder its session started in: that folder is kept, and the
+        // process is never killed on a guess.
+        if !found.unknown.is_empty() {
             kept.push(ResetLeftover {
                 path: entry.folder.clone(),
                 reason: format!(
-                    "{} that dux started would not stop",
-                    ps::describe(&survivors)
+                    "dux could not read where {} that it started there is working, so it kept \
+                     the folder rather than stop a process that may be elsewhere",
+                    ps::describe(&found.unknown)
                 ),
+            });
+        }
+        if found.inside.is_empty() {
+            continue;
+        }
+        if entry.standalone {
+            kept.push(ResetLeftover {
+                path: working_in(),
+                reason: format!(
+                    "a standalone agent's process dux started is working there ({}), and dux \
+                     never stops one",
+                    ps::describe(&found.inside)
+                ),
+            });
+            continue;
+        }
+        let path = working_in();
+        let left = ps::end_exactly(&found.inside, grace);
+        if !left.is_empty() {
+            kept.push(ResetLeftover {
+                path,
+                reason: format!("{} that dux started would not stop", ps::describe(&left)),
             });
         }
     }
@@ -895,6 +907,7 @@ fn end_recorded_processes(
 fn sweep_worktrees_root(
     root: &Path,
     occupied: &[PathBuf],
+    recorded: &[PathBuf],
     already: &[ResetLeftover],
 ) -> Vec<ResetLeftover> {
     let mut leftovers = Vec::new();
@@ -913,15 +926,27 @@ fn sweep_worktrees_root(
     };
     let mut kept = 0usize;
     for entry in entries.flatten() {
-        let path = canonical_or_original(&entry.path());
-        if occupied
-            .iter()
-            .any(|folder| dux_core::worktree_ops::folder_contains(&path, folder))
-        {
+        // Every entry is judged at its own LEXICAL path. A link is only
+        // unlinked (its target stays), so it is kept only when something is
+        // recorded at or through the link itself, never for what its target
+        // holds.
+        let path = entry.path();
+        let link = entry.file_type().is_ok_and(|kind| kind.is_symlink());
+        let keep = if link {
+            recorded
+                .iter()
+                .any(|folder| dux_core::engine::recorded_at_or_through_link(&path, folder))
+        } else {
+            occupied
+                .iter()
+                .any(|folder| dux_core::worktree_ops::folder_contains(&path, folder))
+        };
+        if keep {
             kept += 1;
             continue;
         }
-        let removed = if entry.path().is_dir() {
+        // A link is removed as a link, whatever it points at.
+        let removed = if !link && entry.path().is_dir() {
             fs::remove_dir_all(entry.path())
         } else {
             fs::remove_file(entry.path())
@@ -2988,5 +3013,152 @@ mod tests {
         assert_eq!(removed_worktrees_line(0), "removed 0 session worktrees");
         assert_eq!(removed_worktrees_line(1), "removed 1 session worktree");
         assert_eq!(removed_worktrees_line(3), "removed 3 session worktrees");
+    }
+
+    /// Review 25: a link in the worktrees root (worktrees kept on another
+    /// disk, say) points at a folder outside it. The reset only unlinks the
+    /// link and keeps the folder, but decides it "removes" the link's target,
+    /// so it ends a terminal's job working in that kept folder.
+    #[test]
+    fn review25_factory_reset_kills_a_job_in_the_target_of_a_link_it_only_unlinks() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).expect("elsewhere");
+        fs::write(elsewhere.join("keep.txt"), "mine\n").expect("seed");
+        fs::create_dir_all(&paths.worktrees_root).expect("root");
+        std::os::unix::fs::symlink(&elsewhere, paths.worktrees_root.join("ssd")).expect("link");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).expect("home");
+        let mut command = std::process::Command::new("sleep");
+        command.arg("60").current_dir(&elsewhere);
+        unsafe {
+            command.pre_exec(|| {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        let mut job = command.spawn().expect("spawn the job");
+        let session = dux_core::process_sessions::ProcessSession::started_now(job.id());
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .replace_process_registry(&[dux_core::process_sessions::StoredSession {
+                owner: Some(dux_core::process_sessions::UNOWNED_PTYS.to_string()),
+                session,
+                folder: home.clone(),
+                standalone: false,
+                survivors: Vec::new(),
+                label: Some("a standalone terminal".to_string()),
+            }])
+            .expect("save the registry");
+        drop(store);
+
+        let _ = reset_agent_data(&paths);
+
+        let alive = job.try_wait().expect("try_wait").is_none();
+        let _ = job.kill();
+        let _ = job.wait();
+        assert!(
+            elsewhere.join("keep.txt").exists(),
+            "the link's target is kept"
+        );
+        assert!(
+            alive,
+            "the reset killed a terminal's job working in {}, a folder it keeps (it only \
+             unlinked the link to it)",
+            elsewhere.display()
+        );
+    }
+
+    /// Review 25: an agent's terminal session started in its worktree left a
+    /// job the user moved into their own project's repository (which the
+    /// reset keeps). The reset ends the whole session, so that job dies too,
+    /// though it works in nothing the reset removes.
+    #[test]
+    fn review25_factory_reset_kills_a_job_working_in_a_kept_repository_whose_session_started_in_a_worktree()
+     {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        let worktree = paths.worktrees_root.join("proj").join("feat");
+        fs::create_dir_all(&worktree).expect("worktree");
+        // Leader in the worktree; its job in the user's repository.
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "(cd '{}' && exec sleep 61) & exec sleep 62",
+                repo.display()
+            ))
+            .current_dir(&worktree);
+        unsafe {
+            command.pre_exec(|| {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        let mut job = command.spawn().expect("spawn");
+        let session = dux_core::process_sessions::ProcessSession::started_now(job.id());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let child_pid: Option<i32> = fs::read_dir("/proc").ok().and_then(|entries| {
+            entries.flatten().find_map(|entry| {
+                let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
+                let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
+                let after = stat.rsplit_once(')')?.1;
+                let ppid: u32 = after.split_whitespace().nth(1)?.parse().ok()?;
+                (ppid == job.id()).then_some(pid)
+            })
+        });
+        let child_pid = child_pid.expect("the job in the repository");
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .replace_process_registry(&[dux_core::process_sessions::StoredSession {
+                owner: Some("m1".to_string()),
+                session,
+                folder: worktree.clone(),
+                standalone: false,
+                survivors: Vec::new(),
+                label: Some("terminal of agent m1".to_string()),
+            }])
+            .expect("save the registry");
+        drop(store);
+
+        let _ = reset_agent_data(&paths);
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let repo_job_alive = fs::read_to_string(format!("/proc/{child_pid}/stat"))
+            .map(|stat| {
+                !stat
+                    .rsplit_once(')')
+                    .map(|(_, rest)| rest.trim_start().starts_with('Z'))
+                    .unwrap_or(true)
+            })
+            .unwrap_or(false);
+        let _ = rustix::process::kill_process_group(
+            rustix::process::Pid::from_raw(job.id() as i32).unwrap(),
+            rustix::process::Signal::KILL,
+        );
+        let _ = job.kill();
+        let _ = job.wait();
+        assert!(
+            repo_job_alive,
+            "the reset killed a job (pid {child_pid}) working in the kept repository {}",
+            repo.display()
+        );
     }
 }

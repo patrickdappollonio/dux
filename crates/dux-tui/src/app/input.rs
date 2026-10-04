@@ -2871,7 +2871,7 @@ impl App {
         let success_message = commit_success_message(push_key.as_deref());
         let reaction = self.engine.apply(Command::CommitChanges {
             worktree_path: worktree,
-            message,
+            message: message.clone(),
             success_message,
         })?;
         // The typed message is cleared when the commit's final says it
@@ -2883,7 +2883,7 @@ impl App {
             ..
         }) = &reaction
         {
-            self.pending_commit = Some(key.clone());
+            self.pending_commit = Some((key.clone(), message));
         }
         self.apply_reaction(reaction);
         Ok(())
@@ -27121,6 +27121,45 @@ cyan = "#00ffff"
         assert_eq!(
             app.commit_input.text, "a real message",
             "a refused commit keeps the typed message"
+        );
+    }
+
+    /// Review 25: while a commit runs on its worker the box stays editable;
+    /// a message typed for the NEXT commit is wiped when the first one lands.
+    #[test]
+    fn review25_a_message_typed_while_a_commit_runs_survives_its_final() {
+        let mut app = test_app(default_bindings());
+        let worktree = std::path::Path::new(
+            app.engine.sessions[0]
+                .managed_worktree()
+                .expect("managed test session"),
+        )
+        .to_path_buf();
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let git = |args: &[&str]| {
+            dux_core::test_git::fixture_git()
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .expect("git");
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        std::fs::write(worktree.join("a.txt"), "seed\n").expect("seed");
+        git(&["add", "a.txt"]);
+        app.selected_left = 1;
+        app.commit_input.text = "the first commit".to_string();
+        app.execute_commit().expect("execute_commit");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        // The user starts writing the next message while the first commits.
+        app.commit_input.text = "the second commit, half typed".to_string();
+        drain_until(&mut app, |app| {
+            app.status.tone() != crate::statusline::StatusTone::Busy
+        });
+        assert_eq!(
+            app.commit_input.text, "the second commit, half typed",
+            "the first commit's final wiped a message typed after it was sent"
         );
     }
 

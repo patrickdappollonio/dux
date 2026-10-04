@@ -138,38 +138,49 @@ fn judge_cwds<'a>(
     unknown.map_or(CwdVerdict::Clear, CwdVerdict::Unknown)
 }
 
-/// Every running process of one recorded session whose working directory
-/// `touches` accepts, each judged by the same rule a removal's last look uses
-/// ([`AgentProcessRegistry::cwd_occupant`]), one process at a time. Blocking:
-/// reads the process table and each member's working directory.
+/// The running processes of one recorded session that `touches` concerns,
+/// each judged by the same rule a removal's last look uses
+/// ([`AgentProcessRegistry::cwd_occupant`]), one process at a time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessesWhere {
+    /// Working in a place `touches` accepts, by its working directory read
+    /// natively (or the nearest readable one above it in its session).
+    pub inside: Vec<ProcRow>,
+    /// Whose working directory could not be read at all, in a session
+    /// started in a place `touches` accepts: possibly there.
+    pub unknown: Vec<ProcRow>,
+}
+
+/// [`ProcessesWhere`] for one recorded session. Blocking: reads the process
+/// table and each member's working directory.
 pub fn session_processes_where(
     session: ProcessSession,
     started_in: &std::path::Path,
     known: &[ProcessIdentity],
     touches: &dyn Fn(&std::path::Path) -> bool,
-) -> Vec<ProcRow> {
+) -> ProcessesWhere {
     let table = read_process_table();
     let running = members(&table, &[session], known, std::process::id());
+    let mut found = ProcessesWhere::default();
     if running.is_empty() {
-        return Vec::new();
+        return found;
     }
     let pids: Vec<u32> = running.iter().map(|row| row.pid).collect();
     let report = crate::file_drop::process_cwds(&pids);
-    (0..running.len())
-        .filter(|&index| {
-            !matches!(
-                judge_cwds(
-                    touches,
-                    &running[index..=index],
-                    &table,
-                    &report,
-                    started_in
-                ),
-                CwdVerdict::Clear
-            )
-        })
-        .map(|index| running[index].clone())
-        .collect()
+    for index in 0..running.len() {
+        match judge_cwds(
+            touches,
+            &running[index..=index],
+            &table,
+            &report,
+            started_in,
+        ) {
+            CwdVerdict::Clear => {}
+            CwdVerdict::Inside(row) => found.inside.push(row.clone()),
+            CwdVerdict::Unknown(row) => found.unknown.push(row.clone()),
+        }
+    }
+    found
 }
 
 /// End exactly these processes, and nothing else of their sessions: SIGTERM

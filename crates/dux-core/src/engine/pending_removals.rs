@@ -553,10 +553,7 @@ fn literal_spellings(path: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// session was started in, as dux recorded it) IS the symbolic link at
 /// `link`, or is recorded through it, compared without following the link,
 /// under every spelling of both.
-pub(crate) fn recorded_at_or_through_link(
-    link: &std::path::Path,
-    stored: &std::path::Path,
-) -> bool {
+pub fn recorded_at_or_through_link(link: &std::path::Path, stored: &std::path::Path) -> bool {
     let links = literal_spellings(link);
     literal_spellings(stored).iter().any(|stored| {
         links
