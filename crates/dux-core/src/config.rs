@@ -2851,7 +2851,7 @@ pub fn provider_config(
 /// applied); callers that want to *adopt* the config should reload from disk via
 /// [`load_config`] so provider defaults are reapplied consistently.
 pub fn validate_config_str(s: &str) -> Result<Config, String> {
-    toml::from_str::<Config>(s).map_err(|e| redact_toml_error(&e.to_string()))
+    toml::from_str::<Config>(s).map_err(|e| describe_toml_error(s, &e))
 }
 
 /// Why `config.toml` could not be used at all. Each of these means dux cannot
@@ -2871,33 +2871,102 @@ pub enum ConfigLoadProblem {
     Missing,
 }
 
-/// A TOML error with every quoted value hidden.
+/// A config parse or type error, described without any of the file's text.
 ///
-/// The parser's errors quote the offending line of the user's file, and that
-/// line can be an API token under `[env]` or a password hash. The error goes
-/// to the status line, toasts, dialogs and dux.log, so each quoted line keeps
-/// its line number and key name and loses its value (`2 | GITHUB_TOKEN =
-/// <hidden>`). Table headers and the caret line under the quote stay.
-pub fn redact_toml_error(message: &str) -> String {
-    message
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
-            let rest = trimmed[digits..].trim_start();
-            match (digits > 0, rest.strip_prefix('|')) {
-                (true, Some(content)) => match content.split_once('=') {
-                    Some((key, _)) => {
-                        let prefix_len = line.len() - content.len();
-                        format!("{}{}= <hidden>", &line[..prefix_len], key)
-                    }
-                    None => line.to_string(),
-                },
-                _ => line.to_string(),
+/// The parser's own errors quote the offending line, and a type error repeats
+/// the value it found; either can be an API token under `[env]` or a password
+/// hash, and these messages reach the status line, toasts, dialogs and
+/// dux.log. So only the position, the key where it can be told, and the kind
+/// of problem are kept: `line 2, column 16 (env.GITHUB_TOKEN): string values
+/// must be quoted`.
+pub fn describe_toml_error(raw: &str, error: &toml::de::Error) -> String {
+    describe_config_error(raw, error.message(), error.span())
+}
+
+/// [`describe_toml_error`] for a `toml_edit` parse error.
+pub fn describe_toml_edit_error(raw: &str, error: &toml_edit::TomlError) -> String {
+    describe_config_error(raw, error.message(), error.span())
+}
+
+fn describe_config_error(raw: &str, message: &str, span: Option<std::ops::Range<usize>>) -> String {
+    let kind = problem_kind(message);
+    let Some(span) = span else {
+        return kind;
+    };
+    let start = span.start.min(raw.len());
+    let before = &raw[..start];
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |text| text.chars().count())
+        + 1;
+    match key_path_at(raw, line) {
+        Some(path) => format!("line {line}, column {column} ({path}): {kind}"),
+        None => format!("line {line}, column {column}: {kind}"),
+    }
+}
+
+/// The kind of problem in a parser or serde message, with any value it
+/// repeats taken out: `invalid type: string "x", expected u32` becomes
+/// `invalid type, expected u32`, and an unknown variant drops the variant.
+fn problem_kind(message: &str) -> String {
+    let message = message.lines().next().unwrap_or_default().trim();
+    for prefix in ["invalid type", "invalid value", "invalid length"] {
+        if let Some(rest) = message.strip_prefix(prefix) {
+            return match rest.find(", expected ") {
+                Some(at) => format!("{prefix}, expected {}", &rest[at + ", expected ".len()..]),
+                None => prefix.to_string(),
+            };
+        }
+    }
+    if let Some(rest) = message.strip_prefix("unknown variant") {
+        return match rest.find(", expected ") {
+            Some(at) => format!(
+                "unknown value, expected {}",
+                &rest[at + ", expected ".len()..]
+            ),
+            None => "unknown value".to_string(),
+        };
+    }
+    message.to_string()
+}
+
+/// The dotted key the error's line belongs to, from the nearest
+/// `key = value` line at or above it (a multi-line value's continuation
+/// belongs to the key that opened it) and the table header above that.
+/// Key names are not secrets; nothing after the `=` is read.
+fn key_path_at(raw: &str, line: usize) -> Option<String> {
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut key: Option<String> = None;
+    let mut index = line.min(lines.len());
+    while index > 0 {
+        index -= 1;
+        let text = lines[index].trim();
+        if let Some(header) = text.strip_prefix('[') {
+            let header = header.trim_start_matches('[');
+            let header = header.split(']').next().unwrap_or_default().trim();
+            return Some(match key {
+                Some(key) => format!("{header}.{key}"),
+                None => header.to_string(),
+            });
+        }
+        if key.is_none()
+            && let Some((name, _)) = text.split_once('=')
+        {
+            let name = name.trim().trim_matches(|c| c == '"' || c == '\'');
+            let looks_like_key = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+            if looks_like_key {
+                key = Some(name.to_string());
+            } else {
+                return None;
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+        }
+    }
+    key
 }
 
 impl ConfigLoadProblem {
@@ -2929,8 +2998,8 @@ impl std::fmt::Display for ConfigLoadError {
             ConfigLoadProblem::NotToml(error) => write!(
                 f,
                 "{path} is not valid TOML, so dux cannot read [server.auth] and cannot tell \
-                 whether a password protects the web UI. Fix the error below, then start dux \
-                 or reload the config again.\n{error}"
+                 whether a password protects the web UI. Fix it at {error}, then start dux \
+                 or reload the config again."
             ),
             ConfigLoadProblem::Missing => write!(
                 f,
@@ -2967,7 +3036,7 @@ impl std::error::Error for ConfigLoadError {}
 fn recover_config(raw: &str) -> Result<Config, ConfigLoadProblem> {
     let auth = auth_section_of(raw)?;
     let mut doc: toml::Table = toml::from_str::<toml::Table>(raw)
-        .map_err(|e| ConfigLoadProblem::NotToml(redact_toml_error(&e.to_string())))?;
+        .map_err(|e| ConfigLoadProblem::NotToml(describe_toml_error(raw, &e)))?;
     take_auth_section(&mut doc)?;
     let mut config = recover_config_table(doc);
     config.server.auth = auth;
@@ -3010,9 +3079,9 @@ pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, Confi
         auth: Option<ServerAuthConfig>,
     }
     toml::from_str::<toml::Table>(raw)
-        .map_err(|e| ConfigLoadProblem::NotToml(redact_toml_error(&e.to_string())))?;
+        .map_err(|e| ConfigLoadProblem::NotToml(describe_toml_error(raw, &e)))?;
     let file: File = toml::from_str(raw)
-        .map_err(|e| ConfigLoadProblem::AuthInvalid(redact_toml_error(&e.to_string())))?;
+        .map_err(|e| ConfigLoadProblem::AuthInvalid(describe_toml_error(raw, &e)))?;
     Ok(file
         .server
         .and_then(|server| server.auth)
@@ -4526,8 +4595,8 @@ mod tests {
         };
         assert!(reason.contains("line 7"), "{reason}");
         assert!(
-            reason.contains("7 | require = <hidden>"),
-            "the real line, value hidden: {reason}"
+            reason.contains("(server.auth.require)") && !reason.contains("lan"),
+            "the real line and key, never the value: {reason}"
         );
     }
 
@@ -4550,6 +4619,47 @@ mod tests {
             "{}",
             err.reason()
         );
+    }
+
+    /// Config errors carry no file text and no value in any shape: a line
+    /// with no `=`, the continuation of a multi-line string, an element of a
+    /// multi-line array, and a type error that would repeat the value. They
+    /// say the line, the column, the key where known, and what is wrong.
+    #[test]
+    fn config_errors_never_carry_file_text_or_values() {
+        let cases: [(&str, &str, &str); 5] = [
+            ("[env]\nGITHUB_TOKEN ghp_secret1\n", "ghp_secret1", "line 2"),
+            ("[env]\nX = \"\"\"\nghp_secret2\n", "ghp_secret2", "(env.X)"),
+            (
+                "[server]\nallowed_hosts = [\n  \"a\",\n  ghp_secret3,\n]\n",
+                "ghp_secret3",
+                "line 4",
+            ),
+            (
+                "[server.auth]\nsession_idle_seconds = \"ghp_secret4\"\n",
+                "ghp_secret4",
+                "line 2",
+            ),
+            (
+                "[env]\nGITHUB_TOKEN = ghp_secret5\n",
+                "ghp_secret5",
+                "line 2",
+            ),
+        ];
+        for (body, secret, line) in cases {
+            let err = recover_config(body).expect_err(body);
+            let text = ConfigLoadError {
+                path: PathBuf::from("/x/config.toml"),
+                problem: err,
+            }
+            .to_string();
+            assert!(!text.contains(secret), "{body:?}: {text}");
+            assert!(text.contains(line), "{body:?}: {text}");
+            assert!(!text.contains(" | "), "no quoted file text: {text}");
+        }
+        let err = validate_config_str("[env]\nTOKEN = 12345678\n").unwrap_err();
+        assert!(!err.contains("12345678"), "{err}");
+        assert!(err.contains("line 2") && err.contains("env.TOKEN"), "{err}");
     }
 
     /// The advice fits any problem in the section, not only the password.

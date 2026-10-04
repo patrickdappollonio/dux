@@ -157,7 +157,7 @@ fn run_diff(paths: &DuxPaths, raw: bool) -> Result<()> {
         anyhow!(
             "{}: {}",
             paths.config_path.display(),
-            dux_core::config::redact_toml_error(&e.to_string())
+            dux_core::config::describe_toml_error(&current_raw, &e)
         )
     })?;
 

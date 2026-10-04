@@ -618,7 +618,7 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
     let doc: toml::Table = toml::from_str(raw).map_err(|e| {
         anyhow::anyhow!(
             "config.toml is not valid TOML: {}",
-            crate::config::redact_toml_error(&e.to_string())
+            crate::config::describe_toml_error(raw, &e)
         )
     })?;
     let mut node = Some(toml::Value::Table(doc));

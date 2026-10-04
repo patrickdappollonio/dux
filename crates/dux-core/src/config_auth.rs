@@ -202,10 +202,7 @@ impl ServerAuthConfig {
             crate::auth::validate_password_hash(&self.password_hash).map_err(|e| e.to_string())?;
         }
         if self.minimum_password_score > 4 {
-            return Err(format!(
-                "minimum_password_score is {}; it must be 0 to 4",
-                self.minimum_password_score
-            ));
+            return Err("minimum_password_score must be 0 to 4".to_string());
         }
         if self.session_idle_seconds == 0 {
             return Err("session_idle_seconds must be at least 1".to_string());
@@ -218,16 +215,15 @@ impl ServerAuthConfig {
         }
         if self.max_password_bytes == 0 || self.max_password_bytes > MAX_PASSWORD_BYTES_LIMIT {
             return Err(format!(
-                "max_password_bytes is {}; it must be 1 to {MAX_PASSWORD_BYTES_LIMIT}",
-                self.max_password_bytes
+                "max_password_bytes must be 1 to {MAX_PASSWORD_BYTES_LIMIT}"
             ));
         }
         if self.minimum_password_length > self.max_password_bytes {
-            return Err(format!(
-                "minimum_password_length ({}) is larger than max_password_bytes ({}), so no \
-                 password could meet both",
-                self.minimum_password_length, self.max_password_bytes
-            ));
+            return Err(
+                "minimum_password_length is larger than max_password_bytes, so no \
+                 password could meet both"
+                    .to_string(),
+            );
         }
         if self.max_tracked_addresses == 0 {
             return Err(
@@ -235,9 +231,15 @@ impl ServerAuthConfig {
                     .to_string(),
             );
         }
-        for entry in &self.blocked_addresses {
-            AddressBlock::parse(entry)
-                .map_err(|reason| format!("blocked_addresses entry \"{entry}\": {reason}"))?;
+        // Errors name settings and positions, never values: they reach the
+        // status line, toasts and dux.log.
+        for (index, entry) in self.blocked_addresses.iter().enumerate() {
+            AddressBlock::parse(entry).map_err(|reason| {
+                format!(
+                    "blocked_addresses entry {} (counting from 1): {reason}",
+                    index + 1
+                )
+            })?;
         }
         Ok(())
     }
@@ -474,7 +476,7 @@ mod tests {
             ("max_password_bytes = 0\n", "max_password_bytes"),
             ("max_password_bytes = 10\n", "minimum_password_length"),
             ("max_tracked_addresses = 0\n", "max_tracked_addresses"),
-            ("blocked_addresses = [\"not-an-ip\"]\n", "not-an-ip"),
+            ("blocked_addresses = [\"not-an-ip\"]\n", "entry 1"),
             ("blocked_addresses = [\"10.0.0.0/33\"]\n", "prefix"),
             ("session_idle_seconds = \"sixty\"\n", "session_idle_seconds"),
             ("blocked_addresses = \"203.0.113.7\"\n", "blocked_addresses"),

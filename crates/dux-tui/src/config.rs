@@ -40,7 +40,7 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
         anyhow::anyhow!(
             "failed to parse {}: {}",
             paths.config_path.display(),
-            dux_core::config::redact_toml_error(&e.to_string())
+            dux_core::config::describe_toml_edit_error(&raw, &e)
         )
     })?;
     // The deprecated-key + retired-provider migrations are the core-owned
@@ -57,12 +57,14 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
 
-    // The parser quotes the offending line, which may hold a token: hidden.
-    let mut config: Config = toml::from_str(&doc.to_string()).map_err(|e| {
+    // The error names the position and the key, never the file's text,
+    // which may hold a token.
+    let text = doc.to_string();
+    let mut config: Config = toml::from_str(&text).map_err(|e| {
         anyhow::anyhow!(
             "failed to parse {}: {}",
             paths.config_path.display(),
-            dux_core::config::redact_toml_error(&e.to_string())
+            dux_core::config::describe_toml_error(&text, &e)
         )
     })?;
     config.providers.ensure_defaults();
@@ -1744,7 +1746,7 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
     let original: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
         anyhow::anyhow!(
             "config.toml is not valid TOML, so its values cannot be read back safely: {}",
-            dux_core::config::redact_toml_error(&e.to_string())
+            dux_core::config::describe_toml_edit_error(raw, &e)
         )
     })?;
 
@@ -1752,7 +1754,7 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
         anyhow::anyhow!(
             "config.toml parses as TOML but not as a dux config, so its values cannot be read \
              back safely: {}",
-            dux_core::config::redact_toml_error(&e.to_string())
+            dux_core::config::describe_toml_error(raw, &e)
         )
     })?;
 

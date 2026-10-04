@@ -249,6 +249,22 @@ pub fn patch_config_file_three_way(
     ours: &Config,
     durability: Durability,
 ) -> Result<()> {
+    patch_three_way_returning_text(config_path, base, None, ours, durability).map(|_| ())
+}
+
+/// The three-way patch, given also the file's text when `base` was read
+/// (`base_file`), and returning the text it wrote. With `base_file`, a key
+/// missing from the file now is filled in from memory only when it was
+/// missing then too (a setting new to this version); one the file had then
+/// was deleted by hand since, and stays deleted. Without it, every missing
+/// key is filled in.
+fn patch_three_way_returning_text(
+    config_path: &Path,
+    base: Option<&Config>,
+    base_file: Option<&str>,
+    ours: &Config,
+    durability: Durability,
+) -> Result<String> {
     let _lock = ConfigFileLock::acquire(config_path)?;
     let raw = fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
@@ -256,27 +272,44 @@ pub fn patch_config_file_three_way(
         anyhow::anyhow!(
             "failed to parse {}: {}",
             config_path.display(),
-            crate::config::redact_toml_error(&e.to_string())
+            crate::config::describe_toml_edit_error(&raw, &e)
         )
     })?;
-    apply_patches_three_way(&mut doc, base, ours);
+    let base_file = base_file.and_then(|text| text.parse::<DocumentMut>().ok());
+    apply_patches_three_way(&mut doc, base, base_file.as_ref(), ours);
     let text = doc.to_string();
     check_auth_before_write(config_path, &text)?;
-    write_config_atomic_unlocked(config_path, &text, durability)
+    write_config_atomic_unlocked(config_path, &text, durability)?;
+    Ok(text)
 }
 
-/// [`save_config_with`] for the config writer, which knows its base.
+/// [`save_config_three_way`] for the config writer, which also knows the
+/// file's text as it read it, and wants back the text it wrote (its next
+/// base).
+pub fn save_config_three_way_from(
+    config_path: &Path,
+    base: Option<&Config>,
+    base_file: Option<&str>,
+    ours: &Config,
+    durability: Durability,
+) -> Result<String> {
+    if config_path.exists() {
+        patch_three_way_returning_text(config_path, base, base_file, ours, durability)
+    } else {
+        let text = render_config_documented(ours);
+        write_config_atomic(config_path, &text, durability)?;
+        Ok(text)
+    }
+}
+
+/// [`save_config_with`] for a writer that knows its base.
 pub fn save_config_three_way(
     config_path: &Path,
     base: Option<&Config>,
     ours: &Config,
     durability: Durability,
 ) -> Result<()> {
-    if config_path.exists() {
-        patch_config_file_three_way(config_path, base, ours, durability)
-    } else {
-        write_config_atomic(config_path, &render_config_documented(ours), durability)
-    }
+    save_config_three_way_from(config_path, base, None, ours, durability).map(|_| ())
 }
 
 /// Apply to `disk` only what changed between `base` and `ours`, by running the
@@ -284,7 +317,12 @@ pub fn save_config_three_way(
 /// across the items where the two results differ. With no `base` every item
 /// counts as changed (the full patch), through the same merge, so both keep
 /// comments the same way.
-fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<&Config>, ours: &Config) {
+fn apply_patches_three_way(
+    disk: &mut DocumentMut,
+    base: Option<&Config>,
+    base_file: Option<&DocumentMut>,
+    ours: &Config,
+) {
     let mut with_ours = disk.clone();
     apply_patches(&mut with_ours, ours);
     let with_base = base.map(|base| {
@@ -297,6 +335,7 @@ fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<&Config>, ours: 
         disk.as_table_mut(),
         original.as_table(),
         with_base.as_ref().map(DocumentMut::as_table),
+        base_file.map(DocumentMut::as_table),
         with_ours.as_table(),
     );
     // Retired keys still go on every save, as they always have.
@@ -316,19 +355,34 @@ const RETIRED_KEYS: &[(&str, &str)] = &[
 /// Copy into `target` (the file) what changed between `base` and `ours`
 /// (both the file patched from a config), recursing into tables. `original`
 /// is the file before this save, so "missing from the file" and "added on
-/// disk by someone else" can be told apart.
-fn merge_changed(target: &mut Table, original: &Table, base: Option<&Table>, ours: &Table) {
+/// disk by someone else" can be told apart; `base_file` is the file when the
+/// base was read, so "never there" and "deleted by hand since" can be.
+fn merge_changed(
+    target: &mut Table,
+    original: &Table,
+    base: Option<&Table>,
+    base_file: Option<&Table>,
+    ours: &Table,
+) {
     for (key, ours_item) in ours.iter() {
         let base_item = base.and_then(|base| base.get(key));
         let Some(original_item) = original.get(key) else {
-            // Missing from the file: fill it in, as every save always has.
-            put_in_place(target, key, ours_item.clone());
+            // Missing from the file. Filled in when the file never had it (a
+            // setting new to this version); left out when the file had it
+            // when dux read it, because then someone deleted it since.
+            let deleted_by_hand = base_file.is_some_and(|file| file.contains_key(key));
+            if !deleted_by_hand {
+                put_in_place(target, key, ours_item.clone());
+            }
             continue;
         };
         if base.is_some() && base_item.is_none() {
             put_in_place(target, key, ours_item.clone());
             continue;
         }
+        let file_child = base_file
+            .and_then(|file| file.get(key))
+            .and_then(Item::as_table);
         match (base_item, ours_item, original_item, target.get_mut(key)) {
             (
                 base_item,
@@ -340,6 +394,7 @@ fn merge_changed(target: &mut Table, original: &Table, base: Option<&Table>, our
                     target_table,
                     original_table,
                     base_item.and_then(Item::as_table),
+                    file_child,
                     ours_table,
                 );
             }
@@ -419,77 +474,95 @@ fn put_in_place(target: &mut Table, key: &str, mut item: Item) {
     }
 }
 
-/// An entry's identity in an array of tables: `id`, else `path`, else
-/// `name`. `None` when it has none, and the array is then compared whole.
-fn entry_identity(entry: &Table) -> Option<String> {
-    ["id", "path", "name"]
-        .iter()
-        .find_map(|field| entry.get(field).map(item_text))
+/// Whether two entries of an array of tables are the same entry: the same
+/// `id` when both have one, else the same `path`, else the same `name`.
+/// Falling back past a differing `id` is deliberate: a hand-written project
+/// has no id of its own, so each read mints a fresh one, and an id adopted
+/// from the session database replaces the file's for the same path.
+fn same_entry(a: &Table, b: &Table) -> bool {
+    let field = |table: &Table, name: &str| table.get(name).map(item_text);
+    if let (Some(x), Some(y)) = (field(a, "id"), field(b, "id"))
+        && x == y
+    {
+        return true;
+    }
+    for name in ["path", "name"] {
+        if let (Some(x), Some(y)) = (field(a, name), field(b, name)) {
+            return x == y;
+        }
+    }
+    false
 }
 
-/// `[[projects]]` and any other array of tables, merged entry by entry by
-/// identity: an entry memory did not change keeps the file's version (or
-/// stays deleted if the file deleted it), one memory changed or added is
-/// written, one memory removed goes, and one added on disk is kept after
-/// memory's entries.
+/// `[[projects]]` and any other array of tables, merged entry by entry:
+/// entries are matched across memory, the base and the file with
+/// [`same_entry`], each file entry and base entry used at most once (so a
+/// duplicated identity is neither doubled nor dropped). An entry matched in
+/// the file is merged field by field, so a field changed on disk survives
+/// unless memory changed that same field; one memory added is written; one
+/// memory removed goes; one added on disk is kept after memory's entries.
+/// When memory has an `id` its file entry lacks, the id is written, so a
+/// hand-written project settles on one id.
 fn merge_array_of_tables(
     target: &mut toml_edit::ArrayOfTables,
     original: &toml_edit::ArrayOfTables,
     base: Option<&toml_edit::ArrayOfTables>,
     ours: &toml_edit::ArrayOfTables,
 ) {
-    let whole =
-        |array: &toml_edit::ArrayOfTables| array.iter().map(|t| t.to_string()).collect::<Vec<_>>();
     let Some(base) = base else {
         *target = ours.clone();
         return;
     };
-    let all_keyed = [base, ours, original]
-        .iter()
-        .all(|array| array.iter().all(|entry| entry_identity(entry).is_some()));
-    if !all_keyed {
-        if whole(base) != whole(ours) {
-            *target = ours.clone();
-        }
-        return;
-    }
-    let find = |array: &toml_edit::ArrayOfTables, id: &str| {
-        array
-            .iter()
-            .find(|entry| entry_identity(entry).as_deref() == Some(id))
-            .cloned()
+    let originals: Vec<&Table> = original.iter().collect();
+    let bases: Vec<&Table> = base.iter().collect();
+    let mut file_used = vec![false; originals.len()];
+    let mut base_used = vec![false; bases.len()];
+    let claim = |list: &[&Table], used: &mut [bool], entry: &Table| {
+        let found = (0..list.len()).find(|&i| !used[i] && same_entry(list[i], entry))?;
+        used[found] = true;
+        Some(found)
     };
     let mut merged = toml_edit::ArrayOfTables::new();
-    let mut seen: Vec<String> = Vec::new();
     for entry in ours.iter() {
-        let id = entry_identity(entry).expect("keyed");
-        seen.push(id.clone());
-        match find(base, &id) {
-            Some(base_entry) if base_entry.to_string() == entry.to_string() => {
-                // Unchanged in memory: the file's own version, if it still has
-                // one, less any key the patch drops on every write (it carries
-                // every other key of the file's entry, so a key missing from
-                // the patched entry is one it removes on purpose, such as a
-                // project's `leading_branch`).
-                if let Some(mut file_entry) = find(original, &id) {
-                    let dropped: Vec<String> = file_entry
-                        .iter()
-                        .map(|(key, _)| key.to_string())
-                        .filter(|key| !base_entry.contains_key(key))
-                        .collect();
-                    for key in dropped {
-                        file_entry.remove(&key);
-                    }
-                    merged.push(file_entry);
-                }
+        let base_index = claim(&bases, &mut base_used, entry);
+        let file_index = claim(&originals, &mut file_used, entry)
+            .or_else(|| base_index.and_then(|b| claim(&originals, &mut file_used, bases[b])));
+        let Some(file_index) = file_index else {
+            // Not in the file: new in memory, or deleted by hand. Deleted by
+            // hand when the base had it and memory did not change it.
+            let unchanged = base_index.is_some_and(|b| bases[b].to_string() == entry.to_string());
+            if !unchanged {
+                merged.push(entry.clone());
             }
-            _ => merged.push(entry.clone()),
+            continue;
+        };
+        let file_entry = originals[file_index];
+        let mut out = file_entry.clone();
+        let base_entry = base_index.map(|b| bases[b]);
+        merge_changed(&mut out, file_entry, base_entry, None, entry);
+        // Keys every write drops from a project (its `leading_branch`) go
+        // from the file's entry too.
+        for key in PROJECT_KEYS_DROPPED_ON_WRITE {
+            if !entry.contains_key(key) {
+                out.remove(key);
+            }
         }
+        if !out.contains_key("id")
+            && let Some(id) = entry.get("id")
+        {
+            out.insert("id", id.clone());
+        }
+        merged.push(out);
     }
-    for entry in original.iter() {
-        let id = entry_identity(entry).expect("keyed");
-        if !seen.contains(&id) && find(base, &id).is_none() {
-            merged.push(entry.clone());
+    // Added on disk by someone else: in the file, matched by nothing memory
+    // or the base has.
+    for (i, entry) in originals.iter().enumerate() {
+        if file_used[i] {
+            continue;
+        }
+        let in_base = (0..bases.len()).any(|b| !base_used[b] && same_entry(bases[b], entry));
+        if !in_base {
+            merged.push((*entry).clone());
         }
     }
     *target = merged;
@@ -569,7 +642,7 @@ pub fn mutate_config_file<T>(
         anyhow::anyhow!(
             "{} is not valid TOML, so it cannot be changed safely; fix it by hand first.\n{}",
             config_path.display(),
-            crate::config::redact_toml_error(&e.to_string())
+            crate::config::describe_toml_edit_error(&raw, &e)
         )
     })?;
     let outcome = change(&mut doc)?;
@@ -4173,6 +4246,129 @@ second_note = \"nowhere to go\"
 
     /// A project added to the file by hand survives a save that adds another
     /// project from memory; projects are matched by id, not by position.
+    fn project_ids(path: &Path) -> Vec<(String, String)> {
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        parsed
+            .projects
+            .iter()
+            .map(|p| (p.id.clone(), p.path.clone()))
+            .collect()
+    }
+
+    /// A hand-written project with no `id`: the base and memory each mint
+    /// their own, so the entry is matched by path, written once, and given
+    /// memory's id, which then stays.
+    #[test]
+    fn an_id_less_project_is_not_duplicated_and_gets_its_id_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let body = "[[projects]]\npath = \"/tmp/hand\"\nname = \"hand\"\n";
+        let base = base_and_file(&path, body);
+        let mut ours: Config = toml::from_str(body).unwrap();
+        assert_ne!(
+            base.projects[0].id, ours.projects[0].id,
+            "two parses, two ids"
+        );
+        ours.ui.copy_on_select = false;
+        save_config_three_way(&path, Some(&base), &ours, Durability::NoFsync).expect("save");
+        assert_eq!(
+            project_ids(&path),
+            vec![(ours.projects[0].id.clone(), "/tmp/hand".to_string())]
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("name = \"hand\"")
+        );
+    }
+
+    /// Memory adopted the id SQLite has for the same path: one entry, with
+    /// the adopted id.
+    #[test]
+    fn an_adopted_project_id_replaces_the_files_without_duplicating() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(
+            &path,
+            "[[projects]]\nid = \"from-file\"\npath = \"/tmp/p\"\n",
+        );
+        let mut ours = base.clone();
+        ours.projects[0].id = "from-sqlite".to_string();
+        save_config_three_way(&path, Some(&base), &ours, Durability::NoFsync).expect("save");
+        assert_eq!(
+            project_ids(&path),
+            vec![("from-sqlite".to_string(), "/tmp/p".to_string())]
+        );
+    }
+
+    /// Renamed in memory while another field of the same project changed on
+    /// disk: both changes land, field by field.
+    #[test]
+    fn a_project_entry_merges_field_by_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let base = base_and_file(
+            &path,
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\nname = \"old\"\n",
+        );
+        std::fs::write(
+            &path,
+            "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\nname = \"old\"\nstartup_command = \"make\"\n",
+        )
+        .unwrap();
+        let mut ours = base.clone();
+        ours.projects[0].name = Some("new".to_string());
+        save_config_three_way(&path, Some(&base), &ours, Durability::NoFsync).expect("save");
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.projects.len(), 1);
+        assert_eq!(parsed.projects[0].name.as_deref(), Some("new"));
+        assert_eq!(parsed.projects[0].startup_command.as_deref(), Some("make"));
+    }
+
+    /// Two entries with one identity never make a save push one twice or
+    /// lose one.
+    #[test]
+    fn duplicate_identities_are_neither_doubled_nor_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let body = "[[projects]]\nid = \"same\"\npath = \"/tmp/a\"\n\n[[projects]]\nid = \"same\"\npath = \"/tmp/b\"\n";
+        let base = base_and_file(&path, body);
+        let mut ours = base.clone();
+        ours.ui.copy_on_select = false;
+        save_config_three_way(&path, Some(&base), &ours, Durability::NoFsync).expect("save");
+        assert_eq!(project_ids(&path).len(), 2);
+    }
+
+    /// A setting deleted from the file by hand stays deleted; one the file
+    /// never had (new in this version) is filled in.
+    #[test]
+    fn a_hand_deleted_key_stays_deleted_and_a_new_one_is_filled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let at_read = "[ui]\nleft_width_pct = 20\n\n[env]\nFOO = \"bar\"\n";
+        let base = base_and_file(&path, at_read);
+        // The user deletes `left_width_pct` and the FOO variable.
+        std::fs::write(&path, "[ui]\n\n[env]\n").unwrap();
+        let mut ours = base.clone();
+        ours.ui.copy_on_select = false;
+        save_config_three_way_from(
+            &path,
+            Some(&base),
+            Some(at_read),
+            &ours,
+            Durability::NoFsync,
+        )
+        .expect("save");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("left_width_pct"), "{after}");
+        assert!(!after.contains("FOO"), "{after}");
+        assert!(after.contains("copy_on_select = false"), "{after}");
+        assert!(
+            after.contains("right_width_pct"),
+            "a setting the file never had: {after}"
+        );
+    }
+
     #[test]
     fn projects_merge_by_identity() {
         let dir = tempfile::tempdir().expect("tempdir");

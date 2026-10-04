@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::config_write::{Durability, save_config_three_way};
+use crate::config_write::{Durability, save_config_three_way_from};
 use crate::worker::WorkerEvent;
 
 const QUIET_WINDOW: Duration = Duration::from_millis(250);
@@ -95,7 +95,9 @@ impl ConfigWriteQueue {
         // Read here, before the thread starts, so the base is the file as it
         // was when the queue was made. A file that cannot be loaded leaves no
         // base, and saves fall back to the full patch.
-        let base = crate::config::load_config_file_as_written(&config_path).ok();
+        let base = crate::config::load_config_file_as_written(&config_path)
+            .ok()
+            .map(|config| (config, std::fs::read_to_string(&config_path).ok()));
         let writer = thread::Builder::new()
             .name("config-writer".into())
             .spawn({
@@ -297,7 +299,7 @@ fn decr_inflight(counter: &AtomicUsize) {
 fn writer_loop(
     rx: Receiver<WriteMsg>,
     path: PathBuf,
-    base: Option<Config>,
+    base: Option<Base>,
     lazy_inflight: Arc<AtomicUsize>,
     status_lane: Option<Sender<WorkerEvent>>,
 ) {
@@ -332,7 +334,7 @@ enum WriterControl {
 fn writer_loop_inner(
     rx: Receiver<WriteMsg>,
     path: PathBuf,
-    base: Option<Config>,
+    base: Option<Base>,
     lazy_inflight: Arc<AtomicUsize>,
     status_lane: Option<Sender<WorkerEvent>>,
 ) {
@@ -380,10 +382,15 @@ fn receive_writer_input(
     }
 }
 
+/// The config dux last read or wrote, with the file's text at that moment:
+/// what every save is a three-way patch against, and how a key deleted by
+/// hand since is told from one the file never had.
+type Base = (Config, Option<String>);
+
 /// What the writer thread carries between messages: the base its three-way
 /// saves patch against, and the coalesced lazy save waiting for its deadline.
 struct WriterState {
-    base: Option<Config>,
+    base: Option<Base>,
     pending: Option<Config>,
     deadline: Option<Instant>,
 }
@@ -409,14 +416,13 @@ fn handle_writer_input(
         Ok(Some(WriteMsg::Eager { config, reply })) => {
             state.pending = None;
             state.deadline = None;
-            let result =
-                save_config_three_way(path, state.base.as_ref(), &config, Durability::Fsync)
-                    .map_err(|e| format!("{e:#}"));
+            let result = save_against_base(path, &state.base, &config, Durability::Fsync)
+                .map_err(|e| format!("{e:#}"));
             match &result {
-                Ok(()) => state.base = Some(config),
+                Ok(text) => state.base = Some((config, Some(text.clone()))),
                 Err(error) => crate::logger::error(&format!("eager config write failed: {error}")),
             }
-            let _ = reply.send(result);
+            let _ = reply.send(result.map(|_| ()));
         }
         Ok(Some(WriteMsg::Flush(ack))) => {
             flush_pending(path, state, status_lane);
@@ -426,12 +432,14 @@ fn handle_writer_input(
             flush_pending(path, state, status_lane);
             let _ = ack.send(());
             debug_assert!(state.pending.is_none());
-            if !run_paused_writer(rx, lazy_inflight, &mut state.base) {
+            if !run_paused_writer(rx, lazy_inflight, path, &mut state.base) {
                 return WriterControl::Stop;
             }
         }
         Ok(Some(WriteMsg::Resume)) => {}
-        Ok(Some(WriteMsg::SetBase(config))) => state.base = Some(*config),
+        Ok(Some(WriteMsg::SetBase(config))) => {
+            state.base = Some((*config, std::fs::read_to_string(path).ok()));
+        }
         Ok(Some(WriteMsg::Shutdown)) => {
             flush_pending(path, state, status_lane);
             return WriterControl::Stop;
@@ -443,7 +451,8 @@ fn handle_writer_input(
 fn run_paused_writer(
     rx: &Receiver<WriteMsg>,
     lazy_inflight: &AtomicUsize,
-    base: &mut Option<Config>,
+    path: &std::path::Path,
+    base: &mut Option<Base>,
 ) -> bool {
     let mut depth = 1usize;
     loop {
@@ -466,9 +475,28 @@ fn run_paused_writer(
                 depth = depth.saturating_add(1);
                 let _ = ack.send(());
             }
-            Ok(WriteMsg::SetBase(config)) => *base = Some(*config),
+            Ok(WriteMsg::SetBase(config)) => {
+                *base = Some((*config, std::fs::read_to_string(path).ok()));
+            }
         }
     }
+}
+
+/// One three-way save against the writer's base; the text written comes back
+/// to become the next base.
+fn save_against_base(
+    path: &std::path::Path,
+    base: &Option<Base>,
+    config: &Config,
+    durability: Durability,
+) -> anyhow::Result<String> {
+    save_config_three_way_from(
+        path,
+        base.as_ref().map(|(config, _)| config),
+        base.as_ref().and_then(|(_, file)| file.as_deref()),
+        config,
+        durability,
+    )
 }
 
 fn flush_pending(
@@ -480,10 +508,14 @@ fn flush_pending(
     let Some(cfg) = state.pending.take() else {
         return;
     };
-    let result = save_config_three_way(path, state.base.as_ref(), &cfg, Durability::NoFsync);
-    if result.is_ok() {
-        state.base = Some(cfg);
-    }
+    let result = save_against_base(path, &state.base, &cfg, Durability::NoFsync);
+    let result = match result {
+        Ok(text) => {
+            state.base = Some((cfg, Some(text)));
+            Ok(())
+        }
+        Err(error) => Err(error),
+    };
     if let Err(e) = result {
         crate::logger::error(&format!("lazy config write failed: {e:#}"));
         // Nothing asked for this write and nothing is waiting on its answer, so
@@ -547,6 +579,23 @@ mod tests {
         q.save_eager(memory.clone()).unwrap();
         let after: Config = toml::from_str(&read(&path)).unwrap();
         assert_eq!(after.ui.terminal_font_size, memory.ui.terminal_font_size);
+    }
+
+    /// A setting deleted from the file by hand while dux runs is not put
+    /// back by the next save from memory.
+    #[test]
+    fn the_writer_leaves_a_hand_deleted_key_deleted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nleft_width_pct = 20\ncopy_on_select = true\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let mut memory: Config = toml::from_str(&read(&path)).unwrap();
+        std::fs::write(&path, "[ui]\ncopy_on_select = true\n").unwrap();
+        memory.ui.copy_on_select = false;
+        q.save_eager(memory).unwrap();
+        let after = read(&path);
+        assert!(!after.contains("left_width_pct"), "{after}");
+        assert!(after.contains("copy_on_select = false"), "{after}");
     }
 
     /// With no base set yet, the writer reads one from the file when it starts.
