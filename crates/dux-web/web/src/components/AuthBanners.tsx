@@ -42,6 +42,7 @@ function NoPasswordBanner({ status }: { status: AuthStatus }) {
   return (
     <div
       role="alert"
+      data-testid="no-auth-banner"
       className="flex flex-col gap-2 border-b border-destructive/60 bg-destructive/20 px-4 py-2.5 text-sm text-foreground md:flex-row md:items-center md:gap-4"
     >
       <ShieldAlert className="hidden size-5 shrink-0 text-destructive md:block" aria-hidden />
@@ -66,6 +67,7 @@ function NoPasswordBanner({ status }: { status: AuthStatus }) {
           variant="outline"
           size="sm"
           disabled={busy}
+          data-testid="no-auth-banner-never"
           className={BANNER_BUTTON}
           onClick={() => void never()}
         >
@@ -80,6 +82,7 @@ function WeakPasswordBanner() {
   return (
     <div
       role="status"
+      data-testid="weak-password-banner"
       className="flex flex-col gap-2 border-b border-border bg-card px-4 py-2.5 text-sm text-card-foreground md:flex-row md:items-center md:gap-4"
     >
       <KeyRound className="hidden size-5 shrink-0 text-destructive md:block" aria-hidden />

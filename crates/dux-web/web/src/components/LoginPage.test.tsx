@@ -191,3 +191,14 @@ describe("BrokenPage", () => {
     expect(probeAuth).toHaveBeenCalled()
   })
 })
+
+describe("the hooks the browser journeys hold on to", () => {
+  it("marks the form and the plain HTTP warning", () => {
+    render(<LoginPage status={status({ transport_encrypted: false })} reason="required" />)
+    const form = screen.getByTestId("login-form")
+    expect(form.tagName).toBe("FORM")
+    expect(form.querySelector("input[type=password]")).not.toBeNull()
+    expect(form.querySelector("button[type=submit]")).not.toBeNull()
+    expect(screen.getByTestId("login-insecure-warning")).toBeTruthy()
+  })
+})

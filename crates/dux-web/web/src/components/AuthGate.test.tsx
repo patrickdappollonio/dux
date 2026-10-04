@@ -181,3 +181,16 @@ describe("the weak-password banner", () => {
     expect(screen.queryByRole("status")).toBeNull()
   })
 })
+
+describe("the hooks the browser journeys hold on to", () => {
+  it("marks both banners and the Don't show again control", () => {
+    phase = {
+      kind: "open",
+      status: status({ no_auth_warning: true, weak_password: true }),
+    }
+    renderGate()
+    expect(screen.getByTestId("no-auth-banner").getAttribute("role")).toBe("alert")
+    expect(screen.getByTestId("no-auth-banner-never").textContent).toBe("Don't show again")
+    expect(screen.getByTestId("weak-password-banner").getAttribute("role")).toBe("status")
+  })
+})

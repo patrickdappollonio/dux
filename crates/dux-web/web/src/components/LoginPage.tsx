@@ -45,6 +45,7 @@ function PlainHttpWarning() {
   return (
     <div
       role="note"
+      data-testid="login-insecure-warning"
       aria-labelledby={id}
       className="flex gap-3 rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm"
     >
@@ -146,7 +147,12 @@ export function LoginPage({
     <Shell title="Sign in to dux">
       <p className="text-center text-sm text-muted-foreground">{REASON[reason]}</p>
       {status?.transport_encrypted === false ? <PlainHttpWarning /> : null}
-      <form className="flex flex-col gap-3" onSubmit={(e) => void submit(e)} noValidate>
+      <form
+        data-testid="login-form"
+        className="flex flex-col gap-3"
+        onSubmit={(e) => void submit(e)}
+        noValidate
+      >
         <label htmlFor={fieldId} className="text-sm font-medium">
           Password
         </label>
