@@ -5,8 +5,12 @@ use anyhow::Result;
 const SERVER_USAGE: &str = "\
 Usage: dux server [OPTIONS]
 
-Run the dux web UI over the headless engine. dux is a trusted-local tool with no
-login gate; only run a non-loopback bind on a network you trust.
+Run the dux web UI over the headless engine. The web UI has one optional
+password for one owner, and everyone who gets in shares the one workspace. Set
+it with `dux config set server.auth.password`; [server.auth] require decides
+who is asked for it (by default everyone but this machine and your tailnet).
+With no password, anyone who can reach a non-loopback address controls your
+agents and terminals, and dux says so loudly as it starts.
 
 Options:
       --bind <ADDR:PORT>  Bind this exact address, overriding [server] host+port.
@@ -281,7 +285,7 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         });
     }
 
-    // Loud warning when binding a non-loopback address: dux has no login gate, so
+    // Loud warning when binding a non-loopback address with no password set:
     // anyone who can reach the address can control your agents and worktrees.
     // Printed before the bind so it is visible even if a bind then fails.
     let is_local = |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
@@ -289,7 +293,7 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         .addrs
         .iter()
         .filter(|p| !is_local(&p.addr()))
-        .map(|p| non_loopback_warning(p.addr()))
+        .filter_map(|p| non_loopback_warning(p.addr(), &config.server.auth))
         .collect();
     raise_security_alarms(
         &alarms,
@@ -320,7 +324,7 @@ fn serving_without_tailscale(plan: &dux_core::config::ServerPlan) -> &'static st
     }
 }
 
-/// The "NO login" alarms go to stderr at once, before the engine loads, so a
+/// The "NO password" alarms go to stderr at once, before the engine loads, so a
 /// redirected stdout (`dux server > access.log`) or a start that fails while
 /// loading can never hide them; they also open the log itself, the same lines
 /// the flip's viewer would show.
@@ -355,13 +359,20 @@ fn report_plan_failure(stderr: &mut dyn std::io::Write, warning: Option<&str>, e
 }
 
 /// The alarm for a listener beyond loopback (and beyond the machine's own
-/// Tailscale address): there is no login gate in front of it.
-fn non_loopback_warning(addr: std::net::SocketAddr) -> String {
-    format!(
-        "dux is binding {addr}, a non-loopback address, with NO login gate. Anyone who can \
-         reach this address can control your agents and worktrees. Only do this on a network \
-         you trust, or front dux with an upstream auth proxy."
-    )
+/// Tailscale address) with no password set, or `None` when a password is set:
+/// every client from the network is then asked for it, whatever `require` says.
+fn non_loopback_warning(
+    addr: std::net::SocketAddr,
+    auth: &dux_core::config::ServerAuthConfig,
+) -> Option<String> {
+    if auth.has_password() {
+        return None;
+    }
+    Some(format!(
+        "dux is binding {addr}, a non-loopback address, with NO password set. Anyone who can \
+         reach this address can control your agents and worktrees. Set one with `dux config \
+         set server.auth.password`, or only do this on a network you trust."
+    ))
 }
 
 /// Outcome of parsing `dux server` arguments. Separated from `run_server` so the
@@ -492,7 +503,7 @@ mod tests {
         }
     }
 
-    /// The "NO login" alarm reaches stderr at once, before anything is loaded,
+    /// The "NO password" alarm reaches stderr at once, before anything is loaded,
     /// so `dux server > access.log` still shows it and a failed start does not
     /// swallow it. It also opens the log, where the flip's viewer shows it too.
     #[test]
@@ -509,7 +520,11 @@ mod tests {
             same_file: false,
         };
         raise_security_alarms(
-            &[non_loopback_warning("0.0.0.0:3890".parse().unwrap())],
+            &[non_loopback_warning(
+                "0.0.0.0:3890".parse().unwrap(),
+                &dux_core::config::ServerAuthConfig::default(),
+            )
+            .unwrap()],
             streams,
             &mut stderr,
             &mut startup_warnings,
@@ -549,7 +564,11 @@ mod tests {
         let mut stderr = Vec::new();
         let mut startup_warnings = Vec::new();
         raise_security_alarms(
-            &[non_loopback_warning("0.0.0.0:3890".parse().unwrap())],
+            &[non_loopback_warning(
+                "0.0.0.0:3890".parse().unwrap(),
+                &dux_core::config::ServerAuthConfig::default(),
+            )
+            .unwrap()],
             streams,
             &mut stderr,
             &mut startup_warnings,
@@ -598,13 +617,36 @@ mod tests {
 
     #[test]
     fn the_non_loopback_alarm_names_the_address_and_the_risk() {
-        let w = non_loopback_warning("0.0.0.0:3890".parse().unwrap());
+        let open = dux_core::config::ServerAuthConfig::default();
+        let w = non_loopback_warning("0.0.0.0:3890".parse().unwrap(), &open)
+            .expect("no password: an alarm");
         assert!(w.starts_with("dux is binding 0.0.0.0:3890, a non-loopback address"));
-        assert!(w.contains("NO login gate"));
+        assert!(w.contains("NO password"), "{w}");
+        assert!(w.contains("dux config set server.auth.password"), "{w}");
         assert!(
             !w.starts_with("WARNING:"),
             "the log line carries its own warning glyph"
         );
+        let guarded = dux_core::config::ServerAuthConfig {
+            password_hash: dux_core::auth::hash_password(&dux_core::auth::Password::new(
+                "orbit velvet quarry lantern cobalt".to_string(),
+            ))
+            .unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            non_loopback_warning("0.0.0.0:3890".parse().unwrap(), &guarded),
+            None,
+            "with a password every client from the network signs in"
+        );
+    }
+
+    #[test]
+    fn the_server_usage_describes_the_optional_password() {
+        assert!(!SERVER_USAGE.contains("no\nlogin gate"), "{SERVER_USAGE}");
+        assert!(!SERVER_USAGE.contains("no login"), "{SERVER_USAGE}");
+        assert!(SERVER_USAGE.contains("dux config set server.auth.password"));
+        assert!(SERVER_USAGE.contains("require"));
     }
 
     #[test]

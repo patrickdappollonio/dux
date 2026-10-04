@@ -207,8 +207,9 @@ pub fn help_text() -> &'static str {
           dux server --bind <ADDR:PORT>  Bind this exact address instead\n\
           dux server --port <PORT>       Override the port only\n\
           dux server --no-tailscale      Skip Tailscale detection this run\n\
-          There is no login: everyone who can reach the address shares this\n\
-          workspace, so keep a non-loopback bind on a network you trust.\n\n\
+          One optional password for one owner: everyone who gets in shares\n\
+          this workspace. Set it with `dux config set server.auth.password`;\n\
+          with none, anyone who can reach the address is in.\n\n\
          Config subcommands:\n\
           dux config path          Print the config file path\n\
           dux config get <setting> Print one setting, e.g. server.port\n\
@@ -296,19 +297,16 @@ mod tests {
         }
     }
 
-    /// The trust model currently appears only deep in the docs. `--help` is the
-    /// one place a user is guaranteed to look, so it must say that there is no
-    /// login and that everyone who can reach the address shares the workspace.
+    /// `--help` is the one place a user is guaranteed to look, so it states the
+    /// trust model: one optional password for one owner, the one workspace
+    /// everyone who gets in shares, and that with no password anyone who can
+    /// reach the address is in.
     #[test]
-    fn help_states_the_server_has_no_login() {
+    fn help_states_the_optional_password_and_the_shared_workspace() {
         let help = help_text();
-        assert!(
-            help.contains("no login"),
-            "--help must state that the server has no login:\n{help}"
-        );
-        assert!(
-            help.contains("shares"),
-            "--help must state that reachable clients share the workspace:\n{help}"
-        );
+        assert!(!help.contains("no login"), "{help}");
+        for needle in ["password", "shares", "server.auth.password"] {
+            assert!(help.contains(needle), "--help must say {needle}:\n{help}");
+        }
     }
 }

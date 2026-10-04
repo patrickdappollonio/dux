@@ -6163,6 +6163,48 @@ mod tests {
         }
     }
 
+    /// Every `[server.auth]` setting applies to the running server on a
+    /// reload: the live limits adopt it and no restart is asked for. The
+    /// password-check bounds included: the gate reads them per attempt.
+    #[test]
+    fn every_server_auth_setting_applies_on_reload_with_no_restart() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.auth = dux_core::config::ServerAuthConfig {
+            password_hash: dux_core::auth::hash_password(&dux_core::auth::Password::new(
+                "orbit velvet quarry lantern cobalt".to_string(),
+            ))
+            .unwrap(),
+            require: dux_core::config::AuthRequire::Everywhere,
+            minimum_password_length: 20,
+            minimum_password_score: 3,
+            max_failed_logins: 9,
+            blocked_addresses: vec!["198.51.100.0/24".to_string()],
+            session_idle_seconds: 120,
+            disable_no_auth_warning: true,
+            cookie_secure: dux_core::config::CookieSecure::Always,
+            max_concurrent_password_checks: 4,
+            password_check_queue: 16,
+            max_password_bytes: 2048,
+            failed_login_window_seconds: 60,
+            failed_login_delay_seconds: 2,
+            failed_login_max_delay_seconds: 60,
+            max_failed_logins_per_minute: 10,
+            max_tracked_addresses: 50,
+            max_blocked_addresses: 20,
+        };
+        for surface in [
+            ServeSurface::DuxServer,
+            ServeSurface::Flip,
+            ServeSurface::Background,
+        ] {
+            assert_eq!(server_restart_warning_copy(&prev, &next, surface), None);
+        }
+        let limits = LiveServerLimits::default();
+        limits.store_from(&next);
+        assert_eq!(limits.auth().snapshot().config, next.auth);
+    }
+
     #[test]
     fn restart_drift_detects_host_change() {
         let prev = dux_core::config::ServerConfig::default();
