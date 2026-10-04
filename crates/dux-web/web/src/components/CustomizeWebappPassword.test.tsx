@@ -39,7 +39,6 @@ vi.mock("@/components/SimpleTooltip", () => ({
 }))
 
 let phase: AuthPhase
-const afterPasswordChange = vi.fn(async () => {})
 const reportUnauthorized = vi.fn()
 const refreshAuthStatus = vi.fn(async () => {})
 vi.mock("@/lib/authGate", async (importOriginal) => {
@@ -47,7 +46,6 @@ vi.mock("@/lib/authGate", async (importOriginal) => {
   return {
     ...actual,
     useAuthPhase: () => phase,
-    afterPasswordChange,
     reportUnauthorized,
     refreshAuthStatus,
   }
@@ -134,7 +132,6 @@ beforeEach(() => {
   postPassword.mockReset().mockResolvedValue({ kind: "ok" })
   strengthFailures = 0
   refreshAuthStatus.mockClear()
-  afterPasswordChange.mockClear()
   reportUnauthorized.mockClear()
   closeCustomizeWebapp.mockClear()
   saveSettings.mockClear().mockResolvedValue(true)
@@ -188,7 +185,6 @@ describe("the password row", () => {
     await waitFor(() => expect(screen.getByRole("meter").getAttribute("aria-valuetext")).toBe("Strong"))
     await save()
     expect(postPassword).toHaveBeenCalledWith({ current: "the old password", next: STRONG })
-    expect(afterPasswordChange).toHaveBeenCalled()
     expect(closeCustomizeWebapp).toHaveBeenCalled()
     // Never through the generic PATCH.
     expect(saveSettings).not.toHaveBeenCalled()

@@ -38,10 +38,9 @@ import {
   type SettingDescriptor,
   type SettingValue,
 } from "@/lib/settingsDescriptors"
-import { postPassword } from "@/lib/authActions"
 import type { AuthStatus } from "@/lib/authApi"
 import {
-  afterPasswordChange,
+  changePassword,
   refreshAuthStatus,
   reportUnauthorized,
   useAuthPhase,
@@ -826,7 +825,7 @@ function CustomizeWebappForm({
   // The password's own write. Sent last, because success signs every browser
   // out, this one included; the gate then decides what this page shows.
   const savePassword = async (write: { current?: string; next: string }): Promise<boolean> => {
-    const answer = await postPassword(write)
+    const answer = await changePassword(write)
     switch (answer.kind) {
       case "ok":
         setPasswordDraft(EMPTY_PASSWORD_DRAFT)
@@ -883,7 +882,6 @@ function CustomizeWebappForm({
           pw.current === undefined ? { next: pw.next } : { current: pw.current, next: pw.next }
         if (!(await savePassword(write))) return
         closeCustomizeWebapp()
-        await afterPasswordChange()
         return
       }
       closeCustomizeWebapp()

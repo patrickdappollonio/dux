@@ -86,3 +86,28 @@ describe("fetchServerIdentity", () => {
     await expect(fetchServerIdentity()).resolves.toBeNull()
   })
 })
+
+describe("a read the sign-in gate stopped", () => {
+  it("is thrown as the interruption, never answered as unknown", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        String(url).endsWith("/auth/status")
+          ? new Response(
+              JSON.stringify({ password_set: true, required_here: true, signed_in: false }),
+            )
+          : new Response("{}"),
+      ),
+    )
+    vi.resetModules()
+    const gate = await import("./authGate")
+    await gate.initAuthGate()
+    const { fetchServerIdentity: read } = await import("./buildApi")
+    const { isAuthInterruption } = await import("./apiFetch")
+    const err = await read().then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(isAuthInterruption(err)).toBe(true)
+  })
+})

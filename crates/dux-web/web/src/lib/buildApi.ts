@@ -8,7 +8,7 @@
 //
 // Deliberately narrow: this identifies the run, never a schema or data shape.
 
-import { apiFetch } from "./apiFetch"
+import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 
 export interface ServerIdentity {
   /** The binary's display version ("vX.Y.Z", or "development"). */
@@ -19,6 +19,7 @@ export interface ServerIdentity {
 
 // Reads the server's identity, answering `null` for anything that is not the
 // document. Null means unknown, which `serverChanged` treats as no evidence.
+// Throws the auth interruption when the sign-in gate stopped the read.
 export async function fetchServerIdentity(): Promise<ServerIdentity | null> {
   try {
     const resp = await apiFetch("/api/v1/build", {
@@ -31,7 +32,11 @@ export async function fetchServerIdentity(): Promise<ServerIdentity | null> {
     const { version, process } = body as Partial<ServerIdentity>
     if (typeof version !== "string" || typeof process !== "string") return null
     return { version, process }
-  } catch {
+  } catch (e) {
+    // A read the sign-in gate stopped was never answered by anyone, so it is
+    // neither "unknown" nor a completed check: the caller must not treat it as
+    // having talked to the server.
+    rethrowAuthInterruption(e)
     return null
   }
 }

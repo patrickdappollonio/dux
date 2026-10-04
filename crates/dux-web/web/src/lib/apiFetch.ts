@@ -20,7 +20,6 @@ import { blockedWhere, brokenDetail, isAuthRequired, readErrorBody } from "./aut
 import {
   authEpoch,
   authPaused,
-  noteProtectedSuccess,
   reportBlocked,
   reportBroken,
   reportUnauthorized,
@@ -35,7 +34,13 @@ import {
 export class AuthInterruptedError extends Error {
   readonly status = 401
   readonly reason: "not_sent" | "refused"
-  constructor(reason: "not_sent" | "refused") {
+  /// What the server said, for a refusal: the session is gone, the address is
+  /// blocked, or the auth config is broken. Null for a request never sent.
+  readonly refusal: "signed_out" | "blocked" | "broken" | null
+  constructor(
+    reason: "not_sent" | "refused",
+    refusal: "signed_out" | "blocked" | "broken" | null = null,
+  ) {
     super(
       reason === "not_sent"
         ? "This was not sent: this browser is signed out of dux. Sign in again, then retry."
@@ -43,6 +48,7 @@ export class AuthInterruptedError extends Error {
     )
     this.name = "AuthInterruptedError"
     this.reason = reason
+    this.refusal = refusal
   }
 }
 
@@ -63,26 +69,23 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
   const resp =
     init === undefined ? await fetch(apiUrl(path)) : await fetch(apiUrl(path), init)
   const current = authEpoch() === sentIn
-  if (resp.ok) {
-    if (current) noteProtectedSuccess()
-    return resp
-  }
+  if (resp.ok) return resp
   if (resp.status !== 401 && resp.status !== 403 && resp.status !== 503) return resp
   const body = await readErrorBody(resp)
   if (isAuthRequired(resp.status, body)) {
     if (current) reportUnauthorized()
-    throw new AuthInterruptedError("refused")
+    throw new AuthInterruptedError("refused", "signed_out")
   }
   const where = blockedWhere(resp.status, body)
   if (where !== undefined) {
     // About the address, not the session, so it holds whichever session asked.
     reportBlocked(where)
-    throw new AuthInterruptedError("refused")
+    throw new AuthInterruptedError("refused", "blocked")
   }
   const detail = brokenDetail(resp.status, body)
   if (detail !== undefined) {
     reportBroken(detail)
-    throw new AuthInterruptedError("refused")
+    throw new AuthInterruptedError("refused", "broken")
   }
   return resp
 }

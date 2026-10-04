@@ -33,7 +33,7 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react"
-import { notifyError } from "@/lib/notify"
+import { notifyError, notifyInfo } from "@/lib/notify"
 
 import { signOut } from "@/lib/authGate"
 import { configApi } from "@/lib/configApi"
@@ -294,7 +294,13 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
             icon: LogOut,
             run: () => {
               void signOut().then((answer) => {
-                if (answer.kind === "unreachable") {
+                if (answer.kind === "ok" && answer.reopened) {
+                  // The screen came straight back, so it cannot say what
+                  // happened; this does.
+                  notifyInfo(
+                    "Signed out. This connection doesn't need a password, so dux opened again.",
+                  )
+                } else if (answer.kind === "unreachable") {
                   notifyError(
                     "Could not reach dux to sign out, so this browser is still signed in. Try again once dux is reachable.",
                   )

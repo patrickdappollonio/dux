@@ -442,15 +442,34 @@ describe("the circuit breaker", () => {
     vi.useRealTimers()
   })
 
-  it("forgets the disagreements once a protected request succeeds", async () => {
+  it("trips even when other requests succeed between the refusals", async () => {
+    // The loop the breaker exists for: one route refuses, the reopen's own
+    // refetches succeed, the route refuses again.
     vi.useFakeTimers()
     const g = await load()
     await g.initAuthGate()
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < g.MAX_AUTH_DISAGREEMENTS; i++) {
+      g.reportUnauthorized()
+      await vi.advanceTimersByTimeAsync(5000)
+      // A refetch that worked: says nothing about the route that refuses.
+      if (g.getAuthPhase().kind === "open") {
+        const { apiFetch } = await import("./apiFetch")
+        expect((await apiFetch("/api/v1/workspace")).ok).toBe(true)
+      }
+    }
+    expect(g.getAuthPhase().kind).toBe("stuck")
+    vi.useRealTimers()
+  })
+
+  it("forgets the disagreements after a quiet period", async () => {
+    vi.useFakeTimers()
+    const g = await load()
+    await g.initAuthGate()
+    for (let i = 0; i < 6; i++) {
       g.reportUnauthorized()
       await vi.advanceTimersByTimeAsync(1000)
       expect(g.getAuthPhase().kind).toBe("open")
-      g.noteProtectedSuccess()
+      await vi.advanceTimersByTimeAsync(g.AUTH_DISAGREEMENT_QUIET_MS)
     }
     vi.useRealTimers()
   })
@@ -467,6 +486,60 @@ describe("the circuit breaker", () => {
     await g.retryAuthGate()
     expect(g.getAuthPhase().kind).toBe("open")
     vi.useRealTimers()
+  })
+})
+
+describe("a password change", () => {
+  it("says the password changed even when the server's socket close lands first", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    let finish!: () => void
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        if (String(input).endsWith("/auth/password")) {
+          return new Promise<Response>((resolve) => {
+            finish = () => resolve(json(204, undefined))
+          })
+        }
+        return Promise.resolve(json(200, SIGNED_OUT))
+      }),
+    )
+    const change = g.changePassword({ current: "old", next: "a much longer new one" })
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"))
+    // Every browser is signed out, this one's sockets first.
+    g.reportSocketAuthClose(4401)
+    void g.probeAfterDrop()
+    finish()
+    expect(await change).toEqual({ kind: "ok" })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(g.getAuthPhase()).toMatchObject({ kind: "signed_out", reason: "password_changed" })
+  })
+
+  it("leaves a connection the password does not apply to open", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    statusBody = NO_PASSWORD
+    expect(await g.changePassword({ next: "a first password here" })).toEqual({ kind: "ok" })
+    expect(g.getAuthPhase().kind).toBe("open")
+  })
+})
+
+describe("signing out where no password is needed", () => {
+  it("opens again and says so", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    statusBody = NO_PASSWORD
+    expect(await g.signOut()).toEqual({ kind: "ok", reopened: true })
+    expect(g.getAuthPhase().kind).toBe("open")
+  })
+
+  it("goes to the blocked page when the logout is refused as blocked", async () => {
+    const g = await load()
+    await g.initAuthGate()
+    logoutReply = () => json(403, { error: "blocked", where: "config.toml" })
+    expect(await g.signOut()).toEqual({ kind: "gate" })
+    expect(g.getAuthPhase()).toEqual({ kind: "blocked", where: "config.toml" })
   })
 })
 

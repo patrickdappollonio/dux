@@ -125,12 +125,18 @@ export function LoginPage({
 
   const waiting = retryAt !== null && (secondsLeft ?? 1) > 0
 
+  // Back to the field after a failure, once it is enabled again: a disabled
+  // input refuses focus, so focusing it in the same tick as the answer did
+  // nothing.
+  useEffect(() => {
+    if (!busy && failure !== null) fieldRef.current?.focus()
+  }, [busy, failure])
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (busy || waiting) return
     if (password === "") {
       setFailure({ kind: "empty" })
-      fieldRef.current?.focus()
       return
     }
     setBusy(true)
@@ -150,7 +156,6 @@ export function LoginPage({
     }
     if (answer.kind === "wrong") setPassword("")
     setFailure(answer)
-    fieldRef.current?.focus()
   }
 
   const message = failure === null ? "" : failureText(failure)

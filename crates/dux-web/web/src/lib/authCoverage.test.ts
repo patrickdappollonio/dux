@@ -123,10 +123,16 @@ describe("every fetch helper reports a 401 to the gate", () => {
 })
 
 describe("the server-identity read", () => {
-  it("still answers unknown on a 401, and the gate has heard it", async () => {
+  it("throws the interruption on a 401 rather than answering unknown, and the gate has heard it", async () => {
     const gate = await import("./authGate")
     const { fetchServerIdentity } = await import("./buildApi")
-    expect(await fetchServerIdentity()).toBeNull()
+    const { isAuthInterruption } = await import("./apiFetch")
+    const err = await fetchServerIdentity().then(
+      () => null,
+      (e: unknown) => e,
+    )
+    // Unknown would open the terminals' attach gate; nothing was checked.
+    expect(isAuthInterruption(err)).toBe(true)
     expect(gate.getAuthPhase().kind).toBe("signed_out")
   })
 })

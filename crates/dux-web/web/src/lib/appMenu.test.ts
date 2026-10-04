@@ -37,7 +37,11 @@ vi.mock("@/lib/store", () => ({
 const signOut = vi.fn(async () => ({ kind: "ok" }) as { kind: string; message?: string })
 vi.mock("@/lib/authGate", () => ({ signOut: () => signOut() }))
 const notifyError = vi.fn()
-vi.mock("@/lib/notify", () => ({ notifyError: (m: unknown) => notifyError(m) }))
+const notifyInfo = vi.fn()
+vi.mock("@/lib/notify", () => ({
+  notifyError: (m: unknown) => notifyError(m),
+  notifyInfo: (m: unknown) => notifyInfo(m),
+}))
 vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => reload(), recheckGithub: () => recheckGithub() },
 }))
@@ -405,6 +409,17 @@ describe("Sign out", () => {
     item.run()
     await vi.waitFor(() => expect(notifyError).toHaveBeenCalledTimes(1))
     expect(String(notifyError.mock.calls[0][0])).toContain("still signed in")
+  })
+
+  it("says so when dux opened again because this connection needs no password", async () => {
+    signOut.mockResolvedValueOnce({ kind: "ok", reopened: true } as never)
+    const item = appMenuModel({ ...ctx, canSignOut: true }).at(-1) as AppMenuItem
+    item.run()
+    await vi.waitFor(() =>
+      expect(notifyInfo).toHaveBeenCalledWith(
+        "Signed out. This connection doesn't need a password, so dux opened again.",
+      ),
+    )
   })
 
   it("passes the server's own refusal on", async () => {

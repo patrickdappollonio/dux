@@ -28,6 +28,7 @@ const notifyError = vi.fn()
 vi.mock("@/lib/notify", () => ({ notifySuccess, notifyError }))
 
 const { AuthGate } = await import("./AuthGate")
+const { Dialog, DialogContent, DialogTitle } = await import("@/components/ui/dialog")
 const { resetBannerDismissals } = await import("@/lib/bannerDismissals")
 
 function status(overrides: Partial<AuthStatus> = {}): AuthStatus {
@@ -318,6 +319,122 @@ describe("banners in the layout", () => {
     renderGate()
     for (const b of screen.getAllByRole("button")) {
       expect(b.className).toContain("pointer-coarse:min-h-11")
+    }
+  })
+})
+
+// Sign the page out of a session that was in use, with `app` mounted.
+async function signOutOver(app: React.ReactNode) {
+  phase = { kind: "open", status: status() }
+  const r = render(<AuthGate>{app}</AuthGate>)
+  await act(async () => {
+    await new Promise((res) => setTimeout(res, 20))
+  })
+  phase = {
+    kind: "signed_out",
+    status: status({ password_set: true, required_here: true }),
+    reason: "expired",
+  }
+  r.rerender(<AuthGate>{app}</AuthGate>)
+  await act(async () => {
+    await new Promise((res) => setTimeout(res, 20))
+  })
+  return r
+}
+
+describe("the gate layer", () => {
+  it("lives in its own body-level layer, outside the app's root", async () => {
+    const r = await signOutOver(<div>the app</div>)
+    const field = screen.getByLabelText("Password")
+    expect(r.container.contains(field)).toBe(false)
+    const layer = field.closest("[data-auth-gate-layer]") as HTMLElement
+    expect(layer.parentElement).toBe(document.body)
+  })
+
+  it("is a fixed, scrollable layer on a first load too", () => {
+    phase = { kind: "signed_out", status: status(), reason: "required" }
+    renderGate()
+    const layer = screen.getByLabelText("Password").closest("[data-auth-gate-layer]")
+    expect(layer?.firstElementChild?.className).toContain("fixed")
+    expect(layer?.firstElementChild?.className).toContain("overflow-y-auto")
+    // The layer is in the document before the field renders, so it gets focus.
+    expect(document.activeElement).toBe(screen.getByLabelText("Password"))
+  })
+
+  it("stays audible with a modal dialog open in the hidden app", async () => {
+    await signOutOver(
+      <Dialog open>
+        <DialogContent>
+          <DialogTitle>Commit</DialogTitle>
+          <input aria-label="dialog field" />
+        </DialogContent>
+      </Dialog>,
+    )
+    const field = screen.getByLabelText("Password")
+    for (let el: Element | null = field; el; el = el.parentElement) {
+      expect(el.getAttribute("aria-hidden"), el.tagName).not.toBe("true")
+      expect(el.hasAttribute("inert"), el.tagName).toBe(false)
+    }
+  })
+
+  it("does not let a press or Escape on the login page dismiss a hidden dialog", async () => {
+    const onOpenChange = vi.fn()
+    await signOutOver(
+      <Dialog open onOpenChange={onOpenChange}>
+        <DialogContent>
+          <DialogTitle>Commit</DialogTitle>
+          <textarea aria-label="draft" defaultValue="a long draft" />
+        </DialogContent>
+      </Dialog>,
+    )
+    const field = screen.getByLabelText("Password")
+    field.focus()
+    fireEvent.pointerDown(field, { pointerType: "mouse", button: 0 })
+    fireEvent.mouseDown(field)
+    fireEvent.pointerUp(field, { pointerType: "mouse" })
+    fireEvent.mouseUp(field)
+    fireEvent.click(field)
+    fireEvent.keyDown(field, { key: "Escape" })
+    await act(async () => {
+      await new Promise((res) => setTimeout(res, 20))
+    })
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it("keeps keys typed on the login page away from the app's own shortcuts", async () => {
+    // The sidebar's Ctrl/Cmd-B listens on the window, theater's Escape on the
+    // document.
+    const onWindow = vi.fn()
+    const onDocument = vi.fn()
+    window.addEventListener("keydown", onWindow)
+    document.addEventListener("keydown", onDocument)
+    try {
+      await signOutOver(<div>the app</div>)
+      const field = screen.getByLabelText("Password")
+      fireEvent.keyDown(field, { key: "b", ctrlKey: true })
+      fireEvent.keyDown(field, { key: "Escape" })
+      expect(onWindow).not.toHaveBeenCalled()
+      expect(onDocument).not.toHaveBeenCalled()
+      // Typing in the gate's own field still works.
+      fireEvent.change(field, { target: { value: "hunter2" } })
+      expect((field as HTMLInputElement).value).toBe("hunter2")
+    } finally {
+      window.removeEventListener("keydown", onWindow)
+      document.removeEventListener("keydown", onDocument)
+    }
+  })
+
+  it("lets the app's shortcuts work again once signed in", async () => {
+    const onWindow = vi.fn()
+    window.addEventListener("keydown", onWindow)
+    try {
+      const r = await signOutOver(<button>in the app</button>)
+      phase = { kind: "open", status: status() }
+      r.rerender(<AuthGate><button>in the app</button></AuthGate>)
+      fireEvent.keyDown(screen.getByText("in the app"), { key: "b", ctrlKey: true })
+      expect(onWindow).toHaveBeenCalledTimes(1)
+    } finally {
+      window.removeEventListener("keydown", onWindow)
     }
   })
 })

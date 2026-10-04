@@ -230,3 +230,15 @@ describe("a sign-in that never answers", () => {
     expect(screen.getByRole("alert").textContent).toContain("did not answer in time")
   })
 })
+
+describe("after a wrong password", () => {
+  it("puts the caret back in the field once it is enabled again", async () => {
+    signIn.mockResolvedValue({ kind: "wrong" })
+    render(<LoginPage status={status()} reason="required" />)
+    const field = screen.getByLabelText("Password")
+    // Somewhere else has focus when the answer arrives.
+    ;(screen.getByRole("button", { name: "Sign in" }) as HTMLElement).focus()
+    await act(async () => submit("nope"))
+    expect(document.activeElement).toBe(field)
+  })
+})

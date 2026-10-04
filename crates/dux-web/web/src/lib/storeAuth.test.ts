@@ -330,3 +330,23 @@ describe("a config change announced by the server", () => {
     await vi.waitFor(() => expect(statusReads()).toBe(before + 1))
   })
 })
+
+describe("the server-run check across a sign-out", () => {
+  it("is owed again after signing in, and only a real answer settles it", async () => {
+    const { gate } = await loadSignedIn("")
+    const sv = await import("./serverValidated")
+    FakeWebSocket.instances[0].open()
+    await vi.waitFor(() => expect(sv.serverValidated()).toBe(true))
+
+    signedIn = false
+    gate.reportUnauthorized()
+    expect(sv.serverValidated()).toBe(false)
+
+    const buildReads = () =>
+      fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/v1/build")).length
+    const before = buildReads()
+    await gate.signIn("correct horse battery staple")
+    await vi.waitFor(() => expect(sv.serverValidated()).toBe(true))
+    expect(buildReads()).toBeGreaterThan(before)
+  })
+})

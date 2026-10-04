@@ -421,7 +421,14 @@ export class PtySocket extends ReconnectingSocket {
     takeover = false,
     expectedOwner?: string,
   ): boolean {
-    if (authPaused()) return false
+    if (authPaused()) {
+      // Held, not lost: a window that changed under the login page is
+      // delivered on sign-in (`onAuthResumed`). A take-over is a deliberate
+      // press and is never replayed behind the user's back.
+      if (!takeover) this.heldResize = { rows, cols }
+      return false
+    }
+    this.heldResize = null
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       const frame = takeover
         ? expectedOwner === undefined
@@ -432,6 +439,15 @@ export class PtySocket extends ReconnectingSocket {
       return true
     }
     return false
+  }
+
+  // The size the window reached while signed out, if any.
+  private heldResize: { rows: number; cols: number } | null = null
+
+  protected onAuthResumed(): void {
+    const held = this.heldResize
+    if (held === null || !this.isOpen) return
+    this.sendResize(held.rows, held.cols)
   }
 
   // The one periodic client frame: `{"beat":N,"viewed":B}`.

@@ -1,6 +1,14 @@
 import { useSyncExternalStore } from "react"
 import { wsUrl } from "./apiBase"
-import { initAuthGate, onAuthOpen, probeAfterDrop, refreshAuthStatus } from "./authGate"
+import { isAuthInterruption } from "./apiFetch"
+import {
+  authPaused,
+  initAuthGate,
+  onAuthOpen,
+  probeAfterDrop,
+  refreshAuthStatus,
+  subscribeAuth,
+} from "./authGate"
 import { sanitizeAgentName } from "./agentName"
 import { git } from "./git"
 import {
@@ -1241,7 +1249,16 @@ function scheduleIdentityReprobe(again: () => void): void {
 // run cannot have moved unnoticed. A failed read validates too, since holding
 // every terminal shut over one unreachable endpoint is the wrong failure.
 async function loadServerIdentityBaseline(): Promise<void> {
-  serverIdentityBaseline = await fetchServerIdentity()
+  let answer: ServerIdentity | null
+  try {
+    answer = await fetchServerIdentity()
+  } catch (e) {
+    // Never sent, or refused for the session: nothing was checked. The
+    // sign-in that ends this runs the check again (`resumeAfterSignIn`).
+    if (isAuthInterruption(e)) return
+    throw e
+  }
+  serverIdentityBaseline = answer
   noteServerValidated()
   if (serverIdentityBaseline === null) {
     scheduleIdentityReprobe(() => {
@@ -1258,7 +1275,14 @@ async function loadServerIdentityBaseline(): Promise<void> {
 // network round-trip would strand the app whenever the probe hung, and a reload
 // discards whatever the early refetch produced.
 async function reloadIfServerChanged(): Promise<void> {
-  const current = await fetchServerIdentity()
+  let current: ServerIdentity | null
+  try {
+    current = await fetchServerIdentity()
+  } catch (e) {
+    // As above: no answer is no check, and the gate stays shut.
+    if (isAuthInterruption(e)) return
+    throw e
+  }
   if (serverChanged(serverIdentityBaseline, current)) {
     // Published BEFORE the reload, because the reload is not instantaneous and
     // the memories keyed to the old run's counters (a pane's ghost connection
@@ -1336,6 +1360,11 @@ eventsSocket.onOpen = () => {
 // way: a boot whose first loads were refused must not skip the recovery.
 function resumeAfterSignIn(): void {
   skipNextEventsOnOpenLoad = false
+  // The run check owed since the sign-out (see the `subscribeAuth` below). Run
+  // here as well as by a reopening socket's `onOpen`, because a socket that
+  // stayed open has no `onOpen` coming.
+  if (serverIdentityBaseline === null) void loadServerIdentityBaseline()
+  else void reloadIfServerChanged()
   if (state.conn !== "open") return
   armReconnectDeepLink()
   loadBootstrap()
@@ -2226,6 +2255,14 @@ function boot(): void {
 // when: every move into signed-in boots the app the first time and refetches
 // after that. The URL is never touched on the way, so the position the page was
 // loaded at (or was on when the session ended) is the one it lands on.
+// A page that is signed out has checked nothing about the server since, so
+// the terminals' attach gate shuts until a real check answers after the next
+// sign-in: a server that restarted meanwhile must be noticed before any PTY
+// socket attaches (attaching launches a provider).
+subscribeAuth(() => {
+  if (authPaused()) clearServerValidated()
+})
+
 if (hasBrowser) {
   onAuthOpen(() => {
     if (state.booted) resumeAfterSignIn()

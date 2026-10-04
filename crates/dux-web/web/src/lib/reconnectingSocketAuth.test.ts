@@ -207,3 +207,28 @@ describe("a PTY socket while signed out", () => {
     expect(ws.sent).toHaveLength(1)
   })
 })
+
+describe("a PTY socket that stayed open across a sign-out", () => {
+  it("delivers the size it could not send once signed in again", async () => {
+    const gate = await import("./authGate")
+    const { PtySocket } = await import("./ptySocket")
+    const { noteServerValidated } = await import("./serverValidated")
+    await gate.initAuthGate()
+    noteServerValidated()
+    const sock = new PtySocket("ws://test/ws/sessions/s1/pty")
+    sockets.push(sock)
+    sock.connect()
+    const ws = last()
+    ws.open()
+
+    statusBody = { password_set: true, required_here: true, signed_in: false }
+    gate.reportUnauthorized()
+    // The window changed while the login page was up.
+    expect(sock.sendResize(30, 100)).toBe(false)
+    expect(ws.sent).toHaveLength(0)
+
+    statusBody = { password_set: true, required_here: true, signed_in: true }
+    await gate.signIn("pw")
+    expect(ws.sent.map((f) => JSON.parse(String(f)))).toEqual([{ rows: 30, cols: 100 }])
+  })
+})

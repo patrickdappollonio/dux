@@ -26,8 +26,10 @@
 // THE CIRCUIT BREAKER. A protected route that refuses the session while the
 // status route says the session is fine would otherwise loop: sign out, read
 // the status, reopen, refuse again. Each such disagreement reopens only after
-// an exponential delay, and the third in a row stops on a page that says so.
-// A protected request that succeeds forgets the count.
+// an exponential delay, and the third without a quiet minute between them
+// stops on a page that says so. Other requests succeeding meanwhile prove
+// nothing (the reopen's own refetches succeed every time), so only quiet
+// forgets the count.
 //
 // What signing out does NOT do: reload the page or touch `location.hash`. The
 // store, the editor's drafts and the URL all live in page memory and survive a
@@ -43,7 +45,12 @@ import {
   type LoginAnswer,
   type StatusAnswer,
 } from "./authApi"
-import { postLogout, type LogoutAnswer } from "./authActions"
+import {
+  postLogout,
+  postPassword,
+  type LogoutAnswer,
+  type PasswordAnswer,
+} from "./authActions"
 
 export { normalizeAuthStatus }
 export type { AuthStatus }
@@ -155,18 +162,16 @@ export function currentAuthStatus(): AuthStatus | null {
 
 // ---- The circuit breaker ----------------------------------------------------
 
-/// Disagreements in a row before the page stops on the stuck page.
+/// Disagreements, each within the quiet period of the last, before the page
+/// stops on the stuck page.
 export const MAX_AUTH_DISAGREEMENTS = 3
 /// The first reopen delay; each disagreement doubles it.
 export const AUTH_DISAGREEMENT_BASE_MS = 1000
+/// How long without a disagreement before the count is forgotten.
+export const AUTH_DISAGREEMENT_QUIET_MS = 60_000
 
 let disagreements = 0
-
-/// A protected request succeeded in the current session: whatever disagreed
-/// before has stopped disagreeing.
-export function noteProtectedSuccess(): void {
-  disagreements = 0
-}
+let lastDisagreementAt = 0
 
 // ---- Applying answers -------------------------------------------------------
 
@@ -224,6 +229,9 @@ function applyAnswer(answer: StatusAnswer, reason: SignOutReason, origin: Origin
 // fine. Reopen, but only after a delay that doubles each time, and stop on the
 // stuck page once it has happened often enough.
 function reopenAfterDisagreement(next: AuthPhase): void {
+  const now = Date.now()
+  if (now - lastDisagreementAt > AUTH_DISAGREEMENT_QUIET_MS) disagreements = 0
+  lastDisagreementAt = now
   disagreements++
   if (disagreements >= MAX_AUTH_DISAGREEMENTS) {
     setPhase({ kind: "stuck" })
@@ -250,6 +258,7 @@ export async function initAuthGate(): Promise<void> {
 /// stuck page, the blocked and broken pages.
 export async function retryAuthGate(): Promise<void> {
   disagreements = 0
+  lastDisagreementAt = 0
   if (phase.kind === "unreachable" || phase.kind === "stuck") setPhase({ kind: "checking" })
   if (phase.kind === "checking") {
     await initAuthGate()
@@ -285,15 +294,21 @@ export function probeAuth(
   return promise
 }
 
-// Set while an explicit sign-out is out: everything it causes (the server
-// closing this page's sockets, the drop probes that follow) reads as the
-// sign-out it is, not as a session that ended by itself.
+// Set while an explicit sign-out or password change is out: everything it
+// causes (the server closing this page's sockets, the drop probes that follow)
+// reads as the act it is, not as a session that ended by itself, and the act's
+// own outcome is what the page settles on.
 let signingOut = false
+let changingPassword = false
+
+function actInFlight(): boolean {
+  return signingOut || changingPassword
+}
 
 /// The app socket dropped: if the page thinks it is signed in, check, because
 /// a refused upgrade looks exactly like a network failure from here.
 export function probeAfterDrop(): Promise<void> {
-  if (phase.kind !== "open" || signingOut) return Promise.resolve()
+  if (phase.kind !== "open" || actInFlight()) return Promise.resolve()
   return probeAuth("expired")
 }
 
@@ -307,12 +322,16 @@ export function refreshAuthStatus(): Promise<void> {
 /// A protected request was answered 401: the session is gone.
 export function reportUnauthorized(): void {
   if (phase.kind !== "open" && phase.kind !== "checking") return
-  const reason: SignOutReason = signingOut ? "signed_out" : "expired"
+  const reason: SignOutReason = signingOut
+    ? "signed_out"
+    : changingPassword
+      ? "password_changed"
+      : "expired"
   setPhase({ kind: "signed_out", status: currentAuthStatus(), reason })
   // Refresh what the login page shows (the transport warning, the first
   // password rule). During a sign-out the answer is only a refresh; otherwise
   // a "signed in" answer is a disagreement for the breaker.
-  void probeAuth(reason, { origin: signingOut ? "probe" : "after_refusal" })
+  void probeAuth(reason, { origin: actInFlight() ? "probe" : "after_refusal" })
 }
 
 export function reportBlocked(where: string | null): void {
@@ -374,34 +393,70 @@ export async function signIn(password: string): Promise<LoginAnswer> {
   }
 }
 
+/// What a sign-out came to: the contract's answers, `reopened` when this
+/// connection needs no password (so dux opened again, and the caller says so),
+/// and `gate` when the server answered with something the gate now shows (a
+/// blocked address, a broken config).
+export type SignOutAnswer =
+  | { kind: "ok"; reopened?: true }
+  | { kind: "gate" }
+  | Exclude<LogoutAnswer, { kind: "ok" } | { kind: "gate" }>
+
 /// End this browser's session. The reason is settled before the request goes
 /// out, so the socket closes and drop probes the sign-out itself causes cannot
 /// relabel it "your session ended". Only a server that answered moves the page
 /// to the login screen: a sign-out that never arrived has not happened.
-export async function signOut(): Promise<LogoutAnswer> {
+export async function signOut(): Promise<SignOutAnswer> {
   signingOut = true
   try {
     const answer = await postLogout()
-    if (answer.kind === "ok") {
-      setPhase({ kind: "signed_out", status: currentAuthStatus(), reason: "signed_out" })
-      void probeAuth("signed_out")
+    if (answer.kind !== "ok") return answer
+    const after = await fetchAuthStatus()
+    if (after.kind === "blocked" || after.kind === "broken") {
+      applyAnswer(after, "signed_out", "direct")
+      return { kind: "gate" }
     }
-    return answer
+    if (
+      after.kind === "status" &&
+      after.status.auth_broken === null &&
+      !after.status.required_here
+    ) {
+      // Nothing to sign in to from here: say so rather than flicker.
+      setPhase({ kind: "open", status: after.status })
+      return { kind: "ok", reopened: true }
+    }
+    setPhase({
+      kind: "signed_out",
+      status: after.kind === "status" ? after.status : currentAuthStatus(),
+      reason: "signed_out",
+    })
+    return { kind: "ok" }
   } finally {
     signingOut = false
   }
 }
 
-/// The password changed and the server signed every browser out, this one
-/// included. Asks where that leaves this page: a connection the password does
-/// not apply to stays open.
-export async function afterPasswordChange(): Promise<void> {
-  const at = generation
-  const answer = await fetchAuthStatus()
-  if (generation !== at) return
-  if (answer.kind === "status" && answer.status.required_here && !answer.status.signed_in) {
-    setPhase({ kind: "signed_out", status: answer.status, reason: "password_changed" })
-    return
+/// Change (or set the first) password. Success signs every browser out, this
+/// one included, and the server's socket closes may well land before its
+/// answer; the change's outcome is what the page settles on, so the login page
+/// says the password changed. A connection the password does not apply to
+/// stays open.
+export async function changePassword(write: {
+  current?: string
+  next: string
+}): Promise<PasswordAnswer> {
+  changingPassword = true
+  try {
+    const answer = await postPassword(write)
+    if (answer.kind !== "ok") return answer
+    const after = await fetchAuthStatus()
+    if (after.kind === "status" && after.status.required_here && !after.status.signed_in) {
+      setPhase({ kind: "signed_out", status: after.status, reason: "password_changed" })
+    } else if (after.kind === "status" || after.kind === "blocked" || after.kind === "broken") {
+      applyAnswer(after, "password_changed", "direct")
+    }
+    return answer
+  } finally {
+    changingPassword = false
   }
-  applyAnswer(answer, "password_changed", "direct")
 }

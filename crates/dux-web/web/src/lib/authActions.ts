@@ -33,6 +33,9 @@ function post(path: string, body?: unknown): Promise<Response> {
 
 export type LogoutAnswer =
   | { kind: "ok" }
+  /** The gate has taken over: the address is blocked, the config is broken,
+   * or the page was already on a gate page. */
+  | { kind: "gate" }
   | { kind: "unreachable"; timedOut: boolean }
   | { kind: "refused"; message: string }
 
@@ -41,8 +44,10 @@ export async function postLogout(): Promise<LogoutAnswer> {
   try {
     resp = await post("/api/v1/auth/logout")
   } catch (e) {
-    // No session to end is the outcome a sign-out wanted.
-    if (isAuthInterruption(e)) return { kind: "ok" }
+    // No session to end is the outcome a sign-out wanted. Anything else the
+    // door met (a block, a broken config, a page already on a gate page) is
+    // the gate's to show.
+    if (isAuthInterruption(e)) return e.refusal === "signed_out" ? { kind: "ok" } : { kind: "gate" }
     return { kind: "unreachable", timedOut: isDeadline(e) }
   }
   if (resp.ok) return { kind: "ok" }
