@@ -1,0 +1,61 @@
+[package]
+name = "dux-journeys"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Container-based user journeys for dux's web server: the dux binary in Docker, driven over HTTP, WebSockets and a real browser."
+
+# Test-only. Nothing here ships, and nothing here builds unless asked for:
+#
+# - `journeys` turns the harness and the journey test target on. Without it the
+#   library is empty and the test target is skipped, so `cargo test --workspace`
+#   on a machine with no Docker never tries to start a container, and pays
+#   nothing for these dependencies.
+# - `auth` (implies `journeys`) also RUNS the journeys that wait on the web
+#   password login. Without it they are compiled and listed as ignored with the
+#   reason; with it they run, and they fail until the feature they describe is
+#   built. That is the point: they were written first, and they define done.
+#
+#   cargo test -p dux-journeys --features journeys -- --test-threads=2
+#   cargo test -p dux-journeys --features auth -- --test-threads=2
+[features]
+journeys = [
+    "dep:testcontainers",
+    "dep:tokio",
+    "dep:reqwest",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:serde_json",
+    "dep:base64",
+    "dep:sha2",
+    "dep:fantoccini",
+    "dep:hyper-util",
+    "dep:uuid",
+]
+auth = ["journeys"]
+
+# Docker, the image and the host-built binary are all Linux-only (the binary is
+# bind-mounted into a Linux container), so the dependencies are too. On macOS
+# the crate compiles to nothing whatever the features say.
+[target.'cfg(target_os = "linux")'.dependencies]
+testcontainers = { version = "0.28", default-features = false, optional = true }
+tokio = { workspace = true, features = ["process", "io-util", "fs"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"], optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
+sha2 = { version = "0.10", optional = true }
+fantoccini = { version = "0.22", default-features = false, optional = true }
+# The plain-HTTP connector fantoccini is handed: chromedriver is reached over
+# loopback HTTP, so no TLS stack is pulled in for it.
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"], optional = true }
+uuid = { workspace = true, optional = true }
+
+[lib]
+doctest = false
+
+[[test]]
+name = "journeys"
+path = "tests/journeys/main.rs"
+required-features = ["journeys"]

@@ -71,6 +71,65 @@ else
   rm -f /data/screens-mode
 fi
 
+# --- Journey seed hooks (opt-in) -------------------------------------------
+# The container journey suite (crates/dux-journeys) copies shell hooks into
+# /journey/seed.d before the container starts, to shape the config a journey
+# needs (a port, a setting, a password set through `dux config set`). They run
+# on every start, after the config above exists and before dux does, in name
+# order; a hook that fails stops the container, loudly.
+if [ -d /journey/seed.d ]; then
+  for hook in /journey/seed.d/*.sh; do
+    [ -f "$hook" ] || continue
+    echo "entrypoint: running seed hook $hook"
+    sh "$hook"
+  done
+fi
+
+# --- A stand-in Tailscale (opt-in) -----------------------------------------
+# DUX_FAKE_TAILSCALE=1 puts tailscale-stand-in on PATH, answering from files
+# under /data/tailscale that a journey may rewrite while dux runs, and gives
+# loopback the address it reports so the Tailscale listener really binds. That
+# second step needs the NET_ADMIN capability, inside this container's own
+# network namespace; without it the start fails rather than serving a tailnet
+# leg that cannot exist. Every name and address is obviously fake.
+if [ "${DUX_FAKE_TAILSCALE:-0}" = "1" ]; then
+  ts=/data/tailscale
+  mkdir -p "$ts"
+  [ -f "$ts/ip" ] || echo "100.101.102.103" > "$ts/ip"
+  ts_ip="$(cat "$ts/ip")"
+  if [ ! -f "$ts/status.json" ]; then
+    cat > "$ts/status.json" <<EOF
+{"BackendState":"Running","TailscaleIPs":["$ts_ip"],"Self":{"HostName":"journey-box","DNSName":"journey-box.example-tailnet.ts.net.","TailscaleIPs":["$ts_ip"],"Online":true},"MagicDNSSuffix":"example-tailnet.ts.net","CurrentTailnet":{"Name":"example-tailnet","MagicDNSSuffix":"example-tailnet.ts.net","MagicDNSEnabled":true},"CertDomains":["journey-box.example-tailnet.ts.net"]}
+EOF
+  fi
+  [ -f "$ts/serve.json" ] || echo "{}" > "$ts/serve.json"
+  install -m 0755 /usr/local/share/dux-preview/tailscale-stand-in /usr/local/bin/tailscale
+  ip addr show dev lo | grep -q "inet $ts_ip/" || ip addr add "$ts_ip/32" dev lo
+  echo "entrypoint: stand-in tailscale answering with $ts_ip"
+  DUX_NO_TAILSCALE=0
+fi
+
+# DUX_TAIL_LOG=1 copies dux.log onto the container's own output, so a journey
+# that fails prints what dux logged, and a journey can wait for a log line.
+if [ "${DUX_TAIL_LOG:-0}" = "1" ]; then
+  touch "$DUX_HOME/dux.log"
+  tail -n +1 -F "$DUX_HOME/dux.log" 2> /dev/null | sed -u 's/^/dux.log: /' &
+fi
+
+# --- Port relays (opt-in) ---------------------------------------------------
+# DUX_RELAYS="4100=100.101.102.103:3890 4200=127.0.0.1:3890" listens on each
+# published port and relays the raw TCP stream to the address after `=`, from
+# inside this container. A relay onto loopback is a headerless forward (what
+# `tailscale serve` with a TCP forward, or any port forwarder, looks like to
+# dux); a relay onto the stand-in Tailscale address arrives on the Tailscale
+# listener the way a tailnet peer's connection does.
+for relay in ${DUX_RELAYS:-}; do
+  listen="${relay%%=*}"
+  target="${relay#*=}"
+  echo "entrypoint: relaying port $listen to $target"
+  socat "TCP-LISTEN:$listen,fork,reuseaddr" "TCP:$target" &
+done
+
 # The Tailscale flag is a variable because the Preferences screenshot needs it
 # gone: `--no-tailscale` refuses a live mode change for the whole run, and the
 # dialog says so instead of carrying the general copy the docs describe.
@@ -80,5 +139,44 @@ else
   set --
 fi
 
-echo "entrypoint: serving dux web UI on 0.0.0.0:$PORT (isolated, no login gate)"
-exec dux server --bind "0.0.0.0:$PORT" "$@"
+# Where dux listens. The preview binds every interface, which is what makes it
+# reachable through the published port. DUX_BIND=local serves the way an
+# unconfigured dux does instead (loopback, plus the Tailscale leg when there is
+# one) on $PORT, so a journey can tell this machine and a tailnet peer apart.
+if [ "${DUX_BIND:-}" = "local" ]; then
+  set -- --port "$PORT" "$@"
+  where="loopback (and Tailscale, if any) port $PORT"
+else
+  set -- --bind "${DUX_BIND:-0.0.0.0:$PORT}" "$@"
+  where="${DUX_BIND:-0.0.0.0:$PORT}"
+fi
+
+# DUX_LAUNCH=tui runs the terminal UI in a detached tmux session instead of
+# `dux server`, for the journeys that serve from the TUI (the flip, or
+# `[server] serve_while_tui`); the container lives as long as that session does,
+# and a journey drives it with `tmux -L journey send-keys`.
+if [ "${DUX_LAUNCH:-server}" = "tui" ]; then
+  echo "entrypoint: running the dux terminal UI in tmux session 'journey'"
+  tmux -L journey new-session -d -s journey -x 160 -y 45 \
+    -e "DUX_HOME=$DUX_HOME" -e TERM=xterm-256color dux
+  while tmux -L journey has-session -t journey 2> /dev/null; do sleep 1; done
+  echo "entrypoint: the dux terminal UI exited"
+  exit 0
+fi
+
+# DUX_RESTART_LOOP=1 starts dux again whenever it exits, so a journey can stop
+# the process inside this container and see a NEW run come up behind the same
+# published port and the same state, the way a quick restart looks to an open tab.
+# While /tmp/dux-hold exists the loop waits before starting the next run, so a
+# journey can keep dux down for as long as it needs.
+if [ "${DUX_RESTART_LOOP:-0}" = "1" ]; then
+  while :; do
+    echo "entrypoint: serving dux web UI on $where (restart loop)"
+    dux server "$@" || true
+    sleep 0.2
+    while [ -f /tmp/dux-hold ]; do sleep 0.2; done
+  done
+fi
+
+echo "entrypoint: serving dux web UI on $where (isolated)"
+exec dux server "$@"

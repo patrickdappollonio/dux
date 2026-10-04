@@ -27,11 +27,31 @@ RUN pacman -Syu --noconfirm git nodejs npm ca-certificates tmux which iproute2 \
 # (npm global). They land on PATH as `claude` and `codex`; dux's default config
 # references them by those bare names. They run headless and prompt for login on
 # first spawn, which is a valid, observable state for UI testing.
-RUN npm install -g @anthropic-ai/claude-code @openai/codex \
-    && npm cache clean --force
+#
+# AGENT_CLIS=0 leaves them out: the container journey suite (crates/dux-journeys)
+# builds this same image with only the fake provider, and the two CLIs are the
+# slowest and largest layer here.
+ARG AGENT_CLIS=1
+RUN if [ "$AGENT_CLIS" = "1" ]; then \
+      npm install -g @anthropic-ai/claude-code @openai/codex \
+      && npm cache clean --force; \
+    fi
+
+# The journey suite's extra tools, off for an ordinary preview. `socat` relays a
+# published port onto an address inside the container (the stand-in tailnet
+# address, or loopback with no forwarding header, the way `tailscale serve` with
+# a raw TCP forward reaches dux). `curl` is how a journey makes a request FROM
+# this machine, which no published port can do. `chromium` ships `chromedriver`,
+# which is the browser the browser journeys drive over WebDriver.
+ARG JOURNEY_TOOLS=0
+RUN if [ "$JOURNEY_TOOLS" = "1" ]; then \
+      pacman -Syu --noconfirm --needed socat curl chromium \
+      && pacman -Scc --noconfirm; \
+    fi
 
 COPY fake-agent.sh /usr/local/bin/fake-agent
 COPY entrypoint.sh /usr/local/bin/entrypoint
+COPY tailscale-stand-in.sh /usr/local/share/dux-preview/tailscale-stand-in
 COPY tui-driver.js /usr/local/bin/tui-driver.js
 COPY tui-journey.example.js /usr/local/share/dux-preview/tui-journey.example.js
 RUN chmod +x /usr/local/bin/fake-agent /usr/local/bin/entrypoint

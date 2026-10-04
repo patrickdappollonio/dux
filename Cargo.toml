@@ -4,6 +4,7 @@ members = [
     "crates/dux-tui",
     "crates/dux",
     "crates/dux-web",
+    "crates/dux-journeys",
 ]
 resolver = "3"
 
@@ -56,3 +57,16 @@ opt-level = 2     # Full speed optimizations (not size-optimized).
 debug = 2         # Full debug info for symbols in flamegraphs.
 strip = false     # Keep symbols intact for profilers.
 lto = false       # Disable LTO so builds are faster during profiling.
+
+# The binary the container journeys (crates/dux-journeys) mount into Docker:
+# `cargo build --profile journeys --bin dux` writes target/journeys/dux. Release's
+# own settings (opt-level "z", LTO, one codegen unit) make a build take minutes,
+# and a debug build runs password hashing and PTY streaming slowly enough to
+# shift the timings a journey measures, so this sits between: optimized, but
+# incremental and parallel.
+[profile.journeys]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 256
+incremental = true

@@ -174,6 +174,41 @@ Every change should come with unit tests, and integration tests where that is
 feasible and low-lift. When you are fixing a bug, aim to prove the diagnosis with
 a failing test before you fix it.
 
+### Container journeys
+
+`crates/dux-journeys` runs the real `dux` binary in Docker and drives it the way
+a person does: HTTP with a cookie jar, the events and terminal WebSockets, a real
+Chromium, and nginx, Caddy or a stand-in `tailscale` where a journey needs them.
+Each test's doc comment says what it covers as Situation, Task, Action and
+Result. They are Linux only and need Docker; a plain `cargo test` skips them.
+
+```bash
+cargo build --profile journeys --bin dux     # the binary every container mounts
+cargo test -p dux-journeys --features journeys -- --test-threads=2
+```
+
+The first run builds the `dux-journeys` image from `tools/preview-env` (the
+preview's Dockerfile with its journey tools on), which takes a few minutes; later
+runs reuse it until something in that directory changes. Rebuild the binary after
+changing dux, or the journeys run the old one.
+
+One journey, by name (any part of it):
+
+```bash
+cargo test -p dux-journeys --features journeys -- --test-threads=2 smoke_add_a_project
+```
+
+The journeys for the web password login run only with `--features auth`. They
+were written before the feature, so until it is built they fail; that is what
+they are for. Without the feature they are listed as ignored, with the reason.
+
+Every container a journey starts is labelled `dux-journeys` and removed when the
+journey ends, pass or fail. If a run is killed halfway, clean up with
+`docker ps -aq --filter label=dux-journeys=1 | xargs -r docker rm -f`. The
+journeys never touch your own dux or the preview container. CI runs them on every
+push in `.github/workflows/journeys.yml`, cancelling the run for an older commit
+when a newer one arrives.
+
 ## Writing a release body
 
 **dux parses its own release notes and shows them to every user who updates.** On
