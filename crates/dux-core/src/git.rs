@@ -4587,6 +4587,17 @@ pub fn discard_confirmed<'c>(
              discarded; refresh the changes and look again before discarding it."
         ))));
     }
+    // Checked right before git runs, under the caller's hold: `git checkout
+    // -- <path>` restores the file by removing whatever stands at the path,
+    // and a FOLDER standing there goes recursively (a standalone agent's
+    // folder, a project's repository, anything). A link that took the file's
+    // place is fine: git removes the link and leaves its target alone.
+    if fs::symlink_metadata(worktree_path.join(file_path)).is_ok_and(|meta| meta.is_dir()) {
+        return Err(anyhow::Error::new(Refusal(format!(
+            "\"{file_path}\" is now a folder, so dux did not restore the file over it; move or \
+             delete the folder first if you mean to. Nothing was deleted."
+        ))));
+    }
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
         .args([
@@ -7030,6 +7041,56 @@ mod tests {
             staged_paths(wt),
             vec!["ab.txt".to_string()],
             "unstaging a glob-looking name must leave its lookalike staged",
+        );
+    }
+
+    /// A folder that took a tracked file's place is never restored over:
+    /// `git checkout` would delete it recursively. The refusal says so and
+    /// nothing is deleted.
+    #[test]
+    fn a_restore_is_refused_when_a_folder_took_the_files_place() {
+        let repo = init_test_repo();
+        let wt = repo.path();
+        fs::write(wt.join("README.md"), "readme\n").unwrap();
+        let git = worktree_git(wt);
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "readme"]);
+        fs::remove_file(wt.join("README.md")).unwrap();
+        fs::create_dir_all(wt.join("README.md")).unwrap();
+        fs::write(wt.join("README.md").join("keep.txt"), "mine\n").unwrap();
+        let refused = discard_file(wt, "README.md", false).unwrap_err();
+        assert!(refused.downcast_ref::<Refusal>().is_some(), "{refused}");
+        assert!(refused.to_string().contains("is now a folder"), "{refused}");
+        assert!(
+            wt.join("README.md").join("keep.txt").exists(),
+            "nothing was deleted"
+        );
+    }
+
+    /// A link that took a tracked file's place is restored over as before:
+    /// git removes the link and leaves its target where it is.
+    #[test]
+    fn a_restore_over_a_link_removes_only_the_link() {
+        let repo = init_test_repo();
+        let wt = repo.path();
+        fs::write(wt.join("README.md"), "readme\n").unwrap();
+        let git = worktree_git(wt);
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "readme"]);
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("keep.txt"), "mine\n").unwrap();
+        fs::remove_file(wt.join("README.md")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), wt.join("README.md")).unwrap();
+        discard_file(wt, "README.md", false).unwrap();
+        assert!(
+            fs::symlink_metadata(wt.join("README.md"))
+                .unwrap()
+                .is_file(),
+            "the file is back"
+        );
+        assert!(
+            elsewhere.path().join("keep.txt").exists(),
+            "the link's target stays"
         );
     }
 

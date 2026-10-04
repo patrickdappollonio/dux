@@ -2219,6 +2219,54 @@ mod tests {
         assert!(!worktree.join("out").exists());
     }
 
+    /// Review 14: the TRACKED file `f.txt` has been replaced in the working
+    /// tree by a folder of the same name holding a repository of its own (a
+    /// clone with its history). git lists only ` D f.txt`, so the browser
+    /// offers discard as restoring one file, and confirms it as a file. The
+    /// route runs `git checkout -- f.txt`, which removes the folder in the way
+    /// recursively: the nested repository is deleted with no claim, no
+    /// occupancy question, no clearance and no repository confirmation.
+    #[tokio::test]
+    async fn review14_a_tracked_file_discard_never_deletes_the_folder_that_took_its_place() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::remove_file(worktree.join("f.txt")).unwrap();
+        let nested = worktree.join("f.txt");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_git(&nested, &["init", "-q"]);
+        std::fs::write(nested.join("own.txt"), "own\n").unwrap();
+        run_git(&nested, &["add", "own.txt"]);
+        run_git(
+            &nested,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "own",
+            ],
+        );
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"f.txt","kind":"file"}"#,
+            ))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = body_text(resp).await;
+        assert!(
+            nested.join(".git").exists(),
+            "a discard confirmed as one file deleted the repository that took its place \
+             ({status}: {body})"
+        );
+    }
+
     /// A file row confirmed as a file, which a folder has since replaced, is
     /// refused and the folder is left alone; so is the same request from an
     /// older client that sends no kind at all.

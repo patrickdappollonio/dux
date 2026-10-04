@@ -79,6 +79,11 @@ worktree or a standalone agent's folder, a dux project's repository, an operatio
 running there, something dux started that is still running there, or a terminal whose shell
 is standing in it. The discard is refused and says which, and nothing is deleted.
 
+Discarding a deleted tracked file restores it from the last commit, unless a folder now
+stands where the file was. Then the discard is refused, because restoring the file would
+delete that folder and everything in it: move or delete the folder yourself first if that
+is what you mean.
+
 > [!CAUTION]
 > Discarding a row that is a repository of its own deletes that whole repository, including
 > its history and any commits you have not pushed anywhere else. The dialog warns you first.

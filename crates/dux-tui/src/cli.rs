@@ -661,6 +661,15 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<Vec<ResetLeftover>> {
                                 .push(canonical_or_original(Path::new(session.directory())));
                         }
                     }
+                    // A project's repository is the user's too: a worktree
+                    // that holds one (a clone made inside it) is kept.
+                    if let Ok(projects) = store.load_projects() {
+                        occupied_folders.extend(
+                            projects
+                                .iter()
+                                .map(|project| canonical_or_original(Path::new(&project.path))),
+                        );
+                    }
                     let mut removed = 0usize;
                     for session in &sessions {
                         let Some(managed) = session.workspace.as_managed() else {
@@ -728,7 +737,10 @@ fn sweep_worktrees_root(
     let mut kept = 0usize;
     for entry in entries.flatten() {
         let path = canonical_or_original(&entry.path());
-        if occupied.iter().any(|folder| folder.starts_with(&path)) {
+        if occupied
+            .iter()
+            .any(|folder| dux_core::worktree_ops::folder_contains(&path, folder))
+        {
             kept += 1;
             continue;
         }
@@ -770,8 +782,9 @@ fn sweep_worktrees_root(
 /// here, deliberately: dux made that worktree and resets what it made, and the
 /// user's folder itself is still standing around it afterwards.
 fn worktree_holds_occupied_folder(worktree: &Path, occupied: &[PathBuf]) -> bool {
-    let worktree = canonical_or_original(worktree);
-    occupied.iter().any(|folder| folder.starts_with(&worktree))
+    occupied
+        .iter()
+        .any(|folder| dux_core::worktree_ops::folder_contains(worktree, folder))
 }
 
 /// Remove one agent's managed worktree during a factory reset. Returns whether
@@ -1113,6 +1126,72 @@ mod tests {
             fs::read_to_string(occupied.join("notes.txt")).expect("the folder survives"),
             "mine\n",
             "a standalone agent's folder survives even when a managed worktree encloses it"
+        );
+    }
+
+    /// A dux project's repository inside a managed worktree survives a
+    /// factory reset: the project is the user's, like a standalone folder.
+    #[test]
+    fn a_factory_reset_keeps_a_projects_repository_inside_a_managed_worktree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        let managed_worktree = paths.worktrees_root.join("proj").join("feat");
+        let project_repo = managed_worktree.join("vendor");
+        fs::create_dir_all(&project_repo).expect("project dir");
+        fs::write(project_repo.join("keep.txt"), "mine\n").expect("seed a file");
+        let now = Utc::now();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .upsert_session(&AgentSession {
+                id: "m1".to_string(),
+                slot_tab_id: "m1-slot".to_string(),
+                provider: ProviderKind::new("claude"),
+                workspace: dux_core::model::AgentWorkspace::Managed(
+                    dux_core::model::ManagedWorkspace {
+                        project_id: "p1".to_string(),
+                        project_path: None,
+                        source_branch: "main".to_string(),
+                        branch_name: "feat".to_string(),
+                        initial_branch: "feat".to_string(),
+                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                        worktree_path: managed_worktree.to_string_lossy().to_string(),
+                    },
+                ),
+                title: None,
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: false,
+                status: SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            })
+            .expect("upsert managed");
+        store
+            .upsert_project(&dux_core::config::ProjectConfig {
+                id: "p2".to_string(),
+                path: project_repo.to_string_lossy().into_owned(),
+                name: Some("vendor".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .expect("upsert project");
+        drop(store);
+
+        reset_agent_data(&paths).expect("reset");
+
+        assert!(
+            project_repo.join("keep.txt").exists(),
+            "a project's repository survives a reset even when a managed worktree encloses it"
         );
     }
 

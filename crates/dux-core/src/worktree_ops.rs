@@ -202,7 +202,7 @@ impl Spelled {
     fn contains(&self, inner: &Spelled) -> bool {
         inner
             .forms()
-            .any(|inner| self.forms().any(|outer| inner.starts_with(outer)))
+            .any(|inner| self.forms().any(|outer| spelled_under(inner, outer)))
     }
 
     /// Whether the two name the same folder (each contains the other).
@@ -439,7 +439,33 @@ pub fn folder_contains(outer: &Path, inner: &Path) -> bool {
     let outers = spellings(outer);
     spellings(inner)
         .iter()
-        .any(|inner| outers.iter().any(|outer| inner.starts_with(outer)))
+        .any(|inner| outers.iter().any(|outer| spelled_under(inner, outer)))
+}
+
+/// Whether `inner` is `outer` or under it, component by component. On macOS
+/// the comparison ignores case, because APFS (and HFS+) are case-insensitive
+/// by default: `/Users/me/Work` and `/users/me/work` name one folder there,
+/// and a lexical spelling (never resolved by the filesystem) keeps whatever
+/// case it was recorded in. On Linux the filesystem is case-sensitive and
+/// so is the comparison.
+fn spelled_under(inner: &Path, outer: &Path) -> bool {
+    under_with_case(inner, outer, cfg!(target_os = "macos"))
+}
+
+fn under_with_case(inner: &Path, outer: &Path, ignore_case: bool) -> bool {
+    if !ignore_case {
+        return inner.starts_with(outer);
+    }
+    let mut inner = inner.components();
+    for outer in outer.components() {
+        match inner.next() {
+            Some(inner)
+                if inner.as_os_str().to_string_lossy().to_lowercase()
+                    == outer.as_os_str().to_string_lossy().to_lowercase() => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 impl WorktreeOps {
@@ -985,6 +1011,28 @@ impl RemovalJoin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// macOS compares spellings without case (APFS is case-insensitive by
+    /// default); Linux compares them exactly. Both rules are pinned here, on
+    /// every platform, through the helper the containment rule uses.
+    #[test]
+    fn spellings_compare_without_case_where_the_filesystem_does() {
+        let outer = Path::new("/Users/Me/Work");
+        let inner = Path::new("/users/me/work/agent");
+        assert!(under_with_case(inner, outer, true));
+        assert!(!under_with_case(inner, outer, false));
+        assert!(!under_with_case(
+            Path::new("/users/me/workshop"),
+            outer,
+            true
+        ));
+        assert!(under_with_case(
+            Path::new("/Users/Me/Work/agent"),
+            outer,
+            false
+        ));
+        assert_eq!(spelled_under(inner, outer), cfg!(target_os = "macos"));
+    }
 
     /// A link inside a folder that points outside it is inside the folder
     /// (its lexical spelling), and a link outside it that points inside is
