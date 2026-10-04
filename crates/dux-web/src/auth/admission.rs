@@ -71,8 +71,13 @@ use super::provenance::{Classification, ClientClass, Via};
 /// verified, from that address.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum TrackKey {
-    /// An address dux verified: the only key that can lead to a ban.
+    /// An address dux verified, always the single address: the only key a
+    /// ban is attributed to.
     Verified(IpAddr),
+    /// The /64 of a verified IPv6 address on the network: it governs the
+    /// slow-down only (and, behind [`BAN_WHOLE_IPV6_PREFIX`], the ban of the
+    /// whole /64), never a ban of one address.
+    Prefix(std::net::Ipv6Addr),
     /// An address an unverified request claimed: slowed, never banned.
     Claimed(IpAddr),
     /// The one bucket every unverified request that came the same way shares.
@@ -81,13 +86,16 @@ enum TrackKey {
 
 impl TrackKey {
     /// Every key a client's failures count against: its verified address
-    /// alone (an IPv6 one by its /64), or the address it claims (if any) and
-    /// the shared bucket. This is the only place a key is made, so a claim
-    /// can never become a verified key.
+    /// (and, for a network IPv6 one, its /64), or the address it claims (if
+    /// any) and the shared bucket. This is the only place a key is made, so a
+    /// claim can never become a verified key.
     fn of(c: &Classification) -> Vec<Self> {
         let canonical = dux_core::config_auth::canonical;
         if let Some(ip) = c.verified_ip {
-            return vec![Self::Verified(verified_track(canonical(ip)))];
+            let ip = canonical(ip);
+            return std::iter::once(Self::Verified(ip))
+                .chain(prefix_counted(c, ip).map(Self::Prefix))
+                .collect();
         }
         c.claimed_ip
             .map(|ip| Self::Claimed(canonical(ip)))
@@ -109,40 +117,52 @@ fn ipv6_prefix(ip: IpAddr) -> Option<std::net::Ipv6Addr> {
     }
 }
 
-/// What a verified client's failures and waits are counted under (decided,
-/// after review): its IPv6 /64, never the single address, because one host
-/// owns a whole /64 under SLAAC and can send from any address in it, so
-/// counting per address let it rotate past every wait and ban. IPv4 is
-/// counted per address.
-fn verified_track(ip: IpAddr) -> IpAddr {
-    ipv6_prefix(ip).map_or(ip, IpAddr::V6)
+/// The /64 a verified client's failures are also counted under, for the
+/// slow-down (decided, after review): one host owns a whole /64 under SLAAC
+/// and can send from any address in it, so a wait per address alone let it
+/// rotate past every wait. Only for the verified NETWORK: never the tailnet,
+/// and never an address in Tailscale's ranges, because every Tailscale node
+/// shares one /64 and grouping it made one tailnet device's guesses slow, and
+/// ban, another. IPv4 has no prefix.
+fn prefix_counted(c: &Classification, ip: IpAddr) -> Option<std::net::Ipv6Addr> {
+    let network = Level::of(c) == Level::Network;
+    ipv6_prefix(ip).filter(|_| network && !super::provenance::is_tailscale(ip))
 }
 
-/// Whether reaching `max_failed_logins` writes a verified IPv6 client's whole
-/// /64 to `blocked_addresses` rather than the single address. PENDING THE
-/// USER'S DECISION: until they answer, today's behaviour stands and the single
-/// address is written. Counting is by /64 either way; this is the one switch.
+/// Whether the /64's COMBINED count reaching `max_failed_logins` also writes
+/// the whole /64 to `blocked_addresses`. PENDING THE USER'S DECISION, and off
+/// until they answer: a guesser rotating through a /64 is then slowed by the
+/// /64 but never banned. A single address is banned only when that address
+/// alone reaches the limit, whatever this says.
 const BAN_WHOLE_IPV6_PREFIX: bool = false;
 
 /// What a ban writes and holds: the client's address, and the
 /// `blocked_addresses` entry that covers it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Ban {
-    /// The address that reached the limit.
+    /// The address whose failure reached the limit.
     pub(crate) ip: IpAddr,
     /// The entry written: the address itself, or its /64 when
-    /// [`BAN_WHOLE_IPV6_PREFIX`] is on.
+    /// [`BAN_WHOLE_IPV6_PREFIX`] is on and the /64 reached the limit.
     pub(crate) entry: String,
 }
 
 impl Ban {
+    /// A ban of one address.
     fn of(ip: IpAddr) -> Self {
         let ip = dux_core::config_auth::canonical(ip);
-        let entry = match ipv6_prefix(ip) {
-            Some(prefix) if BAN_WHOLE_IPV6_PREFIX => format!("{prefix}/64"),
-            _ => ip.to_string(),
-        };
-        Self { ip, entry }
+        Self {
+            ip,
+            entry: ip.to_string(),
+        }
+    }
+
+    /// A ban of `ip`'s whole /64.
+    fn of_prefix(ip: IpAddr, prefix: std::net::Ipv6Addr) -> Self {
+        Self {
+            ip: dux_core::config_auth::canonical(ip),
+            entry: format!("{prefix}/64"),
+        }
     }
 }
 
@@ -188,8 +208,8 @@ impl HeldBy {
 impl TrackKey {
     fn held_by(self) -> HeldBy {
         match self {
-            Self::Verified(IpAddr::V6(_)) => HeldBy::ThisPrefix,
-            Self::Verified(IpAddr::V4(_)) | Self::Claimed(_) => HeldBy::ThisAddress,
+            Self::Prefix(_) => HeldBy::ThisPrefix,
+            Self::Verified(_) | Self::Claimed(_) => HeldBy::ThisAddress,
             Self::Unverified(via) => HeldBy::Route(via),
         }
     }
@@ -461,39 +481,49 @@ impl Admission {
         let mut strike = Strike::Counted;
         for key in keys {
             let count = inner.count(cfg, key, window, now);
-            let (TrackKey::Verified(ip) | TrackKey::Claimed(ip)) = key else {
-                continue;
-            };
             if cfg.max_failed_logins == 0
-                || !blockable(ip)
                 || c.verified_this_machine()
                 || count < cfg.max_failed_logins
             {
                 continue;
             }
             match key {
-                TrackKey::Verified(_) => {
+                // A single address is banned only when it ALONE reached the
+                // limit. Only its own count is forgotten (a lifted block starts
+                // over); the /64's count and wait stand, so a ban never hands
+                // the rest of the /64 a fresh run of quick guesses.
+                TrackKey::Verified(ip) if blockable(ip) => {
                     inner.tracked.remove(&key);
-                    // The key may be a /64; the ban names the address that
-                    // reached the limit (or its /64, see the switch).
-                    strike = Strike::Block(Ban::of(c.verified_ip.unwrap_or(ip)));
+                    strike = Strike::Block(Ban::of(ip));
                 }
-                TrackKey::Claimed(_) if count == cfg.max_failed_logins => {
+                TrackKey::Prefix(prefix)
+                    if BAN_WHOLE_IPV6_PREFIX && count == cfg.max_failed_logins =>
+                {
+                    if let Some(ip) = c.verified_ip {
+                        strike = Strike::Block(Ban::of_prefix(ip, prefix));
+                    }
+                }
+                TrackKey::Claimed(ip) if blockable(ip) && count == cfg.max_failed_logins => {
                     strike = Strike::UnverifiedLimit(ip);
                 }
-                TrackKey::Claimed(_) | TrackKey::Unverified(_) => {}
+                TrackKey::Verified(_)
+                | TrackKey::Prefix(_)
+                | TrackKey::Claimed(_)
+                | TrackKey::Unverified(_) => {}
             }
         }
         strike
     }
 
-    /// Forget a client's failures after a successful check. The shared bucket
-    /// is kept: one success behind an unverified forward says nothing about
-    /// whoever else is guessing through it.
+    /// Forget a client's own failures after a successful check. Its /64's and
+    /// its route's are kept: one success there says nothing about whoever
+    /// else is guessing beside it, and they decay only through the window.
     pub(crate) fn record_success(&self, c: &Classification) {
         let mut inner = self.lock();
         for key in TrackKey::of(c) {
-            if !matches!(key, TrackKey::Unverified(_)) {
+            // Only the client's own count: one success says nothing about
+            // whoever else shares its /64 or its route.
+            if matches!(key, TrackKey::Verified(_) | TrackKey::Claimed(_)) {
                 inner.tracked.remove(&key);
             }
         }
@@ -985,5 +1015,84 @@ mod tests {
             ),
             "this machine is never refused"
         );
+    }
+
+    // ── IPv6 prefixes and the tailnet ─────────────────────────────────────────
+
+    /// Every Tailscale node's IPv6 address lies in one /64 (the ULA
+    /// fd7a:115c:a1e0:ab12:4843:cd96::/96, or fd7a:115c:a1e0::/96 on newer
+    /// tailnets), so counting verified IPv6 failures per /64 puts the WHOLE
+    /// tailnet in one bucket: one tailnet device's guesses slow every other
+    /// tailnet device, and the owner's single typo after them writes the
+    /// OWNER's address to `blocked_addresses`. Tailnet devices are meant to be
+    /// limited per address only.
+    #[test]
+    fn one_tailnet_device_cannot_slow_or_ban_another_over_ipv6() {
+        let a = Admission::default();
+        let c = cfg();
+        let t0 = Instant::now();
+        let guesser = from(
+            ClientClass::Tailnet,
+            "fd7a:115c:a1e0:ab12:4843:cd96:6258:b240",
+        );
+        let owner = from(
+            ClientClass::Tailnet,
+            "fd7a:115c:a1e0:ab12:4843:cd96:626b:430b",
+        );
+        for n in 0..4u64 {
+            a.record_failure(&c, &guesser, t0 + Duration::from_secs(n * 100));
+        }
+        let later = t0 + Duration::from_secs(301);
+        let waited = a.check(&c, &owner, later);
+        let typo = a.record_failure(&c, &owner, later + Duration::from_secs(10));
+        assert_eq!(
+            (waited, typo),
+            (Ok(()), Strike::Counted),
+            "another tailnet device is held by the guesser's failures, and the owner's \
+             first typo bans the owner"
+        );
+    }
+
+    /// A verified IPv6 client is slowed per /64, but reaching the ban forgets
+    /// the whole /64's count and wait while the ban names only one address,
+    /// so the next address in the same /64 starts with no wait at all: each
+    /// ban hands the prefix a fresh run of quick guesses.
+    #[test]
+    fn a_ban_does_not_lift_the_slowdown_of_the_rest_of_the_prefix() {
+        let a = Admission::default();
+        let c = cfg();
+        let t0 = Instant::now();
+        let mut now = t0;
+        let mut strike = Strike::Counted;
+        for n in 0..c.max_failed_logins {
+            now = t0 + Duration::from_secs(u64::from(n) * 40);
+            strike = a.record_failure(&c, &net("2001:db8:1:2::1"), now);
+        }
+        assert!(matches!(strike, Strike::Block(_)), "{strike:?}");
+        assert!(
+            a.check(&c, &net("2001:db8:1:2::2"), now).is_err(),
+            "the next address of the same /64 must still wait out the /64's slow-down"
+        );
+    }
+
+    /// A success clears only that address's own count: the owner signing in
+    /// from the same /64 does not reset a guesser's slow-down there.
+    #[test]
+    fn a_success_never_resets_the_prefix_slowdown() {
+        let a = Admission::default();
+        let c = cfg();
+        let t0 = Instant::now();
+        a.record_failure(&c, &net("2001:db8:1:2::1"), t0);
+        a.record_failure(&c, &net("2001:db8:1:2::1"), t0 + Duration::from_secs(5));
+        a.record_success(&net("2001:db8:1:2::2"));
+        assert!(
+            a.check(&c, &net("2001:db8:1:2::3"), t0 + Duration::from_secs(5))
+                .is_err(),
+            "the /64 still waits"
+        );
+        // Over the tailnet's ranges, nothing is grouped.
+        let tailnet = |ip: &str| from(ClientClass::Network, ip);
+        a.record_failure(&c, &tailnet("fd7a:115c:a1e0::1"), t0);
+        assert_eq!(a.check(&c, &tailnet("fd7a:115c:a1e0::2"), t0), Ok(()));
     }
 }

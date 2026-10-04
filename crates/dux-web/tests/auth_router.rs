@@ -2579,9 +2579,12 @@ fn v6(peer: &str) -> Arrival {
 }
 
 /// A single LAN device that owns an IPv6 /64 (every SLAAC host does) rotates
-/// the address it sends from. Its failures count against its /64, so the
-/// rotation gains it nothing: the wait applies across the /64, `max_failed_logins`
-/// still blocks, and the owner on another network signs in.
+/// the address it sends from. The /64 governs the slow-down, so the rotation
+/// gains it no quick guesses; a ban, though, is only ever attributed to an
+/// address that alone reached `max_failed_logins` (writing the whole /64 is
+/// pending the owner's decision and off), so the rotation is slowed but no
+/// one address is banned for its neighbours' failures. The owner on another
+/// network signs in.
 #[tokio::test]
 async fn rotating_ipv6_addresses_in_one_slash64_gains_nothing() {
     let dux = Dux::with_password(
@@ -2594,16 +2597,19 @@ async fn rotating_ipv6_addresses_in_one_slash64_gains_nothing() {
                 "not the password at all",
             )
             .await;
-        assert!(answer.status.is_client_error(), "{}", answer.body);
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{}", answer.body);
     }
-    // The address that reached the limit is written (the /64 itself is
-    // pending the owner's decision), and the next one from it is refused.
+    assert!(!dux.config().contains("2001:db8:1:1"), "{}", dux.config());
+    // One address that alone reaches the limit is banned, and only it.
+    for _ in 0..5 {
+        let _ = dux.login(v6("2001:db8:1:1::7"), "wrong again").await;
+    }
     assert!(
-        dux.config().contains("\"2001:db8:1:1::5\""),
+        dux.config().contains("\"2001:db8:1:1::7\""),
         "{}",
         dux.config()
     );
-    let again = dux.login(v6("2001:db8:1:1::5"), "again").await;
+    let again = dux.login(v6("2001:db8:1:1::7"), "again").await;
     assert_eq!(again.error().as_deref(), Some("blocked"), "{}", again.body);
     // The owner, from another network, with the right password.
     let owner = dux.login(v6("2001:db8:2:2::5"), PASSWORD).await;
@@ -2760,4 +2766,58 @@ async fn the_first_password_refusal_never_says_loopback_for_a_connection_that_wa
             "{what} never reached dux over loopback, yet is told: {message}"
         );
     }
+}
+
+// ── The tailnet over IPv6 ─────────────────────────────────────────────────
+
+/// Every Tailscale node's IPv6 address shares one /64
+/// (fd7a:115c:a1e0:ab12:4843:cd96::/96), and verified IPv6 failures are
+/// counted per /64, so the whole tailnet is ONE failure counter over IPv6:
+/// four wrong guesses from any tailnet device (a shared node, a guest's
+/// laptop) and the owner's single typo from their own tailnet device write
+/// the OWNER's address to `blocked_addresses`, after which the owner is
+/// refused everywhere, the right password included.
+#[tokio::test]
+async fn a_tailnet_guesser_over_ipv6_never_gets_the_owners_device_banned() {
+    use dux_web::exposure::{ExposureCell, FunnelState, IdentityFacts};
+    let own: std::net::IpAddr = "fd7a:115c:a1e0:ab12:4843:cd96:6265:6501".parse().unwrap();
+    let arrival = |peer: &str| Arrival {
+        peer: SocketAddr::new(peer.parse().unwrap(), 50000),
+        local: SocketAddr::new(own, 3890),
+    };
+    let guesser = arrival("fd7a:115c:a1e0:ab12:4843:cd96:6258:b240");
+    let owner = arrival("fd7a:115c:a1e0:ab12:4843:cd96:626b:430b");
+    let dux = Dux::start_tuned(
+        &format!(
+            "password_hash = \"{}\"\nrequire = \"tailnet\"\nfailed_login_delay_seconds = 0\n",
+            hash_of(PASSWORD)
+        ),
+        move |params| {
+            let exposure = ExposureCell::new(FunnelState::Open);
+            exposure.set_identity(Some(IdentityFacts {
+                own_ips: vec![own],
+                ..IdentityFacts::default()
+            }));
+            params.with_live_exposure(exposure)
+        },
+    );
+    assert_eq!(
+        dux.status(owner, None).await["client_class"],
+        "tailnet",
+        "the owner's device is the tailnet"
+    );
+    for _ in 0..4 {
+        let wrong = dux.login(guesser, OTHER_PASSWORD).await;
+        assert_eq!(wrong.status, StatusCode::UNAUTHORIZED, "{}", wrong.body);
+    }
+    let typo = dux.login(owner, OTHER_PASSWORD).await;
+    let right = dux.login(owner, PASSWORD).await;
+    assert_eq!(
+        (typo.status, right.status),
+        (StatusCode::UNAUTHORIZED, StatusCode::NO_CONTENT),
+        "the owner's one typo after another device's guesses banned the owner: {} / {}\n{}",
+        typo.body,
+        right.body,
+        dux.config()
+    );
 }

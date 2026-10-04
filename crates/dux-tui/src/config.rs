@@ -1492,8 +1492,9 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Failed logins one address may make within failed_login_window_seconds\n\
                  # before dux adds it to blocked_addresses below and says so in its log.\n\
-                 # An IPv6 client is counted by its /64, since one device can send from\n\
-                 # any address in it; the address that reaches the limit is what is added.\n\
+                 # Only an address that alone reaches the limit is added. An IPv6 client\n\
+                 # on your network is also slowed by its /64, since one device can send\n\
+                 # from any address in it (never your tailnet, whose devices share one).\n\
                  # dux only adds an address it can verify: a client connected to it\n\
                  # directly, or one that came through your tailscale serve. Behind any\n\
                  # other proxy the address is only what the request claims, so dux\n\

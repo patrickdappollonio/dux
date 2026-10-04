@@ -315,7 +315,7 @@ impl Classification {
     }
 }
 
-fn is_tailscale(ip: IpAddr) -> bool {
+pub(crate) fn is_tailscale(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => dux_core::tailscale::is_tailscale_cgnat(v4),
         IpAddr::V6(v6) => dux_core::tailscale::is_tailscale_ipv6(v6),
