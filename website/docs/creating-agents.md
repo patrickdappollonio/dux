@@ -121,6 +121,13 @@ Confirm and dux checks it out in the project folder (creating the local branch f
 switch, for example because uncommitted changes in the folder would be overwritten, dux
 says so in an error that stays up, and the base stays where it was.
 
+Whenever dux switches the project folder to a branch that only exists on a remote (here,
+when checking out the default branch, or before creating an agent), it creates the local
+branch from `origin` when `origin` has it, otherwise from the one remote that has it. Your
+`checkout.defaultRemote` setting is not consulted. When several remotes have the branch and
+none of them is `origin`, dux refuses the switch and asks you to create the local branch
+from the remote you want first.
+
 > [!NOTE]
 > Uncommitted changes that do not conflict with the new branch travel with the switch and
 > stay in the project folder, the same as with a checkout in your own terminal.

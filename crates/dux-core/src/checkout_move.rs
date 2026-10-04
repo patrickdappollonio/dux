@@ -190,7 +190,8 @@ fn refusal(checkout: &Path, folder: &Path, what: &str, reason: &str) -> anyhow::
 }
 
 /// One path the move would write, and whether the incoming commit records a
-/// submodule there (git makes an empty folder for it and removes nothing).
+/// submodule there (git keeps a real folder standing at that path, and
+/// otherwise makes an empty one, replacing a link).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct IncomingEntry {
     path: PathBuf,
@@ -299,12 +300,13 @@ fn parse_ls_tree(out: &[u8]) -> Vec<IncomingEntry> {
 
 /// Every folder git would have to remove to write `entries` into
 /// `checkout`: a real folder standing where a file (or link) goes, and a
-/// symbolic link standing anywhere on the way to one (git replaces it rather
-/// than write through it). A folder on the way stays, since the incoming
-/// commit has a folder there too.
+/// symbolic link standing at any entry's path or anywhere on the way to one,
+/// a submodule's included (git replaces it rather than write through it). A
+/// folder on the way stays, since the incoming commit has a folder there too,
+/// and so does a real folder at a submodule's own path.
 fn folders_git_would_remove(checkout: &Path, entries: &[IncomingEntry]) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
-    for entry in entries.iter().filter(|entry| !entry.gitlink) {
+    for entry in entries {
         let components: Vec<_> = entry.path.components().collect();
         let mut at = checkout.to_path_buf();
         for (index, component) in components.iter().enumerate() {
@@ -313,7 +315,9 @@ fn folders_git_would_remove(checkout: &Path, entries: &[IncomingEntry]) -> Vec<P
                 break;
             };
             let last = index + 1 == components.len();
-            if meta.file_type().is_symlink() || (last && meta.is_dir()) {
+            // A real folder at a submodule's path is kept (git checks the
+            // submodule out into it); a link there is replaced by one.
+            if meta.file_type().is_symlink() || (last && meta.is_dir() && !entry.gitlink) {
                 if !found.contains(&at) {
                     found.push(at.clone());
                 }
@@ -371,6 +375,42 @@ mod tests {
             gitlink: true,
         }];
         assert!(folders_git_would_remove(tmp.path(), &entries).is_empty());
+    }
+
+    #[test]
+    fn a_link_at_a_submodule_path_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("sub")).unwrap();
+        let entries = vec![IncomingEntry {
+            path: "sub".into(),
+            gitlink: true,
+        }];
+        assert_eq!(
+            folders_git_would_remove(&root, &entries),
+            vec![root.join("sub")]
+        );
+    }
+
+    #[test]
+    fn a_link_on_the_way_to_a_submodule_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("sub")).unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("libs")).unwrap();
+        let entries = vec![IncomingEntry {
+            path: "libs/sub".into(),
+            gitlink: true,
+        }];
+        assert_eq!(
+            folders_git_would_remove(&root, &entries),
+            vec![root.join("libs")]
+        );
     }
 
     #[test]

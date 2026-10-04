@@ -394,3 +394,297 @@ fn a_base_branch_switch_never_deletes_another_projects_repository() {
     );
     assert!(reason.contains("project \"p2-name\""), "{reason}");
 }
+
+// ---- review 18 reproductions ----
+
+/// A link `alone` in the checkout, ignored, pointing at a standalone agent's
+/// folder outside it; the agent is recorded at the link's path.
+fn checkout_with_linked_standalone(
+    tmp: &Path,
+    engine: &mut Engine,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (upstream, repo) = project_checkout(tmp, engine);
+    std::fs::create_dir_all(repo.join(".git").join("info")).unwrap();
+    std::fs::write(repo.join(".git").join("info").join("exclude"), "alone\n").unwrap();
+    let outside = tmp.join("outside");
+    own_repository(&outside);
+    std::os::unix::fs::symlink(&outside, repo.join("alone")).unwrap();
+    engine
+        .sessions
+        .push(crate::engine::test_support::sample_standalone_session(
+            "s-alone",
+            repo.join("alone").to_str().unwrap(),
+        ));
+    (upstream, repo)
+}
+
+/// Control: an incoming FILE at the link's path is refused (the link is
+/// protected as the standalone agent's folder).
+#[test]
+fn review18_control_a_file_over_a_linked_standalone_folder_is_refused() {
+    let (mut engine, tmp) = test_engine();
+    let (upstream, repo) = checkout_with_linked_standalone(tmp.path(), &mut engine);
+    std::fs::write(upstream.join("alone"), "a file\n").unwrap();
+    git(&upstream, &["add", "-f", "alone"]);
+    git(&upstream, &["commit", "-m", "alone is a file"]);
+    let result = session_pull(&mut engine, &repo);
+    assert!(
+        std::fs::symlink_metadata(repo.join("alone"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was replaced: {result:?}"
+    );
+}
+
+/// An incoming SUBMODULE (gitlink) at the link's path: git replaces the link
+/// with an empty folder, and the check skips gitlinks entirely.
+#[test]
+fn review18_a_submodule_over_a_linked_standalone_folder_is_refused() {
+    let (mut engine, tmp) = test_engine();
+    let (upstream, repo) = checkout_with_linked_standalone(tmp.path(), &mut engine);
+    let id = head(&upstream);
+    git(
+        &upstream,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{id},alone"),
+        ],
+    );
+    git(&upstream, &["commit", "-m", "alone is a submodule"]);
+    let result = session_pull(&mut engine, &repo);
+    let meta = std::fs::symlink_metadata(repo.join("alone")).unwrap();
+    assert!(
+        meta.file_type().is_symlink(),
+        "the standalone agent's folder link was replaced by {:?} (pull result {result:?})",
+        meta.file_type()
+    );
+}
+
+/// `git switch <branch>` with no local branch follows `checkout.defaultRemote`
+/// when several remotes have the branch; the guard always checks origin's.
+#[test]
+fn review18_a_switch_checks_the_commit_git_actually_checks_out() {
+    let (engine, tmp) = test_engine();
+    let base = tmp.path();
+    // Seed history shared by both remotes.
+    let seed = base.join("seed");
+    init(&seed);
+    std::fs::write(seed.join(".gitignore"), "vendor/\n").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-m", "ignore vendor"]);
+    git(&seed, &["branch", "feat"]);
+    for name in ["origin.git", "upstream.git"] {
+        git(
+            base,
+            &["clone", "-q", "--bare", seed.to_str().unwrap(), name],
+        );
+    }
+    // upstream's feat tracks a FILE at vendor; origin's does not.
+    git(&seed, &["switch", "-q", "feat"]);
+    std::fs::write(seed.join("vendor"), "a file\n").unwrap();
+    git(&seed, &["add", "-f", "vendor"]);
+    git(&seed, &["commit", "-m", "vendor is a file"]);
+    git(
+        &seed,
+        &[
+            "push",
+            "-q",
+            base.join("upstream.git").to_str().unwrap(),
+            "feat",
+        ],
+    );
+    let repo = base.join("repo");
+    git(
+        base,
+        &[
+            "clone",
+            "-q",
+            base.join("origin.git").to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            base.join("upstream.git").to_str().unwrap(),
+        ],
+    );
+    git(&repo, &["fetch", "-q", "upstream"]);
+    git(&repo, &["config", "checkout.defaultRemote", "upstream"]);
+    let mut engine = engine;
+    engine
+        .projects
+        .push(sample_project("p1", repo.to_str().unwrap()));
+    let other = repo.join("vendor").join("lib");
+    own_repository(&other);
+    engine
+        .projects
+        .push(sample_project("p2", other.to_str().unwrap()));
+    let guard = engine.checkout_move_guard();
+
+    let result = std::thread::spawn(move || {
+        crate::git::switch_branch(&repo, "feat", &guard).map_err(|e| format!("{e:#}"))
+    })
+    .join()
+    .unwrap();
+
+    assert!(
+        other.join(".git").exists() && other.join("notes.txt").exists(),
+        "another project's repository was deleted by a guarded switch (result {result:?})"
+    );
+}
+
+/// An incoming submodule BELOW the link (`alone/sub`): git replaces the link
+/// on its way with a real folder, so the link is judged as the standalone
+/// agent's folder and the pull is refused.
+#[test]
+fn a_submodule_below_a_linked_standalone_folder_is_refused() {
+    let (mut engine, tmp) = test_engine();
+    let (upstream, repo) = checkout_with_linked_standalone(tmp.path(), &mut engine);
+    let id = head(&upstream);
+    git(
+        &upstream,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{id},alone/sub"),
+        ],
+    );
+    git(&upstream, &["commit", "-m", "a submodule below alone"]);
+    let before = head(&repo);
+
+    let error = session_pull(&mut engine, &repo).expect_err("the pull is refused");
+
+    assert!(
+        std::fs::symlink_metadata(repo.join("alone"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link stays"
+    );
+    assert_eq!(head(&repo), before, "the checkout did not move");
+    assert!(error.contains("standalone agent"), "{error}");
+}
+
+/// A submodule at a REAL folder's path is checked out into that folder, so
+/// git removes nothing and the pull goes ahead even with a project inside.
+#[test]
+fn a_submodule_at_a_real_folder_removes_nothing_and_the_pull_goes_ahead() {
+    let (mut engine, tmp) = test_engine();
+    let (upstream, repo) = project_checkout(tmp.path(), &mut engine);
+    let other = repo.join("vendor");
+    own_repository(&other);
+    engine
+        .projects
+        .push(sample_project("p2", other.to_str().unwrap()));
+    let id = head(&upstream);
+    git(
+        &upstream,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{id},vendor"),
+        ],
+    );
+    git(&upstream, &["commit", "-m", "vendor is a submodule"]);
+
+    session_pull(&mut engine, &repo).expect("the pull goes ahead");
+
+    assert_eq!(head(&repo), head(&upstream));
+    assert!(other.join("notes.txt").exists(), "the folder is kept");
+}
+
+/// With no local branch and several remotes carrying it, none of them
+/// origin, dux cannot tell which commit a switch would check out, so it
+/// refuses rather than let git pick unchecked, and creates nothing.
+#[test]
+fn a_switch_dux_cannot_resolve_is_refused_not_left_to_git() {
+    let (engine, tmp) = test_engine();
+    let base = tmp.path();
+    let seed = base.join("seed");
+    init(&seed);
+    git(&seed, &["commit", "--allow-empty", "-m", "seed"]);
+    git(&seed, &["branch", "feat"]);
+    let repo = base.join("repo");
+    init(&repo);
+    git(&repo, &["commit", "--allow-empty", "-m", "local"]);
+    for name in ["one", "two"] {
+        git(&repo, &["remote", "add", name, seed.to_str().unwrap()]);
+        git(&repo, &["fetch", "-q", name]);
+    }
+    let guard = engine.checkout_move_guard();
+    let probe = repo.clone();
+
+    let result = std::thread::spawn(move || {
+        crate::git::switch_branch(&probe, "feat", &guard).map_err(|e| format!("{e:#}"))
+    })
+    .join()
+    .unwrap();
+
+    let error = result.expect_err("the switch is refused");
+    assert!(error.contains("several remotes"), "{error}");
+    assert_eq!(crate::git::current_branch(&repo).unwrap(), "main");
+    assert!(
+        !crate::git::local_branch_exists(&repo, "feat"),
+        "no local branch was created"
+    );
+}
+
+/// A switch to a branch only a remote has starts the local branch from that
+/// remote explicitly, and checks exactly that commit: a file it tracks over
+/// another project's repository is refused.
+#[test]
+fn a_switch_to_a_remote_only_branch_checks_the_branch_it_creates() {
+    let (engine, tmp) = test_engine();
+    let base = tmp.path();
+    let seed = base.join("seed");
+    init(&seed);
+    std::fs::write(seed.join(".gitignore"), "vendor/\n").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-m", "ignore vendor"]);
+    let repo = base.join("repo");
+    git(
+        base,
+        &[
+            "clone",
+            "-q",
+            seed.to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
+    git(&seed, &["switch", "-q", "-c", "feat"]);
+    std::fs::write(seed.join("vendor"), "a file\n").unwrap();
+    git(&seed, &["add", "-f", "vendor"]);
+    git(&seed, &["commit", "-m", "vendor is a file"]);
+    git(&repo, &["fetch", "-q", "origin"]);
+    let mut engine = engine;
+    engine
+        .projects
+        .push(sample_project("p1", repo.to_str().unwrap()));
+    let other = repo.join("vendor").join("lib");
+    own_repository(&other);
+    engine
+        .projects
+        .push(sample_project("p2", other.to_str().unwrap()));
+    let guard = engine.checkout_move_guard();
+    let probe = repo.clone();
+
+    let result = std::thread::spawn(move || {
+        crate::git::switch_branch(&probe, "feat", &guard).map_err(|e| format!("{e:#}"))
+    })
+    .join()
+    .unwrap();
+
+    let error = result.expect_err("the switch is refused");
+    assert!(error.contains("project \"p2-name\""), "{error}");
+    assert!(other.join(".git").exists());
+    assert_eq!(crate::git::current_branch(&repo).unwrap(), "main");
+}

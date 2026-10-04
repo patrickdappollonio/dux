@@ -1096,55 +1096,110 @@ fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<boo
     }
 }
 
-/// The commit `git switch <branch>` would check out: the local branch, or,
-/// when there is none, the remote-tracking branch git would create it from
-/// (`origin`'s first, then the only remote that has it). `None` when git
-/// would refuse the switch anyway.
-fn switch_target(repo_path: &Path, branch: &str) -> Result<Option<String>> {
-    if let Some(id) = crate::checkout_move::commit_id(repo_path, &format!("refs/heads/{branch}"))? {
-        return Ok(Some(id));
-    }
-    if let Some(id) =
-        crate::checkout_move::commit_id(repo_path, &format!("refs/remotes/origin/{branch}"))?
+/// The remote a local branch `branch` would be started from, chosen the way
+/// the base-branch change chooses: `origin` when it has the branch, else the
+/// one remote that has it. Refused with a sentence when no remote has it, or
+/// several do and none is `origin`: dux never lets git pick unchecked.
+fn tracking_remote(repo_path: &Path, branch: &str) -> Result<String> {
+    if crate::checkout_move::commit_id(repo_path, &format!("refs/remotes/origin/{branch}"))?
+        .is_some()
     {
-        return Ok(Some(id));
+        return Ok("origin".to_string());
     }
     let output = Command::new("git")
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
             "for-each-ref",
-            "--format=%(objectname)",
+            "--format=%(refname)",
             // A branch name cannot hold a glob character, so this matches
             // `refs/remotes/<remote>/<branch>` and nothing else.
             &format!("refs/remotes/*/{branch}"),
         ])
-        .output()?;
-    let ids: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .output()
+        .with_context(|| format!("failed to run git for-each-ref in {}", repo_path.display()))?;
+    if !output.status.success() {
+        return Err(git_failure("git for-each-ref", repo_path, &output));
+    }
+    let suffix = format!("/{branch}");
+    let remotes: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .map(str::to_string)
+        .filter_map(|refname| {
+            refname
+                .strip_prefix("refs/remotes/")?
+                .strip_suffix(suffix.as_str())
+                .map(str::to_string)
+        })
         .collect();
-    Ok(match ids.as_slice() {
-        [only] => Some(only.clone()),
-        _ => None,
-    })
+    match remotes.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err(anyhow!(
+            "dux did not switch to branch {branch}: there is no branch by that name in this \
+             checkout or on any of its remotes"
+        )),
+        several => Err(anyhow!(
+            "dux did not switch to branch {branch}: it exists on several remotes ({}) and none \
+             of them is origin, so dux cannot tell which one to start it from; create the local \
+             branch from the remote you want, then switch again",
+            several.join(", ")
+        )),
+    }
 }
 
-/// Switches `repo_path` to `branch_name`, once `guard` has cleared the move
-/// (see [`crate::checkout_move`]). `git switch` rather than `git checkout`
-/// because it is single-purpose and rejects the detached-HEAD and file-restore
-/// surprises `checkout` silently allows. Returns git's raw stderr on failure so
-/// callers can surface the concrete reason. Requires git >= 2.23.
+/// Create local branch `name` tracking `<remote>/<name>`, without switching
+/// to it. The start point is fully qualified and the name follows `--`, so a
+/// dash-leading name is refused as a branch name, never obeyed as a flag.
+fn create_tracking_branch_from(repo_path: &Path, name: &str, remote: &str) -> Result<()> {
+    let start = format!("refs/remotes/{remote}/{name}");
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "branch",
+            "--track",
+            "--",
+            name,
+            &start,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to run git branch in {}", repo_path.display()))?;
+    if !output.status.success() {
+        return Err(git_failure("git branch --track", repo_path, &output));
+    }
+    Ok(())
+}
+
+/// Switches `repo_path` to the local branch `branch_name`, once `guard` has
+/// cleared the move (see [`crate::checkout_move`]). With no local branch yet,
+/// dux first creates it from the remote [`tracking_remote`] picks, so the
+/// commit checked is exactly the one `git switch` then checks out: left to
+/// itself, `git switch` would pick a remote by `checkout.defaultRemote` and
+/// `checkout.guess`, which dux cannot see through. `git switch` rather than
+/// `git checkout` because it is single-purpose and rejects the detached-HEAD
+/// and file-restore surprises `checkout` silently allows. Returns git's raw
+/// stderr on failure so callers can surface the concrete reason. Requires git
+/// >= 2.23.
 pub fn switch_branch(
     repo_path: &Path,
     branch_name: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
 ) -> Result<()> {
-    let _clearance = match switch_target(repo_path, branch_name)? {
-        Some(target) => Some(guard.clear(repo_path, &target, "switch to the branch")?),
-        // git refuses a branch it cannot resolve, and moves nothing.
-        None => None,
+    let local = format!("refs/heads/{branch_name}");
+    let target = match crate::checkout_move::commit_id(repo_path, &local)? {
+        Some(id) => id,
+        None => {
+            let remote = tracking_remote(repo_path, branch_name)?;
+            create_tracking_branch_from(repo_path, branch_name, &remote)?;
+            crate::checkout_move::commit_id(repo_path, &local)?.ok_or_else(|| {
+                anyhow!(
+                    "dux did not switch to branch {branch_name}: the local branch it created \
+                     from {remote} cannot be read back"
+                )
+            })?
+        }
     };
+    let _clearance = guard.clear(repo_path, &target, "switch to the branch")?;
     run_switch(repo_path, branch_name)
 }
 
@@ -1446,24 +1501,7 @@ pub fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> R
 /// git 2.53). The start point is fully qualified and the name follows `--`, so
 /// a dash-leading name is refused as a branch name, never obeyed as a flag.
 pub fn create_tracking_branch(repo_path: &Path, name: &str) -> Result<()> {
-    let start = format!("refs/remotes/origin/{name}");
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "branch",
-            "--track",
-            "--",
-            name,
-            &start,
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("failed to run git branch in {}", repo_path.display()))?;
-    if !output.status.success() {
-        return Err(git_failure("git branch --track", repo_path, &output));
-    }
-    Ok(())
+    create_tracking_branch_from(repo_path, name, "origin")
 }
 
 /// How much of a branch exists only on this machine, and whether there was
@@ -12730,7 +12768,7 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("git switch does-not-exist failed"),
+            msg.contains("no branch by that name"),
             "expected failure message, got: {msg}"
         );
     }
