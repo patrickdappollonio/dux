@@ -7088,13 +7088,31 @@ mod recovery_flags_and_names_tests {
             )
             .is_ok()
         };
-        let host = "[server]\nhost = \"localhost\"\n";
-        assert!(!plan(host, None, Some(4000)));
-        assert!(plan(host, Some("127.0.0.1:4000"), None));
+        // For each overridable problem the start checks raise, every flag
+        // gets `dux server` past it exactly when the problem names it, and
+        // without a flag it does not start.
+        for raw in ["[server]\nhost = \"localhost\"\n", "[server]\nport = 0\n"] {
+            let problems = start_problems_of(raw);
+            let [problem] = problems.as_slice() else {
+                panic!("{raw}: {problems:?}");
+            };
+            let setting = problem.dux_server_override.expect("overridable");
+            assert!(!plan(raw, None, None), "{raw}");
+            for flag in [ServerFlag::Bind, ServerFlag::Port] {
+                let starts = match flag {
+                    ServerFlag::Bind => plan(raw, Some("127.0.0.1:4000"), None),
+                    ServerFlag::Port => plan(raw, None, Some(4000)),
+                };
+                assert_eq!(
+                    starts,
+                    setting.flags().contains(&flag),
+                    "{raw}: {} says {}",
+                    flag.name(),
+                    setting.overriding_flags()
+                );
+            }
+        }
         assert_eq!(ServerFileSetting::Host.overriding_flags(), "--bind");
-        let port = "[server]\nport = 0\n";
-        assert!(plan(port, None, Some(4000)));
-        assert!(plan(port, Some("127.0.0.1:4000"), None));
         assert_eq!(
             ServerFileSetting::Port.overriding_flags(),
             "--port or --bind"
