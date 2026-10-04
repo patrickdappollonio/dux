@@ -1372,12 +1372,13 @@ impl WebDragDropPaste {
     /// that only ever reaches a file cannot be asserted on without racing the
     /// process-wide logger, and "warns once per load" is exactly the property
     /// worth pinning.
-    pub fn unknown_value_warning(provider: &str, s: &str) -> Option<String> {
+    /// `at` is the setting as printed, through the one formatter.
+    pub fn unknown_value_warning(at: &str, s: &str) -> Option<String> {
         if Self::parse(s).is_some() {
             return None;
         }
         Some(format!(
-            "unknown providers.{provider}.web_dragdrop_paste value {s:?}; falling back to \
+            "unknown {at} value {s:?}; falling back to \
              \"bare\" (valid: bare, single_quoted, double_quoted, backslash_escaped)"
         ))
     }
@@ -1387,7 +1388,11 @@ impl WebDragDropPaste {
     /// not per paste, so a typo is surfaced without spamming the log; the paste
     /// path uses the non-warning [`WebDragDropPaste::parse`].
     pub fn from_config_str(provider: &str, s: &str) -> Self {
-        if let Some(warning) = Self::unknown_value_warning(provider, s) {
+        let at = shown_path(
+            "",
+            &key_path(&["providers", provider, "web_dragdrop_paste"]),
+        );
+        if let Some(warning) = Self::unknown_value_warning(&at, s) {
             crate::logger::warn(&warning);
         }
         Self::parse(s).unwrap_or(Self::Bare)
@@ -3145,12 +3150,34 @@ impl std::error::Error for ConfigLoadError {}
 /// read on its own BEFORE any recovery, and a problem there (or a file that is
 /// not TOML at all, where the section cannot be found) is an error rather than
 /// a reset, because its default is "no password".
+#[cfg(test)]
 fn recover_config(raw: &str) -> Result<Config, ConfigLoadProblem> {
-    let auth = auth_section_of(raw)?;
-    let mut doc: toml::Table = toml::from_str::<toml::Table>(raw)
-        .map_err(|e| ConfigLoadProblem::NotToml(describe_toml_error(raw, &e)))?;
+    recover_config_with(raw, raw, Report::Log)
+}
+
+/// Whether a read of the config logs what its recovery and corrections do.
+/// The load that dux then runs with does, once; a check, a `get`, or the
+/// base of a save reads the same text again and says nothing, so one load is
+/// one set of log lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Report {
+    Log,
+    Quiet,
+}
+
+/// [`recover_config`] of `migrated` (the text after the load migrations),
+/// placing a name in a log line by its line in `raw` (the user's own text),
+/// logging or not as `report` says.
+fn recover_config_with(
+    migrated: &str,
+    raw: &str,
+    report: Report,
+) -> Result<Config, ConfigLoadProblem> {
+    let auth = auth_section_of(migrated)?;
+    let mut doc: toml::Table = toml::from_str::<toml::Table>(migrated)
+        .map_err(|e| ConfigLoadProblem::NotToml(describe_toml_error(migrated, &e)))?;
     take_auth_section(&mut doc)?;
-    let mut config = recover_config_table(doc);
+    let mut config = recover_config_table(doc, raw, report);
     config.server.auth = auth;
     Ok(config)
 }
@@ -3237,18 +3264,22 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
             && table.keys().any(|key| auth_settings.contains(key))
     };
     let mut problems = Vec::new();
-    if file.contains_key("password_hash") {
-        problems.push(stray(key_path(&["password_hash"])));
-    }
+    // A password hash anywhere but the real `[server.auth]`, whatever the
+    // table around it is called (any case, quoting or dotting), stops the
+    // start: dux would otherwise serve with no password at all.
+    let mut found = Vec::new();
+    stray_password_hashes(
+        &toml::Value::Table(file.clone()),
+        &mut Vec::new(),
+        &mut found,
+    );
+    problems.extend(found.into_iter().map(stray));
     for (name, value) in &file {
         let Some(table) = value.as_table() else {
             continue;
         };
         if !near_auth(name, table) {
             continue;
-        }
-        if table.contains_key("password_hash") {
-            problems.push(stray(key_path(&[name, "password_hash"])));
         }
         if name != "auth" {
             problems.push(table_problem(key_path(&[name]), true));
@@ -3267,9 +3298,6 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
         ));
     }
     if let Some(server) = file.get("server").and_then(toml::Value::as_table) {
-        if server.contains_key("password_hash") {
-            problems.push(stray(key_path(&["server", "password_hash"])));
-        }
         for (name, value) in server {
             let Some(table) = value.as_table() else {
                 continue;
@@ -3277,13 +3305,50 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
             if name == "auth" || !near_auth(name, table) {
                 continue;
             }
-            if table.contains_key("password_hash") {
-                problems.push(stray(key_path(&["server", name, "password_hash"])));
-            }
             problems.push(table_problem(key_path(&["server", name]), false));
         }
     }
     problems
+}
+
+/// Every key holding a password hash in `value` (a whole config file at
+/// `path`), with its path: a key named `password_hash` in any case, or one
+/// whose dotted name ends in it (`"auth.password_hash"`), anywhere but the
+/// real `[server.auth] password_hash`. Never inside a table whose keys are
+/// names the user chose (`[env]`, a provider, a project, `[macros]`,
+/// `[keys]`): there `password_hash` is just the name someone picked.
+fn stray_password_hashes(
+    value: &toml::Value,
+    path: &mut Vec<String>,
+    found: &mut Vec<Vec<String>>,
+) {
+    const USER_NAMED: [&str; 5] = ["env", "providers", "projects", "macros", "keys"];
+    if path
+        .first()
+        .is_some_and(|section| USER_NAMED.contains(&section.as_str()))
+    {
+        return;
+    }
+    match value {
+        toml::Value::Table(table) => {
+            for (key, child) in table {
+                path.push(key.clone());
+                let lower = key.to_lowercase();
+                let names_a_hash = lower == "password_hash" || lower.ends_with(".password_hash");
+                if names_a_hash && *path != ["server", "auth", "password_hash"] {
+                    found.push(path.clone());
+                }
+                stray_password_hashes(child, path, found);
+                path.pop();
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                stray_password_hashes(item, path, found);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Whether `value` holds, anywhere inside it, a `password_hash` or a table
@@ -3662,9 +3727,9 @@ pub fn check_start(raw: &str) -> StartCheck {
             false,
         ));
     }
-    let mut config = recover_config_table(rest);
+    let mut config = recover_config_table(rest, raw, Report::Quiet);
     config.providers.ensure_defaults();
-    let config = apply_load_corrections(config);
+    let (config, _) = load_corrections(config);
     check
         .problems
         .extend(config_start_problems(&config, Some(raw)));
@@ -3837,9 +3902,30 @@ fn hidden_entry(raw: &str, segments: &[String]) -> Option<(String, String, Vec<S
 pub fn shown_path(raw: &str, segments: &[String]) -> String {
     match hidden_entry(raw, segments) {
         Some((section, entry, rest)) if rest.is_empty() => format!("{entry} of [{section}]"),
-        Some((section, entry, rest)) => format!("{} of {entry} of [{section}]", rest.join(".")),
-        None => segments.join("."),
+        Some((section, entry, rest)) => format!("{} of {entry} of [{section}]", dotted(&rest)),
+        None => dotted(segments),
     }
+}
+
+/// Segments joined as TOML writes a dotted key: a segment that is not a bare
+/// key (it holds a dot, a space or a quote) is quoted, so `["server.auth"]`
+/// never reads as `[server.auth]`.
+fn dotted(segments: &[String]) -> String {
+    segments
+        .iter()
+        .map(|segment| {
+            let bare = !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if bare {
+                segment.clone()
+            } else {
+                toml::Value::String(segment.clone()).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// Whether the last segment of `segments` is an entry name that breaks its
@@ -3854,10 +3940,14 @@ fn shown_place(raw: &str, segments: &[String]) -> String {
     match (hidden_entry(raw, segments), segments) {
         (Some((section, entry, rest)), _) if rest.is_empty() => format!("[{section}] {entry}"),
         (Some((section, entry, rest)), _) => {
-            format!("[{section}] {} of {entry}", rest.join("."))
+            format!("[{section}] {} of {entry}", dotted(&rest))
         }
-        (None, [section]) => format!("[{section}]"),
-        (None, [section, inner @ ..]) => format!("[{section}] {}", inner.join(".")),
+        (None, [section]) => format!("[{}]", dotted(std::slice::from_ref(section))),
+        (None, [section, inner @ ..]) => format!(
+            "[{}] {}",
+            dotted(std::slice::from_ref(section)),
+            dotted(inner)
+        ),
         (None, []) => String::new(),
     }
 }
@@ -4063,7 +4153,7 @@ pub fn start_check(config: &Config) -> Result<()> {
 /// The config dux runs with from a whole file's text: read as a start reads
 /// it, with the corrections a load makes.
 pub fn effective_config_from_text(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
-    config_from_text_as_written(raw).map(apply_load_corrections)
+    config_from_text(raw, Report::Quiet).map(|config| load_corrections(config).0)
 }
 
 /// Every problem the `[server.auth]` section of a whole config file's text
@@ -4235,7 +4325,15 @@ fn recovery_plan(doc: &toml::Table) -> Vec<Recovery> {
 
 /// The field-level recovery of every section but `[server.auth]`: the
 /// document with [`recovery_plan`] applied.
-fn recover_config_table(doc: toml::Table) -> Config {
+///
+/// Every line it logs about a key goes through the one formatter against
+/// `raw`, so a name that breaks its map's rule is placed by its line.
+fn recover_config_table(doc: toml::Table, raw: &str, report: Report) -> Config {
+    let log = |level: fn(&str), line: String| {
+        if report == Report::Log {
+            level(&line);
+        }
+    };
     let plan = recovery_plan(&doc);
     if plan.is_empty()
         && let Ok(cfg) = table_into_config(doc.clone())
@@ -4246,17 +4344,25 @@ fn recover_config_table(doc: toml::Table) -> Config {
     for recovery in &plan {
         match recovery {
             Recovery::DropField { section, field } => {
-                crate::logger::warn(&format!(
-                    "config [{section}] {field} is invalid; resetting it to its default"
-                ));
+                log(
+                    crate::logger::warn,
+                    format!(
+                        "config {} is invalid; resetting it to its default",
+                        recovery.place(raw)
+                    ),
+                );
                 if let Some(table) = pruned.get_mut(section).and_then(toml::Value::as_table_mut) {
                     table.remove(field);
                 }
             }
             Recovery::ResetSection { section } => {
-                crate::logger::warn(&format!(
-                    "config section [{section}] is invalid; resetting it to defaults"
-                ));
+                log(
+                    crate::logger::warn,
+                    format!(
+                        "config section {} is invalid; resetting it to defaults",
+                        recovery.place(raw)
+                    ),
+                );
                 pruned.remove(section);
             }
         }
@@ -4264,9 +4370,15 @@ fn recover_config_table(doc: toml::Table) -> Config {
     match table_into_config(pruned) {
         Ok(cfg) => cfg,
         Err(e) => {
-            crate::logger::error(&format!(
-                "config could not be recovered ({e}); using defaults"
-            ));
+            // The kind of problem only: the parser's own message can quote a
+            // key, and a key can be a value pasted in the wrong place.
+            log(
+                crate::logger::error,
+                format!(
+                    "config could not be recovered ({}); using defaults",
+                    problem_kind(&e)
+                ),
+            );
             Config::default()
         }
     }
@@ -4432,7 +4544,7 @@ pub fn read_config_text(
 /// memory starts as, and therefore the config writer's base: a correction is
 /// never a change dux made, so a save never writes it over what the file says.
 pub fn config_from_text_as_loaded(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
-    config_from_text_as_written(raw).map(|config| load_corrections(config).0)
+    config_from_text(raw, Report::Quiet).map(|config| load_corrections(config).0)
 }
 
 /// The load's in-memory corrections applied to a config a surface read
@@ -4446,6 +4558,11 @@ pub fn correct_loaded(config: Config) -> Config {
 /// provider defaults, without the load corrections, and carrying the text
 /// itself as its [`Config::source_text`].
 pub fn config_from_text_as_written(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
+    config_from_text(raw, Report::Log)
+}
+
+/// [`config_from_text_as_written`], logging or not as `report` says.
+fn config_from_text(raw: &str, report: Report) -> std::result::Result<Config, ConfigLoadProblem> {
     // `[server.auth]` is read from the user's own text first, so an error in
     // it names the line in the file they have to fix: the migrations below
     // rewrite other keys, which moves the lines after them.
@@ -4466,7 +4583,7 @@ pub fn config_from_text_as_written(raw: &str) -> std::result::Result<Config, Con
                 .map(|_| doc.to_string())
         })
         .unwrap_or_else(|| raw.to_string());
-    let mut config = recover_config(&migrated)?;
+    let mut config = recover_config_with(&migrated, raw, report)?;
     config.providers.ensure_defaults();
     config.source_text = SourceText::of(raw);
     Ok(config)
@@ -4491,7 +4608,10 @@ fn apply_load_corrections(config: Config) -> Config {
     let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
     // Same idea for a misspelled provider drag-and-drop paste form: warn ONCE here
     // rather than on every dropped file, and let the resolution itself stay silent.
-    warn_on_unknown_web_dragdrop_paste_forms(&config.providers);
+    warn_on_unknown_web_dragdrop_paste_forms(
+        &config.providers,
+        config.source_text.as_str().unwrap_or_default(),
+    );
     let (config, corrections) = load_corrections(config);
     for (_, warning) in corrections {
         crate::logger::warn(&warning);
@@ -4576,7 +4696,7 @@ pub fn load_corrections_of(raw: &str) -> Vec<(Vec<String>, String)> {
             found.push((recovery.key(), reason));
         }
     }
-    if let Ok(config) = config_from_text_as_written(raw) {
+    if let Ok(config) = config_from_text(raw, Report::Quiet) {
         found.extend(load_corrections(config).1);
     }
     found
@@ -4654,8 +4774,8 @@ fn terminal_font_size_load_warning(size: u16) -> Option<String> {
 /// unrecognized `capabilities.clipboard_passthrough` does; without this the
 /// degradation would be silent and a user who typed `single-quoted` would never
 /// learn why their dropped path stopped being quoted.
-fn warn_on_unknown_web_dragdrop_paste_forms(providers: &ProvidersConfig) {
-    for warning in web_dragdrop_paste_warnings(providers) {
+fn warn_on_unknown_web_dragdrop_paste_forms(providers: &ProvidersConfig, raw: &str) {
+    for warning in web_dragdrop_paste_warnings(providers, raw) {
         crate::logger::warn(&warning);
     }
 }
@@ -4668,12 +4788,16 @@ fn warn_on_unknown_web_dragdrop_paste_forms(providers: &ProvidersConfig) {
 /// per-paste resolution ([`ProviderCommandConfig::resolved_web_dragdrop_paste`])
 /// deliberately does not go through this, which is what keeps the warning to once
 /// per load rather than once per dropped file.
-pub fn web_dragdrop_paste_warnings(providers: &ProvidersConfig) -> Vec<String> {
+///
+/// Each names its setting through the one formatter against the file's text
+/// `raw`, so a provider name that breaks the naming rule is placed by its line.
+pub fn web_dragdrop_paste_warnings(providers: &ProvidersConfig, raw: &str) -> Vec<String> {
     providers
         .commands
         .iter()
         .filter_map(|(name, provider)| {
-            WebDragDropPaste::unknown_value_warning(name, provider.web_dragdrop_paste.as_deref()?)
+            let at = shown_path(raw, &key_path(&["providers", name, "web_dragdrop_paste"]));
+            WebDragDropPaste::unknown_value_warning(&at, provider.web_dragdrop_paste.as_deref()?)
         })
         .collect()
 }
@@ -7259,6 +7383,28 @@ max_websocket_connections = 16
                 "[server.Auth]\nrequire = \"network\"\n".to_string(),
                 "server.Auth",
             ),
+            // A hash outside [server.auth] is misplaced whatever the table
+            // around it is called, in any case, quoted or dotted.
+            (
+                format!("[ui]\npassword_hash = \"{hash}\"\n"),
+                "ui.password_hash",
+            ),
+            (
+                format!("[Server.auth]\npassword_hash = \"{hash}\"\n"),
+                "Server.auth.password_hash",
+            ),
+            (
+                format!("[SERVER.AUTH]\npassword_hash = \"{hash}\"\n"),
+                "SERVER.AUTH.password_hash",
+            ),
+            (
+                format!("[\"server.auth\"]\npassword_hash = \"{hash}\"\n"),
+                "\"server.auth\".password_hash",
+            ),
+            (
+                format!("[server]\n\"auth.password_hash\" = \"{hash}\"\n"),
+                "server.\"auth.password_hash\"",
+            ),
         ] {
             let error = recover_config(&body).expect_err(&body);
             let message = error.reason().to_string();
@@ -7270,15 +7416,14 @@ max_websocket_connections = 16
         // section real older configs carry (no password hash in it) still loads.
         recover_config("[ui]\nsomething_new = 1\n[server.limits]\nx = 1\n").expect("loads");
         recover_config("[auth]\nusername = \"ada\"\n").expect("the retired section loads");
-        // A name the user chose is never a misplaced hash, nor is a key of a
-        // section no auth setting could be meant for.
+        // A name the user chose is never a misplaced hash.
         for body in [
             "[env]\npassword_hash = \"x\"\n",
             "[providers.password_hash]\ncommand = \"mytool\"\n",
             "[providers.mytool]\ncommand = \"mytool\"\npassword_hash = \"x\"\n",
             "[macros.password_hash]\ntext = \"x\"\n",
             "[[projects]]\nid = \"p\"\npath = \"/tmp/p\"\n[projects.env]\npassword_hash = \"x\"\n",
-            "[ui]\npassword_hash = \"x\"\n",
+            "[keys]\npassword_hash = [\"x\"]\n",
         ] {
             assert_eq!(
                 misplaced_auth_problems(body),
@@ -8078,7 +8223,7 @@ mod agent_tabs_cap_tests {
         )
         .expect("a typo must not fail the whole config load");
 
-        let warnings = web_dragdrop_paste_warnings(&config.providers);
+        let warnings = web_dragdrop_paste_warnings(&config.providers, "");
         // ONE per misspelled provider. Not one per provider, and not one per
         // dropped file.
         assert_eq!(
@@ -8111,10 +8256,10 @@ mod agent_tabs_cap_tests {
                 WebDragDropPaste::Bare
             );
         }
-        assert_eq!(web_dragdrop_paste_warnings(&config.providers).len(), 2);
+        assert_eq!(web_dragdrop_paste_warnings(&config.providers, "").len(), 2);
 
         // A clean config says nothing at all.
-        assert!(web_dragdrop_paste_warnings(&ProvidersConfig::default()).is_empty());
+        assert!(web_dragdrop_paste_warnings(&ProvidersConfig::default(), "").is_empty());
     }
 
     #[test]

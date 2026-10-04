@@ -108,3 +108,45 @@ fn a_deprecated_key_still_in_the_file_is_not_written_again_as_its_new_keys() {
     assert!(!text.contains("host ="), "{text}");
     assert!(!text.contains("port ="), "{text}");
 }
+
+/// An untouched public `bind` still serves where it said after an unrelated
+/// save: a save does not remove `bind`, and the next start reads it again.
+#[test]
+fn an_untouched_bind_still_decides_the_listener_after_an_unrelated_save() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[server]\nbind = \"0.0.0.0:4000\"\n\n[ui]\ncopy_on_select = true\n",
+    )
+    .unwrap();
+    let mut memory = dux_core::config::load_config_file(&path).expect("load");
+    let q = ConfigWriteQueue::with_base(path.clone(), &memory);
+    memory.ui.copy_on_select = false;
+    q.save_eager(memory).unwrap();
+    let after = dux_core::config::load_config_file(&path).unwrap();
+    assert_eq!(after.server.host, "0.0.0.0", "{}", read(&path));
+    assert_eq!(after.server.port, 4000, "{}", read(&path));
+}
+
+/// When the file already sets the key that replaced a deprecated one, the
+/// save removes the deprecated key and keeps the file's own new value.
+#[test]
+fn a_new_key_the_file_already_sets_wins_over_the_deprecated_one_a_save_removes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[server]\ntailscale = \"yes\"\ntailscale_enabled = false\n\n[ui]\ncopy_on_select = true\n",
+    )
+    .unwrap();
+    let mut memory = dux_core::config::load_config_file(&path).expect("load");
+    assert_eq!(memory.server.tailscale, "yes");
+    let q = ConfigWriteQueue::with_base(path.clone(), &memory);
+    memory.ui.copy_on_select = false;
+    q.save_eager(memory).unwrap();
+    let text = read(&path);
+    assert!(!text.contains("tailscale_enabled"), "{text}");
+    let after = dux_core::config::load_config_file(&path).unwrap();
+    assert_eq!(after.server.tailscale, "yes", "{text}");
+}

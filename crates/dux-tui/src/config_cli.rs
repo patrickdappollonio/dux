@@ -1984,3 +1984,6 @@ mod dotted_names_migrations_and_providers_tests;
 
 #[cfg(test)]
 mod sets_over_the_start_corpus_tests;
+
+#[cfg(test)]
+mod get_names_every_setting_in_use_tests;

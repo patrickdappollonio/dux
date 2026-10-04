@@ -15,6 +15,13 @@
 #   web UI password setting (a `password_hash`, or an `auth` table) stops
 #   `dux server` too. 7437238c reset `[server]` and started with no password;
 #   a `[server]` that is not a table and holds none starts as it did then.
+# - A `password_hash` anywhere but the real `[server.auth]` (`[Server.auth]`,
+#   `[SERVER.AUTH]`, a quoted `["server.auth"]`, `"auth.password_hash"` under
+#   `[server]`, `[ui]`, `[defaults]`) stops both surfaces. 7437238c had no
+#   web password and ignored such a key, but the hash is a password the user
+#   meant to set, and starting without it would serve with none. Inside a map
+#   whose keys are names the user chose (`[env]`, a provider) it is just a
+#   name, and the file starts as it did then.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
@@ -427,3 +434,12 @@ start start "[keys]\nexit_interactive = [\"ctrl-x\"]\n"
 refuse start "[env]\n\"ghp.SECRET 1\" = \"x\"\n"
 start start "[providers.\"a.b c\"]\ncommand = \"x\"\n"
 refuse start "[macros]\n\"a.b c\" = \"x\"\n"
+refuse(was:start) refuse(was:start) "[server]\nhost = \"0.0.0.0\"\n\n[Server.auth]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[server]\nhost = \"0.0.0.0\"\n\n[\"server.auth\"]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[server]\nhost = \"0.0.0.0\"\n\"auth.password_hash\" = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[SERVER.AUTH]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+start start "server = { auth = { password_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\" } }\n"
+refuse(was:start) refuse(was:start) "[ui]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+refuse(was:start) refuse(was:start) "[defaults]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+start start "[env]\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"
+start start "[providers.mytool]\ncommand = \"x\"\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g\"\n"

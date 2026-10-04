@@ -111,6 +111,24 @@ pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(Vec<String>, String)> 
         .collect()
 }
 
+/// Migrate the one deprecated key `[section] key` in `doc`, if it is there
+/// and a migration rule carries its value: the value is written under the
+/// key that replaced it (unless `doc` already sets that one) and the
+/// deprecated key is removed. A value its rule cannot read is left as it is,
+/// for the caller to remove or keep.
+pub fn carry_over_deprecated_key(doc: &mut DocumentMut, section: &str, key: &str) {
+    let Some(rule) = DEPRECATED_CONFIG_KEYS
+        .iter()
+        .find(|rule| rule.old.section == section && rule.old.key == key)
+    else {
+        return;
+    };
+    let mut migrated = doc.clone();
+    if apply_config_deprecations_with(&mut migrated, std::slice::from_ref(rule)).is_ok() {
+        *doc = migrated;
+    }
+}
+
 /// A value the load migrations write in place of a deprecated key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CarriedOver {

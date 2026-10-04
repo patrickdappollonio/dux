@@ -307,6 +307,10 @@ fn shape_of(segments: &[String]) -> Option<Shape> {
             return provider_template().get(*field).map(shape_of_json);
         }
         ["env", _] => return Some(Shape::Text),
+        // Maps whose keys are names: an action's bindings, a macro by its
+        // name (and the fields of one written as a table). Any name is a
+        // setting there, set or not, as for `[env]` and `[providers]`.
+        ["keys", _] | ["macros", _] | ["macros", _, _] => return Some(Shape::Unknown),
         _ => {}
     }
     let mut node = default_tree();
@@ -1116,7 +1120,11 @@ fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
         }
         match used {
             Some(serde_json::Value::Null) | None => None,
-            Some(json) => toml::Value::try_from(json).ok().map(|value| render(&value)),
+            // A table carries its unset optional settings as nulls, which
+            // TOML has no way to write; they are left out, as the file would.
+            Some(json) => toml::Value::try_from(without_nulls(json))
+                .ok()
+                .map(|value| render(&value)),
         }
     };
     let used = used_at(&path);
@@ -1273,6 +1281,22 @@ fn leaves_of<'a>(
 /// default filled in, which is not a correction, so it is not.
 fn compared(value: &toml::Value) -> bool {
     !matches!(value, toml::Value::Array(items) if items.iter().any(toml::Value::is_table))
+}
+
+/// `json` with every null left out of its tables, recursively.
+fn without_nulls(json: serde_json::Value) -> serde_json::Value {
+    match json {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(key, value)| (key, without_nulls(value)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(without_nulls).collect())
+        }
+        other => other,
+    }
 }
 
 /// The value at the dotted `path` inside `value`, if there is one.

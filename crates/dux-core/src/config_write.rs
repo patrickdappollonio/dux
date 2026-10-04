@@ -558,6 +558,14 @@ fn union_arrays(seen: &mut toml_edit::ArrayOfTables, written: &toml_edit::ArrayO
 }
 
 fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<SaveBase<'_>>, ours: &Config) {
+    // A save removes the retired keys (below). Removing one that still
+    // carries a value and writing that value under the key that replaced it
+    // is ONE rewrite, made on the file as it is now, before anything is
+    // merged: the replacement lands unless the file already sets it, and a
+    // key the user deleted by hand is not there to carry anything.
+    for (section, key) in RETIRED_KEYS {
+        crate::config_migrate::carry_over_deprecated_key(disk, section, key);
+    }
     let original = disk.clone();
     let mut with_ours = original.clone();
     apply_patches(&mut with_ours, ours);
