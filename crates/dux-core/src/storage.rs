@@ -793,12 +793,74 @@ impl SessionStore {
         session_id: &str,
         snapshot: &[crate::process_sessions::ProcessIdentity],
     ) -> Result<()> {
+        // A union with what is already recorded: survivors written into the
+        // row before this snapshot landed must not be lost.
+        for mut row in self.load_pending_worktree_removals()? {
+            if row.session_id != session_id {
+                continue;
+            }
+            for identity in snapshot {
+                if !row.process_snapshot.contains(identity) {
+                    row.process_snapshot.push(*identity);
+                }
+            }
+            self.update_pending_removal_evidence(&row)?;
+        }
+        Ok(())
+    }
+
+    /// Add a session, and the members recorded for it, to every pending
+    /// removal of a folder that contains `folder`, so a later start ends what
+    /// the run that accepted the removal would have ended.
+    pub fn add_pending_removal_evidence(
+        &self,
+        folder: &std::path::Path,
+        session: crate::process_sessions::ProcessSession,
+        identities: &[crate::process_sessions::ProcessIdentity],
+    ) -> Result<()> {
+        for mut row in self.load_pending_worktree_removals()? {
+            if !crate::worktree_ops::folder_contains(
+                std::path::Path::new(&row.managed.worktree_path),
+                folder,
+            ) {
+                continue;
+            }
+            if !row.process_sessions.contains(&session) {
+                row.process_sessions.push(session);
+            }
+            for identity in identities {
+                if !row.process_snapshot.contains(identity) {
+                    row.process_snapshot.push(*identity);
+                }
+            }
+            self.update_pending_removal_evidence(&row)?;
+        }
+        Ok(())
+    }
+
+    fn update_pending_removal_evidence(&self, row: &PendingWorktreeRemoval) -> Result<()> {
+        let sessions = row
+            .process_sessions
+            .iter()
+            .map(|session| {
+                format!(
+                    "{}:{}:{}",
+                    session.sid, session.started_at_secs, session.boot
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         self.conn
             .execute(
-                "update pending_worktree_removals set process_snapshot = ?2 where session_id = ?1",
-                params![session_id, encode_identities(snapshot)],
+                "update pending_worktree_removals set process_sessions = ?2, \
+                 process_snapshot = ?3 where session_id = ?1",
+                params![
+                    row.session_id,
+                    sessions,
+                    encode_identities(&row.process_snapshot)
+                ],
             )
-            .context("failed to record a pending removal's processes")?;
+            .context("failed to record evidence into a pending removal")?;
         Ok(())
     }
 

@@ -322,6 +322,32 @@ impl AdmittedRemoval {
             processes,
             registry,
         } = self;
+        // Classified FIRST, against git's own listing: a path that is not a
+        // worktree dux manages for this project (the project checkout, a home
+        // folder, `/`) is refused here, before anything is waited for or
+        // ended, and the claim is withdrawn by finishing it.
+        let classified = git::list_worktrees(Path::new(&project.path))
+            .map_err(|e| format!("{e:#}"))
+            .map(|worktrees| {
+                resolve_removal(
+                    crate::project_browser::classify_project_worktrees(
+                        &project, &paths, &sessions, worktrees,
+                    ),
+                    &requested,
+                )
+            });
+        let refusal = match classified {
+            Ok(RemovalResolution::Removable { .. }) => None,
+            Ok(RemovalResolution::NotManaged) => Some(Ok(RemovalOutcome::NotManaged)),
+            Ok(RemovalResolution::Attached) => Some(Ok(RemovalOutcome::Attached)),
+            Err(message) => Some(Err(message)),
+        };
+        if let Some(refusal) = refusal {
+            lease.finish(Ok(crate::engine::RemovedBranches::Kept(
+                crate::model::BranchKeptReason::UserDeclined,
+            )));
+            return refusal;
+        }
         if let Err(still) = lease.wait_for_holders(wait) {
             let message = crate::engine::removal::removal_wait_expired_message(
                 &requested,
@@ -336,6 +362,13 @@ impl AdmittedRemoval {
         // folder is looked at once more under the claim, the same as an agent
         // delete's removal does.
         let requested_text = requested.to_string_lossy().into_owned();
+        // A standalone agent's processes are never ended; while any run here
+        // the folder is kept, before anything else is ended.
+        if let Some(message) = crate::engine::standalone_processes_keep(&registry, &requested_text)
+        {
+            lease.finish(Err(message.clone()));
+            return Err(message);
+        }
         let checked = crate::engine::end_agent_processes_before_removal(
             &processes,
             &registry,
@@ -348,6 +381,20 @@ impl AdmittedRemoval {
                     &occupant,
                 )),
                 None => Ok(()),
+            }
+        });
+        let checked = checked.and_then(|()| {
+            // Never at the same time as a removal of a folder around or inside
+            // this one (see `RemovalLease::wait_for_overlapping_removals`).
+            if lease.wait_for_overlapping_removals(wait) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the worktree at {} was kept: a removal of a folder around or inside it was \
+                     still running after {}s.",
+                    crate::home_path::shorten_home(&requested),
+                    wait.as_secs()
+                ))
             }
         });
         if let Err(message) = checked {

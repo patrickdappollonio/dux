@@ -168,6 +168,19 @@ impl Engine {
         &self.removal_coordination.ops
     }
 
+    /// Hold `worktree` for a git change made in it (stage, unstage, discard),
+    /// for as long as the guard lives: a removal of the worktree waits for it,
+    /// and one already under way refuses it with a sentence.
+    pub fn hold_for_git_change(
+        &self,
+        worktree: impl AsRef<Path>,
+        what: &str,
+    ) -> anyhow::Result<crate::worktree_ops::WorktreeOpGuard> {
+        self.worktree_ops()
+            .hold(worktree, WorktreeOpKind::GitChange)
+            .map_err(|refused| anyhow::anyhow!(refused.sentence(what).to_string()))
+    }
+
     /// Claim everything a startup-command rerun needs before it starts, or
     /// the ONE sentence that says why it may not, decided here for both
     /// surfaces:
@@ -663,7 +676,15 @@ impl Engine {
             .iter()
             .find(|project| project.id == project_id)?
             .clone();
-        // Announced FIRST, so the occupancy question below is answered under
+        // Nothing is claimed for a path that cannot be one of this project's
+        // managed worktrees: it must lie strictly inside the project's folder
+        // under dux's worktrees root and must not hold the project's own
+        // checkout. Git's own listing decides the rest on the worker, still
+        // before anything is ended.
+        if !could_be_managed_worktree(&self.paths.worktrees_root, &project, requested) {
+            return Some(RemovalAdmission::Refused(RemovalOutcome::NotManaged));
+        }
+        // Announced next, so the occupancy question below is answered under
         // the claim: nothing new can take the folder (or any folder inside it)
         // from here on, so a "free" answer stays true until git runs. A refusal
         // drops the lease, which withdraws the announcement.
@@ -706,6 +727,21 @@ impl Engine {
             registry: self.process_registry.clone(),
         })))
     }
+}
+
+/// Whether `requested` can be one of `project`'s managed worktrees at all,
+/// decided from paths alone: strictly inside the project's folder under the
+/// worktrees root, and not containing the project's own checkout. A cheap
+/// refusal before anything is claimed; git's listing is the full answer.
+fn could_be_managed_worktree(
+    worktrees_root: &Path,
+    project: &crate::model::Project,
+    requested: &Path,
+) -> bool {
+    let managed_root = worktrees_root.join(&project.name);
+    crate::worktree_ops::folder_contains(&managed_root, requested)
+        && crate::worktree_ops::path_key(requested) != crate::worktree_ops::path_key(&managed_root)
+        && !crate::worktree_ops::folder_contains(requested, Path::new(&project.path))
 }
 
 #[cfg(test)]

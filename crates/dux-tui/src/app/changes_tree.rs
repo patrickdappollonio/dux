@@ -725,6 +725,21 @@ impl App {
             ));
             return;
         }
+        // Held for as long as the worker runs, like every other operation in a
+        // worktree: a removal of it waits for this, and one already under way
+        // refuses it.
+        let what = match op {
+            FolderOp::Stage => "stage the folder",
+            FolderOp::Unstage => "unstage the folder",
+            FolderOp::Delete => "delete the folder's files",
+        };
+        let hold = match self.engine.hold_for_git_change(&worktree, what) {
+            Ok(hold) => hold,
+            Err(refused) => {
+                self.set_error(refused.to_string());
+                return;
+            }
+        };
         let busy = match op {
             FolderOp::Stage => format!("Staging \"{label}\" ({count_words})\u{2026}"),
             FolderOp::Unstage => format!("Unstaging \"{label}\" ({count_words})\u{2026}"),
@@ -758,6 +773,7 @@ impl App {
         let _ = thread::Builder::new()
             .name("dux-changes-folder-op".into())
             .spawn(move || {
+                let _hold = hold;
                 let outcome =
                     match op {
                         FolderOp::Stage => {
@@ -1069,6 +1085,37 @@ mod tests {
                 ChangesRow::Failed { depth, .. } => format!("{}failed", "  ".repeat(depth)),
             })
             .collect()
+    }
+
+    /// A folder stage holds the worktree like every other operation in it:
+    /// refused with a sentence once the worktree's removal has begun, with no
+    /// worker started and nothing staged.
+    #[test]
+    fn a_folder_op_is_refused_in_a_worktree_being_removed() {
+        let (mut app, worktree) = repo_app();
+        let _claim = app.engine.worktree_ops().announce_removal(&worktree);
+        app.start_folder_op(FolderOp::Stage, &folder("node_modules/", "??", 13));
+        assert!(
+            app.changes_tree.pending_ops.is_empty(),
+            "no worker was started"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status.text().contains("dux is removing the worktree"),
+            "{}",
+            app.status.text()
+        );
+        let staged = std::process::Command::new("git")
+            .args([
+                "-C",
+                worktree.to_str().unwrap(),
+                "diff",
+                "--cached",
+                "--name-only",
+            ])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&staged.stdout).trim().is_empty());
     }
 
     fn render_text(app: &mut App, width: u16, height: u16) -> Vec<String> {

@@ -717,6 +717,7 @@ impl Engine {
                 worktree_path,
                 path,
             } => {
+                let _hold = self.hold_for_git_change(&worktree_path, "stage the file")?;
                 crate::git::stage_file(&worktree_path, &path)?;
                 Ok(EventReaction::Nothing)
             }
@@ -725,6 +726,7 @@ impl Engine {
                 worktree_path,
                 path,
             } => {
+                let _hold = self.hold_for_git_change(&worktree_path, "unstage the file")?;
                 crate::git::unstage_file(&worktree_path, &path)?;
                 Ok(EventReaction::Nothing)
             }
@@ -735,6 +737,7 @@ impl Engine {
                 is_untracked,
                 confirmed,
             } => {
+                let _hold = self.hold_for_git_change(&worktree_path, "discard the change")?;
                 // The discard refuses anything that is no longer what was
                 // confirmed, so a success is the kind the user confirmed; the
                 // number of files is what actually went, which may be fewer.

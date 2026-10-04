@@ -719,6 +719,14 @@ pub(crate) fn perform_deferred_removal(
     // Held outside the unwind boundary, so even a panic below finishes it.
     let mut lease = None;
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // A standalone agent's processes are never ended; while any run in
+        // the worktree, it is kept, before anything else is ended.
+        if let Some(message) = standalone_processes_keep(&registry, &managed.worktree_path) {
+            if let crate::worktree_ops::RemovalClaim::Lead(leading) = claim {
+                lease = Some(leading);
+            }
+            return Err(message);
+        }
         // Nothing dux started for the agent may still be running in the
         // worktree when git starts deleting it: a writer there turns
         // `git worktree remove --force` into a half-done removal.
@@ -770,6 +778,19 @@ pub(crate) fn perform_deferred_removal(
                 &occupant,
             ));
         }
+        // A removal of a folder around this one, or inside it, never runs git
+        // at the same time as this one: wait for the earlier one. If it took
+        // this folder with it, the git step below finds it gone and only
+        // forgets its registration and deletes the branches asked for.
+        if !leading.wait_for_overlapping_removals(wait) {
+            return Err(format!(
+                "the worktree at {} was kept: a removal of a folder around or inside it was \
+                 still running after {}s. Remove it from the worktree manager once that has \
+                 finished.",
+                crate::home_path::shorten_home(std::path::Path::new(&managed.worktree_path)),
+                wait.as_secs()
+            ));
+        }
         // A rename that landed while this removal waited moved the branch, so
         // it is deleted by the name it has NOW.
         let branch_name = leading.renamed(&managed.branch_name);
@@ -812,6 +833,48 @@ pub(crate) fn perform_deferred_removal(
         lease.finish(result.clone());
     }
     result
+}
+
+/// The final when processes a standalone agent started are still running in
+/// (or under) the folder being removed: dux never ends them, so the folder is
+/// kept. `None` when none are running. Blocking: a worker thread's call.
+pub(crate) fn standalone_processes_keep(
+    registry: &crate::process_sessions::AgentProcessRegistry,
+    folder: &str,
+) -> Option<String> {
+    let sessions = registry.standalone_sessions_in(std::path::Path::new(folder));
+    if sessions.is_empty() {
+        return None;
+    }
+    let running = crate::process_sessions::members(
+        &crate::process_sessions::read_process_table(),
+        &sessions,
+        &registry.survivors_of(&sessions),
+        std::process::id(),
+    );
+    if running.is_empty() {
+        return None;
+    }
+    let started_in = registry
+        .folders_of(&sessions)
+        .into_iter()
+        .map(|folder| crate::home_path::shorten_home(&folder))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "the worktree at {} was kept: {} that a standalone agent started in {started_in} \
+         {} still running ({}). dux never ends a standalone agent's processes; stop {}, then \
+         remove the worktree from the worktree manager.",
+        crate::home_path::shorten_home(std::path::Path::new(folder)),
+        if running.len() == 1 {
+            "a process"
+        } else {
+            "processes"
+        },
+        if running.len() == 1 { "is" } else { "are" },
+        crate::process_sessions::describe(&running),
+        if running.len() == 1 { "it" } else { "them" },
+    ))
 }
 
 /// What still occupies a folder once a removal has waited for everything it
@@ -1309,8 +1372,16 @@ impl Engine {
             self.owning_session_for_tab(tab_id.as_str()),
             client.process_session(),
         ) {
-            self.process_registry
-                .register(&session_id, process, client.spawn_dir());
+            let standalone = self
+                .session_by_id(&session_id)
+                .is_some_and(|session| session.workspace.as_managed().is_none());
+            if standalone {
+                self.process_registry
+                    .register_standalone(&session_id, process, client.spawn_dir());
+            } else {
+                self.process_registry
+                    .register(&session_id, process, client.spawn_dir());
+            }
             client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
         }
         self.providers.insert(tab_id.clone(), client);
@@ -2287,8 +2358,11 @@ impl Engine {
                 self.begin_close_provider(id, session.display_label(), Some(owner));
             }
             self.begin_close_session_terminals(&session.id);
-            // Nothing of this agent's will ever be purged now, so the record
-            // of what it started goes with it.
+            // The record of what it started is retired, keeping its kind: a
+            // standalone agent's processes are never ended by any removal.
+            if session.workspace.as_managed().is_none() {
+                self.process_registry.mark_standalone(&session.id);
+            }
             let _ = self.process_registry.forget_agent(&session.id);
             return;
         };

@@ -178,7 +178,17 @@ impl Engine {
                     crate::process_sessions::UNOWNED_PTYS
                 }
             };
-            self.process_registry.register(key, process, cwd);
+            let standalone_agent = match owner.as_ref() {
+                crate::model::TerminalOwnerRef::Session(session_id) => self
+                    .session_by_id(session_id)
+                    .is_some_and(|session| session.workspace.as_managed().is_none()),
+                _ => false,
+            };
+            if standalone_agent {
+                self.process_registry.register_standalone(key, process, cwd);
+            } else {
+                self.process_registry.register(key, process, cwd);
+            }
             client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
         }
         self.terminal_counter += 1;

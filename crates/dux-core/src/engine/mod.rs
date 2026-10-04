@@ -22,6 +22,8 @@ pub mod status_op;
 #[cfg(test)]
 mod races_review2_tests;
 #[cfg(test)]
+mod races_review3_tests;
+#[cfg(test)]
 mod removal_review_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -42,6 +44,7 @@ pub use events::{
 };
 pub(crate) use events::{
     end_agent_processes_before_removal, occupant_after_wait, occupied_after_wait_message,
+    standalone_processes_keep,
 };
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{

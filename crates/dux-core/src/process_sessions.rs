@@ -390,6 +390,16 @@ struct RegistryInner {
     /// Agents whose startup command is running right now, and whether the
     /// agent has been deleted under it.
     startup_runs: HashMap<String, bool>,
+    /// Owners that are standalone agents. Their sessions keep that kind for
+    /// life: no removal ever ends them, and while they run they occupy the
+    /// folder they are in.
+    standalone_owners: HashSet<String>,
+    /// Retired sessions whose owner was a standalone agent.
+    retired_standalone: HashSet<ProcessSession>,
+    /// The session database, once a removal has been recorded in it: a
+    /// survivor recorded later for a folder with a pending removal is written
+    /// into that removal's row, so a later start ends the same set.
+    pending_store: Option<std::path::PathBuf>,
 }
 
 /// The registry key for a PTY that belongs to no agent (a project or a
@@ -440,17 +450,70 @@ impl AgentProcessRegistry {
         }
     }
 
+    /// [`Self::register`] for a standalone agent's session (see
+    /// `standalone_owners`).
+    pub fn register_standalone(
+        &self,
+        agent_id: &str,
+        session: ProcessSession,
+        folder: &std::path::Path,
+    ) {
+        self.lock().standalone_owners.insert(agent_id.to_string());
+        self.register(agent_id, session, folder);
+    }
+
+    /// Mark `agent_id` as a standalone agent, so its sessions keep that kind.
+    pub fn mark_standalone(&self, agent_id: &str) {
+        self.lock().standalone_owners.insert(agent_id.to_string());
+    }
+
+    fn is_standalone_entry(
+        inner: &RegistryInner,
+        owner: Option<&str>,
+        session: &ProcessSession,
+    ) -> bool {
+        owner.is_some_and(|owner| inner.standalone_owners.contains(owner))
+            || inner.retired_standalone.contains(session)
+    }
+
+    /// Write survivors recorded from now on into the pending removals of
+    /// `db_path`.
+    pub fn set_pending_removal_store(&self, db_path: &std::path::Path) {
+        self.lock().pending_store = Some(db_path.to_path_buf());
+    }
+
     /// Record `identities` as members of `session` (see
-    /// [`survivors_at_leader_exit`]).
+    /// [`survivors_at_leader_exit`]), and into any pending removal of the
+    /// folder the session runs in.
     pub fn record_survivors(&self, session: ProcessSession, identities: &[ProcessIdentity]) {
         if identities.is_empty() {
             return;
         }
-        let mut inner = self.lock();
-        let entry = inner.survivors.entry(session).or_default();
-        for identity in identities {
-            if !entry.contains(identity) {
-                entry.push(*identity);
+        let (store, folder) = {
+            let mut inner = self.lock();
+            let entry = inner.survivors.entry(session).or_default();
+            for identity in identities {
+                if !entry.contains(identity) {
+                    entry.push(*identity);
+                }
+            }
+            let folder = inner
+                .sessions
+                .values()
+                .flatten()
+                .chain(inner.retired.iter())
+                .find(|(known, _)| *known == session)
+                .map(|(_, folder)| folder.clone());
+            (inner.pending_store.clone(), folder)
+        };
+        if let (Some(store), Some(folder)) = (store, folder) {
+            let written = crate::storage::SessionStore::open(&store)
+                .and_then(|store| store.add_pending_removal_evidence(&folder, session, identities));
+            if let Err(err) = written {
+                crate::logger::warn(&format!(
+                    "could not record what session {} left running into a pending removal: {err:#}",
+                    session.sid
+                ));
             }
         }
     }
@@ -503,15 +566,50 @@ impl AgentProcessRegistry {
     /// removal of the folder ends all of them, and its last look before git
     /// runs asks this again to see whether anything new arrived.
     pub fn sessions_in(&self, folder: &std::path::Path) -> Vec<ProcessSession> {
-        let folder = crate::worktree_ops::path_key(folder);
+        self.sessions_in_of_kind(folder, false)
+    }
+
+    /// The folders `sessions` were started in.
+    pub fn folders_of(&self, sessions: &[ProcessSession]) -> Vec<std::path::PathBuf> {
         let inner = self.lock();
-        let mut found: Vec<ProcessSession> = inner
+        let mut folders: Vec<std::path::PathBuf> = inner
             .sessions
             .values()
             .flatten()
             .chain(inner.retired.iter())
-            .filter(|(_, started_in)| started_in.starts_with(&folder))
-            .map(|(session, _)| *session)
+            .filter(|(session, _)| sessions.contains(session))
+            .map(|(_, folder)| folder.clone())
+            .collect();
+        folders.sort();
+        folders.dedup();
+        folders
+    }
+
+    /// The sessions standalone agents started in `folder` or inside it, live or
+    /// retired. Never ended by a removal; while they run they occupy the folder.
+    pub fn standalone_sessions_in(&self, folder: &std::path::Path) -> Vec<ProcessSession> {
+        self.sessions_in_of_kind(folder, true)
+    }
+
+    fn sessions_in_of_kind(
+        &self,
+        folder: &std::path::Path,
+        standalone: bool,
+    ) -> Vec<ProcessSession> {
+        let folder = crate::worktree_ops::path_key(folder);
+        let inner = self.lock();
+        let live = inner
+            .sessions
+            .iter()
+            .flat_map(|(owner, list)| list.iter().map(move |entry| (Some(owner.as_str()), entry)));
+        let retired = inner.retired.iter().map(|entry| (None, entry));
+        let mut found: Vec<ProcessSession> = live
+            .chain(retired)
+            .filter(|(_, (_, started_in))| started_in.starts_with(&folder))
+            .filter(|(owner, (session, _))| {
+                Self::is_standalone_entry(&inner, *owner, session) == standalone
+            })
+            .map(|(_, (session, _))| *session)
             .collect();
         found.sort_by_key(|session| session.sid);
         found.dedup();
@@ -541,11 +639,17 @@ impl AgentProcessRegistry {
                 })
             })
             .collect();
+        let standalone = inner.standalone_owners.remove(agent_id);
         for entry in &mine {
             inner.retired.push_back(entry.clone());
+            if standalone {
+                inner.retired_standalone.insert(entry.0);
+            }
         }
         while inner.retired.len() > RETIRED_SESSIONS {
-            inner.retired.pop_front();
+            if let Some((dropped, _)) = inner.retired.pop_front() {
+                inner.retired_standalone.remove(&dropped);
+            }
         }
         mine.into_iter().map(|(session, _)| session).collect()
     }

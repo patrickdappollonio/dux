@@ -521,6 +521,40 @@ impl RemovalLease {
         }
     }
 
+    /// Block until no OTHER removal of a folder that contains this one, or
+    /// that this one contains, is running, or `timeout` passes (`false`). Two
+    /// such removals must never run git at the same time: the outer one
+    /// deletes the inner folder too. The later one waits; afterwards its own
+    /// folder may already be gone, which its git step answers by forgetting
+    /// the registration and nothing more. Run it on a worker thread only.
+    pub fn wait_for_overlapping_removals(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.ops.lock();
+        loop {
+            let overlapping = state.paths.iter().any(|(key, entry)| {
+                entry.removal.as_ref().is_some_and(|removal| {
+                    removal.id < self.id
+                        && *key != self.key
+                        && (key_contains(key, &self.key) || key_contains(&self.key, key))
+                })
+            });
+            if !overlapping {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            state = self
+                .ops
+                .inner
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+    }
+
     /// `branch` as it is called now, following every rename recorded while
     /// this removal was pending.
     pub fn renamed(&self, branch: &str) -> String {
@@ -671,6 +705,44 @@ mod tests {
             ops.hold(dir.path().join("wt-two"), WorktreeOpKind::Upload)
                 .is_ok()
         );
+    }
+
+    /// Removals of `/a` and `/a/c` never run git at the same time: the later
+    /// one waits for the earlier one to finish, whichever is the outer.
+    #[test]
+    fn a_removal_waits_for_an_earlier_removal_of_a_folder_around_or_inside_it() {
+        let ops = WorktreeOps::new();
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("a");
+        let inner = outer.join("c");
+        let RemovalClaim::Lead(first) = ops.announce_removal(&outer) else {
+            panic!("leads");
+        };
+        let RemovalClaim::Lead(second) = ops.announce_removal(&inner) else {
+            panic!("a different folder leads its own removal");
+        };
+        assert!(
+            first.wait_for_overlapping_removals(Duration::ZERO),
+            "the earlier one goes first"
+        );
+        assert!(
+            !second.wait_for_overlapping_removals(Duration::from_millis(50)),
+            "the later one waits while the earlier one runs"
+        );
+        let waiter = std::thread::spawn(move || {
+            second.wait_for_overlapping_removals(Duration::from_secs(10))
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        first.finish(kept());
+        assert!(waiter.join().unwrap(), "and goes once it has finished");
+        // An unrelated sibling never waits.
+        let RemovalClaim::Lead(_a) = ops.announce_removal(dir.path().join("x")) else {
+            panic!()
+        };
+        let RemovalClaim::Lead(b) = ops.announce_removal(dir.path().join("y")) else {
+            panic!()
+        };
+        assert!(b.wait_for_overlapping_removals(Duration::ZERO));
     }
 
     #[test]

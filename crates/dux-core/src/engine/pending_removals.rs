@@ -102,20 +102,35 @@ impl Engine {
     /// the removal goes ahead: losing it only on a crash is no worse than
     /// before.
     pub(crate) fn record_pending_removal(&self, label: &str, removal: &DeferredWorktreeRemoval) {
+        // Everything the live dispatch would end, so a removal finished at the
+        // next start ends exactly the same set: the agent's own sessions, and
+        // every session dux registered in the folder (a closed terminal's, an
+        // agent deleted earlier with its worktree kept), with what dux has
+        // already recorded as running in them. The snapshot thread adds what
+        // it sees once it has looked, and a survivor recorded later for this
+        // folder is added as it lands.
+        let mut sessions = removal.processes.sessions.clone();
+        sessions
+            .extend(self.process_sessions_in(std::path::Path::new(&removal.managed.worktree_path)));
+        sessions.sort_by_key(|session| session.sid);
+        sessions.dedup();
+        let mut known = removal
+            .processes
+            .snapshot
+            .get()
+            .cloned()
+            .unwrap_or_default();
+        known.extend(self.process_registry.survivors_of(&sessions));
+        known.sort_by_key(|identity| (identity.pid, identity.start_time));
+        known.dedup();
         let row = PendingWorktreeRemoval {
             session_id: removal.session_id.clone(),
             label: label.to_string(),
             project_path: removal.project_path.clone(),
             managed: removal.managed.clone(),
             delete_branch: removal.delete_branch,
-            process_sessions: removal.processes.sessions.clone(),
-            // Filled in by the snapshot thread once it has looked.
-            process_snapshot: removal
-                .processes
-                .snapshot
-                .get()
-                .cloned()
-                .unwrap_or_default(),
+            process_sessions: sessions,
+            process_snapshot: known,
         };
         if let Err(err) = self.session_store.insert_pending_worktree_removal(&row) {
             crate::logger::error(&format!(
@@ -123,6 +138,8 @@ impl Engine {
                 removal.session_id
             ));
         }
+        self.process_registry
+            .set_pending_removal_store(&self.paths.sessions_db_path);
     }
 
     /// Clear a pending removal's row on the engine's own connection.
