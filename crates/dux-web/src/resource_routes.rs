@@ -214,10 +214,9 @@ impl ResourceService {
     }
 }
 
-/// The resource-monitor read route. Served with no authentication, like every
-/// other API route (the single-tenant trusted-access model in CLAUDE.md): any
-/// client that can reach the server can read every agent's and terminal's process
-/// stats.
+/// The resource-monitor read route. Behind the same auth layer as every other
+/// API route (the single-tenant model in CLAUDE.md): any client it lets in can
+/// read every agent's and terminal's process stats.
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/resources", get(get_resources))
 }

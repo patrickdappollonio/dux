@@ -1,6 +1,6 @@
 //! Test-only helpers shared by the REST route modules' `#[cfg(test)]` suites:
-//! a minimal headless engine handle plus a plain router builder. dux is
-//! trusted-local with no login gate, so every route is served plainly.
+//! a minimal headless engine handle plus a plain router builder. With no
+//! password in the test config, the auth layer lets every route through.
 //! Mirrors the private `test_engine_handle` in `server.rs`, lifted here so every
 //! route module can boot the same engine without duplicating the recipe.
 

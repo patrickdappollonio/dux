@@ -915,12 +915,14 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Blank,
         ConfigEntry::Section("server"),
         ConfigEntry::Comment(
-            "# The dux web UI is a trusted-local tool: there is no login gate. It binds\n\
-             # host:port (loopback by default) and, unless you turn it off, also this\n\
-             # machine's Tailscale address so your other tailnet devices can reach it\n\
-             # (traffic is WireGuard-encrypted in transit). The in-app \"start web\n\
+            "# The dux web UI: one workspace for one owner, with one optional password\n\
+             # (see [server.auth] below, which also decides who is asked for it). It\n\
+             # binds host:port (loopback by default) and, unless you turn it off, also\n\
+             # this machine's Tailscale address so your other tailnet devices can reach\n\
+             # it (traffic is WireGuard-encrypted in transit). The in-app \"start web\n\
              # server\" flip always serves on loopback (plus Tailscale) regardless of\n\
-             # host. Only run a non-loopback host on a network you trust.\n\
+             # host. With no password set, anyone who can reach an address dux listens\n\
+             # on drives your agents and terminals, and dux warns about it loudly.\n\
              #\n\
              # Three settings below decide where dux listens and who it answers.\n\
              # They do NOT override each other; they stack, and they are checked in\n\
@@ -981,20 +983,25 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # If the CLI is missing, the daemon is down, or something else already\n\
                  # holds that port, dux WARNS and keeps listening. A Tailscale problem\n\
                  # never stops dux from starting.\n\
-                 # Unless this is \"no\", dux also checks that no Tailscale Funnel\n\
-                 # publishes it to the internet, because it has no login: while a\n\
-                 # Funnel forwards to dux, or while Tailscale is on this machine but\n\
-                 # dux cannot ask it (the CLI fails, or is missing while a tailscaled\n\
-                 # runs), every request is refused with a page saying why. Fix\n\
-                 # tailscaled or put the tailscale CLI on PATH; \"no\" also gets you in,\n\
-                 # but it turns these checks off. `dux server --no-tailscale` forces\n\
-                 # \"no\" for a single run, and refuses a live change back.\n\
+                 # Unless this is \"no\", dux also looks for a Tailscale Funnel or TCP\n\
+                 # forward that could relay the internet onto its port, because such a\n\
+                 # relay arrives over loopback and would look like this machine. While\n\
+                 # one stands, or while dux cannot tell (the CLI fails, or is missing\n\
+                 # while a tailscaled runs, or the first look has not finished), dux\n\
+                 # counts loopback as the network: with a password set, everyone,\n\
+                 # this machine included, signs in; with none, dux serves and warns\n\
+                 # loudly. Funnel visitors get the login page. On \"no\" dux cannot\n\
+                 # check at all, so it counts loopback as the network the whole time:\n\
+                 # with a password set, someone on this machine signs in too, whatever\n\
+                 # [server.auth] require says. `dux server --no-tailscale` forces \"no\"\n\
+                 # for a single run, and refuses a live change back.\n\
                  # You do not need to edit this file to change your mind: the palette\n\
                  # command set-tailscale-mode and the web Preferences dialog change this\n\
                  # while dux runs, apply it to the listener that is serving, and save the\n\
                  # choice back here.\n\
-                 # NOTE: a shared tailnet means OTHER people's devices can reach dux, and\n\
-                 # there is no login gate.",
+                 # NOTE: a shared tailnet means OTHER people's devices can reach dux.\n\
+                 # Under the default [server.auth] require = \"network\" they need no\n\
+                 # password; set it to \"tailnet\" to ask them for it.",
             )),
             value_fn: |c| FieldValue::Str(c.server.tailscale.clone()),
         },
@@ -1091,10 +1098,12 @@ fn config_schema() -> Vec<ConfigEntry> {
                  #   true:            dux starts serving as soon as the TUI does, on\n\
                  #                    loopback plus the Tailscale address (per tailscale\n\
                  #                    above), exactly like the flip binds.\n\
-                 # TRUST: there is no login. With this on, a listener exists for as long\n\
-                 # as dux runs, and anyone who can reach it drives your agents and\n\
-                 # worktrees. That is the same trust model as the rest of this section;\n\
-                 # what changes is that it now applies whenever the TUI is open.\n\
+                 # TRUST: with this on, a listener exists for as long as dux runs, and\n\
+                 # everyone it lets in drives your agents and worktrees: with no\n\
+                 # password set, that is anyone who can reach it ([server.auth] decides\n\
+                 # who is asked for one). That is the same trust model as the rest of\n\
+                 # this section; what changes is that it now applies whenever the TUI is\n\
+                 # open.\n\
                  # ONE DRIVER AT A TIME: the TUI and every browser take part in the same\n\
                  # input-ownership model, so a terminal is driven by whichever device\n\
                  # claimed it and the others watch. A watcher still sees the live output\n\
@@ -2962,6 +2971,18 @@ mod tests {
     /// There is deliberately NO experimental marker to require: the TUI takes
     /// part in the ownership model, so the comment describes one driver at a time
     /// rather than warning about a redraw fight.
+    /// No serve-related comment still says there is no login: the password
+    /// exists, and the comments are the documentation.
+    #[test]
+    fn no_comment_says_there_is_no_login() {
+        let toml = render_default_config().to_lowercase();
+        for stale in ["no login", "login gate", "is refused with a page"] {
+            assert!(!toml.contains(stale), "{stale}");
+        }
+        let tailscale = render_default_config();
+        assert!(tailscale.contains("On \"no\" dux cannot"), "{tailscale}");
+    }
+
     #[test]
     fn serve_while_tui_comment_states_what_trust_ownership_and_how_to_stop() {
         let toml = render_default_config();
@@ -2978,7 +2999,7 @@ mod tests {
             // what it does
             "keeps running",
             // the trust consequence
-            "no login",
+            "anyone who can reach it",
             // what happens when two devices want the same terminal
             "take over",
             // how to stop it
@@ -4584,8 +4605,9 @@ args = [\"-l\"]
         assert!(rendered.contains("[server.auth]"), "{rendered}");
         let parsed: Config = toml::from_str(&rendered).expect("valid");
         assert_eq!(parsed.server.auth, config.server.auth);
+        // The section's own header line: comments elsewhere mention it too.
         let section = rendered
-            .split("[server.auth]")
+            .split("\n[server.auth]\n")
             .nth(1)
             .expect("section")
             .split("\n[")
