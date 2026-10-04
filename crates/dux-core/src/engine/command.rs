@@ -445,6 +445,7 @@ impl Engine {
                 let paths = self.paths.clone();
                 let config = self.config.clone();
                 let identity = self.resolved_identity();
+                let registry = self.process_registry.clone();
                 Ok(self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: "create-agent".into(),
@@ -467,6 +468,7 @@ impl Engine {
                             term_size,
                             op_id_for_job,
                             identity,
+                            registry,
                         );
                     },
                 ))

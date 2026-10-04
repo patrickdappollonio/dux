@@ -216,7 +216,54 @@ pub fn open_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run_startup_command(paths: &DuxPaths, run: StartupCommandRun) -> StartupCommandResult {
+/// Run an agent's startup command in its worktree and record the run's log.
+///
+/// The command runs in a SESSION of its own (`setsid`), registered for the
+/// agent in `registry`, so deleting the agent with its worktree ends it and
+/// anything it left running, the same way it ends the agent's PTYs. One run
+/// per agent at a time: a second one while the first is still going is
+/// refused rather than run beside it in the same worktree.
+///
+/// When the agent is deleted while the command runs, no log is written: the
+/// agent's log folder went with it and is never recreated for a run nobody can
+/// look at any more.
+pub fn run_startup_command(
+    paths: &DuxPaths,
+    run: StartupCommandRun,
+    registry: &crate::process_sessions::AgentProcessRegistry,
+) -> StartupCommandResult {
+    match registry.begin_startup_run(&run.session.id) {
+        Some(guard) => run_claimed_startup_command(paths, run, guard),
+        None => {
+            let log_path = startup_log_path(paths, &run);
+            StartupCommandResult {
+                status: Err(startup_already_running_message(
+                    &run.session.display_label(),
+                )),
+                session_id: run.session.id,
+                project_name: run.project.name,
+                log_path,
+            }
+        }
+    }
+}
+
+fn startup_log_path(paths: &DuxPaths, run: &StartupCommandRun) -> PathBuf {
+    let log_dir = agent_log_dir(paths, &run.project.id, &run.session.id);
+    let file_stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+    let safe_branch = sanitize_file_component(&run.managed.branch_name);
+    log_dir.join(format!("{file_stamp}-{safe_branch}.log"))
+}
+
+/// [`run_startup_command`] for a caller that has already claimed the agent's
+/// one run, on its own thread, so a second request cannot slip in between the
+/// claim and the worker starting. The surfaces' reruns claim on the engine
+/// thread and refuse there, with a sentence, when the claim is taken.
+pub fn run_claimed_startup_command(
+    paths: &DuxPaths,
+    run: StartupCommandRun,
+    guard: crate::process_sessions::StartupRunGuard,
+) -> StartupCommandResult {
     let log_dir = agent_log_dir(paths, &run.project.id, &run.session.id);
     let timestamp = Utc::now();
     let file_stamp = timestamp.format("%Y%m%dT%H%M%SZ");
@@ -243,12 +290,30 @@ pub fn run_startup_command(paths: &DuxPaths, run: StartupCommandRun) -> StartupC
             .env("DUX_AGENT_ID", &run.session.id)
             .env("DUX_AGENT_BRANCH", &run.managed.branch_name)
             .env("DUX_PROVIDER", run.session.provider.as_str())
-            .env("DUX_STARTUP_COMMAND_LOG", &log_path);
+            .env("DUX_STARTUP_COMMAND_LOG", &log_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         for (name, value) in &run.env {
             command.env(name, value);
         }
-        let output = command
-            .output()
+        // SAFETY: the hook runs in the forked child before exec and calls only
+        // `setsid`, which is async-signal-safe and touches no Rust state.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        let child = command
+            .spawn()
+            .with_context(|| format!("failed to run startup command through {shell}"))?;
+        guard.register_session(crate::process_sessions::ProcessSession::started_now(
+            child.id(),
+        ));
+        let output = child
+            .wait_with_output()
             .with_context(|| format!("failed to run startup command through {shell}"))?;
         let ended = Utc::now();
         Ok(CommandOutcome {
@@ -263,6 +328,19 @@ pub fn run_startup_command(paths: &DuxPaths, run: StartupCommandRun) -> StartupC
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     })();
+
+    if guard.agent_deleted() {
+        return StartupCommandResult {
+            status: Err(format!(
+                "agent \"{}\" was deleted while its startup command was running, so dux \
+                 stopped the command and kept no log of it",
+                run.session.display_label()
+            )),
+            session_id: run.session.id,
+            project_name: run.project.name,
+            log_path,
+        };
+    }
 
     let status = match result {
         Ok(outcome) => {
@@ -293,7 +371,6 @@ pub fn run_startup_command(paths: &DuxPaths, run: StartupCommandRun) -> StartupC
                 stdout: String::new(),
                 stderr: format!("{err:#}"),
             };
-            let _ = fs::create_dir_all(&log_dir);
             let _ = write_log(&log_path, &run, &fallback);
             Err(format!("{err:#}"))
         }
@@ -305,6 +382,15 @@ pub fn run_startup_command(paths: &DuxPaths, run: StartupCommandRun) -> StartupC
         log_path,
         status,
     }
+}
+
+/// The refusal for a second startup-command run of one agent while the first
+/// is still going. Both surfaces say it in these words.
+pub fn startup_already_running_message(agent_label: &str) -> String {
+    format!(
+        "The startup command for agent \"{agent_label}\" is still running. Wait for it to \
+         finish, then run it again; its log will show how the current run went."
+    )
 }
 
 fn startup_shell_command(raw: &str) -> String {
@@ -335,7 +421,15 @@ fn write_log(path: &Path, run: &StartupCommandRun, outcome: &CommandOutcome) -> 
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("startup command log path has no parent"))?;
-    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    // Never created here: the run made the folder when it started, and a
+    // folder that is gone by now was deleted with its agent. Recreating it
+    // would leave a log folder behind for an agent that no longer exists.
+    if !parent.is_dir() {
+        return Err(anyhow!(
+            "the startup command log folder {} no longer exists",
+            parent.display()
+        ));
+    }
     let mut body = String::new();
     body.push_str("dux startup command log\n");
     body.push_str(&format!("started_at = {}\n", outcome.started.to_rfc3339()));
@@ -474,6 +568,7 @@ mod tests {
                 },
                 env: Vec::new(),
             },
+            &crate::process_sessions::AgentProcessRegistry::default(),
         );
 
         assert!(result.status.is_ok());
@@ -508,6 +603,7 @@ mod tests {
                 },
                 env: Vec::new(),
             },
+            &crate::process_sessions::AgentProcessRegistry::default(),
         );
         let err = result
             .status
@@ -559,6 +655,7 @@ mod tests {
                 },
                 env: Vec::new(),
             },
+            &crate::process_sessions::AgentProcessRegistry::default(),
         );
 
         assert!(result.status.is_err());
@@ -595,11 +692,146 @@ mod tests {
                     ("API_KEY".to_string(), "secret".to_string()),
                 ],
             },
+            &crate::process_sessions::AgentProcessRegistry::default(),
         );
 
         assert!(result.status.is_ok());
         let log = read_log(&result.log_path).expect("log");
         assert!(log.contains("--- stdout ---\ntrue:secret"));
+    }
+
+    fn sleeper_run(tmp: &Path, command: &str) -> StartupCommandRun {
+        let session = test_session(tmp);
+        StartupCommandRun {
+            project: test_project(tmp),
+            managed: session
+                .workspace
+                .as_managed()
+                .expect("test_session builds a managed agent")
+                .clone(),
+            session,
+            command: command.to_string(),
+            terminal: StartupCommandTerminalConfig {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string()],
+            },
+            env: Vec::new(),
+        }
+    }
+
+    fn wait_for_pid(path: &Path) -> i32 {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(pid) = fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "the command never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// One run per agent: a second run while the first is going is refused
+    /// with a sentence, and nothing of it runs.
+    #[test]
+    fn a_second_run_for_the_same_agent_is_refused_while_the_first_runs() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        let _first = registry.begin_startup_run("session-1").expect("first run");
+        let result = run_startup_command(&paths, sleeper_run(tmp.path(), "touch ran"), &registry);
+        let err = result.status.expect_err("the second run is refused");
+        assert!(err.contains("is still running"), "{err}");
+        assert!(
+            !tmp.path().join("ran").exists(),
+            "the refused run never ran"
+        );
+    }
+
+    /// The command leads a session of its own, registered for its agent, so a
+    /// worktree removal can end it and whatever it leaves running.
+    #[test]
+    fn the_startup_command_runs_in_a_session_of_its_own_registered_for_its_agent() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        let run = sleeper_run(tmp.path(), "echo $$ > pid.txt; sleep 1");
+        let thread_registry = registry.clone();
+        let handle = std::thread::spawn(move || run_startup_command(&paths, run, &thread_registry));
+        let pid = wait_for_pid(&tmp.path().join("pid.txt"));
+        let sid = rustix::process::getsid(rustix::process::Pid::from_raw(pid))
+            .expect("getsid")
+            .as_raw_nonzero()
+            .get();
+        assert_eq!(sid, pid, "the command leads its own session");
+        assert!(registry.startup_running("session-1"));
+        let result = handle.join().expect("run thread");
+        assert!(result.status.is_ok(), "{:?}", result.status);
+        assert!(
+            !registry.startup_running("session-1"),
+            "the claim is released"
+        );
+        assert!(
+            registry
+                .sessions_of("session-1")
+                .iter()
+                .any(|session| session.sid == pid as u32),
+            "its session is registered for the agent"
+        );
+    }
+
+    /// An agent deleted while its startup command runs takes its log folder
+    /// with it, and the run must not put the folder back.
+    #[test]
+    fn a_run_whose_agent_was_deleted_does_not_recreate_its_log_folder() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        let run = sleeper_run(tmp.path(), "echo $$ > pid.txt; sleep 1");
+        let thread_paths = paths.clone();
+        let thread_registry = registry.clone();
+        let handle =
+            std::thread::spawn(move || run_startup_command(&thread_paths, run, &thread_registry));
+        wait_for_pid(&tmp.path().join("pid.txt"));
+        // What deleting the agent does to its logs and its registration.
+        delete_agent_logs(&paths, "project-1", "session-1").expect("delete logs");
+        let _ = registry.forget_agent("session-1");
+        let result = handle.join().expect("run thread");
+        let err = result.status.expect_err("the run reports the deletion");
+        assert!(err.contains("was deleted"), "{err}");
+        assert!(
+            !agent_log_dir(&paths, "project-1", "session-1").exists(),
+            "the deleted agent's log folder stays gone"
+        );
+    }
+
+    /// Writing a run's log never creates its folder: a folder that is gone by
+    /// then was deleted with its agent.
+    #[test]
+    fn writing_a_log_never_recreates_a_deleted_log_folder() {
+        let tmp = tempdir().expect("tempdir");
+        let gone = tmp.path().join("deleted-agent");
+        let outcome = CommandOutcome {
+            shell: "/bin/sh".to_string(),
+            shell_args: Vec::new(),
+            started: Utc::now(),
+            ended: Utc::now(),
+            duration_ms: 0,
+            code: Some(0),
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let err = write_log(
+            &gone.join("run.log"),
+            &sleeper_run(tmp.path(), "true"),
+            &outcome,
+        )
+        .expect_err("no folder, no log");
+        assert!(err.to_string().contains("no longer exists"), "{err:#}");
+        assert!(!gone.exists(), "the folder was not put back");
     }
 
     #[test]

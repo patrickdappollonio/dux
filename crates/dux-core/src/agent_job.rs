@@ -1504,6 +1504,7 @@ fn launch_managed_create(
     create_key: String,
     identity: crate::term_identity::TerminalIdentity,
     mut creation_notes: Vec<crate::status_text::StatusText>,
+    registry: crate::process_sessions::AgentProcessRegistry,
 ) {
     let ManagedCreatePlan {
         project,
@@ -1672,6 +1673,7 @@ fn launch_managed_create(
                     terminal: config.startup_command_terminal.clone(),
                     env: env.clone(),
                 },
+                &registry,
             )
         });
     if let Some(result) = &startup_result {
@@ -1744,6 +1746,7 @@ pub fn run_create_agent_job(
     term_size: (u16, u16),
     status_op_id: String,
     identity: crate::term_identity::TerminalIdentity,
+    registry: crate::process_sessions::AgentProcessRegistry,
 ) {
     // The opaque id of the shared create-agent `HandlerStatusOp` keys every
     // progress/failure event and is carried in `AgentLaunchKind::Create` so the
@@ -1786,6 +1789,7 @@ pub fn run_create_agent_job(
         create_key,
         identity,
         creation_notes,
+        registry,
     );
 }
 pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<WorkerEvent>) {
@@ -1966,6 +1970,7 @@ mod tests {
             (80, 24),
             "op-1".to_string(),
             crate::term_identity::TerminalIdentity::default(),
+            Default::default(),
         );
         let mut run = JobRun {
             session: None,
@@ -2230,6 +2235,7 @@ mod tests {
             (80, 24),
             "op-standalone".to_string(),
             crate::term_identity::TerminalIdentity::default(),
+            Default::default(),
         );
         let mut run = StandaloneRun::default();
         while let Ok(event) = rx.try_recv() {

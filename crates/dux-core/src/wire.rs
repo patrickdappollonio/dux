@@ -2864,6 +2864,13 @@ impl Engine {
                 )
             })?;
 
+        // One run per agent at a time: a second one beside the first would run
+        // the same provisioning twice in one worktree.
+        let Some(claim) = self.process_registry.begin_startup_run(session_id) else {
+            anyhow::bail!(crate::startup::startup_already_running_message(
+                &session.display_label()
+            ));
+        };
         let paths = self.paths.clone();
         let terminal = self.config.startup_command_terminal.clone();
         let env =
@@ -2903,7 +2910,7 @@ impl Engine {
             env,
         };
         let reaction = self.spawn_status_op(op, move || {
-            crate::startup::run_startup_command(&paths, run).status
+            crate::startup::run_claimed_startup_command(&paths, run, claim).status
         });
         // `spawn_status_op` returns the pending Busy as an `EventReaction::Status`;
         // surface it as the wire outcome so the originating client shows the spinner
@@ -5964,6 +5971,46 @@ mod tests {
             err.to_string().contains("does not have a startup command"),
             "err: {err}"
         );
+    }
+
+    /// A rerun while the previous run is still going is refused with a
+    /// sentence instead of running the same provisioning twice in one worktree,
+    /// and the claim is taken on the engine thread, so no second request can
+    /// slip in before the first run's worker starts.
+    #[test]
+    fn wire_rerun_startup_command_refuses_a_second_run_while_one_is_going() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let mut project = sample_project("p1", "/repo");
+        project.startup_command = Some("touch started; sleep 1".to_string());
+        engine.projects.push(project);
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+        let rerun = WireCommand::RerunStartupCommand {
+            session_id: "s1".to_string(),
+        };
+
+        engine
+            .apply_wire(rerun.clone())
+            .expect("the first run starts");
+        let err = engine
+            .apply_wire(rerun.clone())
+            .map(|_| ())
+            .expect_err("a second run is refused while the first is going");
+        assert!(err.to_string().contains("is still running"), "err: {err}");
+
+        // Once the first has finished, a rerun is accepted again.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while engine.process_registry.startup_running("s1") {
+            assert!(std::time::Instant::now() < deadline, "the run never ended");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        engine.apply_wire(rerun).expect("a later run starts");
     }
 
     #[test]

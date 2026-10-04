@@ -3291,6 +3291,7 @@ mod tests {
             (80, 24),
             "op-test".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),
+            Default::default(),
         );
 
         match worker_rx.recv().expect("worker event") {
@@ -3481,6 +3482,7 @@ mod tests {
             (80, 24),
             "op-create-1".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),
+            Default::default(),
         );
 
         match worker_rx.recv().expect("worker event") {

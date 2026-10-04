@@ -458,3 +458,46 @@ fn a_relaunch_waits_for_the_previous_run_of_its_provider() {
     );
     assert!(waited_out_loud, "the wait was announced");
 }
+
+/// A startup command still running when the agent is deleted with its
+/// worktree runs in a session dux registered for the agent, so the removal
+/// ends it, and what it started, before git touches a file. The run then says
+/// the agent was deleted rather than writing a log for an agent that is gone.
+#[test]
+fn removal_ends_a_startup_command_still_running_in_the_worktree() {
+    let mut fx = fixture();
+    let script = writer_script(&fx.pidfile);
+    let session = fx.engine.sessions[0].clone();
+    let run = crate::startup::StartupCommandRun {
+        project: fx.engine.projects[0].clone(),
+        managed: session
+            .workspace
+            .as_managed()
+            .expect("managed test session")
+            .clone(),
+        session,
+        command: format!("sh '{}'", script.display()),
+        terminal: crate::config::StartupCommandTerminalConfig {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string()],
+        },
+        env: Vec::new(),
+    };
+    let paths = fx.engine.paths.clone();
+    let registry = fx.engine.process_registry.clone();
+    let handle =
+        std::thread::spawn(move || crate::startup::run_startup_command(&paths, run, &registry));
+    wait_for_writers(&fx.pidfile, 1);
+
+    let result = delete_and_wait(&mut fx.engine);
+    // Whatever happened, nothing of the test's may keep running.
+    for pid in writer_pids(&fx.pidfile) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+    let startup = handle.join().expect("startup thread");
+    assert_removed_cleanly(&fx, result);
+    let err = startup.status.expect_err("the run reports the deletion");
+    assert!(err.contains("was deleted"), "{err}");
+}

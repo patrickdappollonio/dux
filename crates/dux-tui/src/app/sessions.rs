@@ -3036,6 +3036,14 @@ impl App {
             ));
             return Ok(());
         };
+        // One run per agent at a time: a second one beside the first would run
+        // the same provisioning twice in one worktree.
+        let Some(claim) = self.engine.process_registry.begin_startup_run(&session.id) else {
+            self.set_error(crate::startup::startup_already_running_message(
+                &session.display_label(),
+            ));
+            return Ok(());
+        };
         let paths = self.engine.paths.clone();
         let tx = self.engine.worker_tx.clone();
         let branch = managed.branch_name.clone();
@@ -3064,7 +3072,7 @@ impl App {
         });
         let pending = self.engine.begin_status_op(&op);
         std::thread::spawn(move || {
-            let result = crate::startup::run_startup_command(
+            let result = crate::startup::run_claimed_startup_command(
                 &paths,
                 crate::startup::StartupCommandRun {
                     project,
@@ -3074,6 +3082,7 @@ impl App {
                     terminal,
                     env,
                 },
+                claim,
             );
             let resolved = op.resolve(&result.status);
             let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
