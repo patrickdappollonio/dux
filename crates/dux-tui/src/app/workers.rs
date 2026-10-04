@@ -3112,7 +3112,7 @@ mod tests {
             status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
         };
 
-        dux_core::agent_job::run_agent_launch_job(request, worker_tx);
+        dux_core::agent_job::run_agent_launch_job(request, worker_tx, &Default::default());
 
         match worker_rx.recv().expect("worker event") {
             WorkerEvent::AgentLaunchFailed(data) => {

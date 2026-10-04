@@ -659,6 +659,7 @@ impl Engine {
                 // consumes `request`, so panic recovery can take the same path
                 // as `process_agent_launch_failed`.
                 let panic_request = (*request).clone();
+                let gate = self.spawn_gate();
                 let reaction = self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: format!("agent-launch:{tab_id}"),
@@ -682,7 +683,7 @@ impl Engine {
                             )));
                             return;
                         }
-                        crate::agent_job::run_agent_launch_job(*request, tx);
+                        crate::agent_job::run_agent_launch_job(*request, tx, &gate);
                     },
                 );
                 // Wrap the primitive's return into the View variant so App

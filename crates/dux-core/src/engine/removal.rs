@@ -1271,6 +1271,7 @@ mod tests {
         let tab = session.slot_tab_id().to_owned();
         let (outcome, final_status) =
             engine.process_agent_launch_ready(crate::worker::AgentLaunchReadyData {
+                spawn_ticket: None,
                 request: crate::worker::AgentLaunchRequest {
                     tab_id: tab,
                     provider: session.provider.clone(),

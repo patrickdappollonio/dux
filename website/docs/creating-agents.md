@@ -139,7 +139,9 @@ from the remote you want first.
 > sits inside, something it knows about: an agent's worktree, a standalone agent's folder,
 > a project's repository, or a terminal working there. Any other ignored folder or file git
 > still replaces, as it would in your own terminal, so move it aside first if it matters.
-> The same goes for an agent's **Pull** and for **Pull project**.
+> Likewise, when the incoming commit deletes every file in a folder, git removes the folder
+> too, and dux refuses when one of those lives or works there. The same goes for an agent's
+> **Pull** and for **Pull project**.
 
 > [!NOTE]
 > dux's own pulls and branch switches never update submodules, even when your git config

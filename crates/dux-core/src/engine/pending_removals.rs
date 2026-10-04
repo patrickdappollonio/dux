@@ -811,6 +811,13 @@ impl Engine {
     /// What a worker that pulls into or switches a checkout needs to refuse a
     /// move that would make git delete a folder something lives in (see
     /// [`crate::checkout_move`]).
+    pub fn spawn_gate(&self) -> crate::process_sessions::SpawnGate {
+        crate::process_sessions::SpawnGate::new(
+            self.process_registry.clone(),
+            self.removal_coordination.ops.clone(),
+        )
+    }
+
     pub fn checkout_move_guard(&self) -> crate::checkout_move::CheckoutMoveGuard {
         crate::checkout_move::CheckoutMoveGuard::new(
             self.process_registry.clone(),

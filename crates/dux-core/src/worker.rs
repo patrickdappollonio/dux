@@ -341,6 +341,9 @@ impl AgentLaunchRequest {
 pub struct AgentLaunchReadyData {
     pub request: AgentLaunchRequest,
     pub client: PtyClient,
+    /// The spawn's ticket, kept until the engine has registered the new
+    /// session (see [`crate::process_sessions::SpawnGate`]).
+    pub spawn_ticket: Option<crate::process_sessions::SpawnTicket>,
 }
 
 #[derive(Clone, Debug)]

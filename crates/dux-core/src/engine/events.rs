@@ -896,6 +896,11 @@ pub(crate) fn occupant_after_wait(
     {
         return Some("an agent is being created in it".to_string());
     }
+    // A spawn that began before the folder was claimed registers its session
+    // in a moment; nothing new can begin now that it is claimed.
+    if !live.wait_for_spawns(lease.path(), crate::process_sessions::SPAWN_WAIT) {
+        return Some("something dux is starting in it has not finished starting".to_string());
+    }
     // The one occupancy rule over the agents and projects as the session
     // database has them now: a project added inside the folder, an agent
     // made there. `stored` names the database and the agent this removal is
@@ -1498,7 +1503,13 @@ impl Engine {
         &mut self,
         data: AgentLaunchReadyData,
     ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
-        let AgentLaunchReadyData { request, client } = data;
+        // Released when this returns: the session is registered by then, or
+        // the client (and its process) was dropped.
+        let AgentLaunchReadyData {
+            request,
+            client,
+            spawn_ticket: _spawn_ticket,
+        } = data;
         let session = request.session.clone();
         let pty_size = request.pty_size;
         // Runtime PTY/provider state is keyed by tab id (the slot tab id for the
@@ -7997,6 +8008,7 @@ mod tests {
             "the two children must be distinguishable for this test to say anything"
         );
         let data = AgentLaunchReadyData {
+            spawn_ticket: None,
             request: AgentLaunchRequest {
                 tab_id: tab.clone(),
                 provider: session.provider.clone(),

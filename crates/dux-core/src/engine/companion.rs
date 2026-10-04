@@ -149,6 +149,14 @@ impl Engine {
         // pane matches it on the first frame, with no initial reflow of the
         // shell; a headless caller passes a default and relies on the client's
         // first resize.
+        //
+        // Announced before the check and kept until the session is registered
+        // below, so a removal claiming the folder meanwhile either refuses
+        // this spawn or waits to see its session.
+        let _spawning = self
+            .spawn_gate()
+            .enter(cwd)
+            .map_err(|refused| anyhow::anyhow!("{}", refused.sentence("open a terminal there")))?;
         let client = PtyClient::spawn_with_env_opts(
             &self.config.terminal.command,
             &self.config.terminal.args,

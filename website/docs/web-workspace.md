@@ -168,7 +168,9 @@ clone that sat on the wrong branch.
 > treats ignored files as disposable. dux refuses, and changes nothing, when that folder
 > holds, or that file sits inside, an agent's worktree, a standalone agent's folder, a
 > project's repository or a terminal working there, and says which. Any other ignored folder
-> or file git still replaces, so move it aside first if it matters.
+> or file git still replaces, so move it aside first if it matters. A folder the incoming
+> commit deletes every file of goes too, and dux refuses the same way when one of those
+> lives or works there.
 
 > [!NOTE]
 > These pulls and switches never update submodules, even when your git config sets

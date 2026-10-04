@@ -99,10 +99,19 @@ impl CheckoutMoveGuard {
         crate::engine::destructive_guard::assert_off_engine_thread(
             "checking what a pull or branch switch would remove",
         );
-        let entries = incoming_entries(checkout, target)?;
-        let tracked = tracked_at_head(checkout, &candidate_paths(checkout, &entries))?;
-        let locations =
-            locations_git_would_replace(checkout, &entries, &|path| tracked.contains(path));
+        let changes = incoming_entries(checkout, target)?;
+        let entries = &changes.entries;
+        let tracked = tracked_at_head(checkout, &candidate_paths(checkout, entries))?;
+        let mut locations =
+            locations_git_would_replace(checkout, entries, &|path| tracked.contains(path));
+        for folder in folders_left_empty(checkout, &changes) {
+            if !locations.iter().any(|known| known.path == folder) {
+                locations.push(Location {
+                    path: folder,
+                    kind: LocationKind::FolderEmptied,
+                });
+            }
+        }
         let mut claims = Vec::with_capacity(locations.len());
         for location in &locations {
             let claim = self
@@ -114,6 +123,19 @@ impl CheckoutMoveGuard {
                 )
                 .map_err(|reason| refusal(checkout, location, what, &reason))?;
             claims.push(claim);
+        }
+        // A spawn anywhere in the checkout that began before the claims
+        // registers its session in a moment; the looks below must see it.
+        if !locations.is_empty()
+            && !self
+                .registry
+                .wait_for_spawns(checkout, crate::process_sessions::SPAWN_WAIT)
+        {
+            return Err(anyhow!(
+                "dux did not {what}: something dux is starting in {} has not finished starting; \
+                 try again in a moment",
+                crate::home_path::shorten_home(checkout)
+            ));
         }
         for (location, claim) in locations.iter().zip(&claims) {
             // What lives in it (a folder or a link removed whole) ...
@@ -285,6 +307,10 @@ fn refusal(checkout: &Path, location: &Location, what: &str, reason: &str) -> an
             "needs a folder at {relative}, so git would replace the untracked file or link that \
              stands there"
         ),
+        LocationKind::FolderEmptied => format!(
+            "deletes everything in {relative}, so git would remove the folder itself once it is \
+             empty"
+        ),
     };
     anyhow!(
         "dux did not {what}: the commit it would check out {change}, and {reason}. Nothing in {} \
@@ -320,10 +346,10 @@ pub(crate) fn commit_id(repo: &Path, rev: &str) -> Result<Option<String>> {
     Ok((!id.is_empty()).then_some(id))
 }
 
-/// Every path moving from HEAD to `target` would create or replace (not the
-/// ones it deletes), from plumbing with NUL-separated paths. On an unborn
-/// HEAD, every path of `target`.
-fn incoming_entries(checkout: &Path, target: &str) -> Result<Vec<IncomingEntry>> {
+/// What moving from HEAD to `target` changes, from plumbing with NUL-separated
+/// paths: every path it creates or replaces, and every path it deletes. On an
+/// unborn HEAD, every path of `target` and nothing deleted.
+fn incoming_entries(checkout: &Path, target: &str) -> Result<IncomingChanges> {
     let head = commit_id(checkout, "HEAD")?;
     let mut command = Command::new("git");
     command.arg("-C").arg(checkout);
@@ -338,7 +364,6 @@ fn incoming_entries(checkout: &Path, target: &str) -> Result<Vec<IncomingEntry>>
                 // still moves: list it whatever the repository says.
                 "--ignore-submodules=none",
                 "--no-commit-id",
-                "--diff-filter=d",
                 head,
                 target,
             ]);
@@ -359,8 +384,18 @@ fn incoming_entries(checkout: &Path, target: &str) -> Result<Vec<IncomingEntry>>
     }
     Ok(match head {
         Some(_) => parse_raw_diff(&output.stdout),
-        None => parse_ls_tree(&output.stdout),
+        None => IncomingChanges {
+            entries: parse_ls_tree(&output.stdout),
+            deleted: Vec::new(),
+        },
     })
+}
+
+/// What a move changes: the paths it writes, and the paths it deletes.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct IncomingChanges {
+    entries: Vec<IncomingEntry>,
+    deleted: Vec<PathBuf>,
 }
 
 fn bytes_to_path(bytes: &[u8]) -> PathBuf {
@@ -370,24 +405,114 @@ fn bytes_to_path(bytes: &[u8]) -> PathBuf {
 
 /// `diff-tree -r -z --no-renames` output: a `:srcmode dstmode src dst status`
 /// header, then the path, each NUL-terminated.
-fn parse_raw_diff(out: &[u8]) -> Vec<IncomingEntry> {
-    let mut entries = Vec::new();
+fn parse_raw_diff(out: &[u8]) -> IncomingChanges {
+    let mut changes = IncomingChanges::default();
     let mut fields = out.split(|b| *b == 0);
     while let Some(header) = fields.next() {
         if header.is_empty() {
             continue;
         }
         let Some(path) = fields.next() else { break };
-        let dst_mode = header
+        let fields: Vec<&[u8]> = header
             .strip_prefix(b":")
-            .and_then(|rest| rest.split(|b| *b == b' ').nth(1))
-            .unwrap_or_default();
-        entries.push(IncomingEntry {
+            .unwrap_or_default()
+            .split(|b| *b == b' ')
+            .collect();
+        let dst_mode = fields.get(1).copied().unwrap_or_default();
+        if fields.get(4).is_some_and(|status| status.starts_with(b"D")) {
+            changes.deleted.push(bytes_to_path(path));
+            continue;
+        }
+        changes.entries.push(IncomingEntry {
             path: bytes_to_path(path),
             gitlink: dst_mode == b"160000",
         });
     }
-    entries
+    changes
+}
+
+/// Every folder git would remove because the move deletes everything in it:
+/// after deleting its files, git removes each folder left empty. A folder
+/// holding anything the move does not delete (an untracked or ignored file, a
+/// path the incoming commit writes) stays. Only the outermost such folders
+/// are answered; the ones inside them go with them. A folder whose contents
+/// cannot be read is answered as removed, which only makes the check ask.
+fn folders_left_empty(checkout: &Path, changes: &IncomingChanges) -> Vec<PathBuf> {
+    use std::collections::HashSet;
+    let deleted: HashSet<&Path> = changes.deleted.iter().map(PathBuf::as_path).collect();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for path in &changes.deleted {
+        let mut at = path.parent();
+        while let Some(folder) = at {
+            if folder.as_os_str().is_empty() {
+                break;
+            }
+            if !candidates.iter().any(|known| known == folder) {
+                candidates.push(folder.to_path_buf());
+            }
+            at = folder.parent();
+        }
+    }
+    let written_under = |folder: &Path| {
+        changes
+            .entries
+            .iter()
+            .any(|entry| entry.path.starts_with(folder))
+    };
+    let mut removed: Vec<PathBuf> = candidates
+        .into_iter()
+        .filter(|folder| {
+            !written_under(folder) && only_deleted_paths_in(checkout, folder, &deleted)
+        })
+        .collect();
+    // Outermost only.
+    let all = removed.clone();
+    removed.retain(|folder| {
+        !all.iter()
+            .any(|other| other != folder && folder.starts_with(other))
+    });
+    removed
+        .into_iter()
+        .map(|folder| checkout.join(folder))
+        .collect()
+}
+
+/// Whether everything on disk in `folder` (relative to `checkout`), at any
+/// depth, is a path the move deletes. A real folder that is not there, or
+/// cannot be read, counts as all deleted.
+fn only_deleted_paths_in(
+    checkout: &Path,
+    folder: &Path,
+    deleted: &std::collections::HashSet<&Path>,
+) -> bool {
+    let at = checkout.join(folder);
+    let Ok(meta) = std::fs::symlink_metadata(&at) else {
+        return true;
+    };
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return deleted.contains(folder);
+    }
+    let Ok(listing) = std::fs::read_dir(&at) else {
+        return true;
+    };
+    for entry in listing {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let child = folder.join(entry.file_name());
+        let is_dir = entry
+            .file_type()
+            .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink());
+        let gone = if is_dir {
+            only_deleted_paths_in(checkout, &child, deleted)
+        } else {
+            deleted.contains(child.as_path())
+        };
+        if !gone {
+            return false;
+        }
+    }
+    true
 }
 
 /// `ls-tree -r -z` output: `mode type id<TAB>path`, NUL-terminated.
@@ -414,6 +539,8 @@ enum LocationKind {
     Overwritten,
     /// An untracked file or link standing where a folder goes: replaced.
     FileWhereFolderGoes,
+    /// A folder whose every entry the move deletes: removed once empty.
+    FolderEmptied,
 }
 
 /// One place git would overwrite or remove something HEAD does not track.
@@ -664,7 +791,7 @@ mod tests {
     fn raw_diff_and_ls_tree_paths_are_read_byte_for_byte() {
         let raw = b":000000 100644 0000 1111 A\0odd name\nwith newline\0:100644 160000 1111 2222 T\0sub\0";
         assert_eq!(
-            parse_raw_diff(raw),
+            parse_raw_diff(raw).entries,
             vec![
                 IncomingEntry {
                     path: "odd name\nwith newline".into(),
@@ -676,6 +803,10 @@ mod tests {
                 },
             ]
         );
+        let deleting = b":100644 000000 1111 0000 D\0docs/guide.md\0";
+        let changes = parse_raw_diff(deleting);
+        assert!(changes.entries.is_empty());
+        assert_eq!(changes.deleted, vec![PathBuf::from("docs/guide.md")]);
         let tree = b"100644 blob 1111\tscratch\x00160000 commit 2222\tsub\x00";
         assert_eq!(
             parse_ls_tree(tree),

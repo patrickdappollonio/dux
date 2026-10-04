@@ -133,6 +133,16 @@ impl DestructiveCheck {
                     "it was not claimed first, so something could still start in it".to_string(),
                 ));
             }
+            // A spawn that began before the claim registers its session in a
+            // moment; the look below must see it.
+            if !self
+                .registry
+                .wait_for_spawns(&target.path, crate::process_sessions::SPAWN_WAIT)
+            {
+                return Err(refused(
+                    "something dux is starting in it has not finished starting".to_string(),
+                ));
+            }
             let reason = target
                 .occupant
                 .clone()

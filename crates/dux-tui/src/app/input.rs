@@ -16820,7 +16820,11 @@ not_a_real_action = ["x"]
         app.engine
             .worker_tx
             .send(WorkerEvent::AgentLaunchReady(Box::new(
-                crate::app::AgentLaunchReadyData { request, client },
+                crate::app::AgentLaunchReadyData {
+                    request,
+                    client,
+                    spawn_ticket: None,
+                },
             )))
             .unwrap();
         app.drain_events();

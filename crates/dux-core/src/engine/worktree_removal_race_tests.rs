@@ -519,6 +519,58 @@ fn removal_ends_a_startup_command_still_running_in_the_worktree() {
     assert!(err.contains("was deleted"), "{err}");
 }
 
+/// The window the ordering closes: a startup command whose process is already
+/// running in the worktree while its session is not yet registered (held open
+/// here for 400 ms). The delete lands inside it, and the removal's last look
+/// must still see, and end, what the command started.
+#[test]
+fn a_removal_waits_for_a_startup_command_spawned_before_it_registered() {
+    let mut fx = fixture();
+    crate::startup::tests_hooks::delay_registration_in(
+        std::path::Path::new(&fx.engine.sessions[0].directory().to_string()),
+        Duration::from_millis(400),
+    );
+    let script = writer_script(&fx.pidfile);
+    let session = fx.engine.sessions[0].clone();
+    let run = crate::startup::StartupCommandRun {
+        project: fx.engine.projects[0].clone(),
+        managed: session
+            .workspace
+            .as_managed()
+            .expect("managed test session")
+            .clone(),
+        session,
+        command: format!("sh '{}'", script.display()),
+        terminal: crate::config::StartupCommandTerminalConfig {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string()],
+        },
+        env: Vec::new(),
+    };
+    let paths = fx.engine.paths.clone();
+    let registry = fx.engine.process_registry.clone();
+    let handle =
+        std::thread::spawn(move || crate::startup::run_startup_command(&paths, run, &registry));
+    // The writer is running; its session is not registered yet.
+    wait_for_writers(&fx.pidfile, 1);
+    assert!(
+        fx.engine
+            .process_registry
+            .sessions_in(&fx.worktree)
+            .is_empty(),
+        "the delete lands inside the window"
+    );
+
+    let result = delete_and_wait(&mut fx.engine);
+    for pid in writer_pids(&fx.pidfile) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+    let _ = handle.join().expect("startup thread");
+    assert_removed_cleanly(&fx, result);
+}
+
 fn pending_rows(engine: &Engine) -> Vec<crate::storage::PendingWorktreeRemoval> {
     engine
         .session_store

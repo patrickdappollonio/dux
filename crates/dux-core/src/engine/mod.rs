@@ -56,6 +56,8 @@ mod review20_tests;
 #[cfg(test)]
 mod review21_tests;
 #[cfg(test)]
+mod review22_tests;
+#[cfg(test)]
 mod review8_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -11663,6 +11665,7 @@ mod tab_ops_tests {
 
         engine.close_tab("s1", "s1-slot").expect("promotion");
         engine.process_agent_launch_ready(AgentLaunchReadyData {
+            spawn_ticket: None,
             request,
             client: spawn_cat(tmp.path()),
         });
@@ -12210,6 +12213,7 @@ mod tab_ops_tests {
             },
         );
         engine.process_agent_launch_ready(AgentLaunchReadyData {
+            spawn_ticket: None,
             request,
             client: spawn_cat(tmp.path()),
         });
@@ -12242,6 +12246,7 @@ mod tab_ops_tests {
             },
         );
         engine.process_agent_launch_ready(AgentLaunchReadyData {
+            spawn_ticket: None,
             request,
             client: spawn_cat(tmp.path()),
         });

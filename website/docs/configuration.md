@@ -45,8 +45,9 @@ Hand-edits are preserved across saves: your comments and ordering survive.
 
 > [!WARNING]
 > A factory reset deletes every worktree dux made, uncommitted work included. First it stops
-> what dux itself started in those worktrees and left running (a startup command's dev
-> server, say), giving each the same grace period as a delete before forcing it. A folder
+> what dux itself started and left running in those worktrees (a startup command's dev
+> server, or a job a terminal left working in one, say), giving each the same grace period
+> as a delete before forcing it. A folder
 > where something still runs (one of those that would not stop, or anything a standalone
 > agent started) is kept, and so may one something else is still writing into. The reset
 > carries on with everything else, then lists each folder it had to leave behind and why.

@@ -335,6 +335,13 @@ pub fn run_claimed_startup_command(
                 Ok(())
             });
         }
+        // Announced before the spawn and kept until the session is
+        // registered, so a removal of the worktree either sees the session or
+        // came after the delete that refuses the spawn here.
+        let worktree = std::path::Path::new(&run.managed.worktree_path);
+        let Some(spawning) = guard.begin_spawn(worktree) else {
+            anyhow::bail!(NOT_STARTED_DELETED);
+        };
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to run startup command through {shell}"))?;
@@ -342,10 +349,12 @@ pub fn run_claimed_startup_command(
         let stderr = OutputDrain::start(child.stderr.take());
         let process = crate::process_sessions::ProcessSession::started_now(child.id());
         crate::process_sessions::note_spawned(process);
+        #[cfg(test)]
+        tests_hooks::delay_registration(worktree);
         // Ended at once, by the registration itself, when the agent was
         // deleted between the check above and here.
-        let _ended =
-            guard.register_session(process, std::path::Path::new(&run.managed.worktree_path));
+        let _ended = guard.register_session(process, worktree);
+        drop(spawning);
         guard.label(process, "an agent's startup command");
         drop(command);
         let status = child.wait();
@@ -386,6 +395,9 @@ pub fn run_claimed_startup_command(
                 format_exit_code(outcome.code)
             ),
             Ok(_) => "dux stopped the command".to_string(),
+            Err(err) if err.to_string() == NOT_STARTED_DELETED => {
+                "the command was never started".to_string()
+            }
             Err(err) => format!("dux could not follow the command to its end ({err:#})"),
         };
         return StartupCommandResult {
@@ -438,6 +450,42 @@ pub fn run_claimed_startup_command(
         project_name: run.project.name,
         log_path,
         status,
+    }
+}
+
+/// The error a run gives itself when its agent was deleted before the command
+/// could start.
+const NOT_STARTED_DELETED: &str = "the agent was deleted before the command started";
+
+/// Test-only hooks into the run.
+#[cfg(test)]
+pub(crate) mod tests_hooks {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    static DELAYS: Mutex<Option<HashMap<PathBuf, Duration>>> = Mutex::new(None);
+
+    /// Hold every run in `worktree` for `delay` between starting its command
+    /// and registering its session: the window a removal must not slip into.
+    pub(crate) fn delay_registration_in(worktree: &Path, delay: Duration) {
+        DELAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .insert(worktree.to_path_buf(), delay);
+    }
+
+    pub(super) fn delay_registration(worktree: &Path) {
+        let delay = DELAYS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|delays| delays.get(worktree).copied());
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
     }
 }
 

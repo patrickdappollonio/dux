@@ -138,6 +138,57 @@ fn judge_cwds<'a>(
     unknown.map_or(CwdVerdict::Clear, CwdVerdict::Unknown)
 }
 
+/// Where a session's running processes stand, judged by the same rule a
+/// removal's last look uses ([`AgentProcessRegistry::cwd_occupant`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionWhereabouts {
+    /// Nothing of it is running, or nothing stands where `touches` accepts.
+    Clear,
+    /// This process stands there.
+    Inside {
+        pid: u32,
+        name: String,
+        cwd: std::path::PathBuf,
+    },
+    /// Where this process stands could not be read, and its session was
+    /// started somewhere `touches` accepts: possibly there.
+    Unknown { pid: u32, name: String },
+}
+
+/// [`SessionWhereabouts`] for one recorded session (started in
+/// `started_in`, with the members recorded at its leader's exit). Blocking:
+/// reads the process table and each member's working directory.
+pub fn session_whereabouts(
+    session: ProcessSession,
+    started_in: &std::path::Path,
+    known: &[ProcessIdentity],
+    touches: &dyn Fn(&std::path::Path) -> bool,
+) -> SessionWhereabouts {
+    let table = read_process_table();
+    let running = members(&table, &[session], known, std::process::id());
+    if running.is_empty() {
+        return SessionWhereabouts::Clear;
+    }
+    let pids: Vec<u32> = running.iter().map(|row| row.pid).collect();
+    let report = crate::file_drop::process_cwds(&pids);
+    match judge_cwds(touches, &running, &table, &report, started_in) {
+        CwdVerdict::Clear => SessionWhereabouts::Clear,
+        CwdVerdict::Inside(row) => SessionWhereabouts::Inside {
+            pid: row.pid,
+            name: row.name.clone(),
+            cwd: report
+                .found
+                .get(&row.pid)
+                .cloned()
+                .unwrap_or_else(|| started_in.to_path_buf()),
+        },
+        CwdVerdict::Unknown(row) => SessionWhereabouts::Unknown {
+            pid: row.pid,
+            name: row.name.clone(),
+        },
+    }
+}
+
 /// A start time the platform would not give (another user's process on
 /// macOS). Every membership rule fails closed on it: such a process is a
 /// member when its session or its parent chain says so, because a start time
@@ -663,6 +714,63 @@ pub struct AgentProcessRegistry {
     inner: Arc<Mutex<RegistryInner>>,
 }
 
+/// A spawn under way (see [`AgentProcessRegistry::begin_spawn`]); dropping it
+/// says the spawn has registered its session or given up.
+pub struct SpawnTicket {
+    registry: AgentProcessRegistry,
+    id: u64,
+}
+
+impl std::fmt::Debug for SpawnTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnTicket").field("id", &self.id).finish()
+    }
+}
+
+impl Drop for SpawnTicket {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .spawning
+            .retain(|(id, _)| *id != self.id);
+    }
+}
+
+/// What a spawn asks before it starts a process in a folder: it announces
+/// itself to the process registry first ([`AgentProcessRegistry::begin_spawn`])
+/// and only then checks that no removal has claimed the folder. Every PTY and
+/// startup command dux starts goes through one.
+#[derive(Clone, Default)]
+pub struct SpawnGate {
+    registry: AgentProcessRegistry,
+    ops: crate::worktree_ops::WorktreeOps,
+}
+
+impl SpawnGate {
+    pub fn new(registry: AgentProcessRegistry, ops: crate::worktree_ops::WorktreeOps) -> Self {
+        Self { registry, ops }
+    }
+
+    /// The ticket for a spawn in `folder`, or the refusal when a removal of it
+    /// (or of a folder containing it) is under way. Keep the ticket until the
+    /// new session is registered.
+    pub fn enter(
+        &self,
+        folder: &std::path::Path,
+    ) -> Result<SpawnTicket, crate::worktree_ops::HoldRefused> {
+        let ticket = self.registry.begin_spawn(folder);
+        match self.ops.removal_refusal(folder) {
+            Some(refused) => Err(refused),
+            None => Ok(ticket),
+        }
+    }
+}
+
+/// How long a removal or a destructive operation waits for a spawn in its
+/// folder to register its session. A spawn takes milliseconds; one still
+/// unregistered after this is treated as something running there.
+pub const SPAWN_WAIT: Duration = Duration::from_secs(10);
+
 /// One write for the registry's writer thread, numbered in the order the
 /// registry changed.
 enum WriteJob {
@@ -881,6 +989,12 @@ struct RegistryInner {
     /// Leader-exit recordings started and not yet written, by session: a
     /// removal reading what was recorded for a session waits for these first.
     recording: HashMap<ProcessSession, usize>,
+    /// Spawns under way, each with the folder it starts in: from just before
+    /// the process is created until its session is registered (or the spawn
+    /// is abandoned). A removal waits for those in its folder before it looks,
+    /// so a session is never running there without being known.
+    spawning: Vec<(u64, std::path::PathBuf)>,
+    spawn_seq: u64,
     /// The pending removals being kept current, by row id, with the folder
     /// each removes. Every change to the registry in or under one of these
     /// folders is written into its row at the moment it happens (see
@@ -1518,6 +1632,44 @@ impl AgentProcessRegistry {
         }
     }
 
+    /// Announce a spawn in `folder`. Take it BEFORE checking that nothing
+    /// forbids starting there (the folder being removed, the agent being
+    /// deleted), and keep it until the new session is registered: a removal
+    /// that claims the folder and then waits ([`Self::wait_for_spawns`]) either
+    /// came first, and the check refuses the spawn, or sees the session.
+    pub fn begin_spawn(&self, folder: &std::path::Path) -> SpawnTicket {
+        let mut inner = self.lock();
+        inner.spawn_seq += 1;
+        let id = inner.spawn_seq;
+        inner
+            .spawning
+            .push((id, crate::worktree_ops::lexical_key(folder)));
+        SpawnTicket {
+            registry: self.clone(),
+            id,
+        }
+    }
+
+    /// Wait until no spawn announced in `folder` or under it is still between
+    /// its process starting and its session being registered. `false` when
+    /// `timeout` passed first. Blocking: a worker thread's call.
+    pub fn wait_for_spawns(&self, folder: &std::path::Path, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let pending =
+                self.lock().spawning.iter().any(|(_, started_in)| {
+                    crate::worktree_ops::folder_contains(folder, started_in)
+                });
+            if !pending {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// [`Self::wait_for_recordings`] for every recording in flight.
     pub fn wait_for_all_recordings(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
@@ -1877,6 +2029,14 @@ impl StartupRunGuard {
         deleted
     }
 
+    /// Announce the run's spawn in `folder` (see
+    /// [`AgentProcessRegistry::begin_spawn`]): `None` when the agent was
+    /// deleted before it, and nothing may start.
+    pub fn begin_spawn(&self, folder: &std::path::Path) -> Option<SpawnTicket> {
+        let ticket = self.registry.begin_spawn(folder);
+        (!self.agent_deleted()).then_some(ticket)
+    }
+
     /// What to call the run's processes in a sentence.
     pub fn label(&self, session: ProcessSession, label: &str) {
         self.registry.label(session, label);
@@ -1942,6 +2102,35 @@ impl Drop for StartupRunGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_spawn_ticket_holds_a_look_in_its_folder_until_it_drops() {
+        let registry = AgentProcessRegistry::default();
+        let folder = std::path::Path::new("/work/wt");
+        let ticket = registry.begin_spawn(&folder.join("sub"));
+        assert!(!registry.wait_for_spawns(folder, Duration::from_millis(30)));
+        assert!(
+            registry.wait_for_spawns(std::path::Path::new("/work/other"), Duration::ZERO),
+            "a spawn elsewhere holds nothing up"
+        );
+        drop(ticket);
+        assert!(registry.wait_for_spawns(folder, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_spawn_gate_refuses_a_folder_already_being_removed_and_lets_go() {
+        let registry = AgentProcessRegistry::default();
+        let ops = crate::worktree_ops::WorktreeOps::new();
+        let gate = SpawnGate::new(registry.clone(), ops.clone());
+        let folder = std::path::Path::new("/work/wt");
+        let _removal = ops.announce_removal(folder);
+        assert!(gate.enter(&folder.join("inner")).is_err());
+        assert!(
+            registry.wait_for_spawns(folder, Duration::ZERO),
+            "a refused spawn leaves no ticket behind"
+        );
+        assert!(gate.enter(std::path::Path::new("/work/other")).is_ok());
+    }
 
     /// One second on the boot-relative clock start times are kept in.
     const SEC: u64 = 1_000_000_000;

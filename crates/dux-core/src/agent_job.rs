@@ -1489,6 +1489,7 @@ fn run_create_standalone_agent_job(
     term_size: (u16, u16),
     create_key: String,
     identity: crate::term_identity::TerminalIdentity,
+    gate: &crate::process_sessions::SpawnGate,
 ) {
     let folder_label = crate::home_path::shorten_home(&folder);
     if !folder.is_dir() {
@@ -1605,7 +1606,7 @@ fn run_create_standalone_agent_job(
         // whole point of the sentence and is nowhere on screen.
         status_quiet: crate::statusline::QuietSurfaces::LOUD,
     };
-    run_agent_launch_job(request, worker_tx);
+    run_agent_launch_job(request, worker_tx, gate);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1858,7 +1859,11 @@ fn launch_managed_create(
         wants_fullscreen: false,
         status_quiet,
     };
-    run_agent_launch_job_with(request, worker_tx, Some(&rollback));
+    let gate = crate::process_sessions::SpawnGate::new(
+        rollback.registries.processes.clone(),
+        rollback.registries.worktrees.clone(),
+    );
+    run_agent_launch_job_with(request, worker_tx, Some(&rollback), &gate);
 }
 
 /// The shared registries an agent create reports into: the process sessions
@@ -1904,8 +1909,10 @@ pub fn run_create_agent_job(
         provider,
     } = request
     {
+        let gate = crate::process_sessions::SpawnGate::new(registry.clone(), worktrees.clone());
         run_create_standalone_agent_job(
             folder, title, provider, paths, config, worker_tx, term_size, create_key, identity,
+            &gate,
         );
         return;
     }
@@ -1939,8 +1946,12 @@ pub fn run_create_agent_job(
         },
     );
 }
-pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<WorkerEvent>) {
-    run_agent_launch_job_with(request, worker_tx, None);
+pub fn run_agent_launch_job(
+    request: AgentLaunchRequest,
+    worker_tx: Sender<WorkerEvent>,
+    gate: &crate::process_sessions::SpawnGate,
+) {
+    run_agent_launch_job_with(request, worker_tx, None, gate);
 }
 
 /// [`run_agent_launch_job`], with what a create's launch needs to take its
@@ -1949,6 +1960,7 @@ fn run_agent_launch_job_with(
     request: AgentLaunchRequest,
     worker_tx: Sender<WorkerEvent>,
     rollback: Option<&Rollback>,
+    gate: &crate::process_sessions::SpawnGate,
 ) {
     let launch_args = request.provider_config.interactive_args(request.resume);
     let (rows, cols) = request.pty_size;
@@ -1983,6 +1995,34 @@ fn run_agent_launch_job_with(
         return;
     }
 
+    // Announced before the last check and kept until the engine registers the
+    // session, so a removal claiming the folder meanwhile either refuses this
+    // spawn here or waits to see its session.
+    let spawn_ticket = match gate.enter(Path::new(request.session.directory())) {
+        Ok(ticket) => ticket,
+        Err(refused) => {
+            let message = refused.sentence("start this agent there").to_string();
+            if let AgentLaunchKind::Create {
+                repo_path,
+                owns_worktree,
+                ..
+            } = &request.kind
+                && *owns_worktree
+                && let Some(managed) = request.session.workspace.as_managed()
+            {
+                rollback_created_worktree(
+                    Path::new(repo_path),
+                    managed,
+                    &request.session.id,
+                    rollback,
+                );
+            }
+            let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
+                AgentLaunchFailedData { request, message },
+            )));
+            return;
+        }
+    };
     let client = match crate::pty::PtyClient::spawn_with_env_opts(
         &request.provider_config.command,
         &launch_args,
@@ -1998,6 +2038,9 @@ fn run_agent_launch_job_with(
     ) {
         Ok(client) => client,
         Err(err) => {
+            // Nothing started, so nothing is left to register; the rollback
+            // below is a removal of this very folder and must not wait for it.
+            drop(spawn_ticket);
             logger::error(&format!(
                 "PTY spawn failed for {}: {err}",
                 request.session.id
@@ -2030,7 +2073,11 @@ fn run_agent_launch_job_with(
     };
     logger::info(&format!("PTY session started for {}", request.session.id));
     let _ = worker_tx.send(WorkerEvent::AgentLaunchReady(Box::new(
-        AgentLaunchReadyData { request, client },
+        AgentLaunchReadyData {
+            request,
+            client,
+            spawn_ticket: Some(spawn_ticket),
+        },
     )));
 }
 
