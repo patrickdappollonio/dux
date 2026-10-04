@@ -811,6 +811,27 @@ mod tests {
         assert!(refreshes.is_empty(), "got {refreshes:?}");
     }
 
+    /// A project terminal belongs to no agent, so the drop has no agent
+    /// worktree to hold; what keeps it out of a worktree being removed is the
+    /// hold on the folder the file would actually land in, which is wherever
+    /// the shell stands. Its shell has `cd`'d into an agent's worktree whose
+    /// removal has begun: the drop is refused with 409 and writes nothing.
+    #[tokio::test]
+    async fn a_drop_on_a_terminal_standing_inside_a_worktree_being_removed_is_refused() {
+        let world = drop_world().await;
+        let terminal = world.create_terminal("/api/v1/projects/p1/terminals").await;
+        world.cd(&terminal, &world.wt).await;
+        let _removal = world.handle.worktree_ops().announce_removal(&world.wt);
+
+        let resp = world.drop_on(&terminal, "shot.png").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(body_text(resp).await.contains("removing the worktree"));
+        assert!(
+            !world.wt.join("shot.png").exists(),
+            "nothing may be written into a folder being removed"
+        );
+    }
+
     #[tokio::test]
     async fn dropping_on_a_standalone_terminal_refreshes_nothing_even_inside_a_worktree() {
         // A standalone terminal is owned by nothing at all. Same answer, and the
