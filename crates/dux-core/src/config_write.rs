@@ -1325,18 +1325,24 @@ pub fn mutate_config_file_with<T>(
 pub fn mutate_config_file_repairing<T>(
     config_path: &Path,
     missing: MissingConfig<'_>,
+    key: &str,
     change: impl FnOnce(&mut DocumentMut) -> Result<T>,
 ) -> Result<(T, Vec<String>)> {
-    mutate_config_file_ruled(config_path, missing, AuthRule::NoNewProblems, change)
+    mutate_config_file_ruled(
+        config_path,
+        missing,
+        AuthRule::NothingAddedBy(key.to_string()),
+        change,
+    )
 }
 
 /// What a locked change must leave of `[server.auth]`.
 enum AuthRule {
     /// A section that loads.
     Valid,
-    /// No problem stopping a start that the file did not have before the
-    /// change.
-    NoNewProblems,
+    /// Nothing that stops a start which the change of this setting is
+    /// answerable for (see [`crate::config::problems_added_by_set`]).
+    NothingAddedBy(String),
 }
 
 fn mutate_config_file_ruled<T>(
@@ -1365,9 +1371,9 @@ fn mutate_config_file_ruled<T>(
             crate::config::describe_toml_edit_error(&raw, &e)
         )
     })?;
-    let before = match rule {
-        AuthRule::Valid => Vec::new(),
-        AuthRule::NoNewProblems => crate::config::start_problems_of(&raw),
+    let before = match &rule {
+        AuthRule::Valid => crate::config::StartCheck::default(),
+        AuthRule::NothingAddedBy(_) => crate::config::check_start(&raw),
     };
     let outcome = change(&mut doc)?;
     let text = doc.to_string();
@@ -1378,24 +1384,23 @@ fn mutate_config_file_ruled<T>(
             }
             Vec::new()
         }
-        AuthRule::NoNewProblems => {
-            // Problems are compared by what they are about (their id), not
-            // by their sentence, which can name a position that moved.
-            let after = crate::config::start_problems_of(&text);
-            let added: Vec<&str> = after
-                .iter()
-                .filter(|p| before.iter().all(|b| b.id != p.id))
+        AuthRule::NothingAddedBy(key) => {
+            // Attributed to the setting changed: its own value, and a rule
+            // spanning it that held before. Problems about other settings
+            // never block it; they are listed after.
+            let after = crate::config::check_start(&text);
+            let added: Vec<&str> = crate::config::problems_added_by_set(&before, &after, &key)
+                .into_iter()
                 .map(|p| p.message.as_str())
                 .collect();
             if !added.is_empty() {
                 anyhow::bail!(
-                    "after that change, dux would refuse to start with {}: {}. Nothing was \
-                     written.",
+                    "that change would stop dux starting with {}: {}. Nothing was written.",
                     config_path.display(),
                     added.join("; ")
                 );
             }
-            after.into_iter().map(|p| p.message).collect()
+            after.problems.into_iter().map(|p| p.message).collect()
         }
     };
     write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;

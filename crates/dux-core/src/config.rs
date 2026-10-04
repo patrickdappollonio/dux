@@ -3312,42 +3312,370 @@ fn is_auth_section_header(line: &str) -> bool {
         .is_some_and(|auth| !auth.is_implicit())
 }
 
-/// Every check a start makes on a config beyond reading it: the server host
-/// must be an IP literal, and every environment variable (global and per
-/// project) must have a valid name and expansion. The terminal UI's start and
-/// `dux config set` both ask this one function, so a value `set` accepts is
-/// one dux starts with.
-pub fn start_check_problems(config: &Config) -> Vec<String> {
-    let mut problems = Vec::new();
-    // The rules `resolve_server_plan` applies to the config itself, through
-    // the same functions it uses: the host must be an IP literal, and the
-    // port must not be 0. The terminal UI only binds the port when the file
-    // has it serve, so a port of 0 stops its start only then (see
-    // [`server_port_problem`] for `dux server`, which always binds it).
-    match parse_server_host(&config.server.host) {
-        Err(error) => problems.push(error),
-        Ok(_) if config.server.serve_while_tui => {
-            problems.extend(server_port_problem(config));
+// ---------------------------------------------------------------------------
+// Start checks: the one list of what stops dux starting with a config file
+// ---------------------------------------------------------------------------
+//
+// Every check either surface makes at start or on reload is here, tagged
+// with the surfaces it stops. The terminal UI's `ensure_config`, `dux
+// server`'s bootstrap, both reload workers and `dux config get`/`set` all
+// ask [`check_start`], so a check cannot exist for one of them and not the
+// others.
+
+/// A surface a start check can stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    /// The terminal UI, at start and on reload.
+    TerminalUi,
+    /// `dux server` (and the terminal UI's background server), at start and
+    /// on reload.
+    DuxServer,
+}
+
+/// One thing that stops dux starting with a config file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartProblem {
+    /// What it is about; two problems are the same when their ids are.
+    pub id: String,
+    /// The sentence shown: which surfaces will not start, and why. Never a
+    /// value from the file.
+    pub message: String,
+    /// The settings it is about, as dotted paths. Empty for the file as a
+    /// whole.
+    pub keys: Vec<String>,
+    /// A rule spanning `keys`, rather than a problem with one value.
+    pub cross_key: bool,
+    /// About one entry of a list value, known by the entry's own text.
+    pub entry: bool,
+    /// Whether the terminal UI will not start (or reload) with the file.
+    pub stops_terminal_ui: bool,
+    /// Whether `dux server` will not start (or reload) with the file.
+    pub stops_dux_server: bool,
+    /// Whether a `--bind`/`--port` on `dux server`'s command line takes the
+    /// file's value out of the picture, so its own start judges it.
+    pub dux_server_overridable: bool,
+}
+
+impl StartProblem {
+    /// Whether this stops `surface`.
+    pub fn stops(&self, surface: Surface) -> bool {
+        match surface {
+            Surface::TerminalUi => self.stops_terminal_ui,
+            Surface::DuxServer => self.stops_dux_server,
         }
-        Ok(_) => {}
+    }
+
+    fn new(problem: crate::config_auth::Problem, terminal_ui: bool, dux_server: bool) -> Self {
+        let who = match (terminal_ui, dux_server) {
+            (true, true) => "the terminal UI and dux server",
+            (true, false) => "the terminal UI",
+            _ => "dux server",
+        };
+        Self {
+            message: format!("{who} will not start with this file: {}", problem.message),
+            id: problem.id,
+            keys: problem.keys,
+            cross_key: problem.cross_key,
+            entry: problem.entry,
+            stops_terminal_ui: terminal_ui,
+            stops_dux_server: dux_server,
+            dux_server_overridable: false,
+        }
+    }
+}
+
+/// Everything [`check_start`] found, and the rules spanning keys it could
+/// not judge (a key they involve does not read), which therefore were not
+/// satisfied either.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartCheck {
+    pub problems: Vec<StartProblem>,
+    pub unjudgeable_rules: Vec<String>,
+}
+
+/// A check only the terminal UI's crate can make (its `[keys]`, after the
+/// key migrations its start applies), installed by it, so the one list holds
+/// it too. It gets the whole file's text and returns what it refuses.
+pub type TerminalUiCheck = fn(&str) -> Vec<String>;
+
+static TERMINAL_UI_CHECK: std::sync::OnceLock<TerminalUiCheck> = std::sync::OnceLock::new();
+
+/// Install the terminal UI's own check (see [`TerminalUiCheck`]). Called by
+/// the terminal UI's crate before it reads or judges a config file; a second
+/// install is ignored.
+pub fn install_terminal_ui_check(check: TerminalUiCheck) {
+    let _ = TERMINAL_UI_CHECK.set(check);
+}
+
+/// Every problem that stops dux starting with the whole config file `raw`,
+/// each listed once, field by field, and each check run on its own so no
+/// problem hides another:
+///
+/// - the file is not TOML (both surfaces);
+/// - a password hash or an auth table where dux does not read one (both);
+/// - `[server.auth]`, key by key, and its rules (both);
+/// - a setting of the wrong type, each field on its own: the terminal UI
+///   reads the file strictly, while `dux server` resets it to its default;
+/// - `[server] host` not an IP literal (both; `--bind` overrides it for
+///   `dux server`);
+/// - `[server] port` 0 (`dux server`, overridable by `--port`/`--bind`, and
+///   the terminal UI only when it serves);
+/// - an environment variable dux cannot use (the terminal UI);
+/// - project records that conflict, such as duplicate ids (both);
+/// - the terminal UI's own `[keys]` check, when installed (the terminal UI).
+pub fn check_start(raw: &str) -> StartCheck {
+    use crate::config_auth::Problem;
+    let mut check = StartCheck::default();
+    let both = |problem: Problem| StartProblem::new(problem, true, true);
+    let file: toml::Table = match toml::from_str(raw) {
+        Ok(file) => file,
+        Err(error) => {
+            check.problems.push(both(Problem::plain(format!(
+                "the file is not valid TOML: {}",
+                problem_kind(error.message())
+            ))));
+            return check;
+        }
+    };
+    for message in misplaced_auth_problems(raw) {
+        check.problems.push(both(Problem::plain(message)));
+    }
+    check
+        .problems
+        .extend(auth_section_problems(&file).into_iter().map(both));
+    if let Some(auth) = file
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("auth"))
+    {
+        check.unjudgeable_rules = crate::config_auth::unjudgeable_rules_of(auth);
+    }
+    let Some(rest) = migrated_beside_auth(&file) else {
+        return check;
+    };
+    for (place, key, kind) in wrong_typed_settings(&rest) {
+        check.problems.push(StartProblem::new(
+            Problem::about(
+                key,
+                format!("{place}: {kind} (dux server would use the default)"),
+            ),
+            true,
+            false,
+        ));
+    }
+    let mut config = recover_config_table(rest);
+    config.providers.ensure_defaults();
+    let config = apply_load_corrections(config);
+    check.problems.extend(config_start_problems(&config));
+    if let Some(terminal_ui_check) = TERMINAL_UI_CHECK.get() {
+        for message in terminal_ui_check(raw) {
+            check.problems.push(StartProblem::new(
+                Problem::about("keys", message),
+                true,
+                false,
+            ));
+        }
+    }
+    check
+}
+
+/// [`check_start`]'s problems.
+pub fn start_problems_of(raw: &str) -> Vec<StartProblem> {
+    check_start(raw).problems
+}
+
+/// The first problem that stops `surface` with the whole config file `raw`,
+/// as the sentence to refuse with. For `dux server` a problem its command
+/// line can override is left to its own start, which knows the command line.
+pub fn start_refusal(raw: &str, surface: Surface) -> Option<String> {
+    check_start(raw)
+        .problems
+        .into_iter()
+        .find(|problem| {
+            problem.stops(surface)
+                && !(surface == Surface::DuxServer && problem.dux_server_overridable)
+        })
+        .map(|problem| problem.message)
+}
+
+/// The problems a set of the setting `key` would add to a file: the
+/// problems in `after` it is answerable for, judged against `before`.
+///
+/// A set is answerable for a problem with its own value (a value of the
+/// wrong type or out of its range), and for a rule spanning its key that
+/// the file satisfied before. A rule that could not be judged before was
+/// not satisfied, so breaking it is not new. A list value's entries are
+/// known by their own text: an entry is new only when no entry of the old
+/// list had its text. Problems about other settings never block a set.
+pub fn problems_added_by_set<'a>(
+    before: &StartCheck,
+    after: &'a StartCheck,
+    key: &str,
+) -> Vec<&'a StartProblem> {
+    let related = |other: &str| {
+        other == key
+            || other.starts_with(&format!("{key}."))
+            || key.starts_with(&format!("{other}."))
+    };
+    after
+        .problems
+        .iter()
+        .filter(|problem| problem.keys.iter().any(|other| related(other)))
+        .filter(|problem| {
+            if problem.entry {
+                before.problems.iter().all(|old| old.id != problem.id)
+            } else if problem.cross_key {
+                let was_broken = before.problems.iter().any(|old| old.id == problem.id);
+                let was_unjudgeable = before.unjudgeable_rules.contains(&problem.id);
+                !was_broken && !was_unjudgeable
+            } else {
+                true
+            }
+        })
+        .collect()
+}
+
+/// The rest of the file beside `[server.auth]` (judged on its own), after
+/// the load migrations, as a start reads it. `None` only when it cannot be
+/// written back out, which a parsed table always can be.
+fn migrated_beside_auth(file: &toml::Table) -> Option<toml::Table> {
+    let mut file = file.clone();
+    if let Some(server) = file.get_mut("server").and_then(toml::Value::as_table_mut) {
+        server.remove("auth");
+    }
+    let rest = toml::to_string(&file).ok()?;
+    let mut doc = rest.parse::<toml_edit::DocumentMut>().ok()?;
+    let migrated = match crate::config_migrate::apply_load_migrations(&mut doc) {
+        Ok(_) => doc.to_string(),
+        Err(_) => rest,
+    };
+    toml::from_str::<toml::Table>(&migrated).ok()
+}
+
+/// Every setting of the wrong type in `table`, each field judged on its
+/// own: (where it is, its dotted key, the kind of problem). A section that
+/// fails although none of its fields does on its own is listed whole.
+fn wrong_typed_settings(table: &toml::Table) -> Vec<(String, String, String)> {
+    let mut found = Vec::new();
+    for (section, value) in table {
+        if section_solo_ok(section, value.clone()) {
+            continue;
+        }
+        let mut any_field = false;
+        if let toml::Value::Table(fields) = value {
+            for (field, field_value) in fields {
+                let mut alone = toml::Table::new();
+                alone.insert(field.clone(), field_value.clone());
+                if !section_solo_ok(section, toml::Value::Table(alone.clone())) {
+                    any_field = true;
+                    found.push((
+                        format!("[{section}] {field}"),
+                        format!("{section}.{field}"),
+                        section_solo_problem(section, toml::Value::Table(alone)),
+                    ));
+                }
+            }
+        }
+        if !any_field {
+            found.push((
+                format!("[{section}]"),
+                section.clone(),
+                section_solo_problem(section, value.clone()),
+            ));
+        }
+    }
+    found
+}
+
+/// The checks a start makes on the config it read: the server host and
+/// port, the environment variables, and the project records.
+fn config_start_problems(config: &Config) -> Vec<StartProblem> {
+    use crate::config_auth::Problem;
+    let mut problems = Vec::new();
+    if let Err(error) = parse_server_host(&config.server.host) {
+        let mut problem = StartProblem::new(Problem::about("server.host", error), true, true);
+        problem.dux_server_overridable = true;
+        problems.push(problem);
+    }
+    // Known by the setting, never by the host it names, so changing the
+    // host beside a port of 0 is not a new problem.
+    if let Some(detail) = port_zero_problem(&config.server.host, config.server.port) {
+        let serving = config.server.serve_while_tui;
+        let mut problem = StartProblem::new(
+            Problem {
+                id: "server.port: 0".to_string(),
+                ..Problem::about("server.port", detail)
+            },
+            serving,
+            true,
+        );
+        if !serving {
+            problem.message = format!(
+                "dux server (and the terminal UI's background server) will not start with this \
+                 file: {}",
+                problem
+                    .message
+                    .split_once(": ")
+                    .map_or("", |(_, rest)| rest)
+            );
+        }
+        problem.dux_server_overridable = true;
+        problems.push(problem);
     }
     // One problem per variable, named by the variable (and project), never
-    // by its value, so a second bad variable is a new problem of its own and
-    // repairing one never waits on another.
+    // by its value.
     for (name, value) in &config.env {
         if let Some(problem) = env_variable_problem(name, value) {
-            problems.push(format!("global env variable {name}: {problem}"));
+            problems.push(StartProblem::new(
+                Problem::about(
+                    format!("env.{name}"),
+                    format!("global env variable {name}: {problem}"),
+                ),
+                true,
+                false,
+            ));
         }
     }
     for project in &config.projects {
         let label = project.name.as_deref().unwrap_or(&project.path);
         for (name, value) in &project.env {
             if let Some(problem) = env_variable_problem(name, value) {
-                problems.push(format!("env variable {name} of project {label}: {problem}"));
+                problems.push(StartProblem::new(
+                    Problem::about(
+                        "projects",
+                        format!("env variable {name} of project {label}: {problem}"),
+                    ),
+                    true,
+                    false,
+                ));
             }
         }
     }
+    if let Err(error) =
+        crate::config_sync::validate_project_records("config.toml", &config.projects)
+    {
+        problems.push(StartProblem::new(
+            Problem::about("projects", format!("{error:#}")),
+            true,
+            true,
+        ));
+    }
     problems
+}
+
+/// The checks the terminal UI's start makes on the config it read (see
+/// [`check_start`] for the whole list), as sentences.
+pub fn start_check_problems(config: &Config) -> Vec<String> {
+    config_start_problems(config)
+        .into_iter()
+        .filter(|problem| problem.stops_terminal_ui)
+        .map(|problem| {
+            problem
+                .message
+                .split_once(": ")
+                .map_or(problem.message.clone(), |(_, rest)| rest.to_string())
+        })
+        .collect()
 }
 
 /// What is wrong with one environment variable as a start reads it (see
@@ -3365,97 +3693,12 @@ fn env_variable_problem(name: &str, value: &str) -> Option<String> {
     }
 }
 
-/// Why `dux server`, and the terminal UI's background server, would not
-/// start with this config's `[server] port`, through the rule
-/// [`resolve_server_plan`] applies.
-fn server_port_problem(config: &Config) -> Option<String> {
-    let host = parse_server_host(&config.server.host).ok()?;
-    port_zero_problem(std::net::SocketAddr::new(host, config.server.port)).map(|problem| {
-        format!("dux server (and the terminal UI's background server) will not start: {problem}")
-    })
-}
-
 /// [`start_check_problems`], failing on the first.
 pub fn start_check(config: &Config) -> Result<()> {
     match start_check_problems(config).into_iter().next() {
         Some(problem) => Err(anyhow!(problem)),
         None => Ok(()),
     }
-}
-
-/// Every problem that stops dux starting with a whole config file's text:
-/// the `[server.auth]` problems key by key ([`auth_problems_of`]), and the
-/// start checks ([`start_check_problems`]) on the rest of the file as dux
-/// reads it. Empty when dux starts with it.
-pub fn start_problems_of(raw: &str) -> Vec<crate::config_auth::Problem> {
-    let mut problems = auth_problems_of(raw);
-    // Every other start check runs on its own, on the rest of the file as a
-    // start's per-field recovery reads it, whatever the auth checks found:
-    // one problem never hides another, and none is listed twice.
-    if let Some((config, recovered)) = recovered_config_beside_auth(raw) {
-        let mut checks = start_check_problems(&config);
-        // `dux server` binds the port whatever the file says about serving
-        // beside the terminal UI.
-        if !config.server.serve_while_tui {
-            checks.extend(server_port_problem(&config));
-        }
-        checks.extend(terminal_ui_refusals(&recovered));
-        problems.extend(checks.into_iter().map(crate::config_auth::Problem::plain));
-    }
-    problems
-}
-
-/// The settings `dux server` recovers (each reset to its default) but the
-/// terminal UI refuses to start over, which reads the file strictly. Never
-/// the values.
-pub fn terminal_ui_refusals_of(raw: &str) -> Vec<String> {
-    recovered_config_beside_auth(raw)
-        .map(|(_, recovered)| terminal_ui_refusals(&recovered))
-        .unwrap_or_default()
-}
-
-fn terminal_ui_refusals(recovered: &[RecoveredSetting]) -> Vec<String> {
-    recovered
-        .iter()
-        .map(|setting| {
-            format!(
-                "the terminal UI will not start with this file: {}: {} (dux server would use \
-                 the default)",
-                setting.place, setting.kind
-            )
-        })
-        .collect()
-}
-
-/// A setting per-field recovery reset to its default: where it is
-/// (`[ui] left_width_pct`, or a whole `[section]`) and what kind of problem
-/// it had, never its value.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RecoveredSetting {
-    place: String,
-    kind: String,
-}
-
-/// The config a start reads from everything in `raw` but `[server.auth]`:
-/// the load migrations, then per-field recovery, the provider defaults and
-/// the load corrections. Nothing about the password is read here, so no
-/// password problem can stop it. `None` only when `raw` is not TOML.
-fn recovered_config_beside_auth(raw: &str) -> Option<(Config, Vec<RecoveredSetting>)> {
-    let mut file = toml::from_str::<toml::Table>(raw).ok()?;
-    if let Some(server) = file.get_mut("server").and_then(toml::Value::as_table_mut) {
-        server.remove("auth");
-    }
-    let rest = toml::to_string(&file).ok()?;
-    let mut doc = rest.parse::<toml_edit::DocumentMut>().ok()?;
-    let migrated = match crate::config_migrate::apply_load_migrations(&mut doc) {
-        Ok(_) => doc.to_string(),
-        Err(_) => rest,
-    };
-    let table = toml::from_str::<toml::Table>(&migrated).ok()?;
-    let mut recovered = Vec::new();
-    let mut config = recover_config_table_noting(table, &mut recovered);
-    config.providers.ensure_defaults();
-    Some((apply_load_corrections(config), recovered))
 }
 
 /// The config dux runs with from a whole file's text: read as a start reads
@@ -3526,11 +3769,6 @@ pub fn parse_auth_value(auth: toml::Value) -> Result<ServerAuthConfig, String> {
 
 /// The field-level recovery of every section but `[server.auth]`.
 fn recover_config_table(doc: toml::Table) -> Config {
-    recover_config_table_noting(doc, &mut Vec::new())
-}
-
-/// [`recover_config_table`], noting in `recovered` every setting it reset.
-fn recover_config_table_noting(doc: toml::Table, recovered: &mut Vec<RecoveredSetting>) -> Config {
     // Fast path: the whole document deserializes cleanly.
     if let Ok(cfg) = table_into_config(doc.clone()) {
         return cfg;
@@ -3551,14 +3789,6 @@ fn recover_config_table_noting(doc: toml::Table, recovered: &mut Vec<RecoveredSe
                 crate::logger::warn(&format!(
                     "config [{section}] {fk} is invalid; resetting it to its default"
                 ));
-                let mut alone = toml::Table::new();
-                if let Some(field) = tbl.get(fk) {
-                    alone.insert(fk.clone(), field.clone());
-                }
-                recovered.push(RecoveredSetting {
-                    place: format!("[{section}] {fk}"),
-                    kind: section_solo_problem(section, toml::Value::Table(alone)),
-                });
             }
             pruned.insert(section.clone(), toml::Value::Table(fixed));
             continue;
@@ -3566,10 +3796,6 @@ fn recover_config_table_noting(doc: toml::Table, recovered: &mut Vec<RecoveredSe
         crate::logger::warn(&format!(
             "config section [{section}] is invalid; resetting it to defaults"
         ));
-        recovered.push(RecoveredSetting {
-            place: format!("[{section}]"),
-            kind: section_solo_problem(section, value.clone()),
-        });
         pruned.remove(section);
     }
     match table_into_config(pruned) {
@@ -4071,11 +4297,15 @@ pub fn parse_server_host(host: &str) -> Result<std::net::IpAddr, String> {
 /// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
 /// disabled / not detected); when present and not already covered by the primary
 /// bind it is added as a BEST-EFFORT leg.
-/// Why `bind` cannot be served on, when its port is 0. Shared by
-/// [`resolve_server_plan`] and the start checks ([`start_check_problems`]),
-/// so `dux config set` refuses exactly what `dux server` refuses.
-fn port_zero_problem(bind: std::net::SocketAddr) -> Option<String> {
-    (bind.port() == 0).then(|| {
+/// Why `host:port` cannot be served on, when the port is 0. Shared by
+/// [`resolve_server_plan`] and the start checks ([`check_start`]), so `dux
+/// config set` refuses exactly what `dux server` refuses.
+fn port_zero_problem(host: &str, port: u16) -> Option<String> {
+    let bind = match host.parse::<std::net::Ipv6Addr>() {
+        Ok(_) => format!("[{host}]:{port}"),
+        Err(_) => format!("{host}:{port}"),
+    };
+    (port == 0).then(|| {
         format!(
             "refusing to bind {bind}: port 0 means \"pick any free port\", so there would be no \
              stable address to open. Set [server] port (default 3890) or pass --port / --bind with \
@@ -4101,7 +4331,7 @@ pub fn resolve_server_plan(
             std::net::SocketAddr::new(host, cli.port.unwrap_or(server.port))
         }
     };
-    if let Some(problem) = port_zero_problem(bind) {
+    if let Some(problem) = port_zero_problem(&bind.ip().to_string(), bind.port()) {
         bail!(problem);
     }
     let tailscale = effective_tailscale_mode(server.tailscale_mode(), cli.no_tailscale);

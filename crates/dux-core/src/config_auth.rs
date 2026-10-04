@@ -225,38 +225,53 @@ impl ServerAuthConfig {
     /// `cross_field`.
     fn problems_with(&self, cross_field: bool) -> Vec<Problem> {
         let mut problems = Vec::new();
+        let key = |name: &str| format!("server.auth.{name}");
         if !self.password_hash.is_empty()
             && let Err(error) = crate::auth::validate_password_hash(&self.password_hash)
         {
-            problems.push(Problem::plain(error.to_string()));
+            problems.push(Problem::about(key("password_hash"), error.to_string()));
         }
         if self.minimum_password_score > 4 {
-            problems.push(Problem::plain("minimum_password_score must be 0 to 4"));
+            problems.push(Problem::about(
+                key("minimum_password_score"),
+                "minimum_password_score must be 0 to 4",
+            ));
         }
         if self.session_idle_seconds == 0 {
-            problems.push(Problem::plain("session_idle_seconds must be at least 1"));
+            problems.push(Problem::about(
+                key("session_idle_seconds"),
+                "session_idle_seconds must be at least 1",
+            ));
         }
         if self.max_concurrent_password_checks == 0 {
-            problems.push(Problem::plain(
+            problems.push(Problem::about(
+                key("max_concurrent_password_checks"),
                 "max_concurrent_password_checks must be at least 1, or nobody could log in",
             ));
         }
         let max_bytes_valid =
             self.max_password_bytes != 0 && self.max_password_bytes <= MAX_PASSWORD_BYTES_LIMIT;
         if !max_bytes_valid {
-            problems.push(Problem::plain(format!(
-                "max_password_bytes must be 1 to {MAX_PASSWORD_BYTES_LIMIT}"
-            )));
+            problems.push(Problem::about(
+                key("max_password_bytes"),
+                format!("max_password_bytes must be 1 to {MAX_PASSWORD_BYTES_LIMIT}"),
+            ));
         }
         if cross_field && max_bytes_valid && self.minimum_password_length > self.max_password_bytes
         {
-            problems.push(Problem::plain(
-                "minimum_password_length is larger than max_password_bytes, so no \
-                 password could meet both",
+            problems.push(Problem::rule(
+                LENGTH_FITS_BYTES_RULE,
+                &[
+                    "server.auth.minimum_password_length",
+                    "server.auth.max_password_bytes",
+                ],
+                "minimum_password_length is larger than max_password_bytes, so no password \
+                 could meet both",
             ));
         }
         if self.max_tracked_addresses == 0 {
-            problems.push(Problem::plain(
+            problems.push(Problem::about(
+                key("max_tracked_addresses"),
                 "max_tracked_addresses must be at least 1, or failed logins would never count",
             ));
         }
@@ -271,6 +286,9 @@ impl ServerAuthConfig {
                         "blocked_addresses entry {} (counting from 1): {reason}",
                         index + 1
                     ),
+                    keys: vec![key("blocked_addresses")],
+                    cross_key: false,
+                    entry: true,
                 });
             }
         }
@@ -289,19 +307,59 @@ pub struct Problem {
     pub id: String,
     /// The sentence shown.
     pub message: String,
+    /// The settings it is about, as dotted paths (`server.auth.max_password_bytes`).
+    /// Empty for a problem about the file as a whole.
+    pub keys: Vec<String>,
+    /// Whether it is a rule spanning `keys` rather than a problem with one
+    /// value.
+    pub cross_key: bool,
+    /// Whether it is about one entry of a list value, known by the entry's
+    /// own text rather than by the list.
+    pub entry: bool,
 }
 
 impl Problem {
     /// A problem whose sentence already names it by what it is about, with
-    /// no position in it.
+    /// no position in it, and about no one setting.
     pub fn plain(message: impl Into<String>) -> Self {
         let message = message.into();
         Self {
             id: message.clone(),
             message,
+            keys: Vec::new(),
+            cross_key: false,
+            entry: false,
+        }
+    }
+
+    /// A problem with the value of the setting `key`.
+    pub fn about(key: impl Into<String>, message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            id: message.clone(),
+            message,
+            keys: vec![key.into()],
+            cross_key: false,
+            entry: false,
+        }
+    }
+
+    /// A rule spanning `keys`, known by `id`.
+    pub fn rule(id: impl Into<String>, keys: &[&str], message: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            message: message.into(),
+            keys: keys.iter().map(|key| (*key).to_string()).collect(),
+            cross_key: true,
+            entry: false,
         }
     }
 }
+
+/// The rule that a password long enough for `minimum_password_length` fits
+/// in `max_password_bytes`.
+pub const LENGTH_FITS_BYTES_RULE: &str =
+    "server.auth: minimum_password_length <= max_password_bytes";
 
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -338,10 +396,10 @@ pub fn rule_problems_of(auth: toml::Value) -> Vec<Problem> {
                 readable.insert(key, value);
             }
             Err(error) => {
-                problems.push(Problem::plain(format!(
-                    "{key}: {}",
-                    crate::config::problem_kind(error.message())
-                )));
+                problems.push(Problem::about(
+                    format!("server.auth.{key}"),
+                    format!("{key}: {}", crate::config::problem_kind(error.message())),
+                ));
                 unreadable.push(key);
             }
         }
@@ -354,6 +412,33 @@ pub fn rule_problems_of(auth: toml::Value) -> Vec<Problem> {
         .any(|key| key == "minimum_password_length" || key == "max_password_bytes");
     problems.extend(ServerAuthConfig::from_raw(raw).problems_with(cross_field));
     problems
+}
+
+/// The rules spanning keys that cannot be judged in the `server.auth` table
+/// `auth`, because a key they involve does not read or is out of its own
+/// range. A rule that could not be judged was not satisfied.
+pub fn unjudgeable_rules_of(auth: &toml::Value) -> Vec<String> {
+    let Some(table) = auth.as_table() else {
+        return vec![LENGTH_FITS_BYTES_RULE.to_string()];
+    };
+    let reads = |key: &str| {
+        table.get(key).is_none_or(|value| {
+            let mut alone = toml::Table::new();
+            alone.insert(key.to_string(), value.clone());
+            toml::Value::Table(alone)
+                .try_into::<RawServerAuthConfig>()
+                .is_ok()
+        })
+    };
+    let max_in_range = table
+        .get("max_password_bytes")
+        .and_then(toml::Value::as_integer)
+        .is_none_or(|max| max >= 1 && max <= i64::from(MAX_PASSWORD_BYTES_LIMIT));
+    if reads("minimum_password_length") && reads("max_password_bytes") && max_in_range {
+        Vec::new()
+    } else {
+        vec![LENGTH_FITS_BYTES_RULE.to_string()]
+    }
 }
 
 /// Whether every value in the `server.auth` table `auth` has its setting's

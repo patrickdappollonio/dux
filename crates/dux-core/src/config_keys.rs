@@ -543,14 +543,18 @@ fn write_value(
     // A set may leave problems `[server.auth]` already had, so a section
     // with several broken values can be repaired one value at a time; one
     // that adds a problem is refused.
-    let (previous, remaining_problems) =
-        crate::config_write::mutate_config_file_repairing(config_path, missing, |doc| {
+    let (previous, remaining_problems) = crate::config_write::mutate_config_file_repairing(
+        config_path,
+        missing,
+        &path.join("."),
+        |doc| {
             let previous = value_in_doc(doc, path);
             prepare_provider(doc, path)?;
             set_in_doc(doc, path, value)?;
             check_provider_command(doc, path)?;
             Ok(previous)
-        })?;
+        },
+    )?;
     Ok(SetReport {
         path: path.join("."),
         previous,
@@ -888,14 +892,17 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
             return Ok(GetValue::Unknown { in_file, reason });
         }
     };
-    // The terminal UI reads the file strictly where `dux server` recovers a
-    // setting: with any such setting, the value the terminal UI would use
-    // cannot be worked out, because it would not start at all.
-    let refusals = crate::config::terminal_ui_refusals_of(raw);
-    if !refusals.is_empty() {
+    // A file a surface will not start with has no value in use there: say
+    // which surface and why, for any problem from the one list of start
+    // checks.
+    let problems: Vec<String> = crate::config::start_problems_of(raw)
+        .into_iter()
+        .map(|problem| problem.message)
+        .collect();
+    if !problems.is_empty() {
         return Ok(GetValue::Unknown {
             in_file,
-            reason: refusals.join("; "),
+            reason: problems.join("; "),
         });
     }
     if let Some(value) = in_file {
@@ -1766,5 +1773,94 @@ port = 3890
                 .contains("dux server (and the terminal UI's background server) will not start"),
             "{error:#}"
         );
+    }
+
+    /// A set is judged by the key it sets: a port of 0 the file already had
+    /// never blocks repairing the host beside it, nor changing the host.
+    #[test]
+    fn a_port_of_zero_already_there_never_blocks_a_host_set() {
+        let (_dir, path) = temp_config("[server]\nhost = \"localhost\"\nport = 0\n");
+        let report = set_plain(&path, &lookup("server.host").unwrap(), "127.0.0.1")
+            .expect("repairing the host");
+        assert_eq!(
+            report.remaining_problems.len(),
+            1,
+            "{:?}",
+            report.remaining_problems
+        );
+        let (_dir, path) = temp_config("[server]\nport = 0\n");
+        set_plain(&path, &lookup("server.host").unwrap(), "0.0.0.0")
+            .expect("changing the host beside a port of 0");
+    }
+
+    /// Duplicate project ids stop both surfaces (the project sync refuses
+    /// them), so they are a start problem and `get` cannot report the value
+    /// in use.
+    #[test]
+    fn duplicate_project_ids_are_a_start_problem() {
+        let body = "[[projects]]\nid = \"same\"\npath = \"/tmp/review19-a\"\n\n\
+                    [[projects]]\nid = \"same\"\npath = \"/tmp/review19-b\"\n";
+        let config = crate::config::effective_config_from_text(body).expect("loads");
+        crate::config_sync::validate_project_records("config.toml", &config.projects)
+            .expect_err("dux refuses to start with duplicate project ids");
+        let problems = crate::config::start_problems_of(body);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].stops_terminal_ui && problems[0].stops_dux_server);
+        let got = get(body, &lookup("server.port").unwrap()).unwrap();
+        assert!(matches!(got, GetValue::Unknown { .. }), "{got:?}");
+    }
+
+    /// Wrong-typed settings are listed field by field, so repairing one of
+    /// two in a section is allowed and leaves the other listed.
+    #[test]
+    fn repairing_one_of_two_wrong_typed_settings_in_a_section_is_allowed() {
+        let (_dir, path) =
+            temp_config("[ui]\nleft_width_pct = \"wide\"\nright_width_pct = \"wide\"\n");
+        let before = crate::config::start_problems_of(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(before.len(), 2, "{before:?}");
+        let report =
+            set_plain(&path, &lookup("ui.left_width_pct").unwrap(), "20").expect("a repair");
+        assert_eq!(
+            report.remaining_problems.len(),
+            1,
+            "{:?}",
+            report.remaining_problems
+        );
+        assert!(report.remaining_problems[0].contains("right_width_pct"));
+    }
+
+    /// A cross-key rule that could not be judged before (one of its keys out
+    /// of range) was not satisfied, so repairing that key is allowed even
+    /// though the rule now reads as broken.
+    #[test]
+    fn repairing_a_key_is_allowed_when_its_cross_key_rule_could_not_be_judged_before() {
+        let (_dir, path) =
+            temp_config("[server.auth]\nminimum_password_length = 2000\nmax_password_bytes = 0\n");
+        let report = set_plain(
+            &path,
+            &lookup("server.auth.max_password_bytes").unwrap(),
+            "1024",
+        )
+        .expect("repairing the out-of-range value");
+        assert_eq!(
+            report.remaining_problems.len(),
+            1,
+            "{:?}",
+            report.remaining_problems
+        );
+        assert!(report.remaining_problems[0].contains("minimum_password_length"));
+    }
+
+    /// `get` warns about any problem that stops a surface, not only a
+    /// wrong-typed setting: a host that is not an IP stops both.
+    #[test]
+    fn get_does_not_report_values_for_a_file_dux_will_not_start_with() {
+        let body = "[server]\nhost = \"localhost\"\nport = 4000\n";
+        assert!(!crate::config::start_problems_of(body).is_empty());
+        let GetValue::Unknown { reason, .. } = get(body, &lookup("server.port").unwrap()).unwrap()
+        else {
+            panic!("expected Unknown");
+        };
+        assert!(reason.contains("localhost"), "{reason}");
     }
 }

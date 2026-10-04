@@ -100,8 +100,14 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     // The text the file holds now: what the config writer compares saves with.
     config.source_text = dux_core::config::SourceText::of(if migrated { &text } else { &raw });
     config.providers.ensure_defaults();
-    // The start checks `dux config set` runs too, from one place.
-    dux_core::config::start_check(&config)?;
+    // The one list of start checks, the same `dux config get`/`set` and `dux
+    // server` ask: anything that stops the terminal UI stops it here, its
+    // own `[keys]` check included (installed above).
+    if let Some(refusal) =
+        dux_core::config::start_refusal(&raw, dux_core::config::Surface::TerminalUi)
+    {
+        anyhow::bail!("{}: {refusal}", paths.config_path.display());
+    }
     // Warn once here (TUI startup and reload both funnel through ensure_config) on
     // an unrecognized clipboard_passthrough so the per-tick host forward can parse
     // silently. The warning is from_config_str's side effect.
@@ -1710,6 +1716,31 @@ pub fn render_config_documented(config: &Config) -> String {
 /// bootstrap project-sync. Idempotent.
 pub fn install_canonical_renderer() {
     dux_core::config_write::set_canonical_renderer(render_config_documented);
+    // The terminal UI's own start check joins the one list of start checks
+    // (`dux_core::config::check_start`), so every surface and `dux config
+    // get`/`set` judge `[keys]` the same way.
+    dux_core::config::install_terminal_ui_check(keys_start_problems);
+}
+
+/// What the terminal UI's start refuses in a whole config file's `[keys]`:
+/// the key migrations its start applies first (retired actions pruned,
+/// legacy ones folded), then [`validate_keys`]. A `[keys]` that does not
+/// read at all is a wrong-typed setting, which the start checks list on
+/// their own.
+fn keys_start_problems(raw: &str) -> Vec<String> {
+    let Ok(mut doc) = raw.parse::<DocumentMut>() else {
+        return Vec::new();
+    };
+    prune_retired_key_actions(&mut doc);
+    fold_legacy_key_actions(&mut doc);
+    let mut keys_only = DocumentMut::new();
+    if let Some(keys) = doc.get("keys") {
+        keys_only["keys"] = keys.clone();
+    }
+    match toml::from_str::<Config>(&keys_only.to_string()) {
+        Ok(config) => validate_keys(&config.keys).err().into_iter().collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4257,6 +4288,41 @@ args = [\"-l\"]
         assert!(error.contains("port 0"), "{error}");
     }
 
+    /// The terminal UI's start (and reload) refuses exactly the files the one
+    /// list of start checks says it refuses, for every kind of problem the
+    /// list knows: a check the start makes that the list lacks, or the other
+    /// way round, fails here.
+    #[test]
+    fn the_terminal_ui_start_refuses_exactly_what_the_start_checks_say() {
+        for fixture in dux_core::start_check_fixtures::FIXTURES {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let root = dir.path().to_path_buf();
+            let paths = dux_core::config::DuxPaths {
+                config_path: root.join("config.toml"),
+                sessions_db_path: root.join("sessions.sqlite3"),
+                lock_path: root.join("dux.lock"),
+                worktrees_root: root.join("worktrees"),
+                root,
+            };
+            fs::write(&paths.config_path, fixture.text).unwrap();
+            let refused = ensure_config(&paths).is_err();
+            install_canonical_renderer();
+            let listed = dux_core::config::start_problems_of(fixture.text)
+                .iter()
+                .any(|problem| problem.stops_terminal_ui);
+            assert_eq!(
+                refused, fixture.stops_terminal_ui,
+                "{}: start",
+                fixture.name
+            );
+            assert_eq!(
+                listed, fixture.stops_terminal_ui,
+                "{}: the list",
+                fixture.name
+            );
+        }
+    }
+
     #[test]
     fn ensure_config_refuses_to_start_when_server_auth_cannot_be_read() {
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -4596,9 +4662,15 @@ mod legacy_exit_interactive_tests {
         // The legacy row also carries the macro bar's own chord, so the fold
         // hands `toggle_fullscreen` a key that genuinely collides.
         let body = config_with_legacy_row("exit_interactive = [\"ctrl-g\", \"ctrl-\\\\\"]", None);
-        let (_dir, _paths, config) = seeded_config(&body);
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let paths = temp_paths(dir.path().to_path_buf());
+        fs::write(&paths.config_path, &body).expect("seed config");
 
-        let err = validate_keys(&config.keys).expect_err("a real conflict must still be reported");
+        // The start's own check of `[keys]` (one of the start checks) refuses it.
+        let err = format!(
+            "{:#}",
+            ensure_config(&paths).expect_err("a real conflict must still be reported")
+        );
         assert!(
             err.contains("open_macro_bar") && err.contains("toggle_fullscreen"),
             "expected the macro-bar conflict, got:\n{err}"

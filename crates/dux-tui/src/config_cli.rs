@@ -52,6 +52,8 @@ pub(crate) fn run_get(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
+    // The terminal UI's own start check joins the one list `get` reports from.
+    crate::config::install_canonical_renderer();
     let show = args.iter().any(|a| a == "--show");
     let rest: Vec<&String> = args.iter().filter(|a| *a != "--show").collect();
     let [path] = rest.as_slice() else {
@@ -1266,5 +1268,52 @@ port = 3890
         let (out, err) = get(&paths, "ui.left_width_pct");
         assert_eq!(out, "wide\n");
         assert!(err.contains("cannot be worked out"), "{err}");
+    }
+
+    const STRONG_PASSWORD: &str = "violet-quarry-71-snowmelt-bracket\n";
+
+    /// `[keys]` the terminal UI does not accept stop its start and its
+    /// reloads, so a set over such a file lists the problem and promises no
+    /// start, and a password set does not claim to be in force.
+    #[test]
+    fn a_set_over_keys_the_terminal_ui_refuses_promises_no_start() {
+        let (_tmp, paths) = setup(Some("[keys]\nnot_a_real_action = [\"x\"]\n"));
+        let said = set(&paths, &["server.port", "4000"], &mut no_secrets()).expect("set");
+        crate::config::ensure_config(&paths).expect_err("the terminal UI refuses [keys]");
+        assert!(!said.contains("applies the next time it starts"), "{said}");
+        assert!(said.contains("the terminal UI will not start"), "{said}");
+        let mut secrets = Canned {
+            stdin: Some(STRONG_PASSWORD),
+            prompts: None,
+        };
+        let said = set(&paths, &["server.auth.password", "--stdin"], &mut secrets).expect("set");
+        assert!(
+            !said.contains("Every browser signed in to dux is signed out"),
+            "{said}"
+        );
+        assert!(said.contains("not in force"), "{said}");
+    }
+
+    /// Duplicate project ids stop the terminal UI and `dux server` alike, so
+    /// a password set over them does not claim to be in force.
+    #[test]
+    fn a_password_set_over_duplicate_project_ids_is_not_in_force() {
+        let (_tmp, paths) = setup(Some(
+            "[[projects]]\nid = \"same\"\npath = \"/tmp/review19-a\"\n\n\
+             [[projects]]\nid = \"same\"\npath = \"/tmp/review19-b\"\n",
+        ));
+        let mut secrets = Canned {
+            stdin: Some(STRONG_PASSWORD),
+            prompts: None,
+        };
+        let said = set(&paths, &["server.auth.password", "--stdin"], &mut secrets).expect("set");
+        let config = dux_core::config::load_config(&paths).expect("loads");
+        dux_core::config_sync::validate_project_records("config.toml", &config.projects)
+            .expect_err("dux refuses duplicate project ids at start");
+        assert!(
+            !said.contains("Every browser signed in to dux is signed out"),
+            "{said}"
+        );
+        assert!(said.contains("dux server"), "{said}");
     }
 }

@@ -7947,4 +7947,33 @@ mod tests {
         assert!(after.contains("left_width_pct = 31"), "{after}");
         assert!(after.contains("API = \"k\""), "{after}");
     }
+
+    /// `dux server`'s start (its bootstrap, then the listener plan with no
+    /// `--bind` or `--port`) refuses exactly the files the one list of start
+    /// checks says stop it, for every kind of problem the list knows.
+    #[test]
+    fn dux_server_refuses_exactly_what_the_start_checks_say() {
+        for fixture in dux_core::start_check_fixtures::FIXTURES {
+            let (_tmp, paths) = temp_paths();
+            std::fs::write(&paths.config_path, fixture.text).unwrap();
+            let refused = match crate::bootstrap::bootstrap_engine(&paths) {
+                Err(_) => true,
+                Ok(engine) => dux_core::config::resolve_server_plan(
+                    &engine.config.server,
+                    &dux_core::config::ServerCliOverrides::default(),
+                    None,
+                )
+                .is_err(),
+            };
+            let listed = dux_core::config::start_problems_of(fixture.text)
+                .iter()
+                .any(|problem| problem.stops_dux_server);
+            assert_eq!(refused, fixture.stops_dux_server, "{}: start", fixture.name);
+            assert_eq!(
+                listed, fixture.stops_dux_server,
+                "{}: the list",
+                fixture.name
+            );
+        }
+    }
 }

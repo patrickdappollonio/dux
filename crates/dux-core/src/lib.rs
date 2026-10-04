@@ -67,6 +67,8 @@ pub mod scroll_margins;
 pub mod serve_log;
 pub mod shell_quote;
 pub mod sidebar;
+#[cfg(any(test, feature = "test-support"))]
+pub mod start_check_fixtures;
 pub mod startup;
 pub mod status_text;
 pub mod statusline;

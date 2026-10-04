@@ -45,6 +45,18 @@ impl ConfigSurface for WebConfigSurface {
                     return;
                 }
             };
+            // The one list of start checks: what stops `dux server` starting
+            // stops its reload too.
+            if let Some(raw) = config.source_text.as_str()
+                && let Some(refusal) =
+                    dux_core::config::start_refusal(raw, dux_core::config::Surface::DuxServer)
+            {
+                guard.complete(Err(format!(
+                    "The config was not reloaded, and the running settings are unchanged: \
+                     {refusal}"
+                )));
+                return;
+            }
             // Config wins: an edited `[[projects]]` applies its preferences to
             // SQLite on a live serve. Errors ride the reload result rather than
             // crashing the reload thread.
@@ -107,6 +119,15 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // start rather than serving with no password.
     let mut config = dux_core::config::load_config(paths)
         .map_err(|e| anyhow::anyhow!("dux cannot start: {e}"))?;
+    // The one list of start checks, the same the terminal UI and `dux config
+    // get`/`set` ask. A host or port the command line can override is left to
+    // `resolve_server_plan`, which knows the command line.
+    if let Some(raw) = config.source_text.as_str()
+        && let Some(refusal) =
+            dux_core::config::start_refusal(raw, dux_core::config::Surface::DuxServer)
+    {
+        anyhow::bail!("dux cannot start: {refusal}");
+    }
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
     // Config wins: adopt config-only projects, apply config-edited preferences to
     // SQLite, and validate identity conflicts, persisting any normalization back
