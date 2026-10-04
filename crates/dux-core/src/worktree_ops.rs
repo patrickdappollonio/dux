@@ -422,6 +422,35 @@ impl WorktreeOps {
     }
 }
 
+impl WorktreeOps {
+    /// Claim `path` for a destructive file operation (an editor delete or
+    /// move of a folder), the same claim a removal takes: from now on nothing
+    /// new can start in it or anywhere inside it, so nothing lands there
+    /// between the occupancy check and the operation. Refused, with the
+    /// reason, when a removal already covers it or an operation is already
+    /// running inside it. Dropping the lease lets the folder go.
+    pub fn claim_for_destructive(&self, path: impl AsRef<Path>) -> Result<RemovalLease, String> {
+        let path = path.as_ref();
+        if let Some(covering) = self.removal_refusal(path) {
+            return Err(format!(
+                "{} is being removed",
+                crate::home_path::shorten_home(&covering.path)
+            ));
+        }
+        match self.announce_removal(path) {
+            RemovalClaim::Lead(lease) => {
+                let holders = lease.holders();
+                if holders.is_empty() {
+                    Ok(lease)
+                } else {
+                    Err(format!("{} is running in it", describe_holders(&holders)))
+                }
+            }
+            RemovalClaim::Join(_) => Err("it is being removed already".to_string()),
+        }
+    }
+}
+
 /// An RAII hold. Dropping it releases the path, panics included.
 pub struct WorktreeOpGuard {
     ops: WorktreeOps,
@@ -655,6 +684,26 @@ impl RemovalJoin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_destructive_claim_keeps_everything_out_of_the_folder_until_it_ends() {
+        let ops = WorktreeOps::new();
+        let lease = ops.claim_for_destructive("/work/folder").unwrap();
+        assert!(
+            ops.hold("/work/folder/inner", WorktreeOpKind::EditorWrite)
+                .is_err()
+        );
+        assert!(ops.claim_for_destructive("/work/folder").is_err());
+        drop(lease);
+        let hold = ops
+            .hold("/work/folder/inner", WorktreeOpKind::EditorWrite)
+            .unwrap();
+        let Err(refused) = ops.claim_for_destructive("/work/folder") else {
+            panic!("a folder something is running in cannot be claimed");
+        };
+        assert!(refused.contains("running in it"), "{refused}");
+        drop(hold);
+    }
     use crate::model::BranchKeptReason;
 
     fn kept() -> RemovalResult {

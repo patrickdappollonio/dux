@@ -227,6 +227,12 @@ Right-click anywhere in the file tree:
 > For the same reason, a **Move…** onto a name that is already taken is **refused
 > outright**, not offered as an "are you sure?". Rename one of the two first, then move.
 
+Deleting or moving a folder is refused while something lives in it: an agent's worktree or
+a standalone agent's folder, a dux project's repository, an operation dux is running there,
+something dux started that is still running there, or a terminal whose shell is standing in
+it. The refusal names which. While the delete or move runs, nothing new can start inside
+that folder.
+
 Renaming, moving, or deleting a file that has other open editor tabs pointed at it (or, for
 a folder, tabs pointed anywhere underneath it) keeps everything in sync: a rename or move
 retargets those tabs, and a delete closes them.

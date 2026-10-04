@@ -311,6 +311,7 @@ pub fn run_claimed_startup_command(
             .with_context(|| format!("failed to run startup command through {shell}"))?;
         let process = crate::process_sessions::ProcessSession::started_now(child.id());
         guard.register_session(process, std::path::Path::new(&run.managed.worktree_path));
+        guard.label(process, "an agent's startup command");
         let output = child
             .wait_with_output()
             .with_context(|| format!("failed to run startup command through {shell}"))?;

@@ -267,6 +267,93 @@ pub(crate) fn hold_targets_for_write(
     Ok(holds)
 }
 
+/// What an editor delete or move holds while it runs (see
+/// [`guard_destructive_targets`]). Dropping it lets everything go.
+pub(crate) struct DestructiveGuard {
+    _holds: Vec<dux_core::worktree_ops::WorktreeOpGuard>,
+    _claims: Vec<dux_core::worktree_ops::RemovalLease>,
+    /// The targets that are not folders, held only once the occupancy check
+    /// has been asked (see [`DestructiveGuard::hold_the_rest`]).
+    rest: Vec<std::path::PathBuf>,
+}
+
+impl DestructiveGuard {
+    /// Hold the targets that are not folders. Done after the occupancy check,
+    /// because a hold on a path is itself something the check reports as
+    /// running there; a file has nothing inside it to land between the two.
+    pub(crate) fn hold_the_rest(
+        &mut self,
+        state: &AppState,
+        what: &str,
+    ) -> Result<(), RouteRejection> {
+        for path in std::mem::take(&mut self.rest) {
+            self._holds.push(hold_root_for_write(
+                state,
+                &path,
+                dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
+                what,
+            )?);
+        }
+        Ok(())
+    }
+}
+
+/// The first half of an editor delete's or move's guard: a hold on the root,
+/// and a CLAIM on every target that is a folder (its own entry, links not
+/// followed), the same claim a worktree removal takes. From the claim on,
+/// nothing new can start anywhere inside the folder, so nothing lands there
+/// between the occupancy check and the operation. A folder something is
+/// already running in is refused with what that is, and one already being
+/// removed or moved is refused too.
+pub(crate) fn guard_destructive_targets(
+    state: &AppState,
+    root: &Path,
+    targets: &[&str],
+    what: &str,
+) -> Result<DestructiveGuard, RouteRejection> {
+    let ops = state.engine.worktree_ops();
+    let mut guard = DestructiveGuard {
+        _holds: vec![hold_root_for_write(
+            state,
+            root,
+            dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
+            what,
+        )?],
+        _claims: Vec::new(),
+        rest: Vec::new(),
+    };
+    let root_key = dux_core::worktree_ops::path_key(root);
+    for target in targets {
+        let path = root.join(target);
+        let is_folder = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir());
+        // The root itself is never deleted or moved (the operation refuses
+        // it), and it is already held above.
+        if dux_core::worktree_ops::path_key(&path) == root_key {
+            continue;
+        }
+        if !is_folder {
+            guard.rest.push(path);
+            continue;
+        }
+        let refused = |reason: String| -> RouteRejection {
+            (
+                StatusCode::CONFLICT,
+                format!(
+                    "dux did not {what} {}: {reason}.",
+                    dux_core::home_path::shorten_home(&path)
+                ),
+            )
+                .into_response()
+                .into()
+        };
+        match ops.claim_for_destructive(&path) {
+            Ok(lease) => guard._claims.push(lease),
+            Err(reason) => return Err(refused(reason)),
+        }
+    }
+    Ok(guard)
+}
+
 /// Which of the two engine predicates a resolution asks.
 #[derive(Clone, Copy)]
 enum GitAsk {
@@ -382,6 +469,11 @@ where
         )
             .into_response()
             .into()),
+        // Something lives where the operation would delete: a conflict with
+        // what is there, said in the sentence that names it.
+        Ok(Err(e)) if e.downcast_ref::<dux_core::destructive::Refused>().is_some() => {
+            Err((StatusCode::CONFLICT, e.to_string()).into_response().into())
+        }
         Ok(Err(e)) => {
             dux_core::logger::warn(&format!("[web] could not {action}: {e:#}"));
             let detail = dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree);
@@ -531,10 +623,16 @@ async fn discard(
     let wt = worktree.clone();
     let confirmed = op.confirmed();
     let path = op.path;
+    // A folder or a nested repository is deleted whole, so the discard needs
+    // a clearance for it from the one occupancy question; a refusal is a 409
+    // naming what lives there.
+    let Some(check) = state.engine.destructive_check(worktree.join(&path)).await else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
+    };
     // A folder that is no longer what the user confirmed is a refusal they can
     // act on (look again), which `run_git` answers as one.
     let files_deleted = match run_git("discard the file's changes", &worktree, hold, move || {
-        dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed)
+        dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed, || check.clear("delete"))
     })
     .await
     {
@@ -2468,5 +2566,85 @@ mod tests {
             "none of the 3 selected files are in this worktree's unstaged changes any more \
              (starting with \"a.rs\"). Refresh the changes and try again."
         );
+    }
+
+    /// Review 6: "the same check also decides every destructive file
+    /// operation: the changes pane's folder discard, nested-repo discard". The
+    /// web changes pane's discard route deletes an untracked folder whole
+    /// without asking the one occupancy question, so a standalone agent whose
+    /// folder sits untracked inside the worktree loses its folder (dux "never
+    /// creates, moves or removes a standalone agent's folder").
+    #[tokio::test]
+    async fn review6_web_discard_does_not_delete_a_standalone_agents_folder() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let root = tmp.path().to_path_buf();
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        run_git(&wt, &["init", "-q"]);
+        run_git(&wt, &["config", "user.email", "t@example.com"]);
+        run_git(&wt, &["config", "user.name", "t"]);
+        std::fs::write(wt.join("f.txt"), "line1\n").unwrap();
+        run_git(&wt, &["add", "f.txt"]);
+        run_git(&wt, &["commit", "-q", "-m", "init"]);
+        let scratch = wt.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("notes.md"), "the standalone agent's work\n").unwrap();
+        let paths = dux_core::config::DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_project(&dux_core::config::ProjectConfig {
+                    id: "p1".to_string(),
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("p1".to_string()),
+                    default_provider: None,
+                    leading_branch: None,
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: Default::default(),
+                })
+                .unwrap();
+            store
+                .create_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                .unwrap();
+            store
+                .create_session(&standalone_session(
+                    "s-alone",
+                    scratch.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
+        let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::build_app(
+            handle,
+            Router::new(),
+            crate::server::RouterParams::plain_http(),
+        );
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/s1/git/discard",
+                r#"{"path":"scratch","kind":"directory","files":1}"#,
+            ))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let text = body_text(resp).await;
+        assert!(
+            scratch.join("notes.md").exists(),
+            "the web changes pane deleted standalone agent s-alone's folder {} \
+             (answered {status}: {text})",
+            scratch.display()
+        );
+        assert_eq!(status, StatusCode::CONFLICT, "{text}");
     }
 }

@@ -422,6 +422,7 @@ impl AdmittedRemoval {
         // A standalone agent's processes are never ended; while any run here
         // the folder is kept, before anything else is ended.
         if let Some(message) = crate::engine::standalone_processes_keep(&registry, &requested_text)
+            .or_else(|| crate::engine::cwd_keeps(&registry, &requested_text, &processes))
         {
             lease.finish(Err(message.clone()));
             return Err(message);
@@ -432,7 +433,7 @@ impl AdmittedRemoval {
             &requested_text,
         )
         .and_then(|()| {
-            match crate::engine::occupant_after_wait(&lease, &registry, &processes) {
+            match crate::engine::occupant_after_wait(&lease, &registry, &registry, &processes) {
                 Some(occupant) => Err(crate::engine::occupied_after_wait_message(
                     &requested_text,
                     &occupant,

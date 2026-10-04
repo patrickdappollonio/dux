@@ -351,7 +351,7 @@ fn the_registry_table_round_trips_and_prunes_dead_sessions() {
     // A session whose leader is long gone, with nothing recorded: pruned.
     let dead = crate::process_sessions::ProcessSession {
         sid: 9_999_990,
-        started_at_secs: 1,
+        started_at: 1,
         boot: crate::process_sessions::current_boot(),
     };
     engine.process_registry.register("s-dead", dead, &folder);

@@ -69,6 +69,16 @@ impl Engine {
                     == crate::worktree_ops::path_key(folder),
             });
         }
+        if let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| inside(std::path::Path::new(&project.path)))
+        {
+            return Some(Occupant::Project {
+                name: project.name.clone(),
+                path: project.path.clone(),
+            });
+        }
         if self
             .removal_coordination
             .ops
@@ -333,6 +343,7 @@ impl Engine {
             grace: self.individual_close_grace(),
         };
         let registry = row_registry;
+        let live = self.process_registry.clone();
         let db_path = self.paths.sessions_db_path.clone();
         // The same claim a delete takes, so nothing new starts in the folder
         // while it is being finished, and a second removal of it joins this one.
@@ -353,6 +364,7 @@ impl Engine {
                     wait,
                     waiting_tx: None,
                     registry,
+                    live,
                 },
             );
             super::events::forget_pending_removal_in(&db_path, &row.session_id);
@@ -491,6 +503,11 @@ pub(crate) enum Occupant {
         /// than one inside it.
         exact: bool,
     },
+    /// A dux project's repository is the folder, or is inside it.
+    Project {
+        name: String,
+        path: String,
+    },
     BeingCreated,
     Process(&'static str),
 }
@@ -518,6 +535,10 @@ impl Occupant {
             } => format!(
                 "agent \"{label}\" has its worktree at {}; delete that agent first",
                 folder(directory)
+            ),
+            Occupant::Project { name, path } => format!(
+                "project \"{name}\" has its repository at {}; remove the project from dux first",
+                folder(path)
             ),
             Occupant::BeingCreated => "an agent is being created in it".to_string(),
             Occupant::Process(what) => (*what).to_string(),
@@ -570,6 +591,16 @@ impl Occupant {
                 " started working in it while this agent was shutting down. Remove it from \
                  the worktree manager if you still want it gone."
             ],
+            Occupant::Project { name, path } => crate::status_text![
+                "Kept the worktree at ",
+                q(worktree.to_string()),
+                ": project ",
+                q(name.clone()),
+                " has its repository at ",
+                n(crate::home_path::shorten_home(std::path::Path::new(path))),
+                ", inside it, and removing the worktree would delete that repository too. \
+                 Remove the project from dux first."
+            ],
             Occupant::BeingCreated => crate::status_text![
                 "Kept the worktree at ",
                 q(worktree.to_string()),
@@ -588,48 +619,6 @@ impl Occupant {
     }
 }
 
-/// What stands in the way of a destructive file operation on a folder (a
-/// delete, a discard of untracked files, a move), from the one occupancy
-/// question plus the registry's holds and process sessions in or under it.
-/// Built on the engine thread; [`DestructiveCheck::refusal`] does the one
-/// blocking part (a look at the process table), so call that off it.
-#[derive(Clone, Debug)]
-pub struct DestructiveCheck {
-    target: std::path::PathBuf,
-    occupant: Option<String>,
-    sessions: Vec<crate::process_sessions::ProcessSession>,
-    known: Vec<crate::process_sessions::ProcessIdentity>,
-}
-
-impl DestructiveCheck {
-    /// The sentence refusing the operation, or `None` when nothing lives in
-    /// the target. Blocking: reads the process table when dux has sessions
-    /// recorded there.
-    pub fn refusal(&self, what: &str) -> Option<String> {
-        let reason = self.occupant.clone().or_else(|| {
-            if self.sessions.is_empty() {
-                return None;
-            }
-            let running = crate::process_sessions::members(
-                &crate::process_sessions::read_process_table(),
-                &self.sessions,
-                &self.known,
-                std::process::id(),
-            );
-            (!running.is_empty()).then(|| {
-                format!(
-                    "something dux started there is still running ({})",
-                    crate::process_sessions::describe(&running)
-                )
-            })
-        })?;
-        Some(format!(
-            "dux did not {what} {}: {reason}.",
-            crate::home_path::shorten_home(&self.target)
-        ))
-    }
-}
-
 impl Engine {
     /// Everything that would make deleting or moving `target` (and all that
     /// is under it) destroy something in use: an agent of any kind living
@@ -637,7 +626,10 @@ impl Engine {
     /// agent being created there, a terminal or tab running there, an
     /// operation holding a path there, or a process session dux recorded
     /// there. The one rule every destructive file operation asks.
-    pub fn destructive_check(&self, target: &std::path::Path) -> DestructiveCheck {
+    pub fn destructive_check(
+        &self,
+        target: &std::path::Path,
+    ) -> crate::destructive::DestructiveCheck {
         let occupant = self
             .folder_occupant(target, None, StoppingProcesses::Occupy)
             .map(|occupant| occupant.reason())
@@ -653,11 +645,12 @@ impl Engine {
         let mut sessions = self.process_registry.sessions_in(target);
         sessions.extend(self.process_registry.standalone_sessions_in(target));
         let known = self.process_registry.survivors_of(&sessions);
-        DestructiveCheck {
-            target: target.to_path_buf(),
+        crate::destructive::DestructiveCheck::new(
+            target,
             occupant,
             sessions,
             known,
-        }
+            self.process_registry.clone(),
+        )
     }
 }

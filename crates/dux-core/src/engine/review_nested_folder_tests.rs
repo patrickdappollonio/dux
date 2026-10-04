@@ -280,8 +280,9 @@ fn a_resumed_removal_does_not_kill_an_unrelated_program_that_reused_a_session_nu
     // hour before this program existed.
     let recorded = crate::process_sessions::ProcessSession {
         sid,
-        started_at_secs: crate::process_sessions::ProcessSession::started_now(sid).started_at_secs
-            - 3600,
+        started_at: crate::process_sessions::ProcessSession::started_now(sid)
+            .started_at
+            .saturating_sub(3_600_000_000_000),
         boot: crate::process_sessions::current_boot(),
     };
     engine

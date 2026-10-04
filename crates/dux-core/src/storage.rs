@@ -775,12 +775,7 @@ impl SessionStore {
         let sessions = row
             .process_sessions
             .iter()
-            .map(|session| {
-                format!(
-                    "{}:{}:{}",
-                    session.sid, session.started_at_secs, session.boot
-                )
-            })
+            .map(|session| format!("{}:{}:{}", session.sid, session.started_at, session.boot))
             .collect::<Vec<_>>()
             .join(",");
         self.conn
@@ -953,12 +948,7 @@ impl SessionStore {
         let sessions = row
             .process_sessions
             .iter()
-            .map(|session| {
-                format!(
-                    "{}:{}:{}",
-                    session.sid, session.started_at_secs, session.boot
-                )
-            })
+            .map(|session| format!("{}:{}:{}", session.sid, session.started_at, session.boot))
             .collect::<Vec<_>>()
             .join(",");
         self.conn
@@ -1043,7 +1033,7 @@ impl SessionStore {
                         let mut fields = entry.split(':');
                         Some(crate::process_sessions::ProcessSession {
                             sid: fields.next()?.parse().ok()?,
-                            started_at_secs: fields.next()?.parse().ok()?,
+                            started_at: fields.next()?.parse().ok()?,
                             // A row written before boots were recorded names
                             // no boot, and is void rather than trusted.
                             boot: fields
@@ -2431,12 +2421,12 @@ mod tests {
             process_sessions: vec![
                 crate::process_sessions::ProcessSession {
                     sid: 41,
-                    started_at_secs: 1_700_000_000,
+                    started_at: 1_700_000_000,
                     boot: 7,
                 },
                 crate::process_sessions::ProcessSession {
                     sid: 42,
-                    started_at_secs: 1_700_000_001,
+                    started_at: 1_700_000_001,
                     boot: 7,
                 },
             ],
@@ -2448,7 +2438,7 @@ mod tests {
                 entries: vec![crate::process_sessions::RegistryEntry {
                     session: crate::process_sessions::ProcessSession {
                         sid: 44,
-                        started_at_secs: 1_700_000_003,
+                        started_at: 1_700_000_003,
                         boot: 7,
                     },
                     folder: std::path::PathBuf::from("/wt/feat/frontend"),

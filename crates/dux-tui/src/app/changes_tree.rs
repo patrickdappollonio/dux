@@ -759,8 +759,7 @@ impl App {
         // standalone agent, another agent's worktree, something dux started)
         // is asked about on this thread, and the one blocking part of the
         // answer is read on the worker, before anything is deleted.
-        let destructive =
-            (op == FolderOp::Delete).then(|| self.engine.destructive_check(&worktree.join(&path)));
+        let destructive = self.engine.destructive_check(&worktree.join(&path));
         // What the user confirmed they were deleting; the delete refuses if the
         // folder is no longer that when it runs.
         // A folder carries the number of files the dialog said would go,
@@ -790,18 +789,14 @@ impl App {
                     FolderOp::Unstage => {
                         git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
                     }
-                    FolderOp::Delete => match destructive
-                        .as_ref()
-                        .and_then(|check| check.refusal("delete"))
-                    {
-                        Some(refused) => Err(anyhow::anyhow!(refused)),
-                        None => delete_untracked_folder(&worktree, &path, confirmed).map(
+                    FolderOp::Delete => {
+                        delete_untracked_folder(&worktree, &path, confirmed, &destructive).map(
                             |deleted_files| FolderOpDone {
                                 deleted_files,
                                 ..FolderOpDone::default()
                             },
-                        ),
-                    },
+                        )
+                    }
                 };
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
             });
@@ -945,13 +940,16 @@ fn delete_untracked_folder(
     worktree: &Path,
     path: &str,
     confirmed: git::ConfirmedEntry,
+    check: &dux_core::destructive::DestructiveCheck,
 ) -> anyhow::Result<usize> {
     if !git::discard_classify(worktree, path)? {
         anyhow::bail!(
             "it is no longer untracked, so dux left it alone; refresh the changes and look again"
         );
     }
-    git::discard_confirmed(worktree, path, true, Some(confirmed))
+    git::discard_confirmed(worktree, path, true, Some(confirmed), || {
+        check.clear("delete")
+    })
 }
 
 /// What a stage left out, in words: "1 nested repository and 2 worktrees of

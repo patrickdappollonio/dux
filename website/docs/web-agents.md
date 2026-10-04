@@ -320,6 +320,11 @@ remove it later from the worktree manager.
 If something refuses to stop even when killed, dux keeps the worktree untouched and names the
 processes, so you can stop them and remove the worktree from the worktree manager.
 
+A project or standalone terminal whose shell you `cd`'d into the worktree, or anything else
+dux started elsewhere that is standing in it, is never ended to make way. The worktree is kept
+and dux names the terminal: `cd` out of the folder or close the terminal, then remove the
+worktree from the worktree manager.
+
 Something dux did not start and cannot see, such as a server another program launched in
 that folder, can still write into it while git deletes it. git then removes the worktree from
 the repository but cannot delete the folder. dux does not finish the job by deleting the

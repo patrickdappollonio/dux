@@ -1546,22 +1546,72 @@ pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let output = std::process::Command::new("lsof")
-            .args(["-a", "-d", "cwd", "-Fn", "-p", &pid.to_string()])
-            .output()
-            .map_err(DropDirError::Io)?;
-        if !output.status.success() {
-            return Err(DropDirError::Io(std::io::Error::other(format!(
-                "lsof could not report the working directory of process {pid}"
-            ))));
-        }
-        let cwd = lsof_cwd_path(&output.stdout).ok_or_else(|| {
+        let cwd = process_cwds(&[pid]).remove(&pid).ok_or_else(|| {
             DropDirError::Io(std::io::Error::other(format!(
-                "lsof reported no working directory for process {pid}"
+                "lsof could not report the working directory of process {pid}"
             )))
         })?;
         DropDir::open(&cwd)
     }
+}
+
+/// The current working directory of each of `pids` that can be asked, as the
+/// path the platform reports: `/proc/<pid>/cwd` on Linux, one `lsof` call for
+/// all of them on macOS (see [`open_process_cwd`] for what each can and
+/// cannot promise). A process that is gone, or not ours to ask, is left out.
+/// Blocking.
+pub fn process_cwds(pids: &[u32]) -> std::collections::HashMap<u32, PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        pids.iter()
+            .filter_map(|pid| {
+                let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+                Some((*pid, cwd))
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if pids.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        let list = pids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        // lsof exits non-zero when any one of the pids has gone, while still
+        // printing the rest, so its output is read whatever its status.
+        match std::process::Command::new("lsof")
+            .args(["-a", "-d", "cwd", "-Fpn", "-p", &list])
+            .output()
+        {
+            Ok(output) => lsof_cwd_paths(&output.stdout),
+            Err(_) => std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Every process's working directory out of `lsof -Fpn` output: a `p` line
+/// starts a process, and the `n` line after it is its directory (see
+/// [`lsof_cwd_path`] for why the bytes are kept as they are).
+#[cfg(any(not(target_os = "linux"), test))]
+fn lsof_cwd_paths(stdout: &[u8]) -> std::collections::HashMap<u32, PathBuf> {
+    let mut found = std::collections::HashMap::new();
+    let mut current: Option<u32> = None;
+    for line in stdout.split(|&b| b == b'\n') {
+        if let Some(pid) = line.strip_prefix(b"p") {
+            current = std::str::from_utf8(pid)
+                .ok()
+                .and_then(|pid| pid.parse().ok());
+        } else if let (Some(pid), Some(_)) = (current, line.strip_prefix(b"n"))
+            && let Some(path) = lsof_cwd_path(line)
+        {
+            found.insert(pid, path);
+            current = None;
+        }
+    }
+    found
 }
 
 /// The working directory out of `lsof -Fn` output, as BYTES.
@@ -1600,6 +1650,23 @@ mod tests {
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
+    }
+
+    #[test]
+    fn lsof_output_for_several_processes_gives_each_its_folder() {
+        let out = b"p12\nfcwd\nn/work/a\np34\nfcwd\nn/work/with space\n";
+        let found = lsof_cwd_paths(out);
+        assert_eq!(found.get(&12), Some(&PathBuf::from("/work/a")));
+        assert_eq!(found.get(&34), Some(&PathBuf::from("/work/with space")));
+    }
+
+    #[test]
+    fn this_processs_own_folder_is_read() {
+        let found = process_cwds(&[std::process::id()]);
+        assert_eq!(
+            found.get(&std::process::id()),
+            Some(&std::env::current_dir().unwrap())
+        );
     }
 
     // ── Containment: did the file land in the tree git is watching? ──────────

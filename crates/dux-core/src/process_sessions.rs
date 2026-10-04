@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// How long a purge waits for a SIGKILL to land once it has been sent, on top
 /// of the configured grace. A SIGKILLed process is gone as soon as the kernel
@@ -31,20 +31,24 @@ pub const KILL_SETTLE: Duration = Duration::from_secs(3);
 /// How often a purge looks at the process table while it waits.
 const PURGE_POLL: Duration = Duration::from_millis(50);
 
-/// Slack allowed between dux recording a spawn and the kernel's own start time
-/// for the same process, which are read from two clocks with one-second
-/// resolution on the kernel's side.
-const START_TIME_SLACK_SECS: u64 = 2;
+/// Slack allowed between the start time dux recorded for a session's leader
+/// and the kernel's own, in nanoseconds since boot. dux reads the kernel's
+/// own number whenever the leader can still be asked, so the two normally
+/// agree exactly; the slack only covers the fallback, the moment of the spawn
+/// on the same clock, when the leader was already gone.
+const START_TIME_SLACK: u64 = 2_000_000_000;
 
 /// A session dux created: a PTY's child or a startup command, both started
 /// with `setsid`, so the session id is the leader's pid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProcessSession {
     pub sid: u32,
-    /// When dux spawned the leader, in seconds since the epoch. Tells this
-    /// session apart from a later one that reused the same pid: nothing that
-    /// started before it can belong to it.
-    pub started_at_secs: u64,
+    /// When the leader started, in nanoseconds since the machine booted (see
+    /// [`process_start`]): a clock no wall-clock step can move, so a session
+    /// is told apart from a later one that reused the same pid the same way
+    /// whatever the clock on the wall did. Nothing that started before it can
+    /// belong to it.
+    pub started_at: u64,
     /// The machine boot the session was recorded in ([`current_boot`]). A
     /// session recorded in an earlier boot is void: every pid has been handed
     /// out afresh since, so its number names nothing of dux's.
@@ -56,7 +60,7 @@ impl ProcessSession {
     pub fn started_now(sid: u32) -> Self {
         Self {
             sid,
-            started_at_secs: epoch_secs(SystemTime::now()),
+            started_at: process_start(sid).unwrap_or_else(boot_nanos_now),
             boot: current_boot(),
         }
     }
@@ -85,8 +89,117 @@ pub fn current_boot() -> u64 {
     })
 }
 
-fn epoch_secs(at: SystemTime) -> u64 {
-    at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+/// Now, in nanoseconds since the machine booted, on the clock process start
+/// times are read in: `CLOCK_BOOTTIME` on Linux (what `/proc/<pid>/stat`'s
+/// start time counts), the Mach absolute clock on macOS (what the kernel
+/// stamps a process's start with). Neither is stepped when the wall clock is.
+pub fn boot_nanos_now() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        let now = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
+        (now.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(now.tv_nsec as u64)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: a plain read of the Mach clock, no arguments.
+        #[allow(deprecated)]
+        let now = unsafe { libc::mach_absolute_time() };
+        mach_to_nanos(now)
+    }
+}
+
+/// When process `pid` started, in nanoseconds since boot (see
+/// [`boot_nanos_now`]), or `None` when it cannot be asked (gone, or not
+/// ours to ask on macOS).
+pub fn process_start(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        parse_linux_stat(pid, &stat).map(|row| row.start_time)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_start(pid)
+    }
+}
+
+/// Clock ticks per second, the unit of `/proc/<pid>/stat`'s start time.
+#[cfg(target_os = "linux")]
+fn clock_ticks_per_second() -> u64 {
+    static TICKS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TICKS.get_or_init(|| {
+        // SAFETY: sysconf reads a constant of the running system.
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        u64::try_from(ticks).ok().filter(|t| *t > 0).unwrap_or(100)
+    })
+}
+
+/// One `/proc/<pid>/stat` line as a row. The command name sits in
+/// parentheses and may itself contain spaces and parentheses, so the fields
+/// after it are read from after the LAST closing parenthesis.
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_stat_with(pid: u32, stat: &str, ticks_per_second: u64) -> Option<ProcRow> {
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let name = stat.get(open + 1..close)?.to_string();
+    // Fields after the name, numbered from 3 in proc(5): state (3), ppid (4),
+    // pgrp (5), session (6), ... starttime (22).
+    let fields: Vec<&str> = stat.get(close + 1..)?.split_whitespace().collect();
+    let state = fields.first()?;
+    let ppid: u32 = fields.get(1)?.parse().ok()?;
+    let sid: u32 = fields.get(3)?.parse().ok()?;
+    let ticks: u64 = fields.get(19)?.parse().ok()?;
+    Some(ProcRow {
+        pid,
+        ppid: (ppid != 0).then_some(ppid),
+        sid: Some(sid),
+        start_time: (u128::from(ticks) * 1_000_000_000 / u128::from(ticks_per_second.max(1)))
+            as u64,
+        name,
+        exited: matches!(*state, "Z" | "X" | "x"),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_stat(pid: u32, stat: &str) -> Option<ProcRow> {
+    parse_linux_stat_with(pid, stat, clock_ticks_per_second())
+}
+
+/// Mach absolute time in nanoseconds.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn mach_to_nanos(abstime: u64) -> u64 {
+    static TIMEBASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    let (numer, denom) = *TIMEBASE.get_or_init(|| {
+        let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+        // SAFETY: fills the struct it is handed.
+        let rc = unsafe { libc::mach_timebase_info(&mut info) };
+        if rc == 0 && info.denom != 0 {
+            (info.numer, info.denom)
+        } else {
+            (1, 1)
+        }
+    });
+    (u128::from(abstime) * u128::from(numer) / u128::from(denom)) as u64
+}
+
+/// A process's start on the Mach absolute clock, in nanoseconds.
+#[cfg(target_os = "macos")]
+fn macos_start(pid: u32) -> Option<u64> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    // SAFETY: zeroed is a valid value for this plain-data struct, and the
+    // kernel writes at most its size for the V2 flavor.
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            pid,
+            libc::RUSAGE_INFO_V2,
+            (&mut info as *mut libc::rusage_info_v2).cast::<libc::rusage_info_t>(),
+        )
+    };
+    (rc == 0).then(|| mach_to_nanos(info.ri_proc_start_abstime))
 }
 
 /// One process, identified across two looks at the table: a pid alone can be
@@ -104,7 +217,8 @@ pub struct ProcRow {
     pub ppid: Option<u32>,
     /// `None` when the process exited between the listing and the question.
     pub sid: Option<u32>,
-    /// Seconds since the epoch.
+    /// When it started, in nanoseconds since boot (see [`process_start`]); 0
+    /// when the platform would not say (another user's process on macOS).
     pub start_time: u64,
     pub name: String,
     /// A zombie has exited: it holds no files and writes nothing.
@@ -155,16 +269,14 @@ pub fn members(
             by_pid.get(&session.sid).is_some_and(|leader| {
                 !leader.exited
                     && leader.sid == Some(leader.pid)
-                    && leader.start_time + START_TIME_SLACK_SECS >= session.started_at_secs
-                    && leader.start_time <= session.started_at_secs + START_TIME_SLACK_SECS
+                    && leader.start_time + START_TIME_SLACK >= session.started_at
+                    && leader.start_time <= session.started_at + START_TIME_SLACK
             })
         })
         .map(|session| {
             (
                 session.sid,
-                session
-                    .started_at_secs
-                    .saturating_sub(START_TIME_SLACK_SECS),
+                session.started_at.saturating_sub(START_TIME_SLACK),
             )
         })
         .collect();
@@ -221,9 +333,7 @@ pub fn survivors_at_leader_exit(session: ProcessSession) -> Vec<ProcessIdentity>
     if !session.is_this_boot() {
         return Vec::new();
     }
-    let earliest = session
-        .started_at_secs
-        .saturating_sub(START_TIME_SLACK_SECS);
+    let earliest = session.started_at.saturating_sub(START_TIME_SLACK);
     read_process_table()
         .iter()
         .filter(|row| {
@@ -236,28 +346,51 @@ pub fn survivors_at_leader_exit(session: ProcessSession) -> Vec<ProcessIdentity>
         .collect()
 }
 
-/// The process table, read off the platform (`/proc` on Linux, libproc on
-/// macOS) through `sysinfo`. Blocking file and syscall work: call it from a
-/// worker thread, never the UI thread.
+/// The process table, read off the platform: `/proc` itself on Linux (the
+/// only place the start time is given in boot-relative ticks), and libproc on
+/// macOS (through `sysinfo`, with each start read off the Mach clock).
+/// Blocking file and syscall work: call it from a worker thread, never the UI
+/// thread.
 pub fn read_process_table() -> Vec<ProcRow> {
-    use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    sys.processes()
-        .iter()
-        .filter(|(_, process)| process.thread_kind().is_none())
-        .map(|(pid, process)| ProcRow {
-            pid: pid.as_u32(),
-            ppid: process.parent().map(|parent| parent.as_u32()),
-            sid: process.session_id().map(|sid| sid.as_u32()),
-            start_time: process.start_time(),
-            name: process.name().to_string_lossy().into_owned(),
-            exited: matches!(
-                process.status(),
-                ProcessStatus::Zombie | ProcessStatus::Dead
-            ),
-        })
-        .collect()
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+            .filter_map(|pid| {
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                parse_linux_stat(pid, &stat)
+            })
+            .collect()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        sys.processes()
+            .iter()
+            .filter(|(_, process)| process.thread_kind().is_none())
+            .map(|(pid, process)| ProcRow {
+                pid: pid.as_u32(),
+                ppid: process.parent().map(|parent| parent.as_u32()),
+                sid: process.session_id().map(|sid| sid.as_u32()),
+                start_time: macos_start(pid.as_u32()).unwrap_or(0),
+                name: process.name().to_string_lossy().into_owned(),
+                exited: matches!(
+                    process.status(),
+                    ProcessStatus::Zombie | ProcessStatus::Dead
+                ),
+            })
+            .collect()
+    }
 }
 
 /// The live members of `sessions` (and their descendants) right now, as
@@ -414,6 +547,16 @@ struct RegistryInner {
     /// [`AgentProcessRegistry::sync_pending`]), so a later start ends exactly
     /// the set the live run would have.
     pending_folders: HashMap<String, std::path::PathBuf>,
+    /// What to call each session's processes in a sentence ("project
+    /// terminal Terminal 2", "agent X's startup command"), for the ones dux
+    /// can name. Runtime only: a session read back from an earlier run is
+    /// "a process dux started".
+    labels: HashMap<ProcessSession, String>,
+    /// A prune of ended sessions is running because a list went past its cap.
+    cap_prune_running: bool,
+    /// The registry went past a cap with every session still live, and that
+    /// has been logged.
+    cap_overrun_logged: bool,
 }
 
 /// One registered session, as a pending removal's row records it: the
@@ -490,13 +633,15 @@ impl RegistrySnapshot {
 /// somebody else's.
 pub const UNOWNED_PTYS: &str = "\u{0}unowned";
 
-/// How many sessions of deleted agents are remembered, newest kept.
+/// How many sessions of deleted agents are remembered before the ones
+/// confirmed ended are dropped. A soft cap: see [`SESSIONS_PER_AGENT`].
 const RETIRED_SESSIONS: usize = 1024;
 
-/// How many sessions are remembered per agent. An agent that has opened and
-/// closed more terminals than this over its life keeps the newest; the purge
-/// still follows every live process's own session, so this only drops the
-/// oldest leftovers from the list of places to look.
+/// How many sessions are remembered per agent before the ones confirmed ended
+/// are dropped. A soft cap: a session with anything still running in it is
+/// never forgotten (a removal of its folder only ends what is listed), so a
+/// list whose every session is still live grows past it, and that is logged
+/// once.
 const SESSIONS_PER_AGENT: usize = 256;
 
 impl AgentProcessRegistry {
@@ -513,25 +658,167 @@ impl AgentProcessRegistry {
         // The kernel handed this number to a newer session: whatever was
         // recorded under it before is gone, under every key.
         let older = |(known, _): &(ProcessSession, std::path::PathBuf)| {
-            known.sid == session.sid && known.started_at_secs < session.started_at_secs
+            known.sid == session.sid && known.started_at < session.started_at
         };
         for list in inner.sessions.values_mut() {
             list.retain(|entry| !older(entry));
         }
         inner.retired.retain(|entry| !older(entry));
         inner.survivors.retain(|known, _| {
-            !(known.sid == session.sid && known.started_at_secs < session.started_at_secs)
+            !(known.sid == session.sid && known.started_at < session.started_at)
         });
         let list = inner.sessions.entry(agent_id.to_string()).or_default();
         if !list.iter().any(|(known, _)| *known == session) {
             list.push((session, folder.clone()));
         }
-        if list.len() > SESSIONS_PER_AGENT {
-            let excess = list.len() - SESSIONS_PER_AGENT;
-            list.drain(..excess);
-        }
         drop(inner);
         self.sync_pending(&folder);
+        self.enforce_caps();
+    }
+
+    /// Remember what to call `session`'s processes in a sentence.
+    pub fn label(&self, session: ProcessSession, label: impl Into<String>) {
+        self.lock().labels.insert(session, label.into());
+    }
+
+    /// Whether a list is past its cap.
+    fn over_cap(inner: &RegistryInner) -> bool {
+        inner.retired.len() > RETIRED_SESSIONS
+            || inner
+                .sessions
+                .values()
+                .any(|list| list.len() > SESSIONS_PER_AGENT)
+    }
+
+    /// Past a cap, drop the sessions confirmed ended, off the calling thread
+    /// (it is a look at the process table). Nothing with a live process is
+    /// ever dropped; if the lists are still past their caps afterwards, that
+    /// is logged once.
+    fn enforce_caps(&self) {
+        {
+            let mut inner = self.lock();
+            if !Self::over_cap(&inner) || inner.cap_prune_running {
+                return;
+            }
+            inner.cap_prune_running = true;
+        }
+        let registry = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("process-registry-cap".to_string())
+            .spawn(move || {
+                registry.prune_gone();
+                let mut inner = registry.lock();
+                inner.cap_prune_running = false;
+                if Self::over_cap(&inner) && !inner.cap_overrun_logged {
+                    inner.cap_overrun_logged = true;
+                    drop(inner);
+                    crate::logger::info(
+                        "dux is following more process sessions than its usual limit, because \
+                         every one of them still has something running; none is forgotten \
+                         while it does",
+                    );
+                }
+            });
+        if spawned.is_err() {
+            self.lock().cap_prune_running = false;
+        }
+    }
+
+    /// Forget `sessions` everywhere, now that nothing runs in them any more
+    /// (a failed create's startup command, ended before its worktree was
+    /// rolled back).
+    pub fn unregister(&self, sessions: &[ProcessSession]) {
+        let folders: Vec<std::path::PathBuf> = {
+            let mut inner = self.lock();
+            let mut folders = Vec::new();
+            for list in inner.sessions.values_mut() {
+                list.retain(|(session, folder)| {
+                    let gone = sessions.contains(session);
+                    if gone {
+                        folders.push(folder.clone());
+                    }
+                    !gone
+                });
+            }
+            inner.sessions.retain(|_, list| !list.is_empty());
+            inner.retired.retain(|(session, folder)| {
+                let gone = sessions.contains(session);
+                if gone {
+                    folders.push(folder.clone());
+                }
+                !gone
+            });
+            for session in sessions {
+                inner.survivors.remove(session);
+                inner.labels.remove(session);
+                inner.retired_standalone.remove(session);
+            }
+            folders
+        };
+        for folder in folders {
+            self.sync_pending(&folder);
+        }
+    }
+
+    /// The first process dux started that stands in `folder` or under it as
+    /// its working directory, among every session dux follows except
+    /// `except` (the ones the caller is about to end itself): a terminal whose
+    /// shell was `cd`'d there, a server a closed tab left running there. The
+    /// answer is a phrase naming it, for a refusal. Blocking: reads the
+    /// process table and each member's working directory.
+    pub fn cwd_occupant(
+        &self,
+        folder: &std::path::Path,
+        except: &[ProcessSession],
+    ) -> Option<String> {
+        let tracked: Vec<(ProcessSession, Vec<ProcessIdentity>, Option<String>)> = {
+            let inner = self.lock();
+            let mut all: Vec<ProcessSession> = inner
+                .sessions
+                .values()
+                .flatten()
+                .chain(inner.retired.iter())
+                .map(|(session, _)| *session)
+                .filter(|session| !except.contains(session))
+                .collect();
+            all.sort_by_key(|session| (session.sid, session.started_at));
+            all.dedup();
+            all.into_iter()
+                .map(|session| {
+                    (
+                        session,
+                        inner.survivors.get(&session).cloned().unwrap_or_default(),
+                        inner.labels.get(&session).cloned(),
+                    )
+                })
+                .collect()
+        };
+        if tracked.is_empty() {
+            return None;
+        }
+        let folder = crate::worktree_ops::path_key(folder);
+        let table = read_process_table();
+        let self_pid = std::process::id();
+        for (session, known, label) in tracked {
+            let running = members(&table, &[session], &known, self_pid);
+            if running.is_empty() {
+                continue;
+            }
+            let pids: Vec<u32> = running.iter().map(|row| row.pid).collect();
+            let cwds = crate::file_drop::process_cwds(&pids);
+            if let Some(row) = running.iter().find(|row| {
+                cwds.get(&row.pid)
+                    .is_some_and(|cwd| crate::worktree_ops::path_key(cwd).starts_with(&folder))
+            }) {
+                let who = label.unwrap_or_else(|| "a process dux started".to_string());
+                return Some(format!(
+                    "{who} is working in it ({} (pid {}) has it as its current folder); `cd` \
+                     out of it or close it first",
+                    row.name, row.pid
+                ));
+            }
+        }
+        None
     }
 
     /// [`Self::register`] for a standalone agent's session (see
@@ -759,6 +1046,7 @@ impl AgentProcessRegistry {
             }
             inner.retired.retain(|(session, _)| !gone.contains(session));
             inner.survivors.retain(|session, _| !gone.contains(session));
+            inner.labels.retain(|session, _| !gone.contains(session));
             inner
                 .retired_standalone
                 .retain(|session| !gone.contains(session));
@@ -1012,7 +1300,7 @@ impl AgentProcessRegistry {
             .into_iter()
             .filter(|(session, _)| {
                 !inner.sessions.values().flatten().any(|(other, _)| {
-                    other.sid == session.sid && other.started_at_secs > session.started_at_secs
+                    other.sid == session.sid && other.started_at > session.started_at
                 })
             })
             .collect();
@@ -1023,17 +1311,13 @@ impl AgentProcessRegistry {
                 inner.retired_standalone.insert(entry.0);
             }
         }
-        while inner.retired.len() > RETIRED_SESSIONS {
-            if let Some((dropped, _)) = inner.retired.pop_front() {
-                inner.retired_standalone.remove(&dropped);
-            }
-        }
         let folders: Vec<std::path::PathBuf> =
             mine.iter().map(|(_, folder)| folder.clone()).collect();
         drop(inner);
         for folder in folders {
             self.sync_pending(&folder);
         }
+        self.enforce_caps();
         mine.into_iter().map(|(session, _)| session).collect()
     }
 
@@ -1068,6 +1352,11 @@ pub struct StartupRunGuard {
 impl StartupRunGuard {
     pub fn register_session(&self, session: ProcessSession, folder: &std::path::Path) {
         self.registry.register(&self.agent_id, session, folder);
+    }
+
+    /// What to call the run's processes in a sentence.
+    pub fn label(&self, session: ProcessSession, label: &str) {
+        self.registry.label(session, label);
     }
 
     /// Record what the run's session still has running now that its leader,
@@ -1111,12 +1400,15 @@ impl Drop for StartupRunGuard {
 mod tests {
     use super::*;
 
+    /// One second on the boot-relative clock start times are kept in.
+    const SEC: u64 = 1_000_000_000;
+
     fn row(pid: u32, ppid: u32, sid: u32) -> ProcRow {
         ProcRow {
             pid,
             ppid: Some(ppid),
             sid: Some(sid),
-            start_time: 1_000,
+            start_time: 1_000 * SEC,
             name: format!("p{pid}"),
             exited: false,
         }
@@ -1125,13 +1417,105 @@ mod tests {
     fn session(sid: u32) -> ProcessSession {
         ProcessSession {
             sid,
-            started_at_secs: 1_000,
+            started_at: 1_000 * SEC,
             boot: current_boot(),
         }
     }
 
     fn pids(rows: &[ProcRow]) -> Vec<u32> {
         rows.iter().map(|r| r.pid).collect()
+    }
+
+    #[test]
+    fn a_stat_line_is_read_from_after_the_last_parenthesis() {
+        // A command name may hold spaces and parentheses of its own.
+        let stat = "4242 (my (odd) name) S 1 4242 4241 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 \
+                    12345 0 0";
+        let row = parse_linux_stat_with(4242, stat, 100).unwrap();
+        assert_eq!(row.name, "my (odd) name");
+        assert_eq!(row.ppid, Some(1));
+        assert_eq!(row.sid, Some(4241));
+        assert_eq!(
+            row.start_time, 123_450_000_000,
+            "12345 ticks at 100 per second"
+        );
+        assert!(!row.exited);
+        let zombie =
+            parse_linux_stat_with(7, "7 (z) Z 1 7 7 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 9 0", 100)
+                .unwrap();
+        assert!(zombie.exited);
+    }
+
+    /// A session's recorded start and the process table's are read off the
+    /// same boot-relative clock, so the leader is recognised exactly, whatever
+    /// the wall clock does in between.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_session_recorded_now_is_led_by_its_own_leader() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let recorded = ProcessSession::started_now(pid);
+        let start = process_start(pid).unwrap();
+        let table = read_process_table();
+        let row = table.iter().find(|row| row.pid == pid).cloned();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            recorded.started_at, start,
+            "recorded from the kernel's own start"
+        );
+        assert_eq!(row.map(|row| row.start_time), Some(start));
+        assert!(start <= boot_nanos_now());
+    }
+
+    /// The cap drops only sessions confirmed ended: one with a live process
+    /// is kept however many newer ones there are.
+    #[test]
+    fn the_cap_forgets_only_sessions_that_have_ended() {
+        let registry = AgentProcessRegistry::default();
+        let folder = std::path::PathBuf::from("/tmp/dux-cap-test");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let live = ProcessIdentity {
+            pid: child.id(),
+            start_time: process_start(child.id()).unwrap_or(0),
+        };
+        let first = ProcessSession {
+            sid: 5_000_000,
+            started_at: SEC,
+            boot: current_boot(),
+        };
+        registry.register("a", first, &folder);
+        registry.record_survivors(first, &[live]);
+        for n in 1..=SESSIONS_PER_AGENT as u32 + 10 {
+            registry.register(
+                "a",
+                ProcessSession {
+                    sid: 5_000_000 + n,
+                    started_at: SEC,
+                    boot: current_boot(),
+                },
+                &folder,
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while registry.sessions_of("a").len() > SESSIONS_PER_AGENT && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = registry.sessions_of("a");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            left.len() <= SESSIONS_PER_AGENT,
+            "back under the cap: {}",
+            left.len()
+        );
+        assert!(left.contains(&first), "the live one stayed");
     }
 
     /// A session registered while the prune is reading the process table is
@@ -1142,12 +1526,12 @@ mod tests {
         let folder = std::path::PathBuf::from("/tmp/dux-prune-test");
         let old = ProcessSession {
             sid: 4_000_001,
-            started_at_secs: 1,
+            started_at: SEC,
             boot: current_boot(),
         };
         let fresh = ProcessSession {
             sid: 4_000_002,
-            started_at_secs: 2,
+            started_at: 2 * SEC,
             boot: current_boot(),
         };
         registry.register("a", old, &folder);
@@ -1197,7 +1581,7 @@ mod tests {
     #[test]
     fn a_reused_session_id_names_somebody_else() {
         let mut leader = row(100, 1, 100);
-        leader.start_time = 5_000;
+        leader.start_time = 5_000 * SEC;
         let table = vec![leader, row(101, 100, 100)];
         assert!(members(&table, &[session(100)], &[], 9).is_empty());
     }
@@ -1207,7 +1591,7 @@ mod tests {
         let table = vec![row(102, 1, 102), row(103, 102, 102)];
         let known = [ProcessIdentity {
             pid: 102,
-            start_time: 1_000,
+            start_time: 1_000 * SEC,
         }];
         assert_eq!(
             pids(&members(&table, &[session(100)], &known, 9)),
@@ -1216,7 +1600,7 @@ mod tests {
         // The same pid with another start time is a different process.
         let stale = [ProcessIdentity {
             pid: 102,
-            start_time: 999,
+            start_time: 999 * SEC,
         }];
         assert!(members(&table, &[session(100)], &stale, 9).is_empty());
     }
@@ -1234,7 +1618,7 @@ mod tests {
     #[test]
     fn nothing_that_started_before_the_session_is_in_it() {
         let mut before = row(101, 1, 100);
-        before.start_time = 900;
+        before.start_time = 900 * SEC;
         let table = vec![row(100, 1, 100), before, row(102, 1, 100)];
         assert_eq!(
             pids(&members(&table, &[session(100)], &[], 9)),
@@ -1249,11 +1633,11 @@ mod tests {
     #[test]
     fn a_leaderless_session_needs_recorded_identities() {
         let mut reused = row(500, 1, 100);
-        reused.start_time = 5_000;
+        reused.start_time = 5_000 * SEC;
         let mine = row(101, 1, 100);
         let child_of_mine = row(102, 101, 100);
         let mut older_than_its_parent = row(103, 101, 100);
-        older_than_its_parent.start_time = 500;
+        older_than_its_parent.start_time = 500 * SEC;
         let table = vec![reused, mine.clone(), child_of_mine, older_than_its_parent];
         let recorded = [mine.identity()];
         assert_eq!(
@@ -1279,7 +1663,7 @@ mod tests {
         let here = std::path::Path::new("/work/a1");
         let old = session(100);
         let newer = ProcessSession {
-            started_at_secs: 2_000,
+            started_at: 2_000 * SEC,
             ..session(100)
         };
         registry.register("a1", old, here);
@@ -1429,12 +1813,12 @@ mod tests {
         let registry = AgentProcessRegistry::default();
         let old = ProcessSession {
             sid: 100,
-            started_at_secs: 1_000,
+            started_at: 1_000 * SEC,
             boot: current_boot(),
         };
         let newer = ProcessSession {
             sid: 100,
-            started_at_secs: 2_000,
+            started_at: 2_000 * SEC,
             boot: current_boot(),
         };
         let here = std::path::Path::new("/work/a1");

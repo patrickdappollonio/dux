@@ -919,48 +919,17 @@ async fn rename_entry<R: EditorRoot>(
     let wt = worktree.clone();
     let from = op.from;
     let to = op.to;
-    // Removing or moving a folder removes or moves everything under it: an
-    // agent's worktree inside a terminal's root, a standalone agent's
-    // folder, something dux started there. The one occupancy question is
-    // asked of every end, and the blocking half of its answer is read below.
-    // It is asked BEFORE this operation's own hold is taken, because the
-    // hold sits on the very paths it asks about and would answer itself.
-    let checks = match destructive_checks(&state, root.path(), &[&from, &to]).await {
-        Some(checks) => checks,
-        None => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
-        }
-    };
-    let hold = match crate::git_routes::hold_targets_for_write(
+    let targets = [from.clone(), to.clone()];
+    let outcome = destructive_editor_op(
         &state,
         root.path(),
-        &[&from, &to],
-        dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
-        "move the entry",
-    ) {
-        Ok(hold) => hold,
-        Err(r) => return r.into_response(),
-    };
-    match tokio::task::spawn_blocking(move || {
-        let _hold = hold;
-        dux_core::worktree_file::rename_entry_guarded(&wt, &from, &to, |entry| {
-            destructive_guard(entry, &checks, "move")
-        })
-    })
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) if e.downcast_ref::<DestructiveRefusal>().is_some() => {
-            return (StatusCode::CONFLICT, e.to_string()).into_response();
-        }
-        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("rename task failed: {e}"),
-            )
-                .into_response();
-        }
+        &[&targets[0], &targets[1]],
+        "move",
+        move |clear| dux_core::worktree_file::rename_entry(&wt, &from, &to, clear),
+    )
+    .await;
+    if let Err(rejection) = outcome {
+        return rejection.into_response();
     }
     refresh_root_changes(&state, &root, &worktree);
     StatusCode::OK.into_response()
@@ -976,94 +945,92 @@ async fn delete_entry<R: EditorRoot>(
     let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
     let path = op.path;
-    // Removing or moving a folder removes or moves everything under it: an
-    // agent's worktree inside a terminal's root, a standalone agent's
-    // folder, something dux started there. The one occupancy question is
-    // asked of every end, and the blocking half of its answer is read below.
-    // It is asked BEFORE this operation's own hold is taken, because the
-    // hold sits on the very paths it asks about and would answer itself.
-    let checks = match destructive_checks(&state, root.path(), &[&path]).await {
-        Some(checks) => checks,
-        None => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();
-        }
-    };
-    let hold = match crate::git_routes::hold_targets_for_write(
-        &state,
-        root.path(),
-        &[&path],
-        dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
-        "delete the entry",
-    ) {
-        Ok(hold) => hold,
-        Err(r) => return r.into_response(),
-    };
-    match tokio::task::spawn_blocking(move || {
-        let _hold = hold;
-        dux_core::worktree_file::delete_entry_guarded(&wt, &path, |entry| {
-            destructive_guard(entry, &checks, "delete")
-        })
+    let target = path.clone();
+    let outcome = destructive_editor_op(&state, root.path(), &[&target], "delete", move |clear| {
+        dux_core::worktree_file::delete_entry(&wt, &path, clear)
     })
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) if e.downcast_ref::<DestructiveRefusal>().is_some() => {
-            return (StatusCode::CONFLICT, e.to_string()).into_response();
-        }
-        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("delete task failed: {e}"),
-            )
-                .into_response();
-        }
+    .await;
+    if let Err(rejection) = outcome {
+        return rejection.into_response();
     }
     refresh_root_changes(&state, &root, &worktree);
     StatusCode::OK.into_response()
 }
 
-/// A destructive editor operation refused because something lives where it
-/// would delete or move.
-#[derive(Debug)]
-struct DestructiveRefusal(String);
-
-impl std::fmt::Display for DestructiveRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for DestructiveRefusal {}
-
-/// Refuse a delete or move of an entry something lives in. A symbolic link
-/// is never asked about: removing or moving one leaves what it points at
-/// where it is.
-fn destructive_guard(
-    entry: &std::fs::Metadata,
-    checks: &[dux_core::engine::DestructiveCheck],
-    what: &str,
-) -> anyhow::Result<()> {
-    if entry.file_type().is_symlink() {
-        return Ok(());
-    }
-    match checks.iter().find_map(|check| check.refusal(what)) {
-        Some(refused) => Err(anyhow::Error::new(DestructiveRefusal(refused))),
-        None => Ok(()),
-    }
-}
-
-/// The engine's destructive check for each of `targets`, relative to `root`.
-async fn destructive_checks(
+/// Run an editor delete or move of `targets` (relative to `root`) behind the
+/// one gate every destructive file operation passes. Removing or moving a
+/// folder removes or moves everything under it (an agent's worktree inside a
+/// terminal's root, a standalone agent's folder, a project's repository,
+/// something dux started there), so:
+///
+/// 1. every target that is a folder is CLAIMED, so nothing new can start
+///    inside it from here on;
+/// 2. the engine is asked the one occupancy question for every target;
+/// 3. the targets that are not folders are held;
+/// 4. the operation runs off the async runtime, and gets its clearance from
+///    the check right before it touches anything. A refusal is a 409 with
+///    the sentence, a request the operation itself rejects a 400.
+async fn destructive_editor_op(
     state: &AppState,
     root: &std::path::Path,
     targets: &[&String],
-) -> Option<Vec<dux_core::engine::DestructiveCheck>> {
-    let mut checks = Vec::with_capacity(targets.len());
+    what: &'static str,
+    op: impl FnOnce(
+        &mut dyn FnMut() -> Result<dux_core::destructive::Cleared, dux_core::destructive::Refused>,
+    ) -> anyhow::Result<()>
+    + Send
+    + 'static,
+) -> Result<(), crate::rest_common::RouteRejection> {
+    let relative: Vec<&str> = targets.iter().map(|target| target.as_str()).collect();
+    let mut guard = crate::git_routes::guard_destructive_targets(
+        state,
+        root,
+        &relative,
+        &format!("{what} the entry"),
+    )?;
+    let mut check: Option<dux_core::engine::DestructiveCheck> = None;
     for target in targets {
-        checks.push(state.engine.destructive_check(root.join(target)).await?);
+        let one = state
+            .engine
+            .destructive_check(root.join(target))
+            .await
+            .ok_or_else(|| {
+                crate::rest_common::RouteRejection::from(
+                    (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response(),
+                )
+            })?;
+        check = Some(match check {
+            Some(check) => check.and(one),
+            None => one,
+        });
     }
-    Some(checks)
+    guard.hold_the_rest(state, &format!("{what} the entry"))?;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        let mut clear = || match &check {
+            Some(check) => check.clear(what),
+            None => Err(dux_core::destructive::Refused(
+                "dux did not touch it: nothing was checked".to_string(),
+            )),
+        };
+        op(&mut clear)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) if e.downcast_ref::<dux_core::destructive::Refused>().is_some() => {
+            Err((StatusCode::CONFLICT, e.to_string()).into_response().into())
+        }
+        Ok(Err(e)) => Err((StatusCode::BAD_REQUEST, e.to_string())
+            .into_response()
+            .into()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{what} task failed: {e}"),
+        )
+            .into_response()
+            .into()),
+    }
 }
 
 /// Open a file in a locally-installed GUI editor, reusing the TUI's detection and

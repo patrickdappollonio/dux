@@ -6161,10 +6161,12 @@ mod tests {
         use crate::engine::BeginDeleteSessionOutcome;
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
-        engine.projects.push(sample_project(
-            "p1",
-            worktree.path().to_string_lossy().as_ref(),
-        ));
+        // The project's repository is somewhere else: a worktree that IS a
+        // project's repository is never removed.
+        let repo = tempfile::tempdir().expect("repo dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
         let mut session = sample_session("s1", "p1", "feat");
         session
             .workspace

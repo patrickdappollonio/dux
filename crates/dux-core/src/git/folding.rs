@@ -1452,6 +1452,19 @@ mod tests {
     use super::super::test_support;
     use super::*;
 
+    /// The discard under test, cleared for any path: these tests are about
+    /// what the discard itself decides, and the clearance gate has its own.
+    fn discard_confirmed(
+        worktree_path: &Path,
+        file_path: &str,
+        is_untracked: bool,
+        confirmed: Option<ConfirmedEntry>,
+    ) -> Result<usize> {
+        super::discard_confirmed(worktree_path, file_path, is_untracked, confirmed, || {
+            Ok(crate::destructive::Cleared::any_for_tests())
+        })
+    }
+
     /// A repository with one committed file, so HEAD exists and `src/` is a
     /// directory HEAD has.
     fn repo() -> tempfile::TempDir {

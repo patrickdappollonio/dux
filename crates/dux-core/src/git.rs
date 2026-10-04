@@ -4398,7 +4398,14 @@ impl std::error::Error for Refusal {}
 /// before, and a directory of any kind is refused, because nothing said the
 /// user was looking at a folder.
 pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -> Result<()> {
-    discard_confirmed(worktree_path, file_path, is_untracked, None).map(|_| ())
+    // A directory is refused before any clearance is asked for, so this one
+    // is never called.
+    discard_confirmed(worktree_path, file_path, is_untracked, None, || {
+        Err(crate::destructive::Refused(format!(
+            "\"{file_path}/\" is a folder; a folder is deleted only when the delete names it as one"
+        )))
+    })
+    .map(|_| ())
 }
 
 /// Discard `file_path`, refusing when a folder is no longer what the user
@@ -4416,11 +4423,19 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
 /// Answers how many files went: one for a file (deleted or restored), the
 /// files actually deleted for a folder, and none for a repository of its own,
 /// which goes whole and was never counted in files.
+///
+/// A folder or a repository is deleted only with a clearance for exactly that
+/// path (see [`crate::destructive`]): `clear` is asked for one once the entry
+/// has been confirmed to be what the user agreed to delete, right before
+/// anything goes, and a refusal comes back as a
+/// [`crate::destructive::Refused`] error.
 pub fn discard_confirmed(
     worktree_path: &Path,
     file_path: &str,
     is_untracked: bool,
     confirmed: Option<ConfirmedEntry>,
+    clear: impl FnOnce()
+        -> std::result::Result<crate::destructive::Cleared, crate::destructive::Refused>,
 ) -> Result<usize> {
     refuse_unplain_path(file_path, "discard")?;
     // Whatever the path's text says, a discard never lands on the worktree
@@ -4525,6 +4540,7 @@ pub fn discard_confirmed(
                     if !whole_repository {
                         return Err(changed("a repository of its own, with a history"));
                     }
+                    clear().map_err(anyhow::Error::new)?.require(&full)?;
                     fs::remove_dir_all(&full)?;
                     return Ok(0);
                 }
@@ -4543,6 +4559,7 @@ pub fn discard_confirmed(
                             promised
                         ))));
                     }
+                    clear().map_err(anyhow::Error::new)?.require(&full)?;
                     clean_untracked_folder(worktree_path, file_path, &inside)?;
                     return Ok(going);
                 }

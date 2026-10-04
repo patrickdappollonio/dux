@@ -668,18 +668,16 @@ fn create_dir_from_root(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
 ///
 /// The DESTINATION keeps the following resolver, because a destination reached
 /// through a symlinked directory really would write outside the tree.
-pub fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Result<()> {
-    rename_entry_guarded(worktree, from_rel, to_rel, |_| Ok(()))
-}
-
-/// [`rename_entry`], asking `guard` once the move is otherwise valid and
-/// before anything moves. `guard` is handed the source entry's own metadata
-/// (never its symlink target's): moving a link moves nothing it points at.
-pub fn rename_entry_guarded(
+///
+/// Anything but a symbolic link moves only with a clearance for both ends
+/// (see [`crate::destructive`]): `clear` is asked once the move is otherwise
+/// valid, right before anything moves. Moving a link moves nothing it points
+/// at, so a link is moved without one.
+pub fn rename_entry(
     worktree: &Path,
     from_rel: &str,
     to_rel: &str,
-    guard: impl FnOnce(&std::fs::Metadata) -> anyhow::Result<()>,
+    clear: impl FnOnce() -> Result<crate::destructive::Cleared, crate::destructive::Refused>,
 ) -> anyhow::Result<()> {
     let src = entry_literal_path(worktree, from_rel)?;
     let dst = resolve_worktree_path(worktree, to_rel)?;
@@ -696,7 +694,11 @@ pub fn rename_entry_guarded(
     if resolves_into_git_dir(worktree, dst_parent) {
         anyhow::bail!("refusing to rename into the git directory: {to_rel}");
     }
-    guard(&src_meta)?;
+    if !src_meta.file_type().is_symlink() {
+        let cleared = clear().map_err(anyhow::Error::new)?;
+        cleared.require(&src)?;
+        cleared.require(&dst)?;
+    }
     rename_no_replace(&src, &dst).map_err(|e| match e {
         RenameNoReplaceError::DestinationExists => {
             anyhow::anyhow!("refusing to rename, destination already exists: {to_rel}")
@@ -863,17 +865,15 @@ fn check_entry_parent_contained(
 /// Deleting a symlink removes the directory entry (the link), never its
 /// target, so an escaping-target symlink is a legitimate delete target: only
 /// the literal path and its PARENT's containment matter here.
-pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
-    delete_entry_guarded(worktree, rel_path, |_| Ok(()))
-}
-
-/// [`delete_entry`], asking `guard` once the delete is otherwise valid and
-/// before anything is removed. `guard` is handed the entry's own metadata
-/// (never its symlink target's): deleting a link removes nothing it points at.
-pub fn delete_entry_guarded(
+///
+/// Anything but a symbolic link goes only with a clearance for exactly that
+/// path (see [`crate::destructive`]): `clear` is asked once the delete is
+/// otherwise valid, right before anything is removed. Deleting a link removes
+/// nothing it points at, so a link goes without one.
+pub fn delete_entry(
     worktree: &Path,
     rel_path: &str,
-    guard: impl FnOnce(&std::fs::Metadata) -> anyhow::Result<()>,
+    clear: impl FnOnce() -> Result<crate::destructive::Cleared, crate::destructive::Refused>,
 ) -> anyhow::Result<()> {
     let path = entry_literal_path(worktree, rel_path)?;
     // No-follow stat on the literal path: existence and kind of the entry
@@ -890,7 +890,9 @@ pub fn delete_entry_guarded(
     {
         anyhow::bail!("refusing to delete the worktree root");
     }
-    guard(&meta)?;
+    if !meta.file_type().is_symlink() {
+        clear().map_err(anyhow::Error::new)?.require(&path)?;
+    }
     if meta.file_type().is_symlink() || meta.is_file() {
         std::fs::remove_file(&path)
             .map_err(|e| anyhow::anyhow!("cannot delete {rel_path}: {e}"))?;
@@ -1155,6 +1157,20 @@ fn entry_git_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The operations under test, cleared for any path: these tests are about
+    /// what the operations themselves decide.
+    fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Result<()> {
+        super::rename_entry(worktree, from_rel, to_rel, || {
+            Ok(crate::destructive::Cleared::any_for_tests())
+        })
+    }
+
+    fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+        super::delete_entry(worktree, rel_path, || {
+            Ok(crate::destructive::Cleared::any_for_tests())
+        })
+    }
 
     fn worktree() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

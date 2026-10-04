@@ -685,6 +685,11 @@ pub(crate) struct RemovalCoordinationInputs<'a> {
     /// The process registry, for the last look before git runs: a session
     /// started in the folder that this removal did not already end.
     pub(crate) registry: crate::process_sessions::AgentProcessRegistry,
+    /// The live registry of this run: every session dux follows, whose
+    /// processes' working directories are read for anything standing in the
+    /// folder. The same as `registry` except for a removal resumed at a start,
+    /// whose `registry` is the one its row was written with.
+    pub(crate) live: crate::process_sessions::AgentProcessRegistry,
 }
 
 /// The removal itself, shared by the delete's worker and the next start's
@@ -714,6 +719,7 @@ pub(crate) fn perform_deferred_removal(
         wait,
         waiting_tx,
         registry,
+        live,
     } = coordination;
     // Held outside the unwind boundary, so even a panic below finishes it.
     let mut lease = None;
@@ -721,6 +727,15 @@ pub(crate) fn perform_deferred_removal(
         // A standalone agent's processes are never ended; while any run in
         // the worktree, it is kept, before anything else is ended.
         if let Some(message) = standalone_processes_keep(&registry, &managed.worktree_path) {
+            if let crate::worktree_ops::RemovalClaim::Lead(leading) = claim {
+                lease = Some(leading);
+            }
+            return Err(message);
+        }
+        // Nor is anything else dux started (a project or standalone terminal
+        // whose shell was `cd`'d into the worktree) ended to make way: while
+        // one stands in it, the worktree is kept, before anything is ended.
+        if let Some(message) = cwd_keeps(&live, &managed.worktree_path, processes) {
             if let crate::worktree_ops::RemovalClaim::Lead(leading) = claim {
                 lease = Some(leading);
             }
@@ -771,7 +786,7 @@ pub(crate) fn perform_deferred_removal(
         // more (every create, launch and terminal is refused once a removal
         // has claimed it), so whatever is found here arrived before the claim
         // and has not gone. Anything that still occupies the folder keeps it.
-        if let Some(occupant) = occupant_after_wait(leading, &registry, processes) {
+        if let Some(occupant) = occupant_after_wait(leading, &registry, &live, processes) {
             return Err(occupied_after_wait_message(
                 &managed.worktree_path,
                 &occupant,
@@ -883,6 +898,7 @@ pub(crate) fn standalone_processes_keep(
 pub(crate) fn occupant_after_wait(
     lease: &crate::worktree_ops::RemovalLease,
     registry: &crate::process_sessions::AgentProcessRegistry,
+    live: &crate::process_sessions::AgentProcessRegistry,
     processes: &crate::engine::RemovalProcesses,
 ) -> Option<String> {
     if lease
@@ -896,21 +912,40 @@ pub(crate) fn occupant_after_wait(
         .into_iter()
         .filter(|session| !processes.sessions.contains(session))
         .collect();
-    if unknown.is_empty() {
-        return None;
+    if !unknown.is_empty() {
+        let alive = crate::process_sessions::members(
+            &crate::process_sessions::read_process_table(),
+            &unknown,
+            &registry.survivors_of(&unknown),
+            std::process::id(),
+        );
+        if !alive.is_empty() {
+            return Some(format!(
+                "something dux started there after the delete is running in it ({})",
+                crate::process_sessions::describe(&alive)
+            ));
+        }
     }
-    let alive = crate::process_sessions::members(
-        &crate::process_sessions::read_process_table(),
-        &unknown,
-        &registry.survivors_of(&unknown),
-        std::process::id(),
-    );
-    (!alive.is_empty()).then(|| {
-        format!(
-            "something dux started there after the delete is running in it ({})",
-            crate::process_sessions::describe(&alive)
-        )
-    })
+    // Where every process dux follows is standing NOW: a shell that was
+    // `cd`'d into the folder while the removal waited occupies it too.
+    live.cwd_occupant(lease.path(), &processes.sessions)
+}
+
+/// The final when a process dux started (and is not ending for this removal)
+/// has the folder, or a folder inside it, as its current folder: dux never
+/// ends it to make way, so the folder is kept. `None` when nothing stands
+/// there. Blocking: a worker thread's call.
+pub(crate) fn cwd_keeps(
+    live: &crate::process_sessions::AgentProcessRegistry,
+    folder: &str,
+    processes: &crate::engine::RemovalProcesses,
+) -> Option<String> {
+    let reason = live.cwd_occupant(std::path::Path::new(folder), &processes.sessions)?;
+    Some(format!(
+        "the worktree at {} was kept: {reason}, then remove the worktree from the worktree \
+         manager.",
+        crate::home_path::shorten_home(std::path::Path::new(folder))
+    ))
 }
 
 /// The final when the folder turned out to be in use after the removal's
@@ -1366,6 +1401,10 @@ impl Engine {
                     .register(&session_id, process, client.spawn_dir());
             }
             client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
+            if let Some(session) = self.session_by_id(&session_id) {
+                self.process_registry
+                    .label(process, format!("agent \"{}\"", session.display_label()));
+            }
         }
         self.providers.insert(tab_id.clone(), client);
         LaunchedProviderInsert::Kept
@@ -2483,6 +2522,7 @@ impl Engine {
         processes.sessions.sort_by_key(|session| session.sid);
         processes.sessions.dedup();
         let registry = self.process_registry.clone();
+        let live = self.process_registry.clone();
         let unwatch = self.process_registry.clone();
         let db_path = self.paths.sessions_db_path.clone();
         let handle = std::thread::spawn(move || {
@@ -2497,6 +2537,7 @@ impl Engine {
                     wait,
                     waiting_tx: Some(&tx),
                     registry,
+                    live,
                 },
             );
             // Finished one way or the other: a failure has told the user what

@@ -28,6 +28,8 @@ mod races_review4_tests;
 #[cfg(test)]
 mod races_review5_tests;
 #[cfg(test)]
+mod races_review6_tests;
+#[cfg(test)]
 mod removal_review_tests;
 #[cfg(test)]
 mod review_nested_folder_tests;
@@ -36,6 +38,7 @@ pub(crate) mod test_support;
 #[cfg(test)]
 mod worktree_removal_race_tests;
 
+pub use crate::destructive::DestructiveCheck;
 pub use command::Command;
 pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
@@ -46,8 +49,8 @@ pub use events::{
     StatusUpdate, WorktreeRemoval, survivors_kept_worktree_message,
 };
 pub(crate) use events::{
-    end_agent_processes_before_removal, occupant_after_wait, occupied_after_wait_message,
-    standalone_processes_keep,
+    RemovalCoordinationInputs, cwd_keeps, end_agent_processes_before_removal, occupant_after_wait,
+    occupied_after_wait_message, perform_deferred_removal, standalone_processes_keep,
 };
 pub use followup::{FollowupOwner, WebFollowupOps, WebFollowupOpsView, owner_of_reaction};
 pub use in_flight::{
@@ -63,7 +66,6 @@ pub use lifecycle::{
     detach_confirm_prose, detach_final, detach_not_running_message, detach_status_key,
     detached_agent_notice, format_shutdown_result, format_shutdown_start,
 };
-pub use pending_removals::DestructiveCheck;
 pub use pr_sync_control::PrSyncControl;
 pub use removal::{
     ProjectDeletionOutcome, RemovalCoordination, StartupRerunClaim, project_deletion_final,

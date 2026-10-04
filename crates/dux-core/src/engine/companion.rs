@@ -190,6 +190,27 @@ impl Engine {
                 self.process_registry.register(key, process, cwd);
             }
             client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
+            let name = format!("Terminal {}", self.terminal_counter + 1);
+            let what = match owner.as_ref() {
+                crate::model::TerminalOwnerRef::Session(session_id) => format!(
+                    "terminal \"{name}\" of agent \"{}\"",
+                    self.session_by_id(session_id)
+                        .map(|session| session.display_label())
+                        .unwrap_or_else(|| session_id.to_string())
+                ),
+                crate::model::TerminalOwnerRef::Project(project_id) => format!(
+                    "project terminal \"{name}\" of project \"{}\"",
+                    self.projects
+                        .iter()
+                        .find(|project| project.id == project_id)
+                        .map(|project| project.name.clone())
+                        .unwrap_or_else(|| project_id.to_string())
+                ),
+                crate::model::TerminalOwnerRef::Standalone => {
+                    format!("standalone terminal \"{name}\"")
+                }
+            };
+            self.process_registry.label(process, what);
         }
         self.terminal_counter += 1;
         let terminal_id = format!("term-{}", self.terminal_counter);
