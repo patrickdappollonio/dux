@@ -219,6 +219,12 @@ impl BackgroundServer {
         self.service.service_engine_once(engine)
     }
 
+    /// This serve's live Tailscale-mode handle, for a test that moves its leg.
+    #[cfg(test)]
+    pub(crate) fn tailscale_mode_control(&self) -> crate::serve_legs::TailscaleModeControl {
+        self.core.tailscale_mode()
+    }
+
     /// The terminal UI's seat in this serve's PTY-ownership registry.
     pub fn ownership(&self) -> dux_core::background_serve::TuiOwnership {
         self.ownership.clone()

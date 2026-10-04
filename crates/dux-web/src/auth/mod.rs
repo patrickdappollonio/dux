@@ -648,6 +648,9 @@ fn flush_period(config: &ServerAuthConfig) -> std::time::Duration {
     std::time::Duration::from_millis((idle_ms(config) / 3).clamp(1_000, 15_000) as u64)
 }
 
+/// How often the reach behind the no-password alarm is looked at.
+const REACH_LOOK: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The auth layer's background work, for the life of the serve's runtime.
 async fn maintain(state: Arc<AuthState>) {
     let mut config = state.live.subscribe();
@@ -655,8 +658,17 @@ async fn maintain(state: Arc<AuthState>) {
     let mut generation = state.snapshot().generation.clone();
     let mut warning = warnings::ExposedWarning::default();
     warning.check(&state);
+    // The Tailscale leg comes and goes with no event of its own to wait on, so
+    // the reach behind the no-password alarm is looked at on a short clock.
+    let mut reach = tokio::time::interval(REACH_LOOK);
+    reach.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Its own clock rather than a sleep made afresh each turn: the other arms
+    // fire every couple of seconds, and a fresh sleep would never finish. A
+    // config change that moves the period starts it again.
+    let mut period = flush_period(&state.snapshot().config);
+    let mut flush = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let period = flush_period(&state.snapshot().config);
         tokio::select! {
             changed = config.changed() => {
                 if changed.is_err() {
@@ -666,6 +678,12 @@ async fn maintain(state: Arc<AuthState>) {
                 if snapshot.generation != generation {
                     generation = snapshot.generation.clone();
                     state.sessions.retain_generation(&generation);
+                }
+                let next = flush_period(&snapshot.config);
+                if next != period {
+                    period = next;
+                    flush = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 }
                 state.bump();
                 warning.check(&state);
@@ -681,10 +699,10 @@ async fn maintain(state: Arc<AuthState>) {
                 }
                 warning.check(&state);
             }
-            () = tokio::time::sleep(period) => {
+            _ = flush.tick() => {
                 state.sessions.flush(idle_ms(&state.snapshot().config)).await;
-                warning.check(&state);
             }
+            _ = reach.tick() => warning.check(&state),
         }
     }
 }
@@ -720,6 +738,60 @@ mod tests {
         live.update(|config| config.blocked_addresses.push("198.51.100.1".into()));
         assert!(rx.has_changed().unwrap());
         assert_eq!(live.snapshot().blocks.len(), 1);
+    }
+
+    /// The stored sessions' last use is written on its own clock even while
+    /// the reach look ticks more often: a session kept alive by an open socket
+    /// must reach the database, or a restart signs its tab out.
+    #[tokio::test(start_paused = true)]
+    async fn the_maintenance_loop_writes_leased_sessions_on_its_own_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.sqlite3");
+        let config = ServerAuthConfig {
+            session_idle_seconds: 9,
+            ..ServerAuthConfig::default()
+        };
+        let state = AuthState::start(AuthSetup {
+            live: Arc::new(LiveAuth::new(&config)),
+            exposure: None,
+            bound_ips: Vec::new(),
+            tailscale_leg: None,
+            config_path: None,
+            sessions_db: Some(db.clone()),
+            console: crate::console::Console::noop(),
+            engine: None,
+            reload: Arc::new(|| {}),
+        });
+        state.sessions.ready().await;
+        let token = state.sessions.issue("").await.unwrap();
+        let _lease = state.sessions.lease(token.digest).unwrap();
+        let stored = || {
+            dux_core::web_sessions::WebSessionStore::open(&db)
+                .unwrap()
+                .load()
+                .unwrap()[0]
+                .last_seen_ms
+        };
+        let first = stored();
+        // Wall time must move for the written last use to; the paused tokio
+        // clock moves the loop's timers.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        for _ in 0..8 {
+            tokio::time::advance(std::time::Duration::from_millis(500)).await;
+            tokio::task::yield_now().await;
+        }
+        // Let the blocking write land.
+        for _ in 0..50 {
+            if stored() > first {
+                break;
+            }
+            tokio::task::yield_now().await;
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            stored() > first,
+            "the leased session's last use was written"
+        );
     }
 
     #[test]

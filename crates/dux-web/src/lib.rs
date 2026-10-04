@@ -6324,3 +6324,158 @@ mod config_surface_tests {
         );
     }
 }
+
+/// The no-password alarm in each of the three serving modes. Every mode builds
+/// its router through `server::build_app`, so the alarm is worded once; these
+/// prove each mode's own start path wires it to that mode's surface: the
+/// console `dux server` prints, the log the start-web-server flip shows, and the
+/// status lane the terminal UI reads beside its background serve.
+#[cfg(test)]
+mod auth_warning_mode_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const WAIT: Duration = Duration::from_secs(10);
+    const ALARM: &str = "No password is set and dux is reachable beyond this machine";
+
+    fn engine_in(tmp: &std::path::Path) -> dux_core::engine::Engine {
+        let paths = DuxPaths {
+            root: tmp.to_path_buf(),
+            config_path: tmp.join("config.toml"),
+            sessions_db_path: tmp.join("sessions.sqlite3"),
+            worktrees_root: tmp.join("worktrees"),
+            lock_path: tmp.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        crate::test_support::bootstrap_test_engine(&paths).unwrap()
+    }
+
+    fn until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + WAIT;
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// `dux server` builds its router with `router_params` and its own stdout
+    /// console; bound on every address with no password, the console prints
+    /// the alarm in its error tone.
+    #[test]
+    fn dux_server_prints_the_alarm_on_its_console_in_red() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let engine = engine_in(tmp.path());
+        let config = engine.config.clone();
+        let (handle, _join) = engine_actor::spawn_engine_thread(engine);
+        let (console, sink) = crate::console::Console::test_capture(true);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _app = {
+            let _guard = runtime.enter();
+            server::build_app(
+                handle,
+                axum::Router::new(),
+                router_params(
+                    &config,
+                    console,
+                    false,
+                    vec!["0.0.0.0".parse().unwrap()],
+                    BackgroundHooks::default(),
+                ),
+            )
+        };
+        until("dux server's console never printed the alarm", || {
+            sink.contents().contains(ALARM)
+        });
+        let line = sink
+            .contents()
+            .lines()
+            .find(|l| l.contains(ALARM))
+            .unwrap()
+            .to_string();
+        assert!(line.contains("\x1b[31m"), "red: {line:?}");
+        assert!(
+            line.contains("dux config set server.auth.password"),
+            "{line}"
+        );
+    }
+
+    /// The flip serves through `ServeCore` with a capturing console; its log
+    /// shows the alarm once the Tailscale leg puts dux on the tailnet.
+    #[test]
+    fn the_flip_shows_the_alarm_in_its_log_when_the_tailnet_leg_binds() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let engine = engine_in(tmp.path());
+        let config = engine.config.clone();
+        let (handle, _ends) = engine_actor::build_actor_channels(&engine);
+        let ring = dux_core::activity::ActivityRing::new(500);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let core = ServeCore::start(
+            handle,
+            vec![listener],
+            &config,
+            Console::capture(ring.clone()),
+            false,
+            SignalPolicy::Inherited,
+            BackgroundHooks::default(),
+        )
+        .unwrap();
+        let texts = || -> Vec<String> {
+            ring.snapshot()
+                .lines
+                .iter()
+                .map(dux_core::serve_log::LogLine::text)
+                .collect()
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !texts().iter().any(|t| t.contains(ALARM)),
+            "loopback alone is not beyond this machine"
+        );
+        *core.tailscale_mode().bound_leg().lock().unwrap() =
+            Some("100.64.0.5:3890".parse().unwrap());
+        until("the flip's log never showed the alarm", || {
+            texts().iter().any(|t| t.contains(ALARM))
+        });
+        let line = texts().into_iter().find(|t| t.contains(ALARM)).unwrap();
+        assert!(line.contains("100.64.0.5"), "names where: {line}");
+        let _ = core.stop(&Arc::new(AtomicBool::new(false)));
+    }
+
+    /// The background serve has no console; the alarm reaches the terminal UI
+    /// beside it through the engine's status lane, which its status line reads.
+    #[test]
+    fn the_background_serve_hands_the_alarm_to_the_terminal_ui() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let mut engine = engine_in(tmp.path());
+        engine
+            .changed_files_poller_started
+            .store(true, Ordering::Relaxed);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut server = crate::background::BackgroundServer::start(
+            &mut engine,
+            vec![listener],
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        *server.tailscale_mode_control().bound_leg().lock().unwrap() =
+            Some("100.64.0.5:3890".parse().unwrap());
+        let mut said = None;
+        until("the terminal UI was never told", || {
+            server.service(&mut engine);
+            while let Ok(event) = engine.worker_rx.try_recv() {
+                if let dux_core::worker::WorkerEvent::PollerStatus(status) = event
+                    && status.message.contains(ALARM)
+                {
+                    said = Some(status);
+                }
+            }
+            said.is_some()
+        });
+        let status = said.unwrap();
+        assert_eq!(status.tone, dux_core::statusline::StatusTone::Warning);
+        assert!(status.quiet_on.web, "the web shows its own banner instead");
+        assert!(!status.quiet_on.tui, "the terminal UI shows it");
+        let _ = server.stop();
+    }
+}
