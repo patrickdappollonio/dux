@@ -12665,7 +12665,7 @@ mod tests {
             "[ui]\nupload_directory = \"tmp/drops\"\nupload_write_gitignore = false\n",
         )
         .expect("seed config");
-        engine.config = crate::config::load_config(&engine.paths);
+        engine.config = crate::config::load_config(&engine.paths).expect("config loads");
         assert_eq!(engine.config.ui.upload_directory, "tmp/drops");
         assert!(!engine.config.ui.upload_write_gitignore);
 
@@ -12698,7 +12698,7 @@ mod tests {
             disk.contains("upload_write_gitignore = false"),
             "a settings PATCH must not reset a [ui] field it never named:\n{disk}"
         );
-        let reloaded = crate::config::load_config(&engine.paths);
+        let reloaded = crate::config::load_config(&engine.paths).expect("config loads");
         assert_eq!(reloaded.ui.upload_directory, "tmp/drops");
         assert!(!reloaded.ui.upload_write_gitignore);
     }

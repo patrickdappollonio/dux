@@ -14,9 +14,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use rustix::fs::{FlockOperation, flock};
+use rustix::io::Errno;
 use toml_edit::{Array, Decor, DocumentMut, Formatted, InlineTable, Item, Key, Table, Value};
 
 /// Permission bits for `config.toml`: owner read/write only (`0600`). The file
@@ -38,11 +41,104 @@ pub enum Durability {
     NoFsync,
 }
 
+/// The cross-process lock every write of `config.toml` holds, so writers in
+/// different processes (a running dux, `dux config set`, a second thread of
+/// the same dux) take turns instead of interleaving.
+///
+/// What it protects is the READ-modify-write: a writer that re-reads the file
+/// and patches it under this lock can never land on top of an update another
+/// writer made between its read and its write. The rename itself was already
+/// atomic; that only ever ruled out a torn file, never a lost update.
+///
+/// It is an advisory `flock(2)` on a lock file beside the config, kept apart
+/// from `dux.lock` (which a running dux holds for its whole life). The kernel
+/// releases it when the holder exits, crash included. Not reentrant: a holder
+/// must not try to take it again on the same thread.
+#[derive(Debug)]
+pub struct ConfigFileLock {
+    file: fs::File,
+}
+
+impl ConfigFileLock {
+    /// How long a writer waits for another one before giving up out loud.
+    pub const DEFAULT_WAIT: Duration = Duration::from_secs(10);
+
+    /// The lock file guarding writes to `config_path`.
+    pub fn lock_path(config_path: &Path) -> PathBuf {
+        let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        dir.join(CONFIG_WRITE_LOCK_NAME)
+    }
+
+    /// Take the lock, waiting up to [`Self::DEFAULT_WAIT`].
+    pub fn acquire(config_path: &Path) -> Result<Self> {
+        Self::acquire_within(config_path, Self::DEFAULT_WAIT)
+    }
+
+    /// Take the lock, waiting up to `wait`. A lock still held after that is
+    /// an error naming the lock file, never an endless wait.
+    pub fn acquire_within(config_path: &Path, wait: Duration) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let lock_path = Self::lock_path(config_path);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(CONFIG_FILE_MODE)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open the config lock {}", lock_path.display()))?;
+        let deadline = Instant::now() + wait;
+        loop {
+            let outcome = crate::io_retry::retry_on_interrupt_errno(|| {
+                flock(&file, FlockOperation::NonBlockingLockExclusive)
+            });
+            match outcome {
+                Ok(()) => return Ok(Self { file }),
+                Err(err) if err == Errno::WOULDBLOCK || err == Errno::AGAIN => {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "another dux process has been writing {} for over {} seconds, so \
+                             this change was not saved; try again in a moment (lock file {})",
+                            config_path.display(),
+                            wait.as_secs_f32(),
+                            lock_path.display()
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => {
+                    return Err(std::io::Error::from(err))
+                        .with_context(|| format!("failed to lock {}", lock_path.display()));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ConfigFileLock {
+    fn drop(&mut self) {
+        let _ =
+            crate::io_retry::retry_on_interrupt_errno(|| flock(&self.file, FlockOperation::Unlock));
+    }
+}
+
+/// The lock file's name, in the config file's own directory. One name for
+/// the whole directory, so a backup written beside the config takes turns
+/// with it too and leaves no lock file of its own behind.
+const CONFIG_WRITE_LOCK_NAME: &str = ".config-write.lock";
+
 /// Atomically write `contents` to `path`: a temp file in the same directory
 /// (created `0600`), optionally fsync'd, then `rename`d into place. The temp file
 /// self-deletes on drop if the rename never happens, so a failed/panicking write
-/// leaves no orphan and never a partial real file.
+/// leaves no orphan and never a partial real file. Holds the
+/// [`ConfigFileLock`] for the write.
 pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) -> Result<()> {
+    let _lock = ConfigFileLock::acquire(path)?;
+    write_config_atomic_unlocked(path, contents, durability)
+}
+
+/// [`write_config_atomic`] for a caller already holding the lock.
+fn write_config_atomic_unlocked(path: &Path, contents: &str, durability: Durability) -> Result<()> {
     let dir = path
         .parent()
         .with_context(|| format!("config path {} has no parent directory", path.display()))?;
@@ -104,13 +200,105 @@ pub fn patch_config_file_with(
     config: &Config,
     durability: Durability,
 ) -> Result<()> {
+    // Read and write under one lock, so an update another process made since
+    // this dux last loaded the file (a `dux config set`, a ban) is in `doc`
+    // before this patch runs, and the auth keys the patch never overwrites
+    // keep it.
+    let _lock = ConfigFileLock::acquire(config_path)?;
     let raw = fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     let mut doc: DocumentMut = raw
         .parse()
         .with_context(|| format!("failed to parse {}", config_path.display()))?;
     apply_patches(&mut doc, config);
-    write_config_atomic(config_path, &doc.to_string(), durability)
+    write_config_atomic_unlocked(config_path, &doc.to_string(), durability)
+}
+
+/// The ONE way to change specific keys of `config.toml` while anything else
+/// may be writing it: take the [`ConfigFileLock`], re-read the file as it is
+/// on disk NOW, let `change` edit only the keys it means to, check the result,
+/// and write it atomically (fsync'd) before releasing the lock. Comments,
+/// formatting and every other key stay exactly as the file had them.
+///
+/// `dux config set`, password changes and the login's ban appends all go
+/// through here, so concurrent writers never lose each other's updates.
+///
+/// A missing file starts from the documented default template. A file that is
+/// not TOML is refused (there is nothing safe to patch), and so is a result
+/// whose `[server.auth]` would not load, because that would stop dux from
+/// starting; in both cases nothing is written.
+pub fn mutate_config_file<T>(
+    config_path: &Path,
+    change: impl FnOnce(&mut DocumentMut) -> Result<T>,
+) -> Result<T> {
+    let _lock = ConfigFileLock::acquire(config_path)?;
+    let raw = match fs::read_to_string(config_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            render_config_documented(&Config::default())
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", config_path.display()));
+        }
+    };
+    let mut doc: DocumentMut = raw.parse().with_context(|| {
+        format!(
+            "{} is not valid TOML, so it cannot be changed safely; fix it by hand first",
+            config_path.display()
+        )
+    })?;
+    let outcome = change(&mut doc)?;
+    let text = doc.to_string();
+    if let Err(problem) = crate::config::auth_section_of(&text) {
+        let reason = match problem {
+            crate::config::ConfigLoadProblem::AuthInvalid(reason)
+            | crate::config::ConfigLoadProblem::NotToml(reason)
+            | crate::config::ConfigLoadProblem::Unreadable(reason) => reason,
+        };
+        anyhow::bail!(
+            "that change would make [server.auth] in {} invalid ({reason}), and dux refuses \
+             to start with an invalid [server.auth]; nothing was written",
+            config_path.display()
+        );
+    }
+    write_config_atomic_unlocked(config_path, &text, Durability::Fsync)?;
+    Ok(outcome)
+}
+
+/// Add the `[server.auth]` keys the document lacks, with the running values.
+///
+/// Never overwrites a key the file already has, and leaves the section alone
+/// entirely when it is not an ordinary table. Every other managed key is
+/// written from memory on each save, but these change from outside the
+/// running dux (`dux config set`, a ban, a password change), and a save from a
+/// memory that has not caught up yet would otherwise quietly put the old
+/// password back or lift a ban. Only [`mutate_config_file`] changes them.
+fn fill_missing_auth_keys(doc: &mut DocumentMut, auth: &crate::config::ServerAuthConfig) {
+    let Some(server) = doc
+        .entry("server")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+    else {
+        return;
+    };
+    let Some(table) = server
+        .entry("auth")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+    else {
+        return;
+    };
+    let Ok(rendered) = toml::to_string(auth) else {
+        return;
+    };
+    let Ok(rendered) = rendered.parse::<DocumentMut>() else {
+        return;
+    };
+    for (key, item) in rendered.iter() {
+        if !table.contains_key(key) {
+            table.insert(key, item.clone());
+        }
+    }
 }
 
 /// Save config: patch in place if the file exists, otherwise write a plain
@@ -607,6 +795,9 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "file_drop_max_concurrency",
         config.server.file_drop_max_concurrency as usize,
     );
+
+    // --- [server.auth] (fill in only; see fill_missing_auth_keys) ---
+    fill_missing_auth_keys(doc, &config.server.auth);
 
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
@@ -1184,8 +1375,10 @@ fn patch_env_table(doc: &mut DocumentMut, section: &str, env: &BTreeMap<String, 
 /// Entries are dotted table paths. A path matches when it is equal to an entry
 /// or nested beneath one.
 pub const ORPHANED_CONFIG_SECTIONS: &[&str] = &[
-    // Removed with the HTTP-basic-auth experiment. The server is single-tenant /
-    // trusted-access by design (CLAUDE.md) and has no login of any kind.
+    // Removed with the HTTP-basic-auth experiment. Only this TOP-LEVEL `[auth]`
+    // table: the web login's live settings are `[server.auth]`, which a dotted
+    // path match never confuses with it (pinned by
+    // `the_orphan_cleanup_never_touches_server_auth`).
     "auth",
     // Removed with the built-in ACME/TLS listener. TLS is delegated to an
     // upstream proxy or to Tailscale.
@@ -1558,13 +1751,24 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "config must be 0600, got {mode:o}");
 
-        // No leftover temp files in the config directory.
+        // No leftover temp files in the config directory. The write lock's
+        // file stays by design (unlinking a lock file someone may be waiting
+        // on would let two writers lock two different files), and is private.
         let leftovers: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name() != "config.toml")
+            .filter(|e| e.file_name() != "config.toml" && e.file_name() != CONFIG_WRITE_LOCK_NAME)
             .collect();
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+        let lock_mode = fs::metadata(ConfigFileLock::lock_path(&path))
+            .expect("lock meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            lock_mode, 0o600,
+            "the lock file is private, got {lock_mode:o}"
+        );
     }
 
     /// A REPLACE, not an edit in place, and the mode of the destination does
@@ -3486,6 +3690,262 @@ second_note = \"nowhere to go\"
         assert!(
             !crate::config::raw_has_removed_max_websocket_connections(&stripped),
             "key must remain absent; got: {stripped}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // [server.auth]: never overwritten from memory, never orphaned
+    // -----------------------------------------------------------------------
+
+    fn a_hash(text: &str) -> String {
+        crate::auth::hash_password(&crate::auth::Password::new(text.to_string())).expect("hash")
+    }
+
+    #[test]
+    fn the_orphan_cleanup_never_touches_server_auth() {
+        let hash = a_hash("correct horse battery staple");
+        let original: DocumentMut = format!(
+            "[auth]\nusers = []\n\n[server]\nport = 8080\n\n[server.auth]\n\
+             password_hash = \"{hash}\"\nblocked_addresses = [\"203.0.113.7\"]\n"
+        )
+        .parse()
+        .expect("parse original");
+        // A render that does not carry the section at all is the worst case:
+        // everything in it must come across from the original.
+        let mut rendered: DocumentMut = "[server]\nport = 8080\n".parse().expect("parse");
+
+        let report = merge_unmanaged_keys(&mut rendered, &original);
+
+        let out = rendered.to_string();
+        assert_eq!(
+            report.dropped,
+            vec!["auth"],
+            "only the old top-level [auth] goes"
+        );
+        assert!(out.contains(&hash), "out:\n{out}");
+        assert!(out.contains("203.0.113.7"), "out:\n{out}");
+    }
+
+    #[test]
+    fn a_save_from_memory_never_overwrites_an_auth_value_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let on_disk = a_hash("the password somebody just set");
+        std::fs::write(
+            &path,
+            format!(
+                "[server]\nport = 4000\n\n[server.auth]\npassword_hash = \"{on_disk}\"\n\
+                 blocked_addresses = [\"203.0.113.7\"]\n"
+            ),
+        )
+        .expect("seed");
+
+        // The running dux still remembers the OLD password and no bans.
+        let mut stale = Config::default();
+        stale.server.auth.password_hash = a_hash("the password from before");
+        stale.server.port = 4001;
+        patch_config_file_with(&path, &stale, Durability::NoFsync).expect("patch");
+
+        let after = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            after.contains("port = 4001"),
+            "an ordinary setting still saves:\n{after}"
+        );
+        assert!(
+            after.contains(&on_disk),
+            "the newer password survives:\n{after}"
+        );
+        assert!(after.contains("203.0.113.7"), "the ban survives:\n{after}");
+    }
+
+    #[test]
+    fn a_save_fills_in_auth_keys_the_file_lacks_from_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[server]\nport = 4000\n\n[server.auth]\nrequire = \"tailnet\"\n",
+        )
+        .expect("seed");
+        let mut config = Config::default();
+        config.server.auth.require = crate::config::AuthRequire::Everywhere;
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+
+        let after = std::fs::read_to_string(&path).expect("read");
+        let parsed: Config = toml::from_str(&after).expect("valid config");
+        assert_eq!(
+            parsed.server.auth.require,
+            crate::config::AuthRequire::Tailnet,
+            "a present key is the file's:\n{after}"
+        );
+        assert!(
+            after.contains("session_idle_seconds = 60"),
+            "missing keys appear:\n{after}"
+        );
+        assert!(after.contains("password_hash = \"\""), "{after}");
+    }
+
+    #[test]
+    fn a_plain_render_carries_the_running_password() {
+        let mut config = Config::default();
+        config.server.auth.password_hash = a_hash("the running password");
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("valid");
+        assert_eq!(parsed.server.auth, config.server.auth, "{rendered}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The coordinated mutation path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_mutations_of_different_keys_never_lose_an_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nport = 4000\n").expect("seed");
+        let rounds = 40;
+        let threads: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..rounds {
+                        mutate_config_file(&path, |doc| {
+                            let server = doc["server"].as_table_mut().expect("server");
+                            let list = server
+                                .entry("allowed_hosts")
+                                .or_insert_with(|| toml_edit::value(Array::new()))
+                                .as_array_mut()
+                                .expect("array");
+                            list.push(format!("{name}{i}.example"));
+                            Ok(())
+                        })
+                        .expect("mutate");
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("join");
+        }
+        let parsed: Config =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).expect("valid");
+        assert_eq!(
+            parsed.server.allowed_hosts.len(),
+            3 * rounds,
+            "every append from every writer landed"
+        );
+    }
+
+    #[test]
+    fn a_save_from_memory_waits_for_a_held_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nport = 4000\n").expect("seed");
+        let held = ConfigFileLock::acquire(&path).expect("lock");
+        let saver = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut config = Config::default();
+                config.server.port = 4002;
+                patch_config_file_with(&path, &config, Durability::NoFsync)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("port = 4000"),
+            "nothing is written while another writer holds the lock"
+        );
+        drop(held);
+        saver.join().expect("join").expect("save");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("port = 4002")
+        );
+    }
+
+    #[test]
+    fn a_lock_that_never_frees_is_an_error_not_a_hang() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").expect("seed");
+        let _held = ConfigFileLock::acquire(&path).expect("lock");
+        let path2 = path.clone();
+        let err = std::thread::spawn(move || {
+            ConfigFileLock::acquire_within(&path2, std::time::Duration::from_millis(150))
+        })
+        .join()
+        .expect("join")
+        .expect_err("times out");
+        assert!(err.to_string().contains("another"), "{err:#}");
+    }
+
+    #[test]
+    fn a_mutation_that_would_break_server_auth_is_refused_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let before = "[server]\nport = 4000\n";
+        std::fs::write(&path, before).expect("seed");
+        let err = mutate_config_file(&path, |doc| {
+            doc["server"]["auth"]["password_hash"] = toml_edit::value("hunter2");
+            Ok(())
+        })
+        .expect_err("refused");
+        assert!(err.to_string().contains("server.auth"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_file_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let before = "[server]\nport = 4000\n";
+        std::fs::write(&path, before).expect("seed");
+        // Create the lock file first so only the temp file's creation fails.
+        drop(ConfigFileLock::acquire(&path).expect("lock"));
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500))
+            .expect("chmod");
+        let result = mutate_config_file(&path, |doc| {
+            doc["server"]["port"] = toml_edit::value(4001);
+            Ok(())
+        });
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod back");
+        assert!(
+            result.is_err(),
+            "a directory dux cannot write to fails the write"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_mutation_of_a_file_that_is_not_toml_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server\n").expect("seed");
+        assert!(mutate_config_file(&path, |_| Ok(())).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[server\n");
+    }
+
+    #[test]
+    fn a_mutation_with_no_file_starts_from_the_documented_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        mutate_config_file(&path, |doc| {
+            doc["server"]["port"] = toml_edit::value(4005);
+            Ok(())
+        })
+        .expect("mutate");
+        let parsed: Config =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).expect("valid");
+        assert_eq!(parsed.server.port, 4005);
+        assert_eq!(
+            parsed.ui.left_width_pct,
+            Config::default().ui.left_width_pct
         );
     }
 }

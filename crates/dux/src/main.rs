@@ -201,7 +201,15 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     // starts in server mode. Registering the TUI's canonical renderer keeps
     // "the config file is the documentation" true on both entry points.
     dux_tui::install_canonical_renderer();
-    let config = dux_core::config::load_config(&paths);
+    // Fails closed: when [server.auth] cannot be read, dux does not serve
+    // at all rather than serve with no password.
+    let config = match dux_core::config::load_config(&paths) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("error: dux server cannot start: {error}");
+            std::process::exit(1);
+        }
+    };
 
     // Initialize the logger early so every subsequent logger::* call in the server
     // path (bootstrap, bind) actually reaches dux.log.

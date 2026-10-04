@@ -217,8 +217,8 @@ enum Policy {
 enum Summary {
     /// `env: changed`. The bare fact, with no shape to it at all.
     Changed,
-    /// `macros: 2 macros configured`, for the given singular noun.
-    Count(&'static str),
+    /// `macros: 2 macros configured`, for the given singular and plural nouns.
+    Count(&'static str, &'static str),
 }
 
 /// How a key present on only one side is reported.
@@ -242,10 +242,18 @@ fn policy_for(path: &[String]) -> Policy {
         // generated at deserialize time, so there is no honest per-project path
         // to print. Projects also carry their own `env`, which must stay
         // unprinted for the reason above.
-        ["projects"] => Policy::Summarize(Summary::Count("project")),
+        ["projects"] => Policy::Summarize(Summary::Count("project", "projects")),
         // A macro body is arbitrary user prose, frequently long and multi-line.
         // Counting them is what this command has always done.
-        ["macros"] => Policy::Summarize(Summary::Count("macro")),
+        ["macros"] => Policy::Summarize(Summary::Count("macro", "macros")),
+        // Not the password, but anyone holding it can guess the password
+        // offline as fast as their hardware allows, so it never reaches a
+        // pasted bug report.
+        ["server", "auth", "password_hash"] => Policy::Summarize(Summary::Changed),
+        // Other people's IP addresses.
+        ["server", "auth", "blocked_addresses"] => {
+            Policy::Summarize(Summary::Count("address", "addresses"))
+        }
         _ => Policy::Recurse,
     }
 }
@@ -274,10 +282,10 @@ fn diff_node(
             let dotted = join_path(path);
             let line = match summary {
                 Summary::Changed => format!("{dotted}: changed"),
-                Summary::Count(noun) => {
+                Summary::Count(singular, plural) => {
                     format!(
                         "{dotted}: {} configured",
-                        count_of(collection_len(current), noun)
+                        dux_core::text::count_of_with(collection_len(current), singular, plural)
                     )
                 }
             };
@@ -1214,12 +1222,23 @@ mod tests {
                     .map(|v| serde_json::json!(v));
                 raised.into_iter().chain(lowered).collect()
             }
-            serde_json::Value::String(s) => vec![serde_json::json!(format!("{s}-mutated"))],
-            serde_json::Value::Array(items) => {
-                let mut grown = items.clone();
-                grown.push(serde_json::json!("dux-diff-probe"));
-                vec![serde_json::Value::Array(grown)]
-            }
+            // Settings that validate their string (an enum, a password hash)
+            // refuse the appended form, so a few values that pass each kind of
+            // check follow it.
+            serde_json::Value::String(s) => vec![
+                serde_json::json!(format!("{s}-mutated")),
+                serde_json::json!("tailnet"),
+                serde_json::json!("always"),
+                serde_json::json!(a_valid_password_hash()),
+            ],
+            serde_json::Value::Array(items) => ["dux-diff-probe", "192.0.2.1"]
+                .into_iter()
+                .map(|probe| {
+                    let mut grown = items.clone();
+                    grown.push(serde_json::json!(probe));
+                    serde_json::Value::Array(grown)
+                })
+                .collect(),
             // A null carries no type, so try each shape an `Option` field can take.
             serde_json::Value::Null => vec![
                 serde_json::json!("dux-diff-probe"),
@@ -1258,6 +1277,45 @@ mod tests {
         assert_eq!(
             collect_config_changes(&config),
             vec!["server.tailscale: auto -> no".to_string()]
+        );
+    }
+
+    fn a_valid_password_hash() -> String {
+        static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        HASH.get_or_init(|| {
+            dux_core::auth::hash_password(&dux_core::auth::Password::new(
+                "correct horse battery staple".to_string(),
+            ))
+            .expect("hash")
+        })
+        .clone()
+    }
+
+    /// A pasted bug report must not carry the password hash: anyone holding
+    /// it can guess offline. The summary says only that it changed.
+    #[test]
+    fn config_diff_never_prints_the_password_hash() {
+        let mut config = Config::default();
+        config.server.auth.password_hash = a_valid_password_hash();
+        let changes = collect_config_changes(&config);
+        assert_eq!(
+            changes,
+            vec!["server.auth.password_hash: changed".to_string()]
+        );
+        assert!(!changes.concat().contains("argon2id"), "{changes:?}");
+    }
+
+    /// Blocked addresses are other people's IP addresses; the summary counts
+    /// them instead of listing them.
+    #[test]
+    fn config_diff_counts_blocked_addresses_without_printing_them() {
+        let mut config = Config::default();
+        config.server.auth.blocked_addresses =
+            vec!["203.0.113.7".to_string(), "198.51.100.0/24".to_string()];
+        let changes = collect_config_changes(&config);
+        assert_eq!(
+            changes,
+            vec!["server.auth.blocked_addresses: 2 addresses configured".to_string()]
         );
     }
 

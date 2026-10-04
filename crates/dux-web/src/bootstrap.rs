@@ -33,7 +33,18 @@ impl ConfigSurface for WebConfigSurface {
             let guard = ReloadCompletionGuard::new(worker_tx);
             // Re-read config from disk (a read-only load, same as bootstrap). Returns the
             // REAL config, not Config::default().
-            let mut config = dux_core::config::load_config(&paths);
+            // A file whose [server.auth] cannot be read rejects the whole
+            // reload: the running config, password included, stays as it was.
+            let mut config = match dux_core::config::load_config(&paths) {
+                Ok(config) => config,
+                Err(error) => {
+                    guard.complete(Err(format!(
+                        "The config was not reloaded, and the running settings are unchanged: \
+                         {error}"
+                    )));
+                    return;
+                }
+            };
             // Config wins: an edited `[[projects]]` applies its preferences to
             // SQLite on a live serve. Errors ride the reload result rather than
             // crashing the reload thread.
@@ -79,7 +90,10 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // The single-instance lock must be held before any config read, DB open, or
     // config write, matching the TUI's invariant.
     let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
-    let mut config = dux_core::config::load_config(paths);
+    // Fails closed: a config whose [server.auth] cannot be read stops the
+    // start rather than serving with no password.
+    let mut config = dux_core::config::load_config(paths)
+        .map_err(|e| anyhow::anyhow!("dux cannot start: {e}"))?;
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
     // Config wins: adopt config-only projects, apply config-edited preferences to
     // SQLite, and validate identity conflicts, persisting any normalization back
@@ -239,6 +253,27 @@ mod tests {
         // A valid TOML table header proves the render is structured config text,
         // not a placeholder.
         assert!(body.contains("[env]"), "env table missing: {body}");
+    }
+
+    /// `dux server` and every engine bootstrap refuse to start when
+    /// `[server.auth]` cannot be read, instead of serving with no password.
+    #[test]
+    fn bootstrap_engine_refuses_to_start_when_server_auth_cannot_be_read() {
+        for body in [
+            "[server.auth]]\n",
+            "[server.auth]\npassword_hash = \"$argon2id$v=19$m=1,t=1,p=1$x$y\"\n",
+            "[server.auth]\nrequire = [\"network\"]\n",
+        ] {
+            let (_tmp, paths) = temp_paths();
+            std::fs::write(&paths.config_path, body).expect("write config");
+            let err = match bootstrap_engine(&paths) {
+                Ok(_) => panic!("{body:?}: the start must be refused"),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(err.contains("dux cannot start"), "{body:?}: {err}");
+            assert!(err.contains("server.auth"), "{body:?}: {err}");
+            assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), body);
+        }
     }
 
     #[test]

@@ -879,6 +879,8 @@ pub fn tailscale_load_warning(config: &Config) -> Option<String> {
     TailscaleMode::unknown_value_warning(&config.server.tailscale)
 }
 
+pub use crate::config_auth::{AddressBlock, AuthRequire, CookieSecure, ServerAuthConfig};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -1134,6 +1136,12 @@ pub struct ServerConfig {
     /// it then retries forever. Read live, so a config reload applies to the
     /// next connection with no restart.
     pub pty_send_timeout_seconds: u32,
+    /// `[server.auth]`: the optional web login. Read FAIL-CLOSED: an invalid
+    /// section refuses the whole config rather than resetting to "no
+    /// password" (see [`crate::config_auth`] and [`load_config`]). Never
+    /// written from memory over a value already on disk: only the coordinated
+    /// mutation path (`crate::config_keys`) changes these keys.
+    pub auth: ServerAuthConfig,
 }
 
 impl ServerConfig {
@@ -2205,6 +2213,7 @@ impl Default for ServerConfig {
             heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
             heartbeat_deadline_seconds: DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
             pty_send_timeout_seconds: DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
+            auth: ServerAuthConfig::default(),
         }
     }
 }
@@ -2845,27 +2854,118 @@ pub fn validate_config_str(s: &str) -> Result<Config, String> {
     toml::from_str::<Config>(s).map_err(|e| e.to_string())
 }
 
-/// Load config for a read-only consumer (the web server). Reads `config.toml` if
-/// present and parses it; on a missing file or parse error, falls back to defaults
-/// (logging the error). Always applies provider defaults. Unlike the TUI's
-/// `ensure_config`, this never creates, migrates, or writes the config file: the
-/// server must not mutate config (that's the TUI's canonical renderer).
+/// Why `config.toml` could not be used at all. Each of these means dux cannot
+/// tell whether `[server.auth]` sets a password, and reading that as "no
+/// password" would open the web UI to anyone who can reach it, so a start
+/// refuses to run and a reload refuses to change the running config.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigLoadProblem {
+    /// The file exists but could not be read.
+    Unreadable(String),
+    /// The file is not valid TOML.
+    NotToml(String),
+    /// `[server.auth]` (or the `[server]` table holding it) is invalid.
+    AuthInvalid(String),
+}
+
+/// A [`ConfigLoadProblem`] with the file it is about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigLoadError {
+    pub path: PathBuf,
+    pub problem: ConfigLoadProblem,
+}
+
+impl std::fmt::Display for ConfigLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path = self.path.display();
+        match &self.problem {
+            ConfigLoadProblem::Unreadable(error) => write!(
+                f,
+                "{path} could not be read ({error}), so dux cannot tell whether [server.auth] \
+                 sets a password for the web UI. Check the file and its permissions."
+            ),
+            ConfigLoadProblem::NotToml(error) => write!(
+                f,
+                "{path} is not valid TOML, so dux cannot read [server.auth] and cannot tell \
+                 whether a password protects the web UI. Fix the error below, then start dux \
+                 or reload the config again.\n{error}"
+            ),
+            ConfigLoadProblem::AuthInvalid(reason) => write!(
+                f,
+                "[server.auth] in {path} is invalid: {reason}. dux will not guess at a \
+                 password setting, so fix that section by hand, or set a new password with \
+                 `dux config set server.auth.password`."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigLoadError {}
+
 /// Deserialize `raw` into a [`Config`], recovering from a bad field or section
 /// instead of discarding the entire file. A full-document parse success is used
 /// directly; otherwise the offending key(s) are pruned (at FIELD granularity
 /// where a single field can be isolated, else the whole top-level section), reset
-/// to their defaults, warned to the log, and the rest is kept. A genuine TOML
-/// syntax error (or a structure that can't be recovered) still falls back to
-/// `Config::default()`. This means one bad value (e.g. `agent_tabs_max = -1`) can
-/// never silently discard every other setting the user configured.
-fn recover_config(raw: &str) -> Config {
-    let doc: toml::Table = match toml::from_str::<toml::Table>(raw) {
-        Ok(t) => t,
-        Err(e) => {
-            crate::logger::error(&format!("config is not valid TOML ({e}); using defaults"));
-            return Config::default();
-        }
+/// to their defaults, warned to the log, and the rest is kept. This means one bad
+/// value (e.g. `agent_tabs_max = -1`) can never silently discard every other
+/// setting the user configured.
+///
+/// `[server.auth]` is the exception, and it fails closed: it is taken out and
+/// read on its own BEFORE any recovery, and a problem there (or a file that is
+/// not TOML at all, where the section cannot be found) is an error rather than
+/// a reset, because its default is "no password".
+fn recover_config(raw: &str) -> Result<Config, ConfigLoadProblem> {
+    let mut doc: toml::Table = toml::from_str::<toml::Table>(raw)
+        .map_err(|e| ConfigLoadProblem::NotToml(e.to_string()))?;
+    let auth = take_auth_section(&mut doc)?;
+    let mut config = recover_config_table(doc);
+    config.server.auth = auth;
+    Ok(config)
+}
+
+/// Remove `server.auth` from `doc` and read it on its own, so the field-level
+/// recovery of `[server]` can never reset it.
+fn take_auth_section(doc: &mut toml::Table) -> Result<ServerAuthConfig, ConfigLoadProblem> {
+    let Some(server) = doc.get_mut("server") else {
+        return Ok(ServerAuthConfig::default());
     };
+    let toml::Value::Table(server) = server else {
+        return Err(ConfigLoadProblem::AuthInvalid(
+            "[server] is not a table, so [server.auth] inside it cannot be read".to_string(),
+        ));
+    };
+    let Some(auth) = server.remove("auth") else {
+        return Ok(ServerAuthConfig::default());
+    };
+    parse_auth_value(auth).map_err(ConfigLoadProblem::AuthInvalid)
+}
+
+/// The `[server.auth]` section of a whole config file's text, read exactly as
+/// [`load_config`] reads it. A writer checks a candidate file with this
+/// before it lands, so nothing it writes can stop dux from starting.
+pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, ConfigLoadProblem> {
+    let mut doc: toml::Table = toml::from_str::<toml::Table>(raw)
+        .map_err(|e| ConfigLoadProblem::NotToml(e.to_string()))?;
+    take_auth_section(&mut doc)
+}
+
+/// Read one `server.auth` value through the same deserializer every other
+/// reader uses.
+pub fn parse_auth_value(auth: toml::Value) -> Result<ServerAuthConfig, String> {
+    #[derive(Deserialize)]
+    struct Holder {
+        auth: ServerAuthConfig,
+    }
+    let mut holder = toml::Table::new();
+    holder.insert("auth".to_string(), auth);
+    let text = toml::to_string(&holder).map_err(|e| e.to_string())?;
+    toml::from_str::<Holder>(&text)
+        .map(|holder| holder.auth)
+        .map_err(|e| e.to_string())
+}
+
+/// The field-level recovery of every section but `[server.auth]`.
+fn recover_config_table(doc: toml::Table) -> Config {
     // Fast path: the whole document deserializes cleanly.
     if let Ok(cfg) = table_into_config(doc.clone()) {
         return cfg;
@@ -2953,7 +3053,20 @@ fn table_into_config(table: toml::Table) -> Result<Config, String> {
     toml::from_str::<Config>(&s).map_err(|e| e.to_string())
 }
 
-pub fn load_config(paths: &DuxPaths) -> Config {
+/// Load config for a read-only consumer (the web server, and every reload).
+/// Reads `config.toml` if present; a missing file is the defaults. Always
+/// applies provider defaults. Unlike the TUI's `ensure_config`, this never
+/// creates, migrates, or writes the config file.
+///
+/// Fails closed on `[server.auth]`: a file that cannot be read, is not TOML,
+/// or carries an invalid auth section is a [`ConfigLoadError`], never a
+/// silent fallback to defaults, because the default is "no password". A
+/// start then refuses to run and a reload keeps the running config.
+pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
+    let fail = |problem| ConfigLoadError {
+        path: paths.config_path.clone(),
+        problem,
+    };
     let mut config = match std::fs::read_to_string(&paths.config_path) {
         Ok(raw) => {
             // One-time migration notice: the single `[server] max_websocket_connections`
@@ -2977,9 +3090,10 @@ pub fn load_config(paths: &DuxPaths) -> Config {
                         .map(|_| doc.to_string())
                 })
                 .unwrap_or_else(|| raw.clone());
-            recover_config(&migrated)
+            recover_config(&migrated).map_err(fail)?
         }
-        Err(_) => Config::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
+        Err(error) => return Err(fail(ConfigLoadProblem::Unreadable(error.to_string()))),
     };
     config.providers.ensure_defaults();
     // Surface a stale/unrecognized editor preference instead of silently falling
@@ -3040,7 +3154,7 @@ pub fn load_config(paths: &DuxPaths) -> Config {
         crate::logger::warn(&warning);
         config.server.tailscale = TailscaleMode::Auto.as_str().to_string();
     }
-    config
+    Ok(config)
 }
 
 /// The warning [`load_config`] emits when `ui.terminal_font_size` is outside
@@ -3634,7 +3748,7 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\nterminal_font_size = 500\n")
             .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         // The in-memory value is corrected at load, so `normalized_terminal_font_size`
         // (now a pure clamp used elsewhere) never has to run to reach a valid value,
         // and a later save persists the corrected default rather than 500.
@@ -3648,7 +3762,7 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\nterminal_font_size = 22\n")
             .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(config.ui.terminal_font_size, 22);
     }
 
@@ -3770,7 +3884,7 @@ mod tests {
             upload_directory_load_warning("../escape").is_some(),
             "the value on disk must be one that warns, or this proves nothing"
         );
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(config.ui.upload_directory, DEFAULT_UPLOAD_DIRECTORY);
         assert_eq!(
             upload_directory_load_warning(&config.ui.upload_directory),
@@ -3789,7 +3903,7 @@ mod tests {
         )
         .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(config.ui.upload_directory, "tmp/drops");
         assert!(!config.ui.upload_write_gitignore);
     }
@@ -3859,7 +3973,7 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\nupload_pasted_text_chars = 3\n")
             .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(
             config.ui.upload_pasted_text_chars,
             MIN_UPLOAD_PASTED_TEXT_CHARS
@@ -3878,7 +3992,13 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\nupload_pasted_text_chars = 0\n")
             .expect("write config");
 
-        assert_eq!(load_config(&paths).ui.upload_pasted_text_chars, 0);
+        assert_eq!(
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .upload_pasted_text_chars,
+            0
+        );
     }
 
     #[test]
@@ -4241,7 +4361,8 @@ mod tests {
     /// of `[server]` is kept.
     #[test]
     fn a_negative_log_viewer_lines_falls_back_to_its_default() {
-        let recovered = recover_config("[server]\nlog_viewer_lines = -5\nport = 4321\n");
+        let recovered =
+            recover_config("[server]\nlog_viewer_lines = -5\nport = 4321\n").expect("recovers");
         assert_eq!(recovered.server.log_viewer_lines, DEFAULT_LOG_VIEWER_LINES);
         assert_eq!(recovered.server.port, 4321);
         assert_eq!(log_viewer_capacity(0), 1);
@@ -4251,7 +4372,8 @@ mod tests {
     fn recover_config_keeps_the_settings_around_one_invalid_field() {
         let recovered = recover_config(
             "[ui]\nagent_tabs_max = -1\nleft_width_pct = 33\n\n[server]\nport = 4321\n",
-        );
+        )
+        .expect("recovers");
         assert_eq!(
             recovered.ui.agent_tabs_max,
             Config::default().ui.agent_tabs_max,
@@ -4263,7 +4385,7 @@ mod tests {
 
     #[test]
     fn recover_config_resets_a_section_whose_fields_cannot_be_isolated() {
-        let recovered = recover_config("ui = 5\n\n[server]\nport = 4321\n");
+        let recovered = recover_config("ui = 5\n\n[server]\nport = 4321\n").expect("recovers");
         assert_eq!(
             recovered.ui.left_width_pct,
             Config::default().ui.left_width_pct,
@@ -4272,10 +4394,131 @@ mod tests {
         assert_eq!(recovered.server.port, 4321);
     }
 
+    // ── [server.auth] fails closed ───────────────────────────────────────────
+
+    fn a_real_hash() -> String {
+        crate::auth::hash_password(&crate::auth::Password::new(
+            "correct horse battery staple".to_string(),
+        ))
+        .expect("hash")
+    }
+
     #[test]
-    fn recover_config_falls_back_to_defaults_on_unparseable_toml() {
-        let recovered = recover_config("[ui\nnot toml at all");
-        assert_eq!(recovered.server.port, Config::default().server.port);
+    fn a_file_that_is_not_toml_is_refused_because_its_password_cannot_be_read() {
+        let err = recover_config("[ui\nnot toml at all").expect_err("refused");
+        assert!(matches!(err, ConfigLoadProblem::NotToml(_)), "{err:?}");
+    }
+
+    #[test]
+    fn an_invalid_password_hash_is_refused_rather_than_read_as_no_password() {
+        let err =
+            recover_config("[server.auth]\npassword_hash = \"hunter2\"\n").expect_err("refused");
+        let ConfigLoadProblem::AuthInvalid(reason) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(reason.contains("PHC"), "{reason}");
+    }
+
+    #[test]
+    fn wrong_types_in_server_auth_are_refused() {
+        for body in [
+            "[server.auth]\nsession_idle_seconds = \"sixty\"\n",
+            "[server.auth]\nblocked_addresses = 5\n",
+            "[server]\nauth = \"on\"\n",
+            "[server.auth]\npasword_hash = \"\"\n",
+        ] {
+            let err = recover_config(body).expect_err(body);
+            assert!(
+                matches!(err, ConfigLoadProblem::AuthInvalid(_)),
+                "{body}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_section_that_is_not_a_table_is_refused() {
+        let err = recover_config("server = 5\n").expect_err("refused");
+        assert!(matches!(err, ConfigLoadProblem::AuthInvalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_valid_auth_section_survives_the_recovery_of_a_bad_neighbour() {
+        let hash = a_real_hash();
+        let body = format!(
+            "[server]\nport = \"not a port\"\nhost = \"127.0.0.1\"\n\n[server.auth]\n\
+             password_hash = \"{hash}\"\nrequire = \"everywhere\"\n\n[ui]\nagent_tabs_max = -1\n"
+        );
+        let config = recover_config(&body).expect("recovered");
+        assert_eq!(
+            config.server.port,
+            Config::default().server.port,
+            "the bad field resets"
+        );
+        assert_eq!(config.server.auth.password_hash(), Some(hash.as_str()));
+        assert_eq!(config.server.auth.require, AuthRequire::Everywhere);
+        assert_eq!(
+            config.ui.agent_tabs_max,
+            Config::default().ui.agent_tabs_max
+        );
+    }
+
+    #[test]
+    fn load_config_reads_a_missing_file_as_no_password() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        let config = load_config(&paths).expect("no file is the defaults");
+        assert!(!config.server.auth.has_password());
+    }
+
+    #[test]
+    fn load_config_refuses_each_unreadable_auth_shape_and_names_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        for body in [
+            "[server\n",
+            "[server.auth]\npassword_hash = \"$argon2id$nope\"\n",
+            "[server.auth]\nrequire = 3\n",
+        ] {
+            std::fs::write(&paths.config_path, body).expect("write");
+            let err = load_config(&paths).expect_err(body);
+            let text = err.to_string();
+            assert!(
+                text.contains(&paths.config_path.display().to_string()),
+                "the error names the file: {text}"
+            );
+            assert!(
+                text.contains("server.auth"),
+                "the error names the section: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_config_refuses_a_file_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::create_dir(&paths.config_path).expect("a directory where the file should be");
+        let err = load_config(&paths).expect_err("a directory cannot be read as a file");
+        assert!(
+            matches!(err.problem, ConfigLoadProblem::Unreadable(_)),
+            "{err:?}"
+        );
+        let _ = std::fs::Permissions::from_mode(0o600);
+    }
+
+    #[test]
+    fn load_config_reads_a_valid_password_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        let hash = a_real_hash();
+        std::fs::write(
+            &paths.config_path,
+            format!("[server.auth]\npassword_hash = \"{hash}\"\n"),
+        )
+        .expect("write");
+        let config = load_config(&paths).expect("valid");
+        assert_eq!(config.server.auth.password_hash(), Some(hash.as_str()));
     }
 
     #[test]
@@ -4308,7 +4551,7 @@ mod tests {
 
     #[test]
     fn recover_config_keeps_a_clean_document_intact() {
-        let recovered = recover_config("[ui]\nleft_width_pct = 21\n");
+        let recovered = recover_config("[ui]\nleft_width_pct = 21\n").expect("recovers");
         assert_eq!(recovered.ui.left_width_pct, 21);
     }
 
@@ -4519,7 +4762,7 @@ mod tests {
         std::fs::write(&paths.config_path, "[server]\nbind = \"0.0.0.0:9000\"\n")
             .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 9000);
     }
@@ -4538,7 +4781,7 @@ mod tests {
         )
         .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert!(
             !config.providers.commands.contains_key("gemini"),
             "an untouched stock retired provider must be pruned"
@@ -4557,7 +4800,7 @@ mod tests {
         )
         .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
         assert!(
             config.providers.commands.contains_key("gemini"),
             "a user-customized retired provider block must be kept"
@@ -4574,7 +4817,13 @@ mod tests {
         )
         .expect("write config");
 
-        assert_eq!(load_config(&paths).ui.github_probe_interval_secs, 900);
+        assert_eq!(
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .github_probe_interval_secs,
+            900
+        );
     }
 
     #[test]
@@ -4585,7 +4834,10 @@ mod tests {
             .expect("write config");
 
         assert_eq!(
-            load_config(&paths).ui.github_probe_interval_secs,
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .github_probe_interval_secs,
             DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
         );
     }
@@ -4601,7 +4853,10 @@ mod tests {
             .expect("write config");
 
         assert_eq!(
-            load_config(&paths).ui.github_probe_interval_secs,
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .github_probe_interval_secs,
             MIN_GITHUB_PROBE_INTERVAL_SECONDS,
         );
     }
@@ -4614,7 +4869,13 @@ mod tests {
         std::fs::write(&paths.config_path, "[ui]\ngithub_probe_interval_secs = 0\n")
             .expect("write config");
 
-        assert_eq!(load_config(&paths).ui.github_probe_interval_secs, 0);
+        assert_eq!(
+            load_config(&paths)
+                .expect("config loads")
+                .ui
+                .github_probe_interval_secs,
+            0
+        );
     }
 
     #[test]
@@ -4674,7 +4935,7 @@ github_integration = false
         )
         .expect("write config");
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
 
         assert_eq!(
             config.providers.commands["claude"].command, "/custom/claude",
@@ -4697,7 +4958,7 @@ github_integration = false
         let paths = make_test_paths(dir.path());
         // No config.toml written: file does not exist.
 
-        let config = load_config(&paths);
+        let config = load_config(&paths).expect("config loads");
 
         // Provider defaults must be present.
         assert!(
@@ -5028,18 +5289,18 @@ port = 3890
     }
 
     #[test]
-    fn load_config_falls_back_to_defaults_on_malformed_toml() {
+    fn load_config_refuses_malformed_toml_instead_of_falling_back_to_defaults() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_test_paths(dir.path());
         std::fs::write(&paths.config_path, "this is not valid toml ][[[")
             .expect("write bad config");
 
-        // Must not panic; must return usable defaults.
-        let config = load_config(&paths);
-
+        // The defaults would read as "no password", which a file whose
+        // [server.auth] cannot be seen may well contradict.
+        let err = load_config(&paths).expect_err("refused");
         assert!(
-            config.providers.commands.contains_key("claude"),
-            "claude provider should be present via defaults after parse failure"
+            matches!(err.problem, ConfigLoadProblem::NotToml(_)),
+            "{err:?}"
         );
     }
 

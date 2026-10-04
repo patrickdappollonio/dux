@@ -3548,9 +3548,18 @@ fn handle_apply_wire_request(
 ) {
     let mutates_config = cmd.mutates_config_static();
     if mutates_config && *config_disk_ahead {
-        let reloaded = dux_core::config::load_config(&engine.paths);
-        let _ = engine.apply_reloaded_config(reloaded);
-        *config_disk_ahead = false;
+        match dux_core::config::load_config(&engine.paths) {
+            Ok(reloaded) => {
+                let _ = engine.apply_reloaded_config(reloaded);
+                *config_disk_ahead = false;
+            }
+            // Kept ahead: the running config stays as it was, and the next
+            // config-mutating command tries again once the file is fixed.
+            Err(error) => dux_core::logger::warn(&format!(
+                "[server] config.toml changed on disk but was not adopted, so the running \
+                 settings are unchanged: {error}"
+            )),
+        }
     }
 
     engine.current_origin = origin;
@@ -6980,6 +6989,85 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "the reload never reached the guard's set: {:?}",
                 guard_set.snapshot()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A reload that meets an unreadable `[server.auth]` changes nothing at
+    /// all, not even the settings beside it that are fine, and says why; the
+    /// next good file applies as usual.
+    #[tokio::test]
+    async fn a_reload_with_an_unreadable_server_auth_keeps_the_running_config() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nallowed_hosts = [\"before.example.com\"]\n",
+        )
+        .expect("seed config");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let guard_set = handle.live_limits().allowed_hosts();
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("first reload");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while guard_set.snapshot() != vec!["before.example.com".to_string()] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first reload never applied"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        for broken_auth in [
+            "[server.auth\n",
+            "[server.auth]\npassword_hash = \"not-a-hash\"\n",
+            "[server.auth]\nsession_idle_seconds = true\n",
+        ] {
+            let mut statuses = handle.subscribe_status();
+            std::fs::write(
+                &paths.config_path,
+                format!("[server]\nallowed_hosts = [\"after.example.com\"]\n\n{broken_auth}"),
+            )
+            .expect("edit config.toml by hand");
+            handle
+                .apply_wire(WireCommand::ReloadConfig {})
+                .await
+                .expect("reload request");
+            let said = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let status = statuses.recv().await.expect("status");
+                    if status.message.contains("server.auth") {
+                        return status.message;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{broken_auth:?}: no status named [server.auth]"));
+            assert!(said.contains("not reloaded"), "{said}");
+            assert_eq!(
+                guard_set.snapshot(),
+                vec!["before.example.com".to_string()],
+                "{broken_auth:?}: the whole reload is refused"
+            );
+        }
+
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nallowed_hosts = [\"after.example.com\"]\n",
+        )
+        .expect("fix config.toml");
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("reload");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while guard_set.snapshot() != vec!["after.example.com".to_string()] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the good reload never applied"
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }

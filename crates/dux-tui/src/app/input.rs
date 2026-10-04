@@ -13070,6 +13070,62 @@ not_a_real_action = ["x"]
         }
     }
 
+    /// A reload that meets an unreadable `[server.auth]` is rejected whole:
+    /// the running config, password included, is exactly what it was, and
+    /// the failure dialog says why.
+    #[test]
+    fn reload_config_refuses_a_file_whose_server_auth_cannot_be_read() {
+        let running_hash = dux_core::auth::hash_password(&dux_core::auth::Password::new(
+            "the running password stays".to_string(),
+        ))
+        .expect("hash");
+        for body in [
+            "[server.auth\n",
+            "[server.auth]\npassword_hash = \"not a hash\"\n",
+            "[server.auth]\nblocked_addresses = 7\n",
+        ] {
+            let mut app = test_app(default_bindings());
+            app.engine.config.ui.right_width_pct = 41;
+            app.engine.config.server.auth.password_hash = running_hash.clone();
+            let before = app.engine.config.clone();
+            std::fs::write(&app.engine.paths.config_path, body).expect("write config");
+
+            app.execute_command("reload-config".to_string())
+                .expect("start reload config");
+            drain_until(&mut app, |app| {
+                matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
+            });
+
+            assert_eq!(app.engine.config, before, "{body:?}: nothing changed");
+            match &app.prompt {
+                PromptState::ConfigReloadFailed { error, .. } => {
+                    assert!(error.contains("server.auth"), "{body:?}: {error}");
+                }
+                other => panic!("expected the reload failure prompt, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn reload_config_applies_a_valid_new_password() {
+        let mut app = test_app(default_bindings());
+        let mut config = Config::default();
+        config.server.auth.password_hash = dux_core::auth::hash_password(
+            &dux_core::auth::Password::new("a brand new passphrase here".to_string()),
+        )
+        .expect("hash");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        std::fs::write(
+            &app.engine.paths.config_path,
+            crate::config::render_config_with(&config, &bindings),
+        )
+        .expect("write valid config");
+        app.execute_command("reload-config".to_string())
+            .expect("start reload config");
+        drain_until(&mut app, |app| app.engine.config.server.auth.has_password());
+        assert_eq!(app.engine.config.server.auth, config.server.auth);
+    }
+
     #[test]
     fn reload_config_failure_can_recover_last_working_config_file() {
         let mut app = test_app(default_bindings());

@@ -21,8 +21,20 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
 
-    let raw = fs::read_to_string(&paths.config_path)
-        .with_context(|| format!("failed to read {}", paths.config_path.display()))?;
+    // Fails closed BEFORE anything else, migrations included (they write the
+    // file): a config whose [server.auth] cannot be read stops the start, and
+    // stops a reload from changing the running config, rather than reading as
+    // "no password".
+    let load_error = |problem| dux_core::config::ConfigLoadError {
+        path: paths.config_path.clone(),
+        problem,
+    };
+    let raw = fs::read_to_string(&paths.config_path).map_err(|error| {
+        load_error(dux_core::config::ConfigLoadProblem::Unreadable(
+            error.to_string(),
+        ))
+    })?;
+    dux_core::config::auth_section_of(&raw).map_err(load_error)?;
     let mut doc: DocumentMut = raw
         .parse()
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
@@ -1359,6 +1371,212 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # the feature off. Read at startup, so a change needs a server restart.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.file_drop_max_concurrency as usize),
+        },
+        ConfigEntry::Blank,
+        ConfigEntry::Section("server.auth"),
+        ConfigEntry::Comment(
+            "# The web UI's optional password: one password for one owner, the same\n\
+             # single workspace as always. With no password, anyone who can reach the\n\
+             # web UI controls your agents and terminals, so set one before serving\n\
+             # beyond this machine:\n\
+             #\n\
+             #   dux config set server.auth.password\n\
+             #\n\
+             # That asks for the password twice without echoing it, shows how strong\n\
+             # it is, and stores only its hash below (`--stdin` reads it from a pipe\n\
+             # for scripts). A running dux picks up any `dux config set` at once.\n\
+             #\n\
+             # dux refuses to start, and a reload refuses to change anything, while\n\
+             # this section is invalid: a misspelled key, a value of the wrong type,\n\
+             # or a password_hash dux will not use. A mistake here is never read as\n\
+             # \"no password\".",
+        ),
+        ConfigEntry::Field {
+            key: "password_hash",
+            comment: Some(CommentSource::Static(
+                "# The password's Argon2id hash (a string starting $argon2id$v=19$), or \"\"\n\
+                 # for no password. Not the password itself, so this file can live in a\n\
+                 # dotfiles repository, but a published hash lets anyone try guesses\n\
+                 # offline as fast as their hardware allows, which no ban can slow down:\n\
+                 # use a long, unique, generated password. Set it with the command\n\
+                 # above rather than by hand. A hash you paste here is checked for its\n\
+                 # format and cost, but its password is only measured against the\n\
+                 # minimums below when you first log in with it. Changing or clearing it\n\
+                 # signs every browser out.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.auth.password_hash.clone()),
+        },
+        ConfigEntry::Field {
+            key: "require",
+            comment: Some(CommentSource::Static(
+                "# Where the password is asked for, once one is set:\n\
+                 #   \"network\"    everyone except this machine and your own tailnet (default)\n\
+                 #   \"tailnet\"    everyone except this machine\n\
+                 #   \"everywhere\" every request, this machine included\n\
+                 # A reverse proxy on this machine makes outside visitors look local, so\n\
+                 # use \"everywhere\" behind one. No effect while password_hash is empty.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.auth.require.as_str().to_string()),
+        },
+        ConfigEntry::Field {
+            key: "minimum_password_length",
+            comment: Some(CommentSource::Static(
+                "# The fewest characters a new password may have. Checked whenever dux sees\n\
+                 # the password itself: `dux config set` and the web UI refuse a shorter\n\
+                 # one, and logging in with one still works but shows a warning until it\n\
+                 # is changed. Default 12.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.minimum_password_length),
+        },
+        ConfigEntry::Field {
+            key: "minimum_password_score",
+            comment: Some(CommentSource::Static(
+                "# The lowest strength a new password may have, from 0 to 4: weak, fair,\n\
+                 # good, strong, excellent. The strength is an estimate of how many guesses\n\
+                 # it would take (dictionary words, names, dates, keyboard runs and l33t\n\
+                 # spellings all count against it), which is why there are no rules about\n\
+                 # symbols or capitals. Checked at the same moments as the length above.\n\
+                 # Default 2.",
+            )),
+            value_fn: |c| FieldValue::U16(u16::from(c.server.auth.minimum_password_score)),
+        },
+        ConfigEntry::Field {
+            key: "max_failed_logins",
+            comment: Some(CommentSource::Static(
+                "# Failed logins one address may make within failed_login_window_seconds\n\
+                 # before dux adds it to blocked_addresses below and says so in its log.\n\
+                 # This machine is never blocked, only slowed down. Everyone behind one\n\
+                 # shared address (an office, a phone carrier) is blocked together. 0\n\
+                 # never blocks anyone automatically. Default 5.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_failed_logins),
+        },
+        ConfigEntry::Field {
+            key: "blocked_addresses",
+            comment: Some(CommentSource::Static(
+                "# Addresses and ranges dux refuses before anything else, with or without a\n\
+                 # password: single addresses (\"203.0.113.7\", \"2001:db8::1\") or CIDR\n\
+                 # ranges (\"203.0.113.0/24\"). Yours to edit: add a scanner you keep\n\
+                 # seeing, or remove an address dux blocked after failed logins (yours,\n\
+                 # if you mistyped). An entry that does not parse makes this section\n\
+                 # invalid. Default empty.",
+            )),
+            value_fn: |c| FieldValue::StrList(c.server.auth.blocked_addresses.clone()),
+        },
+        ConfigEntry::Field {
+            key: "session_idle_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long a signed-in browser stays signed in with nothing happening.\n\
+                 # Any request, and any open dux tab (its live connection counts),\n\
+                 # keeps the session alive, so a tab left open waiting on an agent never\n\
+                 # signs out; close every tab and the session ends this many seconds\n\
+                 # later. Sessions survive a quick restart of dux. At least 1. Default 60.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.session_idle_seconds),
+        },
+        ConfigEntry::Field {
+            key: "disable_no_auth_warning",
+            comment: Some(CommentSource::Static(
+                "# Hide the red warning the web UI shows when dux is reachable beyond this\n\
+                 # machine with no password set. The warning's \"don't show again\" sets\n\
+                 # this to true. Default false.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.server.auth.disable_no_auth_warning),
+        },
+        ConfigEntry::Field {
+            key: "cookie_secure",
+            comment: Some(CommentSource::Static(
+                "# Whether the sign-in cookie is marked Secure, which stops a browser from\n\
+                 # ever sending it over plain HTTP:\n\
+                 #   \"auto\"   only when dux knows the browser reached it over HTTPS (default)\n\
+                 #   \"always\" always; a browser on plain HTTP then cannot stay signed in\n\
+                 #   \"never\"  never\n\
+                 # Use \"always\" when an HTTPS proxy dux cannot see is in front of it.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.auth.cookie_secure.as_str().to_string()),
+        },
+        ConfigEntry::Field {
+            key: "max_concurrent_password_checks",
+            comment: Some(CommentSource::Static(
+                "# Password checks dux runs at once, across every visitor. Each takes about\n\
+                 # 19 MiB of memory and a few dozen milliseconds of CPU on purpose, so this\n\
+                 # bounds what a flood of login attempts can cost. At least 1. Default 2.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_concurrent_password_checks),
+        },
+        ConfigEntry::Field {
+            key: "password_check_queue",
+            comment: Some(CommentSource::Static(
+                "# Logins that may wait for a free check when all of them are busy. Any\n\
+                 # more are answered \"too many requests, try again shortly\" at once,\n\
+                 # without checking anything. Default 8.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.password_check_queue),
+        },
+        ConfigEntry::Field {
+            key: "max_password_bytes",
+            comment: Some(CommentSource::Static(
+                "# The longest password the login accepts, in bytes; a longer attempt is\n\
+                 # refused before any check runs, and `dux config set` refuses to set one.\n\
+                 # 1 to 65536, and no smaller than minimum_password_length. Default 1024.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_password_bytes),
+        },
+        ConfigEntry::Field {
+            key: "failed_login_window_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long a failed login counts against its address. An address's count\n\
+                 # starts over once this long has passed since its last failure.\n\
+                 # Default 900 (15 minutes).",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.failed_login_window_seconds),
+        },
+        ConfigEntry::Field {
+            key: "failed_login_delay_seconds",
+            comment: Some(CommentSource::Static(
+                "# After a failed login, how long that address must wait before its next\n\
+                 # attempt is checked. The wait doubles with each further failure in the\n\
+                 # window, up to failed_login_max_delay_seconds. This machine waits too.\n\
+                 # 0 turns the wait off. Default 1.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.failed_login_delay_seconds),
+        },
+        ConfigEntry::Field {
+            key: "failed_login_max_delay_seconds",
+            comment: Some(CommentSource::Static(
+                "# The longest that doubling wait can grow. Default 30.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.failed_login_max_delay_seconds),
+        },
+        ConfigEntry::Field {
+            key: "max_failed_logins_per_minute",
+            comment: Some(CommentSource::Static(
+                "# Failed logins per minute from all addresses together. Past it, every\n\
+                 # address but this machine is told \"too many requests\" until the minute\n\
+                 # is over, which stops a guesser that keeps changing address. 0 turns\n\
+                 # this limit off. Default 30.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_failed_logins_per_minute),
+        },
+        ConfigEntry::Field {
+            key: "max_tracked_addresses",
+            comment: Some(CommentSource::Static(
+                "# How many addresses dux remembers failed logins for at once; past it, the\n\
+                 # one forgotten is the address whose last failure is oldest. Bounds the\n\
+                 # memory a guesser with many addresses can make dux use. At least 1.\n\
+                 # Default 10000.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_tracked_addresses),
+        },
+        ConfigEntry::Field {
+            key: "max_blocked_addresses",
+            comment: Some(CommentSource::Static(
+                "# How long blocked_addresses may grow through dux's own additions. Past\n\
+                 # it, a newly blocked address stays blocked until dux restarts but is not\n\
+                 # written here, and dux says so in its log. Entries you add yourself are\n\
+                 # never refused. Default 1000.",
+            )),
+            value_fn: |c| FieldValue::U32(c.server.auth.max_blocked_addresses),
         },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
@@ -3829,6 +4047,80 @@ args = [\"-l\"]
     /// The terminal UI never goes through `load_config`, so the correction that
     /// keeps the engine tick from re-warning has to happen here too. Without it
     /// the surface with the fastest tick is the one that floods.
+    /// The three ways `[server.auth]` can be unreadable each stop the start,
+    /// name the file and the section, and leave the file exactly as it was
+    /// (no migration rewrites it first).
+    #[test]
+    fn ensure_config_refuses_to_start_when_server_auth_cannot_be_read() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        for body in [
+            "[server.auth\npassword_hash = \"\"\n",
+            "[server.auth]\npassword_hash = \"$argon2id$v=19$broken\"\n",
+            "[server.auth]\nmax_failed_logins = \"five\"\n",
+            "[server]\nbind = \"127.0.0.1:3890\"\n\n[server.auth]\nrequire = \"nowhere\"\n",
+        ] {
+            fs::write(&paths.config_path, body).expect("seed config");
+            let err = ensure_config(&paths).expect_err(body);
+            let text = format!("{err:#}");
+            assert!(text.contains("server.auth"), "{body:?}: {text}");
+            assert!(
+                text.contains(&paths.config_path.display().to_string()),
+                "{body:?}: {text}"
+            );
+            assert_eq!(
+                fs::read_to_string(&paths.config_path).unwrap(),
+                body,
+                "a refused start writes nothing"
+            );
+        }
+    }
+
+    /// The canonical template documents every `[server.auth]` key, and what it
+    /// renders reads back as the same section.
+    #[test]
+    fn the_template_documents_and_round_trips_server_auth() {
+        let mut config = Config::default();
+        config.server.auth.password_hash = dux_core::auth::hash_password(
+            &dux_core::auth::Password::new("correct horse battery staple".to_string()),
+        )
+        .expect("hash");
+        config.server.auth.blocked_addresses = vec!["203.0.113.0/24".to_string()];
+        config.server.auth.require = dux_core::config::AuthRequire::Tailnet;
+        let rendered = render_config_documented(&config);
+        assert!(rendered.contains("[server.auth]"), "{rendered}");
+        let parsed: Config = toml::from_str(&rendered).expect("valid");
+        assert_eq!(parsed.server.auth, config.server.auth);
+        let section = rendered
+            .split("[server.auth]")
+            .nth(1)
+            .expect("section")
+            .split("\n[")
+            .next()
+            .expect("body");
+        let json = serde_json::to_value(&config.server.auth).expect("json");
+        for key in json.as_object().expect("object").keys() {
+            let line = section
+                .lines()
+                .position(|line| line.starts_with(&format!("{key} = ")))
+                .unwrap_or_else(|| panic!("{key} is rendered"));
+            assert!(
+                section
+                    .lines()
+                    .nth(line.wrapping_sub(1))
+                    .is_some_and(|l| l.starts_with('#')),
+                "{key} has a comment above it"
+            );
+        }
+    }
+
     #[test]
     fn ensure_config_corrects_an_out_of_range_github_probe_interval() {
         let dir = tempfile::TempDir::new().expect("tempdir");
