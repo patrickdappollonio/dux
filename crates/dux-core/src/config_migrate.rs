@@ -94,7 +94,7 @@ const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
 /// Every deprecated key in `doc` the load migrations cannot carry over, each
 /// tried on its own (so one failure never hides another), as its dotted key
 /// and the sentence the migration fails with.
-pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(String, String)> {
+pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(Vec<String>, String)> {
     DEPRECATED_CONFIG_KEYS
         .iter()
         .filter_map(|rule| {
@@ -103,7 +103,7 @@ pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(String, String)> {
                 .err()
                 .map(|error| {
                     (
-                        format!("{}.{}", rule.old.section, rule.old.key),
+                        vec![rule.old.section.to_string(), rule.old.key.to_string()],
                         format!("{error:#}"),
                     )
                 })

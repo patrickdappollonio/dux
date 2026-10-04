@@ -381,7 +381,14 @@ pub fn source_after_sync(
             .unwrap_or_else(|| synced.clone()),
     };
     base.projects = synced.projects.clone();
-    crate::config::SourceText::written(&union_seen(read.as_str(), written, &synced.projects), base)
+    // What the read text expressed, its carried-over keys included.
+    let read_seen = read
+        .as_str()
+        .map(|text| seen_of_read(text, &synced.projects));
+    crate::config::SourceText::written(
+        &union_seen(read_seen.as_deref(), written, &synced.projects),
+        base,
+    )
 }
 
 /// What the writer has seen of the file after writing `written` on top of
@@ -399,6 +406,24 @@ pub fn source_after_sync(
 /// A `[[projects]]` entry neither memory (`projects`) nor the written file
 /// has any more is forgotten: no decision needs it, and keeping it would let
 /// what has been seen grow with every project a session adds and removes.
+/// What dux has seen of a file it just read, `text`: every key the file
+/// sets, and every key a load migration writes from one of them (a
+/// deprecated `[server] bind` seen as `server.host` and `server.port`, for
+/// instance). A value carried over from a deprecated key came from the file,
+/// so its new key counts as one the file has expressed: when the deprecated
+/// key is later deleted by hand, the new keys count as deleted with it, and
+/// a save never fills them in. Only a key the file has never expressed in
+/// any form is filled with its default.
+pub fn seen_of_read(text: &str, projects: &[ProjectConfig]) -> String {
+    let Ok(mut migrated) = text.parse::<DocumentMut>() else {
+        return text.to_string();
+    };
+    if crate::config_migrate::apply_load_migrations(&mut migrated).is_err() {
+        return text.to_string();
+    }
+    union_seen(Some(text), &migrated.to_string(), projects)
+}
+
 pub fn union_seen(seen: Option<&str>, written: &str, projects: &[ProjectConfig]) -> String {
     let Some(seen) = seen else {
         return written.to_string();
@@ -1326,13 +1351,13 @@ pub fn mutate_config_file_with<T>(
 pub fn mutate_config_file_repairing<T>(
     config_path: &Path,
     missing: MissingConfig<'_>,
-    key: &str,
+    key: &[String],
     change: impl FnOnce(&mut DocumentMut) -> Result<T>,
 ) -> Result<(T, Vec<crate::config::StartProblem>)> {
     mutate_config_file_ruled(
         config_path,
         missing,
-        AuthRule::NothingAddedBy(key.to_string()),
+        AuthRule::NothingAddedBy(key.to_vec()),
         change,
     )
 }
@@ -1343,7 +1368,7 @@ enum AuthRule {
     Valid,
     /// Nothing that stops a start which the change of this setting is
     /// answerable for (see [`crate::config::problems_added_by_set`]).
-    NothingAddedBy(String),
+    NothingAddedBy(Vec<String>),
 }
 
 fn mutate_config_file_ruled<T>(
@@ -2613,15 +2638,15 @@ fn patch_env_table(doc: &mut DocumentMut, section: &str, env: &BTreeMap<String, 
 ///
 /// Entries are dotted table paths. A path matches when it is equal to an entry
 /// or nested beneath one.
-pub const ORPHANED_CONFIG_SECTIONS: &[&str] = &[
+pub const ORPHANED_CONFIG_SECTIONS: &[&[&str]] = &[
     // Removed with the HTTP-basic-auth experiment. Only this TOP-LEVEL `[auth]`
     // table: the web login's live settings are `[server.auth]`, which a dotted
     // path match never confuses with it (pinned by
     // `the_orphan_cleanup_never_touches_server_auth`).
-    "auth",
+    &["auth"],
     // Removed with the built-in ACME/TLS listener. TLS is delegated to an
     // upstream proxy or to Tailscale.
-    "server.acme",
+    &["server", "acme"],
 ];
 
 /// One step of a path through a TOML document: a table key, or an index into an
@@ -2633,7 +2658,20 @@ enum PathSeg {
 }
 
 /// Render a path for display: `server.acme.production`, `projects[0].custom_key`.
-fn path_display(path: &[PathSeg]) -> String {
+/// A path of keys only goes through the one formatter
+/// ([`crate::config::shown_path`]) against the file's text `raw`, so a name
+/// that breaks its map's rule is placed by its line, never printed.
+fn path_display(raw: &str, path: &[PathSeg]) -> String {
+    let keys: Option<Vec<String>> = path
+        .iter()
+        .map(|seg| match seg {
+            PathSeg::Key(key) => Some(key.clone()),
+            PathSeg::Index(_) => None,
+        })
+        .collect();
+    if let Some(keys) = keys {
+        return crate::config::shown_path(raw, &keys);
+    }
     let mut out = String::new();
     for seg in path {
         match seg {
@@ -2651,17 +2689,17 @@ fn path_display(path: &[PathSeg]) -> String {
     out
 }
 
-/// The dotted TABLE path (indices elided), used for drop-list matching so that
-/// `projects[0].auth` never collides with the top-level `[auth]` section.
-fn dotted_key_path(path: &[PathSeg]) -> String {
-    let keys: Vec<&str> = path
-        .iter()
+/// The path's keys when it holds no array index, for drop-list matching
+/// segment by segment: `projects[0].auth` never collides with the top-level
+/// `[auth]`, and a top-level key named `"server.acme"` never with
+/// `[server.acme]`.
+fn key_segments(path: &[PathSeg]) -> Option<Vec<&str>> {
+    path.iter()
         .map(|seg| match seg {
-            PathSeg::Key(k) => k.as_str(),
-            PathSeg::Index(_) => "[]",
+            PathSeg::Key(key) => Some(key.as_str()),
+            PathSeg::Index(_) => None,
         })
-        .collect();
-    keys.join(".")
+        .collect()
 }
 
 /// Whether `item` holds a `password_hash` key anywhere inside it.
@@ -2682,9 +2720,9 @@ fn holds_password_hash(item: &Item) -> bool {
     }
 }
 
-/// Whether `dotted` is exactly an orphaned section.
-fn is_orphan_root(dotted: &str) -> bool {
-    ORPHANED_CONFIG_SECTIONS.contains(&dotted)
+/// Whether `path` is exactly an orphaned section, segment by segment.
+fn is_orphan_root(path: &[PathSeg]) -> bool {
+    key_segments(path).is_some_and(|keys| ORPHANED_CONFIG_SECTIONS.contains(&keys.as_slice()))
 }
 
 /// What the documentation-restore merge did to a user's non-canonical content.
@@ -2726,7 +2764,9 @@ pub fn merge_unmanaged_keys(
     let mut report = RestoreMergeReport::default();
     let mut carry: Vec<CarriedLeaf> = Vec::new();
     let mut path = Vec::new();
+    let raw = original.to_string();
     collect_unmanaged(
+        &raw,
         original.as_table(),
         Some(rendered.as_table()),
         &mut path,
@@ -2735,7 +2775,7 @@ pub fn merge_unmanaged_keys(
     );
 
     for leaf in carry {
-        let display = path_display(&leaf.path);
+        let display = path_display(&raw, &leaf.path);
         if insert_at_path(rendered, &leaf.path, leaf.key, leaf.item) {
             report.preserved.push(display);
         } else {
@@ -2764,6 +2804,7 @@ struct CarriedLeaf {
 /// Walk `orig` alongside its counterpart in the rendered document, collecting
 /// leaf keys the rendered document lacks and noting dropped orphan sections.
 fn collect_unmanaged(
+    raw: &str,
     orig: &Table,
     rendered: Option<&Table>,
     path: &mut Vec<PathSeg>,
@@ -2772,15 +2813,14 @@ fn collect_unmanaged(
 ) {
     for (key, item) in orig.iter() {
         path.push(PathSeg::Key(key.to_string()));
-        let dotted = dotted_key_path(path);
 
         // An orphaned section holding a password hash is never cleaned up:
         // that is a password in the wrong place, and the load refuses the
         // file over it (see `misplaced_auth_problems`) rather than lose it.
-        if is_orphan_root(&dotted) && !holds_password_hash(item) {
+        if is_orphan_root(path) && !holds_password_hash(item) {
             // Report the section once and do not descend: everything beneath it
             // goes away with it.
-            dropped.push(dotted);
+            dropped.push(path_display(raw, path));
             path.pop();
             continue;
         }
@@ -2788,7 +2828,7 @@ fn collect_unmanaged(
         match item {
             Item::Table(table) => {
                 let counterpart = rendered.and_then(|r| r.get(key)).and_then(Item::as_table);
-                collect_unmanaged(table, counterpart, path, carry, dropped);
+                collect_unmanaged(raw, table, counterpart, path, carry, dropped);
             }
             Item::ArrayOfTables(arrays) => {
                 let counterpart = rendered
@@ -2797,6 +2837,7 @@ fn collect_unmanaged(
                 for (index, table) in arrays.iter().enumerate() {
                     path.push(PathSeg::Index(index));
                     collect_unmanaged(
+                        raw,
                         table,
                         counterpart.and_then(|a| a.get(index)),
                         path,
@@ -4959,6 +5000,32 @@ second_note = \"nowhere to go\"
 
     fn a_hash(text: &str) -> String {
         crate::auth::hash_password(&crate::auth::Password::new(text.to_string())).expect("hash")
+    }
+
+    /// Orphaned sections are matched segment by segment: a top-level key
+    /// whose name is `"server.acme"` is a user's own key, kept, and never
+    /// taken for the retired `[server.acme]` section.
+    #[test]
+    fn a_key_named_like_an_orphaned_section_is_not_that_section() {
+        let original: DocumentMut = "\"server.acme\" = 1\n\n[server.acme]\nx = 1\n"
+            .parse()
+            .unwrap();
+        let mut rendered = DocumentMut::new();
+        let report = merge_unmanaged_keys(&mut rendered, &original);
+        assert_eq!(
+            report.dropped,
+            vec!["server.acme".to_string()],
+            "{report:?}"
+        );
+        assert_eq!(report.preserved.len(), 1, "{report:?}");
+        assert!(
+            rendered.to_string().contains("\"server.acme\" = 1"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.to_string().contains("[server.acme]"),
+            "{rendered}"
+        );
     }
 
     #[test]

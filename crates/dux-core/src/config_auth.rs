@@ -225,7 +225,7 @@ impl ServerAuthConfig {
     /// `cross_field`.
     fn problems_with(&self, cross_field: bool) -> Vec<Problem> {
         let mut problems = Vec::new();
-        let key = |name: &str| format!("server.auth.{name}");
+        let key = |name: &str| auth_key(name);
         if !self.password_hash.is_empty()
             && let Err(error) = crate::auth::validate_password_hash(&self.password_hash)
         {
@@ -261,9 +261,9 @@ impl ServerAuthConfig {
         {
             problems.push(Problem::rule(
                 LENGTH_FITS_BYTES_RULE,
-                &[
-                    "server.auth.minimum_password_length",
-                    "server.auth.max_password_bytes",
+                vec![
+                    auth_key("minimum_password_length"),
+                    auth_key("max_password_bytes"),
                 ],
                 "minimum_password_length is larger than max_password_bytes, so no password \
                  could meet both",
@@ -307,9 +307,10 @@ pub struct Problem {
     pub id: String,
     /// The sentence shown.
     pub message: String,
-    /// The settings it is about, as dotted paths (`server.auth.max_password_bytes`).
-    /// Empty for a problem about the file as a whole.
-    pub keys: Vec<String>,
+    /// The settings it is about, each as its path's segments (`["server",
+    /// "auth", "max_password_bytes"]`), never a dotted string: a name may
+    /// hold a dot. Empty for a problem about the file as a whole.
+    pub keys: Vec<Vec<String>>,
     /// Whether it is a rule spanning `keys` rather than a problem with one
     /// value.
     pub cross_key: bool,
@@ -332,24 +333,24 @@ impl Problem {
         }
     }
 
-    /// A problem with the value of the setting `key`.
-    pub fn about(key: impl Into<String>, message: impl Into<String>) -> Self {
+    /// A problem with the value of the setting at `key` (its segments).
+    pub fn about(key: Vec<String>, message: impl Into<String>) -> Self {
         let message = message.into();
         Self {
             id: message.clone(),
             message,
-            keys: vec![key.into()],
+            keys: vec![key],
             cross_key: false,
             entry: false,
         }
     }
 
-    /// A rule spanning `keys`, known by `id`.
-    pub fn rule(id: impl Into<String>, keys: &[&str], message: impl Into<String>) -> Self {
+    /// A rule spanning `keys` (each its segments), known by `id`.
+    pub fn rule(id: impl Into<String>, keys: Vec<Vec<String>>, message: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             message: message.into(),
-            keys: keys.iter().map(|key| (*key).to_string()).collect(),
+            keys,
             cross_key: true,
             entry: false,
         }
@@ -383,6 +384,11 @@ fn digest(text: &str) -> u64 {
 /// when every key it involves reads. A loader still refuses on any of them.
 pub fn rule_problems_of(auth: toml::Value) -> Vec<Problem> {
     rule_problems_located(auth, &|_| None)
+}
+
+/// The path of the `[server.auth]` setting `name`, as segments.
+pub fn auth_key(name: &str) -> Vec<String> {
+    vec!["server".to_string(), "auth".to_string(), name.to_string()]
 }
 
 /// Every setting `[server.auth]` has, by name.
@@ -431,7 +437,7 @@ pub fn rule_problems_located(
                         None => format!("a setting of [server.auth] dux does not know: {kind}"),
                     }
                 };
-                problems.push(Problem::about(format!("server.auth.{key}"), message));
+                problems.push(Problem::about(auth_key(&key), message));
                 unreadable.push(key);
             }
         }

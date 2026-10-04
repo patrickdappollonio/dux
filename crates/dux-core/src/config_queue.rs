@@ -458,12 +458,13 @@ impl Base {
 
 /// The base for a file just read: its config as loaded (the load's
 /// corrections included, which is what memory starts as, so a correction is
-/// never a change dux made), and its text.
+/// never a change dux made), and what it expressed, the keys its deprecated
+/// ones carry over to included (see [`crate::config_write::seen_of_read`]).
 fn base_read_from(text: &str) -> Option<Base> {
     let config = crate::config::config_from_text_as_loaded(text).ok()?;
     Some(Base {
+        seen: crate::config_write::seen_of_read(text, &config.projects),
         config,
-        seen: text.to_string(),
     })
 }
 
@@ -549,8 +550,9 @@ fn base_adopted(path: &std::path::Path, config: Config) -> Option<Base> {
     if let Some(base) = base_from_source(&config) {
         return Some(base);
     }
+    let text = std::fs::read_to_string(path).unwrap_or_default();
     Some(Base {
-        seen: std::fs::read_to_string(path).unwrap_or_default(),
+        seen: crate::config_write::seen_of_read(&text, &config.projects),
         config,
     })
 }

@@ -56,31 +56,40 @@ pub enum WritePolicy {
 /// What a [`WritePolicy::Secret`] setting turns its input into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecretKind {
-    /// An Argon2id hash of the input, stored at `stores_at` (a dot path).
-    PasswordHash { stores_at: &'static str },
+    /// An Argon2id hash of the input, stored at `stores_at` (its path's
+    /// segments).
+    PasswordHash { stores_at: &'static [&'static str] },
     /// Stored as typed, but never taken from the command line and never
     /// printed unless asked for: `env.<NAME>`, where API tokens live.
     Text,
 }
 
-/// Write-only settings that have no field of their own in `Config`.
-pub const VIRTUAL_KEYS: &[(&str, WritePolicy)] = &[(
-    "server.auth.password",
+/// Write-only settings that have no field of their own in `Config`, each by
+/// its path's segments.
+pub const VIRTUAL_KEYS: &[(&[&str], WritePolicy)] = &[(
+    &["server", "auth", "password"],
     WritePolicy::Secret(SecretKind::PasswordHash {
-        stores_at: "server.auth.password_hash",
+        stores_at: &["server", "auth", "password_hash"],
     }),
 )];
 
 /// String settings whose value must be one of a known set. Only settings
 /// whose own reader names the set appear here; the rest are free text.
-const ALLOWED_VALUES: &[(&str, &[&str])] = &[
-    ("server.tailscale", &["auto", "yes", "no"]),
-    ("server.color", &["auto", "always", "never"]),
-    ("server.auth.require", &["network", "tailnet", "everywhere"]),
-    ("server.auth.cookie_secure", &["auto", "always", "never"]),
-    ("ui.compose_bar", &["auto", "always", "never"]),
+/// Each by its path's segments, `*` standing for any one name.
+const ALLOWED_VALUES: &[(&[&str], &[&str])] = &[
+    (&["server", "tailscale"], &["auto", "yes", "no"]),
+    (&["server", "color"], &["auto", "always", "never"]),
     (
-        "ui.agent_sort",
+        &["server", "auth", "require"],
+        &["network", "tailnet", "everywhere"],
+    ),
+    (
+        &["server", "auth", "cookie_secure"],
+        &["auto", "always", "never"],
+    ),
+    (&["ui", "compose_bar"], &["auto", "always", "never"]),
+    (
+        &["ui", "agent_sort"],
         &[
             "active",
             "updated",
@@ -91,11 +100,11 @@ const ALLOWED_VALUES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "capabilities.clipboard_passthrough",
+        &["capabilities", "clipboard_passthrough"],
         &["focused", "always", "off"],
     ),
     (
-        "providers.*.web_dragdrop_paste",
+        &["providers", "*", "web_dragdrop_paste"],
         &[
             "bare",
             "single_quoted",
@@ -145,9 +154,9 @@ pub struct Key {
 }
 
 impl Key {
-    /// The dotted path.
+    /// The path as printed, through the one formatter.
     pub fn dotted(&self) -> String {
-        self.path.join(".")
+        crate::config::shown_path("", &self.path)
     }
 
     /// True for a table (`server.auth`) rather than one setting.
@@ -208,7 +217,10 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
         )));
     }
     let segments = split_path(path)?;
-    if let Some((_, policy)) = VIRTUAL_KEYS.iter().find(|(name, _)| *name == path) {
+    if let Some((_, policy)) = VIRTUAL_KEYS
+        .iter()
+        .find(|(name, _)| *name == segments.as_slice())
+    {
         return Ok(Key {
             path: segments,
             policy: *policy,
@@ -304,21 +316,21 @@ fn shape_of(segments: &[String]) -> Option<Shape> {
     Some(shape_of_json(&node))
 }
 
-/// Every setting a path can name, for suggestions.
-fn known_paths() -> Vec<String> {
-    fn walk(node: &serde_json::Value, path: &mut Vec<String>, out: &mut Vec<String>) {
+/// Every setting a path can name, by its segments, for suggestions.
+fn known_paths() -> Vec<Vec<String>> {
+    fn walk(node: &serde_json::Value, path: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
         if let serde_json::Value::Object(map) = node {
             for (name, child) in map {
                 path.push(name.clone());
-                out.push(path.join("."));
+                out.push(path.clone());
                 walk(child, path, out);
                 path.pop();
             }
         }
     }
-    let mut out: Vec<String> = VIRTUAL_KEYS
+    let mut out: Vec<Vec<String>> = VIRTUAL_KEYS
         .iter()
-        .map(|(name, _)| name.to_string())
+        .map(|(name, _)| name.iter().map(|segment| (*segment).to_string()).collect())
         .collect();
     walk(&default_tree(), &mut Vec::new(), &mut out);
     out
@@ -327,6 +339,9 @@ fn known_paths() -> Vec<String> {
 fn suggest(path: &str) -> Option<String> {
     let mut best: Option<(usize, String)> = None;
     for candidate in known_paths() {
+        // Compared as the setting is typed and printed, through the one
+        // formatter.
+        let candidate = crate::config::shown_path("", &candidate);
         let distance = edit_distance(path, &candidate);
         if best.as_ref().is_none_or(|(d, _)| distance < *d) {
             best = Some((distance, candidate));
@@ -354,7 +369,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 fn allowed_values(segments: &[String]) -> Option<&'static [&'static str]> {
     ALLOWED_VALUES.iter().find_map(|(pattern, values)| {
-        let pattern: Vec<&str> = pattern.split('.').collect();
         (pattern.len() == segments.len()
             && pattern
                 .iter()
@@ -455,6 +469,11 @@ fn check_alone(key: &Key, value: &Value) -> Result<(), String> {
 /// Set `path` to `value` in `doc`, creating the tables on the way and keeping
 /// the comment that trails an existing value.
 fn set_in_doc(doc: &mut DocumentMut, path: &[String], mut value: Value) -> Result<()> {
+    // A path `lookup` validated, printed through the one formatter.
+    fn shown<S: AsRef<str>>(path: &[S]) -> String {
+        let segments: Vec<String> = path.iter().map(|s| s.as_ref().to_string()).collect();
+        crate::config::shown_path("", &segments)
+    }
     let (leaf, parents) = path.split_last().context("empty path")?;
     let mut item: &mut Item = doc.as_item_mut();
     let mut walked: Vec<&str> = Vec::new();
@@ -464,7 +483,7 @@ fn set_in_doc(doc: &mut DocumentMut, path: &[String], mut value: Value) -> Resul
         let table = item.as_table_like_mut().with_context(|| {
             format!(
                 "{} is not a table in config.toml",
-                walked[..walked.len() - 1].join(".")
+                shown(&walked[..walked.len() - 1])
             )
         })?;
         if table.get(segment).is_none() {
@@ -479,14 +498,14 @@ fn set_in_doc(doc: &mut DocumentMut, path: &[String], mut value: Value) -> Resul
         if !item.is_table_like() {
             anyhow::bail!(
                 "{} is a value in config.toml, not a table, so {} cannot be set inside it",
-                walked.join("."),
-                path.join(".")
+                shown(&walked),
+                shown(path)
             );
         }
     }
     let table = item
         .as_table_like_mut()
-        .with_context(|| format!("{} is not a table in config.toml", parents.join(".")))?;
+        .with_context(|| format!("{} is not a table in config.toml", shown(parents)))?;
     match table.get_mut(leaf) {
         // Assigned in place, so the key keeps the comment above it.
         Some(existing) => {
@@ -544,19 +563,15 @@ fn write_value(
     // A set may leave problems `[server.auth]` already had, so a section
     // with several broken values can be repaired one value at a time; one
     // that adds a problem is refused.
-    let (previous, remaining_problems) = crate::config_write::mutate_config_file_repairing(
-        config_path,
-        missing,
-        &path.join("."),
-        |doc| {
+    let (previous, remaining_problems) =
+        crate::config_write::mutate_config_file_repairing(config_path, missing, path, |doc| {
             let previous = value_in_doc(doc, path);
             let had = provider_command_in(doc, path);
             prepare_provider(doc, path)?;
             set_in_doc(doc, path, value)?;
             check_provider_command(doc, path, had)?;
             Ok(previous)
-        },
-    )?;
+        })?;
     Ok(SetReport {
         path: path.to_vec(),
         previous,
@@ -875,7 +890,10 @@ fn password_hash_path() -> Vec<String> {
     let WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) = VIRTUAL_KEYS[0].1 else {
         unreachable!("the first virtual key is the password");
     };
-    stores_at.split('.').map(str::to_string).collect()
+    stores_at
+        .iter()
+        .map(|segment| (*segment).to_string())
+        .collect()
 }
 
 /// What `get` found.
@@ -1000,9 +1018,10 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
 /// password, where its hash goes.
 fn stored_path(key: &Key) -> Vec<String> {
     match key.policy {
-        WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => {
-            stores_at.split('.').map(str::to_string).collect()
-        }
+        WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => stores_at
+            .iter()
+            .map(|segment| (*segment).to_string())
+            .collect(),
         WritePolicy::Secret(SecretKind::Text) | WritePolicy::Plain => key.path.clone(),
     }
 }
@@ -1035,9 +1054,10 @@ fn render_shown(raw: &str, path: &[String], value: &toml::Value) -> String {
 fn get_report_inner(raw: &str, key: &Key) -> Result<GetReport> {
     use crate::config::Surface;
     let path: Vec<String> = match key.policy {
-        WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => {
-            stores_at.split('.').map(str::to_string).collect()
-        }
+        WritePolicy::Secret(SecretKind::PasswordHash { stores_at }) => stores_at
+            .iter()
+            .map(|segment| (*segment).to_string())
+            .collect(),
         WritePolicy::Secret(SecretKind::Text) | WritePolicy::Plain => key.path.clone(),
     };
     let doc: toml::Table = toml::from_str(raw).map_err(|e| {
@@ -1304,7 +1324,7 @@ port = 3890
         assert_eq!(
             lookup("server.auth.password").unwrap().policy,
             WritePolicy::Secret(SecretKind::PasswordHash {
-                stores_at: "server.auth.password_hash"
+                stores_at: &["server", "auth", "password_hash"]
             })
         );
         assert_eq!(

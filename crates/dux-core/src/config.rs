@@ -3202,14 +3202,32 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
     let Ok(file) = toml::from_str::<toml::Table>(raw) else {
         return Vec::new();
     };
-    let stray = |place: String| {
+    // Each place is carried as its segments and printed through the one
+    // formatter.
+    let stray = |place: Vec<String>| {
+        let shown = shown_path(raw, &place);
         Problem::about(
-            place.clone(),
+            place,
             format!(
-                "{place} is not read: a password hash belongs in [server.auth] as password_hash, \
+                "{shown} is not read: a password hash belongs in [server.auth] as password_hash, \
                  so dux will not start until it is moved there or removed"
             ),
         )
+    };
+    let table_problem = |place: Vec<String>, top_level: bool| {
+        let shown = shown_path(raw, &place);
+        let message = if top_level {
+            format!(
+                "[{shown}] is not read: the web UI password settings belong in [server.auth], \
+                 so dux will not start until [{shown}] is moved there or removed"
+            )
+        } else {
+            format!(
+                "[{shown}] is not read: the web UI password settings belong in [server.auth], \
+                 so dux will not start until it is renamed or removed"
+            )
+        };
+        Problem::about(place, message)
     };
     let auth_settings = crate::config_auth::auth_setting_names();
     // A table under a name close to "auth" that holds one of its settings.
@@ -3220,7 +3238,7 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
     };
     let mut problems = Vec::new();
     if file.contains_key("password_hash") {
-        problems.push(stray("password_hash".to_string()));
+        problems.push(stray(key_path(&["password_hash"])));
     }
     for (name, value) in &file {
         let Some(table) = value.as_table() else {
@@ -3230,16 +3248,10 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
             continue;
         }
         if table.contains_key("password_hash") {
-            problems.push(stray(format!("{name}.password_hash")));
+            problems.push(stray(key_path(&[name, "password_hash"])));
         }
         if name != "auth" {
-            problems.push(Problem::about(
-                name.clone(),
-                format!(
-                    "[{name}] is not read: the web UI password settings belong in [server.auth], \
-                     so dux will not start until [{name}] is moved there or removed"
-                ),
-            ));
+            problems.push(table_problem(key_path(&[name]), true));
         }
     }
     // A `[server]` that is not a table (an array of tables, a value) holding
@@ -3248,7 +3260,7 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
         && holds_auth_setting(server, &auth_settings)
     {
         problems.push(Problem::about(
-            "server",
+            key_path(&["server"]),
             "[server] is not a table, and it holds a web UI password setting, which dux does \
              not read there: the settings belong in [server.auth] (a [server] table holding an \
              [auth] table), so dux will not start until they are moved there or removed",
@@ -3256,7 +3268,7 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
     }
     if let Some(server) = file.get("server").and_then(toml::Value::as_table) {
         if server.contains_key("password_hash") {
-            problems.push(stray("server.password_hash".to_string()));
+            problems.push(stray(key_path(&["server", "password_hash"])));
         }
         for (name, value) in server {
             let Some(table) = value.as_table() else {
@@ -3266,15 +3278,9 @@ pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem
                 continue;
             }
             if table.contains_key("password_hash") {
-                problems.push(stray(format!("server.{name}.password_hash")));
+                problems.push(stray(key_path(&["server", name, "password_hash"])));
             }
-            problems.push(Problem::about(
-                format!("server.{name}"),
-                format!(
-                    "[server.{name}] is not read: the web UI password settings belong in \
-                     [server.auth], so dux will not start until it is renamed or removed"
-                ),
-            ));
+            problems.push(table_problem(key_path(&["server", name]), false));
         }
     }
     problems
@@ -3426,9 +3432,9 @@ pub struct StartProblem {
     /// Why, without which surfaces it stops: what a caller that words the
     /// surfaces itself lists.
     pub detail: String,
-    /// The settings it is about, as dotted paths. Empty for the file as a
-    /// whole.
-    pub keys: Vec<String>,
+    /// The settings it is about, each as its path's segments. Empty for the
+    /// file as a whole.
+    pub keys: Vec<Vec<String>>,
     /// A rule spanning `keys`, rather than a problem with one value.
     pub cross_key: bool,
     /// About one entry of a list value, known by the entry's own text.
@@ -3651,7 +3657,7 @@ pub fn check_start(raw: &str) -> StartCheck {
         );
         // The setting it is about, for attribution only; never printed.
         check.problems.push(StartProblem::new(
-            Problem::about(key.join("."), format!("{place}: {kind} ({what})")),
+            Problem::about(key, format!("{place}: {kind} ({what})")),
             true,
             false,
         ));
@@ -3665,7 +3671,7 @@ pub fn check_start(raw: &str) -> StartCheck {
     if let Some(terminal_ui_check) = TERMINAL_UI_CHECK.get() {
         for message in terminal_ui_check(raw) {
             check.problems.push(StartProblem::new(
-                Problem::about("keys", message),
+                Problem::about(key_path(&["keys"]), message),
                 true,
                 false,
             ));
@@ -3707,13 +3713,11 @@ pub fn start_refusal(raw: &str, surface: Surface) -> Option<String> {
 pub fn problems_added_by_set<'a>(
     before: &StartCheck,
     after: &'a StartCheck,
-    key: &str,
+    key: &[String],
 ) -> Vec<&'a StartProblem> {
-    let related = |other: &str| {
-        other == key
-            || other.starts_with(&format!("{key}."))
-            || key.starts_with(&format!("{other}."))
-    };
+    // Compared segment by segment: a name holding a dot is one segment, so
+    // a problem about `env."FOO.BAR"` is never taken for one about `env.FOO`.
+    let related = |other: &[String]| other.starts_with(key) || key.starts_with(other);
     let is_new = |problem: &StartProblem| before.problems.iter().all(|old| old.id != problem.id);
     after
         .problems
@@ -3742,7 +3746,11 @@ pub fn problems_added_by_set<'a>(
 /// terminal UI's start refuses it with. When any fails, the rest is the
 /// unmigrated file, as `dux server` reads it then. `None` only when the table
 /// cannot be written back out, which a parsed table always can be.
-fn migrated_beside_auth(file: &toml::Table) -> Option<(toml::Table, Vec<(String, String)>)> {
+/// Each deprecated key the load migrations cannot carry over: its path and
+/// the sentence the terminal UI's start refuses it with.
+type MigrationFailures = Vec<(Vec<String>, String)>;
+
+fn migrated_beside_auth(file: &toml::Table) -> Option<(toml::Table, MigrationFailures)> {
     let mut file = file.clone();
     if let Some(server) = file.get_mut("server").and_then(toml::Value::as_table_mut) {
         server.remove("auth");
@@ -3925,7 +3933,11 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
     use crate::config_auth::Problem;
     let mut problems = Vec::new();
     if let Err(error) = parse_server_host(&config.server.host) {
-        let mut problem = StartProblem::new(Problem::about("server.host", error), true, true);
+        let mut problem = StartProblem::new(
+            Problem::about(key_path(&["server", "host"]), error),
+            true,
+            true,
+        );
         problem.dux_server_override = Some(ServerFileSetting::Host);
         problems.push(problem);
     }
@@ -3938,7 +3950,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
         let mut problem = StartProblem::new(
             Problem {
                 id: "server.port: 0".to_string(),
-                ..Problem::about("server.port", detail)
+                ..Problem::about(key_path(&["server", "port"]), detail)
             },
             false,
             true,
@@ -3968,7 +3980,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
                 }
             };
             problems.push(StartProblem::new(
-                Problem::about(format!("env.{name}"), format!("{which}: {problem}")),
+                Problem::about(key_path(&["env", name]), format!("{which}: {problem}")),
                 true,
                 false,
             ));
@@ -3991,7 +4003,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
                     }
                 };
                 problems.push(StartProblem::new(
-                    Problem::about("projects", format!("{which}: {problem}")),
+                    Problem::about(key_path(&["projects"]), format!("{which}: {problem}")),
                     true,
                     false,
                 ));
@@ -4002,7 +4014,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
         crate::config_sync::validate_project_records("config.toml", &config.projects)
     {
         problems.push(StartProblem::new(
-            Problem::about("projects", format!("{error:#}")),
+            Problem::about(key_path(&["projects"]), format!("{error:#}")),
             true,
             true,
         ));
@@ -7289,7 +7301,7 @@ max_websocket_connections = 16
         };
         let before = check(vec![keyless("already there")]);
         let after = check(vec![keyless("already there"), keyless("new")]);
-        let added = problems_added_by_set(&before, &after, "ui.left_width_pct");
+        let added = problems_added_by_set(&before, &after, &key_path(&["ui", "left_width_pct"]));
         let added: Vec<&str> = added.iter().map(|p| p.detail.as_str()).collect();
         assert_eq!(added, vec!["new"]);
     }
@@ -7299,10 +7311,10 @@ max_websocket_connections = 16
     #[test]
     fn a_wrong_typed_field_inside_a_provider_is_named_by_the_field() {
         let problems = start_problems_of("[providers.mytool]\ncommand = \"m\"\nargs = \"oops\"\n");
-        let keys: Vec<&Vec<String>> = problems.iter().map(|p| &p.keys).collect();
+        let keys: Vec<&Vec<Vec<String>>> = problems.iter().map(|p| &p.keys).collect();
         assert_eq!(
             keys,
-            vec![&vec!["providers.mytool.args".to_string()]],
+            vec![&vec![key_path(&["providers", "mytool", "args"])]],
             "{problems:?}"
         );
     }
@@ -7530,23 +7542,23 @@ mod printed_paths_and_carried_values_tests {
         for (raw, key, said) in [
             (
                 "[server]\nbind = \"0.0.0.0:4000\"\n",
-                "server.host",
+                &["server", "host"][..],
                 "carried over from the deprecated [server] bind = \"0.0.0.0:4000\" (line 2); \
                  replace it with server.host and server.port",
             ),
             (
                 "[server]\nbind = \"0.0.0.0:4000\"\n",
-                "server.port",
+                &["server", "port"][..],
                 "carried over from the deprecated [server] bind",
             ),
             (
                 "[defaults]\nprompt_for_name = true\n",
-                "defaults.enable_randomized_pet_name_by_default",
+                &["defaults", "enable_randomized_pet_name_by_default"][..],
                 "carried over from the deprecated [defaults] prompt_for_name = true (line 2)",
             ),
             (
                 "[server]\ntailscale_enabled = false\n",
-                "server.tailscale",
+                &["server", "tailscale"][..],
                 "carried over from the deprecated [server] tailscale_enabled = false (line 2); \
                  replace it with server.tailscale",
             ),
@@ -7554,10 +7566,10 @@ mod printed_paths_and_carried_values_tests {
             let corrections = load_corrections_of(raw);
             let reason = corrections
                 .iter()
-                .find(|(corrected, _)| corrected.join(".") == key)
+                .find(|(corrected, _)| *corrected == key_path(key))
                 .map(|(_, reason)| reason.as_str())
-                .unwrap_or_else(|| panic!("{key}: {corrections:?}"));
-            assert!(reason.contains(said), "{key}: {reason}");
+                .unwrap_or_else(|| panic!("{key:?}: {corrections:?}"));
+            assert!(reason.contains(said), "{key:?}: {reason}");
         }
         // A loopback bind writes nothing (the default already covers it),
         // and a new key the file sets beside the old one wins, so nothing
