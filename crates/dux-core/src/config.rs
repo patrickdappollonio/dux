@@ -4269,7 +4269,7 @@ pub(crate) enum KeyStep<'a> {
 
 /// The line the project at `index` of `projects` starts on in `raw`: its
 /// `[[projects]]` header, or its inline table.
-fn line_of_project(raw: &str, index: usize) -> Option<usize> {
+pub(crate) fn line_of_project(raw: &str, index: usize) -> Option<usize> {
     let doc = toml_edit::Document::parse(raw).ok()?;
     let projects = doc.as_table().get("projects")?;
     let start = match projects.as_array_of_tables() {

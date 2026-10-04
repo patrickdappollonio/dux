@@ -288,6 +288,18 @@ pub(crate) fn run_set(
                 report.now,
                 paths.config_path.display()
             )?;
+            // Written inside an entry or section the load already drops or
+            // resets over another of its values: said, so a set is never
+            // taken as in effect when it is not.
+            if let Some(reason) = &report.held_back {
+                writeln!(
+                    out,
+                    "{} is written, but it stays at its default until the problems below are \
+                     fixed: {}.",
+                    shown(paths, &report.path),
+                    reason.trim_end_matches('.')
+                )?;
+            }
             (report.remaining_problems, false)
         }
     };

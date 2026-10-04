@@ -298,3 +298,23 @@ fn a_malformed_path_never_repeats_what_was_typed_after_the_known_part() {
     }
     assert!(leaks.is_empty(), "{}", leaks.join("\n"));
 }
+
+/// A set inside a section the load already resets over another of its
+/// values says the value stays at its default until that is fixed.
+#[test]
+fn a_set_held_back_by_an_existing_problem_says_so() {
+    crate::config::install_canonical_renderer();
+    let (result, said, _after) = set_on(
+        "[ui]\nleft_width_pct = \"a\"\nright_width_pct = \"b\"\n",
+        "ui.theme",
+        "nord",
+    );
+    result.expect("the set is taken");
+    assert!(
+        said.contains(
+            "ui.theme is written, but it stays at its default until the problems below are fixed"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("\"a\""), "{said}");
+}

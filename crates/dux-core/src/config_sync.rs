@@ -60,8 +60,19 @@ where
         }) {
             Some(stored_index) => {
                 let stored_project = &stored[stored_index];
+                // Named by its line in config.toml, never by its id or path.
                 let (merged_config_project, merged_stored_project) =
-                    merge_project_records(cfg_project, stored_project)?;
+                    merge_project_records(cfg_project, stored_project).map_err(|clause| {
+                        let label = config
+                            .source_text
+                            .as_str()
+                            .and_then(|raw| crate::config::line_of_project(raw, index))
+                            .map_or_else(
+                                || format!("project {} (counting from 1)", index + 1),
+                                |line| format!("the project on line {line}"),
+                            );
+                        anyhow::anyhow!("Project sync conflict: {label} in config.toml {clause:#}")
+                    })?;
                 if &merged_config_project != cfg_project {
                     merged[index] = merged_config_project;
                     changed_config = true;
@@ -185,20 +196,19 @@ pub fn merge_project_records(
 ) -> Result<(ProjectConfig, ProjectConfig)> {
     let config_path = expanded_project_path(config_project);
     let stored_path = expanded_project_path(stored_project);
+    // Said without the id or either path, which a user may keep private in a
+    // pasted bug report: the caller names the project by its line.
     if config_project.id == stored_project.id && config_path != stored_path {
         anyhow::bail!(
-            "Project sync conflict for id \"{}\": config.toml points to \"{}\" but SQLite points to \"{}\". Edit config.toml or remove/re-add the project so both stores agree.",
-            config_project.id,
-            config_project.path,
-            stored_project.path
+            "points to a different folder than dux recorded for it. If the project moved, \
+             remove it in dux and add it again from its new folder; otherwise put its old path \
+             back in config.toml."
         );
     }
     if config_path == stored_path && config_project.id != stored_project.id {
         anyhow::bail!(
-            "Project sync conflict for path \"{}\": config.toml uses id \"{}\" but SQLite uses id \"{}\". Edit config.toml or remove/re-add the project so both stores agree.",
-            config_path.unwrap_or_else(|| config_project.path.clone()),
-            config_project.id,
-            stored_project.id
+            "has a different id than dux recorded for the same folder. Put the id back as it \
+             was in config.toml, or remove the project in dux and add it again."
         );
     }
 
@@ -435,7 +445,13 @@ mod tests {
         let err = reconcile_config_projects(&mut config, &store, |_| Ok(()))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("config.toml points to"), "{err}");
+        assert!(
+            err.contains("in config.toml points to a different folder than dux recorded"),
+            "{err}"
+        );
+        for private in ["p1", "/tmp/here", "/tmp/there"] {
+            assert!(!err.contains(private), "{err}");
+        }
     }
 
     #[test]
@@ -451,6 +467,12 @@ mod tests {
         let err = reconcile_config_projects(&mut config, &store, |_| Ok(()))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("config.toml uses id"), "{err}");
+        assert!(
+            err.contains("has a different id than dux recorded for the same folder"),
+            "{err}"
+        );
+        for private in ["stored-id", "config-id", "/tmp/same"] {
+            assert!(!err.contains(private), "{err}");
+        }
     }
 }

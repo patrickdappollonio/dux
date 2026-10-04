@@ -582,6 +582,11 @@ pub struct SetReport {
     /// each with the surfaces it stops: a set may repair one of several
     /// broken values, and says what is left.
     pub remaining_problems: Vec<crate::config::StartProblem>,
+    /// Why the value written is not in effect yet, when the entry or section
+    /// holding it was already dropped or reset by the load before the set
+    /// (over another of its values): it stays at its default until that is
+    /// fixed.
+    pub held_back: Option<String>,
 }
 
 /// Write one plain setting into the config file at `config_path`, through
@@ -627,85 +632,60 @@ fn write_value_checked(
     // A set may leave problems `[server.auth]` already had, so a section
     // with several broken values can be repaired one value at a time; one
     // that adds a problem is refused.
-    let (previous, remaining_problems) =
+    let ((previous, held_back), remaining_problems) =
         crate::config_write::mutate_config_file_repairing(config_path, missing, path, |doc| {
             check(doc)?;
             let before = doc.to_string();
+            // Any `[server.auth]` write waits while an auth setting sits where
+            // dux does not read it: which one the user meant cannot be told.
+            if path.starts_with(&["server".to_string(), "auth".to_string()])
+                && let Some(refusal) =
+                    misplaced_auth_refusal(&before, "which web UI password settings you meant")
+            {
+                anyhow::bail!("{refusal}");
+            }
             let previous = value_in_doc(doc, path);
             let had = provider_command_in(doc, path);
             prepare_provider(doc, path)?;
             set_in_doc(doc, path, value)?;
             check_provider_command(doc, path, had)?;
-            refuse_a_set_dux_would_undo(&before, &doc.to_string(), path)?;
-            Ok(previous)
+            let held_back = refuse_a_set_dux_would_undo(&before, &doc.to_string(), path)?;
+            Ok((previous, held_back))
         })?;
     Ok(SetReport {
         path: path.to_vec(),
         previous,
         now,
         remaining_problems,
+        held_back,
     })
 }
 
-/// What dux's load makes of the setting at `path` with the file `raw`, by
-/// the same load `get` reports from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LoadedAs {
-    /// Used as written (or not written at all).
-    Kept,
-    /// Written, but the load drops it, or the entry holding it.
-    Dropped,
-    /// Written as something other than its default, but the load uses the
-    /// default in its place.
-    Reset,
+/// The load correction (a drop, a reset of a whole section or entry) that
+/// already covers an entry or section holding `path` in the file `raw`, if
+/// any: the setting there is not in effect whatever it says.
+fn held_back_by(raw: &str, path: &[String]) -> Option<crate::config::LoadCorrection> {
+    crate::config::load_corrections_with_sources(raw)
+        .into_iter()
+        .find(|correction| correction.path.len() < path.len() && path.starts_with(&correction.path))
 }
 
-fn loaded_as(raw: &str, path: &[String]) -> LoadedAs {
-    let Ok(file) = toml::from_str::<toml::Value>(raw) else {
-        return LoadedAs::Kept;
-    };
-    let Some(written) = value_at(&file, path) else {
-        return LoadedAs::Kept;
-    };
-    let Ok(config) = crate::config::effective_config_from_text(raw) else {
-        return LoadedAs::Kept;
-    };
-    let mut used = serde_json::to_value(&config).ok();
-    for segment in path {
-        used = used.and_then(|node| node.get(segment).cloned());
+/// Refuse a set whose value dux's load would not use as written, by the same
+/// corrections `get` reports (a value dropped, reset, clamped or read as
+/// another): reporting it as set and then running something else would be a
+/// lie the user finds later. A set inside an entry or section the load
+/// already dropped or reset before it (over another of its values) is not
+/// what keeps it out of effect, so it is taken, and the reason is returned
+/// so the report can say the value stays at its default until that is fixed.
+fn refuse_a_set_dux_would_undo(
+    before: &str,
+    after: &str,
+    path: &[String],
+) -> Result<Option<String>> {
+    if let Some(held) = held_back_by(before, path) {
+        let still = held_back_by(after, path).unwrap_or(held);
+        return Ok(Some(still.reason));
     }
-    let Some(used) = used.filter(|used| !used.is_null()) else {
-        return LoadedAs::Dropped;
-    };
-    let mut default = Some(default_tree());
-    for segment in path {
-        default = default.and_then(|node| node.get(segment).cloned());
-    }
-    let written = serde_json::to_value(written).ok();
-    match default {
-        Some(default) if used == default && written.as_ref() != Some(&default) => LoadedAs::Reset,
-        _ => LoadedAs::Kept,
-    }
-}
-
-/// Refuse a set whose result dux's load would drop or reset: reporting it as
-/// set and then running without it would be a lie the user finds later. A
-/// set that leaves a setting dropped or reset as it already was (repairing
-/// one of two wrong fields of an entry, say) is not refused: it changes
-/// nothing about that.
-fn refuse_a_set_dux_would_undo(before: &str, after: &str, path: &[String]) -> Result<()> {
-    let now = loaded_as(after, path);
-    if now == LoadedAs::Kept || loaded_as(before, path) == now {
-        return Ok(());
-    }
-    // An entry the load already dropped before the set (over another of its
-    // values) is not dropped by it: the set may be the first of the repairs.
-    if now == LoadedAs::Dropped
-        && (1..path.len()).any(|len| loaded_as(before, &path[..len]) == LoadedAs::Dropped)
-    {
-        return Ok(());
-    }
-    let shown = crate::config::shown_path(after, path);
     // A provider set back to dux's own retired block is pruned by the load.
     if let [section, name, ..] = path
         && section == "providers"
@@ -720,16 +700,52 @@ fn refuse_a_set_dux_would_undo(before: &str, after: &str, path: &[String]) -> Re
              dux removes on load; nothing was changed. To remove the provider, delete its block."
         );
     }
-    match now {
-        LoadedAs::Dropped => anyhow::bail!(
-            "that change would make dux drop {shown} when it loads the file, so it would not be \
-             set; nothing was changed."
+    let key = Key {
+        path: path.to_vec(),
+        policy: WritePolicy::Plain,
+        shape: Shape::Unknown,
+    };
+    let Ok(report) = get_report_inner(after, &key) else {
+        return Ok(None);
+    };
+    let Some(correction) = report
+        .corrections
+        .iter()
+        .find(|correction| correction.path == path)
+    else {
+        return Ok(None);
+    };
+    let shown = crate::config::shown_path(after, path);
+    let reason = correction.reason.trim_end_matches('.');
+    match (&correction.used, &correction.in_file) {
+        (Some(used), Some(written)) => anyhow::bail!(
+            "dux would use {used} instead of {written} for {shown} ({reason}); nothing was \
+             changed."
         ),
         _ => anyhow::bail!(
-            "that change would make dux reset {shown} to its default when it loads the file, so \
-             it would not be set; nothing was changed."
+            "that change would make dux drop {shown} when it loads the file ({reason}), so it \
+             would not be set; nothing was changed."
         ),
     }
+}
+
+/// The refusal while the file `raw` has a web UI password setting where dux
+/// does not read it (see [`crate::config::misplaced_auth_problem_list`]):
+/// dux cannot tell `what`, so no `[server.auth]` write is made until it is
+/// fixed. `None` when nothing is misplaced. Each problem is named by its
+/// place, never its value.
+fn misplaced_auth_refusal(raw: &str, what: &str) -> Option<String> {
+    let misplaced: Vec<String> = crate::config::misplaced_auth_problem_list(raw)
+        .into_iter()
+        .map(|problem| problem.message)
+        .collect();
+    (!misplaced.is_empty()).then(|| {
+        format!(
+            "dux cannot tell {what} while config.toml has a web UI password setting where dux \
+             does not read it ({}). Fix that first; nothing was changed.",
+            misplaced.join("; ")
+        )
+    })
 }
 
 /// Before one field of a provider the file does not list is set: a
@@ -959,17 +975,8 @@ fn password_policy_of(raw: &str) -> Result<crate::auth::PasswordPolicy> {
     // minimum the user meant, so no policy can be read with any confidence
     // until it is fixed: checking against the defaults could let through a
     // password the user's own minimum would refuse.
-    let misplaced: Vec<String> = crate::config::misplaced_auth_problem_list(raw)
-        .into_iter()
-        .map(|problem| problem.message)
-        .collect();
-    if !misplaced.is_empty() {
-        anyhow::bail!(
-            "dux cannot tell what a new password has to meet while config.toml has a web UI \
-             password setting where dux does not read it ({}). Fix that first; no password was \
-             set.",
-            misplaced.join("; ")
-        );
+    if let Some(refusal) = misplaced_auth_refusal(raw, "what a new password has to meet") {
+        anyhow::bail!("{refusal}");
     }
     let Some(server) = file.get("server") else {
         return Ok(defaults);
@@ -2097,13 +2104,40 @@ port = 3890
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("reset ui.terminal_font_size to its default"),
+            error.contains("dux would use 14 instead of 500 for ui.terminal_font_size"),
             "{error}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         // Its default, and any value dux uses as written, is set.
         set_plain(&path, &lookup("ui.terminal_font_size").unwrap(), "14").unwrap();
         set_plain(&path, &lookup("ui.terminal_font_size").unwrap(), "20").unwrap();
+    }
+
+    /// A use-time correction counts as much as a load one: every correction
+    /// `get` would report for the value refuses the set.
+    #[test]
+    fn a_set_dux_would_read_as_another_value_is_refused() {
+        let (_dir, path) = temp_config("");
+        let error = set_plain(&path, &lookup("logging.keep").unwrap(), "5000")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("dux would use 1000 instead of 5000 for logging.keep"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+    }
+
+    /// A set inside a section the load already reset over another of its
+    /// values is taken, and says it stays at its default until then.
+    #[test]
+    fn a_set_inside_a_section_already_reset_is_taken_and_held_back() {
+        let (_dir, path) = temp_config("[ui]\nleft_width_pct = \"a\"\nright_width_pct = \"b\"\n");
+        let report = set_plain(&path, &lookup("ui.theme").unwrap(), "nord").unwrap();
+        let held = report.held_back.expect("held back");
+        assert!(held.contains("dux server resets all of [ui]"), "{held}");
+        let report = set_plain(&path, &lookup("ui.terminal_font_size").unwrap(), "20").unwrap();
+        assert!(report.held_back.is_some());
     }
 
     #[test]

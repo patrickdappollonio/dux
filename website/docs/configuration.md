@@ -68,9 +68,12 @@ dux config set providers.claude.command claude
 - `set` never writes a file dux would refuse to start with: a value that would add such a
   problem (a host name where `server.host` needs an IP address, an environment variable
   name dux does not accept) is refused with the same message a start gives, and nothing
-  is written. So is a value dux would drop or put back to its default when it loads the
-  file (a terminal font size past its range, a provider changed back into a retired
-  stock block dux removes), since it would never be set.
+  is written. So is a value dux would not use as written when it loads the file: one it
+  would drop, put back to its default or hold at a limit (a terminal font size past its
+  range, a `gh` re-check interval below its floor, a provider changed back into a
+  retired stock block dux removes). The refusal names the value dux would use instead.
+  A setting written inside a section or entry the file already breaks some other way is
+  taken, and `set` says it stays at its default until that problem is fixed.
 - A setting with a value of the wrong type (a word where a number goes) is read two ways:
   `dux server` uses that setting's default and starts, while the terminal UI will not start
   until it is fixed. `get` and `set` say so in those words, and `get` says the value in use
