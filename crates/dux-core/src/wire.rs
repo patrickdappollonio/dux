@@ -5453,14 +5453,19 @@ mod tests {
             message.contains("folder"),
             "the message must name what was left alone, got {message:?}"
         );
+        // The words are judged with the folder's own path taken out: the
+        // temporary directory may live anywhere, a path naming a worktree
+        // included.
+        let words = message
+            .to_string()
+            .replace(&folder_path, "")
+            .replace(&crate::home_path::shorten_home(folder.path()), "")
+            .to_lowercase();
         assert!(
-            !message.to_lowercase().contains("worktree"),
+            !words.contains("worktree"),
             "a standalone agent has no worktree to mention, got {message:?}"
         );
-        assert!(
-            !message.to_lowercase().contains("branch"),
-            "nor a branch, got {message:?}"
-        );
+        assert!(!words.contains("branch"), "nor a branch, got {message:?}");
         assert!(
             folder.path().exists(),
             "and the folder itself must still be there"

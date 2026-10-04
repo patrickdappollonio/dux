@@ -1284,6 +1284,7 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
             "--porcelain=v1",
             "-z",
             "--untracked-files=no",
+            "--ignore-submodules=none",
             "--",
             &pathspec,
         ])
@@ -1433,6 +1434,7 @@ fn staged_numstat_in(worktree: &Path, dir: &str, skip: &[String]) -> HashMap<Str
             "--cached",
             "--numstat",
             "-z",
+            "--ignore-submodules=none",
             "--",
         ])
         .arg(format!(":(literal){dir}/"));

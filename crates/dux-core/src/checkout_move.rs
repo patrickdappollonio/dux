@@ -230,6 +230,9 @@ fn incoming_entries(checkout: &Path, target: &str) -> Result<Vec<IncomingEntry>>
                 "-r",
                 "-z",
                 "--no-renames",
+                // A submodule `.gitmodules` or the config marks `ignore = all`
+                // still moves: list it whatever the repository says.
+                "--ignore-submodules=none",
                 "--no-commit-id",
                 "--diff-filter=d",
                 head,

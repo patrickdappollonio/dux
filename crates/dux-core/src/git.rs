@@ -753,7 +753,15 @@ pub fn create_initial_commit(path: &Path) -> Result<String> {
     // the index, so this can't leak staged content into history; it just stops
     // us from quietly adding a project while the user has staged work pending.
     let staged = Command::new("git")
-        .args(["-C", repo.as_ref(), "diff", "--cached", "--quiet"])
+        .args([
+            "-C",
+            repo.as_ref(),
+            "diff",
+            "--cached",
+            "--quiet",
+            // A submodule `.gitmodules` or the config ignores still counts.
+            "--ignore-submodules=none",
+        ])
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("failed to inspect the index of {}", path.display()))?;
@@ -2331,6 +2339,9 @@ fn uncommitted_status(source: &Path) -> Result<Vec<u8>> {
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
+            // Every submodule change, whatever `.gitmodules` or the config
+            // says to ignore.
+            "--ignore-submodules=none",
         ])
         .output()?;
     if !output.status.success() {
@@ -2921,6 +2932,8 @@ pub fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
+            // A submodule `.gitmodules` or the config ignores is still dirty.
+            "--ignore-submodules=none",
         ])
         .output()?;
     if !output.status.success() {
@@ -3253,6 +3266,9 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
             // entry, `dir/`, rather than one entry per file. `all` listed a
             // 30,000-file `node_modules` as 30,000 rows; see `folding`.
             "--untracked-files=normal",
+            // Every submodule change, whatever `.gitmodules` or the config
+            // says to ignore: the changes view shows what is there.
+            "--ignore-submodules=none",
         ])
         .output()?;
     if !output.status.success() {
@@ -3445,7 +3461,14 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
 /// the unstaged rows, and the other one still has something to say.
 fn unstaged_numstat(worktree: &str) -> HashMap<String, DiffStat> {
     Command::new("git")
-        .args(["-C", worktree, "diff", "--numstat", "-z"])
+        .args([
+            "-C",
+            worktree,
+            "diff",
+            "--numstat",
+            "-z",
+            "--ignore-submodules=none",
+        ])
         .output()
         .ok()
         .filter(|ns| ns.status.success())
@@ -3466,7 +3489,15 @@ fn unstaged_numstat(worktree: &str) -> HashMap<String, DiffStat> {
 fn staged_numstat(worktree: &str, skip: &[String]) -> HashMap<String, DiffStat> {
     const MAX_SKIPPED_FOLDERS: usize = 256;
     let mut command = Command::new("git");
-    command.args(["-C", worktree, "diff", "--cached", "--numstat", "-z"]);
+    command.args([
+        "-C",
+        worktree,
+        "diff",
+        "--cached",
+        "--numstat",
+        "-z",
+        "--ignore-submodules=none",
+    ]);
     if !skip.is_empty() && skip.len() <= MAX_SKIPPED_FOLDERS {
         command.args(["--", "."]);
         command.args(skip.iter().map(|dir| format!(":(exclude,literal){dir}")));
@@ -3899,6 +3930,7 @@ pub fn file_status(worktree: &Path, rel_path: &str) -> Result<Option<FileStatusC
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
+            "--ignore-submodules=none",
             "--",
         ])
         .arg(format!(":(literal){rel_path}"))
@@ -4924,6 +4956,7 @@ pub fn staged_diff_text(worktree_path: &Path) -> Result<String> {
             "color.diff=false",
             "diff",
             "--cached",
+            "--ignore-submodules=none",
         ])
         .output()?;
     if !output.status.success() {
@@ -6442,6 +6475,118 @@ mod tests {
 
     /// Create a temporary bare-ish git repo with an initial commit so
     /// worktrees and branches can be created from it.
+    /// A repository whose `.gitmodules` says `ignore = all` for `sub`, whose
+    /// config sets `diff.ignoreSubmodules = all` and
+    /// `status.showUntrackedFiles = no`, and whose checked-out submodule has an
+    /// edited file: a change every view dux parses must still see. Measured on
+    /// git 2.55: plain `git status --porcelain=v1` prints nothing here, and
+    /// with `--ignore-submodules=none` it prints ` M sub`.
+    fn repo_with_an_ignored_submodule_change() -> tempfile::TempDir {
+        let repo = init_test_repo();
+        let p = repo.path();
+        let sub = p.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        run_git(&sub, &["init", "-q", "-b", "main"]);
+        std::fs::write(sub.join("f"), "one\n").unwrap();
+        run_git(&sub, &["add", "f"]);
+        run_git(
+            &sub,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "a",
+            ],
+        );
+        std::fs::write(
+            p.join(".gitmodules"),
+            "[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n\tignore = all\n",
+        )
+        .unwrap();
+        run_git(p, &["add", ".gitmodules"]);
+        let id = head_commit(&sub).unwrap();
+        run_git(
+            p,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{id},sub"),
+            ],
+        );
+        run_git(p, &["commit", "-q", "-m", "a submodule"]);
+        run_git(p, &["config", "diff.ignoreSubmodules", "all"]);
+        run_git(p, &["config", "status.showUntrackedFiles", "no"]);
+        std::fs::write(sub.join("f"), "two\n").unwrap();
+        repo
+    }
+
+    #[test]
+    fn the_changes_view_sees_a_submodule_the_repository_says_to_ignore() {
+        let repo = repo_with_an_ignored_submodule_change();
+        std::fs::write(repo.path().join("untracked.txt"), "new\n").unwrap();
+        let (_, unstaged) = changed_files(repo.path()).unwrap();
+        assert!(
+            unstaged.iter().any(|file| file.path == "sub"),
+            "the submodule change is listed: {unstaged:?}"
+        );
+        assert!(
+            unstaged.iter().any(|file| file.path == "untracked.txt"),
+            "and untracked files despite status.showUntrackedFiles=no: {unstaged:?}"
+        );
+        assert!(
+            unstaged_numstat(&repo.path().to_string_lossy()).contains_key("sub"),
+            "and its line counts"
+        );
+    }
+
+    #[test]
+    fn a_submodule_the_repository_says_to_ignore_still_makes_a_worktree_dirty() {
+        let repo = repo_with_an_ignored_submodule_change();
+        assert!(worktree_is_dirty(repo.path()).unwrap());
+        assert!(
+            file_status(repo.path(), "sub")
+                .unwrap()
+                .is_some_and(|codes| codes.unstaged.is_some()),
+            "its own status is reported"
+        );
+    }
+
+    #[test]
+    fn the_staged_views_see_a_submodule_the_repository_says_to_ignore() {
+        let repo = repo_with_an_ignored_submodule_change();
+        run_git(
+            &repo.path().join("sub"),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-am",
+                "b",
+            ],
+        );
+        let id = head_commit(&repo.path().join("sub")).unwrap();
+        run_git(
+            repo.path(),
+            &["update-index", "--cacheinfo", &format!("160000,{id},sub")],
+        );
+        assert!(
+            staged_diff_text(repo.path()).unwrap().contains("sub"),
+            "the staged diff shows it"
+        );
+        assert!(
+            staged_numstat(&repo.path().to_string_lossy(), &[]).contains_key("sub"),
+            "with its line counts"
+        );
+    }
+
     fn init_test_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();

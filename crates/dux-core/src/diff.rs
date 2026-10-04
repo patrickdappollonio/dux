@@ -106,7 +106,7 @@ pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<Diff
     if no_index {
         command.args(["--no-index", "--", "/dev/null", rel_path]);
     } else {
-        command.args(["HEAD", "--", rel_path]);
+        command.args(["--ignore-submodules=none", "HEAD", "--", rel_path]);
     }
     // The binary marker below is one of the few git messages this READS rather
     // than shows, so the child is pinned to the C locale: a translated build
