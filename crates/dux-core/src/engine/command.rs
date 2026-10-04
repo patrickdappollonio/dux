@@ -861,6 +861,22 @@ impl Engine {
                         // running one: nothing to explain.
                         let auth_note = match current.map(crate::config::auth_section_of) {
                             None => None,
+                            // The file has no password but the running dux has
+                            // one: recovering must not quietly turn the login
+                            // off, so the running password stays, beside the
+                            // file's other auth settings, and the status says so.
+                            Some(Ok(mut auth))
+                                if !auth.has_password() && running.server.auth.has_password() =>
+                            {
+                                auth.password_hash = running.server.auth.password_hash.clone();
+                                recovered.server.auth = auth;
+                                Some(Some(
+                                    "The file's [server.auth] had no password but the running \
+                                     dux has one, so the running password was kept. To remove \
+                                     it, run `dux config set server.auth.password_hash \"\"`."
+                                        .to_string(),
+                                ))
+                            }
                             Some(Ok(auth)) => {
                                 recovered.server.auth = auth;
                                 Some(None)

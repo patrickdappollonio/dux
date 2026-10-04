@@ -9075,6 +9075,44 @@ mod tests {
         assert_eq!(engine.config.server.port, Config::default().server.port);
     }
 
+    /// Recovering over a file whose [server.auth] has no password while the
+    /// running dux has one keeps the running password and says so, rather
+    /// than writing "no password" as if the file had decided it.
+    #[test]
+    fn recovering_keeps_the_running_password_over_an_empty_one_and_says_so() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FileReloadSurface);
+        let hash = crate::auth::hash_password(&crate::auth::Password::new(
+            "the running password".to_string(),
+        ))
+        .expect("hash");
+        engine.config.server.auth.password_hash = hash.clone();
+        std::fs::write(
+            &engine.paths.config_path,
+            "[server.auth]\nrequire = \"tailnet\"\n",
+        )
+        .unwrap();
+        let status = unwrap_status(
+            engine
+                .apply(crate::engine::Command::RecoverConfig)
+                .expect("recover"),
+        );
+        let written = std::fs::read_to_string(&engine.paths.config_path).unwrap();
+        let auth = crate::config::auth_section_of(&written).expect("valid");
+        assert_eq!(auth.password_hash, hash, "{written}");
+        assert_eq!(
+            auth.require,
+            crate::config::AuthRequire::Tailnet,
+            "the file's own setting"
+        );
+        assert_eq!(status.tone, StatusTone::Warning);
+        assert!(
+            status.message.contains("running password was kept"),
+            "{}",
+            status.message
+        );
+    }
+
     fn flatten(reaction: EventReaction) -> Vec<EventReaction> {
         match reaction {
             EventReaction::Multi(list) => list.into_iter().flat_map(flatten).collect(),
