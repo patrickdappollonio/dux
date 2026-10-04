@@ -2043,5 +2043,11 @@ mod names_never_printed_property_tests;
 
 #[cfg(test)]
 mod effective_values_and_array_names_tests;
+
+#[cfg(test)]
+mod inline_keys_set_tests;
+
+#[cfg(test)]
+mod names_under_unknown_keys_tests;
 #[cfg(test)]
 mod restore_report_and_unknown_path_tests;

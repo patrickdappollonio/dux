@@ -1013,12 +1013,18 @@ fn stored_path(key: &Key) -> Vec<String> {
     }
 }
 
+/// What `get` prints, without `--show`, in place of the whole value of a key
+/// it does not name.
+pub const NOT_SHOWN: &str = "(not shown)";
+
 /// `value`, at `path` in the file `raw`, as `get` prints it: every key the
 /// formatter may not print (a name that breaks its map's rule, a key the
 /// schema has no place for, a key inside an element of an array whose
 /// elements have no keys in the schema) is a marker naming its line (the
 /// formatter's own words), never the name, which may be a token pasted in
-/// the wrong place. Arrays are walked too, element by element.
+/// the wrong place, and its whole value is [`NOT_SHOWN`], since a table or
+/// an array under it can hold more such names. Arrays are walked too,
+/// element by element.
 fn render_shown(raw: &str, path: &[String], value: &toml::Value) -> String {
     /// One step of the walk: a key, or an element of an array.
     enum Step {
@@ -1040,12 +1046,17 @@ fn render_shown(raw: &str, path: &[String], value: &toml::Value) -> String {
                 for (key, child) in table {
                     path.push(Step::Key(key.clone()));
                     let at = parts(path);
-                    let name = if crate::config::part_is_hidden(&at) {
-                        format!("<{}>", crate::config::shown_parts(raw, &at))
+                    // Once a key is hidden, nothing below it is printed: its
+                    // whole value (a table or an array can hold more names
+                    // pasted in the wrong place) is the placeholder.
+                    if crate::config::part_is_hidden(&at) {
+                        out.insert(
+                            format!("<{}>", crate::config::shown_parts(raw, &at)),
+                            toml::Value::String(NOT_SHOWN.to_string()),
+                        );
                     } else {
-                        key.clone()
-                    };
-                    out.insert(name, shown(raw, path, child));
+                        out.insert(key.clone(), shown(raw, path, child));
+                    }
                     path.pop();
                 }
                 toml::Value::Table(out)

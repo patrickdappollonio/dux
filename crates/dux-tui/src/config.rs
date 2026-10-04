@@ -4961,3 +4961,6 @@ mod keys_names_tests {
 
 #[cfg(test)]
 mod start_corpus_tests;
+
+#[cfg(test)]
+mod inline_section_start_tests;

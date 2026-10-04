@@ -3504,7 +3504,9 @@ pub fn terminal_ui_key_corrections_with_sources(raw: &str) -> Vec<LoadCorrection
     if TERMINAL_UI_MIGRATION.get().is_none() {
         return Vec::new();
     }
-    let read = as_terminal_ui_reads(&file);
+    let Some(read) = start_reads(raw).map(|reads| reads.terminal_ui) else {
+        return Vec::new();
+    };
     let keys_of = |table: &toml::Table| -> toml::Table {
         table
             .get("keys")
@@ -3599,22 +3601,6 @@ pub fn terminal_ui_keys(raw: &str) -> Option<toml::Table> {
     TERMINAL_UI_KEYS.get().and_then(|resolve| resolve(raw))
 }
 
-/// `table` as the terminal UI's start reads it: with its own migrations
-/// applied, when installed.
-fn as_terminal_ui_reads(table: &toml::Table) -> toml::Table {
-    let Some(migrate) = TERMINAL_UI_MIGRATION.get() else {
-        return table.clone();
-    };
-    let Ok(mut doc) = toml::to_string(table)
-        .unwrap_or_default()
-        .parse::<toml_edit::DocumentMut>()
-    else {
-        return table.clone();
-    };
-    migrate(&mut doc);
-    toml::from_str(&doc.to_string()).unwrap_or_else(|_| table.clone())
-}
-
 /// Every problem that stops dux starting with the whole config file `raw`,
 /// each listed once, field by field, and each check run on its own so no
 /// problem hides another:
@@ -3658,7 +3644,12 @@ pub fn check_start(raw: &str) -> StartCheck {
     {
         check.unjudgeable_rules = crate::config_auth::unjudgeable_rules_of(auth);
     }
-    let Some((rest, migration_failures)) = migrated_beside_auth(&file) else {
+    let Some(StartReads {
+        dux_server: rest,
+        terminal_ui,
+        migration_failures,
+    }) = start_reads(raw)
+    else {
         return check;
     };
     // A deprecated key the migrations cannot carry over stops the terminal
@@ -3675,8 +3666,9 @@ pub fn check_start(raw: &str) -> StartCheck {
     let plan = recovery_plan(&rest);
     // Wrong types stop the terminal UI, so they are judged as its start reads
     // the file: after its own `[keys]` migrations, which drop a retired
-    // action whatever its value.
-    for (place, key, kind) in wrong_typed_settings(&as_terminal_ui_reads(&rest), raw) {
+    // action whatever its value (where they reach it: a `[keys]` written as
+    // an inline table they leave as it is, and so does its start).
+    for (place, key, kind) in wrong_typed_settings(&terminal_ui, raw) {
         let what = Recovery::covering(&plan, &key).map_or_else(
             || "dux server reads it as its default".to_string(),
             |r| r.said_of(&key, raw),
@@ -3766,29 +3758,58 @@ pub fn problems_added_by_set<'a>(
         .collect()
 }
 
-/// The rest of the file beside `[server.auth]` (judged on its own), after
-/// the load migrations, as `dux server`'s load reads it, and every deprecated
-/// key the migrations could not carry over, each with the sentence the
-/// terminal UI's start refuses it with. When any fails, the rest is the
-/// unmigrated file, as `dux server` reads it then. `None` only when the table
-/// cannot be written back out, which a parsed table always can be.
 /// Each deprecated key the load migrations cannot carry over: its path and
 /// the sentence the terminal UI's start refuses it with.
 type MigrationFailures = Vec<(Vec<String>, String)>;
 
-fn migrated_beside_auth(file: &toml::Table) -> Option<(toml::Table, MigrationFailures)> {
-    let mut file = file.clone();
-    if let Some(server) = file.get_mut("server").and_then(toml::Value::as_table_mut) {
-        server.remove("auth");
-    }
-    let rest = toml::to_string(&file).ok()?;
-    let mut doc = rest.parse::<toml_edit::DocumentMut>().ok()?;
-    let failures = crate::config_migrate::load_migration_failures(&doc);
-    let migrated = match crate::config_migrate::apply_load_migrations(&mut doc) {
-        Ok(_) if failures.is_empty() => doc.to_string(),
-        _ => rest,
+/// The rest of the file beside `[server.auth]` (judged on its own) as each
+/// surface's start reads it, and every deprecated key the migrations could
+/// not carry over, each with the sentence the terminal UI's start refuses it
+/// with.
+///
+/// Each read is the surface's own pipeline, on the representation it runs on:
+/// the file parsed as the toml_edit document it is written as, through the
+/// same migration functions in the same order, and only then read as a table.
+/// Never a re-print of the file: re-printing turns an inline table into a
+/// `[section]`, which the migrations then act on where a start's do not.
+struct StartReads {
+    /// `dux server`'s load ([`config_from_text`]): the load migrations, or
+    /// the file as written when they fail.
+    dux_server: toml::Table,
+    /// The terminal UI's start: the load migrations (a failure stops it, and
+    /// `migration_failures` says so), then its own `[keys]` migrations.
+    terminal_ui: toml::Table,
+    migration_failures: MigrationFailures,
+}
+
+fn start_reads(raw: &str) -> Option<StartReads> {
+    let written = raw.parse::<toml_edit::DocumentMut>().ok()?;
+    let migration_failures = crate::config_migrate::load_migration_failures(&written);
+    let mut migrated = written.clone();
+    let migrations_ran = crate::config_migrate::apply_load_migrations(&mut migrated).is_ok();
+    let dux_server_text = if migrations_ran {
+        migrated.to_string()
+    } else {
+        raw.to_string()
     };
-    Some((toml::from_str::<toml::Table>(&migrated).ok()?, failures))
+    let mut terminal_ui = if migrations_ran { migrated } else { written };
+    if let Some(migrate) = TERMINAL_UI_MIGRATION.get() {
+        migrate(&mut terminal_ui);
+    }
+    // Read as the loads read their text, `[server.auth]` taken out as
+    // `take_auth_section` takes it.
+    let beside_auth = |text: &str| -> Option<toml::Table> {
+        let mut table: toml::Table = toml::from_str(text).ok()?;
+        if let Some(toml::Value::Table(server)) = table.get_mut("server") {
+            server.remove("auth");
+        }
+        Some(table)
+    };
+    Some(StartReads {
+        dux_server: beside_auth(&dux_server_text)?,
+        terminal_ui: beside_auth(&terminal_ui.to_string())?,
+        migration_failures,
+    })
 }
 
 /// Every setting of the wrong type in `table`, each judged on its own down
@@ -4911,10 +4932,7 @@ pub fn load_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
     }
     // What `dux server`'s recovery drops or resets (the terminal UI will not
     // start with such a file at all), each with the wrong values that made it.
-    if let Some((rest, _)) = toml::from_str::<toml::Table>(raw)
-        .ok()
-        .and_then(|file| migrated_beside_auth(&file))
-    {
+    if let Some(rest) = start_reads(raw).map(|reads| reads.dux_server) {
         let wrong = wrong_typed_settings(&rest, raw);
         for recovery in recovery_plan(&rest) {
             let causes: Vec<&(String, Vec<String>, String)> = wrong
