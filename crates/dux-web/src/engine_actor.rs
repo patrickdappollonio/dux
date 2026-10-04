@@ -3548,7 +3548,7 @@ fn handle_apply_wire_request(
 ) {
     let mutates_config = cmd.mutates_config_static();
     if mutates_config && *config_disk_ahead {
-        match dux_core::config::load_config(&engine.paths) {
+        match dux_core::config::load_config_for_reload(&engine.paths) {
             Ok(reloaded) => {
                 let _ = engine.apply_reloaded_config(reloaded);
                 *config_disk_ahead = false;
@@ -7056,6 +7056,51 @@ mod tests {
     /// A reload that meets an unreadable `[server.auth]` changes nothing at
     /// all, not even the settings beside it that are fine, and says why; the
     /// next good file applies as usual.
+    /// config.toml deleted while the server runs: the reload is refused and
+    /// the running config (its password included) stays.
+    #[tokio::test]
+    async fn a_reload_of_a_deleted_config_keeps_the_running_config() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(
+            &paths.config_path,
+            "[server]\nallowed_hosts = [\"before.example.com\"]\n",
+        )
+        .expect("seed config");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+        let guard_set = handle.live_limits().allowed_hosts();
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("first reload");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while guard_set.snapshot() != vec!["before.example.com".to_string()] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first reload never applied"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let mut statuses = handle.subscribe_status();
+        std::fs::remove_file(&paths.config_path).expect("delete");
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("reload request");
+        let said = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = statuses.recv().await.expect("status");
+                if status.message.contains("no longer exists") {
+                    return status.message;
+                }
+            }
+        })
+        .await
+        .expect("a status says the file is gone");
+        assert!(said.contains("not reloaded"), "{said}");
+        assert_eq!(guard_set.snapshot(), vec!["before.example.com".to_string()]);
+    }
+
     #[tokio::test]
     async fn a_reload_with_an_unreadable_server_auth_keeps_the_running_config() {
         let (_tmp, paths) = temp_paths();

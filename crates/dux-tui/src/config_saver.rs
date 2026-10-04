@@ -25,8 +25,13 @@ impl ConfigSurface for TuiConfigSurface {
             // load/validate/sync work below panics; otherwise the engine's
             // reload barrier would never close and config saves would freeze.
             let guard = ReloadCompletionGuard::new(worker_tx);
-            let result = crate::config::ensure_config(&paths)
-                .map_err(|err| format!("{err:#}"))
+            // A file deleted while dux runs is refused rather than recreated
+            // from defaults, which would drop the running password.
+            let result = dux_core::config::config_present_for_reload(&paths)
+                .map_err(|err| format!("{err}"))
+                .and_then(|()| {
+                    crate::config::ensure_config(&paths).map_err(|err| format!("{err:#}"))
+                })
                 .and_then(
                     |mut config| match crate::config::validate_keys(&config.keys) {
                         Ok(()) => {

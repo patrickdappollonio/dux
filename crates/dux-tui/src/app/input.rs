@@ -13133,6 +13133,34 @@ not_a_real_action = ["x"]
         assert!(!app.reload_config_on_signal(), "one signal is one reload");
     }
 
+    /// config.toml deleted while dux runs: a reload is refused whole rather
+    /// than reading "no file" as "no password", and the file is not quietly
+    /// recreated from defaults either.
+    #[test]
+    fn reload_config_refuses_a_deleted_config_file() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.server.auth.password_hash = dux_core::auth::hash_password(
+            &dux_core::auth::Password::new("the running password stays".to_string()),
+        )
+        .expect("hash");
+        let before = app.engine.config.clone();
+        let _ = std::fs::remove_file(&app.engine.paths.config_path);
+
+        app.execute_command("reload-config".to_string())
+            .expect("start reload config");
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
+        });
+        assert_eq!(app.engine.config, before);
+        match &app.prompt {
+            PromptState::ConfigReloadFailed { error, .. } => {
+                assert!(error.contains("no longer exists"), "{error}");
+            }
+            other => panic!("expected the reload failure prompt, got {other:?}"),
+        }
+        assert!(!app.engine.paths.config_path.exists(), "not recreated");
+    }
+
     #[test]
     fn reload_config_applies_a_valid_new_password() {
         let mut app = test_app(default_bindings());

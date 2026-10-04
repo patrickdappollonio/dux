@@ -2866,6 +2866,9 @@ pub enum ConfigLoadProblem {
     NotToml(String),
     /// `[server.auth]` (or the `[server]` table holding it) is invalid.
     AuthInvalid(String),
+    /// The file was there when dux started and is gone now. Only a reload
+    /// reports this: a first start with no file is the defaults.
+    Missing,
 }
 
 /// A TOML error with every quoted value hidden.
@@ -2902,6 +2905,7 @@ impl ConfigLoadProblem {
     pub fn reason(&self) -> &str {
         match self {
             Self::Unreadable(reason) | Self::NotToml(reason) | Self::AuthInvalid(reason) => reason,
+            Self::Missing => "the file no longer exists",
         }
     }
 }
@@ -2927,6 +2931,12 @@ impl std::fmt::Display for ConfigLoadError {
                 "{path} is not valid TOML, so dux cannot read [server.auth] and cannot tell \
                  whether a password protects the web UI. Fix the error below, then start dux \
                  or reload the config again.\n{error}"
+            ),
+            ConfigLoadProblem::Missing => write!(
+                f,
+                "{path} no longer exists, so dux cannot tell whether [server.auth] still sets a \
+                 password, and it keeps the running settings, password included. Put the file \
+                 back (or use Recover config to write the running settings to it), then reload."
             ),
             ConfigLoadProblem::AuthInvalid(reason) => write!(
                 f,
@@ -3124,6 +3134,27 @@ fn table_into_config(table: toml::Table) -> Result<Config, String> {
 /// start then refuses to run and a reload keeps the running config.
 pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
     load_config_file(&paths.config_path)
+}
+
+/// [`load_config`] for a reload: a file that has disappeared since dux started
+/// is an error ([`ConfigLoadProblem::Missing`]) rather than the defaults,
+/// because the defaults would quietly drop a password the running dux has.
+pub fn load_config_for_reload(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
+    config_present_for_reload(paths)?;
+    load_config(paths)
+}
+
+/// The check [`load_config_for_reload`] starts with, for a surface whose
+/// reload reads the file its own way (the terminal UI's `ensure_config`,
+/// which would otherwise create a fresh default file).
+pub fn config_present_for_reload(paths: &DuxPaths) -> std::result::Result<(), ConfigLoadError> {
+    match std::fs::symlink_metadata(&paths.config_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(ConfigLoadError {
+            path: paths.config_path.clone(),
+            problem: ConfigLoadProblem::Missing,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// [`load_config`] for a bare file path.

@@ -35,7 +35,7 @@ impl ConfigSurface for WebConfigSurface {
             // REAL config, not Config::default().
             // A file whose [server.auth] cannot be read rejects the whole
             // reload: the running config, password included, stays as it was.
-            let mut config = match dux_core::config::load_config(&paths) {
+            let mut config = match dux_core::config::load_config_for_reload(&paths) {
                 Ok(config) => config,
                 Err(error) => {
                     guard.complete(Err(format!(

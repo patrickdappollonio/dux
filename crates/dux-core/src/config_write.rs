@@ -156,11 +156,7 @@ pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) 
 /// write path checks this before anything lands.
 fn check_auth_before_write(path: &Path, contents: &str) -> Result<()> {
     if let Err(problem) = crate::config::auth_section_of(contents) {
-        let reason = match problem {
-            crate::config::ConfigLoadProblem::AuthInvalid(reason)
-            | crate::config::ConfigLoadProblem::NotToml(reason)
-            | crate::config::ConfigLoadProblem::Unreadable(reason) => reason,
-        };
+        let reason = problem.reason();
         anyhow::bail!(
             "that write would leave [server.auth] in {} invalid, and dux refuses to start \
              with an invalid [server.auth]; nothing was written.\n{reason}",
@@ -579,11 +575,7 @@ pub fn mutate_config_file<T>(
     let outcome = change(&mut doc)?;
     let text = doc.to_string();
     if let Err(problem) = crate::config::auth_section_of(&text) {
-        let reason = match problem {
-            crate::config::ConfigLoadProblem::AuthInvalid(reason)
-            | crate::config::ConfigLoadProblem::NotToml(reason)
-            | crate::config::ConfigLoadProblem::Unreadable(reason) => reason,
-        };
+        let reason = problem.reason();
         anyhow::bail!(
             "that change would make [server.auth] in {} invalid ({reason}), and dux refuses \
              to start with an invalid [server.auth]; nothing was written",
